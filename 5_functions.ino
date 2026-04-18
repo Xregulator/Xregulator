@@ -1,0 +1,4091 @@
+// X Engineering Alternator Regulator
+// Copyright (C) 2026 X Engineering LLC
+// Contact: joe@xengineering.net
+
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, version 3 of the License.
+
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+
+void SystemTime(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  uint16_t SystemDate;
+  double SystemTime;
+  tN2kTimeSource TimeSource;
+
+  if (ParseN2kSystemTime(N2kMsg, SID, SystemDate, SystemTime, TimeSource)) {
+    // Sync time from GPS (Phase 2 Sensor History)
+    syncTimeFromGPS(SystemDate, SystemTime);
+
+    // Original verbose output (only if enabled)
+    if (NMEA2KVerbose) {
+      OutputStream->println("System time:");
+      PrintLabelValWithConversionCheckUnDef("  SID: ", SID, 0, true);
+      PrintLabelValWithConversionCheckUnDef("  days since 1.1.1970: ", SystemDate, 0, true);
+      PrintLabelValWithConversionCheckUnDef("  seconds since midnight: ", SystemTime, 0, true);
+      OutputStream->print("  time source: ");
+      PrintN2kEnumType(TimeSource, OutputStream);
+    }
+  } else {
+    if (NMEA2KVerbose) {
+      OutputStream->print("Failed to parse PGN: ");
+      OutputStream->println(N2kMsg.PGN);
+    }
+  }
+}
+
+void Rudder(const tN2kMsg &N2kMsg) {
+  unsigned char Instance;
+  tN2kRudderDirectionOrder RudderDirectionOrder;
+  double RudderPosition;
+  double AngleOrder;
+
+  if (ParseN2kRudder(N2kMsg, RudderPosition, Instance, RudderDirectionOrder, AngleOrder)) {
+    //Uncomment below to get serial montior back
+    // PrintLabelValWithConversionCheckUnDef("Rudder: ", Instance, 0, true);
+    // PrintLabelValWithConversionCheckUnDef("  position (deg): ", RudderPosition, &RadToDeg, true);
+    // OutputStream->print("  direction order: ");
+    // PrintN2kEnumType(RudderDirectionOrder, OutputStream);
+    // PrintLabelValWithConversionCheckUnDef("  angle order (deg): ", AngleOrder, &RadToDeg, true);
+  } else {
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//*****************************************************************************
+void Heading(const tN2kMsg &N2kMsg) {
+  static unsigned long lastHeadingUpdate = 0;
+  if (millis() - lastHeadingUpdate < 2000) return;  // Throttle to once every 2 seconds
+  lastHeadingUpdate = millis();
+  unsigned char SID;
+  tN2kHeadingReference HeadingReference;
+  double Heading;
+  double Deviation;
+  double Variation;
+
+  if (ParseN2kHeading(N2kMsg, SID, Heading, Deviation, Variation, HeadingReference)) {
+    // Parsing succeeded - update variable and mark fresh
+    HeadingNMEA = Heading * 180.0 / PI;  // Convert radians to degrees
+    MARK_FRESH(IDX_HEADING_NMEA);        // Only called on successful parse
+
+    // Uncomment below to get serial monitor output back
+    // OutputStream->println("Heading:");
+    // PrintLabelValWithConversionCheckUnDef("  SID: ", SID, 0, true);
+    // OutputStream->print("  reference: ");
+    // PrintN2kEnumType(HeadingReference, OutputStream);
+    // PrintLabelValWithConversionCheckUnDef("  Heading (deg): ", Heading, &RadToDeg, true);
+    // PrintLabelValWithConversionCheckUnDef("  Deviation (deg): ", Deviation, &RadToDeg, true);
+    // PrintLabelValWithConversionCheckUnDef("  Variation (deg): ", Variation, &RadToDeg, true);
+  } else {
+    // Parsing failed - do NOT call MARK_FRESH, data will go stale automatically
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//*****************************************************************************
+void COGSOG(const tN2kMsg &N2kMsg) {
+  static unsigned long lastCOGSOGUpdate = 0;
+  if (millis() - lastCOGSOGUpdate < 2000) return;
+  lastCOGSOGUpdate = millis();
+
+  unsigned char SID;
+  tN2kHeadingReference HeadingReference;
+  double COG;
+  double SOG;
+
+  if (ParseN2kCOGSOGRapid(N2kMsg, SID, HeadingReference, COG, SOG)) {
+    COGNMEA = COG * 180.0 / PI;  // radians → degrees (matches Heading() pattern)
+    SOGNMEA = SOG * 1.94384;     // m/s → knots (matches WindSpeed() pattern)
+    MARK_FRESH(IDX_COG_NMEA);
+    MARK_FRESH(IDX_SOG_NMEA);
+
+    if (SOGNMEA > MaxSpeed) {
+      MaxSpeed = SOGNMEA;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%.2f", (float)MaxSpeed);
+      writeFile(LittleFS, "/MaxSpeed.txt", buf);
+    }
+
+    if (SOGNMEA > MaxSpeed_AllTime) {
+      MaxSpeed_AllTime = SOGNMEA;
+      char buf2[32];
+      snprintf(buf2, sizeof(buf2), "%.2f", (float)MaxSpeed_AllTime);
+      writeFile(LittleFS, "/MaxSpeed_AllTime.txt", buf2);
+    }
+
+  } else {
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+
+//*****************************************************************************
+
+void GNSS(const tN2kMsg &N2kMsg) {
+  //Serial.println("=== GNSS function called ===");
+  //Serial.printf("PGN: %lu\n", N2kMsg.PGN);
+  static unsigned long lastGNSSUpdate = 0;
+  if (millis() - lastGNSSUpdate < 2000) return;  // Throttle to once every 2 seconds
+  lastGNSSUpdate = millis();
+
+  unsigned char SID;
+  uint16_t DaysSince1970;
+  double SecondsSinceMidnight;
+  double Latitude;
+  double Longitude;
+  double Altitude;
+  tN2kGNSStype GNSStype;
+  tN2kGNSSmethod GNSSmethod;
+  unsigned char nSatellites;
+  double HDOP;
+  double PDOP;
+  double GeoidalSeparation;
+  unsigned char nReferenceStations;
+  tN2kGNSStype ReferenceStationType;
+  uint16_t ReferenceStationID;
+  double AgeOfCorrection;
+
+  if (ParseN2kGNSS(N2kMsg, SID, DaysSince1970, SecondsSinceMidnight,
+                   Latitude, Longitude, Altitude,
+                   GNSStype, GNSSmethod,
+                   nSatellites, HDOP, PDOP, GeoidalSeparation,
+                   nReferenceStations, ReferenceStationType, ReferenceStationID,
+                   AgeOfCorrection)) {
+
+    //Serial.println("GNSS parsing SUCCESS!");
+    //Serial.printf("Raw values - Lat: %f, Lon: %f, Sats: %d\n", Latitude, Longitude, nSatellites);
+
+    // Check if we have valid GPS data (not NaN and reasonable values)
+    if (!isnan(Latitude) && !isnan(Longitude) && Latitude != 0.0 && Longitude != 0.0 && abs(Latitude) <= 90.0 && abs(Longitude) <= 180.0 && nSatellites > 0) {
+
+      //Store values globally for web interface
+      LatitudeNMEA = Latitude;
+      LongitudeNMEA = Longitude;
+      SatelliteCountNMEA = nSatellites;
+
+      // Mark all GPS data as fresh - only called on valid data
+      MARK_FRESH(IDX_LATITUDE_NMEA);
+      MARK_FRESH(IDX_LONGITUDE_NMEA);
+      MARK_FRESH(IDX_SATELLITE_COUNT);
+
+      //Serial.printf("Valid GNSS data stored - LatNMEA: %f, LonNMEA: %f, SatNMEA: %d\n", LatitudeNMEA, LongitudeNMEA, SatelliteCountNMEA);
+    } else {
+      //Serial.println("GNSS data invalid - values are NaN, zero, or out of range");
+      // Invalid data - do NOT call MARK_FRESH, let data go stale
+    }
+  } else {
+    //Serial.println("GNSS parsing FAILED!");
+    // Parse failed - do NOT call MARK_FRESH, let data go stale
+  }
+}
+//*****************************************************************************
+void GNSSSatsInView(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  tN2kRangeResidualMode Mode;
+  uint8_t NumberOfSVs;
+  tSatelliteInfo SatelliteInfo;
+
+  if (ParseN2kPGNSatellitesInView(N2kMsg, SID, Mode, NumberOfSVs)) {
+
+    if (NMEA2KVerbose) {
+      OutputStream->println("Satellites in view: ");
+      OutputStream->print("  mode: ");
+      OutputStream->println(Mode);
+      OutputStream->print("  number of satellites: ");
+      OutputStream->println(NumberOfSVs);
+      for (uint8_t i = 0; i < NumberOfSVs && ParseN2kPGNSatellitesInView(N2kMsg, i, SatelliteInfo); i++) {
+        OutputStream->print("  Satellite PRN: ");
+        OutputStream->println(SatelliteInfo.PRN);
+        PrintLabelValWithConversionCheckUnDef("    elevation: ", SatelliteInfo.Elevation, &RadToDeg, true, 1);
+        PrintLabelValWithConversionCheckUnDef("    azimuth:   ", SatelliteInfo.Azimuth, &RadToDeg, true, 1);
+        PrintLabelValWithConversionCheckUnDef("    SNR:       ", SatelliteInfo.SNR, 0, true, 1);
+        PrintLabelValWithConversionCheckUnDef("    residuals: ", SatelliteInfo.RangeResiduals, 0, true, 1);
+        OutputStream->print("    status: ");
+        OutputStream->println(SatelliteInfo.UsageStatus);
+      }
+    }
+  }
+}
+//*****************************************************************************
+void BatteryConfigurationStatus(const tN2kMsg &N2kMsg) {
+  unsigned char BatInstance;
+  tN2kBatType BatType;
+  tN2kBatEqSupport SupportsEqual;
+  tN2kBatNomVolt BatNominalVoltage;
+  tN2kBatChem BatChemistry;
+  double BatCapacity;
+  int8_t BatTemperatureCoefficient;
+  double PeukertExponent;
+  int8_t ChargeEfficiencyFactor;
+
+  if (ParseN2kBatConf(N2kMsg, BatInstance, BatType, SupportsEqual, BatNominalVoltage, BatChemistry, BatCapacity, BatTemperatureCoefficient, PeukertExponent, ChargeEfficiencyFactor)) {
+    PrintLabelValWithConversionCheckUnDef("Battery instance: ", BatInstance, 0, true);
+    OutputStream->print("  - type: ");
+    PrintN2kEnumType(BatType, OutputStream);
+    OutputStream->print("  - support equal.: ");
+    PrintN2kEnumType(SupportsEqual, OutputStream);
+    OutputStream->print("  - nominal voltage: ");
+    PrintN2kEnumType(BatNominalVoltage, OutputStream);
+    OutputStream->print("  - chemistry: ");
+    PrintN2kEnumType(BatChemistry, OutputStream);
+    PrintLabelValWithConversionCheckUnDef("  - capacity (Ah): ", BatCapacity, &CoulombToAh, true);
+    PrintLabelValWithConversionCheckUnDef("  - temperature coefficient (%): ", BatTemperatureCoefficient, 0, true);
+    PrintLabelValWithConversionCheckUnDef("  - peukert exponent: ", PeukertExponent, 0, true);
+    PrintLabelValWithConversionCheckUnDef("  - charge efficiency factor (%): ", ChargeEfficiencyFactor, 0, true);
+  } else {
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//*****************************************************************************
+void DCStatus(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  unsigned char DCInstance;
+  tN2kDCType DCType;
+  unsigned char StateOfCharge;
+  unsigned char StateOfHealth;
+  double TimeRemaining;
+  double RippleVoltage;
+  double Capacity;
+
+  if (ParseN2kDCStatus(N2kMsg, SID, DCInstance, DCType, StateOfCharge, StateOfHealth, TimeRemaining, RippleVoltage, Capacity)) {
+    OutputStream->print("DC instance: ");
+    OutputStream->println(DCInstance);
+    OutputStream->print("  - type: ");
+    PrintN2kEnumType(DCType, OutputStream);
+    OutputStream->print("  - state of charge (%): ");
+    OutputStream->println(StateOfCharge);
+    OutputStream->print("  - state of health (%): ");
+    OutputStream->println(StateOfHealth);
+    OutputStream->print("  - time remaining (h): ");
+    OutputStream->println(TimeRemaining / 60);
+    OutputStream->print("  - ripple voltage: ");
+    OutputStream->println(RippleVoltage);
+    OutputStream->print("  - capacity: ");
+    OutputStream->println(Capacity);
+  } else {
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//*****************************************************************************
+void Speed(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  double SOW;
+  double SOG;
+  tN2kSpeedWaterReferenceType SWRT;
+
+  if (ParseN2kBoatSpeed(N2kMsg, SID, SOW, SOG, SWRT)) {
+    OutputStream->print("Boat speed:");
+    PrintLabelValWithConversionCheckUnDef(" SOW:", N2kIsNA(SOW) ? SOW : msToKnots(SOW));
+    PrintLabelValWithConversionCheckUnDef(", SOG:", N2kIsNA(SOG) ? SOG : msToKnots(SOG));
+    OutputStream->print(", ");
+    PrintN2kEnumType(SWRT, OutputStream, true);
+  }
+}
+void WindSpeed(const tN2kMsg &N2kMsg) {
+  static unsigned long lastWindUpdate = 0;
+  if (millis() - lastWindUpdate < 2000) return;
+  lastWindUpdate = millis();
+
+  unsigned char SID;
+  double WindSpeed;
+  double WindAngle;
+  tN2kWindReference WindReference;
+
+  if (ParseN2kWindSpeed(N2kMsg, SID, WindSpeed, WindAngle, WindReference)) {
+    ApparentWindSpeedNMEA = WindSpeed * 1.94384;
+    ApparentWindAngleNMEA = WindAngle * 180.0 / PI;
+    MARK_FRESH(IDX_APPARENT_WIND_SPEED);
+    MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
+
+    UpdateWindMaximums();  // NEW - add this line
+
+  } else {
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//*****************************************************************************
+void WaterDepth(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  double DepthBelowTransducer;
+  double Offset;
+
+  if (ParseN2kWaterDepth(N2kMsg, SID, DepthBelowTransducer, Offset)) {
+    if (N2kIsNA(Offset) || Offset == 0) {
+      PrintLabelValWithConversionCheckUnDef("Depth below transducer", DepthBelowTransducer);
+      if (N2kIsNA(Offset)) {
+        OutputStream->println(", offset not available");
+      } else {
+        OutputStream->println(", offset=0");
+      }
+    } else {
+      if (Offset > 0) {
+        OutputStream->print("Water depth:");
+      } else {
+        OutputStream->print("Depth below keel:");
+      }
+      if (!N2kIsNA(DepthBelowTransducer)) {
+        OutputStream->println(DepthBelowTransducer + Offset);
+      } else {
+        OutputStream->println(" not available");
+      }
+    }
+  }
+}
+//*****************************************************************************
+void Attitude(const tN2kMsg &N2kMsg) {
+  unsigned char SID;
+  double Yaw;
+  double Pitch;
+  double Roll;
+
+  if (ParseN2kAttitude(N2kMsg, SID, Yaw, Pitch, Roll)) {
+    OutputStream->println("Attitude:");
+    PrintLabelValWithConversionCheckUnDef("  SID: ", SID, 0, true);
+    PrintLabelValWithConversionCheckUnDef("  Yaw (deg): ", Yaw, &RadToDeg, true);
+    PrintLabelValWithConversionCheckUnDef("  Pitch (deg): ", Pitch, &RadToDeg, true);
+    PrintLabelValWithConversionCheckUnDef("  Roll (deg): ", Roll, &RadToDeg, true);
+  } else {
+    OutputStream->print("Failed to parse PGN: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+}
+//NMEA 2000 message handler
+void HandleNMEA2000Msg(const tN2kMsg &N2kMsg) {
+  int iHandler;
+  // Find handler
+  if (NMEA2KVerbose == 1) {
+    OutputStream->print("In Main Handler: ");
+    OutputStream->println(N2kMsg.PGN);
+  }
+  for (iHandler = 0; NMEA2000Handlers[iHandler].PGN != 0 && !(N2kMsg.PGN == NMEA2000Handlers[iHandler].PGN); iHandler++)
+    ;
+
+  if (NMEA2000Handlers[iHandler].PGN != 0) {
+    NMEA2000Handlers[iHandler].Handler(N2kMsg);
+  }
+}
+
+void ReadVEData() {
+  if (VeData != 1) {
+    return;
+  }
+  static unsigned long lastVEDataRead = 0;
+  static unsigned long lastSolarEnergyUpdate = 0;
+  const unsigned long VE_DATA_INTERVAL = 2000;  // 2 seconds
+
+  unsigned long currentTime = millis();
+
+  // Check if it's time to read VE data
+  if (currentTime - lastVEDataRead <= VE_DATA_INTERVAL) {
+    return;
+  }
+
+  int start1 = micros();      // Start timing VeData
+  bool dataReceived = false;  // Track if we got any valid data
+  float solarPower_W = 0.0f;  // Track solar power for this update
+
+  while (Serial1.available()) {
+    myve.rxData(Serial1.read());
+    for (int i = 0; i < myve.veEnd; i++) {
+      if (strcmp(myve.veName[i], "V") == 0) {
+        float newVoltage = (atof(myve.veValue[i]) / 1000);
+        if (newVoltage > 0 && newVoltage < 100) {  // Sanity check
+          VictronVoltage = newVoltage;
+          MARK_FRESH(IDX_VICTRON_VOLTAGE);  // Only mark fresh on valid data
+          dataReceived = true;
+        }
+      }
+      if (strcmp(myve.veName[i], "I") == 0) {
+        float newCurrent = (atof(myve.veValue[i]) / 1000);
+        if (newCurrent > -1000 && newCurrent < 1000) {  // Sanity check
+          VictronCurrent = newCurrent;
+          MARK_FRESH(IDX_VICTRON_CURRENT);  // Only mark fresh on valid data
+          dataReceived = true;
+        }
+      }
+      if (strcmp(myve.veName[i], "PPV") == 0) {
+        solarPower_W = atof(myve.veValue[i]);             // PPV is already in Watts
+        if (solarPower_W >= 0 && solarPower_W < 10000) {  // Sanity check (0-10kW)
+          dataReceived = true;
+        } else {
+          solarPower_W = 0.0f;  // Invalid reading, set to zero
+        }
+      }
+    }
+    yield();  // Allow other processes to run
+  }
+
+  // Calculate solar energy if we got valid power data
+  if (dataReceived && lastSolarEnergyUpdate > 0) {
+    unsigned long elapsedMillis = currentTime - lastSolarEnergyUpdate;
+    float elapsedSeconds = elapsedMillis / 1000.0f;
+    float solarEnergyDelta_Wh = (solarPower_W * elapsedSeconds) / 3600.0f;
+
+    // Accumulate solar energy with floating point precision
+    static float solarEnergyAccumulator = 0.0f;
+    static float solarEnergyAccumulator_AllTime = 0.0f;
+
+    solarEnergyAccumulator += solarEnergyDelta_Wh;
+    solarEnergyAccumulator_AllTime += solarEnergyDelta_Wh;
+
+    if (solarEnergyAccumulator >= 1.0f) {
+      SolarChargedEnergy += (int)solarEnergyAccumulator;
+      solarEnergyAccumulator -= (int)solarEnergyAccumulator;
+    }
+
+    if (solarEnergyAccumulator_AllTime >= 1.0f) {
+      SolarChargedEnergy_AllTime += (int)solarEnergyAccumulator_AllTime;
+      solarEnergyAccumulator_AllTime -= (int)solarEnergyAccumulator_AllTime;
+    }
+  }
+
+  lastSolarEnergyUpdate = currentTime;
+
+  int end1 = micros();     // End timing
+  VeTime = end1 - start1;  // Store elapsed time
+  lastVEDataRead = currentTime;
+}
+void checkAndRestart() {
+  unsigned long currentMillis = millis();
+
+  // Handle millis wraparound
+  if (currentMillis < lastRestartTime) {
+    lastRestartTime = 0;
+  }
+
+  if (currentMillis - lastRestartTime >= RESTART_INTERVAL) {
+    Serial.println("=== SCHEDULED RESTART APPROACHING ===");
+
+    // Wait for any in-progress uploads (max 30 seconds)
+    unsigned long shutdownStart = millis();
+    int waitCycles = 0;
+
+    while (core0Busy && (millis() - shutdownStart < 30000)) {
+      esp_task_wdt_reset();
+      delay(500);
+      waitCycles++;
+
+      if (waitCycles % 10 == 0) {
+        Serial.printf("Waiting for upload to complete... %ds\n",
+                      (waitCycles * 500) / 1000);
+      }
+    }
+
+    // Force-finish if still in progress
+    if (core0Busy) {
+      Serial.println("Upload still in progress after 30s, proceeding with restart");
+      core0Busy = false;
+    }
+
+    // Wait for HTTP operations to fully complete
+    delay(1000);
+    esp_task_wdt_reset();
+
+    // Persist time sync state
+    if (timeIsSynced && timeBase > 0) {
+      Serial.println("Saving time sync state before restart");
+      saveTimeSyncState();
+    }
+
+    // Save final sensor window if it has data
+    // CHANGED - Check if any valid time accumulated instead of sampleCount
+    if (currentWindow.battVolt_valid_us > 0) {
+      Serial.println("Buffering final sensor window before restart");
+      time_t collectionTime = computeCollectionTime();
+      saveToLocalBuffer(collectionTime);
+      resetSensorWindow();
+    }
+
+    // Cleanly notify and close WiFi connections
+    if (WiFi.getMode() != WIFI_OFF) {
+      events.send("Performing scheduled restart", "console");
+      events.send("Device restarting. Will reconnect shortly.", "status");
+      delay(500);             // Give events time to actually send
+      events.close();         // Close all SSE connections
+      delay(100);             // Let close complete
+      WiFi.disconnect(true);  // NOW disconnect WiFi
+      delay(100);
+    }
+
+    Serial.println("=== RESTARTING NOW ===");
+    Serial.flush();  // Ensure all Serial data is sent
+    delay(100);      // Short delay for cleanup
+    writeFile(LittleFS, "/ScheduledRestart.flag", "1");
+    esp_task_wdt_delete(NULL);  // Disable watchdog before restart
+    delay(100);                 // Short delay for cleanup
+    ESP.restart();
+  }
+}
+void captureResetReason() {
+  String fileContent = readFile(LittleFS, "/LastResetReason.txt");
+
+  // Parse "last,ancient" format
+  int commaPos = fileContent.indexOf(',');
+  int previousLast = 0;
+  int previousAncient = 0;
+
+  if (commaPos > 0) {
+    previousLast = fileContent.substring(0, commaPos).toInt();
+    previousAncient = fileContent.substring(commaPos + 1).toInt();
+  } else {
+    previousLast = fileContent.toInt();  // Legacy: single value
+    previousAncient = 0;
+  }
+
+  // Shift: previous last becomes new ancient
+  ancientResetReason = previousLast;
+
+  // Check if this was a scheduled restart
+  bool wasScheduled = false;
+  String flagContent = readFile(LittleFS, "/ScheduledRestart.flag");
+  if (flagContent == "1") {
+    wasScheduled = true;
+    fsRemove("/ScheduledRestart.flag");  // Clean up flag
+  }
+
+  // Get current reason
+  int rawReason = (int)esp_reset_reason();
+  switch (rawReason) {
+    case ESP_RST_POWERON: LastResetReason = 0; break;
+    case ESP_RST_SW:
+      LastResetReason = wasScheduled ? 11 : 1;  // 11=scheduled, 1=unscheduled
+      break;
+    case ESP_RST_DEEPSLEEP: LastResetReason = 2; break;
+    case ESP_RST_EXT: LastResetReason = 3; break;
+    case ESP_RST_TASK_WDT: LastResetReason = 4; break;
+    case ESP_RST_PANIC: LastResetReason = 5; break;
+    case ESP_RST_BROWNOUT: LastResetReason = 6; break;
+    case ESP_RST_INT_WDT: LastResetReason = 7; break;
+    case ESP_RST_WDT: LastResetReason = 9; break;
+    case ESP_RST_SDIO: LastResetReason = 10; break;
+    default: LastResetReason = 8; break;
+  }
+
+  // Save both values: "current,ancient"
+  String saveStr = String(LastResetReason) + "," + String(ancientResetReason);
+  writeFile(LittleFS, "/LastResetReason.txt", saveStr.c_str());
+}
+void UpdateEngineFuel(unsigned long elapsedMillis) {
+  // Only calculate fuel consumption if engine is running
+  if (RPM <= 0 || RPM >= 6000) {
+    return;
+  }
+
+  float elapsedHours = elapsedMillis / 3600000.0f;  // Convert ms to hours
+
+  // Find the number of valid entries (allow first entry to be zero for idle)
+  int validEntries = 0;
+  for (int i = 0; i < FUEL_TABLE_SIZE; i++) {
+    if (fuelTableRPM[i] > 0 || i == 0) {  // Allow zero in first row
+      validEntries = i + 1;
+    } else {
+      break;  // Stop at first zero (after row 0)
+    }
+  }
+
+  // If no valid data, return
+  if (validEntries == 0) {
+    return;
+  }
+
+  // Interpolate fuel consumption based on current RPM
+  float fuelRate_GPH = 0.0f;
+
+  if (RPM <= fuelTableRPM[0]) {
+    // Below first entry, use first GPH value
+    fuelRate_GPH = fuelTableGPH[0];
+  } else if (RPM >= fuelTableRPM[validEntries - 1]) {
+    // Above last valid entry, use last valid GPH value
+    fuelRate_GPH = fuelTableGPH[validEntries - 1];
+  } else {
+    // Find the two points to interpolate between
+    for (int i = 0; i < validEntries - 1; i++) {
+      if (RPM >= fuelTableRPM[i] && RPM < fuelTableRPM[i + 1]) {
+        // Linear interpolation
+        float rpmRange = fuelTableRPM[i + 1] - fuelTableRPM[i];
+        float fuelRange = fuelTableGPH[i + 1] - fuelTableGPH[i];
+        float rpmOffset = RPM - fuelTableRPM[i];
+        fuelRate_GPH = fuelTableGPH[i] + (rpmOffset / rpmRange) * fuelRange;
+        break;
+      }
+    }
+  }
+
+  // Calculate fuel consumed in this interval
+  float fuelConsumed_Gallons = fuelRate_GPH * elapsedHours;
+  float fuelConsumed_Liters = fuelConsumed_Gallons * 3.78541;  // Convert gallons to liters
+
+  // Accumulate with floating point precision
+  static float engineFuelAccumulator = 0.0f;
+  static float engineFuelAccumulator_AllTime = 0.0f;
+
+  engineFuelAccumulator += fuelConsumed_Liters;
+  engineFuelAccumulator_AllTime += fuelConsumed_Liters;
+
+  if (engineFuelAccumulator >= 0.01f) {
+    float toAdd = floor(engineFuelAccumulator * 100.0f) / 100.0f;  // Round down to nearest 0.01 L
+    EngineFuelUsed += toAdd;
+    engineFuelAccumulator -= toAdd;  // Keep the fractional remainder
+  }
+
+  if (engineFuelAccumulator_AllTime >= 0.01f) {
+    float toAdd = floor(engineFuelAccumulator_AllTime * 100.0f) / 100.0f;
+    EngineFuelUsed_AllTime += toAdd;
+    engineFuelAccumulator_AllTime -= toAdd;  // Keep the fractional remainder
+  }
+}
+void UpdateBatterySOC(unsigned long elapsedMillis) {
+  // Convert elapsed milliseconds to seconds for calculations
+  float elapsedSeconds = elapsedMillis / 1000.0f;
+  // =================================================================
+  //     BATTERY STATE MONITORING
+  // =================================================================
+  // This section tracks battery state of charge from ALL sources:
+  // Get current battery voltage and current readings
+  float currentBatteryVoltage = getBatteryVoltage();
+  Voltage_scaled = currentBatteryVoltage * 100;  // V × 100 for precision
+  // Get battery current for SoC tracking (uses dedicated battery source)
+  float batteryCurrentForSoC = getBatteryCurrent();
+  BatteryCurrent_scaled = batteryCurrentForSoC * 100;  // A × 100 for precision
+  // Calculate battery power (positive = charging, negative = discharging)
+  BatteryPower_scaled = (Voltage_scaled * BatteryCurrent_scaled) / 100;  // W × 100
+  // Energy calculations - convert power to energy over time
+  float batteryPower_W = BatteryPower_scaled / 100.0f;
+  float energyDelta_Wh = (batteryPower_W * elapsedSeconds) / 3600.0f;  // Power × time = energy
+  // Energy accumulation with floating point precision
+  static float chargedEnergyAccumulator = 0.0f;
+  static float dischargedEnergyAccumulator = 0.0f;
+  static float chargedEnergyAccumulator_AllTime = 0.0f;
+  static float dischargedEnergyAccumulator_AllTime = 0.0f;
+  if (BatteryCurrent_scaled > 0) {
+    // Charging - energy going INTO battery
+    chargedEnergyAccumulator += energyDelta_Wh;
+    chargedEnergyAccumulator_AllTime += energyDelta_Wh;
+    if (chargedEnergyAccumulator >= 1.0f) {
+      ChargedEnergy += (int)chargedEnergyAccumulator;
+      chargedEnergyAccumulator -= (int)chargedEnergyAccumulator;
+    }
+    if (chargedEnergyAccumulator_AllTime >= 1.0f) {
+      ChargedEnergy_AllTime += (int)chargedEnergyAccumulator_AllTime;
+      chargedEnergyAccumulator_AllTime -= (int)chargedEnergyAccumulator_AllTime;
+    }
+  } else if (BatteryCurrent_scaled < 0) {
+    // Discharging - energy coming OUT of battery
+    dischargedEnergyAccumulator += abs(energyDelta_Wh);
+    dischargedEnergyAccumulator_AllTime += abs(energyDelta_Wh);
+    if (dischargedEnergyAccumulator >= 1.0f) {
+      DischargedEnergy += (int)dischargedEnergyAccumulator;
+      dischargedEnergyAccumulator -= (int)dischargedEnergyAccumulator;
+    }
+    if (dischargedEnergyAccumulator_AllTime >= 1.0f) {
+      DischargedEnergy_AllTime += (int)dischargedEnergyAccumulator_AllTime;
+      dischargedEnergyAccumulator_AllTime -= (int)dischargedEnergyAccumulator_AllTime;
+    }
+  }
+
+  // =================================================================
+  //     COULOMB COUNTING - BATTERY STATE OF CHARGE TRACKING
+  // =================================================================
+  // Track actual amp-hours into/out of battery with efficiency corrections
+
+  static float coulombAccumulator_Ah = 0.0f;
+  float batteryCurrent_A = BatteryCurrent_scaled / 100.0f;
+  float deltaAh = (batteryCurrent_A * elapsedSeconds) / 3600.0f;  // A × hours = Ah
+  if (BatteryCurrent_scaled >= 0) {
+    // Charging - apply charge efficiency (not all energy makes it in)
+    float batteryDeltaAh = deltaAh * (ChargeEfficiency_scaled / 100.0f);
+    coulombAccumulator_Ah += batteryDeltaAh;
+  } else {
+    // Discharging - apply Peukert compensation for high discharge rates
+    float dischargeCurrent_A = abs(batteryCurrent_A);
+    float peukertThreshold = BatteryCapacity_Ah / 100.0f;  // C/100 threshold
+
+    if (dischargeCurrent_A > peukertThreshold) {
+      // High discharge rate - apply Peukert equation
+      float peukertExponent = PeukertExponent_scaled / 100.0f;
+      dischargeCurrent_A = constrain(dischargeCurrent_A, 0, BatteryCapacity_Ah);  // Max 1C
+      float currentRatio = PeukertRatedCurrent_A / dischargeCurrent_A;
+      float peukertFactor = pow(currentRatio, peukertExponent - 1.0f);
+      peukertFactor = constrain(peukertFactor, 0.5f, 2.0f);  // Sanity limits
+      float batteryDeltaAh = deltaAh * peukertFactor;
+      coulombAccumulator_Ah += batteryDeltaAh;
+    } else {
+      // Low discharge rate - no Peukert compensation needed
+      coulombAccumulator_Ah += deltaAh;
+    }
+  }
+
+  // Update SoC when we've accumulated enough change (0.01 Ah threshold)
+  if (abs(coulombAccumulator_Ah) >= 0.01f) {
+    int deltaAh_scaled = (int)(coulombAccumulator_Ah * 100.0f);
+    CoulombCount_Ah_scaled += deltaAh_scaled;
+    coulombAccumulator_Ah -= (deltaAh_scaled / 100.0f);  // Keep remainder
+  }
+
+  // Calculate State of Charge percentage with bounds checking
+  CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, BatteryCapacity_Ah * 100);
+  float SoC_float = (float)CoulombCount_Ah_scaled / (BatteryCapacity_Ah * 100.0f) * 100.0f;
+  SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
+
+  // =================================================================
+  //     FULL CHARGE DETECTION - WORKS FROM ANY CHARGING SOURCE
+  // =================================================================
+  // When battery voltage is high AND current is low (tail current),
+  // we know it's fully charged regardless of what's charging it
+  if ((abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah / 100)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
+    // Conditions met - start/continue timer
+    FullChargeTimer += elapsedSeconds;
+
+    if (FullChargeTimer >= ChargedDetectionTime) {
+      // Timer expired - battery is definitely full
+      SOC_percent = 10000;  // 100.00%
+      CoulombCount_Ah_scaled = BatteryCapacity_Ah * 100;
+
+      static unsigned long lastFullChargeMessage = 0;
+      if (!FullChargeDetected || millis() - lastFullChargeMessage > 60000) {
+        char msg[128];
+        queueConsoleMessageF("BATTERY: Full charge detected - SoC reset to 100%% (V=%.2fV >= %.2fV, I=%.2fA, Timer=%.1fs)",
+                             Voltage_scaled / 100.0, ChargedVoltage_Scaled / 100.0,
+                             BatteryCurrent_scaled / 100.0, FullChargeTimer);
+        lastFullChargeMessage = millis();
+      }
+
+      FullChargeDetected = true;
+      coulombAccumulator_Ah = 0.0f;
+
+      // Apply shunt gain correction ONLY if using INA228 battery shunt
+      if (AutoShuntGainCorrection == 1 && AmpSrc == 1) {
+        applySocGainCorrection();
+      }
+    }
+  } else {
+    // Conditions not met - reset timer
+    FullChargeTimer = 0;
+    FullChargeDetected = false;
+  }
+
+  // =================================================================
+  //     ALTERNATOR-SPECIFIC TRACKING - ONLY RUNS WHEN ALT IS ON
+  // =================================================================
+  // These metrics are ONLY about the alternator's contribution
+
+  // Determine if alternator is actually producing current
+  alternatorIsOn = (MeasuredAmps > CurrentThreshold);
+
+  if (alternatorIsOn) {
+    // Track alternator runtime (seconds → AlternatorOnTime)
+    alternatorOnAccumulator += elapsedMillis;
+    if (alternatorOnAccumulator >= 1000) {  // Every 1 second
+      int secondsRun = alternatorOnAccumulator / 1000;
+      AlternatorOnTime += secondsRun;
+      AlternatorOnTime_AllTime += secondsRun;
+      alternatorOnAccumulator %= 1000;  // Keep remainder milliseconds
+    }
+
+    alternatorWasOn = alternatorIsOn;  // State tracking
+
+    // Calculate alternator energy output
+    static float alternatorEnergyAccumulator = 0.0f;
+    static float alternatorEnergyAccumulator_AllTime = 0.0f;
+    float alternatorPower_W = (currentBatteryVoltage * MeasuredAmps);
+    float altEnergyDelta_Wh = (alternatorPower_W * elapsedSeconds) / 3600.0f;
+
+    if (altEnergyDelta_Wh > 0) {
+      alternatorEnergyAccumulator += altEnergyDelta_Wh;
+      alternatorEnergyAccumulator_AllTime += altEnergyDelta_Wh;
+      if (alternatorEnergyAccumulator >= 1.0f) {
+        AlternatorChargedEnergy += (int)alternatorEnergyAccumulator;
+        alternatorEnergyAccumulator -= (int)alternatorEnergyAccumulator;
+      }
+      if (alternatorEnergyAccumulator_AllTime >= 1.0f) {
+        AlternatorChargedEnergy_AllTime += (int)alternatorEnergyAccumulator_AllTime;
+        alternatorEnergyAccumulator_AllTime -= (int)alternatorEnergyAccumulator_AllTime;
+      }
+      // =================================================================
+      //     FUEL CONSUMPTION CALCULATION - ALTERNATOR SPECIFIC
+      // =================================================================
+      // Calculate diesel fuel used to produce this electrical energy
+      // Chain: Diesel → Engine (30% eff) → Alternator (50% eff) → Electricity
+
+      float energyJoules = altEnergyDelta_Wh * 3600.0f;  // Convert Wh to Joules
+      const float engineEfficiency = 0.30f;              // Engine: fuel → mechanical (30%)
+      const float alternatorEfficiency = 0.50f;          // Alt: mechanical → electrical (50%)
+
+      // Total system efficiency = 0.30 × 0.50 = 0.15 (15%)
+      float fuelEnergyUsed_J = energyJoules / (engineEfficiency * alternatorEfficiency);
+      const float dieselEnergy_J_per_mL = 36000.0f;  // Energy content of diesel
+
+      float fuelUsed_mL = fuelEnergyUsed_J / dieselEnergy_J_per_mL;
+      float fuelUsed_L = fuelUsed_mL / 1000.0f;  // Convert mL to L
+
+      // Accumulate fuel (prevents losing fractional L)
+      static float fuelAccumulator = 0.0f;
+      static float fuelAccumulator_AllTime = 0.0f;
+      fuelAccumulator += fuelUsed_L;
+      fuelAccumulator_AllTime += fuelUsed_L;
+
+      if (fuelAccumulator >= 0.01f) {
+        float toAdd = floor(fuelAccumulator * 100.0f) / 100.0f;  // Round down to nearest 0.01 L
+        AlternatorFuelUsed += toAdd;
+        fuelAccumulator -= toAdd;  // Keep the fractional remainder
+      }
+      if (fuelAccumulator_AllTime >= 0.01f) {
+        float toAdd = floor(fuelAccumulator_AllTime * 100.0f) / 100.0f;
+        AlternatorFuelUsed_AllTime += toAdd;
+        fuelAccumulator_AllTime -= toAdd;  // Keep the fractional remainder
+      }
+    }
+  }
+
+  // =================================================================
+  //     CHARGE CYCLE CALCULATION
+  // =================================================================
+  // Calculate charge cycles based on total energy throughput
+  // One cycle = one full battery capacity worth of energy charged
+  // Determine nominal voltage: <16V = 12V, <32V = 24V, else 48V
+  float nominalVoltage;
+  if (currentBatteryVoltage < 16.0f) {
+    nominalVoltage = 12.0f;
+  } else if (currentBatteryVoltage < 32.0f) {
+    nominalVoltage = 24.0f;
+  } else {
+    nominalVoltage = 48.0f;
+  }
+
+  float batteryCapacity_Wh = BatteryCapacity_Ah * nominalVoltage;
+
+  if (batteryCapacity_Wh > 0) {
+    ChargeCycles = (ChargedEnergy / batteryCapacity_Wh);  //Units: Wh
+    ChargeCycles_AllTime = (ChargedEnergy_AllTime) / batteryCapacity_Wh;
+  }
+
+  // =================================================================
+  //     AVERAGE SOC TRACKING (TIME-WEIGHTED)
+  // =================================================================
+  // Time-weighted average SOC calculation
+  static float socAccumulator = 0.0f;
+  // socAccumulator_AllTime is now GLOBAL (not static here)
+  // totalSocSampleTime_AllTime is now GLOBAL (not static here)
+  static unsigned long totalSocSampleTime = 0;  // Session seconds tracked
+
+  float currentSOC = SOC_percent / 100.0f;  // Convert to actual percentage
+
+  socAccumulator += currentSOC * elapsedSeconds;
+  socAccumulator_AllTime += currentSOC * elapsedSeconds;
+  totalSocSampleTime += elapsedSeconds;
+  totalSocSampleTime_AllTime += elapsedSeconds;
+
+  if (totalSocSampleTime > 0) {
+    AvgSOC = socAccumulator / totalSocSampleTime;
+  }
+  if (totalSocSampleTime_AllTime > 0) {
+    AvgSOC_AllTime = socAccumulator_AllTime / totalSocSampleTime_AllTime;
+  }
+
+
+  // Check calculation
+  if (totalSocSampleTime_AllTime > 0) {
+    float calculatedAvg = socAccumulator_AllTime / totalSocSampleTime_AllTime;
+  } else {
+    Serial.println("WARNING: totalSocSampleTime_AllTime is ZERO!");
+  }
+
+
+  // Track voltage sampling time
+  totalVoltageSampleTime_AllTime += elapsedSeconds;
+
+  // Calculate time-weighted average voltage
+  // voltageAccumulator_AllTime = 0.0f; don't do this shit anymore
+  float currentVoltage = getBatteryVoltage();
+  voltageAccumulator_AllTime += currentVoltage * elapsedSeconds;
+
+  if (totalVoltageSampleTime_AllTime > 0) {
+    AvgVoltage_AllTime = voltageAccumulator_AllTime / totalVoltageSampleTime_AllTime;
+  }
+}
+void UpdateTravelStatistics(unsigned long elapsedMillis) {
+  // ==========================================================================
+  // DISTANCE CALCULATION - Using GPS position (Haversine)
+  // ==========================================================================
+
+  if (!IS_STALE(IDX_LATITUDE_NMEA) && !IS_STALE(IDX_LONGITUDE_NMEA)) {
+    static double lastLat = 0;
+    static double lastLon = 0;
+    static bool firstRun = true;
+
+    if (firstRun) {
+      lastLat = LatitudeNMEA;
+      lastLon = LongitudeNMEA;
+      firstRun = false;
+    } else {
+      double distanceDelta_nm = calculateHaversineDistance(lastLat, lastLon, LatitudeNMEA, LongitudeNMEA);
+
+      if (distanceDelta_nm < 0.1) {
+        static float distanceAccumulator = 0.0f;
+        static float distanceAccumulator_AllTime = 0.0f;
+
+        distanceAccumulator += (float)distanceDelta_nm;
+        distanceAccumulator_AllTime += (float)distanceDelta_nm;
+
+        if (distanceAccumulator >= 0.01f) {
+          TotalDistance += distanceAccumulator;
+          distanceAccumulator = 0.0f;
+
+          char buf[32];
+          snprintf(buf, sizeof(buf), "%.2f", TotalDistance);
+          writeFile(LittleFS, "/TotalDistance.txt", buf);
+        }
+
+        if (distanceAccumulator_AllTime >= 0.01f) {
+          TotalDistance_AllTime += distanceAccumulator_AllTime;
+          distanceAccumulator_AllTime = 0.0f;
+
+          char buf2[32];
+          snprintf(buf2, sizeof(buf2), "%.2f", TotalDistance_AllTime);
+          writeFile(LittleFS, "/TotalDistance_AllTime.txt", buf2);
+        }
+      }
+
+      lastLat = LatitudeNMEA;
+      lastLon = LongitudeNMEA;
+    }
+  }
+
+  // ==========================================================================
+  // SPEED CALCULATION - Using SOGNMEA (time-weighted average) - UNCHANGED
+  // ==========================================================================
+
+  if (IS_STALE(IDX_SOG_NMEA) || SOGNMEA < 0) {
+    return;
+  }
+
+  static float speedAccumulator = 0.0f;
+  static unsigned long totalSpeedSampleTime = 0;  // Session seconds
+
+  float elapsedSeconds = elapsedMillis / 1000.0f;
+
+  speedAccumulator += (float)(SOGNMEA * elapsedSeconds);
+  speedAccumulator_AllTime += (float)(SOGNMEA * elapsedSeconds);
+  totalSpeedSampleTime += (unsigned long)elapsedSeconds;
+  totalSpeedSampleTime_AllTime += (unsigned long)elapsedSeconds;
+
+  if (totalSpeedSampleTime > 0) {
+    AvgSpeed = speedAccumulator / (float)totalSpeedSampleTime;
+  }
+  if (totalSpeedSampleTime_AllTime > 0) {
+    AvgSpeed_AllTime = speedAccumulator_AllTime / (float)totalSpeedSampleTime_AllTime;
+  }
+}
+
+void UpdateEngineRuntime(unsigned long elapsedMillis) {
+  // Check if engine is running (RPM > 100)
+  bool engineIsRunning = (RPM > 100 && RPM < 6000);
+
+  if (engineIsRunning) {
+    // Accumulate running time in milliseconds
+    engineRunAccumulator += elapsedMillis;
+
+    // Update total engine run time every second
+    if (engineRunAccumulator >= 1000) {  // 1 second in milliseconds
+      int secondsRun = engineRunAccumulator / 1000;
+      EngineRunTime += secondsRun;
+      EngineRunTime_AllTime += secondsRun;
+
+      // Update engine cycles (RPM * seconds / 60)
+      int cyclesDelta = (RPM * secondsRun) / 60;
+      EngineCycles += cyclesDelta;
+      EngineCycles_AllTime += cyclesDelta;
+
+      // Keep the remainder milliseconds
+      engineRunAccumulator %= 1000;
+    }
+  }
+
+  // Update engine state
+  engineWasRunning = engineIsRunning;
+}
+// Function to get smoothed GPS position (5-sample moving average)
+void getSmoothedGPS(double &smoothLat, double &smoothLon) {
+  if (gpsBufferCount == 0) {
+    smoothLat = LatitudeNMEA;
+    smoothLon = LongitudeNMEA;
+    return;
+  }
+
+  double latSum = 0;
+  double lonSum = 0;
+  int samplesToAverage = min(gpsBufferCount, GPS_SMOOTHING_SAMPLES);
+
+  for (int i = 0; i < samplesToAverage; i++) {
+    latSum += latBuffer[i];
+    lonSum += lonBuffer[i];
+  }
+
+  smoothLat = latSum / samplesToAverage;
+  smoothLon = lonSum / samplesToAverage;
+}
+// Call this whenever you get a new GPS position (in your GNSS handler or main loop)
+void updateGPSBuffer() {
+  // Only update if we have valid GPS data
+  if (IS_STALE(IDX_LATITUDE_NMEA) || IS_STALE(IDX_LONGITUDE_NMEA)) {
+    return;
+  }
+
+  // **FIX: On first valid reading, pre-fill entire buffer**
+  if (gpsBufferCount == 0) {
+    for (int i = 0; i < GPS_SMOOTHING_SAMPLES; i++) {
+      latBuffer[i] = LatitudeNMEA;
+      lonBuffer[i] = LongitudeNMEA;
+    }
+    gpsBufferCount = GPS_SMOOTHING_SAMPLES;
+    gpsBufferIndex = 0;
+    Serial.println("GPS buffer initialized");
+    return;
+  }
+
+  // Add to circular buffer
+  latBuffer[gpsBufferIndex] = LatitudeNMEA;
+  lonBuffer[gpsBufferIndex] = LongitudeNMEA;
+
+  gpsBufferIndex = (gpsBufferIndex + 1) % GPS_SMOOTHING_SAMPLES;
+}
+// Calculate distance between two GPS coordinates using Haversine formula
+double calculateHaversineDistance(double lat1, double lon1, double lat2, double lon2) {
+  const double R = 3440.065;  // Earth's radius in nautical miles
+
+  // Convert to radians
+  double lat1_rad = lat1 * PI / 180.0;
+  double lat2_rad = lat2 * PI / 180.0;
+  double delta_lat = (lat2 - lat1) * PI / 180.0;
+  double delta_lon = (lon2 - lon1) * PI / 180.0;
+
+  // Haversine formula
+  double a = sin(delta_lat / 2.0) * sin(delta_lat / 2.0) + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2.0) * sin(delta_lon / 2.0);
+  double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+
+  return R * c;  // Distance in nautical miles
+}
+
+/**
+ * UpdateSailingMetrics - Track sailing time and calculate ratio
+ * Sailing conditions: SOG > 0.5 knots AND RPM < 50 AND Ignition == 0
+ */
+void UpdateSailingMetrics(unsigned long elapsedMillis) {
+  // Check sailing conditions
+  bool isSailing = false;
+  if (!IS_STALE(IDX_SOG_NMEA) && SOGNMEA > 0.5 && RPM < 50 && Ignition == 0) {
+    isSailing = true;
+  }
+
+  // Update total operational time (always, regardless of sailing)
+  float elapsedSeconds = elapsedMillis / 1000.0f;
+
+  // Update sailing time (only when sailing)
+  if (isSailing) {
+    float elapsedDays = elapsedMillis / (1000.0f * 60.0f * 60.0f * 24.0f);
+
+    static float sailingDaysAccumulator = 0.0f;
+    sailingDaysAccumulator += elapsedDays;
+
+    // Update when accumulated at least 0.001 days (~1.4 minutes)
+    if (sailingDaysAccumulator >= 0.001f) {
+      sailing_days_alltime += sailingDaysAccumulator;
+      sailingDaysAccumulator = 0.0f;
+      // Will be saved to NVS every 2 minutes
+    }
+  }
+
+  // Calculate sailing ratio using existing totalSocSampleTime_AllTime
+  float total_operational_days = totalSocSampleTime_AllTime / 86400.0f;  // ✅ Use existing variable
+  if (total_operational_days > 0) {
+    sailing_ratio = (sailing_days_alltime / total_operational_days) * 100.0f;
+  } else {
+    sailing_ratio = 0.0f;
+  }
+}
+//UpdateDistanceThisInterval - Accumulate distance for this upload interval
+void UpdateDistanceThisInterval() {
+  // Only calculate if we have valid GPS data
+  if (IS_STALE(IDX_LATITUDE_NMEA) || IS_STALE(IDX_LONGITUDE_NMEA)) {
+    return;
+  }
+
+  // Get smoothed position
+  double smoothLat, smoothLon;
+  getSmoothedGPS(smoothLat, smoothLon);
+
+  // Initialize on first run
+  if (first_distance_calc) {
+    last_position_lat = smoothLat;
+    last_position_lon = smoothLon;
+    first_distance_calc = false;
+    return;
+  }
+
+  // Calculate distance using existing Haversine function
+  double distanceDelta_nm = calculateHaversineDistance(
+    last_position_lat, last_position_lon,
+    smoothLat, smoothLon);
+
+  // Sanity check: Ignore unrealistic jumps (same as TotalDistance logic)
+  if (distanceDelta_nm < 0.1) {
+    distance_this_interval += distanceDelta_nm;
+  }
+
+  // Update last position
+  last_position_lat = smoothLat;
+  last_position_lon = smoothLon;
+}
+void UpdateWindMaximums() {
+  if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && ApparentWindSpeedNMEA > max_wind_speed_apparent_alltime) {
+    max_wind_speed_apparent_alltime = ApparentWindSpeedNMEA;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2f", max_wind_speed_apparent_alltime);
+    writeFile(LittleFS, "/max_wind_apparent_alltime.txt", buf);
+  }
+
+  if (!isnan(TrueWindSpeedNMEA) && TrueWindSpeedNMEA > max_wind_speed_true_alltime) {
+    max_wind_speed_true_alltime = TrueWindSpeedNMEA;
+    char buf2[32];
+    snprintf(buf2, sizeof(buf2), "%.2f", max_wind_speed_true_alltime);
+    writeFile(LittleFS, "/max_wind_true_alltime.txt", buf2);
+  }
+}
+
+void UpdateBoardTempPressureMaximums() {
+  if (ambientTemp > board_temp_max_alltime) {
+    board_temp_max_alltime = ambientTemp;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2f", board_temp_max_alltime);
+    writeFile(LittleFS, "/board_temp_max_alltime.txt", buf);
+  }
+
+  if (ambientTemp < board_temp_min_alltime) {
+    board_temp_min_alltime = ambientTemp;
+    char buf2[32];
+    snprintf(buf2, sizeof(buf2), "%.2f", board_temp_min_alltime);
+    writeFile(LittleFS, "/board_temp_min_alltime.txt", buf2);
+  }
+
+  if (baroPressure > baro_pressure_max_alltime) {
+    baro_pressure_max_alltime = baroPressure;
+    char buf3[32];
+    snprintf(buf3, sizeof(buf3), "%.2f", baro_pressure_max_alltime);
+    writeFile(LittleFS, "/baro_pressure_max_alltime.txt", buf3);
+  }
+
+  if (baroPressure < baro_pressure_min_alltime) {
+    baro_pressure_min_alltime = baroPressure;
+    char buf4[32];
+    snprintf(buf4, sizeof(buf4), "%.2f", baro_pressure_min_alltime);
+    writeFile(LittleFS, "/baro_pressure_min_alltime.txt", buf4);
+  }
+}
+
+void resetDistanceThisInterval() {
+  distance_this_interval = 0.0;
+  // Note: Don't reset last_position - we want continuous tracking
+}
+
+float getBatteryCurrent() {
+  // Return battery current from appropriate source
+  // Variables are populated by ReadAnalogInputs() or ReadAnalogInputs_Fake()
+  switch (BatteryCurrentSource) {
+    case 0: return Bcur;            // INA228
+    case 1: return Bcur;            // NMEA2K (not implemented yet fix later, uses INA228)
+    case 2: return Bcur;            // NMEA0183 (not implemented yet fx later, uses INA228)
+    case 3: return VictronCurrent;  // Victron VE.Direct
+    default: return Bcur;
+  }
+}
+float getBatteryVoltage() {
+  // Return battery voltage from appropriate source
+  // update- removed choice because the control loops need predictable and controllable daq rates
+  // Variables are populated by ReadAnalogInputs() or ReadAnalogInputs_Fake()
+  return BatteryV;
+}
+float getTargetAmps() {
+  float targetValue = 0;
+  static unsigned long lastTargetAmpsWarning = 0;
+
+  switch (AmpSrc) {
+    case 0:  // Alt Hall Effect Sensor
+      targetValue = MeasuredAmps;
+      break;
+
+    case 1:  // Battery Shunt
+      targetValue = Bcur;
+      break;
+
+    case 2:  // NMEA2K Batt
+      if (millis() - lastTargetAmpsWarning > 10000) {
+        queueConsoleMessage("C2a NMEA2K Battery current not implemented, using Battery Shunt");
+        lastTargetAmpsWarning = millis();
+      }
+      targetValue = Bcur;
+      break;
+
+    case 3:  // NMEA2K Alt
+      if (millis() - lastTargetAmpsWarning > 10000) {
+        queueConsoleMessage("C3a NMEA2K Alternator current not implemented, using Alt Hall Sensor");
+        lastTargetAmpsWarning = millis();
+      }
+      targetValue = MeasuredAmps;
+      break;
+
+    case 4:  // NMEA0183 Batt
+      if (millis() - lastTargetAmpsWarning > 10000) {
+        queueConsoleMessage("C4a NMEA0183 Battery current not implemented, using Battery Shunt");
+        lastTargetAmpsWarning = millis();
+      }
+      targetValue = Bcur;
+      break;
+
+    case 5:  // NMEA0183 Alt
+      if (millis() - lastTargetAmpsWarning > 10000) {
+        queueConsoleMessage("C5a NMEA0183 Alternator current not implemented, using Alt Hall Sensor");
+        lastTargetAmpsWarning = millis();
+      }
+      targetValue = MeasuredAmps;
+      break;
+
+    case 6:                             // Victron Batt
+      if (abs(VictronCurrent) > 0.1) {  // Valid reading
+        targetValue = VictronCurrent;
+      } else {
+        if (millis() - lastTargetAmpsWarning > 10000) {
+          queueConsoleMessage("C6a Victron current not available, using Battery Shunt");
+          lastTargetAmpsWarning = millis();
+        }
+        targetValue = Bcur;
+      }
+      break;
+
+    case 7:  // Other
+      targetValue = MeasuredAmps;
+      break;
+
+    default:
+      if (millis() - lastTargetAmpsWarning > 10000) {
+        queueConsoleMessageF("Invalid AmpSrc (%d), using Alt Hall Sensor", AmpSrc);
+        lastTargetAmpsWarning = millis();
+      }
+      targetValue = MeasuredAmps;
+      break;
+  }
+
+  return targetValue;
+}
+int thermistorTempC(float V_thermistor) {
+  float Vcc = 5.0;
+  float R_thermistor = R_fixed * (V_thermistor / (Vcc - V_thermistor));
+  float T0_K = T0_C + 273.15;
+  float tempK = 1.0 / ((1.0 / T0_K) + (1.0 / Beta) * log(R_thermistor / R0));
+  return (int)(tempK - 273.15);  // Cast to int for whole degrees
+}
+
+//============================================================================
+// CheckAlarms() - Alarm monitoring and INA228 hardware protection
+// ============================================================================
+void CheckAlarms() {
+  Alarm_Status = digitalRead(21);
+  static unsigned long lastRunTime = 0;
+  if (millis() - lastRunTime < 250) return;  // Run every 250ms
+  lastRunTime = millis();
+
+  static bool previousAlarmState = false;
+  bool currentAlarmCondition = false;
+  bool outputAlarmState = false;
+  const char *alarmReason = "";
+
+  // ========== ALARM TEST MODE ==========
+  if (AlarmTest == 1) {
+    if (alarmTestStartTime == 0) {
+      alarmTestStartTime = millis();
+      queueConsoleMessage("ALARM TEST: Testing buzzer for 2 seconds");
+    }
+
+    if (millis() - alarmTestStartTime < ALARM_TEST_DURATION) {
+      currentAlarmCondition = true;
+      alarmReason = "Alarm test active";
+    } else {
+      AlarmTest = 0;
+      alarmTestStartTime = 0;
+      queueConsoleMessage("ALARM TEST: Complete");
+    }
+  }
+
+  // ========== NORMAL ALARM CHECKING ==========
+  if (AlarmActivate == 1) {
+    // Set temperature source
+    if (TempSource == 0) {
+      TempToUse = AlternatorTemperatureF;
+    } else if (TempSource == 1) {
+      TempToUse = temperatureThermistor;
+    }
+
+    // Temperature alarm
+    if (TempAlarm > 0 && TempToUse > TempAlarm) {
+      currentAlarmCondition = true;
+      alarmReason = "High alternator temperature";
+      queueConsoleMessageF("High alternator temperature: %.1f°F (limit: %d°F)",
+                           TempToUse, TempAlarm);
+    }
+
+    // Efficiency anomaly alarm
+    if (anomalyAlarmEnable && effAnomalyAlarmActive) {
+      currentAlarmCondition = true;
+      alarmReason = "Alternator efficiency anomaly";
+    }
+
+    // Voltage alarms
+    float currentVoltage = getBatteryVoltage();
+
+    if (VoltageAlarmHigh > 0 && currentVoltage > VoltageAlarmHigh) {
+      currentAlarmCondition = true;
+      alarmReason = "High battery voltage";
+      queueConsoleMessageF("High battery voltage: %.2fV (limit: %.0fV)",
+                           currentVoltage, VoltageAlarmHigh);
+    }
+
+    if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0) {
+      currentAlarmCondition = true;
+      alarmReason = "Low battery voltage";
+      queueConsoleMessageF("Low battery voltage: %.2fV (limit: %.0fV)",
+                           currentVoltage, VoltageAlarmLow);
+    }
+
+    // High alternator current
+    if (CurrentAlarmHigh > 0 && MeasuredAmps > CurrentAlarmHigh) {
+      currentAlarmCondition = true;
+      alarmReason = "High alternator current";
+      queueConsoleMessageF("High alternator current: %.1fA (limit: %.0fA)",
+                           MeasuredAmps, CurrentAlarmHigh);
+    }
+
+    // High battery current
+    if (MaximumAllowedBatteryAmps > 0 && abs(Bcur) > MaximumAllowedBatteryAmps) {
+      currentAlarmCondition = true;
+      alarmReason = "High battery current";
+      queueConsoleMessageF("High battery current: %.1fA (limit: %.0fA)",
+                           abs(Bcur), MaximumAllowedBatteryAmps);
+    }
+  }
+
+  // ========== INA228 HARDWARE OVERVOLTAGE PROTECTION ==========
+  // Only checks BUSOL (bus overvoltage) — the critical hardware protection.
+  // NOTE: This path is NOT governed by FIELD_COLLAPSE_DELAY. It uses its own
+  // independent latch timer and bypasses the normal lockout entirely via
+  // shouldImmediatelyCutGPIO4(). See CheckAlarms() and buildTickSnapshot().
+  // NOTE: Undervoltage (BUSUL) checking can be added here if needed in the future.
+
+  if (INADisconnected == 0) {
+    static unsigned long lastINA228Check = 0;
+    uint16_t alertStatus = 0;  // Declared once here — in scope for all blocks below
+
+    // ---- Latch management (runs every 250ms while latched) ----
+    if (inaOvervoltageLatched) {
+      uint32_t latchAge = millis() - inaOvervoltageTime;
+      static bool earlyCheckDone = false;
+
+      // Keep alarm active while latched
+      currentAlarmCondition = true;
+      alarmReason = "INA228 hardware overvoltage";
+      static unsigned long lastOVMessage = 0;
+      if (millis() - lastOVMessage >= 5000) {
+        lastOVMessage = millis();
+        float busV = INA.getBusVoltage();
+        queueConsoleMessageF("INA228 Hardware Overvoltage active: %.2fV exceeds limit %.2fV",
+                             busV, VoltageHardwareLimit);
+      }
+
+      // One-shot early check at 3s — fast release for transient spikes
+      if (!earlyCheckDone && latchAge >= 3000) {
+        earlyCheckDone = true;
+        clearINA228AlertLatch(INA.getAddress());
+        alertStatus = readINA228AlertRegister(INA.getAddress());
+        if (!(alertStatus & 0x0010)) {
+          inaOvervoltageLatched = false;
+          earlyCheckDone = false;
+          queueConsoleMessage("INA228: Overvoltage cleared early (transient spike)");
+        }
+        // Still present — keep latched, full 10s wait applies
+      }
+
+      // Full 10s timeout — definitive check
+      if (inaOvervoltageLatched && latchAge >= 10000) {
+        earlyCheckDone = false;  // Reset for next event
+        clearINA228AlertLatch(INA.getAddress());
+        alertStatus = readINA228AlertRegister(INA.getAddress());
+        if (!(alertStatus & 0x0010)) {
+          inaOvervoltageLatched = false;
+          queueConsoleMessage("INA228: Overvoltage condition cleared");
+        } else {
+          currentAlarmCondition = true;
+          alarmReason = "INA228 hardware overvoltage still present";
+        }
+      }
+    }
+
+    // ---- Throttled register polling — detect new overvoltage events ----
+    if (millis() - lastINA228Check >= 5000) {
+      lastINA228Check = millis();
+
+      alertStatus = readINA228AlertRegister(INA.getAddress());
+
+      // Check BUSOL bit (bit 4 = 0x0010)
+      if (alertStatus & 0x0010) {
+        if (!inaOvervoltageLatched) {
+          inaOvervoltageLatched = true;
+          inaOvervoltageTime = millis();
+          currentAlarmCondition = true;
+
+          float busV = INA.getBusVoltage();
+          alarmReason = "INA228 hardware overvoltage";
+          queueConsoleMessageF("INA228 Hardware Overvoltage: %.2fV exceeds limit %.2fV",
+                               busV, VoltageHardwareLimit);
+        }
+      }
+    }
+  }
+
+  // ========== MANUAL LATCH RESET ==========
+  if (ResetAlarmLatch == 1) {
+    alarmLatch = false;
+    ResetAlarmLatch = 0;
+    queueConsoleMessage("ALARM LATCH: Manually reset");
+  }
+
+  // ========== LATCHING LOGIC ==========
+  if (AlarmLatchEnabled == 1) {
+    if (currentAlarmCondition) {
+      alarmLatch = true;
+    }
+    outputAlarmState = alarmLatch;
+  } else {
+    outputAlarmState = currentAlarmCondition;
+  }
+
+  // ========== FINAL OUTPUT CONTROL ==========
+  bool finalOutput = false;
+  if (AlarmTest == 1) {
+    finalOutput = outputAlarmState;
+  } else if (AlarmActivate == 1) {
+    finalOutput = outputAlarmState;
+  }
+
+  digitalWrite(21, finalOutput ? HIGH : LOW);
+
+  // ========== CONSOLE MESSAGING ==========
+  if (currentAlarmCondition != previousAlarmState) {
+    if (currentAlarmCondition) {
+      queueConsoleMessageF("ALARM ACTIVATED: %s", alarmReason);
+    } else if (AlarmLatchEnabled == 0) {
+      queueConsoleMessage("ALARM CLEARED");
+    }
+    previousAlarmState = currentAlarmCondition;
+  }
+}
+
+
+void logDashboardValues() {
+  static unsigned long lastDashboardLog = 0;
+  if (millis() - lastDashboardLog >= 120000) {  // Every 2 min
+    lastDashboardLog = millis();
+    queueConsoleMessageF("DASHBOARD: IBV=%.2fV SoC=%d%% AltI=%.1fA BattI=%.1fA AltT=%d°F RPM=%d",
+                         IBV, SOC_percent / 100, MeasuredAmps, Bcur,
+                         (int)AlternatorTemperatureF, (int)RPM);
+  }
+}
+
+void applySocGainCorrection() {
+  // Only apply if feature is enabled AND using INA228 battery shunt
+  if (AutoShuntGainCorrection == 0 || AmpSrc != 1) {
+    return;
+  }
+
+  // Check minimum time interval
+  unsigned long now = millis();
+  if (now - lastGainCorrectionTime < MIN_GAIN_CORRECTION_INTERVAL) {
+    queueConsoleMessage("SOC Gain: Correction blocked, too soon since last adjustment");
+    return;
+  }
+
+  // Calculate actual vs expected capacity
+  float expectedCapacity = BatteryCapacity_Ah;
+  float calculatedCapacity = CoulombCount_Ah_scaled / 100.0;  // Convert from scaled value
+
+  // Sanity check - make sure we have reasonable values
+  if (calculatedCapacity < 10 || expectedCapacity < 10) {
+    queueConsoleMessage("SOC Gain: Invalid capacity values, skipping correction");
+    return;
+  }
+
+  // Calculate error ratio
+  float errorRatio = abs(expectedCapacity - calculatedCapacity) / expectedCapacity;
+
+  // Check if error is too large to be reasonable
+  if (errorRatio > MAX_REASONABLE_ERROR) {
+    queueConsoleMessageF("SOC Gain: Error too large (%.1f%%), ignoring correction",
+                         errorRatio * 100);
+    return;
+  }
+
+  // Calculate desired correction factor
+  float desiredCorrectionFactor = expectedCapacity / calculatedCapacity;
+  float currentFactor = DynamicShuntGainFactor;
+  float newFactor = currentFactor * desiredCorrectionFactor;
+
+  // Limit the adjustment rate per cycle
+  float maxChange = currentFactor * MAX_GAIN_ADJUSTMENT_PER_CYCLE;
+  if (newFactor > currentFactor + maxChange) {
+    newFactor = currentFactor + maxChange;
+    queueConsoleMessage("SOC Gain: Correction limited to maximum change rate");
+  } else if (newFactor < currentFactor - maxChange) {
+    newFactor = currentFactor - maxChange;
+    queueConsoleMessage("SOC Gain: Correction limited to maximum change rate");
+  }
+
+  // Apply bounds checking
+  if (newFactor > MAX_DYNAMIC_GAIN_FACTOR) {
+    newFactor = MAX_DYNAMIC_GAIN_FACTOR;
+    queueConsoleMessageF("SOC Gain: Factor hit maximum limit (%.2f), check system",
+                         MAX_DYNAMIC_GAIN_FACTOR);
+  } else if (newFactor < MIN_DYNAMIC_GAIN_FACTOR) {
+    newFactor = MIN_DYNAMIC_GAIN_FACTOR;
+    queueConsoleMessageF("SOC Gain: Factor hit minimum limit (%.2f), check system",
+                         MIN_DYNAMIC_GAIN_FACTOR);
+  }
+
+  // Apply the correction
+  DynamicShuntGainFactor = newFactor;
+  lastGainCorrectionTime = now;
+  queueConsoleMessageF("SOC Gain: Corrected from %.4f to %.4f (Calc:%.1fAh, Expected:%.1fAh)",
+                       currentFactor, newFactor, calculatedCapacity, expectedCapacity);
+}
+void handleSocGainReset() {
+  if (ResetDynamicShuntGain == 1) {
+    DynamicShuntGainFactor = 1.0;
+    lastGainCorrectionTime = 0;
+    ResetDynamicShuntGain = 0;  // Clear the momentary flag
+    queueConsoleMessage("SOC Gain: Dynamic gain factor reset to 1.0");
+  }
+}
+void checkAutoZeroTriggers() {
+  // Only check if feature is enabled
+  if (AutoAltCurrentZero == 0) {
+    return;
+  }
+
+  // Don't start if already in progress
+  if (autoZeroStartTime > 0) {
+    return;
+  }
+
+  // Make sure engine is running
+  if (RPM < 200) {
+    return;
+  }
+
+  unsigned long now = millis();
+  bool shouldTrigger = false;
+  static char triggerReasonBuf[64];  // Static buffer for reason string
+  const char *triggerReason = "";
+
+  // Check time-based trigger (1 hour)
+  if (now - lastAutoZeroTime >= AUTO_ZERO_INTERVAL) {
+    shouldTrigger = true;
+    triggerReason = "scheduled interval";
+  }
+
+  // Check temperature-based trigger (20°F change)
+  float currentTemp = (TempSource == 0) ? AlternatorTemperatureF : temperatureThermistor;
+  if (lastAutoZeroTemp > -900 && abs(currentTemp - lastAutoZeroTemp) >= AUTO_ZERO_TEMP_DELTA) {
+    shouldTrigger = true;
+    snprintf(triggerReasonBuf, sizeof(triggerReasonBuf), "temperature change (%.1f°F)",
+             abs(currentTemp - lastAutoZeroTemp));
+    triggerReason = triggerReasonBuf;
+  }
+
+  if (shouldTrigger) {
+    startAutoZero(triggerReason);
+  }
+}
+void startAutoZero(const char *reason) {  // Changed from String reason
+  autoZeroStartTime = millis();
+  queueConsoleMessageF("Auto-zero: Starting alternator current zeroing (%s)", reason);
+}
+void processAutoZero() {
+  // Cancel if feature gets disabled during active cycle
+  if (AutoAltCurrentZero == 0) {
+    if (autoZeroStartTime > 0) {
+      autoZeroStartTime = 0;      // Cancel active cycle
+      autoZeroAccumulator = 0.0;  // Reset accumulator
+      autoZeroSampleCount = 0;
+      queueConsoleMessage("Auto-zero: Cancelled - feature disabled");
+    }
+    return;
+  }
+
+  // Only process if auto-zero is active
+  if (autoZeroStartTime == 0) {
+    return;
+  }
+
+  unsigned long now = millis();
+  unsigned long elapsed = now - autoZeroStartTime;
+
+  if (elapsed < AUTO_ZERO_DURATION) {
+    // Still in zeroing phase - force field to minimum
+    dutyCycle = MinDuty;
+    setDutyPercent((int)dutyCycle);
+    digitalWrite(4, 0);  // Disable field completely for more accurate zero
+
+    // Accumulate readings after 2 second settling time
+    if (elapsed > 2000) {
+      autoZeroAccumulator += MeasuredAmps;
+      autoZeroSampleCount++;
+    }
+  } else {
+    // Zeroing complete - calculate average and restore normal operation
+    float currentTemp = (TempSource == 0) ? AlternatorTemperatureF : temperatureThermistor;
+
+    // Calculate average of accumulated samples
+    if (autoZeroSampleCount > 0) {
+      DynamicAltCurrentZero = autoZeroAccumulator / autoZeroSampleCount;
+    } else {
+      DynamicAltCurrentZero = MeasuredAmps;  // Fallback to single reading
+    }
+
+    lastAutoZeroTime = now;
+    lastAutoZeroTemp = currentTemp;
+    autoZeroStartTime = 0;      // Clear active flag
+    autoZeroAccumulator = 0.0;  // Reset accumulator
+    autoZeroSampleCount = 0;
+    queueConsoleMessageF("Auto-zero: Complete, new zero offset: %.3fA (avg of %d samples)",
+                         DynamicAltCurrentZero, autoZeroSampleCount);
+  }
+}
+void handleAltZeroReset() {
+  if (ResetDynamicAltZero == 1) {
+    DynamicAltCurrentZero = 0.0;
+    lastAutoZeroTime = 0;
+    lastAutoZeroTemp = -999.0;
+    autoZeroStartTime = 0;    // Cancel any active auto-zero
+    ResetDynamicAltZero = 0;  // Clear the momentary flag
+    queueConsoleMessage("Auto-zero: Dynamic alternator zero offset reset to 0.0");
+  }
+}
+void calculateChargeTimes() {
+  static unsigned long lastCalcTime = 0;
+  unsigned long now = millis();
+  if (now - lastCalcTime < AnalogInputReadInterval) return;  // Only run every X seconds
+  lastCalcTime = now;
+
+  // Get the current amperage based on AmpSrc setting
+  float currentAmps = getBatteryCurrent();  // this is for battery state
+
+  if (currentAmps > 0.01) {  // charging
+    // Calculate remaining capacity needed to reach 100%
+    float currentSoC = SOC_percent / 100.0;  // Convert from scaled format
+    float remainingCapacity = BatteryCapacity_Ah * (100.0 - currentSoC) / 100.0;
+    timeToFullChargeMin = (int)(remainingCapacity / currentAmps * 60.0);
+    timeToFullDischargeMin = -999;           // Not applicable while charging
+  } else if (currentAmps < -0.01) {          // discharging
+    float currentSoC = SOC_percent / 100.0;  // Convert from scaled format
+    float availableCapacity = BatteryCapacity_Ah * currentSoC / 100.0;
+    timeToFullDischargeMin = (int)(availableCapacity / (-currentAmps) * 60.0);
+    timeToFullChargeMin = -999;  // Not applicable while discharging
+  } else {
+    // No significant current flow
+    timeToFullChargeMin = -999;
+    timeToFullDischargeMin = -999;
+  }
+}
+void calculateThermalStress() {
+  unsigned long now = millis();
+
+  // **FIX 1: Initialize lastThermalUpdateTime on first run**
+  if (lastThermalUpdateTime == 0) {
+    lastThermalUpdateTime = now;
+    return;  // Skip first calculation
+  }
+
+  if (now - lastThermalUpdateTime < THERMAL_UPDATE_INTERVAL) {
+    return;
+  }
+
+  // **FIX 2: Add RPM validation**
+  if (RPM < 0.0f || RPM > 10000.0f || isnan(RPM) || isinf(RPM)) {
+    return;  // Invalid RPM
+  }
+
+
+  if (now - lastThermalUpdateTime < THERMAL_UPDATE_INTERVAL) {
+    return;  // Not time to update yet
+  }
+
+  // **PROTECTION 0: Skip if temperature is invalid (NaN/Inf)**
+  if (isnan(TempToUse) || isinf(TempToUse)) {
+    return;  // Temperature sensor not initialized yet
+  }
+
+  // **PROTECTION 1: Validate temperature before using it (DS18B20 range: -67°F to +257°F)**
+  if (TempToUse < -67.0f || TempToUse > 257.0f) {
+    return;  // Skip calculation if temperature is outside sensor's valid range
+  }
+
+  float elapsedSeconds = (now - lastThermalUpdateTime) / 1000.0f;
+  lastThermalUpdateTime = now;
+
+  // Calculate component temperatures
+  float T_winding_F = TempToUse + WindingTempOffset;
+  float T_bearing_F = TempToUse + WindingTempOffset;  // temporarily using same offset for simplicity until we see how this thing works
+  float T_brush_F = TempToUse + WindingTempOffset;    // temporarily using same offset for simplicity until we see how this thing works
+
+  // **PROTECTION 2: Sanity check component temperatures (allow some headroom for offset)**
+  if (T_winding_F < -100.0f || T_winding_F > 400.0f || T_bearing_F < -100.0f || T_bearing_F > 400.0f || T_brush_F < -100.0f || T_brush_F > 400.0f) {
+    return;  // Don't accumulate damage from obviously bad readings
+  }
+
+  // Calculate alternator RPM
+  float Alt_RPM = RPM * PulleyRatio;
+
+  // Calculate individual component lives
+  float T_winding_K = (T_winding_F - 32.0f) * 5.0f / 9.0f + 273.15f;
+  float L_insul = L_REF_INSUL * exp(EA_INSULATION / BOLTZMANN_K * (1.0f / T_winding_K - 1.0f / T_REF_K));
+  L_insul = min(L_insul, 10000.0f);
+
+  float L_grease_base = L_REF_GREASE * pow(0.5f, (T_bearing_F - 158.0f) / 18.0f);
+  float L_grease = L_grease_base * (6000.0f / max(Alt_RPM, 100.0f));
+  L_grease = min(L_grease, 10000.0f);
+
+  float temp_factor = 1.0f + 0.0025f * (T_brush_F - 150.0f);
+  float L_brush = (L_REF_BRUSH * 6000.0f / max(Alt_RPM, 100.0f)) / max(temp_factor, 0.1f);
+  L_brush = min(L_brush, 10000.0f);
+
+  // Calculate damage rates (damage per hour)
+  float insul_damage_rate = 1.0f / L_insul;
+  float grease_damage_rate = 1.0f / L_grease;
+  float brush_damage_rate = 1.0f / L_brush;
+
+  // Accumulate damage over elapsed time
+  float hours_elapsed = elapsedSeconds / 3600.0f;
+  CumulativeInsulationDamage += insul_damage_rate * hours_elapsed;
+  CumulativeGreaseDamage += grease_damage_rate * hours_elapsed;
+  CumulativeBrushDamage += brush_damage_rate * hours_elapsed;
+
+  // Constrain damage to 0-1 range
+  CumulativeInsulationDamage = constrain(CumulativeInsulationDamage, 0.0f, 1.0f);
+  CumulativeGreaseDamage = constrain(CumulativeGreaseDamage, 0.0f, 1.0f);
+  CumulativeBrushDamage = constrain(CumulativeBrushDamage, 0.0f, 1.0f);
+
+  // Calculate remaining life percentages
+  InsulationLifePercent = (1.0f - CumulativeInsulationDamage) * 100.0f;
+  GreaseLifePercent = (1.0f - CumulativeGreaseDamage) * 100.0f;
+  BrushLifePercent = (1.0f - CumulativeBrushDamage) * 100.0f;
+
+  // Calculate predicted life hours (minimum of current rates)
+  float min_damage_rate = max({ insul_damage_rate, grease_damage_rate, brush_damage_rate });
+  PredictedLifeHours = 1.0f / min_damage_rate;
+
+  // Set indicator color
+  if (PredictedLifeHours > 5000.0f) {
+    LifeIndicatorColor = 0;  // Green
+  } else if (PredictedLifeHours > 1000.0f) {
+    LifeIndicatorColor = 1;  // Yellow
+  } else {
+    LifeIndicatorColor = 2;  // Red
+  }
+}
+
+
+//INA228 functions to compensate for lack of library features related to ALERT pin
+uint16_t readINA228AlertRegister(uint8_t i2cAddress) {
+  Wire.beginTransmission(i2cAddress);
+  Wire.write(0x0B);                                     // DIAG_ALRT (correct register)
+  if (Wire.endTransmission(false) != 0) return 0xFFFF;  // keep repeated start
+  if (Wire.requestFrom(i2cAddress, (uint8_t)2) != 2) return 0xFFFF;
+  return (Wire.read() << 8) | Wire.read();
+}
+bool clearINA228AlertLatch(uint8_t i2cAddress) {
+  // Read CONFIG
+  Wire.beginTransmission(i2cAddress);
+  Wire.write(0x00);  // CONFIG register
+  Wire.endTransmission(false);
+  Wire.requestFrom(i2cAddress, (uint8_t)2);
+  if (Wire.available() < 2) return false;
+  uint16_t config = (Wire.read() << 8) | Wire.read();
+  // Set ALERT_LATCH_CLEAR bit (bit 3)
+  config |= 0x0008;
+  // Write CONFIG back
+  Wire.beginTransmission(i2cAddress);
+  Wire.write(0x00);
+  Wire.write(config >> 8);
+  Wire.write(config & 0xFF);
+  return Wire.endTransmission() == 0;
+}
+
+void updateINA228OvervoltageThreshold() {
+  // Only update if INA228 is connected
+  if (INADisconnected != 0) {
+    queueConsoleMessageF("INA228: Cannot update threshold - chip not connected");
+    return;
+  }
+
+  // Update the hardware limit based on current BulkVoltage setting
+  VoltageHardwareLimit = BulkVoltage + 0.1;
+
+  // Calculate threshold in LSB units for INA228 with proper rounding
+  const double LSB = 0.003125;                                           // 3.125 mV/LSB
+  uint16_t thresholdLSB = (uint16_t)(VoltageHardwareLimit / LSB + 0.5);  // Round instead of truncate
+
+  // Diagnostic messages (no String churn)
+  queueConsoleMessageF("INA228 threshold calc: %.3fV / %.6f = %u LSB", VoltageHardwareLimit, LSB, (unsigned)thresholdLSB);
+  queueConsoleMessageF("INA228 effective threshold: %.3fV", (double)thresholdLSB * LSB);
+
+  // Program overvoltage threshold and clear under-voltage
+  INA.setBusOvervoltageTH(thresholdLSB);
+  INA.setBusUndervoltageTH(0x0000);  // Clear under-voltage threshold (fix accidental setting)
+
+  // Configure DIAG_ALRT behavior explicitly for predictable operation
+  INA.clearDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);      // Compare on instantaneous (non-averaged) readings for immediate response
+  INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_LATCH);     // Transparent mode - alerts clear when condition clears
+  INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_POLARITY);  // Active-low open-drain (default)
+  INA.setDiagnoseAlertBit(INA228_DIAG_BUS_OVER_LIMIT);    // Enable BUSOL reporting
+
+  // Verify what was actually written to the chip
+  uint16_t readback_BOVL = INA.getBusOvervoltageTH();
+  uint16_t readback_BUVL = INA.getBusUndervoltageTH();
+
+  queueConsoleMessageF("INA228 readback: BOVL=0x%04X (%.3fV), BUVL=0x%04X",
+                       (unsigned)readback_BOVL, (double)readback_BOVL * LSB, (unsigned)readback_BUVL);
+
+  // Verify writes were successful
+  if (readback_BOVL != thresholdLSB) {
+    queueConsoleMessageF("WARNING: BOVL write failed - expected 0x%04X, got 0x%04X",
+                         (unsigned)thresholdLSB, (unsigned)readback_BOVL);
+  }
+  if (readback_BUVL != 0) {
+    queueConsoleMessageF("WARNING: BUVL not cleared - still 0x%04X", (unsigned)readback_BUVL);
+  }
+
+  queueConsoleMessageF("INA228: Overvoltage threshold updated to %.2fV", VoltageHardwareLimit);
+}
+
+
+// Throttled write helper - prevents excessive flash writes
+// Returns true if write occurred, false if throttled
+bool writeFileThrottled(fs::FS &fs, const char *path, const char *value,
+                        unsigned long &lastWriteTime, unsigned long intervalMs = 1000) {
+  unsigned long now = millis();
+  if ((unsigned long)(now - lastWriteTime) >= intervalMs) {
+    lastWriteTime = now;
+    writeFile(fs, path, value);
+    return true;
+  }
+  return false;
+}
+
+void checkWebFilesExist() {
+  const char *criticalFiles[] = {
+    "/index.html.gz",
+    "/styles.css.gz",
+    "/script.js.gz",
+    "/uPlot.min.css.gz",
+    "/uPlot.iife.min.js.gz"
+  };
+
+  int missingCount = 0;
+  Serial.println("=== CHECKING WEB FILES ===");
+
+  // First ensure web filesystem is mounted
+  if (!ensureWebFS()) {
+    Serial.println("ERROR: Web filesystem not mounted!");
+    queueConsoleMessage("CRITICAL: Web filesystem mount failed!");
+    return;
+  }
+
+  for (int i = 0; i < 5; i++) {
+    if (!webFS.exists(criticalFiles[i])) {
+      Serial.printf("MISSING: %s\n", criticalFiles[i]);
+      missingCount++;
+    } else {
+      Serial.printf("Found: %s\n", criticalFiles[i]);
+    }
+  }
+
+  if (missingCount > 0) {
+    Serial.println("===============================================");
+    Serial.println("ERROR: Missing web interface files!");
+    Serial.printf("Missing %d critical files from web partition\n", missingCount);
+    Serial.println("Web files should be in factory_fs or prod_fs partition");
+    Serial.println("Currently using: " + String(usingFactoryWebFiles ? "factory_fs" : "prod_fs"));
+    Serial.println("===============================================");
+
+    queueConsoleMessage("CRITICAL: " + String(missingCount) + " web files missing from web partition!");
+
+  } else {
+    Serial.println("All critical web files found");
+    Serial.println("Using web files from: " + String(usingFactoryWebFiles ? "factory_fs" : "prod_fs"));
+    queueConsoleMessage("Web interface files verified OK");
+  }
+}
+void ReadAnalogInputs() {
+
+  // INA228 Battery Monitor
+  static unsigned long lastINARead_local = 0;
+
+  if (millis() - lastINARead_local >= AnalogInputReadInterval) {  // could go down to 600 here, but this logic belongs in Loop anyway
+    if (INADisconnected == 0) {
+      int start33 = micros();  // Start timing analog input reading
+      lastINARead_local = millis();
+
+      try {
+        IBV = INA.getBusVoltage();
+        ShuntVoltage_mV = INA.getShuntVoltage() * 1000;
+
+        // Sanity check the readings
+        if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
+          Bcur = ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm;
+          Bcur = Bcur + BatteryCOffset;
+          // Apply inversioin if needed
+          if (InvertBattAmps == 1) {
+            Bcur = -Bcur;
+          }
+          // Apply dynamic gain correction only when enabled AND using INA228 shunt
+          if (AutoShuntGainCorrection == 1 && AmpSrc == 1) {
+            Bcur = Bcur * DynamicShuntGainFactor;
+          }
+          BatteryCurrent_scaled = Bcur * 100;  // Store raw value for battery monitoring
+          // Only mark fresh on successful, valid readings
+          MARK_FRESH(IDX_IBV);
+          MARK_FRESH(IDX_BCUR);
+          if (IBV > IBVMax) {
+            IBVMax = IBV;
+            static unsigned long lastWrite_IBVMax = 0;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f", IBVMax);
+            writeFileThrottled(LittleFS, "/IBVMax.txt", buf, lastWrite_IBVMax);
+          }
+
+          if (IBV > PeakVoltage_AllTime) {
+            PeakVoltage_AllTime = IBV;
+            static unsigned long lastWrite_PeakVoltage = 0;
+            char buf2[32];
+            snprintf(buf2, sizeof(buf2), "%.2f", PeakVoltage_AllTime);
+            writeFileThrottled(LittleFS, "/PeakVoltage_AllTime.txt", buf2, lastWrite_PeakVoltage);
+          }
+
+          if (IBV < MinVoltage) {
+            MinVoltage = IBV;
+            static unsigned long lastWrite_MinVoltage = 0;
+            char buf3[32];
+            snprintf(buf3, sizeof(buf3), "%.2f", MinVoltage);
+            writeFileThrottled(LittleFS, "/MinVoltage.txt", buf3, lastWrite_MinVoltage);
+          }
+
+          if (IBV < MinVoltage_AllTime) {
+            MinVoltage_AllTime = IBV;
+            static unsigned long lastWrite_MinVoltageAllTime = 0;
+            char buf4[32];
+            snprintf(buf4, sizeof(buf4), "%.2f", MinVoltage_AllTime);
+            writeFileThrottled(LittleFS, "/MinVoltage_AllTime.txt", buf4, lastWrite_MinVoltageAllTime);
+          }
+        }
+
+        int end33 = micros();               // End timing
+        AnalogReadTime2 = end33 - start33;  // Store elapsed time
+
+        static uint32_t lastReset = 0;
+        if (millis() - lastReset >= AinputTrackerTime) {
+          AnalogReadTime = 0;
+          lastReset = millis();
+        }
+
+        if (AnalogReadTime2 > AnalogReadTime) {
+          AnalogReadTime = AnalogReadTime2;
+        }
+
+      } catch (...) {
+        // INA228 read failed - do not call MARK_FRESH
+        static unsigned long lastINAFailureWarning = 0;
+        if (millis() - lastINAFailureWarning > 10000) {
+          Serial.println("INA228 read failed");
+          queueConsoleMessage("INA228 read failed");
+          lastINAFailureWarning = millis();
+        }
+      }
+    }
+  }
+
+  //ADS1115 reading is based on trigger→wait→read so as to not waste time
+  // State machine cycles through 4 channels with Xms conversion time each, providing ~Xms update rate per sensor (UPDATE LATER)
+  if (ADS1115Disconnected != 0) {
+    // Throttled error message to prevent console spam
+    static unsigned long lastADSWarning = 0;
+    if (millis() - lastADSWarning > 10000) {  // Only warn every 10 seconds
+      queueConsoleMessage("theADS1115 was not connected and triggered a return");
+      lastADSWarning = millis();
+    }
+    return;  // Early exit - no MARK_FRESH calls
+  }
+
+  unsigned long now = millis();
+  switch (adsState) {
+
+    case ADS_IDLE:
+      // Trigger single-shot conversion on current channel
+      adsTriggeredChannel = adsCurrentChannel;
+      adc.setMux(adsMuxCodes[adsTriggeredChannel]);
+      adc.triggerConversion();
+      adsStateEntered = now;
+      adsState = ADS_WAIT;
+      break;
+
+    case ADS_WAIT:
+      // Poll OS bit until conversion complete or timeout
+      if (adc.isConversionDone()) {
+        adsState = ADS_READ_RESULT;
+      } else if (now - adsStateEntered > ADS_TIMEOUT_MS) {
+        queueConsoleMessage("ADS1115 timeout ch" + String(adsTriggeredChannel));
+        adsState = ADS_IDLE;  // retry same channel
+      }
+      break;
+
+    case ADS_READ_RESULT:
+      {
+        // Read conversion register directly - we have already confirmed OS bit is set,
+        // so we bypass adc.getConversion() which would busy-wait/block the loop unnecessarily
+        Wire.beginTransmission(0x48);
+        Wire.write(ADS1115_REG_POINTER_CONVERT);
+        uint8_t endStatus = Wire.endTransmission(false);
+        uint8_t bytesReceived = Wire.requestFrom((uint8_t)0x48, (uint8_t)2);
+
+        bool readOK = (endStatus == 0) && (bytesReceived == 2) && (Wire.available() >= 2);
+
+        if (readOK) {
+          Raw = (int16_t)((Wire.read() << 8) | Wire.read());
+        } else {
+          // Drain whatever is in the buffer to leave I2C bus clean
+          while (Wire.available()) Wire.read();
+          adsI2CErrorCount++;
+          queueConsoleMessage("ADS1115 I2C read error ch" + String(adsTriggeredChannel) + " endStatus=" + String(endStatus) + " bytes=" + String(bytesReceived));
+        }
+
+        // CRITICAL: Use adsTriggeredChannel, NOT adsSequenceIndex!
+        // Only process and mark fresh on a confirmed good read
+        if (readOK) {
+          switch (adsTriggeredChannel) {
+            case 0:
+              Channel0V = Raw / 32768.0 * 6.144 * 21.0401;  // divider 1,000,000Ω / 49.9kΩ, scale ≈21.0401
+              BatteryV = Channel0V;
+              if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
+                MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
+                battVFreshFlag = true;
+              }
+              break;
+
+              // case 1:
+              //   //Clamp On Sensor QNHCK1-21
+              //   Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
+              //   MeasuredAmps = (Channel1V - 2.5) * 100;   // alternator current
+
+              //   if (InvertAltAmps == 1) {
+              //     MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
+              //   }
+              //   MeasuredAmps = MeasuredAmps - AlternatorCOffset;
+              //   // Apply dynamic zero correction only when enabled
+              //   if (AutoAltCurrentZero == 1) {
+              //     MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
+              //   }
+
+              //   if (MeasuredAmps > -500 && MeasuredAmps < 500) {  // Sanity check
+              //     MARK_FRESH(IDX_MEASURED_AMPS);
+              //     ch1FreshFlag = true;  // Signal PID that fresh current data is available
+              //   }
+
+
+            case 1:
+              ch1_record(millis());
+              //Clamp On Sensor QNHCK1-21
+              Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
+              MeasuredAmps = (Channel1V - 2.5) * 250;   // alternator current (500A sensor)
+
+              if (InvertAltAmps == 1) {
+                MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
+              }
+              MeasuredAmps = MeasuredAmps - AlternatorCOffset;
+              // Apply dynamic zero correction only when enabled
+              if (AutoAltCurrentZero == 1) {
+                MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
+              }
+
+              if (MeasuredAmps > -600 && MeasuredAmps < 600) {  // Sanity check
+                MARK_FRESH(IDX_MEASURED_AMPS);
+                ch1FreshFlag = true;  // Signal PID that fresh current data is available
+              }
+
+              // ── Current amplitude ring + moving averages ──────────────────────────────
+              // Runs every confirmed CH1 hit. Feeds MA and dI/dt to the fast current
+              // rise supervisor in AdjustFieldLearnMode.
+              {
+                uint32_t now_i = millis();
+                iAmpRing[iAmpHead] = { now_i, MeasuredAmps };
+                iAmpHead = (iAmpHead + 1) % I_RING_SIZE;
+                if (iAmpCount < I_RING_SIZE) iAmpCount++;
+
+                // Indices, newest-first (iAmpHead already advanced past newest)
+                uint8_t i0 = (iAmpHead + I_RING_SIZE - 1) % I_RING_SIZE;  // newest
+                uint8_t i1 = (iAmpHead + I_RING_SIZE - 2) % I_RING_SIZE;
+                uint8_t i2 = (iAmpHead + I_RING_SIZE - 3) % I_RING_SIZE;
+                uint8_t i3 = iAmpHead;  // oldest
+
+                if (iAmpCount >= 2) {
+                  g_iMA2 = (iAmpRing[i0].val + iAmpRing[i1].val) * 0.5f;
+                  uint32_t dt2 = iAmpRing[i0].ts - iAmpRing[i1].ts;
+                  g_dIdt2 = (dt2 > 0) ? (iAmpRing[i0].val - iAmpRing[i1].val)
+                                          / ((float)dt2 * 0.001f)
+                                      : 0.0f;
+                } else {
+                  g_iMA2 = MeasuredAmps;
+                  g_dIdt2 = 0.0f;
+                }
+
+                if (iAmpCount >= 4) {
+                  g_iMA4 = (iAmpRing[i0].val + iAmpRing[i1].val
+                            + iAmpRing[i2].val + iAmpRing[i3].val)
+                           * 0.25f;
+                  uint32_t dt4 = iAmpRing[i0].ts - iAmpRing[i3].ts;
+                  g_dIdt4 = (dt4 > 0) ? (iAmpRing[i0].val - iAmpRing[i3].val)
+                                          / ((float)dt4 * 0.001f)
+                                      : 0.0f;
+                } else {
+                  g_iMA4 = g_iMA2;
+                  g_dIdt4 = g_dIdt2;
+                }
+              }
+
+              // ── cvLog: write here, tied to actual CH1 sample arrival ──────────────────
+              // Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
+              // reflect the previous control tick — one-tick lag is acceptable for analysis.
+              cvLog_tick(millis());
+
+              // Track max values
+              if (MeasuredAmps > MeasuredAmpsMax) {
+                MeasuredAmpsMax = MeasuredAmps;
+                static unsigned long lastWrite_MeasuredAmpsMax = 0;
+                char bufA[32];
+                snprintf(bufA, sizeof(bufA), "%.2f", MeasuredAmpsMax);
+                writeFileThrottled(LittleFS, "/MeasuredAmpsMax.txt", bufA, lastWrite_MeasuredAmpsMax);
+              }
+              if (MeasuredAmps > MeasuredAmpsMax_AllTime) {
+                MeasuredAmpsMax_AllTime = MeasuredAmps;
+                static unsigned long lastWrite_MeasuredAmpsMaxAllTime = 0;
+                char bufA2[32];
+                snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
+                writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
+              }
+              break;
+
+            case 2:
+              Channel2V = Raw / 32768.0 * 2 * 6.144 * RPMScalingFactor;
+              RPM = Channel2V;
+
+              if (RPM > RPMMax) {
+                RPMMax = RPM;
+                static unsigned long lastWrite_RPMMax = 0;
+                char bufR[32];
+                snprintf(bufR, sizeof(bufR), "%.0f", RPMMax);
+                writeFileThrottled(LittleFS, "/RPMMax.txt", bufR, lastWrite_RPMMax);
+              }
+              if (RPM > RPMMax_AllTime) {
+                RPMMax_AllTime = RPM;
+                static unsigned long lastWrite_RPMMaxAllTime = 0;
+                char bufR2[32];
+                snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
+                writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
+              }
+
+              if (RPM < 100) {
+                RPM = 0;
+              }
+              if (RPM >= 0 && RPM < 10000) {  // Sanity check
+                MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
+              }
+              break;
+
+            case 3:
+              Channel3V = Raw / 32768.0 * 6.144 * 833 * 2;
+              temperatureThermistor = thermistorTempC(Channel3V);
+
+              if (temperatureThermistor > 500) {
+                temperatureThermistor = -99;
+              }
+              if (Channel3V > 150) {
+                Channel3V = -99;
+              }
+              if (Channel3V > 0 && Channel3V < 100) {  // Sanity check for Channel3V
+                MARK_FRESH(IDX_CHANNEL3V);
+              }
+              if (temperatureThermistor > -50 && temperatureThermistor < 200) {  // Sanity check for temp
+                MARK_FRESH(IDX_THERMISTOR_TEMP);
+
+                // Track max thermistor temperature (session)
+                if (temperatureThermistor > MaxTemperatureThermistor) {
+                  MaxTemperatureThermistor = temperatureThermistor;
+                  static unsigned long lastWrite_MaxTempTherm = 0;
+                  char bufT[32];
+                  snprintf(bufT, sizeof(bufT), "%.1f", MaxTemperatureThermistor);
+                  writeFileThrottled(LittleFS, "/MaxTemperatureThermistor.txt", bufT, lastWrite_MaxTempTherm);
+                }
+
+                // Track max thermistor temperature (lifetime)
+                if (temperatureThermistor > MaxTemperatureThermistor_AllTime) {
+                  MaxTemperatureThermistor_AllTime = temperatureThermistor;
+                  static unsigned long lastWrite_MaxTempThermAllTime = 0;
+                  char bufT2[32];
+                  snprintf(bufT2, sizeof(bufT2), "%.1f", MaxTemperatureThermistor_AllTime);
+                  writeFileThrottled(LittleFS, "/MaxTemperatureThermistor_AllTime.txt", bufT2, lastWrite_MaxTempThermAllTime);
+                }
+              }
+              break;
+          }
+        }
+
+        // Advance to next channel and return to IDLE
+        // Change 1: sequence — CH1 gets 3 of 6 slots, worst-case gap = 2 conversion cycles
+        static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };  // was {0, 1, 0, 1, 2, 3}
+        static const uint8_t adsSeqLen = 6;
+
+        static uint8_t adsSeqIdx = 0;
+        adsSeqIdx = (adsSeqIdx + 1) % adsSeqLen;
+        adsCurrentChannel = adsSeq[adsSeqIdx];
+        adsState = ADS_IDLE;
+        break;
+      }
+  }
+  static unsigned long lastReaddd = 0;
+  static bool bmpFirstReadDone = false;  // Add this flag
+  unsigned long nowww = millis();
+
+  if (nowww - lastReaddd >= 10000) {
+    lastReaddd = nowww;
+
+    if (bmp.performReading()) {
+      float rawPressure = bmp.pressure;
+      float newPressure = rawPressure / 100.0;
+      float newTemp = bmp.temperature * 9.0 / 5.0 + 32.0;
+      //  Serial.printf("BMP380 raw: %.2f Pa, converted: %.2f mbar, temp: %.1f F\n", rawPressure, newPressure, newTemp);
+      if (!bmpFirstReadDone) {
+        // Discard BOTH pressure and temperature on first read - sensor not stabilized
+        bmpFirstReadDone = true;
+        Serial.printf("BMP380 first read discarded: P=%.2f mbar, T=%.1f F\n", newPressure, newTemp);
+      } else {
+        // Accept subsequent reads with sanity checks
+        if (isfinite(newPressure) && newPressure > 800.0 && newPressure < 1100.0) {
+          baroPressure = newPressure;
+          MARK_FRESH(IDX_BARO_PRESSURE);
+        }
+        if (isfinite(newTemp) && newTemp > -50.0 && newTemp < 150.0) {
+          ambientTemp = newTemp;
+          MARK_FRESH(IDX_AMBIENT_TEMP);
+        }
+      }
+    } else {
+      Serial.println("BMP380 read failed");
+    }
+  }
+
+  // ============================================================================
+  // LSM6DSOX IMU FIFO Polling (integrated into analog input state machine)
+  // ============================================================================
+
+  if (imuEnabled && (millis() - lastIMUPoll >= IMU_POLL_INTERVAL)) {
+
+    // Collision avoidance: skip IMU drain if analog reads just took too long
+    if (AnalogReadTime2 > ANALOG_READ_COLLISION_THRESHOLD) {
+      lastIMUPoll = millis();  // Reset timer but skip this poll
+      IMUReadTime2 = 0;        // Don't pollute timing stats with skipped polls
+      goto imu_done;
+    }
+
+    int start_imu = micros();  // Start timing IMU operations
+    lastIMUPoll = millis();
+
+    uint16_t fifo_samples = 0;
+
+    // Read FIFO status (quick operation, ~50 µs)
+    if (imu.Get_FIFO_Num_Samples(&fifo_samples) != LSM6DSOX_OK) {
+      imu_i2c_error_count++;
+      // Throttled error message
+      static unsigned long last_i2c_error = 0;
+      if (millis() - last_i2c_error > 60000) {  // Once per minute max
+        queueConsoleMessageF("IMU I2C error count: %u", imu_i2c_error_count);
+        last_i2c_error = millis();
+      }
+      goto imu_done;
+    }
+
+    // Check for FIFO overrun
+    uint8_t fifo_ovr = 0;
+    if (imu.Get_FIFO_Overrun_Status(&fifo_ovr) == LSM6DSOX_OK && fifo_ovr) {
+      imu_fifo_overrun_count++;
+      // One-time warning on first overrun, then throttled
+      static bool first_overrun = true;
+      static unsigned long last_overrun_msg = 0;
+      if (first_overrun) {
+        queueConsoleMessageF("IMU FIFO overrun detected (increase drain rate)");
+        first_overrun = false;
+        last_overrun_msg = millis();
+      } else if (millis() - last_overrun_msg > 300000) {  // Every 5 minutes after first
+        queueConsoleMessageF("IMU FIFO overruns: %u total", imu_fifo_overrun_count);
+        last_overrun_msg = millis();
+      }
+    }
+
+    if (fifo_samples == 0) {
+      // No data available - fast path exit
+      int end_imu = micros();
+      IMUReadTime2 = end_imu - start_imu;
+      goto imu_done;
+    }
+
+    // Cap drain to budget
+    uint16_t samples_to_read = (fifo_samples > MAX_FIFO_DRAIN_PER_POLL)
+                                 ? MAX_FIFO_DRAIN_PER_POLL
+                                 : fifo_samples;
+
+    // Burst read from FIFO (efficient single I²C transaction)
+    if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
+      imu_i2c_error_count++;
+      int end_imu = micros();
+      IMUReadTime2 = end_imu - start_imu;
+      goto imu_done;
+    }
+
+    // Timestamp the batch end, then backdate each sample by its nominal interval.
+    // The sensor's internal timestamp register (0x40-0x42, 25µs resolution) would give
+    // true sample times but requires FIFO timestamp batching config. Using nominal ODR
+    // intervals instead - error is negligible (<1% at these rates) and avoids the
+    // batch_timestamp=same_value problem which caused dt_us=0 for all but the first
+    // sample, effectively stalling the complementary filter.
+    uint32_t batch_end_us = micros();
+    constexpr uint32_t ACCEL_INTERVAL_US = 2398;  // 1,000,000 / 417 Hz
+    constexpr uint32_t GYRO_INTERVAL_US = 19231;  // 1,000,000 / 52 Hz
+
+    // Pre-count each sensor type so we can backdate oldest-first
+    uint16_t accel_in_batch = 0, gyro_in_batch = 0;
+    for (uint16_t i = 0; i < samples_to_read; i++) {
+      uint8_t tag = fifoBuffer[i * 7] >> 3;
+      if (tag == TAG_SENSOR_ACCEL) accel_in_batch++;
+      else if (tag == TAG_SENSOR_GYRO) gyro_in_batch++;
+    }
+
+    // Parse FIFO buffer
+    uint16_t accel_idx = 0, gyro_idx = 0;
+    for (uint16_t i = 0; i < samples_to_read; i++) {
+      uint8_t raw_tag = fifoBuffer[i * 7];
+      uint8_t tag_sensor = raw_tag >> 3;
+
+      int16_t raw_x = (int16_t)((fifoBuffer[i * 7 + 2] << 8) | fifoBuffer[i * 7 + 1]);
+      int16_t raw_y = (int16_t)((fifoBuffer[i * 7 + 4] << 8) | fifoBuffer[i * 7 + 3]);
+      int16_t raw_z = (int16_t)((fifoBuffer[i * 7 + 6] << 8) | fifoBuffer[i * 7 + 5]);
+
+      if (tag_sensor == TAG_SENSOR_ACCEL) {
+        int16_t x = raw_x * ACCEL_X_SIGN;
+        int16_t y = raw_y * ACCEL_Y_SIGN;
+        int16_t z = raw_z * ACCEL_Z_SIGN;
+        uint32_t ts = batch_end_us - (uint32_t)(accel_in_batch - 1 - accel_idx) * ACCEL_INTERVAL_US;
+        pushAccelSample(x, y, z, ts);
+        accel_idx++;
+
+      } else if (tag_sensor == TAG_SENSOR_GYRO) {
+        int16_t x = raw_x * GYRO_X_SIGN;
+        int16_t y = raw_y * GYRO_Y_SIGN;
+        int16_t z = raw_z * GYRO_Z_SIGN;
+        uint32_t ts = batch_end_us - (uint32_t)(gyro_in_batch - 1 - gyro_idx) * GYRO_INTERVAL_US;
+        pushGyroSample(x, y, z, ts);
+        gyro_idx++;
+
+      } else if (tag_sensor == TAG_SENSOR_TEMP) {
+        // Temperature samples explicitly ignored (we're not batching temp in FIFO)
+        // This is expected and not an error
+
+      } else {
+        // Truly unknown tag_sensor - possibly compression artifact or config error
+        imu_unknown_tag_count++;
+        // One-time warning on first unknown tag
+        static bool unknown_tag_warned = false;
+        if (!unknown_tag_warned) {
+          queueConsoleMessageF("IMU: unknown tag_sensor=%d (raw=0x%02X)", tag_sensor, raw_tag);
+          unknown_tag_warned = true;
+        }
+      }
+    }
+
+    int end_imu = micros();
+    IMUReadTime2 = end_imu - start_imu;
+
+    // Track max IMU read time (with periodic reset like AnalogReadTime)
+    static uint32_t lastIMUTimeReset = 0;
+    if (millis() - lastIMUTimeReset >= IMUTrackerTime) {
+      IMUReadTime = 0;
+      lastIMUTimeReset = millis();
+    }
+    if (IMUReadTime2 > IMUReadTime) {
+      IMUReadTime = IMUReadTime2;
+    }
+  }
+
+imu_done:;  // Label target for IMU block exit
+}
+
+void ReadAnalogInputs_Fake() {
+  static unsigned long lastINARead_local2 = 0;
+
+  if (millis() - lastINARead_local2 >= AnalogInputReadInterval) {  // could go down to 600 here, but this logic belongs in Loop anyway
+    lastINARead_local2 = millis();                                 // ← ADD THIS LINE!
+
+    static unsigned long lastFakeUpdate = 0;
+    static float fakeVoltage = 13.2;
+    static float fakeCurrent = -85.0;  // Start at -85A
+    static float fakeRPM = 1000;
+    static float fakeTemp = 45.0;
+
+    // GPS motion simulation
+    static float fakeLat = 0.0;     // Equator
+    static float fakeLon = -140.0;  // Open Pacific
+    static float fakeHeading = random(0, 360);
+    static float fakeCOG = fakeHeading + random(-30, 30);
+    static float fakeSOG = 3.0 + (random(-150, 150) / 100.0);  // 1.5–4.5 kt initial band
+    // Wind simulation
+    static float fakeApparentWindSpeed = 12.0;
+    static float fakeApparentWindAngle = 45.0;
+    fakeLon += 0.000375f;
+    if (fakeLon > 180.0f) fakeLon -= 360.0f;
+    // small lat oscillation near equator
+    // 0.1 deg amplitude, period controlled by time
+    // this uses fakeLon as the "time" driver, no new vars
+    fakeLat = 0.1f * sin(fakeLon * 0.1f);
+
+    LatitudeNMEA = fakeLat;
+    LongitudeNMEA = fakeLon;
+    SatelliteCountNMEA = 6 + random(0, 10);  // 6–15 sats
+    MARK_FRESH(IDX_LATITUDE_NMEA);
+    MARK_FRESH(IDX_LONGITUDE_NMEA);
+    MARK_FRESH(IDX_SATELLITE_COUNT);
+
+    // Speed Over Ground - vary a lot more
+    fakeSOG += (random(-80, 80) / 100.0);  // ±0.8 kt per update
+    if (fakeSOG < 0.5) fakeSOG = 0.5;
+    if (fakeSOG > 12.0) fakeSOG = 12.0;
+    SOGNMEA = fakeSOG;
+    MARK_FRESH(IDX_SOG_NMEA);
+
+    // Track max speed (session and lifetime)
+    if (fakeSOG > MaxSpeed) {
+      MaxSpeed = fakeSOG;
+      static unsigned long lastWrite_MaxSpeed = 0;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%.2f", MaxSpeed);
+      writeFileThrottled(LittleFS, "/MaxSpeed.txt", buf, lastWrite_MaxSpeed);
+    }
+    if (fakeSOG > MaxSpeed_AllTime) {
+      MaxSpeed_AllTime = fakeSOG;
+      static unsigned long lastWrite_MaxSpeedAllTime = 0;
+      char buf2[32];
+      snprintf(buf2, sizeof(buf2), "%.2f", MaxSpeed_AllTime);
+      writeFileThrottled(LittleFS, "/MaxSpeed_AllTime.txt", buf2, lastWrite_MaxSpeedAllTime);
+    }
+
+
+    // Course Over Ground - wander more
+    fakeCOG += (random(-40, 40) / 10.0);  // ±4° per update
+    if (fakeCOG < 0) fakeCOG += 360;
+    if (fakeCOG >= 360) fakeCOG -= 360;
+    COGNMEA = fakeCOG;
+    MARK_FRESH(IDX_COG_NMEA);
+
+    // Heading - similar to COG but can differ more
+    fakeHeading += (random(-60, 60) / 10.0);  // ±6° per update
+    if (fakeHeading < 0) fakeHeading += 360;
+    if (fakeHeading >= 360) fakeHeading -= 360;
+    HeadingNMEA = fakeHeading;
+    MARK_FRESH(IDX_HEADING_NMEA);
+
+    // Apparent Wind
+    fakeApparentWindSpeed += (random(-40, 40) / 10.0);  // ±4 kt per update
+    if (fakeApparentWindSpeed < 0.0) fakeApparentWindSpeed = 0.0;
+    if (fakeApparentWindSpeed > 35.0) fakeApparentWindSpeed = 35.0;
+    ApparentWindSpeedNMEA = fakeApparentWindSpeed;
+    MARK_FRESH(IDX_APPARENT_WIND_SPEED);
+
+    fakeApparentWindAngle += (random(-120, 120) / 10.0);  // ±12° per update
+    if (fakeApparentWindAngle < 0.0) fakeApparentWindAngle += 360.0;
+    if (fakeApparentWindAngle >= 360.0) fakeApparentWindAngle -= 360.0;
+    ApparentWindAngleNMEA = fakeApparentWindAngle;
+    MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
+
+    // Generate fake battery voltage (11.5–15.0V range, much looser)
+    fakeVoltage += (random(-80, 80) / 100.0);  // ±0.8 V per update
+    if (fakeVoltage < 11.5) fakeVoltage = 11.5;
+    if (fakeVoltage > 15.0) fakeVoltage = 15.0;
+    BatteryV = fakeVoltage;
+    IBV = fakeVoltage + (random(-30, 30) / 100.0);             // ±0.30 V
+    VictronVoltage = fakeVoltage + (random(-50, 50) / 100.0);  // ±0.50 V
+    MARK_FRESH(IDX_BATTERY_V);
+    MARK_FRESH(IDX_IBV);
+    MARK_FRESH(IDX_VICTRON_VOLTAGE);
+
+
+    // Track peak voltage (lifetime)
+    if (IBV > PeakVoltage_AllTime) {
+      PeakVoltage_AllTime = IBV;
+      static unsigned long lastWrite_PeakVoltage = 0;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%.2f", PeakVoltage_AllTime);
+      writeFileThrottled(LittleFS, "/PeakVoltage_AllTime.txt", buf, lastWrite_PeakVoltage);
+    }
+
+    if (IBV > IBVMax) {
+      IBVMax = IBV;
+      static unsigned long lastWrite_IBVMax = 0;
+      char buf2[32];
+      snprintf(buf2, sizeof(buf2), "%.2f", IBVMax);
+      writeFileThrottled(LittleFS, "/IBVMax.txt", buf2, lastWrite_IBVMax);
+    }
+
+    if (IBV < MinVoltage) {
+      MinVoltage = IBV;
+      static unsigned long lastWrite_MinVoltage = 0;
+      char buf3[32];
+      snprintf(buf3, sizeof(buf3), "%.2f", MinVoltage);
+      writeFileThrottled(LittleFS, "/MinVoltage.txt", buf3, lastWrite_MinVoltage);
+    }
+
+    if (MinVoltage_AllTime == 0.0 || IBV < MinVoltage_AllTime) {
+      MinVoltage_AllTime = IBV;
+      static unsigned long lastWrite_MinVoltageAllTime = 0;
+      char buf4[32];
+      snprintf(buf4, sizeof(buf4), "%.2f", MinVoltage_AllTime);
+      writeFileThrottled(LittleFS, "/MinVoltage_AllTime.txt", buf4, lastWrite_MinVoltageAllTime);
+    }
+
+
+    // Generate fake alternator current: wander heavily in a broad band
+    //fakeCurrent += (random(-50, 50) / 100.0);  // ±0.5 A per update
+    //if (fakeCurrent < -140.0) fakeCurrent = -140.0;
+    // if (fakeCurrent > 150.0) fakeCurrent = 150.0;
+    fakeCurrent = 10;
+    MeasuredAmps = fakeCurrent * (InvertAltAmps ? -1 : 1);  // Apply invert flag
+    ch1FreshFlag = true;                                    // Signal PID that fresh current data is available
+    MARK_FRESH(IDX_MEASURED_AMPS);
+
+    // Track max alternator current (session and lifetime)
+    if (MeasuredAmps > MeasuredAmpsMax) {
+      MeasuredAmpsMax = MeasuredAmps;
+      static unsigned long lastWrite_MeasuredAmpsMax = 0;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%.2f", MeasuredAmpsMax);
+      writeFileThrottled(LittleFS, "/MeasuredAmpsMax.txt", buf, lastWrite_MeasuredAmpsMax);
+    }
+    if (MeasuredAmps > MeasuredAmpsMax_AllTime) {
+      MeasuredAmpsMax_AllTime = MeasuredAmps;
+      static unsigned long lastWrite_MeasuredAmpsMaxAllTime = 0;
+      char buf2[32];
+      snprintf(buf2, sizeof(buf2), "%.2f", MeasuredAmpsMax_AllTime);
+      writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", buf2, lastWrite_MeasuredAmpsMaxAllTime);
+    }
+
+
+    // Generate fake battery current - broad noisy range
+    static float fakeBattCurrent = 0;
+    if (SOC_percent > 99) {
+      fakeBattCurrent = -100.0;
+    }
+    if (SOC_percent < 99) {
+      fakeBattCurrent = 100.0;
+    }
+    //fakeBattCurrent += (random(-80, 80) / 10.0);  // ±8 A per update
+    //if (fakeBattCurrent < -180.0) fakeBattCurrent = -180.0;
+    //if (fakeBattCurrent > 180.0) fakeBattCurrent = 180.0;
+    fakeBattCurrent = 100;
+    Bcur = fakeBattCurrent * (InvertBattAmps ? -1 : 1);  // Apply invert flag
+    BatteryCurrent_scaled = Bcur * 100;
+    VictronCurrent = Bcur + (random(-80, 80) / 10.0);  // ±8 A offset
+    MARK_FRESH(IDX_BCUR);
+    MARK_FRESH(IDX_VICTRON_CURRENT);
+
+    // Generate fake RPM (800–3200 range, looser)
+    //fakeRPM += (random(-3, 3));  // ±3 rpm per update
+    // if (fakeRPM < 800) fakeRPM = 800;
+    // if (fakeRPM > 3200) fakeRPM = 3200;
+    fakeRPM = 1000;
+    RPM = fakeRPM;
+    MARK_FRESH(IDX_RPM);
+
+    // Track RPM max
+    if (RPM > RPMMax) {
+      RPMMax = RPM;
+      static unsigned long lastWrite_RPMMax = 0;
+      char bufR[32];
+      snprintf(bufR, sizeof(bufR), "%.0f", RPMMax);
+      writeFileThrottled(LittleFS, "/RPMMax.txt", bufR, lastWrite_RPMMax);
+    }
+    if (RPM > RPMMax_AllTime) {
+      RPMMax_AllTime = RPM;
+      static unsigned long lastWrite_RPMMaxAllTime = 0;
+      char bufR2[32];
+      snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
+      writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
+    }
+
+    // Generate fake temperatures (10–110°C, looser swings)
+    fakeTemp += (random(-30, 30) / 10.0);
+    if (fakeTemp < 10) fakeTemp = 10;
+    if (fakeTemp > 110) fakeTemp = 110;
+    temperatureThermistor = fakeTemp;
+    ambientTemp = fakeTemp - (5 + random(-20, 20) / 10.0);
+
+    float tempC = fakeTemp + 10 + random(-20, 20) / 10.0;
+    AlternatorTemperatureF = tempC * 9.0 / 5.0 + 32.0;
+    MARK_FRESH(IDX_THERMISTOR_TEMP);
+    MARK_FRESH(IDX_ALTERNATOR_TEMP);
+
+    // Track temperature maxes
+    if (temperatureThermistor > MaxTemperatureThermistor) {
+      MaxTemperatureThermistor = temperatureThermistor;
+      static unsigned long lastWrite_MaxTempTherm = 0;
+      char bufT[32];
+      snprintf(bufT, sizeof(bufT), "%.1f", MaxTemperatureThermistor);
+      writeFileThrottled(LittleFS, "/MaxTemperatureThermistor.txt", bufT, lastWrite_MaxTempTherm);
+    }
+    if (temperatureThermistor > MaxTemperatureThermistor_AllTime) {
+      MaxTemperatureThermistor_AllTime = temperatureThermistor;
+      static unsigned long lastWrite_MaxTempThermAllTime = 0;
+      char bufT2[32];
+      snprintf(bufT2, sizeof(bufT2), "%.1f", MaxTemperatureThermistor_AllTime);
+      writeFileThrottled(LittleFS, "/MaxTemperatureThermistor_AllTime.txt", bufT2, lastWrite_MaxTempThermAllTime);
+    }
+    if (AlternatorTemperatureF > MaxAlternatorTemperatureF) {
+      MaxAlternatorTemperatureF = AlternatorTemperatureF;
+      static unsigned long lastWrite_MaxAltTempF = 0;
+      char bufA[32];
+      snprintf(bufA, sizeof(bufA), "%.2f", MaxAlternatorTemperatureF);
+      writeFileThrottled(LittleFS, "/MaxAlternatorTemperatureF.txt", bufA, lastWrite_MaxAltTempF);
+    }
+    if (AlternatorTemperatureF > MaxAlternatorTemperatureF_AllTime) {
+      MaxAlternatorTemperatureF_AllTime = AlternatorTemperatureF;
+      static unsigned long lastWrite_MaxAltTempFAllTime = 0;
+      char bufA2[32];
+      snprintf(bufA2, sizeof(bufA2), "%.2f", MaxAlternatorTemperatureF_AllTime);
+      writeFileThrottled(LittleFS, "/MaxAlternatorTemperatureF_AllTime.txt", bufA2, lastWrite_MaxAltTempFAllTime);
+    }
+
+
+    // Solar energy simulation (fake Victron data)
+    static unsigned long lastSolarUpdate = 0;
+    if (millis() - lastSolarUpdate >= 2000) {  // Update every 2 seconds like real VE.Direct
+      lastSolarUpdate = millis();
+
+      // Simulate solar power output (100–800W range, quite loose)
+      static float fakeSolarPower = 300.0;
+      fakeSolarPower += (random(-300, 300));  // ±300 W per update
+      if (fakeSolarPower < 100) fakeSolarPower = 100;
+      if (fakeSolarPower > 800) fakeSolarPower = 800;
+
+      // Calculate energy: Power × time = energy
+      float elapsedSeconds = 2.0;  // 2 second update interval
+      float solarEnergyDelta_Wh = (fakeSolarPower * elapsedSeconds) / 3600.0f;
+
+      static float solarEnergyAccumulator = 0.0f;
+      static float solarEnergyAccumulator_AllTime = 0.0f;
+
+      solarEnergyAccumulator += solarEnergyDelta_Wh;
+      solarEnergyAccumulator_AllTime += solarEnergyDelta_Wh;
+
+      if (solarEnergyAccumulator >= 1.0f) {
+        SolarChargedEnergy += (int)solarEnergyAccumulator;
+        solarEnergyAccumulator -= (int)solarEnergyAccumulator;
+      }
+
+      if (solarEnergyAccumulator_AllTime >= 1.0f) {
+        SolarChargedEnergy_AllTime += (int)solarEnergyAccumulator_AllTime;
+        solarEnergyAccumulator_AllTime -= (int)solarEnergyAccumulator_AllTime;
+      }
+    }
+
+    // Fake barometric pressure (wide, stormy)
+    baroPressure = 1013 + (random(-200, 200) / 10.0);  // ±20 hPa
+
+    // Fake other channels
+    Channel0V = BatteryV;
+    Channel1V = 2.5 + (MeasuredAmps / 50.0);  // more aggressive scaling
+    Channel2V = RPM / RPMScalingFactor;
+    Channel3V = 50 + (random(-60, 60));  //  -10–110 range
+    MARK_FRESH(IDX_CHANNEL3V);
+  }
+
+  // ============================================================================
+  // IMU FAKE DATA GENERATION
+  // ============================================================================
+  if (imuEnabled) {
+    static float fakeHeelAngle = 0;
+    static float fakePitchAngle = 0;
+    static float fakeHeelRate = 0;
+    static float fakePitchRate = 0;
+    static unsigned long lastIMUFake = 0;
+
+    unsigned long now = millis();
+    float dt = (now - lastIMUFake) / 1000.0f;
+    if (lastIMUFake == 0) dt = 0.1f;  // First call
+    lastIMUFake = now;
+
+    // Simulate yacht rolling motion (slow sinusoidal, ~6-8 second period)
+    static float rollPhase = 0;
+    rollPhase += dt * 0.5f;                                             // ~0.5 rad/s = ~12s period
+    fakeHeelAngle = 8.0f * sin(rollPhase) + (random(-30, 30) / 10.0f);  // ±8° ±3° noise
+    fakeHeelRate = 8.0f * 0.5f * cos(rollPhase);                        // Derivative
+
+    // Simulate pitching motion (slower, smaller amplitude)
+    static float pitchPhase = 0;
+    pitchPhase += dt * 0.3f;                                              // ~0.3 rad/s = ~20s period
+    fakePitchAngle = 4.0f * sin(pitchPhase) + (random(-20, 20) / 10.0f);  // ±4° ±2° noise
+    fakePitchRate = 4.0f * 0.3f * cos(pitchPhase);                        // Derivative
+
+    // Occasional slam event (5% chance per call)
+    static float slamDecay = 0;
+    if (random(0, 100) < 5 && slamDecay == 0) {
+      slamDecay = 3.0f + (random(0, 200) / 100.0f);  // 3-5g spike
+    }
+    if (slamDecay > 0) {
+      slamDecay -= dt * 8.0f;  // Decay over ~0.5s
+      if (slamDecay < 0) slamDecay = 0;
+    }
+
+    // Convert angles to accelerations (sensor frame)
+    // When boat heels, gravity vector rotates
+    float heel_rad = fakeHeelAngle * PI / 180.0f;
+    float pitch_rad = fakePitchAngle * PI / 180.0f;
+
+    // Gravity components in sensor frame (simplified, no yaw)
+    float ax_g = -sin(pitch_rad);                 // Forward/aft tilt
+    float ay_g = sin(heel_rad) * cos(pitch_rad);  // Port/starboard tilt
+    float az_g = cos(heel_rad) * cos(pitch_rad);  // Vertical (1g when level)
+
+    // Add vertical slam spike
+    az_g += slamDecay;
+
+    // Add wave-induced vertical motion (0.2g RMS, ~8s period)
+    static float wavePhase = 0;
+    wavePhase += dt * 0.8f;
+    az_g += 0.3f * sin(wavePhase) + (random(-20, 20) / 100.0f);
+
+    // Convert to raw sensor counts (±2g range, 16-bit)
+    // ACCEL_SCALE = 0.000061 g/LSB → 1g = 16393 LSB
+    int16_t raw_ax = (int16_t)(ax_g / ACCEL_SCALE);
+    int16_t raw_ay = (int16_t)(ay_g / ACCEL_SCALE);
+    int16_t raw_az = (int16_t)(az_g / ACCEL_SCALE);
+
+    // Gyro rates (already in dps)
+    // GYRO_SCALE = 0.070 dps/LSB → 1 dps = 14.3 LSB
+    float gx_dps = fakePitchRate + (random(-50, 50) / 100.0f);  // ±0.5 dps noise
+    float gy_dps = fakeHeelRate + (random(-50, 50) / 100.0f);
+    float gz_dps = (random(-30, 30) / 100.0f);  // Small yaw rate noise
+
+    int16_t raw_gx = (int16_t)(gx_dps / GYRO_SCALE);
+    int16_t raw_gy = (int16_t)(gy_dps / GYRO_SCALE);
+    int16_t raw_gz = (int16_t)(gz_dps / GYRO_SCALE);
+
+    // Push samples to ring buffers
+    // Simulate batch of samples accumulated since last call
+    // At 417 Hz over ~100ms interval = ~42 samples, but just push a few representative ones
+    uint32_t timestamp_us = micros();
+
+    // Push accel samples (5 samples at 417 Hz = ~2.4ms spacing)
+    for (int i = 0; i < 5; i++) {
+      // Add small jitter to each sample
+      int16_t jitter_ax = raw_ax + random(-100, 100);
+      int16_t jitter_ay = raw_ay + random(-100, 100);
+      int16_t jitter_az = raw_az + random(-100, 100);
+      pushAccelSample(jitter_ax, jitter_ay, jitter_az, timestamp_us + i * 2400);  // ~2.4ms spacing = 417Hz
+    }
+
+    // Gyro at 52 Hz (one sample per ~20ms)
+    // Give it a timestamp 19ms AFTER the base timestamp
+    pushGyroSample(raw_gx, raw_gy, raw_gz, timestamp_us + 19000);  // ← CHANGED from timestamp_us
+  }
+}
+
+
+bool validateWebFile(const char *filename) {
+  esp_task_wdt_reset();  // Feed watchdog before file operations
+
+  Serial.printf("\n=== VALIDATING WEB FILE: %s ===\n", filename);
+  Serial.flush();
+
+  File file = webFS.open(filename, "r");
+  if (!file) {
+    Serial.printf("ERROR: %s - FILE NOT FOUND\n", filename);
+    Serial.flush();
+    return false;
+  }
+
+  size_t fileSize = file.size();
+  Serial.printf("File size: %d bytes\n", fileSize);
+  Serial.flush();
+
+  if (fileSize < 18) {  // Minimum valid gzip file size
+    Serial.printf("ERROR: %s - FILE TOO SMALL (%d bytes, need at least 18)\n", filename, fileSize);
+    Serial.flush();
+    file.close();
+    return false;
+  }
+
+  // Check gzip magic bytes (0x1F 0x8B)
+  Serial.printf("Checking gzip magic bytes...\n");
+  Serial.flush();
+  uint8_t magic[2];
+  size_t bytesRead = file.read(magic, 2);
+  file.close();
+
+  bool validGzip = (bytesRead == 2 && magic[0] == 0x1F && magic[1] == 0x8B);
+
+  if (validGzip) {
+    Serial.printf("SUCCESS: %s - Valid gzip file (magic bytes 0x1F 0x8B confirmed) ✓\n", filename);
+  } else {
+    Serial.printf("FAILED: %s - Invalid gzip magic bytes (got 0x%02X 0x%02X, expected 0x1F 0x8B) ✗\n",
+                  filename, magic[0], magic[1]);
+  }
+  Serial.printf("=== VALIDATION COMPLETE: %s ===\n\n", filename);
+  Serial.flush();
+
+  esp_task_wdt_reset();  // Feed watchdog after file operations
+
+  return validGzip;
+}
+
+bool validateWebFilesystem() {
+  Serial.println("\n--- Validating all web files ---");
+  Serial.flush();
+
+  bool result = true;
+  result = validateWebFile("/index.html.gz") && result;
+  result = validateWebFile("/styles.css.gz") && result;
+  result = validateWebFile("/script.js.gz") && result;
+  result = validateWebFile("/uPlot.min.css.gz") && result;
+  result = validateWebFile("/uPlot.iife.min.js.gz") && result;
+
+  if (result) {
+    Serial.println("--- All web files validated successfully ---");
+  } else {
+    Serial.println("--- One or more web files FAILED validation (see above) ---");
+  }
+  Serial.flush();
+
+  return result;
+}
+bool ensureWebFS() {
+  esp_task_wdt_reset();  // Feed watchdog at start
+
+  static bool webMounted = false;
+  if (webMounted) {
+    Serial.println("Web filesystem already mounted - skipping");
+    return true;
+  }
+
+  Serial.println("\n========================================");
+  Serial.println("=== MOUNTING WEB FILESYSTEM ===");
+  Serial.println("========================================");
+  Serial.flush();
+
+  // Check which partition we're running from
+  const esp_partition_t *running_partition = esp_ota_get_running_partition();
+  const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
+
+  bool runningFromFactory = (running_partition == factory_partition);
+
+  Serial.printf("Running from: %s\n", runningFromFactory ? "FACTORY partition" : "OTA partition");
+  Serial.flush();
+
+  if (runningFromFactory) {
+    Serial.println("Attempting to mount factory_fs...");
+    Serial.flush();
+
+    if (webFS.begin(true, "/web", 10, "factory_fs")) {
+      Serial.println("factory_fs mounted successfully");
+      Serial.flush();
+      Serial.println("Starting validation of web files...");
+      Serial.flush();
+
+      if (validateWebFilesystem()) {
+        usingFactoryWebFiles = true;
+        Serial.println("\n✓✓✓ SUCCESS: factory_fs validated and mounted ✓✓✓");
+        Serial.flush();
+        webMounted = true;
+        cacheGzFiles();  // <-- ADDED
+        esp_task_wdt_reset();
+        return true;
+      } else {
+        Serial.println("\n✗✗✗ CRITICAL ERROR: Factory web files FAILED validation ✗✗✗");
+        Serial.println("This should never happen - factory partition is corrupted!");
+        Serial.flush();
+        delay(5000);
+        return false;
+      }
+    } else {
+      Serial.println("✗✗✗ CRITICAL ERROR: Failed to mount factory_fs ✗✗✗");
+      Serial.flush();
+      delay(5000);
+      return false;
+    }
+
+  } else {
+    Serial.println("Attempting to mount prod_fs (OTA web files)...");
+    Serial.flush();
+
+    if (webFS.begin(true, "/web", 10, "prod_fs")) {
+      Serial.println("prod_fs mounted successfully");
+      Serial.flush();
+      Serial.println("Starting validation of OTA web files...");
+      Serial.flush();
+
+      if (validateWebFilesystem()) {
+        usingFactoryWebFiles = false;
+        Serial.println("\n✓✓✓ SUCCESS: prod_fs validated and mounted ✓✓✓");
+        Serial.flush();
+        webMounted = true;
+        cacheGzFiles();  // <-- ADDED
+        esp_task_wdt_reset();
+        return true;
+
+      } else {
+        Serial.println("\n✗✗✗ VALIDATION FAILED: prod_fs is corrupted! ✗✗✗");
+        Serial.println("OTA web files are corrupted or incomplete");
+        Serial.println("Triggering factory rollback in 5 seconds...");
+        Serial.println("You will see which file(s) failed validation above ^^^");
+        Serial.flush();
+
+        webFS.end();
+        queueConsoleMessage("CRITICAL: prod_fs corrupted, forcing factory rollback");
+
+        delay(5000);
+
+        Serial.println("NOW REBOOTING TO FACTORY FIRMWARE...");
+        Serial.flush();
+        delay(1000);
+
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+      }
+    }
+
+    Serial.println("\n--- prod_fs mount failed, trying factory_fs fallback ---");
+    Serial.flush();
+
+    if (webFS.begin(true, "/web", 10, "factory_fs")) {
+      Serial.println("factory_fs mounted successfully (fallback)");
+      Serial.flush();
+      Serial.println("Starting validation of factory web files (fallback)...");
+      Serial.flush();
+
+      if (validateWebFilesystem()) {
+        usingFactoryWebFiles = true;
+        Serial.println("\n✓✓✓ SUCCESS: factory_fs validated and mounted (fallback from prod_fs) ✓✓✓");
+        Serial.flush();
+        webMounted = true;
+        cacheGzFiles();  // <-- ADDED
+        esp_task_wdt_reset();
+        return true;
+
+      } else {
+        Serial.println("\n✗✗✗ CATASTROPHIC ERROR: Both web filesystems are corrupted! ✗✗✗");
+        Serial.println("prod_fs: FAILED");
+        Serial.println("factory_fs: FAILED");
+        Serial.println("System cannot continue - halting in 10 seconds");
+        Serial.flush();
+        webFS.end();
+        delay(10000);
+        return false;
+      }
+    }
+
+    Serial.println("✗✗✗ ERROR: Could not mount any web filesystem ✗✗✗");
+    Serial.flush();
+    delay(5000);
+    return false;
+  }
+}
+void switchToFactoryWebFiles() {
+  webFS.end();
+  usingFactoryWebFiles = true;
+  if (!webFS.begin(true, "/web", 10, "factory_fs")) {
+    Serial.println("ERROR: Failed to mount factory web files");
+    events.send("CRITICAL: Failed to mount factory web files", "console", millis());
+  } else {
+    Serial.println("Switched to factory web files");
+    events.send("Switched to factory web files for recovery", "console", millis());
+  }
+}
+void performFactoryReset() {
+  Serial.println("FACTORY RESET: Switching to factory firmware and web files");
+  events.send("FACTORY RESET: Switching to factory firmware and web files", "console", millis());
+
+  const esp_partition_t *factory_partition =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
+
+  if (factory_partition) {
+    esp_ota_set_boot_partition(factory_partition);
+    switchToFactoryWebFiles();
+    Serial.println("Factory reset complete - restarting in 3 seconds");
+    events.send("Factory reset complete - restarting in 3 seconds", "console", millis());
+    delay(3000);
+    ESP.restart();
+  } else {
+    Serial.println("ERROR: Factory partition not found");
+    events.send("ERROR: Factory partition not found", "console", millis());
+  }
+}
+
+void calculateDerivedMetrics() {
+  // ===== TRUE WIND CALCULATION =====
+  // Only calculate if we have valid apparent wind and boat speed data
+  if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && !IS_STALE(IDX_APPARENT_WIND_ANGLE) && !IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_HEADING_NMEA)) {
+
+    // Convert apparent wind angle to radians for calculation
+    float awaRad = ApparentWindAngleNMEA * PI / 180.0;
+
+    // Calculate true wind speed and direction using vector mathematics
+    // True wind = Apparent wind - Boat motion vector
+    float awsX = ApparentWindSpeedNMEA * sin(awaRad);  // Apparent wind X component
+    float awsY = ApparentWindSpeedNMEA * cos(awaRad);  // Apparent wind Y component
+
+    // Subtract boat speed (boat speed is in direction of heading, so Y component)
+    float twsX = awsX;
+    float twsY = awsY - SOGNMEA;
+
+    // Calculate true wind speed and angle
+    TrueWindSpeedNMEA = sqrt(twsX * twsX + twsY * twsY);
+    TrueWindAngleNMEA = atan2(twsX, twsY) * 180.0 / PI;
+
+    // Normalize angle to 0-360
+    if (TrueWindAngleNMEA < 0) TrueWindAngleNMEA += 360.0;
+
+    MARK_FRESH(IDX_TRUE_WIND_SPEED);
+    MARK_FRESH(IDX_TRUE_WIND_ANGLE);
+  } else {
+    // NMEA2K data not available - set to NAN
+    TrueWindSpeedNMEA = NAN;
+    TrueWindAngleNMEA = NAN;
+  }
+
+  // ===== LEEWAY CALCULATION =====
+  // Only calculate if we have valid heading and COG
+  if (!IS_STALE(IDX_HEADING_NMEA) && !IS_STALE(IDX_COG_NMEA)) {
+    LeewayNMEA = HeadingNMEA - COGNMEA;
+
+    // Normalize to -180 to +180 range
+    if (LeewayNMEA > 180.0) LeewayNMEA -= 360.0;
+    if (LeewayNMEA < -180.0) LeewayNMEA += 360.0;
+
+    MARK_FRESH(IDX_LEEWAY);
+  } else {
+    LeewayNMEA = NAN;
+  }
+
+  // ===== VELOCITY MADE GOOD CALCULATION =====
+  if (!IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_COG_NMEA)) {
+    float targetBearing;
+    bool hasValidTarget = false;
+
+    // Determine which bearing to use
+    if (VMGUseTrueWind == 1 && !IS_STALE(IDX_TRUE_WIND_ANGLE)) {
+      targetBearing = TrueWindAngleNMEA;  // Use true wind direction
+      hasValidTarget = true;
+    } else if (VMGTargetBearing >= 0) {
+      targetBearing = VMGTargetBearing;  // Use manual bearing
+      hasValidTarget = true;
+    }
+
+    if (hasValidTarget) {
+      float bearingDiff = (targetBearing - COGNMEA) * PI / 180.0;
+      VMGNMEA = SOGNMEA * cos(bearingDiff);
+      MARK_FRESH(IDX_VMG);
+    } else {
+      VMGNMEA = NAN;  // No valid target
+    }
+  } else {
+    VMGNMEA = NAN;
+  }
+}
+void saveFuelTableToNVS() {
+  nvs_handle_t nvs_handle;
+  esp_err_t err = nvs_open("fuel", NVS_READWRITE, &nvs_handle);
+  if (err != ESP_OK) {
+    queueConsoleMessage("Failed to open NVS for fuel table");
+    Serial.println("DEBUG: Failed to open NVS!");
+    return;
+  }
+  nvs_set_blob(nvs_handle, "fuelRPM", fuelTableRPM, sizeof(fuelTableRPM));
+  Serial.print("DEBUG: Writing fuelTableGPH blob (");
+  nvs_set_blob(nvs_handle, "fuelGPH", fuelTableGPH, sizeof(fuelTableGPH));
+  nvs_commit(nvs_handle);
+  nvs_close(nvs_handle);
+}
+
+void loadFuelTableFromNVS() {
+  nvs_handle_t nvs_handle;
+  esp_err_t err = nvs_open("fuel", NVS_READONLY, &nvs_handle);
+  if (err != ESP_OK) {
+    queueConsoleMessage("Fuel: No saved table, using defaults");
+    return;
+  }
+
+  size_t required_size = sizeof(fuelTableRPM);
+  err = nvs_get_blob(nvs_handle, "fuelRPM", fuelTableRPM, &required_size);
+  if (err != ESP_OK) {
+    Serial.println("DEBUG: Failed to load fuelRPM from NVS");
+    nvs_close(nvs_handle);
+    return;
+  }
+
+  required_size = sizeof(fuelTableGPH);
+  err = nvs_get_blob(nvs_handle, "fuelGPH", fuelTableGPH, &required_size);
+  if (err != ESP_OK) {
+    Serial.println("DEBUG: Failed to load fuelGPH from NVS");
+  }
+  nvs_close(nvs_handle);
+}
+void resetFuelTableToDefaults() {
+  for (int i = 0; i < FUEL_TABLE_SIZE; i++) {
+    fuelTableRPM[i] = defaultFuelRPMValues[i];
+    fuelTableGPH[i] = defaultFuelGPHValues[i];
+  }
+  saveFuelTableToNVS();
+}
+
+bool ensureLittleFS() {
+  if (littleFSMounted) {
+    return true;
+  }
+
+  Serial.println("Initializing LittleFS...");
+
+  // Start clean
+  LittleFS.end();
+
+  // Use formatOnFail=TRUE (first parameter)
+  if (!LittleFS.begin(true, "/littlefs", 20, "userdata")) {
+    Serial.println("CRITICAL: LittleFS begin failed even with formatOnFail=true");
+    littleFSMounted = false;
+    return false;
+  }
+
+  // Create mutex if it doesn't exist yet
+  if (!fsMutex) {
+    fsMutex = xSemaphoreCreateMutex();  // MUST be a mutex (priority inheritance + ownership)
+    if (!fsMutex) {
+      Serial.println("CRITICAL: fsMutex creation failed");
+      littleFSMounted = false;
+      return false;
+    }
+    // Do NOT xSemaphoreGive() a mutex here.
+  }
+
+
+  Serial.println("LittleFS mounted successfully");
+  Serial.printf("Total: %u Used: %u\n",
+                (unsigned)fsTotalBytes(),
+                (unsigned)fsUsedBytes());
+  littleFSMounted = true;
+  return true;
+}
+
+
+
+void ensurePreferredBootPartition() {
+  //called during startup, in setup() function.
+  //Purpose: Decides which firmware partition to boot from and handles emergency recovery.
+  //User Flow Permutations:
+  //Normal Operation (GPIO41 not pressed)
+  //If running from factory → switch to ota_0 (if valid firmware exists there)
+  //If running from ota_0 → stay on ota_0
+  //Goal: Always prefer the updated firmware in ota_0
+  //Emergency Recovery (GPIO41 pressed during boot)
+  //Force boot to factory partition regardless of current location
+  //Clear any stuck OTA update flags in memory
+  //Stay in factory mode (safe, known-good firmware)
+  //Corrupted ota_0 Firmware
+  //If ota_0 has invalid/corrupted firmware → stay on factory
+  //Prevents boot to broken firmware
+  const esp_partition_t *ota0_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+  const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
+  const esp_partition_t *current_boot = esp_ota_get_boot_partition();
+
+  // Check GPIO41 for manual factory reset
+  pinMode(41, INPUT_PULLUP);
+  bool forceFactory = (digitalRead(41) == LOW);  //When pin 41 is low, forceFactory = 1
+
+  if (forceFactory) {
+    // Clear any pending update flags to prevent boot loops
+    nvs_handle_t nvs_handle;
+    if (nvs_open("storage", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+      nvs_erase_key(nvs_handle, "update_flag");
+      nvs_erase_key(nvs_handle, "target_ver");
+      nvs_commit(nvs_handle);
+      nvs_close(nvs_handle);
+    }
+
+
+    if (current_boot != factory_partition) {
+      esp_ota_set_boot_partition(factory_partition);
+      Serial.println("Boot: GPIO41 forced factory partition - restarting...");
+      events.send("Boot: GPIO41 forced factory partition - restarting...", "console", millis());
+      Serial.printf("GPIO41 state: %d\n", digitalRead(41));
+      delay(1500);
+      ESP.restart();
+    } else {
+      Serial.println("Boot: GPIO41 detected - staying in factory mode");
+      events.send("Boot: GPIO41 detected - staying in factory mode", "console", millis());
+      Serial.printf("GPIO41 status: %d\n", digitalRead(41));
+    }
+
+
+    return;  // <<<< CRITICAL: Exit function, don't run normal logic
+  }
+
+  // Check if ota_0 has valid firmware
+  esp_app_desc_t app_desc;
+  esp_err_t err = esp_ota_get_partition_description(ota0_partition, &app_desc);
+  bool ota0_valid = (err == ESP_OK);
+
+  if (ota0_valid && current_boot != ota0_partition) {
+    esp_ota_set_boot_partition(ota0_partition);
+    Serial.println("Boot: Switched to ota_0 partition !!");
+    events.send("Boot: Switched to ota_0 partition", "console", millis());
+  } else if (!ota0_valid && current_boot != factory_partition) {
+    esp_ota_set_boot_partition(factory_partition);
+    Serial.println("Boot: ota_0 invalid, using factory partition");
+    events.send("Boot: ota_0 invalid, using factory partition", "console", millis());
+  }
+}
+void sha256(const char *input, char *outputBuffer) {  // for security
+  byte shaResult[32];
+  mbedtls_md_context_t ctx;
+  const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, info, 0);
+  mbedtls_md_starts(&ctx);
+  mbedtls_md_update(&ctx, (const unsigned char *)input, strlen(input));
+  mbedtls_md_finish(&ctx, shaResult);
+  mbedtls_md_free(&ctx);
+
+  for (int i = 0; i < 32; ++i) {
+    sprintf(outputBuffer + (i * 2), "%02x", shaResult[i]);
+  }
+}
+
+void loadPasswordHash() {
+  // First try to load plaintext password (for auth)
+  if (fsExists("/password.txt")) {
+    fsTakeLock();
+    File plainFile = LittleFS.open("/password.txt", "r");
+    if (plainFile) {
+      size_t n = plainFile.readBytesUntil('\n', requiredPassword, sizeof(requiredPassword) - 1);
+      requiredPassword[n] = '\0';
+
+      // Trim trailing whitespace/newlines
+      while (n > 0 && (requiredPassword[n - 1] == '\r' || requiredPassword[n - 1] == '\n' || requiredPassword[n - 1] == ' ' || requiredPassword[n - 1] == '\t')) {
+        requiredPassword[--n] = '\0';
+      }
+
+      plainFile.close();
+      Serial.println("Plaintext password loaded from LittleFS");
+    }
+    fsReleaseLock();
+  }
+  // Now load the hash (for future use)
+  if (fsExists("/password.hash")) {
+    fsTakeLock();
+    File file = LittleFS.open("/password.hash", "r");
+    if (file) {
+      size_t len = file.readBytesUntil('\n', storedPasswordHash, sizeof(storedPasswordHash) - 1);
+      storedPasswordHash[len] = '\0';
+      file.close();
+      fsReleaseLock();
+      Serial.println("Password hash loaded from LittleFS");
+      return;
+    }
+    fsReleaseLock();
+  }
+
+  // If we get here, no password files exist - set defaults
+  strncpy(requiredPassword, "admin", sizeof(requiredPassword) - 1);
+  sha256("admin", storedPasswordHash);
+  Serial.println("No password file, using default admin password");
+}
+
+void savePasswordHash() {
+  fsTakeLock();
+  File file = LittleFS.open("/password.hash", "w");
+  if (file) {
+    file.println(storedPasswordHash);
+    file.close();
+    fsReleaseLock();
+    Serial.println("Password hash saved to LittleFS");
+    queueConsoleMessage("Password hash saved to LittleFS");
+  } else {
+    fsReleaseLock();
+    Serial.println("Failed to open password.hash for writing");
+    queueConsoleMessage("Failed to open password.hash for writing");
+  }
+}
+
+void savePasswordPlaintext(const char *password) {
+  fsTakeLock();
+  File file = LittleFS.open("/password.txt", "w");
+  if (file) {
+    file.println(password);
+    file.close();
+    fsReleaseLock();
+    Serial.println("Password saved to LittleFS");
+    queueConsoleMessage("Password saved");
+  } else {
+    fsReleaseLock();
+    Serial.println("Failed to open password.txt for writing");
+    queueConsoleMessage("Password save failed");
+  }
+}
+
+bool validatePassword(const char *password) {
+  if (!password) return false;
+
+  char hash[65] = { 0 };
+  sha256(password, hash);
+
+  return (strcmp(hash, storedPasswordHash) == 0);
+}
+// NEW - printf-style (for new code and critical fixes as of 1/20/26 that were churning heap)
+void queueConsoleMessageF(const char *format, ...) {
+  if (otaInProgress) {
+    return;  // Skip during OTA
+  }
+  if (!consoleQueue || !format) return;
+  char formattedMsg[128];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(formattedMsg, sizeof(formattedMsg), format, args);
+  va_end(args);
+
+  Serial.print("QUEUE DEBUG: ");
+  Serial.println(formattedMsg);
+
+  portENTER_CRITICAL(&consoleMux);
+  if (consoleCount >= CONSOLE_QUEUE_SIZE) {
+    consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
+    consoleCount = CONSOLE_QUEUE_SIZE - 1;
+  }
+  strncpy(consoleQueue[consoleHead].message, formattedMsg, 127);
+  consoleQueue[consoleHead].message[127] = '\0';
+  consoleQueue[consoleHead].timestamp = millis();
+  consoleHead = (consoleHead + 1) % CONSOLE_QUEUE_SIZE;
+  consoleCount++;
+  portEXIT_CRITICAL(&consoleMux);
+}
+//Legacy  // Works, but no formatting benefit
+void queueConsoleMessage(const char *msg) {
+  if (otaInProgress) {
+    return;  // Skip during OTA
+  }
+  if (!consoleQueue || !msg) return;
+
+  Serial.print("QUEUE DEBUG: ");  // Debug output
+  Serial.println(msg);
+
+  portENTER_CRITICAL(&consoleMux);
+  if (consoleCount >= CONSOLE_QUEUE_SIZE) {
+    consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
+    consoleCount = CONSOLE_QUEUE_SIZE - 1;
+  }
+  // Copy directly into queue slot (truncate to 127)
+  strncpy(consoleQueue[consoleHead].message, msg, 127);
+  consoleQueue[consoleHead].message[127] = '\0';
+  consoleQueue[consoleHead].timestamp = millis();
+  consoleHead = (consoleHead + 1) % CONSOLE_QUEUE_SIZE;
+  consoleCount++;
+  portEXIT_CRITICAL(&consoleMux);
+}
+//legacy // OLD - String overload (keeps existing code working)
+void queueConsoleMessage(const String &message) {
+  if (otaInProgress) {
+    return;  // Skip during OTA
+  }
+  queueConsoleMessage(message.c_str());
+}
+// Pop up to maxPop messages into provided buffers; returns count popped.
+int popConsoleMessages(char outMsgs[][128], unsigned long *outTs, int maxPop) {
+  if (!consoleQueue || maxPop <= 0) return 0;
+
+  int popped = 0;
+
+  portENTER_CRITICAL(&consoleMux);
+
+  while (popped < maxPop && consoleCount > 0) {
+    int idx = consoleTail;
+    strncpy(outMsgs[popped], consoleQueue[idx].message, 127);
+    outMsgs[popped][127] = '\0';
+    if (outTs) outTs[popped] = consoleQueue[idx].timestamp;
+
+    consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
+    consoleCount--;
+    popped++;
+  }
+
+  portEXIT_CRITICAL(&consoleMux);
+
+  return popped;
+}
+void trySendConsoleSSE(bool &sentSomething, unsigned long now) {
+  if (sentSomething) return;
+  if (now - lastConsoleMessageTime < CONSOLE_MESSAGE_INTERVAL) return;
+
+  char msgs[5][128];
+  unsigned long ts[5];
+
+  int n = popConsoleMessages(msgs, ts, 5);
+  if (n <= 0) return;
+
+  // Send outside lock
+  for (int i = 0; i < n; i++) {
+    events.send(msgs[i], "console");
+  }
+
+  lastConsoleMessageTime = now;
+  lastEventSourceSend = now;  // DELETE THIS LINE TO UNTHROTTLE CONSOLE
+  sentSomething = true;
+}
+//NVS STUFF
+void initializeNVS() {
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    Serial.println("NVS init issue: erasing NVS and retrying...");
+    err = nvs_flash_erase();
+    if (err != ESP_OK) {
+      Serial.printf("ERROR: Failed to erase NVS (code %d)\n", err);
+      return;
+    }
+    err = nvs_flash_init();
+  }
+  if (err != ESP_OK) {
+    Serial.printf("ERROR: Failed to initialize NVS (code %d)\n", err);
+    return;
+  }
+  Serial.println("NVS initialized successfully");
+  queueConsoleMessage("NVS initialized successfully");
+}
+void saveNVSData() {
+  // Throttle: only save every X (currently 2) minutes
+  unsigned long currentTime = millis();
+  if (currentTime - lastNVSSaveTime < NVS_SAVE_INTERVAL) {
+    return;
+  }
+
+  nvs_handle_t nvs_handle;
+  esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+  if (err != ESP_OK) {
+    queueConsoleMessage("ERROR: Failed to open NVS");
+    Serial.println("ERROR: Failed to open NVS");
+    return;
+  }
+
+  bool anyChanges = false;
+
+  // Session Energy Tracking
+  if (prev_ChargedEnergy != (uint32_t)ChargedEnergy) {
+    nvs_set_u32(nvs_handle, "ChargedEnergy", (uint32_t)ChargedEnergy);
+    prev_ChargedEnergy = (uint32_t)ChargedEnergy;
+    anyChanges = true;
+  }
+  if (prev_DischrgdEnergy != (uint32_t)DischargedEnergy) {
+    nvs_set_u32(nvs_handle, "DischrgdEnergy", (uint32_t)DischargedEnergy);
+    prev_DischrgdEnergy = (uint32_t)DischargedEnergy;
+    anyChanges = true;
+  }
+  if (prev_AltChrgdEnergy != (uint32_t)AlternatorChargedEnergy) {
+    nvs_set_u32(nvs_handle, "AltChrgdEnergy", (uint32_t)AlternatorChargedEnergy);
+    prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;
+    anyChanges = true;
+  }
+  if (prev_SolarEnergy != (uint32_t)SolarChargedEnergy) {
+    nvs_set_u32(nvs_handle, "SolarEnergy", (uint32_t)SolarChargedEnergy);
+    prev_SolarEnergy = (uint32_t)SolarChargedEnergy;
+    anyChanges = true;
+  }
+  if (prev_AltFuelUsed != (int32_t)(AlternatorFuelUsed * 10)) {
+    nvs_set_i32(nvs_handle, "AltFuelUsed", (int32_t)(AlternatorFuelUsed * 10));
+    prev_AltFuelUsed = (int32_t)(AlternatorFuelUsed * 10);
+    anyChanges = true;
+  }
+  if (prev_EngineFuel != (int32_t)(EngineFuelUsed * 10)) {
+    nvs_set_i32(nvs_handle, "EngineFuel", (int32_t)(EngineFuelUsed * 10));
+    prev_EngineFuel = (int32_t)(EngineFuelUsed * 10);
+    anyChanges = true;
+  }
+
+  // Lifetime Energy Tracking (_AllTime)
+  if (prev_ChargedEnergy_AllTime != (uint32_t)ChargedEnergy_AllTime) {
+    nvs_set_u32(nvs_handle, "ChrgdEng_AT", (uint32_t)ChargedEnergy_AllTime);
+    prev_ChargedEnergy_AllTime = (uint32_t)ChargedEnergy_AllTime;
+    anyChanges = true;
+  }
+  if (prev_DischrgdEnergy_AllTime != (uint32_t)DischargedEnergy_AllTime) {
+    nvs_set_u32(nvs_handle, "DschrgEng_AT", (uint32_t)DischargedEnergy_AllTime);
+    prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;
+    anyChanges = true;
+  }
+  if (prev_AltChrgdEnergy_AllTime != (uint32_t)AlternatorChargedEnergy_AllTime) {
+    nvs_set_u32(nvs_handle, "AltChrgEng_AT", (uint32_t)AlternatorChargedEnergy_AllTime);
+    prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime;
+    anyChanges = true;
+  }
+  if (prev_SolarEnergy_AllTime != (uint32_t)SolarChargedEnergy_AllTime) {
+    nvs_set_u32(nvs_handle, "SolarEng_AT", (uint32_t)SolarChargedEnergy_AllTime);
+    prev_SolarEnergy_AllTime = (uint32_t)SolarChargedEnergy_AllTime;
+    anyChanges = true;
+  }
+  if (prev_AltFuelUsed_AllTime != (int32_t)(AlternatorFuelUsed_AllTime * 10)) {
+    nvs_set_i32(nvs_handle, "AltFuel_AT", (int32_t)(AlternatorFuelUsed_AllTime * 10));
+    prev_AltFuelUsed_AllTime = (int32_t)(AlternatorFuelUsed_AllTime * 10);
+    anyChanges = true;
+  }
+  if (prev_EngineFuel_AllTime != (int32_t)(EngineFuelUsed_AllTime * 10)) {
+    nvs_set_i32(nvs_handle, "EngFuel_AT", (int32_t)(EngineFuelUsed_AllTime * 10));
+    prev_EngineFuel_AllTime = (int32_t)(EngineFuelUsed_AllTime * 10);
+    anyChanges = true;
+  }
+
+  // Session Runtime Tracking
+  if (prev_EngineRunTime != (int32_t)EngineRunTime) {
+    nvs_set_i32(nvs_handle, "EngineRunTime", (int32_t)EngineRunTime);
+    prev_EngineRunTime = (int32_t)EngineRunTime;
+    anyChanges = true;
+  }
+  if (prev_EngineCycles != (int32_t)EngineCycles) {
+    nvs_set_i32(nvs_handle, "EngineCycles", (int32_t)EngineCycles);
+    prev_EngineCycles = (int32_t)EngineCycles;
+    anyChanges = true;
+  }
+  if (prev_AltOnTime != (int32_t)AlternatorOnTime) {
+    nvs_set_i32(nvs_handle, "AltOnTime", (int32_t)AlternatorOnTime);
+    prev_AltOnTime = (int32_t)AlternatorOnTime;
+    anyChanges = true;
+  }
+
+  // Lifetime Runtime Tracking (_AllTime)
+  if (prev_EngineRunTime_AllTime != (int32_t)EngineRunTime_AllTime) {
+    nvs_set_i32(nvs_handle, "EngRunTime_AT", (int32_t)EngineRunTime_AllTime);
+    prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime;
+    anyChanges = true;
+  }
+  if (prev_EngineCycles_AllTime != (int32_t)EngineCycles_AllTime) {
+    nvs_set_i32(nvs_handle, "EngCycles_AT", (int32_t)EngineCycles_AllTime);
+    prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;
+    anyChanges = true;
+  }
+  if (prev_AltOnTime_AllTime != (int32_t)AlternatorOnTime_AllTime) {
+    nvs_set_i32(nvs_handle, "AltOnTime_AT", (int32_t)AlternatorOnTime_AllTime);
+    prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;
+    anyChanges = true;
+  }
+
+  // Session Charge Cycles
+  if (prev_ChargeCycles != (int32_t)ChargeCycles) {
+    nvs_set_i32(nvs_handle, "ChrgCycles", (int32_t)ChargeCycles);
+    prev_ChargeCycles = (int32_t)ChargeCycles;
+    anyChanges = true;
+  }
+
+  // Lifetime Charge Cycles (_AllTime)
+  if (prev_ChargeCycles_AllTime != (int32_t)ChargeCycles_AllTime) {
+    nvs_set_i32(nvs_handle, "ChrgCyc_AT", (int32_t)ChargeCycles_AllTime);
+    prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;
+    anyChanges = true;
+  }
+
+  // Session Travel Statistics
+  if (prev_TotalDist != (int32_t)TotalDistance) {
+    nvs_set_i32(nvs_handle, "TotalDist", (int32_t)TotalDistance);
+    prev_TotalDist = (int32_t)TotalDistance;
+    anyChanges = true;
+  }
+  if (prev_AvgSpeed != (int32_t)(AvgSpeed * 100)) {
+    nvs_set_i32(nvs_handle, "AvgSpeed", (int32_t)(AvgSpeed * 100));
+    prev_AvgSpeed = (int32_t)(AvgSpeed * 100);
+    anyChanges = true;
+  }
+
+  // Lifetime Travel Statistics (_AllTime)
+  if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime) {
+    nvs_set_i32(nvs_handle, "TotDist_AT", (int32_t)TotalDistance_AllTime);
+    prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;
+    anyChanges = true;
+  }
+  if (prev_AvgSpeed_AllTime != (int32_t)(AvgSpeed_AllTime * 100)) {
+    nvs_set_i32(nvs_handle, "AvgSpd_AT", (int32_t)(AvgSpeed_AllTime * 100));
+    prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);
+    anyChanges = true;
+  }
+
+  // Average SOC (Session only - save the average directly)
+  if (prev_AvgSOC != (int32_t)(AvgSOC * 100)) {
+    nvs_set_i32(nvs_handle, "AvgSOC", (int32_t)(AvgSOC * 100));
+    prev_AvgSOC = (int32_t)(AvgSOC * 100);
+    anyChanges = true;
+  }
+
+  // Average SOC (AllTime - save the ACCUMULATORS, not the average)
+  static uint64_t prev_socAccum_AllTime = 0;
+  static uint32_t prev_socTime_AllTime = 0;
+
+  // Scale accumulator: multiply by 100 to preserve 2 decimal places
+  uint64_t socAccum_scaled = (uint64_t)(socAccumulator_AllTime * 100.0f);
+  if (prev_socAccum_AllTime != socAccum_scaled) {
+    nvs_set_u64(nvs_handle, "SocAccum_AT", socAccum_scaled);
+    prev_socAccum_AllTime = socAccum_scaled;
+    anyChanges = true;
+  }
+
+  if (prev_socTime_AllTime != (uint32_t)totalSocSampleTime_AllTime) {
+    nvs_set_u32(nvs_handle, "SocTime_AT", (uint32_t)totalSocSampleTime_AllTime);
+    prev_socTime_AllTime = (uint32_t)totalSocSampleTime_AllTime;
+    anyChanges = true;
+  }
+
+  // Battery State
+  if (prev_SOC_percent != (int32_t)SOC_percent) {
+    nvs_set_i32(nvs_handle, "SOC_percent", (int32_t)SOC_percent);
+    prev_SOC_percent = (int32_t)SOC_percent;
+    anyChanges = true;
+  }
+  if (prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled) {
+    nvs_set_i32(nvs_handle, "CoulombCount", (int32_t)CoulombCount_Ah_scaled);
+    prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;
+    anyChanges = true;
+  }
+
+  // Session Health Stats
+  if (prev_SessionDur != (uint32_t)CurrentSessionDuration) {
+    nvs_set_u32(nvs_handle, "SessionDur", (uint32_t)CurrentSessionDuration);
+    prev_SessionDur = (uint32_t)CurrentSessionDuration;
+    anyChanges = true;
+  }
+  if (prev_MaxLoop != (int32_t)MaxLoopTime) {
+    nvs_set_i32(nvs_handle, "MaxLoop", (int32_t)MaxLoopTime);
+    prev_MaxLoop = (int32_t)MaxLoopTime;
+    anyChanges = true;
+  }
+  if (prev_MinHeap != (int32_t)MinFreeHeap) {
+    nvs_set_i32(nvs_handle, "MinHeap", (int32_t)MinFreeHeap);
+    prev_MinHeap = (int32_t)MinFreeHeap;
+    anyChanges = true;
+  }
+
+  // System Health Counters
+  if (prev_PowerCycles != (int32_t)totalPowerCycles) {
+    nvs_set_i32(nvs_handle, "PowerCycles", (int32_t)totalPowerCycles);
+    prev_PowerCycles = (int32_t)totalPowerCycles;
+    anyChanges = true;
+  }
+
+  // Thermal Stress
+  if (prev_InsulDamage != CumulativeInsulationDamage) {
+    nvs_set_blob(nvs_handle, "InsulDamage", &CumulativeInsulationDamage, sizeof(float));
+    prev_InsulDamage = CumulativeInsulationDamage;
+    anyChanges = true;
+  }
+  if (prev_GreaseDamage != CumulativeGreaseDamage) {
+    nvs_set_blob(nvs_handle, "GreaseDamage", &CumulativeGreaseDamage, sizeof(float));
+    prev_GreaseDamage = CumulativeGreaseDamage;
+    anyChanges = true;
+  }
+  if (prev_BrushDamage != CumulativeBrushDamage) {
+    nvs_set_blob(nvs_handle, "BrushDamage", &CumulativeBrushDamage, sizeof(float));
+    prev_BrushDamage = CumulativeBrushDamage;
+    anyChanges = true;
+  }
+
+  // Dynamic Learning
+  if (prev_ShuntGain != DynamicShuntGainFactor) {
+    nvs_set_blob(nvs_handle, "ShuntGain", &DynamicShuntGainFactor, sizeof(float));
+    prev_ShuntGain = DynamicShuntGainFactor;
+    anyChanges = true;
+  }
+  if (prev_AltZero != DynamicAltCurrentZero) {
+    nvs_set_blob(nvs_handle, "AltZero", &DynamicAltCurrentZero, sizeof(float));
+    prev_AltZero = DynamicAltCurrentZero;
+    anyChanges = true;
+  }
+  if (prev_LastGainTime != (uint32_t)lastGainCorrectionTime) {
+    nvs_set_u32(nvs_handle, "LastGainTime", (uint32_t)lastGainCorrectionTime);
+    prev_LastGainTime = (uint32_t)lastGainCorrectionTime;
+    anyChanges = true;
+  }
+  if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime) {
+    nvs_set_u32(nvs_handle, "LastZeroTime", (uint32_t)lastAutoZeroTime);
+    prev_LastZeroTime = (uint32_t)lastAutoZeroTime;
+    anyChanges = true;
+  }
+  if (prev_LastZeroTemp != lastAutoZeroTemp) {
+    nvs_set_blob(nvs_handle, "LastZeroTemp", &lastAutoZeroTemp, sizeof(float));
+    prev_LastZeroTemp = lastAutoZeroTemp;
+    anyChanges = true;
+  }
+
+  if (prev_sailing_days_alltime != sailing_days_alltime) {
+    nvs_set_blob(nvs_handle, "SailDays_AT", &sailing_days_alltime, sizeof(float));
+    prev_sailing_days_alltime = sailing_days_alltime;
+    anyChanges = true;
+  }
+
+  // IMU Lifetime Counters
+  if (prev_imu_capsize_count != imu_capsize_count) {
+    nvs_set_u32(nvs_handle, "IMU_Capsize", imu_capsize_count);
+    prev_imu_capsize_count = imu_capsize_count;
+    anyChanges = true;
+  }
+  if (prev_imu_pitchpole_count != imu_pitchpole_count) {
+    nvs_set_u32(nvs_handle, "IMU_Pitchpol", imu_pitchpole_count);
+    prev_imu_pitchpole_count = imu_pitchpole_count;
+    anyChanges = true;
+  }
+  if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime) {
+    nvs_set_u32(nvs_handle, "IMU_SlamLife", imu_slam_count_lifetime);
+    prev_imu_slam_count_lifetime = imu_slam_count_lifetime;
+    anyChanges = true;
+  }
+
+  // IMU Lifetime Maximums
+  if (prev_imu_heel_max_lifetime != imu_heel_max_lifetime) {
+    nvs_set_blob(nvs_handle, "IMU_HeelMax", &imu_heel_max_lifetime, sizeof(float));
+    prev_imu_heel_max_lifetime = imu_heel_max_lifetime;
+    anyChanges = true;
+  }
+  if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime) {
+    nvs_set_blob(nvs_handle, "IMU_PitchMax", &imu_pitch_max_lifetime, sizeof(float));
+    prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;
+    anyChanges = true;
+  }
+  if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime) {
+    nvs_set_blob(nvs_handle, "IMU_SlamMax", &imu_slam_peak_lifetime, sizeof(float));
+    prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;
+    anyChanges = true;
+  }
+
+  // IMU Settings
+  if (prev_imuMountOrientation != imuMountOrientation) {
+    nvs_set_u8(nvs_handle, "IMU_Orient", imuMountOrientation);
+    prev_imuMountOrientation = imuMountOrientation;
+    anyChanges = true;
+  }
+  if (prev_CAPSIZE_THRESHOLD_DEG != CAPSIZE_THRESHOLD_DEG) {
+    nvs_set_blob(nvs_handle, "IMU_CapThres", &CAPSIZE_THRESHOLD_DEG, sizeof(float));
+    prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;
+    anyChanges = true;
+  }
+  if (prev_PITCHPOLE_THRESHOLD_DEG != PITCHPOLE_THRESHOLD_DEG) {
+    nvs_set_blob(nvs_handle, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, sizeof(float));
+    prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;
+    anyChanges = true;
+  }
+  if (prev_SLAM_THRESHOLD_G != SLAM_THRESHOLD_G) {
+    nvs_set_blob(nvs_handle, "IMU_SlamThrs", &SLAM_THRESHOLD_G, sizeof(float));
+    prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;
+    anyChanges = true;
+  }
+
+  if (anyChanges) {
+    nvs_commit(nvs_handle);
+  }
+  nvs_close(nvs_handle);
+
+  lastNVSSaveTime = currentTime;
+}
+void loadNVSData() {
+  nvs_handle_t nvs_handle;
+  esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
+  if (err != ESP_OK) {
+    queueConsoleMessage("NVS: No existing data found, using defaults");
+    Serial.println("NVS: No existing data found, using defaults");
+    return;
+  }
+
+  size_t required_size;
+  uint32_t temp_uint32;
+  int32_t temp_int32;
+
+  // Session Energy Tracking
+  if (nvs_get_u32(nvs_handle, "ChargedEnergy", &temp_uint32) == ESP_OK) ChargedEnergy = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "DischrgdEnergy", &temp_uint32) == ESP_OK) DischargedEnergy = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "AltChrgdEnergy", &temp_uint32) == ESP_OK) AlternatorChargedEnergy = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "SolarEnergy", &temp_uint32) == ESP_OK) SolarChargedEnergy = temp_uint32;
+  if (nvs_get_i32(nvs_handle, "AltFuelUsed", &temp_int32) == ESP_OK) AlternatorFuelUsed = temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "EngineFuel", &temp_int32) == ESP_OK) EngineFuelUsed = temp_int32 / 10.0f;
+
+  // Lifetime Energy Tracking (_AllTime)
+  if (nvs_get_u32(nvs_handle, "ChrgdEng_AT", &temp_uint32) == ESP_OK) ChargedEnergy_AllTime = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "DschrgEng_AT", &temp_uint32) == ESP_OK) DischargedEnergy_AllTime = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "AltChrgEng_AT", &temp_uint32) == ESP_OK) AlternatorChargedEnergy_AllTime = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "SolarEng_AT", &temp_uint32) == ESP_OK) SolarChargedEnergy_AllTime = temp_uint32;
+  if (nvs_get_i32(nvs_handle, "AltFuel_AT", &temp_int32) == ESP_OK) AlternatorFuelUsed_AllTime = temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "EngFuel_AT", &temp_int32) == ESP_OK) EngineFuelUsed_AllTime = temp_int32 / 10.0f;
+
+  // Session Runtime Tracking
+  if (nvs_get_i32(nvs_handle, "EngineRunTime", &temp_int32) == ESP_OK) EngineRunTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "EngineCycles", &temp_int32) == ESP_OK) EngineCycles = temp_int32;
+  if (nvs_get_i32(nvs_handle, "AltOnTime", &temp_int32) == ESP_OK) AlternatorOnTime = temp_int32;
+
+  // Lifetime Runtime Tracking (_AllTime)
+  if (nvs_get_i32(nvs_handle, "EngRunTime_AT", &temp_int32) == ESP_OK) EngineRunTime_AllTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "EngCycles_AT", &temp_int32) == ESP_OK) EngineCycles_AllTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "AltOnTime_AT", &temp_int32) == ESP_OK) AlternatorOnTime_AllTime = temp_int32;
+
+  // Session Charge Cycles
+  if (nvs_get_i32(nvs_handle, "ChrgCycles", &temp_int32) == ESP_OK) ChargeCycles = temp_int32;
+
+  // Lifetime Charge Cycles (_AllTime)
+  if (nvs_get_i32(nvs_handle, "ChrgCyc_AT", &temp_int32) == ESP_OK) ChargeCycles_AllTime = temp_int32;
+
+  // Session Travel Statistics
+  if (nvs_get_i32(nvs_handle, "TotalDist", &temp_int32) == ESP_OK) TotalDistance = temp_int32;
+  if (nvs_get_i32(nvs_handle, "AvgSpeed", &temp_int32) == ESP_OK) AvgSpeed = temp_int32 / 100.0f;
+
+  // Lifetime Travel Statistics (_AllTime)
+  if (nvs_get_i32(nvs_handle, "TotDist_AT", &temp_int32) == ESP_OK) TotalDistance_AllTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "AvgSpd_AT", &temp_int32) == ESP_OK) AvgSpeed_AllTime = temp_int32 / 100.0f;
+
+  // NEW: Sailing metrics (add after other _AllTime loads)
+  required_size = sizeof(float);  // ✅ Just assign, don't declare
+  nvs_get_blob(nvs_handle, "SailDays_AT", &sailing_days_alltime, &required_size);
+
+
+  // Average SOC (Session)
+  if (nvs_get_i32(nvs_handle, "AvgSOC", &temp_int32) == ESP_OK) AvgSOC = temp_int32 / 100.0f;
+
+  // Average SOC (AllTime - load ACCUMULATORS, then calculate average)
+  uint64_t temp_uint64;
+  if (nvs_get_u64(nvs_handle, "SocAccum_AT", &temp_uint64) == ESP_OK) {
+    socAccumulator_AllTime = temp_uint64 / 100.0f;
+    Serial.printf("NVS LOAD: socAccumulator_AllTime = %.2f\n", socAccumulator_AllTime);
+  }
+
+  if (nvs_get_u32(nvs_handle, "SocTime_AT", &temp_uint32) == ESP_OK) {
+    totalSocSampleTime_AllTime = temp_uint32;
+    Serial.printf("NVS LOAD: totalSocSampleTime_AllTime = %lu sec (%.1f hours)\n",
+                  temp_uint32, temp_uint32 / 3600.0f);
+  }
+
+  // Calculate AvgSOC_AllTime from loaded accumulators
+  if (totalSocSampleTime_AllTime > 0) {
+    AvgSOC_AllTime = socAccumulator_AllTime / totalSocSampleTime_AllTime;
+    Serial.printf("NVS LOAD: Calculated AvgSOC_AllTime = %.2f%%\n", AvgSOC_AllTime);
+  } else {
+    Serial.println("NVS LOAD: No AllTime SOC history found");
+  }
+
+  // Battery State (with initialization if not found)
+  if (nvs_get_i32(nvs_handle, "SOC_percent", &temp_int32) == ESP_OK) {
+    SOC_percent = temp_int32;
+    Serial.printf("NVS LOAD: SOC_percent = %d (%.2f%%)\n", temp_int32, temp_int32 / 100.0f);
+  } else {
+    // If no saved SoC, estimate from voltage
+    float voltage = getBatteryVoltage();
+    int estimatedSoC = 50;  // Default to 50%
+
+    // Simple voltage-based estimation for 12V battery
+    if (voltage >= 12.7) estimatedSoC = 100;
+    else if (voltage >= 12.5) estimatedSoC = 90;
+    else if (voltage >= 12.4) estimatedSoC = 80;
+    else if (voltage >= 12.2) estimatedSoC = 60;
+    else if (voltage >= 12.0) estimatedSoC = 40;
+    else if (voltage >= 11.8) estimatedSoC = 20;
+    else estimatedSoC = 10;
+
+    SOC_percent = estimatedSoC * 100;
+    Serial.printf("NVS LOAD: SOC_percent NOT FOUND - estimated %d%% from voltage %.2fV\n",
+                  estimatedSoC, voltage);
+  }
+
+  if (nvs_get_i32(nvs_handle, "CoulombCount", &temp_int32) == ESP_OK) {
+    CoulombCount_Ah_scaled = temp_int32;
+    Serial.printf("NVS LOAD: CoulombCount_Ah_scaled = %d\n", temp_int32);
+  } else {
+    // Initialize based on estimated SoC
+    CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 100;
+    // CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 10000; ChatGPT suggests this!!
+
+    Serial.printf("NVS LOAD: CoulombCount NOT FOUND - initialized to %d based on SoC\n",
+                  CoulombCount_Ah_scaled);
+  }
+
+  // Session Health Stats (✅ restore to prior-session variables)
+  if (nvs_get_u32(nvs_handle, "SessionDur", &temp_uint32) == ESP_OK) LastSessionDuration = temp_uint32;
+  if (nvs_get_i32(nvs_handle, "MaxLoop", &temp_int32) == ESP_OK) LastSessionMaxLoopTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "MinHeap", &temp_int32) == ESP_OK) lastSessionMinHeap = temp_int32;
+
+  // System Health Counters
+  if (nvs_get_i32(nvs_handle, "PowerCycles", &temp_int32) == ESP_OK) totalPowerCycles = temp_int32;
+
+  // Thermal Stress
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "InsulDamage", &CumulativeInsulationDamage, &required_size);
+  nvs_get_blob(nvs_handle, "GreaseDamage", &CumulativeGreaseDamage, &required_size);
+  nvs_get_blob(nvs_handle, "BrushDamage", &CumulativeBrushDamage, &required_size);
+
+  // Dynamic Learning
+  nvs_get_blob(nvs_handle, "ShuntGain", &DynamicShuntGainFactor, &required_size);
+  nvs_get_blob(nvs_handle, "AltZero", &DynamicAltCurrentZero, &required_size);
+  if (nvs_get_u32(nvs_handle, "LastGainTime", &temp_uint32) == ESP_OK) lastGainCorrectionTime = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "LastZeroTime", &temp_uint32) == ESP_OK) lastAutoZeroTime = temp_uint32;
+  nvs_get_blob(nvs_handle, "LastZeroTemp", &lastAutoZeroTemp, &required_size);
+
+  // IMU Lifetime Counters
+  if (nvs_get_u32(nvs_handle, "IMU_Capsize", &temp_uint32) == ESP_OK) imu_capsize_count = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_Pitchpol", &temp_uint32) == ESP_OK) imu_pitchpole_count = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_SlamLife", &temp_uint32) == ESP_OK) imu_slam_count_lifetime = temp_uint32;
+
+  // IMU Lifetime Maximums
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "IMU_HeelMax", &imu_heel_max_lifetime, &required_size);
+  nvs_get_blob(nvs_handle, "IMU_PitchMax", &imu_pitch_max_lifetime, &required_size);
+  nvs_get_blob(nvs_handle, "IMU_SlamMax", &imu_slam_peak_lifetime, &required_size);
+
+  // IMU Settings
+  uint8_t temp_uint8;
+  if (nvs_get_u8(nvs_handle, "IMU_Orient", &temp_uint8) == ESP_OK) imuMountOrientation = temp_uint8;
+  nvs_get_blob(nvs_handle, "IMU_CapThres", &CAPSIZE_THRESHOLD_DEG, &required_size);
+  nvs_get_blob(nvs_handle, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, &required_size);
+  nvs_get_blob(nvs_handle, "IMU_SlamThrs", &SLAM_THRESHOLD_G, &required_size);
+
+
+  nvs_close(nvs_handle);
+  //queueConsoleMessage("NVS: Persistent data loaded successfully");
+}
+void initNVSCache() {
+  // Session cache
+  prev_ChargedEnergy = (uint32_t)ChargedEnergy;
+  prev_DischrgdEnergy = (uint32_t)DischargedEnergy;
+  prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;
+  prev_SolarEnergy = (uint32_t)SolarChargedEnergy;
+  prev_AltFuelUsed = (int32_t)(AlternatorFuelUsed * 10);
+  prev_EngineFuel = (int32_t)(EngineFuelUsed * 10);
+  prev_EngineRunTime = (int32_t)EngineRunTime;
+  prev_EngineCycles = (int32_t)EngineCycles;
+  prev_AltOnTime = (int32_t)AlternatorOnTime;
+  prev_ChargeCycles = (int32_t)ChargeCycles;
+  prev_TotalDist = (int32_t)TotalDistance;
+  prev_AvgSpeed = (int32_t)(AvgSpeed * 100);
+  prev_AvgSOC = (int32_t)(AvgSOC * 100);
+
+  // Lifetime cache (_AllTime)
+  prev_ChargedEnergy_AllTime = (uint32_t)ChargedEnergy_AllTime;
+  prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;
+  prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime;
+  prev_SolarEnergy_AllTime = (uint32_t)SolarChargedEnergy_AllTime;
+  prev_AltFuelUsed_AllTime = (int32_t)(AlternatorFuelUsed_AllTime * 10);
+  prev_EngineFuel_AllTime = (int32_t)(EngineFuelUsed_AllTime * 10);
+  prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime;
+  prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;
+  prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;
+  prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;
+  prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;
+  prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);
+  prev_AvgSOC_AllTime = (int32_t)(AvgSOC_AllTime * 100);
+
+  // Battery state
+  prev_SOC_percent = (int32_t)SOC_percent;
+  prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;
+
+  // Session health
+  prev_SessionDur = (uint32_t)CurrentSessionDuration;
+  prev_MaxLoop = (int32_t)MaxLoopTime;
+  prev_MinHeap = (int32_t)MinFreeHeap;
+
+  // System health
+  prev_PowerCycles = (int32_t)totalPowerCycles;
+
+  // Thermal stress
+  prev_InsulDamage = CumulativeInsulationDamage;
+  prev_GreaseDamage = CumulativeGreaseDamage;
+  prev_BrushDamage = CumulativeBrushDamage;
+
+  // Dynamic learning
+  prev_ShuntGain = DynamicShuntGainFactor;
+  prev_AltZero = DynamicAltCurrentZero;
+  prev_LastGainTime = (uint32_t)lastGainCorrectionTime;
+  prev_LastZeroTime = (uint32_t)lastAutoZeroTime;
+  prev_LastZeroTemp = lastAutoZeroTemp;
+
+  // Sailing metrics cached
+  prev_sailing_days_alltime = sailing_days_alltime;
+
+  // IMU cache
+  prev_imu_capsize_count = imu_capsize_count;
+  prev_imu_pitchpole_count = imu_pitchpole_count;
+  prev_imu_slam_count_lifetime = imu_slam_count_lifetime;
+  prev_imu_heel_max_lifetime = imu_heel_max_lifetime;
+  prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;
+  prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;
+  prev_imuMountOrientation = imuMountOrientation;
+  prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;
+  prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;
+  prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;
+}
+// Helper function to get human-readable subtype names
+String getSubtypeString(esp_partition_type_t type, esp_partition_subtype_t subtype) {
+  if (type == ESP_PARTITION_TYPE_APP) {
+    switch (subtype) {
+      case ESP_PARTITION_SUBTYPE_APP_FACTORY: return "factory";
+      case ESP_PARTITION_SUBTYPE_APP_OTA_0: return "ota_0";
+      case ESP_PARTITION_SUBTYPE_APP_OTA_1: return "ota_1";
+      default: return "app_unknown";
+    }
+  } else if (type == ESP_PARTITION_TYPE_DATA) {
+    switch (subtype) {
+      case ESP_PARTITION_SUBTYPE_DATA_NVS: return "nvs";
+      case ESP_PARTITION_SUBTYPE_DATA_OTA: return "otadata";
+      case ESP_PARTITION_SUBTYPE_DATA_LITTLEFS: return "littlefs";
+      case ESP_PARTITION_SUBTYPE_DATA_SPIFFS: return "spiffs";
+      case ESP_PARTITION_SUBTYPE_DATA_COREDUMP: return "coredump";
+      default: return "data_unknown";
+    }
+  }
+  return "unknown";
+}
+// Helper to verify expected partitions exist with correct sizes
+void checkExpectedPartition(const char *name, esp_partition_type_t type, esp_partition_subtype_t subtype, size_t expectedSize) {
+  const esp_partition_t *partition = esp_partition_find_first(type, subtype, name);
+  if (partition) {
+    bool sizeOK = (partition->size == expectedSize);
+    Serial.printf("  ✅ %s: Found at 0x%X, size %d bytes %s\n",
+                  name, partition->address, partition->size,
+                  sizeOK ? "✓" : "❌ SIZE MISMATCH!");
+  } else {
+    Serial.printf("  ❌ %s: NOT FOUND!\n", name);
+  }
+}
+void StuffToDoAtSomePoint() {
+  //every reset button has a pointless flag and an echo.  I did not delete them for fear of breaking the payload and they hardly cost anything to keep
+  //Battery Voltage Source drop down menu- make this text update on page re-load instead of just an echo number
+}
