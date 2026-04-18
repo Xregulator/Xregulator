@@ -2902,6 +2902,10 @@ void setupServer() {
     snprintf(url, sizeof(url), "%s/functions/v1/register-device", SUPABASE_URL);
     Serial.print("Connecting to: ");
     Serial.println(url);
+    Serial.printf("=== PRE-REGISTRATION HEAP ===\n");
+Serial.printf("Free internal: %u\n", ESP.getFreeHeap());
+Serial.printf("Max alloc internal: %u\n", ESP.getMaxAllocHeap());
+Serial.printf("Free PSRAM: %u\n", ESP.getFreePsram());
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     char authHeader[512];
@@ -3599,8 +3603,8 @@ void SendWifiData() {
              SafeInt(imu_fifo_overrun_count),                                                                                                                       //194
              SafeInt(imu_i2c_error_count),                                                                                                                          //195
              SafeInt(imu_unknown_tag_count),                                                                                                                        //196
-             SafeInt(imuRingBuffer.accel_dropped),                                                                                                                  //197
-             SafeInt(imuRingBuffer.gyro_dropped),                                                                                                                   //198
+             SafeInt(imuRingBuffer->accel_dropped),                                                                                                                  //197
+             SafeInt(imuRingBuffer->gyro_dropped),                                                                                                                   //198
              SafeInt(imu_total_samples_accel),                                                                                                                      //199
              SafeInt(imu_total_samples_gyro),                                                                                                                       //200
              SafeInt(IMUReadTime2),                                                                                                                                 //201

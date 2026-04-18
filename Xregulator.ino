@@ -397,17 +397,20 @@ constexpr uint16_t GYRO_RING_SIZE = (sizeof(IMUSample) == 10) ? 666 : 555;     /
 
 volatile bool otaInProgress = false;
 unsigned long lastEventSourceSend = 0;
-// Ring buffers (static allocation, no heap)
-struct {
+
+
+// Ring buffers (static allocation, no heap). // OLD COMMENT, WAS THIS BS?
+struct ImuRingBuffer {
   IMUSample accel[ACCEL_RING_SIZE];
   IMUSample gyro[GYRO_RING_SIZE];
-  uint16_t accel_head = 0;  // No volatile - only written from main loop
+  uint16_t accel_head = 0;
   uint16_t accel_tail = 0;
   uint16_t gyro_head = 0;
   uint16_t gyro_tail = 0;
-  uint32_t accel_dropped = 0;  // Count of dropped samples (ring full)
+  uint32_t accel_dropped = 0;
   uint32_t gyro_dropped = 0;
-} imuRingBuffer;
+};
+static ImuRingBuffer *imuRingBuffer = nullptr;
 
 // IMU polling state
 bool imuEnabled = false;
@@ -1594,7 +1597,7 @@ struct Ch1Bucket {
 };
 
 // 10-second ring
-static Ch1Entry ch1Ring[CH1_RING];
+static Ch1Entry *ch1Ring = nullptr;
 static uint16_t ch1Head = 0;
 static uint16_t ch1Count = 0;  // valid entries; saturates at CH1_RING
 
@@ -2640,8 +2643,17 @@ void setup() {
   timestampBuffer = (char *)ps_malloc(TIMESTAMP_BUFFER_SIZE);
   messageBuffer = (char *)ps_malloc(MESSAGE_BUFFER_SIZE);
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
-  if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));  // ADD THIS LINE
+  if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));  
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
+  // CH1 interval ring — 30 KB to PSRAM
+ch1Ring = (Ch1Entry*)ps_malloc(sizeof(Ch1Entry) * CH1_RING);
+if (!ch1Ring) Serial.println("FATAL: ch1Ring ps_malloc failed");
+else memset(ch1Ring, 0, sizeof(Ch1Entry) * CH1_RING);
+
+// IMU ring buffer — ~30 KB to PSRAM
+imuRingBuffer = (ImuRingBuffer*)ps_malloc(sizeof(ImuRingBuffer));
+if (!imuRingBuffer) Serial.println("FATAL: imuRingBuffer ps_malloc failed");
+else memset(imuRingBuffer, 0, sizeof(ImuRingBuffer));
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3
 
@@ -3238,7 +3250,7 @@ void loop() {
   }
   checkAndRestart();     // scheduled maintenance restart
   esp_task_wdt_reset();  // Always reset watchdog at end of loop
- // delay(1);              // Not sure this is needed, whatever
+ // delay(1);              // Removed 4/18/2026
 }
 
 //This has to stay here, something about lambda functions (?)

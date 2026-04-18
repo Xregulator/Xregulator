@@ -1776,37 +1776,37 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
 // IMU Ring Buffer Helper Functions
 // ============================================================================
 inline void pushAccelSample(int16_t x, int16_t y, int16_t z, uint32_t timestamp_us) {
-  uint16_t next_head = (imuRingBuffer.accel_head + 1) % ACCEL_RING_SIZE;
+  uint16_t next_head = (imuRingBuffer->accel_head + 1) % ACCEL_RING_SIZE;
 
-  if (next_head == imuRingBuffer.accel_tail) {
+  if (next_head == imuRingBuffer->accel_tail) {
     // Ring buffer full - drop oldest sample (move tail forward)
-    imuRingBuffer.accel_tail = (imuRingBuffer.accel_tail + 1) % ACCEL_RING_SIZE;
-    imuRingBuffer.accel_dropped++;
+    imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
+    imuRingBuffer->accel_dropped++;
   }
 
-  imuRingBuffer.accel[imuRingBuffer.accel_head].x = x;
-  imuRingBuffer.accel[imuRingBuffer.accel_head].y = y;
-  imuRingBuffer.accel[imuRingBuffer.accel_head].z = z;
-  imuRingBuffer.accel[imuRingBuffer.accel_head].timestamp_us = timestamp_us;
-  imuRingBuffer.accel_head = next_head;
+  imuRingBuffer->accel[imuRingBuffer->accel_head].x = x;
+  imuRingBuffer->accel[imuRingBuffer->accel_head].y = y;
+  imuRingBuffer->accel[imuRingBuffer->accel_head].z = z;
+  imuRingBuffer->accel[imuRingBuffer->accel_head].timestamp_us = timestamp_us;
+  imuRingBuffer->accel_head = next_head;
 
   imu_total_samples_accel++;
 }
 
 inline void pushGyroSample(int16_t x, int16_t y, int16_t z, uint32_t timestamp_us) {
-  uint16_t next_head = (imuRingBuffer.gyro_head + 1) % GYRO_RING_SIZE;
+  uint16_t next_head = (imuRingBuffer->gyro_head + 1) % GYRO_RING_SIZE;
 
-  if (next_head == imuRingBuffer.gyro_tail) {
+  if (next_head == imuRingBuffer->gyro_tail) {
     // Ring buffer full - drop oldest sample (move tail forward)
-    imuRingBuffer.gyro_tail = (imuRingBuffer.gyro_tail + 1) % GYRO_RING_SIZE;
-    imuRingBuffer.gyro_dropped++;
+    imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
+    imuRingBuffer->gyro_dropped++;
   }
 
-  imuRingBuffer.gyro[imuRingBuffer.gyro_head].x = x;
-  imuRingBuffer.gyro[imuRingBuffer.gyro_head].y = y;
-  imuRingBuffer.gyro[imuRingBuffer.gyro_head].z = z;
-  imuRingBuffer.gyro[imuRingBuffer.gyro_head].timestamp_us = timestamp_us;
-  imuRingBuffer.gyro_head = next_head;
+  imuRingBuffer->gyro[imuRingBuffer->gyro_head].x = x;
+  imuRingBuffer->gyro[imuRingBuffer->gyro_head].y = y;
+  imuRingBuffer->gyro[imuRingBuffer->gyro_head].z = z;
+  imuRingBuffer->gyro[imuRingBuffer->gyro_head].timestamp_us = timestamp_us;
+  imuRingBuffer->gyro_head = next_head;
 
   imu_total_samples_gyro++;
 }
@@ -1818,12 +1818,12 @@ void printIMUStatus() {
   Serial.print("Accel samples: ");
   Serial.print(imu_total_samples_accel);
   Serial.print(" (dropped: ");
-  Serial.print(imuRingBuffer.accel_dropped);
+  Serial.print(imuRingBuffer->accel_dropped);
   Serial.println(")");
   Serial.print("Gyro samples: ");
   Serial.print(imu_total_samples_gyro);
   Serial.print(" (dropped: ");
-  Serial.print(imuRingBuffer.gyro_dropped);
+  Serial.print(imuRingBuffer->gyro_dropped);
   Serial.println(")");
   Serial.print("FIFO overruns: ");
   Serial.println(imu_fifo_overrun_count);
@@ -1838,12 +1838,12 @@ void printIMUStatus() {
   Serial.println(" us)");
 
   // Ring buffer fill levels
-  uint16_t accel_used = (imuRingBuffer.accel_head >= imuRingBuffer.accel_tail)
-                          ? (imuRingBuffer.accel_head - imuRingBuffer.accel_tail)
-                          : (ACCEL_RING_SIZE - imuRingBuffer.accel_tail + imuRingBuffer.accel_head);
-  uint16_t gyro_used = (imuRingBuffer.gyro_head >= imuRingBuffer.gyro_tail)
-                         ? (imuRingBuffer.gyro_head - imuRingBuffer.gyro_tail)
-                         : (GYRO_RING_SIZE - imuRingBuffer.gyro_tail + imuRingBuffer.gyro_head);
+  uint16_t accel_used = (imuRingBuffer->accel_head >= imuRingBuffer->accel_tail)
+                          ? (imuRingBuffer->accel_head - imuRingBuffer->accel_tail)
+                          : (ACCEL_RING_SIZE - imuRingBuffer->accel_tail + imuRingBuffer->accel_head);
+  uint16_t gyro_used = (imuRingBuffer->gyro_head >= imuRingBuffer->gyro_tail)
+                         ? (imuRingBuffer->gyro_head - imuRingBuffer->gyro_tail)
+                         : (GYRO_RING_SIZE - imuRingBuffer->gyro_tail + imuRingBuffer->gyro_head);
 
   Serial.print("Ring buffer usage: Accel ");
   Serial.print(accel_used);
@@ -1989,8 +1989,8 @@ void updateAccelMetrics() {
   unsigned long now = millis();
 
   // Process accel ring buffer
-  while (imuRingBuffer.accel_tail != imuRingBuffer.accel_head) {
-    IMUSample *s = &imuRingBuffer.accel[imuRingBuffer.accel_tail];
+  while (imuRingBuffer->accel_tail != imuRingBuffer->accel_head) {
+    IMUSample *s = &imuRingBuffer->accel[imuRingBuffer->accel_tail];
 
     // Calculate time delta for area accumulation
     uint64_t now_us = s->timestamp_us;
@@ -2070,13 +2070,13 @@ void updateAccelMetrics() {
     // TODO: High-frequency vibration energy
 
     imuWindow.lastUpdateTime_us = now_us;
-    imuRingBuffer.accel_tail = (imuRingBuffer.accel_tail + 1) % ACCEL_RING_SIZE;
+    imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
     samples_processed++;
   }
 
   // Process gyro ring buffer
-  while (imuRingBuffer.gyro_tail != imuRingBuffer.gyro_head) {
-    IMUSample *s = &imuRingBuffer.gyro[imuRingBuffer.gyro_tail];
+  while (imuRingBuffer->gyro_tail != imuRingBuffer->gyro_head) {
+    IMUSample *s = &imuRingBuffer->gyro[imuRingBuffer->gyro_tail];
 
     // Calculate time delta (uses separate gyro tracker, not shared with accel)
     uint64_t now_us = s->timestamp_us;
@@ -2146,7 +2146,7 @@ void updateAccelMetrics() {
     cf_lastUpdate = s->timestamp_us;
 
     imuWindow.lastGyroUpdateTime_us = now_us;  // separate from accel tracker
-    imuRingBuffer.gyro_tail = (imuRingBuffer.gyro_tail + 1) % GYRO_RING_SIZE;
+    imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
   }
 
   // Update current display values
