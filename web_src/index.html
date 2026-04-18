@@ -5825,6 +5825,114 @@
             </div>
           </div>
 
+          <!-- FUNCTION TIMING — WORST CASE -->
+          <div class="card-group">
+            <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
+              <span>Function Timing — Worst Case (ms)</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">Worst-case execution time per function. 5s window resets every 5 seconds —
+                  shows active spikes. Session resets only at reboot — catches infrequent spikes. Nested calls are
+                  included: a flash write inside ReadAnalogInputs shows up under that row.
+                </span>
+              </span>
+            </p>
+            <div style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 0;">
+
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
+                <div style="padding: 6px 8px;"></div>
+                <div
+                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02);">
+                  5s Worst</div>
+                <div
+                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
+                  Session Worst</div>
+              </div>
+
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Read Analog Inputs
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Primary spike suspect — includes any NVS or flash writes triggered by new
+                      max values inside this function.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_ReadAnalogInputs_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_ReadAnalogInputs_ses_ID">0</span>
+                </div>
+              </div>
+
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Alternator Control Logic
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">AdjustFieldLearnMode — field duty cycle calculation and learning table
+                      updates.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_AdjustFieldLearnMode_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_AdjustFieldLearnMode_ses_ID">0</span>
+                </div>
+              </div>
+
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Upload Sensor History
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Times the LittleFS read and queue send. Actual HTTP transfer happens on
+                      Core 0 and is not included.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_uploadSensorHistory_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_uploadSensorHistory_ses_ID">0</span>
+                </div>
+              </div>
+
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Upload Buffered Records
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Times the LittleFS read and queue send. Actual HTTP transfer happens on
+                      Core 0 and is not included.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_uploadBufferedRecords_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_uploadBufferedRecords_ses_ID">0</span>
+                </div>
+              </div>
+
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Build Config Payload
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Builds the configuration snapshot JSON for cloud upload. Fires
+                      infrequently — 0ms is normal between snapshot intervals.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_buildConfigPayload_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_buildConfigPayload_ses_ID">0</span></div>
+              </div>
+
+
+
+            </div>
+          </div>
+
+
           <!-- CH1 INTERVAL DIAGNOSTICS -->
           <div class="card-group">
             <p class="card-group-title">CH1 Sample Interval (ms)</p>

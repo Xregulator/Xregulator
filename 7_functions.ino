@@ -1019,26 +1019,45 @@ void ch1_record(uint32_t now) {
     if ((float)iv > runMean * 2.0f) ch1AtOver2x++;
   }
 
-  // ── Bucket rollover: runs briefly once per 10 seconds ─────────────────
+// ── 1s mini-bucket: incremental update, O(1), no ring scan ────────────
+  ch1Bkt1sCurrent.sum += iv;
+  ch1Bkt1sCurrent.count++;
+  if (iv > ch1Bkt1sCurrent.worst) ch1Bkt1sCurrent.worst = iv;
+
+  // 1s rollover: close current mini-bucket, open a new one
+  if (now - ch1Bkt1sStart >= 1000UL) {
+    ch1Bkt1s[ch1Bkt1sHead] = ch1Bkt1sCurrent;
+    ch1Bkt1sHead  = (ch1Bkt1sHead + 1) % CH1_1S_BUCKETS;
+    if (ch1Bkt1sCount < CH1_1S_BUCKETS) ch1Bkt1sCount++;
+    ch1Bkt1sCurrent = { 0, 0, 0, 0 };
+    ch1Bkt1sStart   = now;
+  }
+
+  // ── 10s→2m bucket rollover: O(10) mini-bucket sum, no ring scan ────────
+  // over2x approximated using bucket mean * 2 threshold (acceptable for 2m diagnostic)
   if (now - ch1BktStart >= 10000UL) {
     Ch1Bucket bkt = { 0, 0, 0, 0 };
 
-    // Pass 1: collect entries since bucket opened
-    for (uint16_t i = 0; i < ch1Count; i++) {
-      uint16_t idx = (ch1Head + CH1_RING - 1 - i) % CH1_RING;
-      if (ch1Ring[idx].ts < ch1BktStart) break;  // chronological boundary
-      bkt.sum += ch1Ring[idx].iv;
-      bkt.count++;
-      if (ch1Ring[idx].iv > bkt.worst) bkt.worst = ch1Ring[idx].iv;
+    // Sum all closed 1s mini-buckets
+    for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
+      uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
+      bkt.sum   += ch1Bkt1s[idx].sum;
+      bkt.count += ch1Bkt1s[idx].count;
+      if (ch1Bkt1s[idx].worst > bkt.worst) bkt.worst = ch1Bkt1s[idx].worst;
     }
+    // Include currently open mini-bucket
+    bkt.sum   += ch1Bkt1sCurrent.sum;
+    bkt.count += ch1Bkt1sCurrent.count;
+    if (ch1Bkt1sCurrent.worst > bkt.worst) bkt.worst = ch1Bkt1sCurrent.worst;
 
-    // Pass 2: over2x against this bucket's own mean
+    // over2x: approximate — count mini-buckets whose worst exceeds 2× overall mean
+    // (per-sample accuracy not possible without ring scan; this is a diagnostic counter)
     if (bkt.count > 0) {
       float thresh = ((float)bkt.sum / (float)bkt.count) * 2.0f;
-      for (uint16_t i = 0; i < bkt.count; i++) {
-        uint16_t idx = (ch1Head + CH1_RING - 1 - i) % CH1_RING;
-        if (ch1Ring[idx].ts < ch1BktStart) break;
-        if ((float)ch1Ring[idx].iv > thresh) bkt.over2x++;
+      for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
+        uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
+        bkt.over2x += ch1Bkt1s[idx].over2x;  // carry forward from mini-buckets if tracked
+        if ((float)ch1Bkt1s[idx].worst > thresh) bkt.over2x++;
       }
     }
 
@@ -1053,31 +1072,21 @@ void ch1_compute_stats() {
   if (ch1Count == 0) return;
 
   uint32_t now = millis();
-  uint32_t cut = now - 10000UL;
+// ── 10s: O(10) mini-bucket scan — no ring access, no PSRAM thrash ────
+  ch1_last_ms    = ch1Ring[(ch1Head + CH1_RING - 1) % CH1_RING].iv;  // O(1) single element
+  ch1_n_10s      = ch1Bkt1sCurrent.count;   // start with open bucket
+  ch1_worst_10s  = ch1Bkt1sCurrent.worst;
+  ch1_over2x_10s = 0;                        // not tracked at 1s granularity
+  uint32_t sum10 = ch1Bkt1sCurrent.sum;
 
-  // ── 10s ──────────────────────────────────────────────────────────────
-  ch1_last_ms = ch1Ring[(ch1Head + CH1_RING - 1) % CH1_RING].iv;
-  ch1_n_10s = 0;
-  ch1_worst_10s = 0;
-  ch1_over2x_10s = 0;
-  ch1_avg_10s = 0;
-
-  uint32_t sum10 = 0;
-  for (uint16_t i = 0; i < ch1Count; i++) {
-    uint16_t idx = (ch1Head + CH1_RING - 1 - i) % CH1_RING;
-    if (ch1Ring[idx].ts < cut) break;
-    sum10 += ch1Ring[idx].iv;
-    ch1_n_10s++;
-    if (ch1Ring[idx].iv > ch1_worst_10s) ch1_worst_10s = ch1Ring[idx].iv;
+  for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
+    uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
+    sum10        += ch1Bkt1s[idx].sum;
+    ch1_n_10s    += ch1Bkt1s[idx].count;
+    if (ch1Bkt1s[idx].worst > ch1_worst_10s) ch1_worst_10s = ch1Bkt1s[idx].worst;
   }
-  if (ch1_n_10s > 0) {
-    ch1_avg_10s = (float)sum10 / (float)ch1_n_10s;
-    float thresh = ch1_avg_10s * 2.0f;
-    for (uint16_t i = 0; i < ch1_n_10s; i++) {
-      uint16_t idx = (ch1Head + CH1_RING - 1 - i) % CH1_RING;
-      if ((float)ch1Ring[idx].iv > thresh) ch1_over2x_10s++;
-    }
-  }
+  if (ch1_n_10s > 0) ch1_avg_10s = (float)sum10 / (float)ch1_n_10s;
+  else               ch1_avg_10s = 0.0f;
 
   // ── 2m ───────────────────────────────────────────────────────────────
   ch1_n_2m = 0;

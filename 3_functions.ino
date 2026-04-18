@@ -2903,9 +2903,9 @@ void setupServer() {
     Serial.print("Connecting to: ");
     Serial.println(url);
     Serial.printf("=== PRE-REGISTRATION HEAP ===\n");
-Serial.printf("Free internal: %u\n", ESP.getFreeHeap());
-Serial.printf("Max alloc internal: %u\n", ESP.getMaxAllocHeap());
-Serial.printf("Free PSRAM: %u\n", ESP.getFreePsram());
+    Serial.printf("Free internal: %u\n", ESP.getFreeHeap());
+    Serial.printf("Max alloc internal: %u\n", ESP.getMaxAllocHeap());
+    Serial.printf("Free PSRAM: %u\n", ESP.getFreePsram());
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     char authHeader[512];
@@ -3603,8 +3603,8 @@ void SendWifiData() {
              SafeInt(imu_fifo_overrun_count),                                                                                                                       //194
              SafeInt(imu_i2c_error_count),                                                                                                                          //195
              SafeInt(imu_unknown_tag_count),                                                                                                                        //196
-             SafeInt(imuRingBuffer->accel_dropped),                                                                                                                  //197
-             SafeInt(imuRingBuffer->gyro_dropped),                                                                                                                   //198
+             SafeInt(imuRingBuffer->accel_dropped),                                                                                                                 //197
+             SafeInt(imuRingBuffer->gyro_dropped),                                                                                                                  //198
              SafeInt(imu_total_samples_accel),                                                                                                                      //199
              SafeInt(imu_total_samples_gyro),                                                                                                                       //200
              SafeInt(IMUReadTime2),                                                                                                                                 //201
@@ -3658,8 +3658,8 @@ void SendWifiData() {
 
     snprintf(payload3, sizeof(payload3),
              "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+             "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
              "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
              "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
@@ -3892,8 +3892,17 @@ void SendWifiData() {
              (int)rpmCapPowerTable[7],                     // 226
              (int)rpmCapPowerTable[8],                     // 227
              (int)rpmCapPowerTable[9],                     // 228
-             SafeInt(VoltageTrimLimit, 100)                // 229
-
+SafeInt(VoltageTrimLimit, 100),               // 229
+             SafeInt(ft_ReadAnalogInputs.worstWindow   / 1000),  // 230 — Read Analog Inputs worst 5s window (ms)
+             SafeInt(ft_ReadAnalogInputs.worstSession  / 1000),  // 231 — Read Analog Inputs worst session (ms)
+             SafeInt(ft_AdjustFieldLearnMode.worstWindow  / 1000),  // 232 — Alternator Control Logic worst 5s window (ms)
+             SafeInt(ft_AdjustFieldLearnMode.worstSession / 1000),  // 233 — Alternator Control Logic worst session (ms)
+             SafeInt(ft_uploadSensorHistory.worstWindow   / 1000),  // 234 — Upload Sensor History worst 5s window (ms)
+             SafeInt(ft_uploadSensorHistory.worstSession  / 1000),  // 235 — Upload Sensor History worst session (ms)
+             SafeInt(ft_uploadBufferedRecords.worstWindow  / 1000), // 236 — Upload Buffered Records worst 5s window (ms)
+SafeInt(ft_uploadBufferedRecords.worstSession / 1000), // 237 — Upload Buffered Records worst session (ms)
+             SafeInt(ft_buildConfigPayload.worstWindow  / 1000),    // 238 — Build Config Payload worst 5s window (ms)
+             SafeInt(ft_buildConfigPayload.worstSession / 1000)     // 239 — Build Config Payload worst session (ms)
     );
     events.send(payload3, "CSVData3");
     lastpayload3send = now;

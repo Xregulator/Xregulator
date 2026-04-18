@@ -1206,10 +1206,9 @@ struct SensorWindow {
   uint64_t lastUpdateTime_us = 0;  // Track last update for time-weighted averaging
   unsigned long windowStartTime = 0;
 };
-SensorWindow currentWindow;
+SensorWindow* currentWindow = nullptr;  // allocated to PSRAM in init
 
-//same but for accel data
-EXT_RAM_ATTR struct {  // moved to PSRAM to save 32kb internal SRAM
+struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
   int32_t accel_x_min, accel_x_max;
   int64_t accel_x_area_v_us;
@@ -1276,7 +1275,8 @@ EXT_RAM_ATTR struct {  // moved to PSRAM to save 32kb internal SRAM
   uint64_t lastUpdateTime_us;
   uint64_t lastGyroUpdateTime_us;
   unsigned long windowStartTime;
-} imuWindow;
+};                   
+ImuWindow *imuWindow = nullptr; 
 
 // Upload timing
 unsigned long lastSensorUploadTime = 0;
@@ -1607,6 +1607,14 @@ static Ch1Bucket ch1Buckets[CH1_BUCKETS];
 static uint8_t ch1BktHead = 0;
 static uint8_t ch1BktCount = 0;
 static uint32_t ch1BktStart = 0;  // millis() when current bucket opened
+// ── 1s mini-buckets for O(1) 10s window stats (eliminates ring scan) ──────
+#define CH1_1S_BUCKETS 10
+Ch1Bucket ch1Bkt1s[CH1_1S_BUCKETS];          // closed 1s buckets ring (internal RAM, ~120 bytes)
+Ch1Bucket ch1Bkt1sCurrent = { 0, 0, 0, 0 };  // currently open/accumulating 1s bucket
+uint8_t ch1Bkt1sHead = 0;                    // next write slot in ch1Bkt1s[]
+uint8_t ch1Bkt1sCount = 0;                   // how many closed 1s buckets are valid
+uint32_t ch1Bkt1sStart = 0;                  // millis() when current 1s bucket opened
+// ── End 1s mini-bucket globals ─────────────────────────────────────────────
 
 // All-time accumulators
 static uint64_t ch1AtSum = 0;  // 64-bit: survives multi-hour sessions
@@ -1647,6 +1655,19 @@ FuncTiming ft_ch1_compute_stats;
 FuncTiming ft_uploadSensorHistory;
 FuncTiming ft_uploadBufferedRecords;
 FuncTiming ft_buildConfigPayload;
+FuncTiming ft_UpdateEngineRuntime;
+FuncTiming ft_UpdateEngineFuel;
+FuncTiming ft_UpdateBatterySOC;
+FuncTiming ft_UpdateTravelStatistics;
+FuncTiming ft_UpdateDistanceThisInterval;
+FuncTiming ft_UpdateBoardTempPressureMaximums;
+FuncTiming ft_handleSocGainReset;
+FuncTiming ft_handleAltZeroReset;
+FuncTiming ft_calculateChargeTimes;
+FuncTiming ft_UpdateSailingMetrics;
+FuncTiming ft_updateWeatherMode;
+FuncTiming ft_updateSensorWindow;
+FuncTiming ft_checkTimeSync;
 
 // Wrap any void call — records worst-case into both rolling window and session fields.
 // Nested calls (e.g. a flash write inside ReadAnalogInputs) are fully included in
@@ -2693,6 +2714,9 @@ void setup() {
   ch1Ring = (Ch1Entry *)ps_malloc(sizeof(Ch1Entry) * CH1_RING);
   if (!ch1Ring) Serial.println("FATAL: ch1Ring ps_malloc failed");
   else memset(ch1Ring, 0, sizeof(Ch1Entry) * CH1_RING);
+currentWindow = (SensorWindow*)ps_malloc(sizeof(SensorWindow));
+if (!currentWindow) Serial.println("FATAL: currentWindow ps_malloc failed");
+else new(currentWindow) SensorWindow();  // runs default initializers (999900 sentinels etc)
 
   // IMU ring buffer — ~30 KB to PSRAM
   imuRingBuffer = (ImuRingBuffer *)ps_malloc(sizeof(ImuRingBuffer));
@@ -2792,6 +2816,20 @@ void setup() {
   memset(&ft_uploadSensorHistory, 0, sizeof(FuncTiming));
   memset(&ft_uploadBufferedRecords, 0, sizeof(FuncTiming));
   memset(&ft_buildConfigPayload, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateEngineRuntime, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateEngineFuel, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateBatterySOC, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateTravelStatistics, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateDistanceThisInterval, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateBoardTempPressureMaximums, 0, sizeof(FuncTiming));
+  memset(&ft_handleSocGainReset, 0, sizeof(FuncTiming));
+  memset(&ft_handleAltZeroReset, 0, sizeof(FuncTiming));
+  memset(&ft_calculateChargeTimes, 0, sizeof(FuncTiming));
+  memset(&ft_UpdateSailingMetrics, 0, sizeof(FuncTiming));
+  memset(&ft_updateWeatherMode, 0, sizeof(FuncTiming));
+  memset(&ft_updateSensorWindow, 0, sizeof(FuncTiming));
+  memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
+
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
   ensurePreferredBootPartition();  // Ensure we boot from preferred partition
   loadNVSData();                   // Load persistent variables from NVS- everything from last session is restored
@@ -3027,17 +3065,17 @@ void loop() {
     CurrentSessionDuration = (millis() - sessionStartTime) / 1000 / 60;  //minutes
     elapsedMillis = currentTime - lastSOCUpdateTime;
     lastSOCUpdateTime = currentTime;
-    UpdateEngineRuntime(elapsedMillis);
-    UpdateEngineFuel(elapsedMillis);  //
-    UpdateBatterySOC(elapsedMillis);
-    UpdateTravelStatistics(elapsedMillis);  //
-    UpdateDistanceThisInterval();           // NEW
-    UpdateBoardTempPressureMaximums();      // NEW
-    handleSocGainReset();                   // do the dynamic updates
-    handleAltZeroReset();                   // do the dynamic udpates
+    TIMED_CALL(ft_UpdateEngineRuntime, UpdateEngineRuntime(elapsedMillis));
+    TIMED_CALL(ft_UpdateEngineFuel, UpdateEngineFuel(elapsedMillis));  //
+    TIMED_CALL(ft_UpdateBatterySOC, UpdateBatterySOC(elapsedMillis));
+    TIMED_CALL(ft_UpdateTravelStatistics, UpdateTravelStatistics(elapsedMillis));       //
+    TIMED_CALL(ft_UpdateDistanceThisInterval, UpdateDistanceThisInterval());            // NEW
+    TIMED_CALL(ft_UpdateBoardTempPressureMaximums, UpdateBoardTempPressureMaximums());  // NEW
+    TIMED_CALL(ft_handleSocGainReset, handleSocGainReset());                            // do the dynamic updates
+    TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
   }
-  calculateChargeTimes();                     // might want to put this in the above if statement and unthrottle at some point update later
-  TIMED_CALL(ft_saveNVSData, saveNVSData());  // Only save current operational data, not session stats — worstWindow spikes only when internal throttle allows actual commit
+  TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
+  TIMED_CALL(ft_saveNVSData, saveNVSData());                    // Only save current operational data, not session stats
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
   // Power management affects AP and CLIENT modes, but NOT CONFIG mode (CONFIG mode exits early below)
@@ -3162,7 +3200,7 @@ void loop() {
       processAutoZero();        //Auto-zero processing (must be before AdjustField)
 
       if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
-        updateWeatherMode();
+        TIMED_CALL(ft_updateWeatherMode, updateWeatherMode());
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       efficiencyTracker_tick();
@@ -3183,7 +3221,7 @@ void loop() {
       }
       TIMED_CALL(ft_logDashboardValues, logDashboardValues());  //  nice to have some history in the Console
       TIMED_CALL(ft_printSystemHealth, printSystemHealth());
-      updateSensorWindow();  // Update sensor aggregation (after sensor reads)
+      TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());  // Update sensor aggregation (after sensor reads)
       if (accelEnabled == 1) {
         updateAccelMetrics();  // accelerometer
       };
@@ -3194,13 +3232,13 @@ void loop() {
         }
         unsigned long currentMillisz = millis();
         // Check time sync every 12 hours
-        checkTimeSync();
+        TIMED_CALL(ft_checkTimeSync, checkTimeSync());
         // Save current sensor window to buffer every SENSOR_UPLOAD_INTERVAL. All data goes to buffer first
         if (currentMillisz - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
           esp_task_wdt_reset();
-          UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL);
+          TIMED_CALL(ft_UpdateSailingMetrics, UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL));
           lastSensorUploadTime = currentMillisz;
-          TIMED_CALL(ft_uploadSensorHistory, uploadSensorHistory());  // times LittleFS read + queue send; HTTP transfer is on core 0 and not captured here
+          TIMED_CALL(ft_uploadSensorHistory, uploadSensorHistory());
           resetDistanceThisInterval();
           esp_task_wdt_reset();
         }
@@ -3281,6 +3319,20 @@ void loop() {
     ft_uploadSensorHistory.worstWindow = 0;
     ft_uploadBufferedRecords.worstWindow = 0;
     ft_buildConfigPayload.worstWindow = 0;
+    ft_UpdateEngineRuntime.worstWindow = 0;
+    ft_UpdateEngineFuel.worstWindow = 0;
+    ft_UpdateBatterySOC.worstWindow = 0;
+    ft_UpdateTravelStatistics.worstWindow = 0;
+    ft_UpdateDistanceThisInterval.worstWindow = 0;
+    ft_UpdateBoardTempPressureMaximums.worstWindow = 0;
+    ft_handleSocGainReset.worstWindow = 0;
+    ft_handleAltZeroReset.worstWindow = 0;
+    ft_calculateChargeTimes.worstWindow = 0;
+    ft_UpdateSailingMetrics.worstWindow = 0;
+    ft_updateWeatherMode.worstWindow = 0;
+    ft_updateSensorWindow.worstWindow = 0;
+    ft_checkTimeSync.worstWindow = 0;
+
     prev_millis7888 = millis();
   }
   endtime = esp_timer_get_time();  //Record end of Loop
@@ -3313,7 +3365,69 @@ void loop() {
     lastTempDebugPrint = millis();
     printTempDebugStatus();
   }
-
+  // === FUNCTION TIMING DIGEST — Serial only, key spike candidates ===
+  static unsigned long lastTimingPrint = 0;
+  if (millis() - lastTimingPrint >= 10000) {
+    lastTimingPrint = millis();
+    Serial.println("--- Function Timing Worst-Case (ms) | 5s-win / session ---");
+    Serial.printf("  Loop overall:           %4lu / %4lu\n",
+                  (uint32_t)(loopTime5sWindow / 1000), (uint32_t)(MaximumLoopTime / 1000));
+    Serial.printf("  ReadAnalogInputs:       %4lu / %4lu\n",
+                  ft_ReadAnalogInputs.worstWindow / 1000, ft_ReadAnalogInputs.worstSession / 1000);
+    Serial.printf("  saveNVSData:            %4lu / %4lu\n",
+                  ft_saveNVSData.worstWindow / 1000, ft_saveNVSData.worstSession / 1000);
+    Serial.printf("  Alternator Control:     %4lu / %4lu\n",
+                  ft_AdjustFieldLearnMode.worstWindow / 1000, ft_AdjustFieldLearnMode.worstSession / 1000);
+    Serial.printf("  CheckAlarms:            %4lu / %4lu\n",
+                  ft_CheckAlarms.worstWindow / 1000, ft_CheckAlarms.worstSession / 1000);
+    Serial.printf("  calcDerivedMetrics:     %4lu / %4lu\n",
+                  ft_calculateDerivedMetrics.worstWindow / 1000, ft_calculateDerivedMetrics.worstSession / 1000);
+    Serial.printf("  logDashboardValues:     %4lu / %4lu\n",
+                  ft_logDashboardValues.worstWindow / 1000, ft_logDashboardValues.worstSession / 1000);
+    Serial.printf("  printSystemHealth:      %4lu / %4lu\n",
+                  ft_printSystemHealth.worstWindow / 1000, ft_printSystemHealth.worstSession / 1000);
+    Serial.printf("  checkWiFiConnection:    %4lu / %4lu\n",
+                  ft_checkWiFiConnection.worstWindow / 1000, ft_checkWiFiConnection.worstSession / 1000);
+    Serial.printf("  SendWifiData:           %4lu / %4lu\n",
+                  ft_SendWifiData.worstWindow / 1000, ft_SendWifiData.worstSession / 1000);
+    Serial.printf("  ch1_compute_stats:      %4lu / %4lu\n",
+                  ft_ch1_compute_stats.worstWindow / 1000, ft_ch1_compute_stats.worstSession / 1000);
+    Serial.printf("  uploadSensorHistory:    %4lu / %4lu\n",
+                  ft_uploadSensorHistory.worstWindow / 1000, ft_uploadSensorHistory.worstSession / 1000);
+    Serial.printf("  uploadBufferedRecords:  %4lu / %4lu\n",
+                  ft_uploadBufferedRecords.worstWindow / 1000, ft_uploadBufferedRecords.worstSession / 1000);
+    Serial.printf("  buildConfigPayload:     %4lu / %4lu\n",
+                  ft_buildConfigPayload.worstWindow / 1000, ft_buildConfigPayload.worstSession / 1000);
+    Serial.println("--- SOC / update block ---");
+    Serial.printf("  UpdateEngineRuntime:    %4lu / %4lu\n",
+                  ft_UpdateEngineRuntime.worstWindow / 1000, ft_UpdateEngineRuntime.worstSession / 1000);
+    Serial.printf("  UpdateEngineFuel:       %4lu / %4lu\n",
+                  ft_UpdateEngineFuel.worstWindow / 1000, ft_UpdateEngineFuel.worstSession / 1000);
+    Serial.printf("  UpdateBatterySOC:       %4lu / %4lu\n",
+                  ft_UpdateBatterySOC.worstWindow / 1000, ft_UpdateBatterySOC.worstSession / 1000);
+    Serial.printf("  UpdateTravelStats:      %4lu / %4lu\n",
+                  ft_UpdateTravelStatistics.worstWindow / 1000, ft_UpdateTravelStatistics.worstSession / 1000);
+    Serial.printf("  UpdateDistanceInterval: %4lu / %4lu\n",
+                  ft_UpdateDistanceThisInterval.worstWindow / 1000, ft_UpdateDistanceThisInterval.worstSession / 1000);
+    Serial.printf("  UpdateBoardTempPress:   %4lu / %4lu\n",
+                  ft_UpdateBoardTempPressureMaximums.worstWindow / 1000, ft_UpdateBoardTempPressureMaximums.worstSession / 1000);
+    Serial.printf("  handleSocGainReset:     %4lu / %4lu\n",
+                  ft_handleSocGainReset.worstWindow / 1000, ft_handleSocGainReset.worstSession / 1000);
+    Serial.printf("  handleAltZeroReset:     %4lu / %4lu\n",
+                  ft_handleAltZeroReset.worstWindow / 1000, ft_handleAltZeroReset.worstSession / 1000);
+    Serial.printf("  calculateChargeTimes:   %4lu / %4lu\n",
+                  ft_calculateChargeTimes.worstWindow / 1000, ft_calculateChargeTimes.worstSession / 1000);
+    Serial.printf("  UpdateSailingMetrics:   %4lu / %4lu\n",
+                  ft_UpdateSailingMetrics.worstWindow / 1000, ft_UpdateSailingMetrics.worstSession / 1000);
+    Serial.printf("  updateWeatherMode:      %4lu / %4lu\n",
+                  ft_updateWeatherMode.worstWindow / 1000, ft_updateWeatherMode.worstSession / 1000);
+    Serial.printf("  updateSensorWindow:     %4lu / %4lu\n",
+                  ft_updateSensorWindow.worstWindow / 1000, ft_updateSensorWindow.worstSession / 1000);
+    Serial.printf("  checkTimeSync:          %4lu / %4lu\n",
+                  ft_checkTimeSync.worstWindow / 1000, ft_checkTimeSync.worstSession / 1000);
+    Serial.println("---");
+  }
+  // === END FUNCTION TIMING DIGEST ===
 
   // === LED FIELD INDICATOR: 10-second cycle, ON-time proportional to duty MOVE THIS OUT OF LOOP SOMEDAY ===
   {

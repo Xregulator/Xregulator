@@ -5301,13 +5301,13 @@ window.addEventListener("load", function () {
             const values = e.data.split(',').map(Number);
 
             // CSVData3
-            if (values.length !== 230) {
+            if (values.length !== 240) {
                 // Throttle CSV mismatch warnings to every 10 seconds
                 if (!window.lastCsv3WarningTime) window.lastCsv3WarningTime = 0;
                 const now = Date.now();
 
                 if ((now - window.lastCsv3WarningTime) > 10000) { // 10 seconds
-                    diagWarn(`CSV3 mismatch: Got ${values.length} values but expected 230 fields for CSVData3`);
+                    diagWarn(`CSV3 mismatch: Got ${values.length} values but expected 240 fields for CSVData3`);
                     diagWarn("First few values:", values.slice(0, 10));
                     diagWarn("Last few values:", values.slice(-10));
                     window.lastCsv3WarningTime = now;
@@ -5569,17 +5569,21 @@ window.addEventListener("load", function () {
                 rpmCapPowerTable7: values[226],      // 226
                 rpmCapPowerTable8: values[227],      // 227
                 rpmCapPowerTable9: values[228],      // 228
-                VoltageTrimLimit: values[229] / 100 // 229
-
+                VoltageTrimLimit: values[229] / 100, // 229
+                ft_ReadAnalogInputs_win: values[230], // 230 
+                ft_ReadAnalogInputs_ses: values[231], // 231 
+                ft_AdjustFieldLearnMode_win: values[232], // 232 
+                ft_AdjustFieldLearnMode_ses: values[233], // 233
+                ft_uploadSensorHistory_win: values[234], // 234 
+                ft_uploadSensorHistory_ses: values[235], // 235 
+                ft_uploadBufferedRecords_win: values[236], // 236 
+                ft_uploadBufferedRecords_ses: values[237],  // 237 
+                ft_buildConfigPayload_win: values[238], // 238 
+                ft_buildConfigPayload_ses: values[239]
             };
-
-
             if (data.stateRevision !== undefined) {
                 lastSeenRev = data.stateRevision;
             }
-
-
-
             // updateFields for CSVData3     the only time a user setting needs to be displayed via updateFields() is if its shown somewhere other than an Echo (like a status indicator, for example).  Echos are updated elsewhere (updateAllEchosOptimized).
             const updateFields = (fieldArray) => {
                 for (const [elementId, key] of fieldArray) {
@@ -5660,7 +5664,17 @@ window.addEventListener("load", function () {
                 ["LargestInternalBlockID", "LargestInternalBlock"],
                 ["FreePSRAMID", "FreePSRAM"],
                 ["TotalPSRAMID", "TotalPSRAM"],
-                ["HeapfragID", "Heapfrag"]
+                ["HeapfragID", "Heapfrag"],
+                ["ft_ReadAnalogInputs_win_ID", "ft_ReadAnalogInputs_win"],
+                ["ft_ReadAnalogInputs_ses_ID", "ft_ReadAnalogInputs_ses"],
+                ["ft_AdjustFieldLearnMode_win_ID", "ft_AdjustFieldLearnMode_win"],
+                ["ft_AdjustFieldLearnMode_ses_ID", "ft_AdjustFieldLearnMode_ses"],
+                ["ft_uploadSensorHistory_win_ID", "ft_uploadSensorHistory_win"],
+                ["ft_uploadSensorHistory_ses_ID", "ft_uploadSensorHistory_ses"],
+                ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
+                ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
+                ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
+                ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"]
 
             ];
 
@@ -9071,22 +9085,22 @@ function cvBinToCsv(d) {
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
-lines.push([
-    d.ts[i].toFixed(3),
-    d.battV[i].toFixed(2), d.targV[i].toFixed(2),
-    d.vError[i].toFixed(4), d.dvdt[i].toFixed(4),
-    d.vPred[i].toFixed(2),
-    d.fastOvCap[i].toFixed(1), d.cv_I[i].toFixed(1),
-    d.Icv[i].toFixed(1), d.uTarget[i].toFixed(1),
-    d.spLimited[i].toFixed(1),
-    d.iMeas[i].toFixed(1), d.duty[i].toFixed(1),
-    d.fastOvActive[i], d.voltLoopFired[i], d.cvActive[i],
-    d.softClamp[i], d.hardClamp[i],
-    d.rpm[i],
-    d.iMA2[i].toFixed(1), d.iMA4[i].toFixed(1),     // new
-    d.dIdt2[i].toFixed(1), d.dIdt4[i].toFixed(1),   // new
-    d.ch1Interval[i], d.fastIRising[i],              // new
-].join(','));
+        lines.push([
+            d.ts[i].toFixed(3),
+            d.battV[i].toFixed(2), d.targV[i].toFixed(2),
+            d.vError[i].toFixed(4), d.dvdt[i].toFixed(4),
+            d.vPred[i].toFixed(2),
+            d.fastOvCap[i].toFixed(1), d.cv_I[i].toFixed(1),
+            d.Icv[i].toFixed(1), d.uTarget[i].toFixed(1),
+            d.spLimited[i].toFixed(1),
+            d.iMeas[i].toFixed(1), d.duty[i].toFixed(1),
+            d.fastOvActive[i], d.voltLoopFired[i], d.cvActive[i],
+            d.softClamp[i], d.hardClamp[i],
+            d.rpm[i],
+            d.iMA2[i].toFixed(1), d.iMA4[i].toFixed(1),     // new
+            d.dIdt2[i].toFixed(1), d.dIdt4[i].toFixed(1),   // new
+            d.ch1Interval[i], d.fastIRising[i],              // new
+        ].join(','));
     }
 
     return lines.join('\n');
