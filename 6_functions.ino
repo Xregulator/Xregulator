@@ -334,9 +334,11 @@ void enter_sys_auto() {
 // ── INNER CURRENT PID ────────────────────────────────────────
 //   Runs every CH1 ADS1115 sample (÷ PidSampleDivisor).
 //   ADS sequence {1,0,1,2,1,3}: CH1 fires 3× per 6-step cycle.
-//   Measured: ~18ms avg CH1 interval, ~36ms worst-case (2m window).
+//   Measured: ~6ms avg CH1 interval, ~85ms worst-case (10s window).
 //   Back-to-back trigger in ADS_READ_RESULT saves one loop() call per channel.
-//   PidSampleDivisor=1 (default) → PID every CH1 hit (~56 Hz avg).
+//   Worst-case spikes believed to be cloud upload blocking in loop().
+//   PidSampleDivisor=1 (default) → PID every CH1 hit (~167 Hz avg).
+//   PidSampleDivisor=2           → every other hit (~83 Hz avg).
 //
 //   Kp (proportional)          0.500       web UI default
 //   Ki (integral)              2.000       web UI default
@@ -426,17 +428,16 @@ void enter_sys_auto() {
 //   Sequence {1,0,1,2,1,3}: CH1 at positions 0,2,4 → 3× per cycle.
 //   Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
 //   collapsing 3 loop() calls per channel to 2.
-//   Measured CH1 interval: ~18ms avg, ~36ms worst-case (2m window).
-//   All-time worst: 156ms (rare system spike).
-//   CH0 (battV): 1× per cycle → ~54ms avg cadence.
-//   CH2 (RPM):   1× per cycle → ~54ms avg cadence.
-//   CH3 (temp):  1× per cycle → ~54ms avg cadence (fine for 5s thermal PID).
+//   Measured CH1 interval: ~6ms avg, ~85ms worst-case (10s window).
+//   All-time worst: 445ms — believed to be cloud upload blocking in loop().
+//   CH0 (battV): 1× per cycle → ~18ms avg cadence.
+//   CH2 (RPM):   1× per cycle → ~18ms avg cadence.
+//   CH3 (temp):  1× per cycle → ~18ms avg cadence (fine for 5s thermal PID).
 //   Verify via ch1IntervalMs in cvLog after any loop() cadence changes.
-
-// Channel scan sequence:    {1, 0, 1, 2, 1, 3}  (adsSeq[] in ADS_READ_RESULT)
-//   CH0 = BatteryV    CH1 = MeasuredAmps    CH2 = RPM    CH3 = Thermistor
-//   PidSampleDivisor=1 (default) → inner PID runs every CH1 hit (~64 Hz avg)   (This is what i run!)
-//   ADS_TIMEOUT_MS = 50          → conversion timeout before retry
+//
+//   Channel assignments: CH0=BatteryV  CH1=MeasuredAmps  CH2=RPM  CH3=Thermistor
+//   PidSampleDivisor=1 (default) → inner PID runs every CH1 hit (~167 Hz avg).
+//   ADS_TIMEOUT_MS = 50          → conversion timeout before retry.
 //
 // ============================================================
 

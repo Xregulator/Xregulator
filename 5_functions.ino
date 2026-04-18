@@ -2032,8 +2032,8 @@ void ReadAnalogInputs() {
 
 // ADS1115 non-blocking state machine
   // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples
-  // Measured CH1 interval: ~18 ms avg, ~36 ms worst-case (2m window)
-  // All-time worst: 156 ms (rare WiFi/system spike, not representative)
+  // Measured CH1 interval: ~6ms avg, ~85ms worst-case (10s window)
+  // All-time worst: 445ms — believed to be cloud upload blocking in loop()
   // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
   // saving one loop() call per channel. Falls back to ADS_IDLE if <2ms elapsed.
   if (ADS1115Disconnected != 0) {

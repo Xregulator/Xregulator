@@ -26,19 +26,17 @@
 
 #include <OneWire.h>            // temp sensors
 #include <DallasTemperature.h>  // temp sensors
-//#include <SPI.h>                // display- removed to save connectors space, code commented out
-//#include <U8g2lib.h>            // display- removed to save connectors space, code commented out
+//#include <SPI.h>                // display- removed to save connectors space
+//#include <U8g2lib.h>            // display- removed to save connectors space
 #include <ADS1115_lite.h>  // measuring 4 analog inputs
 ADS1115_lite adc(ADS1115_DEFAULT_ADDRESS);
 #include "VeDirectFrameHandler.h"  // for victron communication
 #include "INA228.h"
 INA228 INA(0x40);
 //DONT MOVE THE NEXT 6 LINES AROUND, MUST STAY IN THIS ORDER
-//#include <Arduino.h>                  // maybe not needed, was in NMEA2K example I copied
-#define ESP32_CAN_RX_PIN GPIO_NUM_16  //
-#define ESP32_CAN_TX_PIN GPIO_NUM_17  //
-//#include <NMEA2000_CAN.h>             // Thank you Timo Lappalainen, great stuff  // this one doesn't work with S3
-#include <NMEA2000_esp32.h>                                    // (This one is for ESP32-S3, thank you Svante Karlsson)
+#define ESP32_CAN_RX_PIN GPIO_NUM_16                           //
+#define ESP32_CAN_TX_PIN GPIO_NUM_17                           //
+#include <NMEA2000_esp32.h>                                    // (This one is for ESP32-S3, thank you Svante Karlsson and Timo Lappalainen )
 tNMEA2000_esp32 NMEA2000(ESP32_CAN_TX_PIN, ESP32_CAN_RX_PIN);  // necessary for ESP32-S3 library
 #include <N2kMessages.h>
 #include <N2kMessagesEnumToStr.h>  // questionably needed
@@ -66,17 +64,16 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <HTTPClient.h>                  // for weather reports
 #include <ArduinoJson.h>                 // for weather reports (and secure OTA?)
 #include <WiFiClientSecure.h>            // for weather reports
-//#include <PID_v1.h>                      // PID library from http://brettbeauregard.com/blog/2011/04/improving-the-beginners-pid-introduction/    Thanks Brett!
-#include <PID_v1_xeng.h>      // My fork to include tracking anti-windup methods       Thanks Brett!
-#include <esp_ota_ops.h>      // secure OTA
-#include <mbedtls/pk.h>       // secure OTA
-#include <mbedtls/base64.h>   // secure OTA
-#include "esp_system.h"       // secure OTA
-#include <Adafruit_Sensor.h>  // BMP390
-#include <Adafruit_BMP3XX.h>  // BMP390
-#include "esp_partition.h"    // for esp_partition_find_first
+#include <PID_v1_xeng.h>                 // My fork to include tracking anti-windup methods       Thanks Brett!
+#include <esp_ota_ops.h>                 // secure OTA
+#include <mbedtls/pk.h>                  // secure OTA
+#include <mbedtls/base64.h>              // secure OTA
+#include "esp_system.h"                  // secure OTA
+#include <Adafruit_Sensor.h>             // BMP390
+#include <Adafruit_BMP3XX.h>             // BMP390
+#include "esp_partition.h"               // for esp_partition_find_first
 #include "esp_heap_caps.h"
-#include <time.h>            // Supabase My History
+#include <time.h>            // Supabase
 #include "esp_psram.h"       // for ESP32 health calculations
 #include "LSM6DSOXSensor.h"  //accelerometer
 
@@ -86,7 +83,7 @@ struct UpdateInfo;
 struct StreamingExtractor;
 struct HttpsRequest;
 
-SET_LOOP_TASK_STACK_SIZE(20 * 1024);  // Increase stack from 8KB to 20KB, necessary for SSL/TLS operations
+SET_LOOP_TASK_STACK_SIZE(20 * 1024);  // Increase stack from 8KB to 20KB, necessary for SSL/TLS operations, backtraced at 12 on 4/18/26
 int hardwarePresent = 1;              // usage varies
 // Parse JSON update response - this struct definition cannot move down in file, I don't know why, but leave it here.
 struct UpdateInfo {
@@ -98,23 +95,25 @@ struct UpdateInfo {
   size_t firmwareSize;
 };
 
-
 struct CachedGzFile {
-  uint8_t* data = nullptr;
-  size_t   size = 0;
+  uint8_t *data = nullptr;
+  size_t size = 0;
 };
 
-CachedGzFile loadFileToRAM(const char* path);  // add this line
+CachedGzFile loadFileToRAM(const char *path);  // add this line
 
 CachedGzFile cachedIndex, cachedCss, cachedJs, cachedUplotCss, cachedUplotJs;
 
-CachedGzFile loadFileToRAM(const char* path) {
+CachedGzFile loadFileToRAM(const char *path) {
   CachedGzFile result;
   File f = webFS.open(path, "r");
-  if (!f) { Serial.printf("preload FAILED: %s\n", path); return result; }
+  if (!f) {
+    Serial.printf("preload FAILED: %s\n", path);
+    return result;
+  }
   result.size = f.size();
-  result.data = (uint8_t*)ps_malloc(result.size);   // PSRAM-aware malloc
-  if (!result.data) result.data = (uint8_t*)malloc(result.size);  // heap fallback
+  result.data = (uint8_t *)ps_malloc(result.size);                 // PSRAM-aware malloc
+  if (!result.data) result.data = (uint8_t *)malloc(result.size);  // heap fallback
   if (result.data) {
     f.read(result.data, result.size);
     Serial.printf("Preloaded %s into RAM (%d bytes)\n", path, result.size);
@@ -193,6 +192,7 @@ static uint32_t sessionHealthCount = 0;
 // Set when history changes — triggers SSE resend
 static bool effHistoryDirty = false;
 
+#define FUNC_TIMING_WINDOW_MS 10000  // rolling window for per-function worst-case timing (ms)
 
 
 // --- Field-drive axis ---
@@ -1317,6 +1317,7 @@ int SOCUpdateInterval = 2000;             // Update SOC every 2 seconds.   Don't
 //NVS Stuff
 unsigned long lastNVSSaveTime = 0;
 const unsigned long NVS_SAVE_INTERVAL = 120000;  // 2 minutes
+
 /*
 NVS lifetime analysis (ESP32-S3-WROOM-1U-N16R8, 16 MB flash)
 Partition: nvs @ 0x9000, size = 0x5000 (20 KB = 5 pages × 4 KB)
@@ -1624,6 +1625,49 @@ uint64_t LoopTime;                  // must not use unsigned long becasue cant r
 int WifiStrength = -999;            // must not use unsigned long becasue cant run String() on an unsigned long and that's done by the wifi code
 int MaximumLoopTime;                // must not use unsigned long becasue cant run String() on an unsigned long and that's done by the wifi code
 unsigned long prev_millis7888 = 0;  // used to reset the meximum loop time
+// ── Per-function worst-case timing ───────────────────────────────────────────
+// worstWindow resets every FUNC_TIMING_WINDOW_MS — shows current spike behavior
+// worstSession resets only at boot — never lies about session worst
+struct FuncTiming {
+  uint32_t worstWindow;   // worst execution time in current rolling window (µs)
+  uint32_t worstSession;  // worst execution time this session (µs)
+};
+
+// One instance per timed function
+FuncTiming ft_ReadAnalogInputs;
+FuncTiming ft_saveNVSData;
+FuncTiming ft_AdjustFieldLearnMode;
+FuncTiming ft_logDashboardValues;
+FuncTiming ft_printSystemHealth;
+FuncTiming ft_checkWiFiConnection;
+FuncTiming ft_SendWifiData;
+FuncTiming ft_CheckAlarms;
+FuncTiming ft_calculateDerivedMetrics;
+FuncTiming ft_ch1_compute_stats;
+FuncTiming ft_uploadSensorHistory;
+FuncTiming ft_uploadBufferedRecords;
+FuncTiming ft_buildConfigPayload;
+
+// Wrap any void call — records worst-case into both rolling window and session fields.
+// Nested calls (e.g. a flash write inside ReadAnalogInputs) are fully included in
+// the outer timer, allowing triangulation without needing to instrument sub-calls.
+#define TIMED_CALL(ft, call) \
+  do { \
+    uint32_t _t0 = (uint32_t)esp_timer_get_time(); \
+    call; \
+    uint32_t _dt = (uint32_t)esp_timer_get_time() - _t0; \
+    if (_dt > (ft).worstWindow) (ft).worstWindow = _dt; \
+    if (_dt > (ft).worstSession) (ft).worstSession = _dt; \
+  } while (0)
+
+// Session-scoped rolling 5s loop worst (replaces MaximumLoopTime rolling reset)
+uint32_t loopTime5sWindow = 0;  // worst loop time in last AinputTrackerTime window (µs)
+
+// Previous session max loop time — snapshot of MaxLoopTime taken at boot before reset
+uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before this one (µs)
+// ── End per-function timing ───────────────────────────────────────────────────
+
+
 
 // Global variable to track ESP32 restart time
 unsigned long lastRestartTime = 0;
@@ -2251,7 +2295,7 @@ struct CvLogEntry {
   int16_t dIdt2_x10;      // dI/dt 2-sample × 10       (A/s)
   int16_t dIdt4_x10;      // dI/dt 4-sample × 10       (A/s)
   int16_t ch1IntervalMs;  // last CH1 inter-sample gap  (ms)
-  int16_t  pad2;   // explicit alignment pad — keeps sizeof == 44
+  int16_t pad2;           // explicit alignment pad — keeps sizeof == 44
   // pack into existing flags: bit 5 = fastIRisingActive
 };
 static_assert(sizeof(CvLogEntry) == 44, "CvLogEntry must be 44 bytes");
@@ -2643,17 +2687,17 @@ void setup() {
   timestampBuffer = (char *)ps_malloc(TIMESTAMP_BUFFER_SIZE);
   messageBuffer = (char *)ps_malloc(MESSAGE_BUFFER_SIZE);
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
-  if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));  
+  if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
   // CH1 interval ring — 30 KB to PSRAM
-ch1Ring = (Ch1Entry*)ps_malloc(sizeof(Ch1Entry) * CH1_RING);
-if (!ch1Ring) Serial.println("FATAL: ch1Ring ps_malloc failed");
-else memset(ch1Ring, 0, sizeof(Ch1Entry) * CH1_RING);
+  ch1Ring = (Ch1Entry *)ps_malloc(sizeof(Ch1Entry) * CH1_RING);
+  if (!ch1Ring) Serial.println("FATAL: ch1Ring ps_malloc failed");
+  else memset(ch1Ring, 0, sizeof(Ch1Entry) * CH1_RING);
 
-// IMU ring buffer — ~30 KB to PSRAM
-imuRingBuffer = (ImuRingBuffer*)ps_malloc(sizeof(ImuRingBuffer));
-if (!imuRingBuffer) Serial.println("FATAL: imuRingBuffer ps_malloc failed");
-else memset(imuRingBuffer, 0, sizeof(ImuRingBuffer));
+  // IMU ring buffer — ~30 KB to PSRAM
+  imuRingBuffer = (ImuRingBuffer *)ps_malloc(sizeof(ImuRingBuffer));
+  if (!imuRingBuffer) Serial.println("FATAL: imuRingBuffer ps_malloc failed");
+  else memset(imuRingBuffer, 0, sizeof(ImuRingBuffer));
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3
 
@@ -2732,15 +2776,32 @@ else memset(imuRingBuffer, 0, sizeof(ImuRingBuffer));
   delay(500);
   checkWebFilesExist();
   sessionStartTime = millis();
+  // Reset all per-function timing structs and session loop metrics at boot
+  MaximumLoopTime = 0;
+  loopTime5sWindow = 0;
+  memset(&ft_ReadAnalogInputs, 0, sizeof(FuncTiming));
+  memset(&ft_saveNVSData, 0, sizeof(FuncTiming));
+  memset(&ft_AdjustFieldLearnMode, 0, sizeof(FuncTiming));
+  memset(&ft_logDashboardValues, 0, sizeof(FuncTiming));
+  memset(&ft_printSystemHealth, 0, sizeof(FuncTiming));
+  memset(&ft_checkWiFiConnection, 0, sizeof(FuncTiming));
+  memset(&ft_SendWifiData, 0, sizeof(FuncTiming));
+  memset(&ft_CheckAlarms, 0, sizeof(FuncTiming));
+  memset(&ft_calculateDerivedMetrics, 0, sizeof(FuncTiming));
+  memset(&ft_ch1_compute_stats, 0, sizeof(FuncTiming));
+  memset(&ft_uploadSensorHistory, 0, sizeof(FuncTiming));
+  memset(&ft_uploadBufferedRecords, 0, sizeof(FuncTiming));
+  memset(&ft_buildConfigPayload, 0, sizeof(FuncTiming));
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
   ensurePreferredBootPartition();  // Ensure we boot from preferred partition
   loadNVSData();                   // Load persistent variables from NVS- everything from last session is restored
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
   //Reset some parameters to zero since we are re-starting on a re-boot
   CurrentSessionDuration = 0;
-  MaxLoopTime = 0;
-  totalPowerCycles++;  // Increment power cycle counter
-  saveNVSData();       // Save immediately to persist the adjustments done above in setup so far
+  prevSessionMaxLoopTime = MaxLoopTime;  // snapshot last session's worst before zeroing
+  MaxLoopTime = 0;                       // reset for this session (persists to NVS on next save)
+  totalPowerCycles++;
+  saveNVSData();  // Save immediately to persist the adjustments done above in setup so far
   initEfficiencyTracker();
   setCpuFrequencyMhz(240);
   pinMode(4, OUTPUT);     // This pin is used to provide a high signal to Field Enable pin
@@ -2975,8 +3036,8 @@ void loop() {
     handleSocGainReset();                   // do the dynamic updates
     handleAltZeroReset();                   // do the dynamic udpates
   }
-  calculateChargeTimes();  // might want to put this in the above if statement and unthrottle at some point update later
-  saveNVSData();           // Only save current operational data, not session stats
+  calculateChargeTimes();                     // might want to put this in the above if statement and unthrottle at some point update later
+  TIMED_CALL(ft_saveNVSData, saveNVSData());  // Only save current operational data, not session stats — worstWindow spikes only when internal throttle allows actual commit
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
   // Power management affects AP and CLIENT modes, but NOT CONFIG mode (CONFIG mode exits early below)
@@ -3069,7 +3130,7 @@ void loop() {
       if (hardwarePresent == 1) {
         checkTempTaskHealth();  // digital temperature measurement monitor (only with real hardware)
 
-        ReadAnalogInputs();  // Real sensor readings
+        TIMED_CALL(ft_ReadAnalogInputs, ReadAnalogInputs());
       } else {
         imuEnabled = true;        //hack but it works for now
         ReadAnalogInputs_Fake();  // Fake sensor readings for development
@@ -3087,15 +3148,15 @@ void loop() {
       // ========== END HARDWARE-DEPENDENT SECTION ==========
       // All remaining code runs regardless of hardwarePresent flag
       // This allows full development/testing even with broken hardware
-      calculateDerivedMetrics();  // Calculate true wind, leeway, VMG, duty cycles
+      TIMED_CALL(ft_calculateDerivedMetrics, calculateDerivedMetrics());  // Calculate true wind, leeway, VMG, duty cycles
       if (VeData == 1 && hardwarePresent == 1) {
         ReadVEData();  //read Data from Victron (only with real hardware)
       }
       if (NMEA2KData == 1 && hardwarePresent == 1) {
         NMEA2000.ParseMessages();  // CAN bus (only with real hardware)
       }
-      CheckAlarms();             // Process alarms (runs with fake or real data)
-      calculateThermalStress();  // alternator lifetime modeling (runs with fake or real data)
+      TIMED_CALL(ft_CheckAlarms, CheckAlarms());  // Process alarms (runs with fake or real data)
+      calculateThermalStress();                   // alternator lifetime modeling (runs with fake or real data)
       //UpdateDisplay();
       checkAutoZeroTriggers();  //Auto-zero processing (must be before AdjustField)
       processAutoZero();        //Auto-zero processing (must be before AdjustField)
@@ -3103,7 +3164,7 @@ void loop() {
       if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
         updateWeatherMode();
       }
-      AdjustFieldLearnMode();
+      TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       efficiencyTracker_tick();
 
       // Sync legacy display variables
@@ -3120,8 +3181,8 @@ void loop() {
       } else {
         overheatingPenaltyTimer = 0;
       }
-      logDashboardValues();  //  nice to have some history in the Console
-      printSystemHealth();
+      TIMED_CALL(ft_logDashboardValues, logDashboardValues());  //  nice to have some history in the Console
+      TIMED_CALL(ft_printSystemHealth, printSystemHealth());
       updateSensorWindow();  // Update sensor aggregation (after sensor reads)
       if (accelEnabled == 1) {
         updateAccelMetrics();  // accelerometer
@@ -3139,7 +3200,7 @@ void loop() {
           esp_task_wdt_reset();
           UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL);
           lastSensorUploadTime = currentMillisz;
-          uploadSensorHistory();
+          TIMED_CALL(ft_uploadSensorHistory, uploadSensorHistory());  // times LittleFS read + queue send; HTTP transfer is on core 0 and not captured here
           resetDistanceThisInterval();
           esp_task_wdt_reset();
         }
@@ -3148,19 +3209,21 @@ void loop() {
         if (currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7) {  // added 7 to give a tiny offset, not sure if useful or not
           lastBufferUploadAttempt = currentMillisz;
           if (bufferedRecordCount > 0) {
-            esp_task_wdt_reset();  // Feed before upload
-            uploadBufferedRecords();
-            esp_task_wdt_reset();  // Feed after upload completes
+            esp_task_wdt_reset();                                           // Feed before upload
+            TIMED_CALL(ft_uploadBufferedRecords, uploadBufferedRecords());  // times LittleFS read + queue send; HTTP transfer is on core 0 and not captured here
+            esp_task_wdt_reset();                                           // Feed after upload completes
           }
         }
-        delay(3);  // random, possibly helps, possibly remove later (stability at 10 was proven at one point). Watch wifiheartbeat (?)
+        //delay(3);  // removed 4/18/26, don't think it was ever necessary
 
         // Configuration Snapshot
         if (millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
           lastConfigSnapshotTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
             if (WiFi.RSSI() >= -76) {
-              if (buildConfigPayload()) {
+              bool _configBuilt;
+              TIMED_CALL(ft_buildConfigPayload, _configBuilt = buildConfigPayload());  // time the payload build separately from the queue send
+              if (_configBuilt) {
                 HttpsRequest req = {};
                 req.type = HTTPS_UPLOAD_CONFIG;
                 strncpy(req.payload, configPayloadBuffer, sizeof(req.payload) - 1);
@@ -3171,14 +3234,14 @@ void loop() {
           }
         }
       }
-      ch1_compute_stats();
-      SendWifiData();  // Safely sends data (has internal guard to check if WiFi is actually on)
+      TIMED_CALL(ft_ch1_compute_stats, ch1_compute_stats());
+      TIMED_CALL(ft_SendWifiData, SendWifiData());  // Safely sends data (has internal guard to check if WiFi is actually on)
 
       // Client-specific connection monitoring
       // if (currentMode == MODE_CLIENT) {  // moved the gating check into the checkwificonnection function WAS NOT SUFFICIENT FOR WHATEVER REASON
       if (currentMode == MODE_CLIENT && (Ignition == 1 || millis() < wifiWakeTimeout)) {
         // if (currentMode == MODE_CLIENT && (Ignition == 1 || wifiWakeActive)) { // can't try to do anything wifi related unless ignition is on and clock speed is fast enough to not crash
-        checkWiFiConnection();
+        TIMED_CALL(ft_checkWiFiConnection, checkWiFiConnection());
 
         // Track actual WiFi disconnects
         static unsigned long lastWiFiStatusCheck = 0;
@@ -3202,8 +3265,22 @@ void loop() {
       break;  // Exit switch statement, continue with rest of loop()
   }
   // ========== LOOP TIMING METRICS ==========
-  if (millis() - prev_millis7888 > AinputTrackerTime) {  // every 5 seconds reset the maximum loop time
-    MaximumLoopTime = 0;
+  if (millis() - prev_millis7888 > AinputTrackerTime) {  // every 5 seconds reset the rolling window metrics
+    loopTime5sWindow = 0;                                // rolling 5s loop worst resets here; MaximumLoopTime is now session-persistent
+    // Reset all per-function rolling windows
+    ft_ReadAnalogInputs.worstWindow = 0;
+    ft_saveNVSData.worstWindow = 0;
+    ft_AdjustFieldLearnMode.worstWindow = 0;
+    ft_logDashboardValues.worstWindow = 0;
+    ft_printSystemHealth.worstWindow = 0;
+    ft_checkWiFiConnection.worstWindow = 0;
+    ft_SendWifiData.worstWindow = 0;
+    ft_CheckAlarms.worstWindow = 0;
+    ft_calculateDerivedMetrics.worstWindow = 0;
+    ft_ch1_compute_stats.worstWindow = 0;
+    ft_uploadSensorHistory.worstWindow = 0;
+    ft_uploadBufferedRecords.worstWindow = 0;
+    ft_buildConfigPayload.worstWindow = 0;
     prev_millis7888 = millis();
   }
   endtime = esp_timer_get_time();  //Record end of Loop
@@ -3216,15 +3293,18 @@ void loop() {
       events.send(warnMsg, "console", millis());
     }
   }
-  //This one resets every 5 seconds (AinputTrackerTime) and is displayed on client
+  //This one resets every 5 seconds (AinputTrackerTime) — rolling short-window worst for UI sparkle
+  if (LoopTime > loopTime5sWindow) {
+    loopTime5sWindow = LoopTime;
+  }
+  //This one is the true session worst — resets only at boot, never mid-session
   if (LoopTime > MaximumLoopTime) {
     MaximumLoopTime = LoopTime;
   }
-  //This one is persistent, not displayed in current session for Client, but visible on next boot
+  //This one persists to NVS — becomes prevSessionMaxLoopTime on next boot
   if (LoopTime > MaxLoopTime) {
     MaxLoopTime = LoopTime;
   }
-
 
   //TempTask Debug
   // Temp debug status - print every 30 seconds
@@ -3250,7 +3330,7 @@ void loop() {
   }
   checkAndRestart();     // scheduled maintenance restart
   esp_task_wdt_reset();  // Always reset watchdog at end of loop
- // delay(1);              // Removed 4/18/2026
+                         // delay(1);              // Removed 4/18/2026
 }
 
 //This has to stay here, something about lambda functions (?)

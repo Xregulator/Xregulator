@@ -715,11 +715,6 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   //Gain parameter.
   adc.setGain(ADS1115_REG_CONFIG_PGA_6_144V);
   // ADS1115_REG_CONFIG_PGA_6_144V(0x0000)  // +/-6.144V range = Gain 2/3
-  // ADS1115_REG_CONFIG_PGA_4_096V(0x0200)  // +/-4.096V range = Gain 1
-  // ADS1115_REG_CONFIG_PGA_2_048V(0x0400)  // +/-2.048V range = Gain 2 (default)
-  // ADS1115_REG_CONFIG_PGA_1_024V(0x0600)  // +/-1.024V range = Gain 4
-  // ADS1115_REG_CONFIG_PGA_0_512V(0x0800)  // +/-0.512V range = Gain 8
-  // ADS1115_REG_CONFIG_PGA_0_256V(0x0A00)  // +/-0.256V range = Gain 16
   //Sample rate parameter
   // adc.setSampleRate(ADS1115_REG_CONFIG_DR_8SPS);  //Set the slowest and most accurate sample rate, 8 THIS WAS PRIOR SETTING
   // ADS1115_REG_CONFIG_DR_8SPS(0x0000)              // 8 SPS(Sample per Second), or a sample every 125ms
@@ -737,14 +732,6 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   //16 SPS = 62.5ms actual conversion time
   //32 SPS = 31.3ms actual conversion time
   //You can't set ADSConversionDelay shorter than the actual hardware conversion time - the chip won't be done yet.
-  //For 10 MeasuredAmps readings/second:
-  //Need MeasuredAmps every 100ms
-  //With 4 channels: 100ms ÷ 4 = 25ms per channel
-  //So you need ≤25ms conversion time
-  //32 SPS (31.3ms) is too slow
-  //64 SPS (15.6ms) works - gives maximum averaging while meeting timing
-  // ADS1115_REG_CONFIG_DR_128SPS(0x0080)            // 128 SPS, or every 7.8ms  (default)
-  // ADS1115_REG_CONFIG_DR_250SPS(0x00A0)            // 250 SPS, or every 4ms, note that noise free resolution is reduced to ~14.75-16bits, see table 2 in datasheet
   // ADS1115_REG_CONFIG_DR_475SPS(0x00C0)            // 475 SPS, or every 2.1ms, note that noise free resolution is reduced to ~14.3-15.5bits, see table 2 in datasheet
   adc.setSampleRate(ADS1115_REG_CONFIG_DR_860SPS);  
   //ADS1115_REG_CONFIG_DR_860SPS(0x00E0);  // 860 SPS, or every 1.16ms, note that noise free resolution is reduced to ~13.8-15bits, see table 2 in datasheet
@@ -755,10 +742,6 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   } else {
     Serial.println("ADS1115 configured successfully");
   }
-
-  // Add this after your existing ADS1115 initialization in initializeHardware()
-  // Verify configuration was applied correctly
-
   // Read back the config register to verify settings
   Wire.beginTransmission(0x48);  // ADS1115 default address
   Wire.write(0x01);              // Config register
@@ -774,7 +757,6 @@ void initializeHardware() {  // Helper function to organize hardware initializat
     uint8_t mode = (configReg >> 8) & 0x01;
 
     queueConsoleMessage("ADS1115 MUX: " + String(mux) + ", PGA: " + String(pga) + ", Mode: " + String(mode));
-
     // Expected values:
     // MUX should be 4 (single-ended A0) when you read channel 0
     // PGA should be 0 (±6.144V range)
