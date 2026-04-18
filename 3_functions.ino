@@ -2900,6 +2900,8 @@ void setupServer() {
     HTTPClient http;
     char url[256];
     snprintf(url, sizeof(url), "%s/functions/v1/register-device", SUPABASE_URL);
+    Serial.print("Connecting to: ");
+    Serial.println(url);
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     char authHeader[512];
@@ -2914,14 +2916,28 @@ void setupServer() {
 
     http.end();
 
+    // Connection-level failure (DNS, timeout, refused, etc.)
+    if (httpCode <= 0) {
+      Serial.println("HTTP connection failed: " + String(httpCode));
+      request->send(503, "application/json",
+                    "{\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
+      return;
+    }
+
+    // Empty body guard
+    if (response.length() == 0) {
+      Serial.println("Empty response from server (HTTP " + String(httpCode) + ")");
+      request->send(502, "application/json",
+                    "{\"error\":\"Empty response from cloud\",\"code\":" + String(httpCode) + "}");
+      return;
+    }
+
+    // Token extraction for 200
     if (httpCode == 200) {
       DynamicJsonDocument responseDoc(1024);
       DeserializationError error = deserializeJson(responseDoc, response.c_str(), response.length());
-
       if (!error && responseDoc.containsKey("token")) {
         String newToken = responseDoc["token"].as<String>();
-        Serial.println("Extracted token: " + newToken);
-
         if (newToken.length() > 0) {
           saveAuthToken(newToken);
           Serial.println("Token saved to NVS");

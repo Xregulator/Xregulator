@@ -2030,8 +2030,12 @@ void ReadAnalogInputs() {
     }
   }
 
-  //ADS1115 reading is based on trigger→wait→read so as to not waste time
-  // State machine cycles through 4 channels with Xms conversion time each, providing ~Xms update rate per sensor (UPDATE LATER)
+// ADS1115 non-blocking state machine
+  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples
+  // Measured CH1 interval: ~18 ms avg, ~36 ms worst-case (2m window)
+  // All-time worst: 156 ms (rare WiFi/system spike, not representative)
+  // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
+  // saving one loop() call per channel. Falls back to ADS_IDLE if <2ms elapsed.
   if (ADS1115Disconnected != 0) {
     // Throttled error message to prevent console spam
     static unsigned long lastADSWarning = 0;
@@ -2272,7 +2276,20 @@ void ReadAnalogInputs() {
         static uint8_t adsSeqIdx = 0;
         adsSeqIdx = (adsSeqIdx + 1) % adsSeqLen;
         adsCurrentChannel = adsSeq[adsSeqIdx];
-        adsState = ADS_IDLE;
+
+        // Back-to-back trigger: fire next conversion immediately if ≥2ms has
+        // elapsed since this conversion was triggered. At 860SPS (1.16ms) and
+        // ~3ms loop cadence this is always true, saving one loop() call per
+        // channel. Falls back to ADS_IDLE if called too soon (protects WiFi).
+        if (millis() - adsStateEntered >= 2) {
+          adsTriggeredChannel = adsCurrentChannel;
+          adc.setMux(adsMuxCodes[adsTriggeredChannel]);
+          adc.triggerConversion();
+          adsStateEntered = millis();
+          adsState = ADS_WAIT;
+        } else {
+          adsState = ADS_IDLE;
+        }
         break;
       }
   }

@@ -3238,7 +3238,7 @@ void loop() {
   }
   checkAndRestart();     // scheduled maintenance restart
   esp_task_wdt_reset();  // Always reset watchdog at end of loop
-  delay(1);              // Not sure this is needed, whatever
+ // delay(1);              // Not sure this is needed, whatever
 }
 
 //This has to stay here, something about lambda functions (?)

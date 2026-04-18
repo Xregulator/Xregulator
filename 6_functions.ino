@@ -333,10 +333,10 @@ void enter_sys_auto() {
 //
 // ── INNER CURRENT PID ────────────────────────────────────────
 //   Runs every CH1 ADS1115 sample (÷ PidSampleDivisor).
-//   ADS sequence {0,1,0,1,2,3}: CH1 fires 2× per 6-step cycle.
-//   Measured: ~5ms/step → 30ms cycle → CH1 at positions 1,3 → alternating 10ms/20ms
-//   gaps → ~64 Hz average inner-loop rate. (Early comments said 20ms/step / 16.7 Hz —
-//   wrong; hardware runs ~4× faster.) PidSampleDivisor=1 → PID every CH1 hit (~64 Hz avg).
+//   ADS sequence {1,0,1,2,1,3}: CH1 fires 3× per 6-step cycle.
+//   Measured: ~18ms avg CH1 interval, ~36ms worst-case (2m window).
+//   Back-to-back trigger in ADS_READ_RESULT saves one loop() call per channel.
+//   PidSampleDivisor=1 (default) → PID every CH1 hit (~56 Hz avg).
 //
 //   Kp (proportional)          0.500       web UI default
 //   Ki (integral)              2.000       web UI default
@@ -422,9 +422,16 @@ void enter_sys_auto() {
 //   Field collapse delay      30000 ms      before restart after fault
 //
 // ── ADS1115 TIMING (inner loop clock source) ─────────────────
-//   Conversion time    ~1.16 ms theoretical at 860 SPS; actual interval
-//                      includes I2C + loop() overhead — measure via
-//                      ch1IntervalMs in cvLog before trusting any figure here.
+//   Conversion time    ~1.16 ms theoretical at 860 SPS.
+//   Sequence {1,0,1,2,1,3}: CH1 at positions 0,2,4 → 3× per cycle.
+//   Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
+//   collapsing 3 loop() calls per channel to 2.
+//   Measured CH1 interval: ~18ms avg, ~36ms worst-case (2m window).
+//   All-time worst: 156ms (rare system spike).
+//   CH0 (battV): 1× per cycle → ~54ms avg cadence.
+//   CH2 (RPM):   1× per cycle → ~54ms avg cadence.
+//   CH3 (temp):  1× per cycle → ~54ms avg cadence (fine for 5s thermal PID).
+//   Verify via ch1IntervalMs in cvLog after any loop() cadence changes.
 
 // Channel scan sequence:    {1, 0, 1, 2, 1, 3}  (adsSeq[] in ADS_READ_RESULT)
 //   CH0 = BatteryV    CH1 = MeasuredAmps    CH2 = RPM    CH3 = Thermistor
