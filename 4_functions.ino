@@ -636,27 +636,37 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   Wire.end();  // End any existing I2C
   Wire.begin(9, 10);
   Wire.setClock(400000);  // 400 kHz (Fast-mode)
+  Wire.setTimeOut(15);   // Added as safety April 2026
   delay(100);
   Serial.println("I2C initialized on SDA=9, SCL=10");
   delay(100);  // Give I2C time to initialize
 
-  //BMP390
-  if (!bmp.begin_I2C(BMP3_ADDR)) {
-    Serial.println("BMP3XX not found");
-    while (1) delay(1000);
-  }
-// BMP388 — max accuracy, non-blocking state machine absorbs conversion time
-// 32x pressure OSR: max chip resolution, meaningful for marine barometry
-// 2x temp OSR: sufficient for internal pressure compensation (more does not improve pressure)
-// IIR COEFF_3: ~40s smoothing window, filters wave/motion spikes, tracks real weather
-// Conversion time at 32x/2x: ~68ms per datasheet — absorbed by state machine, zero loop impact
-bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
-bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
-bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  //   //BMP390
+  //   if (!bmp.begin_I2C(BMP3_ADDR)) {
+  //     Serial.println("BMP3XX not found");
+  //     while (1) delay(1000);
+  //   }
+  // // BMP388 — max accuracy, non-blocking state machine absorbs conversion time
+  // // 32x pressure OSR: max chip resolution, meaningful for marine barometry
+  // // 2x temp OSR: sufficient for internal pressure compensation (more does not improve pressure)
+  // // IIR COEFF_3: ~40s smoothing window, filters wave/motion spikes, tracks real weather
+  // // Conversion time at 32x/2x: ~68ms per datasheet — absorbed by state machine, zero loop impact
+  // bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
+  // bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
+  // bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+ 
+if (!bmp388.begin(BMP3_ADDR)) {
+  Serial.println("BMP388 not found");
+  while (1);
+}
 
-  //NMEA2K
+bmp388.setPresOversampling(OVERSAMPLING_X32);
+bmp388.setTempOversampling(OVERSAMPLING_X2);
+bmp388.setIIRFilter(IIR_FILTER_32);   // use highest exposed by this library
+Serial.println("BMP388 found");
+
+  // NMEA2K
   OutputStream = &Serial;
-  //   while (!Serial)
   //  NMEA2000.SetN2kCANReceiveFrameBufSize(50); // was commented
   // Do not forward bus messages at all
   NMEA2000.SetForwardType(tNMEA2000::fwdt_Text);
@@ -736,7 +746,7 @@ bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
   //32 SPS = 31.3ms actual conversion time
   //You can't set ADSConversionDelay shorter than the actual hardware conversion time - the chip won't be done yet.
   // ADS1115_REG_CONFIG_DR_475SPS(0x00C0)            // 475 SPS, or every 2.1ms, note that noise free resolution is reduced to ~14.3-15.5bits, see table 2 in datasheet
-  adc.setSampleRate(ADS1115_REG_CONFIG_DR_860SPS);  
+  adc.setSampleRate(ADS1115_REG_CONFIG_DR_860SPS);
   //ADS1115_REG_CONFIG_DR_860SPS(0x00E0);  // 860 SPS, or every 1.16ms, note that noise free resolution is reduced to ~13.8-15bits, see table 2 in datasheet
 
   delay(100);  // Give chip time to configure

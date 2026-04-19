@@ -334,11 +334,12 @@ void enter_sys_auto() {
 // ── INNER CURRENT PID ────────────────────────────────────────
 //   Runs every CH1 ADS1115 sample (÷ PidSampleDivisor).
 //   ADS sequence {1,0,1,2,1,3}: CH1 fires 3× per 6-step cycle.
-//   Measured: ~6ms avg CH1 interval, ~85ms worst-case (10s window).
 //   Back-to-back trigger in ADS_READ_RESULT saves one loop() call per channel.
-//   Worst-case spikes believed to be cloud upload blocking in loop().
-//   PidSampleDivisor=1 (default) → PID every CH1 hit (~167 Hz avg).
-//   PidSampleDivisor=2           → every other hit (~83 Hz avg).
+//
+//   Measured performance (preliminary — full hardware validation pending):
+//   CH1 interval: ~5ms typical; worst-case not yet characterised.
+//   PidSampleDivisor=1 (default) → PID runs every CH1 hit.
+//   PidSampleDivisor=2           → every other CH1 hit.
 //
 //   Kp (proportional)          0.500       web UI default
 //   Ki (integral)              2.000       web UI default
@@ -423,20 +424,22 @@ void enter_sys_auto() {
 // ── FIELD COLLAPSE / LOCKOUT ─────────────────────────────────
 //   Field collapse delay      30000 ms      before restart after fault
 //
-// ── ADS1115 TIMING (inner loop clock source) ─────────────────
+//// ── ADS1115 TIMING (inner loop clock source) ─────────────────
 //   Conversion time    ~1.16 ms theoretical at 860 SPS.
 //   Sequence {1,0,1,2,1,3}: CH1 at positions 0,2,4 → 3× per cycle.
 //   Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
 //   collapsing 3 loop() calls per channel to 2.
-//   Measured CH1 interval: ~6ms avg, ~85ms worst-case (10s window).
-//   All-time worst: 445ms — believed to be cloud upload blocking in loop().
-//   CH0 (battV): 1× per cycle → ~18ms avg cadence.
-//   CH2 (RPM):   1× per cycle → ~18ms avg cadence.
-//   CH3 (temp):  1× per cycle → ~18ms avg cadence (fine for 5s thermal PID).
+//
+//   Measured performance (preliminary — full hardware validation pending):
+//   loop() duration:  3–14ms typical; one-time spike ~150ms on first client page load.
+//   ADS read time:    ~2ms avg.
+//   CH1 interval:     ~5ms typical.
+//   CH0/CH2/CH3:      1× per cycle → ~3× CH1 interval avg cadence.
+//   Worst-case intervals not yet characterised under full load with all hardware present.
 //   Verify via ch1IntervalMs in cvLog after any loop() cadence changes.
 //
 //   Channel assignments: CH0=BatteryV  CH1=MeasuredAmps  CH2=RPM  CH3=Thermistor
-//   PidSampleDivisor=1 (default) → inner PID runs every CH1 hit (~167 Hz avg).
+//   PidSampleDivisor=1 (default) → inner PID runs every CH1 hit.
 //   ADS_TIMEOUT_MS = 50          → conversion timeout before retry.
 //
 // ============================================================

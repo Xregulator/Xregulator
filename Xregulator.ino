@@ -69,9 +69,8 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <mbedtls/pk.h>                  // secure OTA
 #include <mbedtls/base64.h>              // secure OTA
 #include "esp_system.h"                  // secure OTA
-#include <Adafruit_Sensor.h>             // BMP390/388
-#include <Adafruit_BMP3XX.h>             // BMP390/388
-#include "esp_partition.h"               // for esp_partition_find_first
+#include <BMP388_DEV.h>     //non blocking capability - don't upgrade, this was customized for better error handling by xengineering
+#include "esp_partition.h"  // for esp_partition_find_first
 #include "esp_heap_caps.h"
 #include <time.h>            // Supabase
 #include "esp_psram.h"       // for ESP32 health calculations
@@ -653,10 +652,8 @@ struct StreamingExtractor {
   bool hashStarted;
 };
 
-//BMP390
 #define BMP3_ADDR 0x76
-Adafruit_BMP3XX bmp;
-
+BMP388_DEV bmp388;
 
 //WIFI STUFF
 //these will be the custom network created by the user in AP mode

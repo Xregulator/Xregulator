@@ -2030,12 +2030,16 @@ void ReadAnalogInputs() {
     }
   }
 
-  // ADS1115 non-blocking state machine
+// ADS1115 non-blocking state machine
   // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples
-  // Measured CH1 interval: ~6ms avg, ~85ms worst-case (10s window)
-  // All-time worst: 445ms — believed to be cloud upload blocking in loop()
   // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
   // saving one loop() call per channel. Falls back to ADS_IDLE if <2ms elapsed.
+  //
+  // Measured performance (preliminary — full hardware validation pending):
+  //   loop() duration:  3–14ms typical; one-time spike ~150ms on first client page load
+  //   ADS read time:    ~2ms avg
+  //   CH1 interval:     ~5ms typical
+  //   Worst-case not yet characterised under full load with all hardware present
   if (ADS1115Disconnected != 0) {
     // Throttled error message to prevent console spam
     static unsigned long lastADSWarning = 0;
@@ -2294,94 +2298,71 @@ void ReadAnalogInputs() {
       }
   }
 
+  // ============================================================================
+  // BMP388 forced-mode non-blocking state machine
+  // x32 pressure, x2 temperature, IIR filter enabled
+  // Trigger conversion, return immediately, poll until ready, burst-read once
+  // ============================================================================
 
-  // // ============================================================================
-  // // BMP388 Non-Blocking State Machine
-  // // ----------------------------------------------------------------------------
-  // // Trigger:  bmp3_set_op_mode()  — single I2C register write, ~150µs, no polling
-  // // Wait:     millis() check      — free, loop passes through in <1µs
-  // // Read:     bmp3_get_data()     — 6-byte I2C read, ~300µs, no polling
-  // //
-  // // Total cost to ReadAnalogInputs(): <1ms across both states combined.
-  // // Zero blocking. Zero delay(). Zero busy-waiting.
-  // //
-  // // Sensor does 32x pressure / 2x temp conversion autonomously in ~68ms.
-  // // State machine waits 80ms (safe margin) before reading.
-  // // Triggers every 10s. IIR COEFF_3 gives ~40s smoothing window.
-  // // ============================================================================
+  enum BMPState {
+    BMP_IDLE,
+    BMP_WAIT_READY
+  };
 
-  // enum BMPState { BMP_IDLE,
-  //                 BMP_WAIT_READY };
-  // static BMPState bmpState = BMP_IDLE;
-  // static uint32_t lastBMPTrigger = 0;
-  // static uint32_t lastBMPRead = 0;
-  // static bool bmpFirstReadDone = false;
+  static BMPState bmpState = BMP_IDLE;
+  static uint32_t bmpLastCycleMs = 0;
+  static uint32_t bmpTriggerMs = 0;
+  static bool bmpFirstReadDone = false;
 
-  // switch (bmpState) {
+  float temperature, pressure, altitude;
 
-  //   case BMP_IDLE:
-  //     // Trigger every 10 seconds. Single I2C register write, returns immediately.
-  //     if (millis() - lastBMPRead >= 10000) {
-  //       bmp.the_sensor.settings.op_mode = BMP3_MODE_FORCED;
-  //       int8_t rslt = bmp3_set_op_mode(&bmp.the_sensor);
-  //       if (rslt == BMP3_OK) {
-  //         lastBMPTrigger = millis();
-  //         bmpState = BMP_WAIT_READY;
-  //       } else {
-  //         // Trigger failed — stay in IDLE, retry next 10s tick
-  //         static uint32_t lastBMPTriggerFail = 0;
-  //         if (millis() - lastBMPTriggerFail > 60000) {
-  //           Serial.println("BMP388 trigger failed");
-  //           queueConsoleMessage("BMP388 trigger failed");
-  //           lastBMPTriggerFail = millis();
-  //         }
-  //       }
-  //     }
-  //     break;
+  switch (bmpState) {
 
-  //   case BMP_WAIT_READY:
-  //     // 80ms margin over datasheet ~68ms conversion time at 32x pressure / 2x temp.
-  //     // millis() check costs nothing. Loop passes through in <1µs until ready.
-  //     if (millis() - lastBMPTrigger >= 80) {
-  //       struct bmp3_data data = { 0 };
-  //       uint32_t sensor_comp = BMP3_PRESS | BMP3_TEMP;
-  //       int8_t rslt = bmp3_get_data(sensor_comp, &data, &bmp.the_sensor);
+    case BMP_IDLE:
+      // Change this interval to whatever you want. This is only the trigger cadence.
+      if (millis() - bmpLastCycleMs >= 10000) {
+        bmp388.startForcedConversion();  // returns immediately if sensor is in sleep
+        bmpTriggerMs = millis();
+        bmpState = BMP_WAIT_READY;
+      }
+      break;
 
-  //       lastBMPRead = millis();
-  //       bmpState = BMP_IDLE;
+    case BMP_WAIT_READY:
+      // Non-blocking poll. Returns 0 until data ready, then does the short read.
+      if (bmp388.getMeasurements(temperature, pressure, altitude)) {
 
-  //       if (rslt == BMP3_OK) {
-  //         if (!bmpFirstReadDone) {
-  //           // Discard first read — sensor not yet stabilized after power-on
-  //           bmpFirstReadDone = true;
-  //           Serial.printf("BMP388 first read discarded (stabilizing): P=%.2f mbar, T=%.1f F\n",
-  //                         (float)(data.pressure / 100.0),
-  //                         (float)(data.temperature * 9.0 / 5.0 + 32.0));
-  //         } else {
-  //           float newPressure = (float)(data.pressure / 100.0);
-  //           float newTemp = (float)(data.temperature * 9.0 / 5.0 + 32.0);
+        float newPressure = pressure;  // already hPa / mbar in this library
+        float newTemp = temperature * 9.0f / 5.0f + 32.0f;
 
-  //           if (isfinite(newPressure) && newPressure > 800.0 && newPressure < 1100.0) {
-  //             baroPressure = newPressure;
-  //             MARK_FRESH(IDX_BARO_PRESSURE);
-  //           }
-  //           if (isfinite(newTemp) && newTemp > -50.0 && newTemp < 150.0) {
-  //             ambientTemp = newTemp;
-  //             MARK_FRESH(IDX_AMBIENT_TEMP);
-  //           }
-  //         }
-  //       } else {
-  //         // Read failed — log throttled, will retrigger on next 10s IDLE tick
-  //         static uint32_t lastBMPReadFail = 0;
-  //         if (millis() - lastBMPReadFail > 60000) {
-  //           Serial.println("BMP388 read failed");
-  //           queueConsoleMessage("BMP388 read failed");
-  //           lastBMPReadFail = millis();
-  //         }
-  //       }
-  //     }
-  //     break;
-  // }
+        if (!bmpFirstReadDone) {
+          bmpFirstReadDone = true;  // optional discard of first sample
+        } else {
+          if (isfinite(newPressure) && newPressure > 800.0f && newPressure < 1100.0f) {
+            baroPressure = newPressure;
+            MARK_FRESH(IDX_BARO_PRESSURE);
+          }
+
+          if (isfinite(newTemp) && newTemp > -50.0f && newTemp < 150.0f) {
+            ambientTemp = newTemp;
+            MARK_FRESH(IDX_AMBIENT_TEMP);
+          }
+        }
+
+        bmpLastCycleMs = millis();
+        bmpState = BMP_IDLE;
+      } else if (millis() - bmpTriggerMs > 120) {
+        // x32/x2 conversion should be done long before this; timeout just prevents getting stuck
+        static uint32_t lastBMPTimeoutMsg = 0;
+        if (millis() - lastBMPTimeoutMsg > 60000) {
+          Serial.println("BMP388 forced conversion timeout");
+          queueConsoleMessage("BMP388 forced conversion timeout");
+          lastBMPTimeoutMsg = millis();
+        }
+        bmpLastCycleMs = millis();
+        bmpState = BMP_IDLE;
+      }
+      break;
+  }
 
   // ============================================================================
   // LSM6DSOX IMU FIFO Polling (integrated into analog input state machine)

@@ -1118,8 +1118,6 @@ void cacheGzFiles() {
   cachedUplotCss = loadFileToRAM("/uPlot.min.css.gz");
   cachedUplotJs = loadFileToRAM("/uPlot.iife.min.js.gz");
 }
-
-
 bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const String &contentType) {
   CachedGzFile *cf = nullptr;
   if (path == "/index.html") cf = &cachedIndex;

@@ -492,34 +492,10 @@ void setupWiFiConfigServer() {
 
   // Enhanced 404 handler
   server.onNotFound([](AsyncWebServerRequest *request) {
-    String path = request->url();
-    Serial.println("=== WIFI CONFIG SERVER REQUEST DEBUG ===");
-    Serial.print("Request for: ");
-    Serial.println(path);
-    Serial.println("Client IP: " + request->client()->remoteIP().toString());
-    Serial.println("Method: " + String(request->method() == HTTP_GET ? "GET" : "POST"));
-
-    String contentType = "text/html";
-    if (path.endsWith(".css")) contentType = "text/css";
-    else if (path.endsWith(".js")) contentType = "application/javascript";
-    else if (path.endsWith(".json")) contentType = "application/json";
-    else if (path.endsWith(".png")) contentType = "image/png";
-    else if (path.endsWith(".jpg")) contentType = "image/jpeg";
-
-    if (serveCachedGz(request, path, contentType)) {
-      return;
-    } else if (webFS.exists(path)) {
-      Serial.println("Serving: " + path);
-      request->send(webFS, path, contentType);
+    if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+      request->redirect("http://" + WiFi.softAPIP().toString() + "/");
     } else {
-      Serial.print("File not found in LittleFS: ");
-      Serial.println(path);
-      Serial.println("Redirecting to captive portal: " + WiFi.softAPIP().toString());
-      if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
-        request->redirect("http://" + WiFi.softAPIP().toString() + "/");
-      } else {
-        request->send(404, "text/plain", "Not Found");
-      }
+      request->send(404, "text/plain", "Not Found");
     }
   });
 
@@ -2696,33 +2672,37 @@ void setupServer() {
       request->send(403, "text/plain", "FAIL");
     }
   });
+
+  // Explicit routes for all static web assets — served directly, never hit onNotFound
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!serveCachedGz(request, "/index.html", "text/html"))
+      request->send(webFS, "/index.html", "text/html");
+  });
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!serveCachedGz(request, "/index.html", "text/html"))
+      request->send(webFS, "/index.html", "text/html");
+  });
+  server.on("/styles.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!serveCachedGz(request, "/styles.css", "text/css"))
+      request->send(webFS, "/styles.css", "text/css");
+  });
+  server.on("/uPlot.min.css", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!serveCachedGz(request, "/uPlot.min.css", "text/css"))
+      request->send(webFS, "/uPlot.min.css", "text/css");
+  });
+  server.on("/uPlot.iife.min.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!serveCachedGz(request, "/uPlot.iife.min.js", "application/javascript"))
+      request->send(webFS, "/uPlot.iife.min.js", "application/javascript");
+  });
+  server.on("/script.js", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!serveCachedGz(request, "/script.js", "application/javascript"))
+      request->send(webFS, "/script.js", "application/javascript");
+  });
   server.onNotFound([](AsyncWebServerRequest *request) {
-    String path = request->url();
-    Serial.println("=== MAIN SERVER onNotFound HANDLER ===");
-    Serial.print("Request for: ");
-    Serial.println(path);
-
-    String contentType = "text/html";
-    if (path.endsWith(".css")) contentType = "text/css";
-    else if (path.endsWith(".js")) contentType = "application/javascript";
-    else if (path.endsWith(".json")) contentType = "application/json";
-    else if (path.endsWith(".png")) contentType = "image/png";
-    else if (path.endsWith(".jpg")) contentType = "image/jpeg";
-
-    if (serveCachedGz(request, path, contentType)) {
-      return;
-    } else if (webFS.exists(path)) {
-      Serial.println("Serving: " + path);
-      request->send(webFS, path, contentType);
+    if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+      sendWifiConfigPortal(request);
     } else {
-      Serial.print("File not found in webFS: ");
-      Serial.println(path);
-      if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
-        Serial.println("Serving captive portal page directly");
-        sendWifiConfigPortal(request);
-      } else {
-        request->send(404, "text/plain", "Not Found");
-      }
+      request->send(404, "text/plain", "Not Found");
     }
   });
   // Setup event source for real-time updates
