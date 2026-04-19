@@ -1933,7 +1933,7 @@ function updateAllEchosOptimized(data) {
             { key: 'PidKd', id: 'PidKd_echo', transform: v => (v / 1000).toFixed(3) },
             { key: 'DutySlowRampRate', id: 'DutySlowRampRate_echo', transform: v => (v / 100).toFixed(2) },
             { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => v.toFixed(2) },
-            { key: 'PidSampleTime', id: 'PidSampleTime_echo', transform: v => v },
+            { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
             { key: 'IgnoreLearningDuringPenalty', id: 'IgnoreLearningDuringPenalty_echo', transform: v => v },
             { key: 'AmbientTempCorrectionFactor', id: 'AmbientTempCorrectionFactor_echo', transform: v => (v / 100).toFixed(2) },
             { key: 'xTime', id: 'xTime_echo', transform: v => v },
@@ -5375,7 +5375,7 @@ window.addEventListener("load", function () {
                 PidKp: values[32],                      // 32
                 PidKi: values[33],                      // 33
                 PidKd: values[34],                      // 34
-                PidSampleTime: values[35],              // 35
+                PidSampleDivisor: values[35],              // 35
                 MaxTableValue: values[36],              // 36
                 MinTableValue: values[37],              // 37
                 MaxPenaltyPercent: values[38],          // 38
@@ -5596,8 +5596,12 @@ window.addEventListener("load", function () {
 
                         newTextContent = "—";
                     }
-                    // Values scaled by 1000 for time intervals
-                    else if (["timeSinceLastOverheat", "overheatingPenaltyTimer", "LearningSettlingPeriod", "rebulkDebounceTime", "MinFloatTime"].includes(key)) {
+                    // Values already pre-divided by 1000 in C++ — multiply to restore if needed, or just display raw
+                    else if (["timeSinceLastOverheat", "overheatingPenaltyTimer"].includes(key)) {
+                        newTextContent = (value).toFixed(0);  // already in seconds from C++
+                    }
+                    // Values sent as raw milliseconds — divide by 1000 to display in seconds
+                    else if (["LearningSettlingPeriod", "rebulkDebounceTime", "MinFloatTime"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(0);
                     }
                     // Values scaled by 100 
@@ -5638,6 +5642,7 @@ window.addEventListener("load", function () {
                 ["overheatCount6_display", "overheatCount6"],
                 ["overheatCount7_display", "overheatCount7"],
                 ["overheatCount8_display", "overheatCount8"],
+                ["overheatCount9_display", "overheatCount9"],
                 ["safeHours0_display", "safeHours0"],
                 ["safeHours1_display", "safeHours1"],
                 ["safeHours2_display", "safeHours2"],
@@ -6871,7 +6876,7 @@ function drawPidWatermark(u) {
     const riseRate = getEchoText('SetpointRiseRate_echo');
     const fallRate = getEchoText('SetpointFallRate_echo');
     const dutyRate = getEchoText('DutyRampRate_echo');
-    const sampleTime = getEchoText('PidSampleTime_echo');
+    const sampleTime = getEchoText('PidSampleDivisor_echo');
     const vLoopInt = getEchoText('VoltageLoopInterval_echo');
     const vKp = getEchoText('VoltageKp_echo');
     const vTrim = getEchoText('VoltageTrimLimit_echo');   // <-- added

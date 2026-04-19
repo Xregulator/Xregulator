@@ -624,210 +624,210 @@ void initSensorBuffer() {
 }
 
 void resetSensorWindow() {
-  currentWindow.battVolt_min = 999900;
-  currentWindow.battVolt_max = 0;
-  currentWindow.battVolt_area_v_us = 0;
-  currentWindow.battVolt_valid_us = 0;
+  currentWindow->battVolt_min = 999900;
+  currentWindow->battVolt_max = 0;
+  currentWindow->battVolt_area_v_us = 0;
+  currentWindow->battVolt_valid_us = 0;
 
-  currentWindow.battCurr_min = 999900;
-  currentWindow.battCurr_max = -999900;
-  currentWindow.battCurr_area_v_us = 0;
-  currentWindow.battCurr_valid_us = 0;
+  currentWindow->battCurr_min = 999900;
+  currentWindow->battCurr_max = -999900;
+  currentWindow->battCurr_area_v_us = 0;
+  currentWindow->battCurr_valid_us = 0;
 
-  currentWindow.altCurr_min = 999900;
-  currentWindow.altCurr_max = 0;
-  currentWindow.altCurr_area_v_us = 0;
-  currentWindow.altCurr_valid_us = 0;
+  currentWindow->altCurr_min = 999900;
+  currentWindow->altCurr_max = 0;
+  currentWindow->altCurr_area_v_us = 0;
+  currentWindow->altCurr_valid_us = 0;
 
-  currentWindow.victronCurr_min = 999900;
-  currentWindow.victronCurr_max = -999900;
-  currentWindow.victronCurr_area_v_us = 0;
-  currentWindow.victronCurr_valid_us = 0;
+  currentWindow->victronCurr_min = 999900;
+  currentWindow->victronCurr_max = -999900;
+  currentWindow->victronCurr_area_v_us = 0;
+  currentWindow->victronCurr_valid_us = 0;
 
-  currentWindow.soc_min = 999900;
-  currentWindow.soc_max = 0;
-  currentWindow.soc_area_v_us = 0;
-  currentWindow.soc_valid_us = 0;
+  currentWindow->soc_min = 999900;
+  currentWindow->soc_max = 0;
+  currentWindow->soc_area_v_us = 0;
+  currentWindow->soc_valid_us = 0;
 
-  currentWindow.baro_min = 999900;
-  currentWindow.baro_max = 0;
-  currentWindow.baro_area_v_us = 0;
-  currentWindow.baro_valid_us = 0;
+  currentWindow->baro_min = 999900;
+  currentWindow->baro_max = 0;
+  currentWindow->baro_area_v_us = 0;
+  currentWindow->baro_valid_us = 0;
 
-  currentWindow.altTemp_min = 999900;
-  currentWindow.altTemp_max = -999900;
-  currentWindow.altTemp_area_v_us = 0;
-  currentWindow.altTemp_valid_us = 0;
+  currentWindow->altTemp_min = 999900;
+  currentWindow->altTemp_max = -999900;
+  currentWindow->altTemp_area_v_us = 0;
+  currentWindow->altTemp_valid_us = 0;
 
-  currentWindow.tempTherm_min = 999900;
-  currentWindow.tempTherm_max = -999900;
-  currentWindow.tempTherm_area_v_us = 0;
-  currentWindow.tempTherm_valid_us = 0;
+  currentWindow->tempTherm_min = 999900;
+  currentWindow->tempTherm_max = -999900;
+  currentWindow->tempTherm_area_v_us = 0;
+  currentWindow->tempTherm_valid_us = 0;
 
-  currentWindow.ambTemp_min = 999900;
-  currentWindow.ambTemp_max = -999900;
-  currentWindow.ambTemp_area_v_us = 0;
-  currentWindow.ambTemp_valid_us = 0;
+  currentWindow->ambTemp_min = 999900;
+  currentWindow->ambTemp_max = -999900;
+  currentWindow->ambTemp_area_v_us = 0;
+  currentWindow->ambTemp_valid_us = 0;
 
-  currentWindow.rpm_min = 999900;
-  currentWindow.rpm_max = 0;
-  currentWindow.rpm_area_v_us = 0;
-  currentWindow.rpm_valid_us = 0;
+  currentWindow->rpm_min = 999900;
+  currentWindow->rpm_max = 0;
+  currentWindow->rpm_area_v_us = 0;
+  currentWindow->rpm_valid_us = 0;
 
-  currentWindow.wifiStr_min = 999900;
-  currentWindow.wifiStr_max = -999900;
-  currentWindow.wifiStr_area_v_us = 0;
-  currentWindow.wifiStr_valid_us = 0;
+  currentWindow->wifiStr_min = 999900;
+  currentWindow->wifiStr_max = -999900;
+  currentWindow->wifiStr_area_v_us = 0;
+  currentWindow->wifiStr_valid_us = 0;
 
-  currentWindow.dutyCycle_min = 999900;
-  currentWindow.dutyCycle_max = 0;
-  currentWindow.dutyCycle_area_v_us = 0;
-  currentWindow.dutyCycle_valid_us = 0;
+  currentWindow->dutyCycle_min = 999900;
+  currentWindow->dutyCycle_max = 0;
+  currentWindow->dutyCycle_area_v_us = 0;
+  currentWindow->dutyCycle_valid_us = 0;
 
-  currentWindow.altZero_min = 999900;
-  currentWindow.altZero_max = -999900;
-  currentWindow.altZero_area_v_us = 0;
-  currentWindow.altZero_valid_us = 0;
+  currentWindow->altZero_min = 999900;
+  currentWindow->altZero_max = -999900;
+  currentWindow->altZero_area_v_us = 0;
+  currentWindow->altZero_valid_us = 0;
 
-  currentWindow.sog_min = 999900;
-  currentWindow.sog_max = 0;
-  currentWindow.sog_area_v_us = 0;
-  currentWindow.sog_valid_us = 0;
+  currentWindow->sog_min = 999900;
+  currentWindow->sog_max = 0;
+  currentWindow->sog_area_v_us = 0;
+  currentWindow->sog_valid_us = 0;
 
-  currentWindow.cog_min = 999900;
-  currentWindow.cog_max = 0;
-  currentWindow.cog_area_v_us = 0;
-  currentWindow.cog_valid_us = 0;
+  currentWindow->cog_min = 999900;
+  currentWindow->cog_max = 0;
+  currentWindow->cog_area_v_us = 0;
+  currentWindow->cog_valid_us = 0;
 
-  currentWindow.heading_min = 999900;
-  currentWindow.heading_max = 0;
-  currentWindow.heading_area_v_us = 0;
-  currentWindow.heading_valid_us = 0;
+  currentWindow->heading_min = 999900;
+  currentWindow->heading_max = 0;
+  currentWindow->heading_area_v_us = 0;
+  currentWindow->heading_valid_us = 0;
 
-  currentWindow.aws_min = 999900;
-  currentWindow.aws_max = 0;
-  currentWindow.aws_area_v_us = 0;
-  currentWindow.aws_valid_us = 0;
+  currentWindow->aws_min = 999900;
+  currentWindow->aws_max = 0;
+  currentWindow->aws_area_v_us = 0;
+  currentWindow->aws_valid_us = 0;
 
-  currentWindow.awa_min = 999900;
-  currentWindow.awa_max = 0;
-  currentWindow.awa_area_v_us = 0;
-  currentWindow.awa_valid_us = 0;
+  currentWindow->awa_min = 999900;
+  currentWindow->awa_max = 0;
+  currentWindow->awa_area_v_us = 0;
+  currentWindow->awa_valid_us = 0;
 
-  currentWindow.tws_min = 999900;
-  currentWindow.tws_max = 0;
-  currentWindow.tws_area_v_us = 0;
-  currentWindow.tws_valid_us = 0;
+  currentWindow->tws_min = 999900;
+  currentWindow->tws_max = 0;
+  currentWindow->tws_area_v_us = 0;
+  currentWindow->tws_valid_us = 0;
 
-  currentWindow.twa_min = 999900;
-  currentWindow.twa_max = 0;
-  currentWindow.twa_area_v_us = 0;
-  currentWindow.twa_valid_us = 0;
+  currentWindow->twa_min = 999900;
+  currentWindow->twa_max = 0;
+  currentWindow->twa_area_v_us = 0;
+  currentWindow->twa_valid_us = 0;
 
-  currentWindow.leeway_min = 999900;
-  currentWindow.leeway_max = -999900;
-  currentWindow.leeway_area_v_us = 0;
-  currentWindow.leeway_valid_us = 0;
+  currentWindow->leeway_min = 999900;
+  currentWindow->leeway_max = -999900;
+  currentWindow->leeway_area_v_us = 0;
+  currentWindow->leeway_valid_us = 0;
 
-  currentWindow.vmg_min = 999900;
-  currentWindow.vmg_max = -999900;
-  currentWindow.vmg_area_v_us = 0;
-  currentWindow.vmg_valid_us = 0;
+  currentWindow->vmg_min = 999900;
+  currentWindow->vmg_max = -999900;
+  currentWindow->vmg_area_v_us = 0;
+  currentWindow->vmg_valid_us = 0;
 
-  currentWindow.lat_current = 0;
-  currentWindow.lon_current = 0;
+  currentWindow->lat_current = 0;
+  currentWindow->lon_current = 0;
 
-  currentWindow.uTargetAmps_min = 999900;
-  currentWindow.uTargetAmps_max = -999900;
-  currentWindow.uTargetAmps_area_v_us = 0;
-  currentWindow.uTargetAmps_valid_us = 0;
+  currentWindow->uTargetAmps_min = 999900;
+  currentWindow->uTargetAmps_max = -999900;
+  currentWindow->uTargetAmps_area_v_us = 0;
+  currentWindow->uTargetAmps_valid_us = 0;
 
-  currentWindow.tempMargin_min = 999900;
-  currentWindow.tempMargin_max = -999900;
-  currentWindow.tempMargin_area_v_us = 0;
-  currentWindow.tempMargin_valid_us = 0;
+  currentWindow->tempMargin_min = 999900;
+  currentWindow->tempMargin_max = -999900;
+  currentWindow->tempMargin_area_v_us = 0;
+  currentWindow->tempMargin_valid_us = 0;
 
-  currentWindow.lastUpdateTime_us = micros();  // Initialize timing
-  currentWindow.windowStartTime = millis();
+  currentWindow->lastUpdateTime_us = micros();  // Initialize timing
+  currentWindow->windowStartTime = millis();
 }
 
 void resetAccelWindow() {
   // Raw accel (signed - can be negative, scaled by 1000)
-  imuWindow.accel_x_min = 999900;
-  imuWindow.accel_x_max = -999900;
-  imuWindow.accel_x_area_v_us = 0;
-  imuWindow.accel_x_valid_us = 0;
+  imuWindow->accel_x_min = 999900;
+  imuWindow->accel_x_max = -999900;
+  imuWindow->accel_x_area_v_us = 0;
+  imuWindow->accel_x_valid_us = 0;
 
-  imuWindow.accel_y_min = 999900;
-  imuWindow.accel_y_max = -999900;
-  imuWindow.accel_y_area_v_us = 0;
-  imuWindow.accel_y_valid_us = 0;
+  imuWindow->accel_y_min = 999900;
+  imuWindow->accel_y_max = -999900;
+  imuWindow->accel_y_area_v_us = 0;
+  imuWindow->accel_y_valid_us = 0;
 
-  imuWindow.accel_z_min = 999900;
-  imuWindow.accel_z_max = -999900;
-  imuWindow.accel_z_area_v_us = 0;
-  imuWindow.accel_z_valid_us = 0;
+  imuWindow->accel_z_min = 999900;
+  imuWindow->accel_z_max = -999900;
+  imuWindow->accel_z_area_v_us = 0;
+  imuWindow->accel_z_valid_us = 0;
 
   // Raw gyro (signed - can be negative, scaled by 100)
-  imuWindow.gyro_x_min = 999900;
-  imuWindow.gyro_x_max = -999900;
-  imuWindow.gyro_x_area_v_us = 0;
-  imuWindow.gyro_x_valid_us = 0;
+  imuWindow->gyro_x_min = 999900;
+  imuWindow->gyro_x_max = -999900;
+  imuWindow->gyro_x_area_v_us = 0;
+  imuWindow->gyro_x_valid_us = 0;
 
-  imuWindow.gyro_y_min = 999900;
-  imuWindow.gyro_y_max = -999900;
-  imuWindow.gyro_y_area_v_us = 0;
-  imuWindow.gyro_y_valid_us = 0;
+  imuWindow->gyro_y_min = 999900;
+  imuWindow->gyro_y_max = -999900;
+  imuWindow->gyro_y_area_v_us = 0;
+  imuWindow->gyro_y_valid_us = 0;
 
-  imuWindow.gyro_z_min = 999900;
-  imuWindow.gyro_z_max = -999900;
-  imuWindow.gyro_z_area_v_us = 0;
-  imuWindow.gyro_z_valid_us = 0;
+  imuWindow->gyro_z_min = 999900;
+  imuWindow->gyro_z_max = -999900;
+  imuWindow->gyro_z_area_v_us = 0;
+  imuWindow->gyro_z_valid_us = 0;
 
   // Calculated metrics - heel/pitch (signed, scaled by 100)
-  imuWindow.heel_min = 999900;
-  imuWindow.heel_max = -999900;
-  imuWindow.heel_area_v_us = 0;
-  imuWindow.heel_valid_us = 0;
+  imuWindow->heel_min = 999900;
+  imuWindow->heel_max = -999900;
+  imuWindow->heel_area_v_us = 0;
+  imuWindow->heel_valid_us = 0;
 
-  imuWindow.pitch_min = 999900;
-  imuWindow.pitch_max = -999900;
-  imuWindow.pitch_area_v_us = 0;
-  imuWindow.pitch_valid_us = 0;
+  imuWindow->pitch_min = 999900;
+  imuWindow->pitch_max = -999900;
+  imuWindow->pitch_area_v_us = 0;
+  imuWindow->pitch_valid_us = 0;
 
   // Calculated metrics - accelerations (signed, scaled by 1000)
-  imuWindow.vertical_accel_min = 999900;
-  imuWindow.vertical_accel_max = -999900;
-  imuWindow.vertical_accel_area_v_us = 0;
-  imuWindow.vertical_accel_valid_us = 0;
+  imuWindow->vertical_accel_min = 999900;
+  imuWindow->vertical_accel_max = -999900;
+  imuWindow->vertical_accel_area_v_us = 0;
+  imuWindow->vertical_accel_valid_us = 0;
 
-  imuWindow.total_accel_min = 999900;
-  imuWindow.total_accel_max = 0;  // Total accel is always positive
-  imuWindow.total_accel_area_v_us = 0;
-  imuWindow.total_accel_valid_us = 0;
+  imuWindow->total_accel_min = 999900;
+  imuWindow->total_accel_max = 0;  // Total accel is always positive
+  imuWindow->total_accel_area_v_us = 0;
+  imuWindow->total_accel_valid_us = 0;
 
   // Vibration energy (scaled by 1000000)
-  imuWindow.hf_vibe_min = 999900000;
-  imuWindow.hf_vibe_max = 0;
-  imuWindow.hf_vibe_area_v_us = 0;
-  imuWindow.hf_vibe_valid_us = 0;
+  imuWindow->hf_vibe_min = 999900000;
+  imuWindow->hf_vibe_max = 0;
+  imuWindow->hf_vibe_area_v_us = 0;
+  imuWindow->hf_vibe_valid_us = 0;
 
   // 60s rolling metrics
-  imuWindow.heel_change_60s = 0;
-  imuWindow.heel_deviation_60s = 0;
-  imuWindow.pitch_change_60s = 0;
-  imuWindow.pitch_deviation_60s = 0;
+  imuWindow->heel_change_60s = 0;
+  imuWindow->heel_deviation_60s = 0;
+  imuWindow->pitch_change_60s = 0;
+  imuWindow->pitch_deviation_60s = 0;
 
   // Wave period
-  imuWindow.wave_period = -1000;  // -1.0s scaled
+  imuWindow->wave_period = -1000;  // -1.0s scaled
 
   // Period counters
-  imuWindow.slam_count = 0;
-  imuWindow.slam_peak_max = 0;
+  imuWindow->slam_count = 0;
+  imuWindow->slam_peak_max = 0;
 
   // Timing
-  imuWindow.lastUpdateTime_us = micros();
-  imuWindow.windowStartTime = millis();
+  imuWindow->lastUpdateTime_us = micros();
+  imuWindow->windowStartTime = millis();
 }
 
 void updateSensorWindow() {
@@ -835,71 +835,71 @@ void updateSensorWindow() {
   uint64_t now_us = micros();
   uint64_t delta_us;
 
-  if (currentWindow.lastUpdateTime_us == 0) {
+  if (currentWindow->lastUpdateTime_us == 0) {
     // First call after reset - no delta yet
     delta_us = 0;
   } else {
-    delta_us = now_us - currentWindow.lastUpdateTime_us;
+    delta_us = now_us - currentWindow->lastUpdateTime_us;
   }
 
-  currentWindow.lastUpdateTime_us = now_us;
+  currentWindow->lastUpdateTime_us = now_us;
 
   // If this is the first call (delta_us == 0), skip accumulation but still update min/max
   bool shouldAccumulate = (delta_us > 0);
 
   // Battery voltage
   int32_t battVolt = (int32_t)(getBatteryVoltage() * 100.0);
-  if (battVolt < currentWindow.battVolt_min) currentWindow.battVolt_min = battVolt;
-  if (battVolt > currentWindow.battVolt_max) currentWindow.battVolt_max = battVolt;
+  if (battVolt < currentWindow->battVolt_min) currentWindow->battVolt_min = battVolt;
+  if (battVolt > currentWindow->battVolt_max) currentWindow->battVolt_max = battVolt;
   if (shouldAccumulate) {
-    currentWindow.battVolt_area_v_us += (int64_t)battVolt * delta_us;
-    currentWindow.battVolt_valid_us += delta_us;
+    currentWindow->battVolt_area_v_us += (int64_t)battVolt * delta_us;
+    currentWindow->battVolt_valid_us += delta_us;
   }
 
   // Battery current
   int32_t battCurr = (int32_t)(Bcur * 100.0);
-  if (battCurr < currentWindow.battCurr_min) currentWindow.battCurr_min = battCurr;
-  if (battCurr > currentWindow.battCurr_max) currentWindow.battCurr_max = battCurr;
+  if (battCurr < currentWindow->battCurr_min) currentWindow->battCurr_min = battCurr;
+  if (battCurr > currentWindow->battCurr_max) currentWindow->battCurr_max = battCurr;
   if (shouldAccumulate) {
-    currentWindow.battCurr_area_v_us += (int64_t)battCurr * delta_us;
-    currentWindow.battCurr_valid_us += delta_us;
+    currentWindow->battCurr_area_v_us += (int64_t)battCurr * delta_us;
+    currentWindow->battCurr_valid_us += delta_us;
   }
 
   // Alternator current
   int32_t altCurr = (int32_t)(MeasuredAmps * 100.0);
-  if (altCurr < currentWindow.altCurr_min) currentWindow.altCurr_min = altCurr;
-  if (altCurr > currentWindow.altCurr_max) currentWindow.altCurr_max = altCurr;
+  if (altCurr < currentWindow->altCurr_min) currentWindow->altCurr_min = altCurr;
+  if (altCurr > currentWindow->altCurr_max) currentWindow->altCurr_max = altCurr;
   if (shouldAccumulate) {
-    currentWindow.altCurr_area_v_us += (int64_t)altCurr * delta_us;
-    currentWindow.altCurr_valid_us += delta_us;
+    currentWindow->altCurr_area_v_us += (int64_t)altCurr * delta_us;
+    currentWindow->altCurr_valid_us += delta_us;
   }
 
   // Victron current
   int32_t victronCurr = (int32_t)(VictronCurrent * 100.0);
-  if (victronCurr < currentWindow.victronCurr_min) currentWindow.victronCurr_min = victronCurr;
-  if (victronCurr > currentWindow.victronCurr_max) currentWindow.victronCurr_max = victronCurr;
+  if (victronCurr < currentWindow->victronCurr_min) currentWindow->victronCurr_min = victronCurr;
+  if (victronCurr > currentWindow->victronCurr_max) currentWindow->victronCurr_max = victronCurr;
   if (shouldAccumulate) {
-    currentWindow.victronCurr_area_v_us += (int64_t)victronCurr * delta_us;
-    currentWindow.victronCurr_valid_us += delta_us;
+    currentWindow->victronCurr_area_v_us += (int64_t)victronCurr * delta_us;
+    currentWindow->victronCurr_valid_us += delta_us;
   }
 
   // SOC
   int32_t soc = SOC_percent;
-  if (soc < currentWindow.soc_min) currentWindow.soc_min = soc;
-  if (soc > currentWindow.soc_max) currentWindow.soc_max = soc;
+  if (soc < currentWindow->soc_min) currentWindow->soc_min = soc;
+  if (soc > currentWindow->soc_max) currentWindow->soc_max = soc;
   if (shouldAccumulate) {
-    currentWindow.soc_area_v_us += (int64_t)soc * delta_us;
-    currentWindow.soc_valid_us += delta_us;
+    currentWindow->soc_area_v_us += (int64_t)soc * delta_us;
+    currentWindow->soc_valid_us += delta_us;
   }
 
   // Barometric pressure - CONDITIONAL on freshness
   if (!IS_STALE(IDX_BARO_PRESSURE) && isfinite(baroPressure)) {
     int32_t baro = (int32_t)(baroPressure * 100.0);
-    if (baro < currentWindow.baro_min) currentWindow.baro_min = baro;
-    if (baro > currentWindow.baro_max) currentWindow.baro_max = baro;
+    if (baro < currentWindow->baro_min) currentWindow->baro_min = baro;
+    if (baro > currentWindow->baro_max) currentWindow->baro_max = baro;
     if (shouldAccumulate) {
-      currentWindow.baro_area_v_us += (int64_t)baro * delta_us;
-      currentWindow.baro_valid_us += delta_us;
+      currentWindow->baro_area_v_us += (int64_t)baro * delta_us;
+      currentWindow->baro_valid_us += delta_us;
     }
   }
 
@@ -915,182 +915,182 @@ void updateSensorWindow() {
   } else {
     altTemp = (int32_t)(TempToUse * 100.0);
   }
-  if (altTemp < currentWindow.altTemp_min) currentWindow.altTemp_min = altTemp;
-  if (altTemp > currentWindow.altTemp_max) currentWindow.altTemp_max = altTemp;
+  if (altTemp < currentWindow->altTemp_min) currentWindow->altTemp_min = altTemp;
+  if (altTemp > currentWindow->altTemp_max) currentWindow->altTemp_max = altTemp;
   if (shouldAccumulate && !isnan(TempToUse)) {
-    currentWindow.altTemp_area_v_us += (int64_t)altTemp * delta_us;
-    currentWindow.altTemp_valid_us += delta_us;
+    currentWindow->altTemp_area_v_us += (int64_t)altTemp * delta_us;
+    currentWindow->altTemp_valid_us += delta_us;
   }
 
 // Thermistor temperature - CONDITIONAL on freshness (matches baro/ambient pattern)
   if (!IS_STALE(IDX_THERMISTOR_TEMP) && temperatureThermistor != -99) {
     int32_t tempTherm = (int32_t)(temperatureThermistor * 100.0);
-    if (tempTherm < currentWindow.tempTherm_min) currentWindow.tempTherm_min = tempTherm;
-    if (tempTherm > currentWindow.tempTherm_max) currentWindow.tempTherm_max = tempTherm;
+    if (tempTherm < currentWindow->tempTherm_min) currentWindow->tempTherm_min = tempTherm;
+    if (tempTherm > currentWindow->tempTherm_max) currentWindow->tempTherm_max = tempTherm;
     if (shouldAccumulate) {
-      currentWindow.tempTherm_area_v_us += (int64_t)tempTherm * delta_us;
-      currentWindow.tempTherm_valid_us += delta_us;
+      currentWindow->tempTherm_area_v_us += (int64_t)tempTherm * delta_us;
+      currentWindow->tempTherm_valid_us += delta_us;
     }
   }
 
   // Ambient temperature - CONDITIONAL on freshness
   if (!IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp)) {
     int32_t ambTemp = (int32_t)(ambientTemp * 100.0);
-    if (ambTemp < currentWindow.ambTemp_min) currentWindow.ambTemp_min = ambTemp;
-    if (ambTemp > currentWindow.ambTemp_max) currentWindow.ambTemp_max = ambTemp;
+    if (ambTemp < currentWindow->ambTemp_min) currentWindow->ambTemp_min = ambTemp;
+    if (ambTemp > currentWindow->ambTemp_max) currentWindow->ambTemp_max = ambTemp;
     if (shouldAccumulate) {
-      currentWindow.ambTemp_area_v_us += (int64_t)ambTemp * delta_us;
-      currentWindow.ambTemp_valid_us += delta_us;
+      currentWindow->ambTemp_area_v_us += (int64_t)ambTemp * delta_us;
+      currentWindow->ambTemp_valid_us += delta_us;
     }
   }
 
   // RPM
   int32_t rpm = (int32_t)RPM;
-  if (rpm < currentWindow.rpm_min) currentWindow.rpm_min = rpm;
-  if (rpm > currentWindow.rpm_max) currentWindow.rpm_max = rpm;
+  if (rpm < currentWindow->rpm_min) currentWindow->rpm_min = rpm;
+  if (rpm > currentWindow->rpm_max) currentWindow->rpm_max = rpm;
   if (shouldAccumulate) {
-    currentWindow.rpm_area_v_us += (int64_t)rpm * delta_us;
-    currentWindow.rpm_valid_us += delta_us;
+    currentWindow->rpm_area_v_us += (int64_t)rpm * delta_us;
+    currentWindow->rpm_valid_us += delta_us;
   }
 
   // WiFi strength
   int32_t wifiStr = WifiStrength;
-  if (wifiStr < currentWindow.wifiStr_min) currentWindow.wifiStr_min = wifiStr;
-  if (wifiStr > currentWindow.wifiStr_max) currentWindow.wifiStr_max = wifiStr;
+  if (wifiStr < currentWindow->wifiStr_min) currentWindow->wifiStr_min = wifiStr;
+  if (wifiStr > currentWindow->wifiStr_max) currentWindow->wifiStr_max = wifiStr;
   if (shouldAccumulate) {
-    currentWindow.wifiStr_area_v_us += (int64_t)wifiStr * delta_us;
-    currentWindow.wifiStr_valid_us += delta_us;
+    currentWindow->wifiStr_area_v_us += (int64_t)wifiStr * delta_us;
+    currentWindow->wifiStr_valid_us += delta_us;
   }
 
   // Duty cycle
   int32_t duty = (int32_t)(dutyCycle * 100.0);
-  if (duty < currentWindow.dutyCycle_min) currentWindow.dutyCycle_min = duty;
-  if (duty > currentWindow.dutyCycle_max) currentWindow.dutyCycle_max = duty;
+  if (duty < currentWindow->dutyCycle_min) currentWindow->dutyCycle_min = duty;
+  if (duty > currentWindow->dutyCycle_max) currentWindow->dutyCycle_max = duty;
   if (shouldAccumulate) {
-    currentWindow.dutyCycle_area_v_us += (int64_t)duty * delta_us;
-    currentWindow.dutyCycle_valid_us += delta_us;
+    currentWindow->dutyCycle_area_v_us += (int64_t)duty * delta_us;
+    currentWindow->dutyCycle_valid_us += delta_us;
   }
 
   // Dynamic alternator zero
   int32_t altZero = (int32_t)(DynamicAltCurrentZero * 100.0);
-  if (altZero < currentWindow.altZero_min) currentWindow.altZero_min = altZero;
-  if (altZero > currentWindow.altZero_max) currentWindow.altZero_max = altZero;
+  if (altZero < currentWindow->altZero_min) currentWindow->altZero_min = altZero;
+  if (altZero > currentWindow->altZero_max) currentWindow->altZero_max = altZero;
   if (shouldAccumulate) {
-    currentWindow.altZero_area_v_us += (int64_t)altZero * delta_us;
-    currentWindow.altZero_valid_us += delta_us;
+    currentWindow->altZero_area_v_us += (int64_t)altZero * delta_us;
+    currentWindow->altZero_valid_us += delta_us;
   }
 
   // Target amps (uTargetAmps)
   int32_t targetAmps = (int32_t)(uTargetAmps * 100.0);
-  if (targetAmps < currentWindow.uTargetAmps_min) currentWindow.uTargetAmps_min = targetAmps;
-  if (targetAmps > currentWindow.uTargetAmps_max) currentWindow.uTargetAmps_max = targetAmps;
+  if (targetAmps < currentWindow->uTargetAmps_min) currentWindow->uTargetAmps_min = targetAmps;
+  if (targetAmps > currentWindow->uTargetAmps_max) currentWindow->uTargetAmps_max = targetAmps;
   if (shouldAccumulate) {
-    currentWindow.uTargetAmps_area_v_us += (int64_t)targetAmps * delta_us;
-    currentWindow.uTargetAmps_valid_us += delta_us;
+    currentWindow->uTargetAmps_area_v_us += (int64_t)targetAmps * delta_us;
+    currentWindow->uTargetAmps_valid_us += delta_us;
   }
 
   // Temperature margin
   float tempMargin = TemperatureLimitF - TempToUse;
   int32_t tempMarginScaled = (int32_t)(tempMargin * 100.0);
-  if (tempMarginScaled < currentWindow.tempMargin_min) currentWindow.tempMargin_min = tempMarginScaled;
-  if (tempMarginScaled > currentWindow.tempMargin_max) currentWindow.tempMargin_max = tempMarginScaled;
+  if (tempMarginScaled < currentWindow->tempMargin_min) currentWindow->tempMargin_min = tempMarginScaled;
+  if (tempMarginScaled > currentWindow->tempMargin_max) currentWindow->tempMargin_max = tempMarginScaled;
   if (shouldAccumulate) {
-    currentWindow.tempMargin_area_v_us += (int64_t)tempMarginScaled * delta_us;
-    currentWindow.tempMargin_valid_us += delta_us;
+    currentWindow->tempMargin_area_v_us += (int64_t)tempMarginScaled * delta_us;
+    currentWindow->tempMargin_valid_us += delta_us;
   }
 
 // Speed over ground - CONDITIONAL on freshness
   if (!IS_STALE(IDX_SOG_NMEA)) {
     int32_t sog = (int32_t)(SOGNMEA * 100.0);
-    if (sog < currentWindow.sog_min) currentWindow.sog_min = sog;
-    if (sog > currentWindow.sog_max) currentWindow.sog_max = sog;
+    if (sog < currentWindow->sog_min) currentWindow->sog_min = sog;
+    if (sog > currentWindow->sog_max) currentWindow->sog_max = sog;
     if (shouldAccumulate) {
-      currentWindow.sog_area_v_us += (int64_t)sog * delta_us;
-      currentWindow.sog_valid_us += delta_us;
+      currentWindow->sog_area_v_us += (int64_t)sog * delta_us;
+      currentWindow->sog_valid_us += delta_us;
     }
   }
 
   // Course over ground - CONDITIONAL on freshness
   if (!IS_STALE(IDX_COG_NMEA)) {
     int32_t cog = (int32_t)(COGNMEA * 100.0);
-    if (cog < currentWindow.cog_min) currentWindow.cog_min = cog;
-    if (cog > currentWindow.cog_max) currentWindow.cog_max = cog;
+    if (cog < currentWindow->cog_min) currentWindow->cog_min = cog;
+    if (cog > currentWindow->cog_max) currentWindow->cog_max = cog;
     if (shouldAccumulate) {
-      currentWindow.cog_area_v_us += (int64_t)cog * delta_us;
-      currentWindow.cog_valid_us += delta_us;
+      currentWindow->cog_area_v_us += (int64_t)cog * delta_us;
+      currentWindow->cog_valid_us += delta_us;
     }
   }
 
   // Heading
   if (!IS_STALE(IDX_HEADING_NMEA)) {
     int32_t heading = (int32_t)(HeadingNMEA * 100.0);
-    if (heading < currentWindow.heading_min) currentWindow.heading_min = heading;
-    if (heading > currentWindow.heading_max) currentWindow.heading_max = heading;
+    if (heading < currentWindow->heading_min) currentWindow->heading_min = heading;
+    if (heading > currentWindow->heading_max) currentWindow->heading_max = heading;
     if (shouldAccumulate) {
-      currentWindow.heading_area_v_us += (int64_t)heading * delta_us;
-      currentWindow.heading_valid_us += delta_us;
+      currentWindow->heading_area_v_us += (int64_t)heading * delta_us;
+      currentWindow->heading_valid_us += delta_us;
     }
   }
 
 // Apparent wind speed
   int32_t aws = (int32_t)(ApparentWindSpeedNMEA * 100.0);
-  if (aws < currentWindow.aws_min) currentWindow.aws_min = aws;
-  if (aws > currentWindow.aws_max) currentWindow.aws_max = aws;
+  if (aws < currentWindow->aws_min) currentWindow->aws_min = aws;
+  if (aws > currentWindow->aws_max) currentWindow->aws_max = aws;
   if (shouldAccumulate) {
-    currentWindow.aws_area_v_us += (int64_t)aws * delta_us;
-    currentWindow.aws_valid_us += delta_us;
+    currentWindow->aws_area_v_us += (int64_t)aws * delta_us;
+    currentWindow->aws_valid_us += delta_us;
   }
 
   // Apparent wind angle
   int32_t awa = (int32_t)(ApparentWindAngleNMEA * 100.0);
-  if (awa < currentWindow.awa_min) currentWindow.awa_min = awa;
-  if (awa > currentWindow.awa_max) currentWindow.awa_max = awa;
+  if (awa < currentWindow->awa_min) currentWindow->awa_min = awa;
+  if (awa > currentWindow->awa_max) currentWindow->awa_max = awa;
   if (shouldAccumulate) {
-    currentWindow.awa_area_v_us += (int64_t)awa * delta_us;
-    currentWindow.awa_valid_us += delta_us;
+    currentWindow->awa_area_v_us += (int64_t)awa * delta_us;
+    currentWindow->awa_valid_us += delta_us;
   }
 
   // True wind speed - CONDITIONAL on valid
   if (!isnan(TrueWindSpeedNMEA)) {
     int32_t tws = (int32_t)(TrueWindSpeedNMEA * 100.0);
-    if (tws < currentWindow.tws_min) currentWindow.tws_min = tws;
-    if (tws > currentWindow.tws_max) currentWindow.tws_max = tws;
+    if (tws < currentWindow->tws_min) currentWindow->tws_min = tws;
+    if (tws > currentWindow->tws_max) currentWindow->tws_max = tws;
     if (shouldAccumulate) {
-      currentWindow.tws_area_v_us += (int64_t)tws * delta_us;
-      currentWindow.tws_valid_us += delta_us;
+      currentWindow->tws_area_v_us += (int64_t)tws * delta_us;
+      currentWindow->tws_valid_us += delta_us;
     }
   }
 
   // True wind angle - CONDITIONAL on valid
   if (!isnan(TrueWindAngleNMEA)) {
     int32_t twa = (int32_t)(TrueWindAngleNMEA * 100.0);
-    if (twa < currentWindow.twa_min) currentWindow.twa_min = twa;
-    if (twa > currentWindow.twa_max) currentWindow.twa_max = twa;
+    if (twa < currentWindow->twa_min) currentWindow->twa_min = twa;
+    if (twa > currentWindow->twa_max) currentWindow->twa_max = twa;
     if (shouldAccumulate) {
-      currentWindow.twa_area_v_us += (int64_t)twa * delta_us;
-      currentWindow.twa_valid_us += delta_us;
+      currentWindow->twa_area_v_us += (int64_t)twa * delta_us;
+      currentWindow->twa_valid_us += delta_us;
     }
   }
 
   // Leeway - CONDITIONAL on valid
   if (!isnan(LeewayNMEA)) {
     int32_t leeway = (int32_t)(LeewayNMEA * 100.0);
-    if (leeway < currentWindow.leeway_min) currentWindow.leeway_min = leeway;
-    if (leeway > currentWindow.leeway_max) currentWindow.leeway_max = leeway;
+    if (leeway < currentWindow->leeway_min) currentWindow->leeway_min = leeway;
+    if (leeway > currentWindow->leeway_max) currentWindow->leeway_max = leeway;
     if (shouldAccumulate) {
-      currentWindow.leeway_area_v_us += (int64_t)leeway * delta_us;
-      currentWindow.leeway_valid_us += delta_us;
+      currentWindow->leeway_area_v_us += (int64_t)leeway * delta_us;
+      currentWindow->leeway_valid_us += delta_us;
     }
   }
 
   // VMG - CONDITIONAL on valid
   if (!isnan(VMGNMEA)) {
     int32_t vmg = (int32_t)(VMGNMEA * 100.0);
-    if (vmg < currentWindow.vmg_min) currentWindow.vmg_min = vmg;
-    if (vmg > currentWindow.vmg_max) currentWindow.vmg_max = vmg;
+    if (vmg < currentWindow->vmg_min) currentWindow->vmg_min = vmg;
+    if (vmg > currentWindow->vmg_max) currentWindow->vmg_max = vmg;
     if (shouldAccumulate) {
-      currentWindow.vmg_area_v_us += (int64_t)vmg * delta_us;
-      currentWindow.vmg_valid_us += delta_us;
+      currentWindow->vmg_area_v_us += (int64_t)vmg * delta_us;
+      currentWindow->vmg_valid_us += delta_us;
     }
   }
 
@@ -1098,8 +1098,8 @@ void updateSensorWindow() {
   updateGPSBuffer();
   double smoothLat, smoothLon;
   getSmoothedGPS(smoothLat, smoothLon);
-  currentWindow.lat_current = smoothLat;
-  currentWindow.lon_current = smoothLon;
+  currentWindow->lat_current = smoothLat;
+  currentWindow->lon_current = smoothLon;
 }
 
 // FILE BUFFERING
@@ -1289,80 +1289,80 @@ void saveToLocalBuffer(time_t collectionTime) {
     authToken.c_str(),  // token
     timestampStr,       // timestamp
     FIRMWARE_VERSION,
-    currentWindow.battVolt_min / 100.0,
-    currentWindow.battVolt_max / 100.0,
-    SAFE_AVG(currentWindow.battVolt_area_v_us, currentWindow.battVolt_valid_us),
+    currentWindow->battVolt_min / 100.0,
+    currentWindow->battVolt_max / 100.0,
+    SAFE_AVG(currentWindow->battVolt_area_v_us, currentWindow->battVolt_valid_us),
     AvgVoltage_AllTime,
     (unsigned long)totalVoltageSampleTime_AllTime,
-    currentWindow.battCurr_min / 100.0,
-    currentWindow.battCurr_max / 100.0,
-    SAFE_AVG(currentWindow.battCurr_area_v_us, currentWindow.battCurr_valid_us),
-    currentWindow.altCurr_min / 100.0,
-    currentWindow.altCurr_max / 100.0,
-    SAFE_AVG(currentWindow.altCurr_area_v_us, currentWindow.altCurr_valid_us),
-    currentWindow.victronCurr_min / 100.0,
-    currentWindow.victronCurr_max / 100.0,
-    SAFE_AVG(currentWindow.victronCurr_area_v_us, currentWindow.victronCurr_valid_us),
-    currentWindow.soc_min / 100.0,
-    currentWindow.soc_max / 100.0,
-    SAFE_AVG(currentWindow.soc_area_v_us, currentWindow.soc_valid_us),
+    currentWindow->battCurr_min / 100.0,
+    currentWindow->battCurr_max / 100.0,
+    SAFE_AVG(currentWindow->battCurr_area_v_us, currentWindow->battCurr_valid_us),
+    currentWindow->altCurr_min / 100.0,
+    currentWindow->altCurr_max / 100.0,
+    SAFE_AVG(currentWindow->altCurr_area_v_us, currentWindow->altCurr_valid_us),
+    currentWindow->victronCurr_min / 100.0,
+    currentWindow->victronCurr_max / 100.0,
+    SAFE_AVG(currentWindow->victronCurr_area_v_us, currentWindow->victronCurr_valid_us),
+    currentWindow->soc_min / 100.0,
+    currentWindow->soc_max / 100.0,
+    SAFE_AVG(currentWindow->soc_area_v_us, currentWindow->soc_valid_us),
     AvgSOC_AllTime,
     (unsigned long)totalSocSampleTime_AllTime,
-    currentWindow.baro_min / 100.0,
-    currentWindow.baro_max / 100.0,
-    SAFE_AVG(currentWindow.baro_area_v_us, currentWindow.baro_valid_us),
-    currentWindow.altTemp_min / 100.0,
-    currentWindow.altTemp_max / 100.0,
-    SAFE_AVG(currentWindow.altTemp_area_v_us, currentWindow.altTemp_valid_us),
-    currentWindow.tempTherm_min / 100.0,
-    currentWindow.tempTherm_max / 100.0,
-    SAFE_AVG(currentWindow.tempTherm_area_v_us, currentWindow.tempTherm_valid_us),
-    currentWindow.ambTemp_min / 100.0,
-    currentWindow.ambTemp_max / 100.0,
-    SAFE_AVG(currentWindow.ambTemp_area_v_us, currentWindow.ambTemp_valid_us),
-    currentWindow.rpm_min,
-    currentWindow.rpm_max,
-    (int)SAFE_AVG(currentWindow.rpm_area_v_us, currentWindow.rpm_valid_us),
-    currentWindow.wifiStr_min,
-    currentWindow.wifiStr_max,
-    (int)SAFE_AVG(currentWindow.wifiStr_area_v_us, currentWindow.wifiStr_valid_us),
-    currentWindow.dutyCycle_min / 100.0,
-    currentWindow.dutyCycle_max / 100.0,
-    SAFE_AVG(currentWindow.dutyCycle_area_v_us, currentWindow.dutyCycle_valid_us),
-    currentWindow.altZero_min / 100.0,
-    currentWindow.altZero_max / 100.0,
-    SAFE_AVG(currentWindow.altZero_area_v_us, currentWindow.altZero_valid_us),
-    currentWindow.sog_min / 100.0,
-    currentWindow.sog_max / 100.0,
-    SAFE_AVG(currentWindow.sog_area_v_us, currentWindow.sog_valid_us),
+    currentWindow->baro_min / 100.0,
+    currentWindow->baro_max / 100.0,
+    SAFE_AVG(currentWindow->baro_area_v_us, currentWindow->baro_valid_us),
+    currentWindow->altTemp_min / 100.0,
+    currentWindow->altTemp_max / 100.0,
+    SAFE_AVG(currentWindow->altTemp_area_v_us, currentWindow->altTemp_valid_us),
+    currentWindow->tempTherm_min / 100.0,
+    currentWindow->tempTherm_max / 100.0,
+    SAFE_AVG(currentWindow->tempTherm_area_v_us, currentWindow->tempTherm_valid_us),
+    currentWindow->ambTemp_min / 100.0,
+    currentWindow->ambTemp_max / 100.0,
+    SAFE_AVG(currentWindow->ambTemp_area_v_us, currentWindow->ambTemp_valid_us),
+    currentWindow->rpm_min,
+    currentWindow->rpm_max,
+    (int)SAFE_AVG(currentWindow->rpm_area_v_us, currentWindow->rpm_valid_us),
+    currentWindow->wifiStr_min,
+    currentWindow->wifiStr_max,
+    (int)SAFE_AVG(currentWindow->wifiStr_area_v_us, currentWindow->wifiStr_valid_us),
+    currentWindow->dutyCycle_min / 100.0,
+    currentWindow->dutyCycle_max / 100.0,
+    SAFE_AVG(currentWindow->dutyCycle_area_v_us, currentWindow->dutyCycle_valid_us),
+    currentWindow->altZero_min / 100.0,
+    currentWindow->altZero_max / 100.0,
+    SAFE_AVG(currentWindow->altZero_area_v_us, currentWindow->altZero_valid_us),
+    currentWindow->sog_min / 100.0,
+    currentWindow->sog_max / 100.0,
+    SAFE_AVG(currentWindow->sog_area_v_us, currentWindow->sog_valid_us),
     AvgSpeed_AllTime,
     (unsigned long)totalSpeedSampleTime_AllTime,
-    currentWindow.cog_min / 100.0,
-    currentWindow.cog_max / 100.0,
-    SAFE_AVG(currentWindow.cog_area_v_us, currentWindow.cog_valid_us),
-    currentWindow.heading_min / 100.0,
-    currentWindow.heading_max / 100.0,
-    SAFE_AVG(currentWindow.heading_area_v_us, currentWindow.heading_valid_us),
-    currentWindow.aws_min / 100.0,
-    currentWindow.aws_max / 100.0,
-    SAFE_AVG(currentWindow.aws_area_v_us, currentWindow.aws_valid_us),
-    currentWindow.awa_min / 100.0,
-    currentWindow.awa_max / 100.0,
-    SAFE_AVG(currentWindow.awa_area_v_us, currentWindow.awa_valid_us),
-    currentWindow.tws_min / 100.0,
-    currentWindow.tws_max / 100.0,
-    SAFE_AVG(currentWindow.tws_area_v_us, currentWindow.tws_valid_us),
-    currentWindow.twa_min / 100.0,
-    currentWindow.twa_max / 100.0,
-    SAFE_AVG(currentWindow.twa_area_v_us, currentWindow.twa_valid_us),
-    currentWindow.leeway_min / 100.0,
-    currentWindow.leeway_max / 100.0,
-    SAFE_AVG(currentWindow.leeway_area_v_us, currentWindow.leeway_valid_us),
-    currentWindow.vmg_min / 100.0,
-    currentWindow.vmg_max / 100.0,
-    SAFE_AVG(currentWindow.vmg_area_v_us, currentWindow.vmg_valid_us),
-    currentWindow.lat_current,
-    currentWindow.lon_current,
+    currentWindow->cog_min / 100.0,
+    currentWindow->cog_max / 100.0,
+    SAFE_AVG(currentWindow->cog_area_v_us, currentWindow->cog_valid_us),
+    currentWindow->heading_min / 100.0,
+    currentWindow->heading_max / 100.0,
+    SAFE_AVG(currentWindow->heading_area_v_us, currentWindow->heading_valid_us),
+    currentWindow->aws_min / 100.0,
+    currentWindow->aws_max / 100.0,
+    SAFE_AVG(currentWindow->aws_area_v_us, currentWindow->aws_valid_us),
+    currentWindow->awa_min / 100.0,
+    currentWindow->awa_max / 100.0,
+    SAFE_AVG(currentWindow->awa_area_v_us, currentWindow->awa_valid_us),
+    currentWindow->tws_min / 100.0,
+    currentWindow->tws_max / 100.0,
+    SAFE_AVG(currentWindow->tws_area_v_us, currentWindow->tws_valid_us),
+    currentWindow->twa_min / 100.0,
+    currentWindow->twa_max / 100.0,
+    SAFE_AVG(currentWindow->twa_area_v_us, currentWindow->twa_valid_us),
+    currentWindow->leeway_min / 100.0,
+    currentWindow->leeway_max / 100.0,
+    SAFE_AVG(currentWindow->leeway_area_v_us, currentWindow->leeway_valid_us),
+    currentWindow->vmg_min / 100.0,
+    currentWindow->vmg_max / 100.0,
+    SAFE_AVG(currentWindow->vmg_area_v_us, currentWindow->vmg_valid_us),
+    currentWindow->lat_current,
+    currentWindow->lon_current,
     EngineRunTime_AllTime,
     AlternatorOnTime_AllTime,
     EngineCycles_AllTime,
@@ -1373,12 +1373,12 @@ void saveToLocalBuffer(time_t collectionTime) {
     SolarChargedEnergy / 1000.0,
     SolarChargedEnergy_AllTime / 1000.0,
     intendedIntervalSec,
-    currentWindow.uTargetAmps_min / 100.0,
-    currentWindow.uTargetAmps_max / 100.0,
-    SAFE_AVG(currentWindow.uTargetAmps_area_v_us, currentWindow.uTargetAmps_valid_us),
-    currentWindow.tempMargin_min / 100.0,
-    currentWindow.tempMargin_max / 100.0,
-    SAFE_AVG(currentWindow.tempMargin_area_v_us, currentWindow.tempMargin_valid_us),
+    currentWindow->uTargetAmps_min / 100.0,
+    currentWindow->uTargetAmps_max / 100.0,
+    SAFE_AVG(currentWindow->uTargetAmps_area_v_us, currentWindow->uTargetAmps_valid_us),
+    currentWindow->tempMargin_min / 100.0,
+    currentWindow->tempMargin_max / 100.0,
+    SAFE_AVG(currentWindow->tempMargin_area_v_us, currentWindow->tempMargin_valid_us),
     (unsigned int)totalOverheats,
     (float)totalSafeHours,
     ChargedEnergy_AllTime / 1000.0,
@@ -1732,7 +1732,7 @@ void uploadSensorHistory() {
   // Serial.printf("isRegistered: %d\n", isRegistered);
   // Serial.printf("===================\n");
 
-  if (currentWindow.battVolt_valid_us == 0) {  // check if any data collected
+  if (currentWindow->battVolt_valid_us == 0) {  // check if any data collected
     resetSensorWindow();
     resetAccelWindow();
     return;  // No sensor data at all, skip upload
@@ -1741,7 +1741,7 @@ void uploadSensorHistory() {
   esp_task_wdt_reset();
 
   //Serial.println("=== uploadSensorHistory() ===");
-  // Serial.printf("Samples: %u, buffered: %d\n", currentWindow.sampleCount, bufferedRecordCount);  // OLD - commented out
+  // Serial.printf("Samples: %u, buffered: %d\n", currentWindow->sampleCount, bufferedRecordCount);  // OLD - commented out
 
   // Sync time if needed
   if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && currentTimeSource != TIME_GPS && !timeIsSynced) {
@@ -1751,8 +1751,8 @@ void uploadSensorHistory() {
   saveToLocalBuffer(collectionTime);  // This eventually will include IMU data in JSON
   // CHANGED - Updated debug to show time-weighted stats
   //Serial.printf("UPLOAD DEBUG: baro_min=%d, baro_max=%d, baro_area=%lld, baro_valid_us=%llu\n",
-  //  currentWindow.baro_min, currentWindow.baro_max,
-  //currentWindow.baro_area_v_us, currentWindow.baro_valid_us);
+  //  currentWindow->baro_min, currentWindow->baro_max,
+  //currentWindow->baro_area_v_us, currentWindow->baro_valid_us);
   // Reset BOTH windows after local save
   resetSensorWindow();
   resetAccelWindow();

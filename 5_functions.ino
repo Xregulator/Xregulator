@@ -500,7 +500,7 @@ void checkAndRestart() {
 
     // Save final sensor window if it has data
     // CHANGED - Check if any valid time accumulated instead of sampleCount
-    if (currentWindow.battVolt_valid_us > 0) {
+    if (currentWindow->battVolt_valid_us > 0) {
       Serial.println("Buffering final sensor window before restart");
       time_t collectionTime = computeCollectionTime();
       saveToLocalBuffer(collectionTime);

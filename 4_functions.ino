@@ -608,24 +608,24 @@ void imuInit() {
 }
 void initIMUStructures() {
   // Zero out the entire window structure to avoid garbage values
-  memset(&imuWindow, 0, sizeof(imuWindow));
+  memset(imuWindow, 0, sizeof(ImuWindow));
 
   // Initialize min/max to sentinel values (will be overwritten by first real data)
-  imuWindow.accel_x_min = imuWindow.accel_y_min = imuWindow.accel_z_min = INT32_MAX;
-  imuWindow.accel_x_max = imuWindow.accel_y_max = imuWindow.accel_z_max = INT32_MIN;
-  imuWindow.total_accel_min = imuWindow.vertical_accel_min = INT32_MAX;
-  imuWindow.total_accel_max = imuWindow.vertical_accel_max = INT32_MIN;
-  imuWindow.gyro_x_min = imuWindow.gyro_y_min = imuWindow.gyro_z_min = INT32_MAX;
-  imuWindow.gyro_x_max = imuWindow.gyro_y_max = imuWindow.gyro_z_max = INT32_MIN;
-  imuWindow.heel_min = imuWindow.pitch_min = INT32_MAX;
-  imuWindow.heel_max = imuWindow.pitch_max = INT32_MIN;
+  imuWindow->accel_x_min = imuWindow->accel_y_min = imuWindow->accel_z_min = INT32_MAX;
+  imuWindow->accel_x_max = imuWindow->accel_y_max = imuWindow->accel_z_max = INT32_MIN;
+  imuWindow->total_accel_min = imuWindow->vertical_accel_min = INT32_MAX;
+  imuWindow->total_accel_max = imuWindow->vertical_accel_max = INT32_MIN;
+  imuWindow->gyro_x_min = imuWindow->gyro_y_min = imuWindow->gyro_z_min = INT32_MAX;
+  imuWindow->gyro_x_max = imuWindow->gyro_y_max = imuWindow->gyro_z_max = INT32_MIN;
+  imuWindow->heel_min = imuWindow->pitch_min = INT32_MAX;
+  imuWindow->heel_max = imuWindow->pitch_max = INT32_MIN;
 
   // Initialize timing
-  imuWindow.lastUpdateTime_us = 0;
-  imuWindow.lastGyroUpdateTime_us = 0;
+  imuWindow->lastUpdateTime_us = 0;
+  imuWindow->lastGyroUpdateTime_us = 0;
 
   // Initialize wave period to invalid
-  imuWindow.wave_period = -1000;  // -1.0s scaled
+  imuWindow->wave_period = -1000;  // -1.0s scaled
 
   Serial.println("IMU structures initialized");
 }
@@ -1976,8 +1976,8 @@ void updateAccelMetrics() {
 
     // Calculate time delta for area accumulation
     uint64_t now_us = s->timestamp_us;
-    uint64_t dt_us = (imuWindow.lastUpdateTime_us > 0)
-                       ? (now_us - imuWindow.lastUpdateTime_us)
+    uint64_t dt_us = (imuWindow->lastUpdateTime_us > 0)
+                       ? (now_us - imuWindow->lastUpdateTime_us)
                        : 0;
 
     // Convert to engineering units with full axis permutation + sign remapping
@@ -1995,45 +1995,45 @@ void updateAccelMetrics() {
     // Update window statistics with time-weighted averaging
     if (dt_us > 0 && dt_us < 100000) {  // Sanity check: 0-100ms
       // Accel X
-      if (ax_scaled < imuWindow.accel_x_min) imuWindow.accel_x_min = ax_scaled;
-      if (ax_scaled > imuWindow.accel_x_max) imuWindow.accel_x_max = ax_scaled;
-      imuWindow.accel_x_area_v_us += (int64_t)ax_scaled * dt_us;
-      imuWindow.accel_x_valid_us += dt_us;
+      if (ax_scaled < imuWindow->accel_x_min) imuWindow->accel_x_min = ax_scaled;
+      if (ax_scaled > imuWindow->accel_x_max) imuWindow->accel_x_max = ax_scaled;
+      imuWindow->accel_x_area_v_us += (int64_t)ax_scaled * dt_us;
+      imuWindow->accel_x_valid_us += dt_us;
 
       // Accel Y
-      if (ay_scaled < imuWindow.accel_y_min) imuWindow.accel_y_min = ay_scaled;
-      if (ay_scaled > imuWindow.accel_y_max) imuWindow.accel_y_max = ay_scaled;
-      imuWindow.accel_y_area_v_us += (int64_t)ay_scaled * dt_us;
-      imuWindow.accel_y_valid_us += dt_us;
+      if (ay_scaled < imuWindow->accel_y_min) imuWindow->accel_y_min = ay_scaled;
+      if (ay_scaled > imuWindow->accel_y_max) imuWindow->accel_y_max = ay_scaled;
+      imuWindow->accel_y_area_v_us += (int64_t)ay_scaled * dt_us;
+      imuWindow->accel_y_valid_us += dt_us;
 
       // Accel Z
-      if (az_scaled < imuWindow.accel_z_min) imuWindow.accel_z_min = az_scaled;
-      if (az_scaled > imuWindow.accel_z_max) imuWindow.accel_z_max = az_scaled;
-      imuWindow.accel_z_area_v_us += (int64_t)az_scaled * dt_us;
-      imuWindow.accel_z_valid_us += dt_us;
+      if (az_scaled < imuWindow->accel_z_min) imuWindow->accel_z_min = az_scaled;
+      if (az_scaled > imuWindow->accel_z_max) imuWindow->accel_z_max = az_scaled;
+      imuWindow->accel_z_area_v_us += (int64_t)az_scaled * dt_us;
+      imuWindow->accel_z_valid_us += dt_us;
 
       // Total acceleration magnitude
       float total_accel = sqrt(ax * ax + ay * ay + az * az);
       int32_t total_accel_scaled = (int32_t)(total_accel * 1000.0f);
-      if (total_accel_scaled < imuWindow.total_accel_min) imuWindow.total_accel_min = total_accel_scaled;
-      if (total_accel_scaled > imuWindow.total_accel_max) imuWindow.total_accel_max = total_accel_scaled;
-      imuWindow.total_accel_area_v_us += (int64_t)total_accel_scaled * dt_us;
-      imuWindow.total_accel_valid_us += dt_us;
+      if (total_accel_scaled < imuWindow->total_accel_min) imuWindow->total_accel_min = total_accel_scaled;
+      if (total_accel_scaled > imuWindow->total_accel_max) imuWindow->total_accel_max = total_accel_scaled;
+      imuWindow->total_accel_area_v_us += (int64_t)total_accel_scaled * dt_us;
+      imuWindow->total_accel_valid_us += dt_us;
 
       // Vertical acceleration (Z-axis in vessel frame)
       float vert_accel = az;
       int32_t vert_accel_scaled = az_scaled;  // Already scaled above
-      if (vert_accel_scaled < imuWindow.vertical_accel_min) imuWindow.vertical_accel_min = vert_accel_scaled;
-      if (vert_accel_scaled > imuWindow.vertical_accel_max) imuWindow.vertical_accel_max = vert_accel_scaled;
-      imuWindow.vertical_accel_area_v_us += (int64_t)vert_accel_scaled * dt_us;
-      imuWindow.vertical_accel_valid_us += dt_us;
+      if (vert_accel_scaled < imuWindow->vertical_accel_min) imuWindow->vertical_accel_min = vert_accel_scaled;
+      if (vert_accel_scaled > imuWindow->vertical_accel_max) imuWindow->vertical_accel_max = vert_accel_scaled;
+      imuWindow->vertical_accel_area_v_us += (int64_t)vert_accel_scaled * dt_us;
+      imuWindow->vertical_accel_valid_us += dt_us;
 
       // Slam detection (positive vertical accel spike)
       if (vert_accel > SLAM_THRESHOLD_G) {
-        imuWindow.slam_count++;
+        imuWindow->slam_count++;
         imu_slam_count_lifetime++;
-        if (vert_accel_scaled > imuWindow.slam_peak_max) {
-          imuWindow.slam_peak_max = vert_accel_scaled;
+        if (vert_accel_scaled > imuWindow->slam_peak_max) {
+          imuWindow->slam_peak_max = vert_accel_scaled;
         }
         if (vert_accel > imu_slam_peak_lifetime) {
           imu_slam_peak_lifetime = vert_accel;
@@ -2051,7 +2051,7 @@ void updateAccelMetrics() {
     // TODO: Wave period decimation and processing
     // TODO: High-frequency vibration energy
 
-    imuWindow.lastUpdateTime_us = now_us;
+    imuWindow->lastUpdateTime_us = now_us;
     imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
     samples_processed++;
   }
@@ -2062,8 +2062,8 @@ void updateAccelMetrics() {
 
     // Calculate time delta (uses separate gyro tracker, not shared with accel)
     uint64_t now_us = s->timestamp_us;
-    uint64_t dt_us = (imuWindow.lastGyroUpdateTime_us > 0)
-                       ? (now_us - imuWindow.lastGyroUpdateTime_us)
+    uint64_t dt_us = (imuWindow->lastGyroUpdateTime_us > 0)
+                       ? (now_us - imuWindow->lastGyroUpdateTime_us)
                        : 0;
 
     // Convert to engineering units with full axis permutation + sign remapping
@@ -2081,22 +2081,22 @@ void updateAccelMetrics() {
     // Update window statistics
     if (dt_us > 0 && dt_us < 100000) {  // Sanity check
       // Gyro X
-      if (gx_scaled < imuWindow.gyro_x_min) imuWindow.gyro_x_min = gx_scaled;
-      if (gx_scaled > imuWindow.gyro_x_max) imuWindow.gyro_x_max = gx_scaled;
-      imuWindow.gyro_x_area_v_us += (int64_t)gx_scaled * dt_us;
-      imuWindow.gyro_x_valid_us += dt_us;
+      if (gx_scaled < imuWindow->gyro_x_min) imuWindow->gyro_x_min = gx_scaled;
+      if (gx_scaled > imuWindow->gyro_x_max) imuWindow->gyro_x_max = gx_scaled;
+      imuWindow->gyro_x_area_v_us += (int64_t)gx_scaled * dt_us;
+      imuWindow->gyro_x_valid_us += dt_us;
 
       // Gyro Y
-      if (gy_scaled < imuWindow.gyro_y_min) imuWindow.gyro_y_min = gy_scaled;
-      if (gy_scaled > imuWindow.gyro_y_max) imuWindow.gyro_y_max = gy_scaled;
-      imuWindow.gyro_y_area_v_us += (int64_t)gy_scaled * dt_us;
-      imuWindow.gyro_y_valid_us += dt_us;
+      if (gy_scaled < imuWindow->gyro_y_min) imuWindow->gyro_y_min = gy_scaled;
+      if (gy_scaled > imuWindow->gyro_y_max) imuWindow->gyro_y_max = gy_scaled;
+      imuWindow->gyro_y_area_v_us += (int64_t)gy_scaled * dt_us;
+      imuWindow->gyro_y_valid_us += dt_us;
 
       // Gyro Z
-      if (gz_scaled < imuWindow.gyro_z_min) imuWindow.gyro_z_min = gz_scaled;
-      if (gz_scaled > imuWindow.gyro_z_max) imuWindow.gyro_z_max = gz_scaled;
-      imuWindow.gyro_z_area_v_us += (int64_t)gz_scaled * dt_us;
-      imuWindow.gyro_z_valid_us += dt_us;
+      if (gz_scaled < imuWindow->gyro_z_min) imuWindow->gyro_z_min = gz_scaled;
+      if (gz_scaled > imuWindow->gyro_z_max) imuWindow->gyro_z_max = gz_scaled;
+      imuWindow->gyro_z_area_v_us += (int64_t)gz_scaled * dt_us;
+      imuWindow->gyro_z_valid_us += dt_us;
     }
 
     // Store current raw values
@@ -2115,19 +2115,19 @@ void updateAccelMetrics() {
       int32_t heel_scaled = (int32_t)(cf_heel * 100.0f);
       int32_t pitch_scaled = (int32_t)(cf_pitch * 100.0f);
 
-      if (heel_scaled < imuWindow.heel_min) imuWindow.heel_min = heel_scaled;
-      if (heel_scaled > imuWindow.heel_max) imuWindow.heel_max = heel_scaled;
-      imuWindow.heel_area_v_us += (int64_t)heel_scaled * dt_us;
-      imuWindow.heel_valid_us += dt_us;
+      if (heel_scaled < imuWindow->heel_min) imuWindow->heel_min = heel_scaled;
+      if (heel_scaled > imuWindow->heel_max) imuWindow->heel_max = heel_scaled;
+      imuWindow->heel_area_v_us += (int64_t)heel_scaled * dt_us;
+      imuWindow->heel_valid_us += dt_us;
 
-      if (pitch_scaled < imuWindow.pitch_min) imuWindow.pitch_min = pitch_scaled;
-      if (pitch_scaled > imuWindow.pitch_max) imuWindow.pitch_max = pitch_scaled;
-      imuWindow.pitch_area_v_us += (int64_t)pitch_scaled * dt_us;
-      imuWindow.pitch_valid_us += dt_us;
+      if (pitch_scaled < imuWindow->pitch_min) imuWindow->pitch_min = pitch_scaled;
+      if (pitch_scaled > imuWindow->pitch_max) imuWindow->pitch_max = pitch_scaled;
+      imuWindow->pitch_area_v_us += (int64_t)pitch_scaled * dt_us;
+      imuWindow->pitch_valid_us += dt_us;
     }
     cf_lastUpdate = s->timestamp_us;
 
-    imuWindow.lastGyroUpdateTime_us = now_us;  // separate from accel tracker
+    imuWindow->lastGyroUpdateTime_us = now_us;  // separate from accel tracker
     imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
   }
 
@@ -2164,14 +2164,14 @@ void updateAccelMetrics() {
       float pitch_mean_60s = pitch_sum_60s / rolling60s.count;
 
       // Store as scaled integers (12.34° → 1234)
-      imuWindow.heel_change_60s = (int32_t)((heel_max_60s - heel_min_60s) * 100.0f);
-      imuWindow.pitch_change_60s = (int32_t)((pitch_max_60s - pitch_min_60s) * 100.0f);
+      imuWindow->heel_change_60s = (int32_t)((heel_max_60s - heel_min_60s) * 100.0f);
+      imuWindow->pitch_change_60s = (int32_t)((pitch_max_60s - pitch_min_60s) * 100.0f);
 
       float heel_dev = max(abs(heel_max_60s - heel_mean_60s), abs(heel_min_60s - heel_mean_60s));
       float pitch_dev = max(abs(pitch_max_60s - pitch_mean_60s), abs(pitch_min_60s - pitch_mean_60s));
 
-      imuWindow.heel_deviation_60s = (int32_t)(heel_dev * 100.0f);
-      imuWindow.pitch_deviation_60s = (int32_t)(pitch_dev * 100.0f);
+      imuWindow->heel_deviation_60s = (int32_t)(heel_dev * 100.0f);
+      imuWindow->pitch_deviation_60s = (int32_t)(pitch_dev * 100.0f);
 
       // Update display values
       imu_heel_change_60s = heel_max_60s - heel_min_60s;
@@ -3841,7 +3841,7 @@ const char *formatTimestamp(time_t timestamp) {
 time_t computeCollectionTime() {
   if (timeIsSynced && timeBase > 0) {
     // Compute epoch for window start
-    long long deltaMs = (long long)currentWindow.windowStartTime - (long long)timeBaseMillis;
+    long long deltaMs = (long long)currentWindow->windowStartTime - (long long)timeBaseMillis;
     long long deltaSec = deltaMs / 1000;
     time_t epoch = timeBase + deltaSec;
 
@@ -3852,7 +3852,7 @@ time_t computeCollectionTime() {
   }
 
   // No valid time: return NEGATIVE millis to mark as "needs correction"
-  return -(time_t)currentWindow.windowStartTime;
+  return -(time_t)currentWindow->windowStartTime;
 }
 // Reconstruct timestamp for buffered record
 // Handles negative millis markers and reboot scenarios

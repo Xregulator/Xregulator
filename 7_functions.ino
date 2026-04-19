@@ -1019,7 +1019,7 @@ void ch1_record(uint32_t now) {
     if ((float)iv > runMean * 2.0f) ch1AtOver2x++;
   }
 
-// ── 1s mini-bucket: incremental update, O(1), no ring scan ────────────
+  // ── 1s mini-bucket: incremental update, O(1), no ring scan ────────────
   ch1Bkt1sCurrent.sum += iv;
   ch1Bkt1sCurrent.count++;
   if (iv > ch1Bkt1sCurrent.worst) ch1Bkt1sCurrent.worst = iv;
@@ -1027,10 +1027,10 @@ void ch1_record(uint32_t now) {
   // 1s rollover: close current mini-bucket, open a new one
   if (now - ch1Bkt1sStart >= 1000UL) {
     ch1Bkt1s[ch1Bkt1sHead] = ch1Bkt1sCurrent;
-    ch1Bkt1sHead  = (ch1Bkt1sHead + 1) % CH1_1S_BUCKETS;
+    ch1Bkt1sHead = (ch1Bkt1sHead + 1) % CH1_1S_BUCKETS;
     if (ch1Bkt1sCount < CH1_1S_BUCKETS) ch1Bkt1sCount++;
     ch1Bkt1sCurrent = { 0, 0, 0, 0 };
-    ch1Bkt1sStart   = now;
+    ch1Bkt1sStart = now;
   }
 
   // ── 10s→2m bucket rollover: O(10) mini-bucket sum, no ring scan ────────
@@ -1041,12 +1041,12 @@ void ch1_record(uint32_t now) {
     // Sum all closed 1s mini-buckets
     for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
       uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
-      bkt.sum   += ch1Bkt1s[idx].sum;
+      bkt.sum += ch1Bkt1s[idx].sum;
       bkt.count += ch1Bkt1s[idx].count;
       if (ch1Bkt1s[idx].worst > bkt.worst) bkt.worst = ch1Bkt1s[idx].worst;
     }
     // Include currently open mini-bucket
-    bkt.sum   += ch1Bkt1sCurrent.sum;
+    bkt.sum += ch1Bkt1sCurrent.sum;
     bkt.count += ch1Bkt1sCurrent.count;
     if (ch1Bkt1sCurrent.worst > bkt.worst) bkt.worst = ch1Bkt1sCurrent.worst;
 
@@ -1072,21 +1072,21 @@ void ch1_compute_stats() {
   if (ch1Count == 0) return;
 
   uint32_t now = millis();
-// ── 10s: O(10) mini-bucket scan — no ring access, no PSRAM thrash ────
-  ch1_last_ms    = ch1Ring[(ch1Head + CH1_RING - 1) % CH1_RING].iv;  // O(1) single element
-  ch1_n_10s      = ch1Bkt1sCurrent.count;   // start with open bucket
-  ch1_worst_10s  = ch1Bkt1sCurrent.worst;
-  ch1_over2x_10s = 0;                        // not tracked at 1s granularity
+  // ── 10s: O(10) mini-bucket scan — no ring access, no PSRAM thrash ────
+  ch1_last_ms = ch1Ring[(ch1Head + CH1_RING - 1) % CH1_RING].iv;  // O(1) single element
+  ch1_n_10s = ch1Bkt1sCurrent.count;                              // start with open bucket
+  ch1_worst_10s = ch1Bkt1sCurrent.worst;
+  ch1_over2x_10s = 0;  // not tracked at 1s granularity
   uint32_t sum10 = ch1Bkt1sCurrent.sum;
 
   for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
     uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
-    sum10        += ch1Bkt1s[idx].sum;
-    ch1_n_10s    += ch1Bkt1s[idx].count;
+    sum10 += ch1Bkt1s[idx].sum;
+    ch1_n_10s += ch1Bkt1s[idx].count;
     if (ch1Bkt1s[idx].worst > ch1_worst_10s) ch1_worst_10s = ch1Bkt1s[idx].worst;
   }
   if (ch1_n_10s > 0) ch1_avg_10s = (float)sum10 / (float)ch1_n_10s;
-  else               ch1_avg_10s = 0.0f;
+  else ch1_avg_10s = 0.0f;
 
   // ── 2m ───────────────────────────────────────────────────────────────
   ch1_n_2m = 0;
@@ -1112,30 +1112,30 @@ void ch1_compute_stats() {
 }
 
 void cacheGzFiles() {
-  cachedIndex    = loadFileToRAM("/index.html.gz");
-  cachedCss      = loadFileToRAM("/styles.css.gz");
-  cachedJs       = loadFileToRAM("/script.js.gz");
+  cachedIndex = loadFileToRAM("/index.html.gz");
+  cachedCss = loadFileToRAM("/styles.css.gz");
+  cachedJs = loadFileToRAM("/script.js.gz");
   cachedUplotCss = loadFileToRAM("/uPlot.min.css.gz");
-  cachedUplotJs  = loadFileToRAM("/uPlot.iife.min.js.gz");
+  cachedUplotJs = loadFileToRAM("/uPlot.iife.min.js.gz");
 }
 
 
-bool serveCachedGz(AsyncWebServerRequest* request, const String& path, const String& contentType) {
-  CachedGzFile* cf = nullptr;
-  if      (path == "/index.html")        cf = &cachedIndex;
-  else if (path == "/styles.css")        cf = &cachedCss;
-  else if (path == "/script.js")         cf = &cachedJs;
-  else if (path == "/uPlot.min.css")     cf = &cachedUplotCss;
+bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const String &contentType) {
+  CachedGzFile *cf = nullptr;
+  if (path == "/index.html") cf = &cachedIndex;
+  else if (path == "/styles.css") cf = &cachedCss;
+  else if (path == "/script.js") cf = &cachedJs;
+  else if (path == "/uPlot.min.css") cf = &cachedUplotCss;
   else if (path == "/uPlot.iife.min.js") cf = &cachedUplotJs;
 
   if (cf && cf->data && cf->size > 0) {
-    uint8_t* data = cf->data;
-    size_t   len  = cf->size;
-    AsyncWebServerResponse* resp = request->beginResponse(
+    uint8_t *data = cf->data;
+    size_t len = cf->size;
+    AsyncWebServerResponse *resp = request->beginResponse(
       contentType, len,
-      [data, len](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+      [data, len](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
         size_t remaining = len - index;
-        size_t toSend    = min(maxLen, remaining);
+        size_t toSend = min(maxLen, remaining);
         memcpy(buffer, data + index, toSend);
         return toSend;
       });

@@ -1840,15 +1840,13 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Sample Time (ms) (<span id="PidSampleTime_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the PID controller recalculates. Anything but 100ms is NOT TESTED. DO NOT CHANGE without
-                        inspecting firmware.</span></span>
+                    <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 2 makes it update half as often, etc.  Don't adjust.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="PidSampleTime" type="number" step="1" min="1" max="500000" />
+                      <input name="PidSampleDivisor" type="number" step="1" min="1" max="500000" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -7541,7 +7539,7 @@
     <input id="PidKp" style="display:none;" value="0" />
     <input id="PidKi" style="display:none;" value="0" />
     <input id="PidKd" style="display:none;" value="0" />
-    <input id="PidSampleTime" style="display:none;" value="0" />
+    <input id="PidSampleDivisor" style="display:none;" value="0" />
     <input type="hidden" id="CloudFeatures" name="CloudFeatures" value="0">
     <input type="hidden" id="VMGUseTrueWind" name="VMGUseTrueWind" value="0">
     <input id="AbsorptionVoltage" style="display:none;" value="0" />
