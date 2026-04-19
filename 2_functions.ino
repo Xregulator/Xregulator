@@ -7,8 +7,8 @@
  * AI_RISKS: 
  * CRITICAL_INSTRUCTION_FOR_AI:: When adding new code, try to first use or modify existing code whenever possible, to avoid bloat. When impossible, always mimick my style and coding patterns. If you have a performance improvement idea, tell me. When giving me new code, I prefer complete copy and paste functions when they are short, or for you to give step by step instructions for me to edit if function is long, to conserve tokens. Always specify which option you chose.
  */
- 
- // X Engineering Alternator Regulator
+
+// X Engineering Alternator Regulator
 // Copyright (C) 2026 X Engineering LLC
 // Contact: joe@xengineering.net
 
@@ -48,14 +48,14 @@ String readFile(fs::FS &fs, const char *path) {
   }
 
   size_t size = file.size();
-  if (size > 4096) {  // pick your limit 
+  if (size > 4096) {  // pick your limit
     file.close();
     xSemaphoreGive(fsMutex);
     Serial.printf("readFile: file too large (%u): %s\n", (unsigned)size, path);
-    return String();   // More importantly, callers can't distinguish "file too large" from "file not found" — both return String(). The config payload buffer is 8192 bytes, so it's possible valid config JSON could exceed 4096 bytes. Consider bumping the limit or returning a distinct error indicator.
+    return String();  // More importantly, callers can't distinguish "file too large" from "file not found" — both return String(). The config payload buffer is 8192 bytes, so it's possible valid config JSON could exceed 4096 bytes. Consider bumping the limit or returning a distinct error indicator.
   }
 
-char *buffer = (char *)ps_malloc(size + 1);
+  char *buffer = (char *)ps_malloc(size + 1);
   if (!buffer) {
     file.close();
     xSemaphoreGive(fsMutex);
@@ -922,7 +922,7 @@ void updateSensorWindow() {
     currentWindow->altTemp_valid_us += delta_us;
   }
 
-// Thermistor temperature - CONDITIONAL on freshness (matches baro/ambient pattern)
+  // Thermistor temperature - CONDITIONAL on freshness (matches baro/ambient pattern)
   if (!IS_STALE(IDX_THERMISTOR_TEMP) && temperatureThermistor != -99) {
     int32_t tempTherm = (int32_t)(temperatureThermistor * 100.0);
     if (tempTherm < currentWindow->tempTherm_min) currentWindow->tempTherm_min = tempTherm;
@@ -999,7 +999,7 @@ void updateSensorWindow() {
     currentWindow->tempMargin_valid_us += delta_us;
   }
 
-// Speed over ground - CONDITIONAL on freshness
+  // Speed over ground - CONDITIONAL on freshness
   if (!IS_STALE(IDX_SOG_NMEA)) {
     int32_t sog = (int32_t)(SOGNMEA * 100.0);
     if (sog < currentWindow->sog_min) currentWindow->sog_min = sog;
@@ -1032,7 +1032,7 @@ void updateSensorWindow() {
     }
   }
 
-// Apparent wind speed
+  // Apparent wind speed
   int32_t aws = (int32_t)(ApparentWindSpeedNMEA * 100.0);
   if (aws < currentWindow->aws_min) currentWindow->aws_min = aws;
   if (aws > currentWindow->aws_max) currentWindow->aws_max = aws;

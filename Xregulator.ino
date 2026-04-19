@@ -2707,19 +2707,23 @@ void setup() {
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
-// CH1 interval ring — 30 KB to PSRAM
+  // CH1 interval ring — 30 KB to PSRAM
   ch1Ring = (Ch1Entry *)ps_malloc(sizeof(Ch1Entry) * CH1_RING);
   if (!ch1Ring) Serial.println("FATAL: ch1Ring ps_malloc failed");
   else memset(ch1Ring, 0, sizeof(Ch1Entry) * CH1_RING);
   // Allocate currentWindow to PSRAM — SensorWindow has non-zero defaults (999900 sentinels)
   Serial.printf("Free PSRAM before window allocs: %u bytes\n", ESP.getFreePsram());
   currentWindow = (SensorWindow *)ps_malloc(sizeof(SensorWindow));
-  if (!currentWindow) { Serial.println("FATAL: currentWindow ps_malloc failed"); while(1) delay(100); }
-  else new (currentWindow) SensorWindow();
+  if (!currentWindow) {
+    Serial.println("FATAL: currentWindow ps_malloc failed");
+    while (1) delay(100);
+  } else new (currentWindow) SensorWindow();
   // Allocate imuWindow to PSRAM — ImuWindow has no non-zero defaults
   imuWindow = (ImuWindow *)ps_malloc(sizeof(ImuWindow));
-  if (!imuWindow) { Serial.println("FATAL: imuWindow ps_malloc failed"); while(1) delay(100); }
-  else memset(imuWindow, 0, sizeof(ImuWindow));
+  if (!imuWindow) {
+    Serial.println("FATAL: imuWindow ps_malloc failed");
+    while (1) delay(100);
+  } else memset(imuWindow, 0, sizeof(ImuWindow));
 
   // IMU ring buffer — ~30 KB to PSRAM
   imuRingBuffer = (ImuRingBuffer *)ps_malloc(sizeof(ImuRingBuffer));
