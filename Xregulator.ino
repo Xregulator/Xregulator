@@ -69,8 +69,8 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <mbedtls/pk.h>                  // secure OTA
 #include <mbedtls/base64.h>              // secure OTA
 #include "esp_system.h"                  // secure OTA
-#include <Adafruit_Sensor.h>             // BMP390
-#include <Adafruit_BMP3XX.h>             // BMP390
+#include <Adafruit_Sensor.h>             // BMP390/388
+#include <Adafruit_BMP3XX.h>             // BMP390/388
 #include "esp_partition.h"               // for esp_partition_find_first
 #include "esp_heap_caps.h"
 #include <time.h>            // Supabase

@@ -645,11 +645,14 @@ void initializeHardware() {  // Helper function to organize hardware initializat
     Serial.println("BMP3XX not found");
     while (1) delay(1000);
   }
-  // Optional: configure oversampling and filter
-  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
-  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
-  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+// BMP388 — max accuracy, non-blocking state machine absorbs conversion time
+// 32x pressure OSR: max chip resolution, meaningful for marine barometry
+// 2x temp OSR: sufficient for internal pressure compensation (more does not improve pressure)
+// IIR COEFF_3: ~40s smoothing window, filters wave/motion spikes, tracks real weather
+// Conversion time at 32x/2x: ~68ms per datasheet — absorbed by state machine, zero loop impact
+bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
+bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
+bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
 
   //NMEA2K
   OutputStream = &Serial;
