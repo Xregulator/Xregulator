@@ -1841,7 +1841,8 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 2 makes it update half as often, etc.  Don't adjust.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 2
+                        makes it update half as often, etc. Don't adjust.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -2512,7 +2513,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageLoopInterval" type="number" step="1" min="100" max="5000" />
+                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="9000" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -5651,55 +5652,118 @@
           <div class="card-group">
             <p class="card-group-title">Diagnostics</p>
             <div class="metric-row">
-              <span class="metric-label">IMU Status</span>
+              <span class="metric-label">IMU Status
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Whether the LSM6DSOX IMU is enabled and initialized.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imuEnabled_ID">Disabled</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Mounting Orientation</span>
+              <span class="metric-label">Mounting Orientation
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Detected or configured physical orientation of the IMU on the PCB.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imuMountOrientation_ID">Unknown</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">FIFO Overruns</span>
+              <span class="metric-label">FIFO Overruns
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Count of times the IMU FIFO filled before it could be drained. Indicates
+                    loop() is too slow to keep up with the sensor output rate.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_fifo_overrun_count_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">I²C Errors</span>
+              <span class="metric-label">I²C Errors
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Cumulative I²C communication failures on the IMU bus since boot. A rising
+                    count here points to bus contention or signal integrity issues.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_i2c_error_count_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Unknown Tags</span>
+              <span class="metric-label">Unknown Tags
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">FIFO samples with unrecognised tag bytes. Expected to be zero — a non-zero
+                    value suggests a FIFO configuration mismatch or hardware issue.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_unknown_tag_count_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Accel Ring Drops</span>
+              <span class="metric-label">Accel Ring Drops
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Accelerometer samples discarded because the ring buffer was full. Should be
+                    zero during normal operation.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_accel_dropped_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Gyro Ring Drops</span>
+              <span class="metric-label">Gyro Ring Drops
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Gyroscope samples discarded because the ring buffer was full. Should be zero
+                    during normal operation.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_gyro_dropped_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Total Accel Samples</span>
+              <span class="metric-label">Total Accel Samples
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Cumulative accelerometer samples successfully pushed to the ring buffer
+                    since boot.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_total_samples_accel_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Total Gyro Samples</span>
+              <span class="metric-label">Total Gyro Samples
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Cumulative gyroscope samples successfully pushed to the ring buffer since
+                    boot.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="imu_total_samples_gyro_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">IMU Read Time (current)</span>
+              <span class="metric-label">IMU Read Time (last call)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Duration of the most recent IMU FIFO drain in microseconds. Previously
+                    labelled "current" — now reflects the last completed call via the FuncTiming lastCall field.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="IMUReadTime2_ID">0</span> µs</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">IMU Read Time (max)</span>
+              <span class="metric-label">IMU Read Time (worst 5s)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Worst IMU FIFO drain duration in the rolling 5-second window. Resets every 5
+                    seconds alongside all other function timing windows.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="IMUReadTime_ID">0</span> µs</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Accel Ring Usage</span>
+              <span class="metric-label">Accel Ring Usage
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Current accelerometer ring buffer fill level as a percentage of total
+                    capacity.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="accel_ring_usage_ID">0</span>%</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Gyro Ring Usage</span>
+              <span class="metric-label">Gyro Ring Usage
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Current gyroscope ring buffer fill level as a percentage of total
+                    capacity.</span>
+                </span>
+              </span>
               <span class="metric-value"><span id="gyro_ring_usage_ID">0</span>%</span>
             </div>
           </div>
@@ -5797,14 +5861,6 @@
               <span class="metric-value"><span id="LoopTimeID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Analog Read
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Less than 3,000μs typical</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="AnalogReadTimeID">0</span></span>
-            </div>
-            <div class="metric-row">
               <span class="metric-label">WiFi Send
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">&lt;2,000μs typical; measures the frequent payload (data for plots, sensor
@@ -5812,14 +5868,6 @@
                 </span>
               </span>
               <span class="metric-value"><span id="SendWifiTimeID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">VE Direct
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">12,000μs typical for Victron data</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="VeTimeID">0</span></span>
             </div>
           </div>
 
@@ -5837,6 +5885,7 @@
             </p>
             <div style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 0;">
 
+              <!-- HEADER -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
                 <div style="padding: 6px 8px;"></div>
@@ -5848,6 +5897,7 @@
                   Session Worst</div>
               </div>
 
+              <!-- Read Analog Inputs -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Read Analog Inputs
@@ -5864,6 +5914,112 @@
                 </div>
               </div>
 
+              <!-- ↳ RAI Total -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ RAI Total
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Full ReadAnalogInputs() duration including all sub-sections and any flash
+                      writes. Should match the outer ft_ReadAnalogInputs row closely — a large gap between them
+                      indicates overhead outside the measured sections.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="ft_rai_total_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_rai_total_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- ↳ INA228 -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ INA228
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">INA228 battery monitor read block only. Includes any flash writes
+                      triggered by new voltage max/min values. If this is consistently near zero while RAI Total spikes,
+                      the culprit is ADS, BMP, or IMU.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="ft_rai_ina228_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_rai_ina228_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- ↳ ADS1115 State -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ ADS1115 State
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">ADS1115 state machine cost per state step — not a full conversion cycle. A
+                      spike here indicates an I²C timeout or a slow Wire.requestFrom() call on the ADS bus.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="ft_rai_ads_state_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_rai_ads_state_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- ↳ BMP388 State -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ BMP388 State
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">BMP388 pressure/temperature state machine cost per state step. Normally
+                      near zero — a spike indicates a slow forced-conversion read or I²C contention.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="ft_rai_bmp_state_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_rai_bmp_state_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- ↳ IMU FIFO Drain -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ IMU FIFO Drain
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">LSM6DSOX FIFO drain cost per poll. Scales with sample backlog — if loop()
+                      slows down and samples accumulate, this will spike. Collision avoidance skips the drain if INA228
+                      just ran long, which shows as zero here.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="ft_rai_imu_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_rai_imu_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- VE Direct Read -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">VE Direct Read
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">ReadVEData() duration in µs. ~12,000µs typical for a full Victron frame
+                      parse. Spikes indicate UART contention or a long frame with many fields.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="VeTimeID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="VeTime2_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Alternator Control Logic -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Alternator Control Logic
@@ -5880,6 +6036,7 @@
                 </div>
               </div>
 
+              <!-- Upload Sensor History -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Upload Sensor History
@@ -5896,7 +6053,9 @@
                 </div>
               </div>
 
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+              <!-- Upload Buffered Records -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Upload Buffered Records
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">Times the LittleFS read and queue send. Actual HTTP transfer happens on
@@ -5911,6 +6070,7 @@
                 </div>
               </div>
 
+              <!-- Build Config Payload -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Build Config Payload
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
@@ -5922,10 +6082,9 @@
                     id="ft_buildConfigPayload_win_ID">0</span></div>
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_buildConfigPayload_ses_ID">0</span></div>
+                  <span id="ft_buildConfigPayload_ses_ID">0</span>
+                </div>
               </div>
-
-
 
             </div>
           </div>
@@ -6217,6 +6376,8 @@
               </span>
               <span class="metric-value"><span id="totalPowerCyclesID">0</span></span>
             </div>
+
+
             <div class="metric-row">
               <span class="metric-label">ADS1115 I2C Error Count
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
@@ -6225,8 +6386,18 @@
               </span>
               <span class="metric-value"><span id="adsI2CErrorCount_ID">0</span></span>
             </div>
-          </div>
 
+            <div class="metric-row">
+              <span class="metric-label">FS Write Queue Drops
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Count of LittleFS writes dropped because the async write queue was full.
+                    Non-zero means queue depth needs increasing.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="fsWriteQueueDrops">0</span></span>
+            </div>
+
+          </div>
         </div>
       </div>
     </div>

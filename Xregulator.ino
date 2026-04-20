@@ -69,8 +69,8 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <mbedtls/pk.h>                  // secure OTA
 #include <mbedtls/base64.h>              // secure OTA
 #include "esp_system.h"                  // secure OTA
-#include <BMP388_DEV.h>     //non blocking capability - don't upgrade, this was customized for better error handling by xengineering
-#include "esp_partition.h"  // for esp_partition_find_first
+#include <BMP388_DEV.h>                  //non blocking capability - don't upgrade, this was customized for better error handling by xengineering
+#include "esp_partition.h"               // for esp_partition_find_first
 #include "esp_heap_caps.h"
 #include <time.h>            // Supabase
 #include "esp_psram.h"       // for ESP32 health calculations
@@ -123,6 +123,24 @@ CachedGzFile loadFileToRAM(const char *path) {
   f.close();
   return result;
 }
+
+// ── Async LittleFS write queue ────────────────────────────────
+// Decouples writeFileThrottled() from the actual flash write.
+// FlushFileWriteQueue() drains one entry per loop() call.
+// If queue fills (drops > 0), increase FS_WRITE_QUEUE_DEPTH.
+#define FS_WRITE_QUEUE_DEPTH 16
+#define FS_WRITE_PATH_MAX 48
+#define FS_WRITE_DATA_MAX 48  // bump if any setting value exceeds 47 chars
+
+struct PendingFSWrite {
+  char path[FS_WRITE_PATH_MAX];
+  char data[FS_WRITE_DATA_MAX];
+};
+
+static PendingFSWrite fsWriteQueue[FS_WRITE_QUEUE_DEPTH];
+static volatile uint8_t fsWriteHead = 0;  // consumer (FlushFileWriteQueue)
+static volatile uint8_t fsWriteTail = 0;  // producer (writeFileThrottled)
+uint32_t fsWriteQueueDrops = 0;           // wire into telemetry
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
@@ -419,11 +437,6 @@ constexpr unsigned long IMU_POLL_INTERVAL = 10;  // ms
 // FIFO drain budget
 constexpr uint16_t MAX_FIFO_DRAIN_PER_POLL = 6;   // Conservative start, tune up if needed
 uint8_t fifoBuffer[MAX_FIFO_DRAIN_PER_POLL * 7];  // 7 bytes per FIFO entry
-
-// Timing instrumentation (matches AnalogReadTime pattern)
-int IMUReadTime2 = 0;                            // Current read time
-int IMUReadTime = 0;                             // Max read time in current window
-constexpr unsigned long IMUTrackerTime = 60000;  // Reset window (ms)
 
 // Error/diagnostic counters
 uint32_t imu_fifo_overrun_count = 0;
@@ -779,11 +792,10 @@ bool littleFSMounted = false;
 int INADisconnected = 0;
 int WifiHeartBeat = 0;
 static uint32_t stateRevision = 0;  // used for UX in client interface improvement
-int VeTime = 0;
+int VeTime = 0;                     // rolling
+int VeTime2 = 0;                    //session
+
 int SendWifiTime = 0;
-int AnalogReadTime = 0;        // this is the present
-int AnalogReadTime2 = 0;       // this is the maximum ever
-int AinputTrackerTime = 5000;  //ms- how long between resetting maximum loop time and analog read times in display
 //Needed for ALERT pin on INA228 to shut off Field and delay 10 seconds before retrying if fault condition is gone
 bool inaOvervoltageLatched = false;
 unsigned long inaOvervoltageTime = 0;
@@ -881,7 +893,7 @@ int ManualFieldToggle = 1;           // set to 1 to enable manual control of reg
 int SwitchControlOverride = 1;       // set to 1 for web interface switches to override physical switch panel
 int MaintainMode = 0;                // Set to 1 to target 0 amps at battery
 int TargetVoltageMode = 0;
-float TargetVoltageSetpoint = 0.0f;
+float TargetVoltageSetpoint = 12.6f;
 int OnOff = 0;             // 0 is charger off, 1 is charger On (corresponds to Alternator Enable in Basic Settings)
 int Ignition = 0;          // Digital Input      NEED THIS TO HAVE WIFI ON , FOR NOW
 int IgnitionOverride = 1;  // to fake the ignition signal w/ software
@@ -1631,8 +1643,9 @@ unsigned long prev_millis7888 = 0;  // used to reset the meximum loop time
 // worstWindow resets every FUNC_TIMING_WINDOW_MS — shows current spike behavior
 // worstSession resets only at boot — never lies about session worst
 struct FuncTiming {
-  uint32_t worstWindow;   // worst execution time in current rolling window (µs)
-  uint32_t worstSession;  // worst execution time this session (µs)
+  uint32_t worstWindow;
+  uint32_t worstSession;
+  uint32_t lastCall;  // Most recent individual call duration (µs)
 };
 
 // One instance per timed function
@@ -1662,8 +1675,21 @@ FuncTiming ft_UpdateSailingMetrics;
 FuncTiming ft_updateWeatherMode;
 FuncTiming ft_updateSensorWindow;
 FuncTiming ft_checkTimeSync;
+FuncTiming ft_rai_total;      // ReadAnalogInputs() — full function including flash writes
+FuncTiming ft_rai_ina228;     // INA228 read block only
+FuncTiming ft_rai_ads_state;  // ADS1115 state machine — cost per state step
+FuncTiming ft_rai_bmp_state;  // BMP388 state machine — cost per state step
+FuncTiming ft_rai_imu;        // IMU FIFO drain block
+FuncTiming ft_ReadVEData;
+FuncTiming ft_FlushFileWriteQueue;
 
-// Wrap any void call — records worst-case into both rolling window and session fields.
+// Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
+// Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
+#define AnalogReadTime ft_rai_ina228.worstWindow
+#define AnalogReadTime2 ft_rai_ina228.lastCall
+#define IMUReadTime ft_rai_imu.worstWindow
+#define IMUReadTime2 ft_rai_imu.lastCall
+// Wrap any void call — records last, worst-window, and worst-session into FuncTiming.
 // Nested calls (e.g. a flash write inside ReadAnalogInputs) are fully included in
 // the outer timer, allowing triangulation without needing to instrument sub-calls.
 #define TIMED_CALL(ft, call) \
@@ -1671,15 +1697,17 @@ FuncTiming ft_checkTimeSync;
     uint32_t _t0 = (uint32_t)esp_timer_get_time(); \
     call; \
     uint32_t _dt = (uint32_t)esp_timer_get_time() - _t0; \
+    (ft).lastCall = _dt; \
     if (_dt > (ft).worstWindow) (ft).worstWindow = _dt; \
     if (_dt > (ft).worstSession) (ft).worstSession = _dt; \
   } while (0)
 
 // Session-scoped rolling 5s loop worst (replaces MaximumLoopTime rolling reset)
-uint32_t loopTime5sWindow = 0;  // worst loop time in last AinputTrackerTime window (µs)
-
+uint32_t loopTime5sWindow = 0;                     // worst loop time in last AinputTrackerTime window (µs)
+constexpr unsigned long AinputTrackerTime = 5000;  // rolling window reset interval (ms)
 // Previous session max loop time — snapshot of MaxLoopTime taken at boot before reset
 uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before this one (µs)
+
 // ── End per-function timing ───────────────────────────────────────────────────
 
 
@@ -1766,13 +1794,13 @@ float PidKi = 2.0;   // Integral gain
 float PidKd = 0.01;  // Derivative gain
 // ===== VOLTAGE CONTROL (Float Stage) =====
 float VoltageTrimLimit = 5.0f;       // max trim authority in amps.   OBSOLETE DELETE LATER
-float VoltageKp = 20.0f;             // Voltage loop gain (A per V error), user adjustable
+float VoltageKp = 25.0f;             // Voltage loop gain (A per V error), user adjustable
 uint32_t VoltageLoopInterval = 100;  // Voltage loop update interval (ms), user adjustable
 uint32_t lastVoltageLoopMs = 0;      // Last voltage loop update timestamp
 float Icv = 0.0f;                    // CV velocity-form PI output (A) — direct current setpoint in CV modes
 float cv_I = 0.0f;                   // CV position-form PI integrator state
 bool voltageControlActive = false;   // True when in float stage (suppresses learning)
-float VoltageKi = 2.0f;              // Voltage loop integral gain (A per V per second)
+float VoltageKi = 2.5f;              // Voltage loop integral gain (A per V per second)
 float VoltageTargetRiseRate = 0.3f;  // V/s — slew rate for voltage target rise only ADD TO WEB INTERFACE LATER
 // Table Bounds & Safety
 float MaxTableValue = 150.0;               // Maximum table entry (A)
@@ -2358,8 +2386,8 @@ float g_dIdt2 = 0.0f;              // A/s, newest-to-prev
 float g_dIdt4 = 0.0f;              // A/s, newest-to-oldest in ring
 uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
-bool g_fastIRisingActive = false;
-float g_fastIRisingDutyCap = 100.0f;
+bool  g_iExcessActive  = false;
+float g_iExcessDutyCap = 100.0f;
 
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)
@@ -2619,7 +2647,6 @@ void HandleNMEA2000Msg(const tN2kMsg &N2kMsg);
 // (and other functions)
 void performOTAUpdateToVersion(const char *targetVersion);
 void performOTAUpdate(const UpdateInfo &updateInfo);
-//bool ensureLittleFS(); //remove probably
 
 // HTML for the WiFi configuration page with traditional concatenation
 const char WIFI_CONFIG_HTML[] PROGMEM =
@@ -2833,6 +2860,9 @@ void setup() {
   memset(&ft_updateWeatherMode, 0, sizeof(FuncTiming));
   memset(&ft_updateSensorWindow, 0, sizeof(FuncTiming));
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
+  memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
+memset(&ft_FlushFileWriteQueue, 0, sizeof(FuncTiming));
+
 
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
   ensurePreferredBootPartition();  // Ensure we boot from preferred partition
@@ -3080,6 +3110,8 @@ void loop() {
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   TIMED_CALL(ft_saveNVSData, saveNVSData());                    // Only save current operational data, not session stats
+  TIMED_CALL(ft_saveNVSData, saveNVSData());
+TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
   // Power management affects AP and CLIENT modes, but NOT CONFIG mode (CONFIG mode exits early below)
@@ -3192,7 +3224,9 @@ void loop() {
       // This allows full development/testing even with broken hardware
       TIMED_CALL(ft_calculateDerivedMetrics, calculateDerivedMetrics());  // Calculate true wind, leeway, VMG, duty cycles
       if (VeData == 1 && hardwarePresent == 1) {
-        ReadVEData();  //read Data from Victron (only with real hardware)
+        TIMED_CALL(ft_ReadVEData, ReadVEData());
+        VeTime = ft_ReadVEData.worstWindow;
+        VeTime2 = ft_ReadVEData.worstSession;
       }
       if (NMEA2KData == 1 && hardwarePresent == 1) {
         NMEA2000.ParseMessages();  // CAN bus (only with real hardware)
@@ -3336,6 +3370,15 @@ void loop() {
     ft_updateWeatherMode.worstWindow = 0;
     ft_updateSensorWindow.worstWindow = 0;
     ft_checkTimeSync.worstWindow = 0;
+    ft_rai_total.worstWindow = 0;
+    ft_rai_ina228.worstWindow = 0;
+    ft_rai_ads_state.worstWindow = 0;
+    ft_rai_bmp_state.worstWindow = 0;
+    ft_rai_imu.worstWindow = 0;
+    ft_ReadVEData.worstWindow = 0;
+    ft_FlushFileWriteQueue.worstWindow = 0;
+
+
 
     prev_millis7888 = millis();
   }
@@ -3378,6 +3421,16 @@ void loop() {
                   (uint32_t)(loopTime5sWindow / 1000), (uint32_t)(MaximumLoopTime / 1000));
     Serial.printf("  ReadAnalogInputs:       %4lu / %4lu\n",
                   ft_ReadAnalogInputs.worstWindow / 1000, ft_ReadAnalogInputs.worstSession / 1000);
+    Serial.printf("  RAI total:              %4lu / %4lu\n",
+                  ft_rai_total.worstWindow / 1000, ft_rai_total.worstSession / 1000);
+    Serial.printf("  RAI INA228:             %4lu / %4lu\n",
+                  ft_rai_ina228.worstWindow / 1000, ft_rai_ina228.worstSession / 1000);
+    Serial.printf("  RAI ADS state:          %4lu / %4lu\n",
+                  ft_rai_ads_state.worstWindow / 1000, ft_rai_ads_state.worstSession / 1000);
+    Serial.printf("  RAI BMP state:          %4lu / %4lu\n",
+                  ft_rai_bmp_state.worstWindow / 1000, ft_rai_bmp_state.worstSession / 1000);
+    Serial.printf("  RAI IMU:                %4lu / %4lu\n",
+                  ft_rai_imu.worstWindow / 1000, ft_rai_imu.worstSession / 1000);
     Serial.printf("  saveNVSData:            %4lu / %4lu\n",
                   ft_saveNVSData.worstWindow / 1000, ft_saveNVSData.worstSession / 1000);
     Serial.printf("  Alternator Control:     %4lu / %4lu\n",
@@ -3430,6 +3483,8 @@ void loop() {
     Serial.printf("  checkTimeSync:          %4lu / %4lu\n",
                   ft_checkTimeSync.worstWindow / 1000, ft_checkTimeSync.worstSession / 1000);
     Serial.println("---");
+    Serial.printf("  FlushFileWriteQueue:    %4lu / %4lu\n",
+              ft_FlushFileWriteQueue.worstWindow / 1000, ft_FlushFileWriteQueue.worstSession / 1000);
   }
   // === END FUNCTION TIMING DIGEST ===
 

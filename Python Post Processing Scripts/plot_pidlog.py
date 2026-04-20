@@ -405,7 +405,7 @@ for t in df.loc[df["enteringTargetVoltageMode"] == 1, "t_plot"]:
     ax1s.axvline(x=t, color=EV_COLOR_TVM, linewidth=1.4,
                  linestyle="--", alpha=0.9)
 
-save_fig(fig1, "plot1_voltage")
+# save_fig(fig1, "plot1_voltage")
 # ---------------------------------------------------------------------------
 # PLOT 2 — CV outer loop
 #
@@ -444,7 +444,7 @@ draw_state_strip(ax2s, df, state_changes)
 for t in df.loc[df["voltageLoopRanThisTick"] == 1, "t_plot"]:
     ax2.axvline(x=t, color=EV_COLOR_VLOOP, linewidth=0.7, alpha=0.4)
 
-save_fig(fig2, "plot2_outer_loop")
+# save_fig(fig2, "plot2_outer_loop")
 
 # ---------------------------------------------------------------------------
 # PLOT 3 — Inner PID internals
@@ -501,7 +501,7 @@ add_mode_vlines(ax3a, df, state_changes)
 add_mode_vlines(ax3b, df, state_changes)
 draw_state_strip(ax3s, df, state_changes)
 
-save_fig(fig3, "plot3_inner_pid")
+# save_fig(fig3, "plot3_inner_pid")
 
 # ---------------------------------------------------------------------------
 # PLOT 4 — Duty pipeline + actual amps
@@ -540,7 +540,7 @@ add_event_vlines(ax4, df)
 add_mode_vlines(ax4, df, state_changes)
 draw_state_strip(ax4s, df, state_changes)
 
-save_fig(fig4, "plot4_duty")
+# save_fig(fig4, "plot4_duty")
 
 # ---------------------------------------------------------------------------
 plt.show()

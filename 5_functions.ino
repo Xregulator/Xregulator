@@ -15,6 +15,37 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 
+bool writeFileThrottled(fs::FS &fs, const char *path, const char *value,
+                        unsigned long &lastWriteTime, unsigned long intervalMs = 1000) {
+  unsigned long now = millis();
+  if ((unsigned long)(now - lastWriteTime) >= intervalMs) {
+    lastWriteTime = now;
+    queueFSWrite(path, value);  // was: writeFile(fs, path, value)
+    return true;
+  }
+  return false;
+}
+static bool queueFSWrite(const char *path, const char *data) {
+  uint8_t nextTail = (fsWriteTail + 1) % FS_WRITE_QUEUE_DEPTH;
+  if (nextTail == fsWriteHead) {
+    // Queue full - drop this write
+    fsWriteQueueDrops++;
+    return false;
+  }
+  strlcpy(fsWriteQueue[fsWriteTail].path, path, FS_WRITE_PATH_MAX);
+  strlcpy(fsWriteQueue[fsWriteTail].data, data, FS_WRITE_DATA_MAX);
+  fsWriteTail = nextTail;
+  return true;
+}
+
+// Call once per loop() - drains one entry per call
+void FlushFileWriteQueue() {
+  if (fsWriteHead == fsWriteTail) return;  // queue empty
+  writeFile(LittleFS, fsWriteQueue[fsWriteHead].path,
+            fsWriteQueue[fsWriteHead].data);
+  fsWriteHead = (fsWriteHead + 1) % FS_WRITE_QUEUE_DEPTH;
+}
+
 void SystemTime(const tN2kMsg &N2kMsg) {
   unsigned char SID;
   uint16_t SystemDate;
@@ -1168,28 +1199,32 @@ void UpdateBoardTempPressureMaximums() {
     board_temp_max_alltime = ambientTemp;
     char buf[32];
     snprintf(buf, sizeof(buf), "%.2f", board_temp_max_alltime);
-    writeFile(LittleFS, "/board_temp_max_alltime.txt", buf);
+    static unsigned long lastWrite_board_temp_max = 0;
+    writeFileThrottled(LittleFS, "/board_temp_max_alltime.txt", buf, lastWrite_board_temp_max);
   }
 
   if (ambientTemp < board_temp_min_alltime) {
     board_temp_min_alltime = ambientTemp;
     char buf2[32];
     snprintf(buf2, sizeof(buf2), "%.2f", board_temp_min_alltime);
-    writeFile(LittleFS, "/board_temp_min_alltime.txt", buf2);
+    static unsigned long lastWrite_board_temp_min = 0;
+    writeFileThrottled(LittleFS, "/board_temp_min_alltime.txt", buf2, lastWrite_board_temp_min);
   }
 
   if (baroPressure > baro_pressure_max_alltime) {
     baro_pressure_max_alltime = baroPressure;
     char buf3[32];
     snprintf(buf3, sizeof(buf3), "%.2f", baro_pressure_max_alltime);
-    writeFile(LittleFS, "/baro_pressure_max_alltime.txt", buf3);
+    static unsigned long lastWrite_baro_max = 0;
+    writeFileThrottled(LittleFS, "/baro_pressure_max_alltime.txt", buf3, lastWrite_baro_max);
   }
 
   if (baroPressure < baro_pressure_min_alltime) {
     baro_pressure_min_alltime = baroPressure;
     char buf4[32];
     snprintf(buf4, sizeof(buf4), "%.2f", baro_pressure_min_alltime);
-    writeFile(LittleFS, "/baro_pressure_min_alltime.txt", buf4);
+    static unsigned long lastWrite_baro_min = 0;
+    writeFileThrottled(LittleFS, "/baro_pressure_min_alltime.txt", buf4, lastWrite_baro_min);
   }
 }
 
@@ -1884,20 +1919,6 @@ void updateINA228OvervoltageThreshold() {
   queueConsoleMessageF("INA228: Overvoltage threshold updated to %.2fV", VoltageHardwareLimit);
 }
 
-
-// Throttled write helper - prevents excessive flash writes
-// Returns true if write occurred, false if throttled
-bool writeFileThrottled(fs::FS &fs, const char *path, const char *value,
-                        unsigned long &lastWriteTime, unsigned long intervalMs = 1000) {
-  unsigned long now = millis();
-  if ((unsigned long)(now - lastWriteTime) >= intervalMs) {
-    lastWriteTime = now;
-    writeFile(fs, path, value);
-    return true;
-  }
-  return false;
-}
-
 void checkWebFilesExist() {
   const char *criticalFiles[] = {
     "/index.html.gz",
@@ -1943,103 +1964,97 @@ void checkWebFilesExist() {
   }
 }
 void ReadAnalogInputs() {
+  // Outer wrapper — ft_rai_total captures the true worst-case duration including
+  // any flash writes (writeFileThrottled) and I2C timeouts that the old
+  // INA228-only timer missed entirely. Individual section timers triangulate which
+  // sub-block is responsible when ft_rai_total spikes.
+  TIMED_CALL(ft_rai_total, _ReadAnalogInputs_inner());
+}
 
-  // INA228 Battery Monitor
+void _ReadAnalogInputs_inner() {
+
+  // ── INA228 Battery Monitor ────────────────────────────────────────────────
   static unsigned long lastINARead_local = 0;
 
-  if (millis() - lastINARead_local >= AnalogInputReadInterval) {  // could go down to 600 here, but this logic belongs in Loop anyway
+  if (millis() - lastINARead_local >= AnalogInputReadInterval) {
     if (INADisconnected == 0) {
-      int start33 = micros();  // Start timing analog input reading
       lastINARead_local = millis();
 
-      try {
-        IBV = INA.getBusVoltage();
-        ShuntVoltage_mV = INA.getShuntVoltage() * 1000;
+      // ft_rai_ina228 / AnalogReadTime aliases: worstWindow + lastCall updated by macro
+      TIMED_CALL(ft_rai_ina228, ([&]() {
+                   try {
+                     IBV = INA.getBusVoltage();
+                     ShuntVoltage_mV = INA.getShuntVoltage() * 1000;
 
-        // Sanity check the readings
-        if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
-          Bcur = ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm;
-          Bcur = Bcur + BatteryCOffset;
-          // Apply inversioin if needed
-          if (InvertBattAmps == 1) {
-            Bcur = -Bcur;
-          }
-          // Apply dynamic gain correction only when enabled AND using INA228 shunt
-          if (AutoShuntGainCorrection == 1 && AmpSrc == 1) {
-            Bcur = Bcur * DynamicShuntGainFactor;
-          }
-          BatteryCurrent_scaled = Bcur * 100;  // Store raw value for battery monitoring
-          // Only mark fresh on successful, valid readings
-          MARK_FRESH(IDX_IBV);
-          MARK_FRESH(IDX_BCUR);
-          if (IBV > IBVMax) {
-            IBVMax = IBV;
-            static unsigned long lastWrite_IBVMax = 0;
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%.2f", IBVMax);
-            writeFileThrottled(LittleFS, "/IBVMax.txt", buf, lastWrite_IBVMax);
-          }
+                     // Sanity check the readings
+                     if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
+                       Bcur = ShuntVoltage_mV * 1000.0f / ShuntResistanceMicroOhm;
+                       Bcur = Bcur + BatteryCOffset;
+                       // Apply inversion if needed
+                       if (InvertBattAmps == 1) {
+                         Bcur = -Bcur;
+                       }
+                       // Apply dynamic gain correction only when enabled AND using INA228 shunt
+                       if (AutoShuntGainCorrection == 1 && AmpSrc == 1) {
+                         Bcur = Bcur * DynamicShuntGainFactor;
+                       }
+                       BatteryCurrent_scaled = Bcur * 100;  // Store raw value for battery monitoring
+                       // Only mark fresh on successful, valid readings
+                       MARK_FRESH(IDX_IBV);
+                       MARK_FRESH(IDX_BCUR);
+                       if (IBV > IBVMax) {
+                         IBVMax = IBV;
+                         static unsigned long lastWrite_IBVMax = 0;
+                         char buf[32];
+                         snprintf(buf, sizeof(buf), "%.2f", IBVMax);
+                         writeFileThrottled(LittleFS, "/IBVMax.txt", buf, lastWrite_IBVMax);
+                       }
 
-          if (IBV > PeakVoltage_AllTime) {
-            PeakVoltage_AllTime = IBV;
-            static unsigned long lastWrite_PeakVoltage = 0;
-            char buf2[32];
-            snprintf(buf2, sizeof(buf2), "%.2f", PeakVoltage_AllTime);
-            writeFileThrottled(LittleFS, "/PeakVoltage_AllTime.txt", buf2, lastWrite_PeakVoltage);
-          }
+                       if (IBV > PeakVoltage_AllTime) {
+                         PeakVoltage_AllTime = IBV;
+                         static unsigned long lastWrite_PeakVoltage = 0;
+                         char buf2[32];
+                         snprintf(buf2, sizeof(buf2), "%.2f", PeakVoltage_AllTime);
+                         writeFileThrottled(LittleFS, "/PeakVoltage_AllTime.txt", buf2, lastWrite_PeakVoltage);
+                       }
 
-          if (IBV < MinVoltage) {
-            MinVoltage = IBV;
-            static unsigned long lastWrite_MinVoltage = 0;
-            char buf3[32];
-            snprintf(buf3, sizeof(buf3), "%.2f", MinVoltage);
-            writeFileThrottled(LittleFS, "/MinVoltage.txt", buf3, lastWrite_MinVoltage);
-          }
+                       if (IBV < MinVoltage) {
+                         MinVoltage = IBV;
+                         static unsigned long lastWrite_MinVoltage = 0;
+                         char buf3[32];
+                         snprintf(buf3, sizeof(buf3), "%.2f", MinVoltage);
+                         writeFileThrottled(LittleFS, "/MinVoltage.txt", buf3, lastWrite_MinVoltage);
+                       }
 
-          if (IBV < MinVoltage_AllTime) {
-            MinVoltage_AllTime = IBV;
-            static unsigned long lastWrite_MinVoltageAllTime = 0;
-            char buf4[32];
-            snprintf(buf4, sizeof(buf4), "%.2f", MinVoltage_AllTime);
-            writeFileThrottled(LittleFS, "/MinVoltage_AllTime.txt", buf4, lastWrite_MinVoltageAllTime);
-          }
-        }
+                       if (IBV < MinVoltage_AllTime) {
+                         MinVoltage_AllTime = IBV;
+                         static unsigned long lastWrite_MinVoltageAllTime = 0;
+                         char buf4[32];
+                         snprintf(buf4, sizeof(buf4), "%.2f", MinVoltage_AllTime);
+                         writeFileThrottled(LittleFS, "/MinVoltage_AllTime.txt", buf4, lastWrite_MinVoltageAllTime);
+                       }
+                     }
 
-        int end33 = micros();               // End timing
-        AnalogReadTime2 = end33 - start33;  // Store elapsed time
-
-        static uint32_t lastReset = 0;
-        if (millis() - lastReset >= AinputTrackerTime) {
-          AnalogReadTime = 0;
-          lastReset = millis();
-        }
-
-        if (AnalogReadTime2 > AnalogReadTime) {
-          AnalogReadTime = AnalogReadTime2;
-        }
-
-      } catch (...) {
-        // INA228 read failed - do not call MARK_FRESH
-        static unsigned long lastINAFailureWarning = 0;
-        if (millis() - lastINAFailureWarning > 10000) {
-          Serial.println("INA228 read failed");
-          queueConsoleMessage("INA228 read failed");
-          lastINAFailureWarning = millis();
-        }
-      }
+                   } catch (...) {
+                     // INA228 read failed - do not call MARK_FRESH
+                     static unsigned long lastINAFailureWarning = 0;
+                     if (millis() - lastINAFailureWarning > 10000) {
+                       Serial.println("INA228 read failed");
+                       queueConsoleMessage("INA228 read failed");
+                       lastINAFailureWarning = millis();
+                     }
+                   }
+                 }()));
     }
   }
 
-// ADS1115 non-blocking state machine
+  // ── ADS1115 non-blocking state machine ───────────────────────────────────
   // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples
   // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
   // saving one loop() call per channel. Falls back to ADS_IDLE if <2ms elapsed.
   //
-  // Measured performance (preliminary — full hardware validation pending):
-  //   loop() duration:  3–14ms typical; one-time spike ~150ms on first client page load
-  //   ADS read time:    ~2ms avg
-  //   CH1 interval:     ~5ms typical
-  //   Worst-case not yet characterised under full load with all hardware present
+  // ft_rai_ads_state measures cost per state step (not a full logical read cycle),
+  // which is the correct unit for a non-blocking state machine.
   if (ADS1115Disconnected != 0) {
     // Throttled error message to prevent console spam
     static unsigned long lastADSWarning = 0;
@@ -2051,461 +2066,450 @@ void ReadAnalogInputs() {
   }
 
   unsigned long now = millis();
-  switch (adsState) {
 
-    case ADS_IDLE:
-      // Trigger single-shot conversion on current channel
-      adsTriggeredChannel = adsCurrentChannel;
-      adc.setMux(adsMuxCodes[adsTriggeredChannel]);
-      adc.triggerConversion();
-      adsStateEntered = now;
-      adsState = ADS_WAIT;
-      break;
+  TIMED_CALL(ft_rai_ads_state, ([&]() {
+               switch (adsState) {
 
-    case ADS_WAIT:
-      // Poll OS bit until conversion complete or timeout
-      if (adc.isConversionDone()) {
-        adsState = ADS_READ_RESULT;
-      } else if (now - adsStateEntered > ADS_TIMEOUT_MS) {
-        queueConsoleMessage("ADS1115 timeout ch" + String(adsTriggeredChannel));
-        adsState = ADS_IDLE;  // retry same channel
-      }
-      break;
+                 case ADS_IDLE:
+                   // Trigger single-shot conversion on current channel
+                   adsTriggeredChannel = adsCurrentChannel;
+                   adc.setMux(adsMuxCodes[adsTriggeredChannel]);
+                   adc.triggerConversion();
+                   adsStateEntered = now;
+                   adsState = ADS_WAIT;
+                   break;
 
-    case ADS_READ_RESULT:
-      {
-        // Read conversion register directly - we have already confirmed OS bit is set,
-        // so we bypass adc.getConversion() which would busy-wait/block the loop unnecessarily
-        Wire.beginTransmission(0x48);
-        Wire.write(ADS1115_REG_POINTER_CONVERT);
-        uint8_t endStatus = Wire.endTransmission(false);
-        uint8_t bytesReceived = Wire.requestFrom((uint8_t)0x48, (uint8_t)2);
+                 case ADS_WAIT:
+                   // Poll OS bit until conversion complete or timeout
+                   if (adc.isConversionDone()) {
+                     adsState = ADS_READ_RESULT;
+                   } else if (now - adsStateEntered > ADS_TIMEOUT_MS) {
+                     queueConsoleMessage("ADS1115 timeout ch" + String(adsTriggeredChannel));
+                     adsState = ADS_IDLE;  // retry same channel
+                   }
+                   break;
 
-        bool readOK = (endStatus == 0) && (bytesReceived == 2) && (Wire.available() >= 2);
+                 case ADS_READ_RESULT:
+                   {
+                     // Read conversion register directly - we have already confirmed OS bit is set,
+                     // so we bypass adc.getConversion() which would busy-wait/block the loop unnecessarily
+                     Wire.beginTransmission(0x48);
+                     Wire.write(ADS1115_REG_POINTER_CONVERT);
+                     uint8_t endStatus = Wire.endTransmission(false);
+                     uint8_t bytesReceived = Wire.requestFrom((uint8_t)0x48, (uint8_t)2);
 
-        if (readOK) {
-          Raw = (int16_t)((Wire.read() << 8) | Wire.read());
-        } else {
-          // Drain whatever is in the buffer to leave I2C bus clean
-          while (Wire.available()) Wire.read();
-          adsI2CErrorCount++;
-          queueConsoleMessage("ADS1115 I2C read error ch" + String(adsTriggeredChannel) + " endStatus=" + String(endStatus) + " bytes=" + String(bytesReceived));
-        }
+                     bool readOK = (endStatus == 0) && (bytesReceived == 2) && (Wire.available() >= 2);
 
-        // CRITICAL: Use adsTriggeredChannel, NOT adsSequenceIndex!
-        // Only process and mark fresh on a confirmed good read
-        if (readOK) {
-          switch (adsTriggeredChannel) {
-            case 0:
-              Channel0V = Raw / 32768.0 * 6.144 * 21.0401;  // divider 1,000,000Ω / 49.9kΩ, scale ≈21.0401
-              BatteryV = Channel0V;
-              if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
-                MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
-                battVFreshFlag = true;
-              }
-              break;
+                     if (readOK) {
+                       Raw = (int16_t)((Wire.read() << 8) | Wire.read());
+                     } else {
+                       // Drain whatever is in the buffer to leave I2C bus clean
+                       while (Wire.available()) Wire.read();
+                       adsI2CErrorCount++;
+                       queueConsoleMessage("ADS1115 I2C read error ch" + String(adsTriggeredChannel) + " endStatus=" + String(endStatus) + " bytes=" + String(bytesReceived));
+                     }
 
-              // case 1:
-              //   //Clamp On Sensor QNHCK1-21
-              //   Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
-              //   MeasuredAmps = (Channel1V - 2.5) * 100;   // alternator current
+                     // CRITICAL: Use adsTriggeredChannel, NOT adsSequenceIndex!
+                     // Only process and mark fresh on a confirmed good read
+                     if (readOK) {
+                       switch (adsTriggeredChannel) {
+                         case 0:
+                           Channel0V = Raw / 32768.0 * 6.144 * 21.0401;  // divider 1,000,000Ω / 49.9kΩ, scale ≈21.0401
+                           BatteryV = Channel0V;
+                           if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
+                             MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
+                             battVFreshFlag = true;
+                           }
+                           break;
 
-              //   if (InvertAltAmps == 1) {
-              //     MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
-              //   }
-              //   MeasuredAmps = MeasuredAmps - AlternatorCOffset;
-              //   // Apply dynamic zero correction only when enabled
-              //   if (AutoAltCurrentZero == 1) {
-              //     MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
-              //   }
+                           // case 1:
+                           //   //Clamp On Sensor QNHCK1-21
+                           //   Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
+                           //   MeasuredAmps = (Channel1V - 2.5) * 100;   // alternator current
 
-              //   if (MeasuredAmps > -500 && MeasuredAmps < 500) {  // Sanity check
-              //     MARK_FRESH(IDX_MEASURED_AMPS);
-              //     ch1FreshFlag = true;  // Signal PID that fresh current data is available
-              //   }
+                           //   if (InvertAltAmps == 1) {
+                           //     MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
+                           //   }
+                           //   MeasuredAmps = MeasuredAmps - AlternatorCOffset;
+                           //   // Apply dynamic zero correction only when enabled
+                           //   if (AutoAltCurrentZero == 1) {
+                           //     MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
+                           //   }
+
+                           //   if (MeasuredAmps > -500 && MeasuredAmps < 500) {  // Sanity check
+                           //     MARK_FRESH(IDX_MEASURED_AMPS);
+                           //     ch1FreshFlag = true;  // Signal PID that fresh current data is available
+                           //   }
 
 
-            case 1:
-              ch1_record(millis());
-              //Clamp On Sensor QNHCK1-21
-              Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
-              MeasuredAmps = (Channel1V - 2.5) * 250;   // alternator current (500A sensor)
+                         case 1:
+                           ch1_record(millis());
+                           //Clamp On Sensor QNHCK1-21
+                           Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
+                           MeasuredAmps = (Channel1V - 2.5) * 250;   // alternator current (500A sensor)
 
-              if (InvertAltAmps == 1) {
-                MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
-              }
-              MeasuredAmps = MeasuredAmps - AlternatorCOffset;
-              // Apply dynamic zero correction only when enabled
-              if (AutoAltCurrentZero == 1) {
-                MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
-              }
+                           if (InvertAltAmps == 1) {
+                             MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
+                           }
+                           MeasuredAmps = MeasuredAmps - AlternatorCOffset;
+                           // Apply dynamic zero correction only when enabled
+                           if (AutoAltCurrentZero == 1) {
+                             MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
+                           }
 
-              if (MeasuredAmps > -600 && MeasuredAmps < 600) {  // Sanity check
-                MARK_FRESH(IDX_MEASURED_AMPS);
-                ch1FreshFlag = true;  // Signal PID that fresh current data is available
-              }
+                           if (MeasuredAmps > -600 && MeasuredAmps < 600) {  // Sanity check
+                             MARK_FRESH(IDX_MEASURED_AMPS);
+                             ch1FreshFlag = true;  // Signal PID that fresh current data is available
+                           }
 
-              // ── Current amplitude ring + moving averages ──────────────────────────────
-              // Runs every confirmed CH1 hit. Feeds MA and dI/dt to the fast current
-              // rise supervisor in AdjustFieldLearnMode.
-              {
-                uint32_t now_i = millis();
-                iAmpRing[iAmpHead] = { now_i, MeasuredAmps };
-                iAmpHead = (iAmpHead + 1) % I_RING_SIZE;
-                if (iAmpCount < I_RING_SIZE) iAmpCount++;
+                           // ── Current amplitude ring + moving averages ──────────────────────────────
+                           // Runs every confirmed CH1 hit. Feeds MA and dI/dt to the fast current
+                           // rise supervisor in AdjustFieldLearnMode.
+                           {
+                             uint32_t now_i = millis();
+                             iAmpRing[iAmpHead] = { now_i, MeasuredAmps };
+                             iAmpHead = (iAmpHead + 1) % I_RING_SIZE;
+                             if (iAmpCount < I_RING_SIZE) iAmpCount++;
 
-                // Indices, newest-first (iAmpHead already advanced past newest)
-                uint8_t i0 = (iAmpHead + I_RING_SIZE - 1) % I_RING_SIZE;  // newest
-                uint8_t i1 = (iAmpHead + I_RING_SIZE - 2) % I_RING_SIZE;
-                uint8_t i2 = (iAmpHead + I_RING_SIZE - 3) % I_RING_SIZE;
-                uint8_t i3 = iAmpHead;  // oldest
+                             // Indices, newest-first (iAmpHead already advanced past newest)
+                             uint8_t i0 = (iAmpHead + I_RING_SIZE - 1) % I_RING_SIZE;  // newest
+                             uint8_t i1 = (iAmpHead + I_RING_SIZE - 2) % I_RING_SIZE;
+                             uint8_t i2 = (iAmpHead + I_RING_SIZE - 3) % I_RING_SIZE;
+                             uint8_t i3 = iAmpHead;  // oldest
 
-                if (iAmpCount >= 2) {
-                  g_iMA2 = (iAmpRing[i0].val + iAmpRing[i1].val) * 0.5f;
-                  uint32_t dt2 = iAmpRing[i0].ts - iAmpRing[i1].ts;
-                  g_dIdt2 = (dt2 > 0) ? (iAmpRing[i0].val - iAmpRing[i1].val)
-                                          / ((float)dt2 * 0.001f)
-                                      : 0.0f;
-                } else {
-                  g_iMA2 = MeasuredAmps;
-                  g_dIdt2 = 0.0f;
-                }
+                             if (iAmpCount >= 2) {
+                               g_iMA2 = (iAmpRing[i0].val + iAmpRing[i1].val) * 0.5f;
+                               uint32_t dt2 = iAmpRing[i0].ts - iAmpRing[i1].ts;
+                               g_dIdt2 = (dt2 > 0) ? (iAmpRing[i0].val - iAmpRing[i1].val)
+                                                       / ((float)dt2 * 0.001f)
+                                                   : 0.0f;
+                             } else {
+                               g_iMA2 = MeasuredAmps;
+                               g_dIdt2 = 0.0f;
+                             }
 
-                if (iAmpCount >= 4) {
-                  g_iMA4 = (iAmpRing[i0].val + iAmpRing[i1].val
-                            + iAmpRing[i2].val + iAmpRing[i3].val)
-                           * 0.25f;
-                  uint32_t dt4 = iAmpRing[i0].ts - iAmpRing[i3].ts;
-                  g_dIdt4 = (dt4 > 0) ? (iAmpRing[i0].val - iAmpRing[i3].val)
-                                          / ((float)dt4 * 0.001f)
-                                      : 0.0f;
-                } else {
-                  g_iMA4 = g_iMA2;
-                  g_dIdt4 = g_dIdt2;
-                }
-              }
+                             if (iAmpCount >= 4) {
+                               g_iMA4 = (iAmpRing[i0].val + iAmpRing[i1].val
+                                         + iAmpRing[i2].val + iAmpRing[i3].val)
+                                        * 0.25f;
+                               uint32_t dt4 = iAmpRing[i0].ts - iAmpRing[i3].ts;
+                               g_dIdt4 = (dt4 > 0) ? (iAmpRing[i0].val - iAmpRing[i3].val)
+                                                       / ((float)dt4 * 0.001f)
+                                                   : 0.0f;
+                             } else {
+                               g_iMA4 = g_iMA2;
+                               g_dIdt4 = g_dIdt2;
+                             }
+                           }
 
-              // ── cvLog: write here, tied to actual CH1 sample arrival ──────────────────
-              // Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
-              // reflect the previous control tick — one-tick lag is acceptable for analysis.
-              cvLog_tick(millis());
+                           // ── cvLog: write here, tied to actual CH1 sample arrival ──────────────────
+                           // Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
+                           // reflect the previous control tick — one-tick lag is acceptable for analysis.
+                           cvLog_tick(millis());
 
-              // Track max values
-              if (MeasuredAmps > MeasuredAmpsMax) {
-                MeasuredAmpsMax = MeasuredAmps;
-                static unsigned long lastWrite_MeasuredAmpsMax = 0;
-                char bufA[32];
-                snprintf(bufA, sizeof(bufA), "%.2f", MeasuredAmpsMax);
-                writeFileThrottled(LittleFS, "/MeasuredAmpsMax.txt", bufA, lastWrite_MeasuredAmpsMax);
-              }
-              if (MeasuredAmps > MeasuredAmpsMax_AllTime) {
-                MeasuredAmpsMax_AllTime = MeasuredAmps;
-                static unsigned long lastWrite_MeasuredAmpsMaxAllTime = 0;
-                char bufA2[32];
-                snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
-                writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
-              }
-              break;
+                           // Track max values
+                           if (MeasuredAmps > MeasuredAmpsMax) {
+                             MeasuredAmpsMax = MeasuredAmps;
+                             static unsigned long lastWrite_MeasuredAmpsMax = 0;
+                             char bufA[32];
+                             snprintf(bufA, sizeof(bufA), "%.2f", MeasuredAmpsMax);
+                             writeFileThrottled(LittleFS, "/MeasuredAmpsMax.txt", bufA, lastWrite_MeasuredAmpsMax);
+                           }
+                           if (MeasuredAmps > MeasuredAmpsMax_AllTime) {
+                             MeasuredAmpsMax_AllTime = MeasuredAmps;
+                             static unsigned long lastWrite_MeasuredAmpsMaxAllTime = 0;
+                             char bufA2[32];
+                             snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
+                             writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
+                           }
+                           break;
 
-            case 2:
-              Channel2V = Raw / 32768.0 * 2 * 6.144 * RPMScalingFactor;
-              RPM = Channel2V;
+                         case 2:
+                           Channel2V = Raw / 32768.0 * 2 * 6.144 * RPMScalingFactor;
+                           RPM = Channel2V;
 
-              if (RPM > RPMMax) {
-                RPMMax = RPM;
-                static unsigned long lastWrite_RPMMax = 0;
-                char bufR[32];
-                snprintf(bufR, sizeof(bufR), "%.0f", RPMMax);
-                writeFileThrottled(LittleFS, "/RPMMax.txt", bufR, lastWrite_RPMMax);
-              }
-              if (RPM > RPMMax_AllTime) {
-                RPMMax_AllTime = RPM;
-                static unsigned long lastWrite_RPMMaxAllTime = 0;
-                char bufR2[32];
-                snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
-                writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
-              }
+                           if (RPM > RPMMax) {
+                             RPMMax = RPM;
+                             static unsigned long lastWrite_RPMMax = 0;
+                             char bufR[32];
+                             snprintf(bufR, sizeof(bufR), "%.0f", RPMMax);
+                             writeFileThrottled(LittleFS, "/RPMMax.txt", bufR, lastWrite_RPMMax);
+                           }
+                           if (RPM > RPMMax_AllTime) {
+                             RPMMax_AllTime = RPM;
+                             static unsigned long lastWrite_RPMMaxAllTime = 0;
+                             char bufR2[32];
+                             snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
+                             writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
+                           }
 
-              if (RPM < 100) {
-                RPM = 0;
-              }
-              if (RPM >= 0 && RPM < 10000) {  // Sanity check
-                MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
-              }
-              break;
+                           if (RPM < 100) {
+                             RPM = 0;
+                           }
+                           if (RPM >= 0 && RPM < 10000) {  // Sanity check
+                             MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
+                           }
+                           break;
 
-            case 3:
-              Channel3V = Raw / 32768.0 * 6.144 * 833 * 2;
-              temperatureThermistor = thermistorTempC(Channel3V);
+                         case 3:
+                           Channel3V = Raw / 32768.0 * 6.144 * 833 * 2;
+                           temperatureThermistor = thermistorTempC(Channel3V);
 
-              if (temperatureThermistor > 500) {
-                temperatureThermistor = -99;
-              }
-              if (Channel3V > 150) {
-                Channel3V = -99;
-              }
-              if (Channel3V > 0 && Channel3V < 100) {  // Sanity check for Channel3V
-                MARK_FRESH(IDX_CHANNEL3V);
-              }
-              if (temperatureThermistor > -50 && temperatureThermistor < 200) {  // Sanity check for temp
-                MARK_FRESH(IDX_THERMISTOR_TEMP);
+                           if (temperatureThermistor > 500) {
+                             temperatureThermistor = -99;
+                           }
+                           if (Channel3V > 150) {
+                             Channel3V = -99;
+                           }
+                           if (Channel3V > 0 && Channel3V < 100) {  // Sanity check for Channel3V
+                             MARK_FRESH(IDX_CHANNEL3V);
+                           }
+                           if (temperatureThermistor > -50 && temperatureThermistor < 200) {  // Sanity check for temp
+                             MARK_FRESH(IDX_THERMISTOR_TEMP);
 
-                // Track max thermistor temperature (session)
-                if (temperatureThermistor > MaxTemperatureThermistor) {
-                  MaxTemperatureThermistor = temperatureThermistor;
-                  static unsigned long lastWrite_MaxTempTherm = 0;
-                  char bufT[32];
-                  snprintf(bufT, sizeof(bufT), "%.1f", MaxTemperatureThermistor);
-                  writeFileThrottled(LittleFS, "/MaxTemperatureThermistor.txt", bufT, lastWrite_MaxTempTherm);
-                }
+                             // Track max thermistor temperature (session)
+                             if (temperatureThermistor > MaxTemperatureThermistor) {
+                               MaxTemperatureThermistor = temperatureThermistor;
+                               static unsigned long lastWrite_MaxTempTherm = 0;
+                               char bufT[32];
+                               snprintf(bufT, sizeof(bufT), "%.1f", MaxTemperatureThermistor);
+                               writeFileThrottled(LittleFS, "/MaxTemperatureThermistor.txt", bufT, lastWrite_MaxTempTherm);
+                             }
 
-                // Track max thermistor temperature (lifetime)
-                if (temperatureThermistor > MaxTemperatureThermistor_AllTime) {
-                  MaxTemperatureThermistor_AllTime = temperatureThermistor;
-                  static unsigned long lastWrite_MaxTempThermAllTime = 0;
-                  char bufT2[32];
-                  snprintf(bufT2, sizeof(bufT2), "%.1f", MaxTemperatureThermistor_AllTime);
-                  writeFileThrottled(LittleFS, "/MaxTemperatureThermistor_AllTime.txt", bufT2, lastWrite_MaxTempThermAllTime);
-                }
-              }
-              break;
-          }
-        }
+                             // Track max thermistor temperature (lifetime)
+                             if (temperatureThermistor > MaxTemperatureThermistor_AllTime) {
+                               MaxTemperatureThermistor_AllTime = temperatureThermistor;
+                               static unsigned long lastWrite_MaxTempThermAllTime = 0;
+                               char bufT2[32];
+                               snprintf(bufT2, sizeof(bufT2), "%.1f", MaxTemperatureThermistor_AllTime);
+                               writeFileThrottled(LittleFS, "/MaxTemperatureThermistor_AllTime.txt", bufT2, lastWrite_MaxTempThermAllTime);
+                             }
+                           }
+                           break;
+                       }
+                     }
 
-        // Advance to next channel and return to IDLE
-        // Change 1: sequence — CH1 gets 3 of 6 slots, worst-case gap = 2 conversion cycles
-        static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };  // was {0, 1, 0, 1, 2, 3}
-        static const uint8_t adsSeqLen = 6;
+                     // Advance to next channel and return to IDLE
+                     // Change 1: sequence — CH1 gets 3 of 6 slots, worst-case gap = 2 conversion cycles
+                     static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };  // was {0, 1, 0, 1, 2, 3}
+                     static const uint8_t adsSeqLen = 6;
 
-        static uint8_t adsSeqIdx = 0;
-        adsSeqIdx = (adsSeqIdx + 1) % adsSeqLen;
-        adsCurrentChannel = adsSeq[adsSeqIdx];
+                     static uint8_t adsSeqIdx = 0;
+                     adsSeqIdx = (adsSeqIdx + 1) % adsSeqLen;
+                     adsCurrentChannel = adsSeq[adsSeqIdx];
 
-        // Back-to-back trigger: fire next conversion immediately if ≥2ms has
-        // elapsed since this conversion was triggered. At 860SPS (1.16ms) and
-        // ~3ms loop cadence this is always true, saving one loop() call per
-        // channel. Falls back to ADS_IDLE if called too soon (protects WiFi).
-        if (millis() - adsStateEntered >= 2) {
-          adsTriggeredChannel = adsCurrentChannel;
-          adc.setMux(adsMuxCodes[adsTriggeredChannel]);
-          adc.triggerConversion();
-          adsStateEntered = millis();
-          adsState = ADS_WAIT;
-        } else {
-          adsState = ADS_IDLE;
-        }
-        break;
-      }
-  }
+                     // Back-to-back trigger: fire next conversion immediately if ≥2ms has
+                     // elapsed since this conversion was triggered. At 860SPS (1.16ms) and
+                     // ~3ms loop cadence this is always true, saving one loop() call per
+                     // channel. Falls back to ADS_IDLE if called too soon (protects WiFi).
+                     if (millis() - adsStateEntered >= 2) {
+                       adsTriggeredChannel = adsCurrentChannel;
+                       adc.setMux(adsMuxCodes[adsTriggeredChannel]);
+                       adc.triggerConversion();
+                       adsStateEntered = millis();
+                       adsState = ADS_WAIT;
+                     } else {
+                       adsState = ADS_IDLE;
+                     }
+                     break;
+                   }
+               }
+             }()));
 
-  // ============================================================================
-  // BMP388 forced-mode non-blocking state machine
+
+  // ── BMP388 forced-mode non-blocking state machine ────────────────────────
   // x32 pressure, x2 temperature, IIR filter enabled
-  // Trigger conversion, return immediately, poll until ready, burst-read once
-  // ============================================================================
+  // Trigger conversion, return immediately, poll until ready, burst-read once.
+  // ft_rai_bmp_state measures cost per state step.
+  {
+    enum BMPState {
+      BMP_IDLE,
+      BMP_WAIT_READY
+    };
 
-  enum BMPState {
-    BMP_IDLE,
-    BMP_WAIT_READY
-  };
+    static BMPState bmpState = BMP_IDLE;
+    static uint32_t bmpLastCycleMs = 0;
+    static uint32_t bmpTriggerMs = 0;
+    static bool bmpFirstReadDone = false;
 
-  static BMPState bmpState = BMP_IDLE;
-  static uint32_t bmpLastCycleMs = 0;
-  static uint32_t bmpTriggerMs = 0;
-  static bool bmpFirstReadDone = false;
+    float temperature, pressure, altitude;
 
-  float temperature, pressure, altitude;
+    TIMED_CALL(ft_rai_bmp_state, ([&]() {
+                 switch (bmpState) {
 
-  switch (bmpState) {
+                   case BMP_IDLE:
+                     // Change this interval to whatever you want. This is only the trigger cadence.
+                     if (millis() - bmpLastCycleMs >= 10000) {
+                       bmp388.startForcedConversion();  // returns immediately if sensor is in sleep
+                       bmpTriggerMs = millis();
+                       bmpState = BMP_WAIT_READY;
+                     }
+                     break;
 
-    case BMP_IDLE:
-      // Change this interval to whatever you want. This is only the trigger cadence.
-      if (millis() - bmpLastCycleMs >= 10000) {
-        bmp388.startForcedConversion();  // returns immediately if sensor is in sleep
-        bmpTriggerMs = millis();
-        bmpState = BMP_WAIT_READY;
-      }
-      break;
+                   case BMP_WAIT_READY:
+                     // Non-blocking poll. Returns 0 until data ready, then does the short read.
+                     if (bmp388.getMeasurements(temperature, pressure, altitude)) {
 
-    case BMP_WAIT_READY:
-      // Non-blocking poll. Returns 0 until data ready, then does the short read.
-      if (bmp388.getMeasurements(temperature, pressure, altitude)) {
+                       float newPressure = pressure;  // already hPa / mbar in this library
+                       float newTemp = temperature * 9.0f / 5.0f + 32.0f;
 
-        float newPressure = pressure;  // already hPa / mbar in this library
-        float newTemp = temperature * 9.0f / 5.0f + 32.0f;
+                       if (!bmpFirstReadDone) {
+                         bmpFirstReadDone = true;  // optional discard of first sample
+                       } else {
+                         if (isfinite(newPressure) && newPressure > 800.0f && newPressure < 1100.0f) {
+                           baroPressure = newPressure;
+                           MARK_FRESH(IDX_BARO_PRESSURE);
+                         }
 
-        if (!bmpFirstReadDone) {
-          bmpFirstReadDone = true;  // optional discard of first sample
-        } else {
-          if (isfinite(newPressure) && newPressure > 800.0f && newPressure < 1100.0f) {
-            baroPressure = newPressure;
-            MARK_FRESH(IDX_BARO_PRESSURE);
-          }
+                         if (isfinite(newTemp) && newTemp > -50.0f && newTemp < 150.0f) {
+                           ambientTemp = newTemp;
+                           MARK_FRESH(IDX_AMBIENT_TEMP);
+                         }
+                       }
 
-          if (isfinite(newTemp) && newTemp > -50.0f && newTemp < 150.0f) {
-            ambientTemp = newTemp;
-            MARK_FRESH(IDX_AMBIENT_TEMP);
-          }
-        }
-
-        bmpLastCycleMs = millis();
-        bmpState = BMP_IDLE;
-      } else if (millis() - bmpTriggerMs > 120) {
-        // x32/x2 conversion should be done long before this; timeout just prevents getting stuck
-        static uint32_t lastBMPTimeoutMsg = 0;
-        if (millis() - lastBMPTimeoutMsg > 60000) {
-          Serial.println("BMP388 forced conversion timeout");
-          queueConsoleMessage("BMP388 forced conversion timeout");
-          lastBMPTimeoutMsg = millis();
-        }
-        bmpLastCycleMs = millis();
-        bmpState = BMP_IDLE;
-      }
-      break;
+                       bmpLastCycleMs = millis();
+                       bmpState = BMP_IDLE;
+                     } else if (millis() - bmpTriggerMs > 120) {
+                       // x32/x2 conversion should be done long before this; timeout just prevents getting stuck
+                       static uint32_t lastBMPTimeoutMsg = 0;
+                       if (millis() - lastBMPTimeoutMsg > 60000) {
+                         Serial.println("BMP388 forced conversion timeout");
+                         queueConsoleMessage("BMP388 forced conversion timeout");
+                         lastBMPTimeoutMsg = millis();
+                       }
+                       bmpLastCycleMs = millis();
+                       bmpState = BMP_IDLE;
+                     }
+                     break;
+                 }
+               }()));
   }
 
-  // ============================================================================
-  // LSM6DSOX IMU FIFO Polling (integrated into analog input state machine)
-  // ============================================================================
-
+  // ── LSM6DSOX IMU FIFO Polling ─────────────────────────────────────────────
+  // ft_rai_imu / IMUReadTime aliases: worstWindow + lastCall updated by macro.
+  // Collision avoidance and goto remain outside the lambda — goto cannot cross
+  // into a lambda scope. IMUReadTime2 = 0 on skip path zeroes lastCall via alias.
   if (imuEnabled && (millis() - lastIMUPoll >= IMU_POLL_INTERVAL)) {
 
     // Collision avoidance: skip IMU drain if analog reads just took too long
     if (AnalogReadTime2 > ANALOG_READ_COLLISION_THRESHOLD) {
       lastIMUPoll = millis();  // Reset timer but skip this poll
-      IMUReadTime2 = 0;        // Don't pollute timing stats with skipped polls
+      IMUReadTime2 = 0;        // Zero lastCall via alias; don't pollute timing stats with skipped polls
       goto imu_done;
     }
 
-    int start_imu = micros();  // Start timing IMU operations
     lastIMUPoll = millis();
 
-    uint16_t fifo_samples = 0;
+    TIMED_CALL(ft_rai_imu, ([&]() {
+                 uint16_t fifo_samples = 0;
 
-    // Read FIFO status (quick operation, ~50 µs)
-    if (imu.Get_FIFO_Num_Samples(&fifo_samples) != LSM6DSOX_OK) {
-      imu_i2c_error_count++;
-      // Throttled error message
-      static unsigned long last_i2c_error = 0;
-      if (millis() - last_i2c_error > 60000) {  // Once per minute max
-        queueConsoleMessageF("IMU I2C error count: %u", imu_i2c_error_count);
-        last_i2c_error = millis();
-      }
-      goto imu_done;
-    }
+                 // Read FIFO status (quick operation, ~50 µs)
+                 if (imu.Get_FIFO_Num_Samples(&fifo_samples) != LSM6DSOX_OK) {
+                   imu_i2c_error_count++;
+                   // Throttled error message
+                   static unsigned long last_i2c_error = 0;
+                   if (millis() - last_i2c_error > 60000) {  // Once per minute max
+                     queueConsoleMessageF("IMU I2C error count: %u", imu_i2c_error_count);
+                     last_i2c_error = millis();
+                   }
+                   return;  // exits lambda; TIMED_CALL still records this short duration
+                 }
 
-    // Check for FIFO overrun
-    uint8_t fifo_ovr = 0;
-    if (imu.Get_FIFO_Overrun_Status(&fifo_ovr) == LSM6DSOX_OK && fifo_ovr) {
-      imu_fifo_overrun_count++;
-      // One-time warning on first overrun, then throttled
-      static bool first_overrun = true;
-      static unsigned long last_overrun_msg = 0;
-      if (first_overrun) {
-        queueConsoleMessageF("IMU FIFO overrun detected (increase drain rate)");
-        first_overrun = false;
-        last_overrun_msg = millis();
-      } else if (millis() - last_overrun_msg > 300000) {  // Every 5 minutes after first
-        queueConsoleMessageF("IMU FIFO overruns: %u total", imu_fifo_overrun_count);
-        last_overrun_msg = millis();
-      }
-    }
+                 // Check for FIFO overrun
+                 uint8_t fifo_ovr = 0;
+                 if (imu.Get_FIFO_Overrun_Status(&fifo_ovr) == LSM6DSOX_OK && fifo_ovr) {
+                   imu_fifo_overrun_count++;
+                   // One-time warning on first overrun, then throttled
+                   static bool first_overrun = true;
+                   static unsigned long last_overrun_msg = 0;
+                   if (first_overrun) {
+                     queueConsoleMessageF("IMU FIFO overrun detected (increase drain rate)");
+                     first_overrun = false;
+                     last_overrun_msg = millis();
+                   } else if (millis() - last_overrun_msg > 300000) {  // Every 5 minutes after first
+                     queueConsoleMessageF("IMU FIFO overruns: %u total", imu_fifo_overrun_count);
+                     last_overrun_msg = millis();
+                   }
+                 }
 
-    if (fifo_samples == 0) {
-      // No data available - fast path exit
-      int end_imu = micros();
-      IMUReadTime2 = end_imu - start_imu;
-      goto imu_done;
-    }
+                 if (fifo_samples == 0) {
+                   return;  // No data available - fast path exit; TIMED_CALL records this short duration
+                 }
 
-    // Cap drain to budget
-    uint16_t samples_to_read = (fifo_samples > MAX_FIFO_DRAIN_PER_POLL)
-                                 ? MAX_FIFO_DRAIN_PER_POLL
-                                 : fifo_samples;
+                 // Cap drain to budget
+                 uint16_t samples_to_read = (fifo_samples > MAX_FIFO_DRAIN_PER_POLL)
+                                              ? MAX_FIFO_DRAIN_PER_POLL
+                                              : fifo_samples;
 
-    // Burst read from FIFO (efficient single I²C transaction)
-    if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
-      imu_i2c_error_count++;
-      int end_imu = micros();
-      IMUReadTime2 = end_imu - start_imu;
-      goto imu_done;
-    }
+                 // Burst read from FIFO (efficient single I²C transaction)
+                 if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
+                   imu_i2c_error_count++;
+                   return;  // exits lambda; TIMED_CALL still records this duration
+                 }
 
-    // Timestamp the batch end, then backdate each sample by its nominal interval.
-    // The sensor's internal timestamp register (0x40-0x42, 25µs resolution) would give
-    // true sample times but requires FIFO timestamp batching config. Using nominal ODR
-    // intervals instead - error is negligible (<1% at these rates) and avoids the
-    // batch_timestamp=same_value problem which caused dt_us=0 for all but the first
-    // sample, effectively stalling the complementary filter.
-    uint32_t batch_end_us = micros();
-    constexpr uint32_t ACCEL_INTERVAL_US = 2398;  // 1,000,000 / 417 Hz
-    constexpr uint32_t GYRO_INTERVAL_US = 19231;  // 1,000,000 / 52 Hz
+                 // Timestamp the batch end, then backdate each sample by its nominal interval.
+                 // The sensor's internal timestamp register (0x40-0x42, 25µs resolution) would give
+                 // true sample times but requires FIFO timestamp batching config. Using nominal ODR
+                 // intervals instead - error is negligible (<1% at these rates) and avoids the
+                 // batch_timestamp=same_value problem which caused dt_us=0 for all but the first
+                 // sample, effectively stalling the complementary filter.
+                 uint32_t batch_end_us = micros();
+                 constexpr uint32_t ACCEL_INTERVAL_US = 2398;  // 1,000,000 / 417 Hz
+                 constexpr uint32_t GYRO_INTERVAL_US = 19231;  // 1,000,000 / 52 Hz
 
-    // Pre-count each sensor type so we can backdate oldest-first
-    uint16_t accel_in_batch = 0, gyro_in_batch = 0;
-    for (uint16_t i = 0; i < samples_to_read; i++) {
-      uint8_t tag = fifoBuffer[i * 7] >> 3;
-      if (tag == TAG_SENSOR_ACCEL) accel_in_batch++;
-      else if (tag == TAG_SENSOR_GYRO) gyro_in_batch++;
-    }
+                 // Pre-count each sensor type so we can backdate oldest-first
+                 uint16_t accel_in_batch = 0, gyro_in_batch = 0;
+                 for (uint16_t i = 0; i < samples_to_read; i++) {
+                   uint8_t tag = fifoBuffer[i * 7] >> 3;
+                   if (tag == TAG_SENSOR_ACCEL) accel_in_batch++;
+                   else if (tag == TAG_SENSOR_GYRO) gyro_in_batch++;
+                 }
 
-    // Parse FIFO buffer
-    uint16_t accel_idx = 0, gyro_idx = 0;
-    for (uint16_t i = 0; i < samples_to_read; i++) {
-      uint8_t raw_tag = fifoBuffer[i * 7];
-      uint8_t tag_sensor = raw_tag >> 3;
+                 // Parse FIFO buffer
+                 uint16_t accel_idx = 0, gyro_idx = 0;
+                 for (uint16_t i = 0; i < samples_to_read; i++) {
+                   uint8_t raw_tag = fifoBuffer[i * 7];
+                   uint8_t tag_sensor = raw_tag >> 3;
 
-      int16_t raw_x = (int16_t)((fifoBuffer[i * 7 + 2] << 8) | fifoBuffer[i * 7 + 1]);
-      int16_t raw_y = (int16_t)((fifoBuffer[i * 7 + 4] << 8) | fifoBuffer[i * 7 + 3]);
-      int16_t raw_z = (int16_t)((fifoBuffer[i * 7 + 6] << 8) | fifoBuffer[i * 7 + 5]);
+                   int16_t raw_x = (int16_t)((fifoBuffer[i * 7 + 2] << 8) | fifoBuffer[i * 7 + 1]);
+                   int16_t raw_y = (int16_t)((fifoBuffer[i * 7 + 4] << 8) | fifoBuffer[i * 7 + 3]);
+                   int16_t raw_z = (int16_t)((fifoBuffer[i * 7 + 6] << 8) | fifoBuffer[i * 7 + 5]);
 
-      if (tag_sensor == TAG_SENSOR_ACCEL) {
-        int16_t x = raw_x * ACCEL_X_SIGN;
-        int16_t y = raw_y * ACCEL_Y_SIGN;
-        int16_t z = raw_z * ACCEL_Z_SIGN;
-        uint32_t ts = batch_end_us - (uint32_t)(accel_in_batch - 1 - accel_idx) * ACCEL_INTERVAL_US;
-        pushAccelSample(x, y, z, ts);
-        accel_idx++;
+                   if (tag_sensor == TAG_SENSOR_ACCEL) {
+                     int16_t x = raw_x * ACCEL_X_SIGN;
+                     int16_t y = raw_y * ACCEL_Y_SIGN;
+                     int16_t z = raw_z * ACCEL_Z_SIGN;
+                     uint32_t ts = batch_end_us - (uint32_t)(accel_in_batch - 1 - accel_idx) * ACCEL_INTERVAL_US;
+                     pushAccelSample(x, y, z, ts);
+                     accel_idx++;
 
-      } else if (tag_sensor == TAG_SENSOR_GYRO) {
-        int16_t x = raw_x * GYRO_X_SIGN;
-        int16_t y = raw_y * GYRO_Y_SIGN;
-        int16_t z = raw_z * GYRO_Z_SIGN;
-        uint32_t ts = batch_end_us - (uint32_t)(gyro_in_batch - 1 - gyro_idx) * GYRO_INTERVAL_US;
-        pushGyroSample(x, y, z, ts);
-        gyro_idx++;
+                   } else if (tag_sensor == TAG_SENSOR_GYRO) {
+                     int16_t x = raw_x * GYRO_X_SIGN;
+                     int16_t y = raw_y * GYRO_Y_SIGN;
+                     int16_t z = raw_z * GYRO_Z_SIGN;
+                     uint32_t ts = batch_end_us - (uint32_t)(gyro_in_batch - 1 - gyro_idx) * GYRO_INTERVAL_US;
+                     pushGyroSample(x, y, z, ts);
+                     gyro_idx++;
 
-      } else if (tag_sensor == TAG_SENSOR_TEMP) {
-        // Temperature samples explicitly ignored (we're not batching temp in FIFO)
-        // This is expected and not an error
+                   } else if (tag_sensor == TAG_SENSOR_TEMP) {
+                     // Temperature samples explicitly ignored (we're not batching temp in FIFO)
+                     // This is expected and not an error
 
-      } else {
-        // Truly unknown tag_sensor - possibly compression artifact or config error
-        imu_unknown_tag_count++;
-        // One-time warning on first unknown tag
-        static bool unknown_tag_warned = false;
-        if (!unknown_tag_warned) {
-          queueConsoleMessageF("IMU: unknown tag_sensor=%d (raw=0x%02X)", tag_sensor, raw_tag);
-          unknown_tag_warned = true;
-        }
-      }
-    }
-
-    int end_imu = micros();
-    IMUReadTime2 = end_imu - start_imu;
-
-    // Track max IMU read time (with periodic reset like AnalogReadTime)
-    static uint32_t lastIMUTimeReset = 0;
-    if (millis() - lastIMUTimeReset >= IMUTrackerTime) {
-      IMUReadTime = 0;
-      lastIMUTimeReset = millis();
-    }
-    if (IMUReadTime2 > IMUReadTime) {
-      IMUReadTime = IMUReadTime2;
-    }
+                   } else {
+                     // Truly unknown tag_sensor - possibly compression artifact or config error
+                     imu_unknown_tag_count++;
+                     // One-time warning on first unknown tag
+                     static bool unknown_tag_warned = false;
+                     if (!unknown_tag_warned) {
+                       queueConsoleMessageF("IMU: unknown tag_sensor=%d (raw=0x%02X)", tag_sensor, raw_tag);
+                       unknown_tag_warned = true;
+                     }
+                   }
+                 }
+               }()));
   }
 
-imu_done:;  // Label target for IMU block exit
+imu_done:;  // Label target for collision-avoidance skip and IMU block exit
 }
 
 void ReadAnalogInputs_Fake() {

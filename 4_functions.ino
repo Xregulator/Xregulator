@@ -641,25 +641,11 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   Serial.println("I2C initialized on SDA=9, SCL=10");
   delay(100);  // Give I2C time to initialize
 
-  //   //BMP390
-  //   if (!bmp.begin_I2C(BMP3_ADDR)) {
-  //     Serial.println("BMP3XX not found");
-  //     while (1) delay(1000);
-  //   }
-  // // BMP388 — max accuracy, non-blocking state machine absorbs conversion time
-  // // 32x pressure OSR: max chip resolution, meaningful for marine barometry
-  // // 2x temp OSR: sufficient for internal pressure compensation (more does not improve pressure)
-  // // IIR COEFF_3: ~40s smoothing window, filters wave/motion spikes, tracks real weather
-  // // Conversion time at 32x/2x: ~68ms per datasheet — absorbed by state machine, zero loop impact
-  // bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
-  // bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
-  // bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
- 
+//BMP390
 if (!bmp388.begin(BMP3_ADDR)) {
   Serial.println("BMP388 not found");
   while (1);
 }
-
 bmp388.setPresOversampling(OVERSAMPLING_X32);
 bmp388.setTempOversampling(OVERSAMPLING_X2);
 bmp388.setIIRFilter(IIR_FILTER_32);   // use highest exposed by this library

@@ -981,7 +981,7 @@ void cvLog_tick(uint32_t nowMs) {
   e.dIdt4_x10 = (int16_t)clamp_f(g_dIdt4 * 10.0f, -32767.0f, 32767.0f);
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;
 
-  if (g_fastIRisingActive) e.flags |= (1 << 5);
+  if (g_iExcessActive) e.flags |= (1 << 5);
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;

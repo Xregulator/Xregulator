@@ -15,6 +15,601 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 
+enum Csv1Index {
+  CSV1_AlternatorTemperatureF,   // 0
+  CSV1_dutyCycle,                // 1
+  CSV1_BatteryV,                 // 2
+  CSV1_MeasuredAmps,             // 3
+  CSV1_RPM,                      // 4
+  CSV1_Channel3V,                // 5
+  CSV1_IBV,                      // 6
+  CSV1_Bcur,                     // 7
+  CSV1_VictronVoltage,           // 8
+  CSV1_LoopTime,                 // 9
+  CSV1_WifiStrength,             // 10
+  CSV1_WifiHeartBeat,            // 11
+  CSV1_SendWifiTime,             // 12
+  CSV1_AnalogReadTime,           // 13
+  CSV1_VeTime,                   // 14
+  CSV1_MaximumLoopTime,          // 15
+  CSV1_HeadingNMEA,              // 16
+  CSV1_vvout,                    // 17
+  CSV1_iiout,                    // 18
+  CSV1_FreeHeap,                 // 19
+  CSV1_EngineCycles,             // 20
+  CSV1_Alarm_Status,             // 21
+  CSV1_fieldActiveStatus,        // 22
+  CSV1_CurrentSessionDuration,   // 23
+  CSV1_timeAxisModeChanging,     // 24
+  CSV1_webgaugesinterval,        // 25
+  CSV1_plotTimeWindow,           // 26
+  CSV1_Ymin1,                    // 27
+  CSV1_Ymax1,                    // 28
+  CSV1_Ymin2,                    // 29
+  CSV1_Ymax2,                    // 30
+  CSV1_Ymin3,                    // 31
+  CSV1_Ymax3,                    // 32
+  CSV1_Ymin4,                    // 33
+  CSV1_Ymax4,                    // 34
+  CSV1_currentMode,              // 35
+  CSV1_currentPartitionType,     // 36
+  CSV1_stateRevision,            // 37
+  CSV1_setpointLimited,          // 38
+  CSV1_uTargetAmps,              // 39
+  CSV1_pidInput,                 // 40
+  CSV1_pidOutput,                // 41
+  CSV1_pidError,                 // 42
+  CSV1_imu_heel_deg,             // 43
+  CSV1_imu_pitch_deg,            // 44
+  CSV1_imu_vertical_accel_g,     // 45
+  CSV1_imu_yaw_rate_dps,         // 46
+  CSV1_imu_total_accel_g,        // 47
+  CSV1_imu_hf_vibration_energy,  // 48
+  CSV1_shutdownPhase,            // 49
+  CSV1_g_fastOvCurrentCap,       // 50
+  CSV1_g_fastOvClampCount,       // 51
+  CSV1_g_fastOvSoftCount,        // 52
+  CSV1_g_fastOvHardCount,        // 53
+  CSV1_ch1_last_ms,              // 54
+  CSV1_ch1_avg_10s,              // 55
+  CSV1_ch1_worst_10s,            // 56
+  CSV1_ch1_over2x_10s,           // 57
+  CSV1_ch1_n_10s,                // 58
+  CSV1_ch1_avg_2m,               // 59
+  CSV1_ch1_worst_2m,             // 60
+  CSV1_ch1_over2x_2m,            // 61
+  CSV1_ch1_n_2m,                 // 62
+  CSV1_ch1_avg_at,               // 63
+  CSV1_ch1_worst_at,             // 64
+  CSV1_ch1_over2x_at,            // 65
+  CSV1_ch1_n_at,                 // 66
+
+  CSV1_FIELD_COUNT  // = 67
+};
+
+enum Csv2Index {
+  CSV2_IBVMax,                             // 0
+  CSV2_MeasuredAmpsMax,                    // 1
+  CSV2_RPMMax,                             // 2
+  CSV2_SOC_percent,                        // 3
+  CSV2_EngineRunTime,                      // 4
+  CSV2_AlternatorOnTime,                   // 5
+  CSV2_AlternatorFuelUsed,                 // 6
+  CSV2_ChargedEnergy,                      // 7
+  CSV2_DischargedEnergy,                   // 8
+  CSV2_AlternatorChargedEnergy,            // 9
+  CSV2_MaxAlternatorTemperatureF,          // 10
+  CSV2_temperatureThermistor,              // 11
+  CSV2_MaxTemperatureThermistor,           // 12
+  CSV2_VictronCurrent,                     // 13
+  CSV2_timeToFullChargeMin,                // 14
+  CSV2_timeToFullDischargeMin,             // 15
+  CSV2_LatitudeNMEA,                       // 16
+  CSV2_LongitudeNMEA,                      // 17
+  CSV2_SatelliteCountNMEA,                 // 18
+  CSV2_absorptionCompleteTime,             // 19
+  CSV2_LastSessionDuration,                // 20
+  CSV2_LastSessionMaxLoopTime,             // 21
+  CSV2_lastSessionMinHeap,                 // 22
+  CSV2_wifiReconnectsTotal,                // 23
+  CSV2_LastResetReason,                    // 24
+  CSV2_ancientResetReason,                 // 25
+  CSV2_totalPowerCycles,                   // 26
+  CSV2_MinFreeHeap,                        // 27
+  CSV2_currentWeatherMode,                 // 28
+  CSV2_UVToday,                            // 29
+  CSV2_UVTomorrow,                         // 30
+  CSV2_UVDay2,                             // 31
+  CSV2_weatherDataValid,                   // 32
+  CSV2_SolarWatts,                         // 33
+  CSV2_performanceRatio,                   // 34
+  CSV2_OnOff,                              // 35
+  CSV2_ManualFieldToggle,                  // 36
+  CSV2_HiLow,                              // 37
+  CSV2_LimpHome,                           // 38
+  CSV2_VeData,                             // 39
+  CSV2_NMEA0183Data,                       // 40
+  CSV2_NMEA2KData,                         // 41
+  CSV2_AlarmActivate,                      // 42
+  CSV2_TempAlarm,                          // 43
+  CSV2_VoltageAlarmHigh,                   // 44
+  CSV2_VoltageAlarmLow,                    // 45
+  CSV2_CurrentAlarmHigh,                   // 46
+  CSV2_AlarmTest,                          // 47
+  CSV2_AlarmLatchEnabled,                  // 48
+  CSV2_AlarmLatchState,                    // 49
+  CSV2_ResetAlarmLatch,                    // 50
+  CSV2_MaintainMode,                       // 51
+  CSV2_ResetTemp,                          // 52
+  CSV2_ResetVoltage,                       // 53
+  CSV2_ResetCurrent,                       // 54
+  CSV2_ResetEngineRunTime,                 // 55
+  CSV2_ResetAlternatorOnTime,              // 56
+  CSV2_ResetEnergy,                        // 57
+  CSV2_ManualSOCPoint,                     // 58
+  CSV2_LearningMode,                       // 59
+  CSV2_LearningPaused,                     // 60
+  CSV2_IgnoreLearningDuringPenalty,        // 61
+  CSV2_ShowLearningDebugMessages,          // 62
+  CSV2_LogAllLearningEvents,               // 63
+  CSV2_CloudFeatures,                      // 64
+  CSV2_LearningDryRunMode,                 // 65
+  CSV2_AutoSaveLearningTable,              // 66
+  CSV2_ResetLearningTable,                 // 67
+  CSV2_ClearOverheatHistory,               // 68
+  CSV2_AutoShuntGainCorrection,            // 69
+  CSV2_DynamicShuntGainFactor,             // 70
+  CSV2_AutoAltCurrentZero,                 // 71
+  CSV2_DynamicAltCurrentZero,              // 72
+  CSV2_InsulationLifePercent,              // 73
+  CSV2_GreaseLifePercent,                  // 74
+  CSV2_BrushLifePercent,                   // 75
+  CSV2_PredictedLifeHours,                 // 76
+  CSV2_LifeIndicatorColor,                 // 77
+  CSV2_WindingTempOffset,                  // 78
+  CSV2_ManualLifePercentage,               // 79
+  CSV2_UVThresholdHigh,                    // 80
+  CSV2_weatherModeEnabled,                 // 81
+  CSV2_pKwHrToday,                         // 82
+  CSV2_pKwHrTomorrow,                      // 83
+  CSV2_pKwHr2days,                         // 84
+  CSV2_ambientTemp,                        // 85
+  CSV2_baroPressure,                       // 86
+  CSV2_firmwareVersionInt,                 // 87
+  CSV2_deviceIdUpper,                      // 88
+  CSV2_deviceIdLower,                      // 89
+  CSV2_ChargedEnergy_AllTime,              // 90
+  CSV2_AlternatorFuelUsed_AllTime,         // 91
+  CSV2_PeakVoltage_AllTime,                // 92
+  CSV2_EngineRunTime_AllTime,              // 93
+  CSV2_MinVoltage,                         // 94
+  CSV2_MinVoltage_AllTime,                 // 95
+  CSV2_ChargeCycles,                       // 96
+  CSV2_ChargeCycles_AllTime,               // 97
+  CSV2_EngineFuelUsed,                     // 98
+  CSV2_EngineFuelUsed_AllTime,             // 99
+  CSV2_TotalDistance,                      // 100
+  CSV2_TotalDistance_AllTime,              // 101
+  CSV2_MaxSpeed,                           // 102
+  CSV2_MaxSpeed_AllTime,                   // 103
+  CSV2_SolarChargedEnergy,                 // 104
+  CSV2_SolarChargedEnergy_AllTime,         // 105
+  CSV2_AlternatorChargedEnergy_AllTime,    // 106
+  CSV2_DischargedEnergy_AllTime,           // 107
+  CSV2_AvgSOC_AllTime,                     // 108
+  CSV2_AvgSpeed_AllTime,                   // 109
+  CSV2_AvgSpeed,                           // 110
+  CSV2_AlternatorOnTime_AllTime,           // 111
+  CSV2_EngineCycles_AllTime,               // 112
+  CSV2_MaxAlternatorTemperatureF_AllTime,  // 113
+  CSV2_MaxTemperatureThermistor_AllTime,   // 114
+  CSV2_MeasuredAmpsMax_AllTime,            // 115
+  CSV2_RPMMax_AllTime,                     // 116
+  CSV2_Ignition,                           // 117
+  CSV2_BulkStage,                          // 118
+  CSV2_WifiWakeSecondsRemaining,           // 119
+  CSV2_BufferedRecordCount,                // 120
+  CSV2_BufferedRecordPercent,              // 121
+  CSV2_MAX_BUFFERED_RECORDS,               // 122
+  CSV2_COGNMEA,                            // 123
+  CSV2_SOGNMEA,                            // 124
+  CSV2_ApparentWindSpeedNMEA,              // 125
+  CSV2_ApparentWindAngleNMEA,              // 126
+  CSV2_TrueWindSpeedNMEA,                  // 127
+  CSV2_TrueWindAngleNMEA,                  // 128
+  CSV2_LeewayNMEA,                         // 129
+  CSV2_VMGNMEA,                            // 130
+  CSV2_VMGTargetBearing,                   // 131
+  CSV2_VMGUseTrueWind,                     // 132
+  CSV2_SENSOR_UPLOAD_INTERVAL,             // 133
+  CSV2_cpuLoadCore0,                       // 134
+  CSV2_cpuLoadCore0Max,                    // 135
+  CSV2_cpuLoadCore1,                       // 136
+  CSV2_cpuLoadCore1Max,                    // 137
+  CSV2_hasForcedUpdate,                    // 138
+  CSV2_forcedFwVersionInt,                 // 139
+  CSV2_forcedUpdateDeadline,               // 140
+  CSV2_stateRevision,                      // 141
+  CSV2_hardwarePresent,                    // 142
+  CSV2_imu_accel_x_raw,                    // 143
+  CSV2_imu_accel_y_raw,                    // 144
+  CSV2_imu_accel_z_raw,                    // 145
+  CSV2_imu_gyro_x_raw,                     // 146
+  CSV2_imu_gyro_y_raw,                     // 147
+  CSV2_imu_gyro_z_raw,                     // 148
+  CSV2_accel_x_min,                        // 149
+  CSV2_accel_x_max,                        // 150
+  CSV2_accel_x_avg,                        // 151
+  CSV2_accel_y_min,                        // 152
+  CSV2_accel_y_max,                        // 153
+  CSV2_accel_y_avg,                        // 154
+  CSV2_accel_z_min,                        // 155
+  CSV2_accel_z_max,                        // 156
+  CSV2_accel_z_avg,                        // 157
+  CSV2_gyro_x_min,                         // 158
+  CSV2_gyro_x_max,                         // 159
+  CSV2_gyro_x_avg,                         // 160
+  CSV2_gyro_y_min,                         // 161
+  CSV2_gyro_y_max,                         // 162
+  CSV2_gyro_y_avg,                         // 163
+  CSV2_gyro_z_min,                         // 164
+  CSV2_gyro_z_max,                         // 165
+  CSV2_gyro_z_avg,                         // 166
+  CSV2_heel_min,                           // 167
+  CSV2_heel_max,                           // 168
+  CSV2_heel_avg,                           // 169
+  CSV2_pitch_min,                          // 170
+  CSV2_pitch_max,                          // 171
+  CSV2_pitch_avg,                          // 172
+  CSV2_vertical_accel_min,                 // 173
+  CSV2_vertical_accel_max,                 // 174
+  CSV2_vertical_accel_avg,                 // 175
+  CSV2_total_accel_min,                    // 176
+  CSV2_total_accel_max,                    // 177
+  CSV2_total_accel_avg,                    // 178
+  CSV2_imu_slam_count,                     // 179
+  CSV2_imu_slam_peak_max,                  // 180
+  CSV2_imu_slam_count_lifetime,            // 181
+  CSV2_imu_capsize_count,                  // 182
+  CSV2_imu_pitchpole_count,                // 183
+  CSV2_imu_heel_change_60s,                // 184
+  CSV2_imu_heel_deviation_60s,             // 185
+  CSV2_imu_pitch_change_60s,               // 186
+  CSV2_imu_pitch_deviation_60s,            // 187
+  CSV2_imu_wave_period_sec,                // 188
+  CSV2_imu_heel_max_lifetime,              // 189
+  CSV2_imu_pitch_max_lifetime,             // 190
+  CSV2_imu_slam_peak_lifetime,             // 191
+  CSV2_imuEnabled,                         // 192
+  CSV2_imuMountOrientation,                // 193
+  CSV2_imu_fifo_overrun_count,             // 194
+  CSV2_imu_i2c_error_count,                // 195
+  CSV2_imu_unknown_tag_count,              // 196
+  CSV2_imu_accel_dropped,                  // 197
+  CSV2_imu_gyro_dropped,                   // 198
+  CSV2_imu_total_samples_accel,            // 199
+  CSV2_imu_total_samples_gyro,             // 200
+  CSV2_IMUReadTime2,                       // 201
+  CSV2_IMUReadTime,                        // 202
+  CSV2_adsI2CErrorCount,                   // 203
+  CSV2_tempPIDActive,                      // 204
+  CSV2_tempPIDInput_d,                     // 205
+  CSV2_tempPIDSetpoint_d,                  // 206
+  CSV2_thermalPenaltyAmps,                 // 207
+  CSV2_innerTermP,                         // 208
+  CSV2_innerTermI,                         // 209
+  CSV2_innerTermD,                         // 210
+  CSV2_outerTermP,                         // 211
+  CSV2_outerTermI,                         // 212
+  CSV2_outerTermD,                         // 213
+  CSV2_outerTermDExternal,                 // 214
+  CSV2_AbsorptionVoltage,                  // 215
+  CSV2_AbsorptionTimeoutMs,                // 216
+  CSV2_bulkVoltageHoldMs,                  // 217
+  CSV2_chargeStageDisplay,                 // 218
+  CSV2_voltageControlActive,               // 219
+  CSV2_voltageTarget,                      // 220
+  CSV2_voltageError,                       // 221
+  CSV2_Icv,                                // 222
+  CSV2_cv_I,                               // 223
+  CSV2_capLimitMode,                       // 224
+  CSV2_TargetVoltageMode,                  // 225
+  CSV2_TargetVoltageSetpoint,              // 226
+  CSV2_RebulkCurrent_A,                    // 227
+  CSV2_UseFloat,                           // 228
+  CSV2_inIdleStage,                        // 229
+  CSV2_referenceFinalized,                 // 230
+  CSV2_sessionErrorCount,                  // 231
+  CSV2_anomalyMarginAmps,                  // 232
+  CSV2_anomalyAlarmThreshold,              // 233
+  CSV2_anomalyAlarmEnable,                 // 234
+  CSV2_degradationThreshold,               // 235
+  CSV2_ft_rai_total_win,                   // 236
+  CSV2_ft_rai_total_ses,                   // 237
+  CSV2_ft_rai_ina228_win,                  // 238
+  CSV2_ft_rai_ina228_ses,                  // 239
+  CSV2_ft_rai_ads_state_win,               // 240
+  CSV2_ft_rai_ads_state_ses,               // 241
+  CSV2_ft_rai_bmp_state_win,               // 242
+  CSV2_ft_rai_bmp_state_ses,               // 243
+  CSV2_ft_rai_imu_win,                     // 244
+  CSV2_ft_rai_imu_ses,                     // 245
+  CSV2_fsWriteQueueDrops,                  // 246
+
+  CSV2_FIELD_COUNT  // ← always last, = 247
+};
+
+enum Csv3Index {
+  CSV3_TemperatureLimitF,             // 0
+  CSV3_BulkVoltage,                   // 1
+  CSV3_wavePeriod,                    // 2
+  CSV3_FloatVoltage,                  // 3
+  CSV3_SwitchingFrequency,            // 4
+  CSV3_yyMin,                         // 5
+  CSV3_FieldAdjustmentInterval,       // 6
+  CSV3_ManualDutyTarget,              // 7
+  CSV3_SwitchControlOverride,         // 8
+  CSV3_waveAmplitude,                 // 9
+  CSV3_CurrentThreshold,              // 10
+  CSV3_PeukertExponent_scaled,        // 11
+  CSV3_ChargeEfficiency_scaled,       // 12
+  CSV3_ChargedVoltage_Scaled,         // 13
+  CSV3_TailCurrent,                   // 14
+  CSV3_ChargedDetectionTime,          // 15
+  CSV3_IgnoreTemperature,             // 16
+  CSV3_bmsLogic,                      // 17
+  CSV3_bmsLogicLevelOff,              // 18
+  CSV3_FourWay,                       // 19
+  CSV3_RPMScalingFactor,              // 20
+  CSV3_MaximumAllowedBatteryAmps,     // 21
+  CSV3_BatteryVoltageSource,          // 22
+  CSV3_LearningUpwardEnabled,         // 23
+  CSV3_LearningDownwardEnabled,       // 24
+  CSV3_AlternatorNominalAmps,         // 25
+  CSV3_LearningUpStep,                // 26
+  CSV3_LearningDownStep,              // 27
+  CSV3_AmbientTempCorrectionFactor,   // 28
+  CSV3_xTime,                         // 29
+  CSV3_MinLearningInterval,           // 30
+  CSV3_SafeOperationThreshold,        // 31
+  CSV3_PidKp,                         // 32
+  CSV3_PidKi,                         // 33
+  CSV3_PidKd,                         // 34
+  CSV3_PidSampleDivisor,              // 35
+  CSV3_MaxTableValue,                 // 36
+  CSV3_MinTableValue,                 // 37
+  CSV3_MaxPenaltyPercent,             // 38
+  CSV3_MaxPenaltyDuration,            // 39
+  CSV3_NeighborLearningFactor,        // 40
+  CSV3_yyMax,                         // 41
+  CSV3_LearningMemoryDuration,        // 42
+  CSV3_EnableNeighborLearning,        // 43
+  CSV3_EnableAmbientCorrection,       // 44
+  CSV3_TuningMode,                    // 45
+  CSV3_LearningTableSaveInterval,     // 46
+  CSV3_rpmCurrentTable_0,             // 47
+  CSV3_rpmCurrentTable_1,             // 48
+  CSV3_rpmCurrentTable_2,             // 49
+  CSV3_rpmCurrentTable_3,             // 50
+  CSV3_rpmCurrentTable_4,             // 51
+  CSV3_rpmCurrentTable_5,             // 52
+  CSV3_rpmCurrentTable_6,             // 53
+  CSV3_rpmCurrentTable_7,             // 54
+  CSV3_rpmCurrentTable_8,             // 55
+  CSV3_rpmCurrentTable_9,             // 56
+  CSV3_currentRPMTableIndex,          // 57
+  CSV3_pidInitialized,                // 58
+  CSV3_ShuntResistanceMicroOhm,       // 59
+  CSV3_InvertAltAmps,                 // 60
+  CSV3_InvertBattAmps,                // 61
+  CSV3_MaxDuty,                       // 62
+  CSV3_MinDuty,                       // 63
+  CSV3_FieldResistance,               // 64
+  CSV3_maxPoints,                     // 65
+  CSV3_AlternatorCOffset,             // 66
+  CSV3_BatteryCOffset,                // 67
+  CSV3_BatteryCapacity_Ah,            // 68
+  CSV3_AmpSrc,                        // 69
+  CSV3_R_fixed,                       // 70
+  CSV3_Beta,                          // 71
+  CSV3_T0_C,                          // 72
+  CSV3_TempSource,                    // 73
+  CSV3_IgnitionOverride,              // 74
+  CSV3_FLOAT_DURATION,                // 75
+  CSV3_PulleyRatio,                   // 76
+  CSV3_BatteryCurrentSource,          // 77
+  CSV3_overheatCount_0,               // 78
+  CSV3_overheatCount_1,               // 79
+  CSV3_overheatCount_2,               // 80
+  CSV3_overheatCount_3,               // 81
+  CSV3_overheatCount_4,               // 82
+  CSV3_overheatCount_5,               // 83
+  CSV3_overheatCount_6,               // 84
+  CSV3_overheatCount_7,               // 85
+  CSV3_overheatCount_8,               // 86
+  CSV3_overheatCount_9,               // 87
+  CSV3_cumulativeNoOverheatTime_0,    // 88
+  CSV3_cumulativeNoOverheatTime_1,    // 89
+  CSV3_cumulativeNoOverheatTime_2,    // 90
+  CSV3_cumulativeNoOverheatTime_3,    // 91
+  CSV3_cumulativeNoOverheatTime_4,    // 92
+  CSV3_cumulativeNoOverheatTime_5,    // 93
+  CSV3_cumulativeNoOverheatTime_6,    // 94
+  CSV3_cumulativeNoOverheatTime_7,    // 95
+  CSV3_cumulativeNoOverheatTime_8,    // 96
+  CSV3_cumulativeNoOverheatTime_9,    // 97
+  CSV3_totalLearningEvents,           // 98
+  CSV3_totalOverheats,                // 99
+  CSV3_totalSafeHours,                // 100
+  CSV3_averageTableValue,             // 101
+  CSV3_timeSinceLastOverheat,         // 102
+  CSV3_learningTargetFromRPM,         // 103
+  CSV3_ambientTempCorrection,         // 104
+  CSV3_finalLearningTarget,           // 105
+  CSV3_overheatingPenaltyTimer,       // 106
+  CSV3_overheatingPenaltyAmps,        // 107
+  CSV3_pidSetpoint,                   // 108
+  CSV3_TempToUse,                     // 109
+  CSV3_rpmTableRPMPoints_0,           // 110
+  CSV3_rpmTableRPMPoints_1,           // 111
+  CSV3_rpmTableRPMPoints_2,           // 112
+  CSV3_rpmTableRPMPoints_3,           // 113
+  CSV3_rpmTableRPMPoints_4,           // 114
+  CSV3_rpmTableRPMPoints_5,           // 115
+  CSV3_rpmTableRPMPoints_6,           // 116
+  CSV3_rpmTableRPMPoints_7,           // 117
+  CSV3_rpmTableRPMPoints_8,           // 118
+  CSV3_rpmTableRPMPoints_9,           // 119
+  CSV3_LearningSettlingPeriod,        // 120
+  CSV3_LearningRPMChangeThreshold,    // 121
+  CSV3_LearningTempHysteresis,        // 122
+  CSV3_fuelTableRPM_0,                // 123
+  CSV3_fuelTableRPM_1,                // 124
+  CSV3_fuelTableRPM_2,                // 125
+  CSV3_fuelTableRPM_3,                // 126
+  CSV3_fuelTableRPM_4,                // 127
+  CSV3_fuelTableRPM_5,                // 128
+  CSV3_fuelTableRPM_6,                // 129
+  CSV3_fuelTableRPM_7,                // 130
+  CSV3_fuelTableRPM_8,                // 131
+  CSV3_fuelTableRPM_9,                // 132
+  CSV3_fuelTableGPH_0,                // 133
+  CSV3_fuelTableGPH_1,                // 134
+  CSV3_fuelTableGPH_2,                // 135
+  CSV3_fuelTableGPH_3,                // 136
+  CSV3_fuelTableGPH_4,                // 137
+  CSV3_fuelTableGPH_5,                // 138
+  CSV3_fuelTableGPH_6,                // 139
+  CSV3_fuelTableGPH_7,                // 140
+  CSV3_fuelTableGPH_8,                // 141
+  CSV3_fuelTableGPH_9,                // 142
+  CSV3_stateRevision,                 // 143
+  CSV3_SetpointRampRate,              // 144
+  CSV3_DutyRampRate,                  // 145
+  CSV3_SettleTimeBeforeCut,           // 146
+  CSV3_TempWarnExcess,                // 147
+  CSV3_TempCritExcess,                // 148
+  CSV3_TempSustainedTimeout,          // 149
+  CSV3_VoltageSpikeMargin,            // 150
+  CSV3_VoltageDisagreeThreshold,      // 151
+  CSV3_VoltageDisagreeTimeout,        // 152
+  CSV3_rpmMinDutyTable_0,             // 153
+  CSV3_rpmMinDutyTable_1,             // 154
+  CSV3_rpmMinDutyTable_2,             // 155
+  CSV3_rpmMinDutyTable_3,             // 156
+  CSV3_rpmMinDutyTable_4,             // 157
+  CSV3_rpmMinDutyTable_5,             // 158
+  CSV3_rpmMinDutyTable_6,             // 159
+  CSV3_rpmMinDutyTable_7,             // 160
+  CSV3_rpmMinDutyTable_8,             // 161
+  CSV3_rpmMinDutyTable_9,             // 162
+  CSV3_rpmCapCurrentTable_0,          // 163
+  CSV3_rpmCapCurrentTable_1,          // 164
+  CSV3_rpmCapCurrentTable_2,          // 165
+  CSV3_rpmCapCurrentTable_3,          // 166
+  CSV3_rpmCapCurrentTable_4,          // 167
+  CSV3_rpmCapCurrentTable_5,          // 168
+  CSV3_rpmCapCurrentTable_6,          // 169
+  CSV3_rpmCapCurrentTable_7,          // 170
+  CSV3_rpmCapCurrentTable_8,          // 171
+  CSV3_rpmCapCurrentTable_9,          // 172
+  CSV3_VoltageKp,                     // 173
+  CSV3_VoltageLoopInterval,           // 174
+  CSV3_FIELD_COLLAPSE_DELAY,          // 175
+  CSV3_SetpointRiseRate,              // 176
+  CSV3_SetpointFallRate,              // 177
+  CSV3_PIDTrackingGain,               // 178
+  CSV3_CAPSIZE_THRESHOLD_DEG,         // 179
+  CSV3_PITCHPOLE_THRESHOLD_DEG,       // 180
+  CSV3_SLAM_THRESHOLD_G,              // 181
+  CSV3_imuMountOrientation,           // 182
+  CSV3_socInfoAvailable,              // 183
+  CSV3_TailCurrent_A,                 // 184
+  CSV3_RebulkVoltage,                 // 185
+  CSV3_rebulkDebounceTime,            // 186
+  CSV3_MinFloatTime,                  // 187
+  CSV3_SOC_BlockRebulk_percent,       // 188
+  CSV3_SOC_AllowRebulk_percent,       // 189
+  CSV3_accelEnabled,                  // 190
+  CSV3_DutySlowRampRate,              // 191
+  CSV3_ShutdownPhase2HoldMs,          // 192
+  CSV3_learningUpCount_0,             // 193
+  CSV3_learningUpCount_1,             // 194
+  CSV3_learningUpCount_2,             // 195
+  CSV3_learningUpCount_3,             // 196
+  CSV3_learningUpCount_4,             // 197
+  CSV3_learningUpCount_5,             // 198
+  CSV3_learningUpCount_6,             // 199
+  CSV3_learningUpCount_7,             // 200
+  CSV3_learningUpCount_8,             // 201
+  CSV3_learningUpCount_9,             // 202
+  CSV3_TempPIDKp,                     // 203
+  CSV3_TempPIDKi,                     // 204
+  CSV3_TempPIDKd,                     // 205
+  CSV3_TempPIDMarginF,                // 206
+  CSV3_TempPIDIntervalMs,             // 207
+  CSV3_TempPIDFilterAlpha,            // 208
+  CSV3_TempPIDStaleMs,                // 209
+  CSV3_TempPIDAntiWindupMarginA,      // 210
+  CSV3_FreeInternalRam,               // 211
+  CSV3_TotalInternalRam,              // 212
+  CSV3_LargestInternalBlock,          // 213
+  CSV3_FreePSRAM,                     // 214
+  CSV3_TotalPSRAM,                    // 215
+  CSV3_Heapfrag,                      // 216
+  CSV3_TempPIDKdExternal,             // 217
+  CSV3_VoltageKi,                     // 218
+  CSV3_rpmCapPowerTable_0,            // 219
+  CSV3_rpmCapPowerTable_1,            // 220
+  CSV3_rpmCapPowerTable_2,            // 221
+  CSV3_rpmCapPowerTable_3,            // 222
+  CSV3_rpmCapPowerTable_4,            // 223
+  CSV3_rpmCapPowerTable_5,            // 224
+  CSV3_rpmCapPowerTable_6,            // 225
+  CSV3_rpmCapPowerTable_7,            // 226
+  CSV3_rpmCapPowerTable_8,            // 227
+  CSV3_rpmCapPowerTable_9,            // 228
+  CSV3_VoltageTrimLimit,              // 229
+  CSV3_ft_ReadAnalogInputs_win,       // 230
+  CSV3_ft_ReadAnalogInputs_ses,       // 231
+  CSV3_ft_AdjustFieldLearnMode_win,   // 232
+  CSV3_ft_AdjustFieldLearnMode_ses,   // 233
+  CSV3_ft_uploadSensorHistory_win,    // 234
+  CSV3_ft_uploadSensorHistory_ses,    // 235
+  CSV3_ft_uploadBufferedRecords_win,  // 236
+  CSV3_ft_uploadBufferedRecords_ses,  // 237
+  CSV3_ft_buildConfigPayload_win,     // 238
+  CSV3_ft_buildConfigPayload_ses,     // 239
+  CSV3_VeTime2,                       // 240
+
+  CSV3_FIELD_COUNT  // = 241
+};
+
+enum TsIndex {
+  TS_HeadingNMEA,     // 0
+  TS_LatitudeNMEA,    // 1
+  TS_LongitudeNMEA,   // 2
+  TS_SatelliteCount,  // 3
+  TS_VictronVoltage,  // 4
+  TS_VictronCurrent,  // 5
+  TS_AlternatorTemp,  // 6
+  TS_ThermistorTemp,  // 7
+  TS_RPM,             // 8
+  TS_MeasuredAmps,    // 9
+  TS_BatteryV,        // 10
+  TS_IBV,             // 11
+  TS_Bcur,            // 12
+  TS_Channel3V,       // 13
+  TS_DutyCycle,       // 14
+  TS_FieldVolts,      // 15
+  TS_FieldAmps,       // 16
+
+  TS_FIELD_COUNT  // = 17
+};
+
+
+
+
 // Cap current table functions
 float getCapCurrentForRPM(float rpm);
 void saveCapCurrentTableToNVS();
@@ -3281,10 +3876,13 @@ void SendWifiData() {
       }
     }
     int payload1Len = snprintf(payload1, PAYLOAD1_SIZE,
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,"  // CSV1_FIELD_COUNT
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // 13 new CH1 interval fields
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
+                               CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),    // 0
                                SafeInt(dutyCycle, 100),                 // 1
                                SafeInt(BatteryV, 100),                  // 2
@@ -3379,9 +3977,10 @@ void SendWifiData() {
       }
     }  // Format string:
     int payload2Len = snprintf(payload2, PAYLOAD2_SIZE,
+
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -3400,10 +3999,11 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
+                               CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
                                SafeInt(MeasuredAmpsMax, 100),                                                                                                                            //1
                                SafeInt(RPMMax),                                                                                                                                          //2
@@ -3629,17 +4229,28 @@ void SendWifiData() {
                                SafeInt(Icv * 100),                                                                                                                                       // 222
                                SafeInt(cv_I * 100),                                                                                                                                      // 223
                                SafeInt(capLimitMode),
-                               SafeInt(TargetVoltageMode),           //225
-                               SafeInt(TargetVoltageSetpoint, 100),  // 226
-                               SafeInt(RebulkCurrent_A, 100),        // 227
-                               SafeInt(UseFloat),                    // 228
-                               SafeInt(inIdleStage),                 // 229
-                               SafeInt(referenceFinalized),          // 230
-                               SafeInt(sessionErrorCount),           // 231
-                               SafeInt(anomalyMarginAmps, 10),       // 232  — 1 decimal, divide by 10 in JS
-                               SafeInt(anomalyAlarmThreshold),       // 233
-                               SafeInt(anomalyAlarmEnable),          // 234
-                               SafeInt(degradationThreshold, 100)    // 235
+                               SafeInt(TargetVoltageMode),              //225
+                               SafeInt(TargetVoltageSetpoint, 100),     // 226
+                               SafeInt(RebulkCurrent_A, 100),           // 227
+                               SafeInt(UseFloat),                       // 228
+                               SafeInt(inIdleStage),                    // 229
+                               SafeInt(referenceFinalized),             // 230
+                               SafeInt(sessionErrorCount),              // 231
+                               SafeInt(anomalyMarginAmps, 10),          // 232  — 1 decimal, divide by 10 in JS
+                               SafeInt(anomalyAlarmThreshold),          // 233
+                               SafeInt(anomalyAlarmEnable),             // 234
+                               SafeInt(degradationThreshold, 100),      // 235
+                               SafeInt(ft_rai_total.worstWindow),       // 236
+                               SafeInt(ft_rai_total.worstSession),      // 237
+                               SafeInt(ft_rai_ina228.worstWindow),      // 238
+                               SafeInt(ft_rai_ina228.worstSession),     // 239
+                               SafeInt(ft_rai_ads_state.worstWindow),   // 240
+                               SafeInt(ft_rai_ads_state.worstSession),  // 241
+                               SafeInt(ft_rai_bmp_state.worstWindow),   // 242
+                               SafeInt(ft_rai_bmp_state.worstSession),  // 243
+                               SafeInt(ft_rai_imu.worstWindow),         // 244
+                               SafeInt(ft_rai_imu.worstSession),        // 245
+                               SafeInt(fsWriteQueueDrops)               // 246
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -3669,10 +4280,11 @@ void SendWifiData() {
     int payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
+                               CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
                                SafeInt(BulkVoltage, 100),                              // 1
                                SafeInt(wavePeriod),                                    // 2
@@ -3912,7 +4524,8 @@ void SendWifiData() {
                                SafeInt(ft_uploadBufferedRecords.worstWindow / 1000),   // 236 — Upload Buffered Records worst 5s window (ms)
                                SafeInt(ft_uploadBufferedRecords.worstSession / 1000),  // 237 — Upload Buffered Records worst session (ms)
                                SafeInt(ft_buildConfigPayload.worstWindow / 1000),      // 238 — Build Config Payload worst 5s window (ms)
-                               SafeInt(ft_buildConfigPayload.worstSession / 1000)      // 239 — Build Config Payload worst session (ms)
+                               SafeInt(ft_buildConfigPayload.worstSession / 1000),     // 239 — Build Config Payload worst session (ms)
+                               SafeInt(VeTime2)                                        //240
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
@@ -3938,7 +4551,8 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),        // 0
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),      // 1
                                        (dataTimestamps[IDX_LONGITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LONGITUDE_NMEA]),    // 2
