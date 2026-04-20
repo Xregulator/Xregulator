@@ -608,8 +608,6 @@ enum TsIndex {
 };
 
 
-
-
 // Cap current table functions
 float getCapCurrentForRPM(float rpm);
 void saveCapCurrentTableToNVS();

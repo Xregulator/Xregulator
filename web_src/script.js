@@ -463,7 +463,27 @@ const CSV3_FIELDS = [
     "rpmCurrentTable7",                // 54
     "rpmCurrentTable8",                // 55
     "rpmCurrentTable9",                // 56
-    // ...
+    "currentRPMTableIndex",            // 57
+    "pidInitialized",                  // 58
+    "ShuntResistanceMicroOhm",         // 59
+    "InvertAltAmps",                   // 60
+    "InvertBattAmps",                  // 61
+    "MaxDuty",                         // 62
+    "MinDuty",                         // 63
+    "FieldResistance",                 // 64
+    "maxPoints",                       // 65
+    "AlternatorCOffset",               // 66
+    "BatteryCOffset",                  // 67
+    "BatteryCapacity_Ah",              // 68
+    "AmpSrc",                          // 69
+    "R_fixed",                         // 70
+    "Beta",                            // 71
+    "T0_C",                            // 72
+    "TempSource",                      // 73
+    "IgnitionOverride",                // 74
+    "FLOAT_DURATION",                  // 75
+    "PulleyRatio",                     // 76
+    "BatteryCurrentSource",            // 77
     "overheatCount0",                  // 78
     "overheatCount1",                  // 79
     "overheatCount2",                  // 80
@@ -484,7 +504,18 @@ const CSV3_FIELDS = [
     "cumulativeNoOverheatTime7",       // 95
     "cumulativeNoOverheatTime8",       // 96
     "cumulativeNoOverheatTime9",       // 97
-    // ...
+    "totalLearningEvents",             // 98
+    "totalOverheats",                  // 99
+    "totalSafeHours",                  // 100
+    "averageTableValue",               // 101
+    "timeSinceLastOverheat",           // 102
+    "learningTargetFromRPM",           // 103
+    "ambientTempCorrection",           // 104
+    "finalLearningTarget",             // 105
+    "overheatingPenaltyTimer",         // 106
+    "overheatingPenaltyAmps",          // 107
+    "pidSetpoint",                     // 108
+    "TempToUse",                       // 109
     "rpmTableRPMPoints0",              // 110
     "rpmTableRPMPoints1",              // 111
     "rpmTableRPMPoints2",              // 112
@@ -495,7 +526,9 @@ const CSV3_FIELDS = [
     "rpmTableRPMPoints7",              // 117
     "rpmTableRPMPoints8",              // 118
     "rpmTableRPMPoints9",              // 119
-    // ...
+    "LearningSettlingPeriod",          // 120
+    "LearningRPMChangeThreshold",      // 121
+    "LearningTempHysteresis",          // 122
     "fuelTableRPM0",                   // 123
     "fuelTableRPM1",                   // 124
     "fuelTableRPM2",                   // 125
@@ -516,7 +549,16 @@ const CSV3_FIELDS = [
     "fuelTableGPH7",                   // 140
     "fuelTableGPH8",                   // 141
     "fuelTableGPH9",                   // 142
-    // ...
+    "stateRevision",                   // 143
+    "SetpointRampRate",                // 144
+    "DutyRampRate",                    // 145
+    "SettleTimeBeforeCut",             // 146
+    "TempWarnExcess",                  // 147
+    "TempCritExcess",                  // 148
+    "TempSustainedTimeout",            // 149
+    "VoltageSpikeMargin",              // 150
+    "VoltageDisagreeThreshold",        // 151
+    "VoltageDisagreeTimeout",          // 152
     "rpmMinDutyTable0",                // 153
     "rpmMinDutyTable1",                // 154
     "rpmMinDutyTable2",                // 155
@@ -537,7 +579,26 @@ const CSV3_FIELDS = [
     "rpmCapCurrentTable7",             // 170
     "rpmCapCurrentTable8",             // 171
     "rpmCapCurrentTable9",             // 172
-    // ...
+    "VoltageKp",                       // 173
+    "VoltageLoopInterval",             // 174
+    "FIELD_COLLAPSE_DELAY",            // 175
+    "SetpointRiseRate",                // 176
+    "SetpointFallRate",                // 177
+    "PIDTrackingGain",                 // 178
+    "CAPSIZE_THRESHOLD_DEG",           // 179
+    "PITCHPOLE_THRESHOLD_DEG",         // 180
+    "SLAM_THRESHOLD_G",                // 181
+    "imuMountOrientation",             // 182
+    "socInfoAvailable",                // 183
+    "TailCurrent_A",                   // 184
+    "RebulkVoltage",                   // 185
+    "rebulkDebounceTime",              // 186
+    "MinFloatTime",                    // 187
+    "SOC_BlockRebulk_percent",         // 188
+    "SOC_AllowRebulk_percent",         // 189
+    "accelEnabled",                    // 190
+    "DutySlowRampRate",                // 191
+    "ShutdownPhase2HoldMs",            // 192
     "learningUpCount0",                // 193
     "learningUpCount1",                // 194
     "learningUpCount2",                // 195
@@ -548,7 +609,22 @@ const CSV3_FIELDS = [
     "learningUpCount7",                // 200
     "learningUpCount8",                // 201
     "learningUpCount9",                // 202
-    // ...
+    "TempPIDKp",                       // 203
+    "TempPIDKi",                       // 204
+    "TempPIDKd",                       // 205
+    "TempPIDMarginF",                  // 206
+    "TempPIDIntervalMs",               // 207
+    "TempPIDFilterAlpha",              // 208
+    "TempPIDStaleMs",                  // 209
+    "TempPIDAntiWindupMarginA",        // 210
+    "FreeInternalRam",                 // 211
+    "TotalInternalRam",                // 212
+    "LargestInternalBlock",            // 213
+    "FreePSRAM",                       // 214
+    "TotalPSRAM",                      // 215
+    "Heapfrag",                        // 216
+    "TempPIDKdExternal",               // 217
+    "VoltageKi",                       // 218
     "rpmCapPowerTable0",               // 219
     "rpmCapPowerTable1",               // 220
     "rpmCapPowerTable2",               // 221
@@ -2327,241 +2403,240 @@ function updateWeatherAlerts() {
 
 // Function to update all echo values
 function updateAllEchosOptimized(data) {
-    return profileOperation('echoUpdates', () => {
-        let updatesCount = 0;
+    let updatesCount = 0;
 
-        // All echo updates with change detection        
-        //THIS IS WHERE SCALING HAPPENS FOR THE ECHOS!!!
+    // All echo updates with change detection        
+    //THIS IS WHERE SCALING HAPPENS FOR THE ECHOS!!!
 
-        const echoUpdates = [
-            { key: 'TemperatureLimitF', id: 'TemperatureLimitF_echo', transform: v => v },
-            { key: 'BulkVoltage', id: 'BulkVoltage_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'wavePeriod', id: 'wavePeriod_echo', transform: v => v },
-            { key: 'FloatVoltage', id: 'FloatVoltage_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'SwitchingFrequency', id: 'SwitchingFrequency_echo', transform: v => v },
-            { key: 'yyMin', id: 'yyMin_echo', transform: v => v },
-            { key: 'FieldAdjustmentInterval', id: 'FieldAdjustmentInterval_echo', transform: v => v },
-            { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => v },
-            { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v },
-            { key: 'OnOff', id: 'OnOff_echo', transform: v => v },
-            { key: 'ManualFieldToggle', id: 'ManualFieldToggle_echo', transform: v => v === 0 ? 1 : 0 },
-            { key: 'HiLow', id: 'HiLow_echo', transform: v => v },
-            { key: 'LimpHome', id: 'LimpHome_echo', transform: v => v },
-            { key: 'VeData', id: 'VeData_echo', transform: v => v },
-            { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v },
-            { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v },
-            { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
-            { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
-            { key: 'PeukertExponent', id: 'PeukertExponent_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'ChargeEfficiency', id: 'ChargeEfficiency_echo', transform: v => v + '%' },
-            { key: 'ChargedVoltage', id: 'ChargedVoltage_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'TailCurrent', id: 'TailCurrent_echo', transform: v => v },
-            { key: 'ChargedDetectionTime', id: 'ChargedDetectionTime_echo', transform: v => v },
-            { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v },
-            { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v },
-            { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v },
-            { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v },
-            { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => v },
-            { key: 'VoltageAlarmHigh', id: 'VoltageAlarmHigh_echo', transform: v => v },
-            { key: 'VoltageAlarmLow', id: 'VoltageAlarmLow_echo', transform: v => v },
-            { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
-            { key: 'FourWay', id: 'FourWay_echo', transform: v => v },
-            { key: 'RPMScalingFactor', id: 'RPMScalingFactor_echo', transform: v => v },
-            { key: 'ResetTemp', id: 'ResetTemp_echo', transform: v => v },
-            { key: 'ResetVoltage', id: 'ResetVoltage_echo', transform: v => v },
-            { key: 'ResetCurrent', id: 'ResetCurrent_echo', transform: v => v },
-            { key: 'ResetEngineRunTime', id: 'ResetEngineRunTime_echo', transform: v => v },
-            { key: 'ResetAlternatorOnTime', id: 'ResetAlternatorOnTime_echo', transform: v => v },
-            { key: 'ResetEnergy', id: 'ResetEnergy_echo', transform: v => v },
-            { key: 'MaximumAllowedBatteryAmps', id: 'MaximumAllowedBatteryAmps_echo', transform: v => v },
-            { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
-            { key: 'BatteryVoltageSource', id: 'BatteryVoltageSource_echo', transform: v => v },
-            { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
-            { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v },
-            { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v },
-            { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
-            { key: 'MinDuty', id: 'MinDuty_echo', transform: v => v },
-            { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'maxPoints', id: 'maxPoints_echo', transform: v => v },
-            { key: 'AlternatorCOffset', id: 'AlternatorCOffset_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'BatteryCOffset', id: 'BatteryCOffset_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'BatteryCapacity_Ah', id: 'BatteryCapacity_Ah_echo', transform: v => v },
-            { key: 'R_fixed', id: 'R_fixed_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'Beta', id: 'Beta_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'T0_C', id: 'T0_C_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'TempSource', id: 'TempSource_echo', transform: v => v },
-            { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v },
-            { key: 'AmpSrc', id: 'AmpSrc_echo', transform: v => v },
-            { key: 'AlarmLatchEnabled', id: 'AlarmLatchEnabled_echo', transform: v => v },
-            { key: 'AlarmTest', id: 'AlarmTest_echo', transform: v => v },
-            { key: 'ResetAlarmLatch', id: 'ResetAlarmLatch_echo', transform: v => v },
-            { key: 'MaintainMode', id: 'MaintainMode_echo', transform: v => v },
-            { key: 'UseFloat', id: 'UseFloat_echo', transform: v => v },
-            { key: 'RebulkCurrent_A', id: 'RebulkCurrent_A_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'TargetVoltageMode', id: 'TargetVoltageMode_echo', transform: v => v },
-            { key: 'absorptionCompleteTime', id: 'absorptionCompleteTime_echo', transform: v => Math.round(v / 1000) },
-            { key: 'FLOAT_DURATION', id: 'FLOAT_DURATION_echo', transform: v => (v / 3600).toFixed(2) },
-            { key: 'AutoShuntGainCorrection', id: 'AutoShuntGainCorrection_echo', transform: v => v },
-            { key: 'AutoAltCurrentZero', id: 'AutoAltCurrentZero_echo', transform: v => v },
-            { key: 'WindingTempOffset', id: 'WindingTempOffset_echo', transform: v => v },
-            { key: 'PulleyRatio', id: 'PulleyRatio_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'ManualLifePercentage', id: 'ManualLifePercentage_echo', transform: v => v },
-            { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => v },
-            { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v },
-            { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
-            { key: 'plotTimeWindow', id: 'plotTimeWindow_echo', transform: v => v },
-            { key: 'Ymin1', id: 'Ymin1_echo', transform: v => v },
-            { key: 'Ymax1', id: 'Ymax1_echo', transform: v => v },
-            { key: 'Ymin2', id: 'Ymin2_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'Ymax2', id: 'Ymax2_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'Ymin3', id: 'Ymin3_echo', transform: v => v },
-            { key: 'Ymax3', id: 'Ymax3_echo', transform: v => v },
-            { key: 'Ymin4', id: 'Ymin4_echo', transform: v => v },
-            { key: 'Ymax4', id: 'Ymax4_echo', transform: v => v },
-            { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v },
-            { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
-            { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
-            { key: 'LearningMode', id: 'LearningMode_echo', transform: v => v },
-            { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v },
-            { key: 'LearningPaused', id: 'LearningPaused_echo', transform: v => v },
-            { key: 'LearningDryRunMode', id: 'LearningDryRunMode_echo', transform: v => v },
-            { key: 'LearningUpwardEnabled', id: 'LearningUpwardEnabled_echo', transform: v => v },
-            { key: 'LearningDownwardEnabled', id: 'LearningDownwardEnabled_echo', transform: v => v },
-            { key: 'EnableNeighborLearning', id: 'EnableNeighborLearning_echo', transform: v => v },
-            { key: 'EnableAmbientCorrection', id: 'EnableAmbientCorrection_echo', transform: v => v },
-            { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v },
-            { key: 'AutoSaveLearningTable', id: 'AutoSaveLearningTable_echo', transform: v => v },
-            { key: 'ShowLearningDebugMessages', id: 'ShowLearningDebugMessages_echo', transform: v => v },
-            { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v },
-            { key: 'AlternatorNominalAmps', id: 'AlternatorNominalAmps_echo', transform: v => v },
-            { key: 'LearningUpStep', id: 'LearningUpStep_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'LearningDownStep', id: 'LearningDownStep_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'MinLearningInterval', id: 'MinLearningInterval_echo', transform: v => (v / 1000).toFixed(2) },
-            { key: 'SafeOperationThreshold', id: 'SafeOperationThreshold_echo', transform: v => (v / 1000).toFixed(2) },
-            { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'PidKi', id: 'PidKi_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'PidKd', id: 'PidKd_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'DutySlowRampRate', id: 'DutySlowRampRate_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => v.toFixed(2) },
-            { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
-            { key: 'IgnoreLearningDuringPenalty', id: 'IgnoreLearningDuringPenalty_echo', transform: v => v },
-            { key: 'AmbientTempCorrectionFactor', id: 'AmbientTempCorrectionFactor_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'xTime', id: 'xTime_echo', transform: v => v },
-            { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'MinTableValue', id: 'MinTableValue_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'MaxPenaltyPercent', id: 'MaxPenaltyPercent_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'MaxPenaltyDuration', id: 'MaxPenaltyDuration_echo', transform: v => v },
-            { key: 'NeighborLearningFactor', id: 'NeighborLearningFactor_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
-            { key: 'LearningTableSaveInterval', id: 'LearningTableSaveInterval_echo', transform: v => v },
-            { key: 'pidInput', id: 'pidInput_display', transform: v => (v / 100).toFixed(1) },
-            { key: 'pidSetpoint', id: 'pidSetpoint_display', transform: v => (v / 100).toFixed(1) },
-            { key: 'pidOutput', id: 'pidOutput_display', transform: v => (v / 100).toFixed(1) },
-            { key: 'pidError', id: 'pidError_display', transform: v => (v / 100).toFixed(1) },
-            { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
-            { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
-            { key: 'SetpointRampRate', id: 'SetpointRampRate_echo', transform: v => v.toFixed(2) },
-            { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => v.toFixed(2) },
-            { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
-            { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => v.toFixed(1) },
-            { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => v.toFixed(1) },
-            { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v / 1000) },
-            { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => v.toFixed(2) },
-            { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => v.toFixed(2) },
-            { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v / 1000) },
-            { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => v.toFixed(2) },
-            { key: 'VoltageTrimLimit', id: 'VoltageTrimLimit_echo', transform: v => v.toFixed(2) },
-            { key: 'VoltageLoopInterval', id: 'VoltageLoopInterval_echo', transform: v => Math.round(v) },
-            { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
-            { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
-            { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => v.toFixed(2) },
-            { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => v.toFixed(2) },
-            { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'CAPSIZE_THRESHOLD_DEG', id: 'CAPSIZE_THRESHOLD_DEG_echo', transform: v => v },
-            { key: 'PITCHPOLE_THRESHOLD_DEG', id: 'PITCHPOLE_THRESHOLD_DEG_echo', transform: v => v },
-            { key: 'SLAM_THRESHOLD_G', id: 'SLAM_THRESHOLD_G_echo', transform: v => (v / 10).toFixed(1) },
-            { key: 'socInfoAvailable', id: 'socInfoAvailable_echo', transform: v => v },
-            { key: 'TailCurrent_A', id: 'TailCurrent_A_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'RebulkVoltage', id: 'RebulkVoltage_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'rebulkDebounceTime', id: 'rebulkDebounceTime_echo', transform: v => Math.round(v / 1000) },
-            { key: 'MinFloatTime', id: 'MinFloatTime_echo', transform: v => Math.round(v / 60000) },
-            { key: 'SOC_BlockRebulk_percent', id: 'SOC_BlockRebulk_percent_echo', transform: v => v.toFixed(1) },
-            { key: 'SOC_AllowRebulk_percent', id: 'SOC_AllowRebulk_percent_echo', transform: v => v.toFixed(1) },
-            { key: 'TempPIDKp', id: 'TempPIDKp_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'TempPIDKi', id: 'TempPIDKi_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'TempPIDKd', id: 'TempPIDKd_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'TempPIDMarginF', id: 'TempPIDMarginF_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
-            { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
-            { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
-            { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
-            { key: 'bulkVoltageHoldMs', id: 'bulkVoltageHoldMs_echo', transform: v => (v / 1000).toFixed(2) },
-            { key: 'capLimitMode', id: 'capLimitMode_echo', transform: v => v },
-            { key: 'anomalyMarginAmps', id: 'anomalyMarginAmps_echo', transform: v => (v / 10).toFixed(1) },
-            { key: 'anomalyAlarmThreshold', id: 'anomalyAlarmThreshold_echo', transform: v => v },
-            { key: 'anomalyAlarmEnable', id: 'anomalyAlarmEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
-            { key: 'degradationThreshold', id: 'degradationThreshold_echo', transform: v => (v).toFixed(2) },
-            { key: 'fsWriteQueueDropsID', id: 'fsWriteQueueDrops', transform: v => v },
+    const echoUpdates = [
+        { key: 'TemperatureLimitF', id: 'TemperatureLimitF_echo', transform: v => v },
+        { key: 'BulkVoltage', id: 'BulkVoltage_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'wavePeriod', id: 'wavePeriod_echo', transform: v => v },
+        { key: 'FloatVoltage', id: 'FloatVoltage_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'SwitchingFrequency', id: 'SwitchingFrequency_echo', transform: v => v },
+        { key: 'yyMin', id: 'yyMin_echo', transform: v => v },
+        { key: 'FieldAdjustmentInterval', id: 'FieldAdjustmentInterval_echo', transform: v => v },
+        { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => v },
+        { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v },
+        { key: 'OnOff', id: 'OnOff_echo', transform: v => v },
+        { key: 'ManualFieldToggle', id: 'ManualFieldToggle_echo', transform: v => v === 0 ? 1 : 0 },
+        { key: 'HiLow', id: 'HiLow_echo', transform: v => v },
+        { key: 'LimpHome', id: 'LimpHome_echo', transform: v => v },
+        { key: 'VeData', id: 'VeData_echo', transform: v => v },
+        { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v },
+        { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v },
+        { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
+        { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
+        { key: 'PeukertExponent', id: 'PeukertExponent_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'ChargeEfficiency', id: 'ChargeEfficiency_echo', transform: v => v + '%' },
+        { key: 'ChargedVoltage', id: 'ChargedVoltage_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'TailCurrent', id: 'TailCurrent_echo', transform: v => v },
+        { key: 'ChargedDetectionTime', id: 'ChargedDetectionTime_echo', transform: v => v },
+        { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v },
+        { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v },
+        { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v },
+        { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v },
+        { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => v },
+        { key: 'VoltageAlarmHigh', id: 'VoltageAlarmHigh_echo', transform: v => v },
+        { key: 'VoltageAlarmLow', id: 'VoltageAlarmLow_echo', transform: v => v },
+        { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
+        { key: 'FourWay', id: 'FourWay_echo', transform: v => v },
+        { key: 'RPMScalingFactor', id: 'RPMScalingFactor_echo', transform: v => v },
+        { key: 'ResetTemp', id: 'ResetTemp_echo', transform: v => v },
+        { key: 'ResetVoltage', id: 'ResetVoltage_echo', transform: v => v },
+        { key: 'ResetCurrent', id: 'ResetCurrent_echo', transform: v => v },
+        { key: 'ResetEngineRunTime', id: 'ResetEngineRunTime_echo', transform: v => v },
+        { key: 'ResetAlternatorOnTime', id: 'ResetAlternatorOnTime_echo', transform: v => v },
+        { key: 'ResetEnergy', id: 'ResetEnergy_echo', transform: v => v },
+        { key: 'MaximumAllowedBatteryAmps', id: 'MaximumAllowedBatteryAmps_echo', transform: v => v },
+        { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
+        { key: 'BatteryVoltageSource', id: 'BatteryVoltageSource_echo', transform: v => v },
+        { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
+        { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v },
+        { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v },
+        { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
+        { key: 'MinDuty', id: 'MinDuty_echo', transform: v => v },
+        { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'maxPoints', id: 'maxPoints_echo', transform: v => v },
+        { key: 'AlternatorCOffset', id: 'AlternatorCOffset_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'BatteryCOffset', id: 'BatteryCOffset_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'BatteryCapacity_Ah', id: 'BatteryCapacity_Ah_echo', transform: v => v },
+        { key: 'R_fixed', id: 'R_fixed_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'Beta', id: 'Beta_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'T0_C', id: 'T0_C_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'TempSource', id: 'TempSource_echo', transform: v => v },
+        { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v },
+        { key: 'AmpSrc', id: 'AmpSrc_echo', transform: v => v },
+        { key: 'AlarmLatchEnabled', id: 'AlarmLatchEnabled_echo', transform: v => v },
+        { key: 'AlarmTest', id: 'AlarmTest_echo', transform: v => v },
+        { key: 'ResetAlarmLatch', id: 'ResetAlarmLatch_echo', transform: v => v },
+        { key: 'MaintainMode', id: 'MaintainMode_echo', transform: v => v },
+        { key: 'UseFloat', id: 'UseFloat_echo', transform: v => v },
+        { key: 'RebulkCurrent_A', id: 'RebulkCurrent_A_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'TargetVoltageMode', id: 'TargetVoltageMode_echo', transform: v => v },
+        { key: 'absorptionCompleteTime', id: 'absorptionCompleteTime_echo', transform: v => Math.round(v / 1000) },
+        { key: 'FLOAT_DURATION', id: 'FLOAT_DURATION_echo', transform: v => (v / 3600).toFixed(2) },
+        { key: 'AutoShuntGainCorrection', id: 'AutoShuntGainCorrection_echo', transform: v => v },
+        { key: 'AutoAltCurrentZero', id: 'AutoAltCurrentZero_echo', transform: v => v },
+        { key: 'WindingTempOffset', id: 'WindingTempOffset_echo', transform: v => v },
+        { key: 'PulleyRatio', id: 'PulleyRatio_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'ManualLifePercentage', id: 'ManualLifePercentage_echo', transform: v => v },
+        { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => v },
+        { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v },
+        { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
+        { key: 'plotTimeWindow', id: 'plotTimeWindow_echo', transform: v => v },
+        { key: 'Ymin1', id: 'Ymin1_echo', transform: v => v },
+        { key: 'Ymax1', id: 'Ymax1_echo', transform: v => v },
+        { key: 'Ymin2', id: 'Ymin2_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'Ymax2', id: 'Ymax2_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'Ymin3', id: 'Ymin3_echo', transform: v => v },
+        { key: 'Ymax3', id: 'Ymax3_echo', transform: v => v },
+        { key: 'Ymin4', id: 'Ymin4_echo', transform: v => v },
+        { key: 'Ymax4', id: 'Ymax4_echo', transform: v => v },
+        { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v },
+        { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
+        { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
+        { key: 'LearningMode', id: 'LearningMode_echo', transform: v => v },
+        { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v },
+        { key: 'LearningPaused', id: 'LearningPaused_echo', transform: v => v },
+        { key: 'LearningDryRunMode', id: 'LearningDryRunMode_echo', transform: v => v },
+        { key: 'LearningUpwardEnabled', id: 'LearningUpwardEnabled_echo', transform: v => v },
+        { key: 'LearningDownwardEnabled', id: 'LearningDownwardEnabled_echo', transform: v => v },
+        { key: 'EnableNeighborLearning', id: 'EnableNeighborLearning_echo', transform: v => v },
+        { key: 'EnableAmbientCorrection', id: 'EnableAmbientCorrection_echo', transform: v => v },
+        { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v },
+        { key: 'AutoSaveLearningTable', id: 'AutoSaveLearningTable_echo', transform: v => v },
+        { key: 'ShowLearningDebugMessages', id: 'ShowLearningDebugMessages_echo', transform: v => v },
+        { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v },
+        { key: 'AlternatorNominalAmps', id: 'AlternatorNominalAmps_echo', transform: v => v },
+        { key: 'LearningUpStep', id: 'LearningUpStep_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'LearningDownStep', id: 'LearningDownStep_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'MinLearningInterval', id: 'MinLearningInterval_echo', transform: v => (v / 1000).toFixed(2) },
+        { key: 'SafeOperationThreshold', id: 'SafeOperationThreshold_echo', transform: v => (v / 1000).toFixed(2) },
+        { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'PidKi', id: 'PidKi_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'PidKd', id: 'PidKd_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'DutySlowRampRate', id: 'DutySlowRampRate_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => v.toFixed(2) },
+        { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
+        { key: 'IgnoreLearningDuringPenalty', id: 'IgnoreLearningDuringPenalty_echo', transform: v => v },
+        { key: 'AmbientTempCorrectionFactor', id: 'AmbientTempCorrectionFactor_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'xTime', id: 'xTime_echo', transform: v => v },
+        { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'MinTableValue', id: 'MinTableValue_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'MaxPenaltyPercent', id: 'MaxPenaltyPercent_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'MaxPenaltyDuration', id: 'MaxPenaltyDuration_echo', transform: v => v },
+        { key: 'NeighborLearningFactor', id: 'NeighborLearningFactor_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
+        { key: 'LearningTableSaveInterval', id: 'LearningTableSaveInterval_echo', transform: v => v },
+        { key: 'pidInput', id: 'pidInput_display', transform: v => (v / 100).toFixed(1) },
+        { key: 'pidSetpoint', id: 'pidSetpoint_display', transform: v => (v / 100).toFixed(1) },
+        { key: 'pidOutput', id: 'pidOutput_display', transform: v => (v / 100).toFixed(1) },
+        { key: 'pidError', id: 'pidError_display', transform: v => (v / 100).toFixed(1) },
+        { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
+        { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
+        { key: 'SetpointRampRate', id: 'SetpointRampRate_echo', transform: v => v.toFixed(2) },
+        { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => v.toFixed(2) },
+        { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
+        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => v.toFixed(1) },
+        { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => v.toFixed(1) },
+        { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v / 1000) },
+        { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => v.toFixed(2) },
+        { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => v.toFixed(2) },
+        { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v / 1000) },
+        { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => v.toFixed(2) },
+        { key: 'VoltageTrimLimit', id: 'VoltageTrimLimit_echo', transform: v => v.toFixed(2) },
+        { key: 'VoltageLoopInterval', id: 'VoltageLoopInterval_echo', transform: v => Math.round(v) },
+        { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
+        { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
+        { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => v.toFixed(2) },
+        { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => v.toFixed(2) },
+        { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'CAPSIZE_THRESHOLD_DEG', id: 'CAPSIZE_THRESHOLD_DEG_echo', transform: v => v },
+        { key: 'PITCHPOLE_THRESHOLD_DEG', id: 'PITCHPOLE_THRESHOLD_DEG_echo', transform: v => v },
+        { key: 'SLAM_THRESHOLD_G', id: 'SLAM_THRESHOLD_G_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'socInfoAvailable', id: 'socInfoAvailable_echo', transform: v => v },
+        { key: 'TailCurrent_A', id: 'TailCurrent_A_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'RebulkVoltage', id: 'RebulkVoltage_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'rebulkDebounceTime', id: 'rebulkDebounceTime_echo', transform: v => Math.round(v / 1000) },
+        { key: 'MinFloatTime', id: 'MinFloatTime_echo', transform: v => Math.round(v / 60000) },
+        { key: 'SOC_BlockRebulk_percent', id: 'SOC_BlockRebulk_percent_echo', transform: v => v.toFixed(1) },
+        { key: 'SOC_AllowRebulk_percent', id: 'SOC_AllowRebulk_percent_echo', transform: v => v.toFixed(1) },
+        { key: 'TempPIDKp', id: 'TempPIDKp_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'TempPIDKi', id: 'TempPIDKi_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'TempPIDKd', id: 'TempPIDKd_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'TempPIDMarginF', id: 'TempPIDMarginF_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
+        { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
+        { key: 'bulkVoltageHoldMs', id: 'bulkVoltageHoldMs_echo', transform: v => (v / 1000).toFixed(2) },
+        { key: 'capLimitMode', id: 'capLimitMode_echo', transform: v => v },
+        { key: 'anomalyMarginAmps', id: 'anomalyMarginAmps_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'anomalyAlarmThreshold', id: 'anomalyAlarmThreshold_echo', transform: v => v },
+        { key: 'anomalyAlarmEnable', id: 'anomalyAlarmEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'degradationThreshold', id: 'degradationThreshold_echo', transform: v => (v).toFixed(2) },
+        { key: 'fsWriteQueueDropsID', id: 'fsWriteQueueDrops', transform: v => v },
 
 
-        ];
+    ];
 
-        // Special display elements (not echos but similar update pattern)
-        const specialDisplays = [
-            { key: 'DynamicShuntGainFactor', id: 'DynamicShuntGainFactor_display', transform: v => (v / 1000).toFixed(3) },
-            { key: 'DynamicAltCurrentZero', id: 'DynamicAltCurrentZero_display', transform: v => (v / 1000).toFixed(3) + ' A' },
-            { key: 'totalPowerCycles', id: 'totalPowerCyclesID', transform: v => v },
-            {
-                key: 'AlarmLatchState',
-                id: 'AlarmLatchState_display',
-                transform: v => v,
-                special: (el, value) => {
-                    if (value === 1) {
-                        el.textContent = 'LATCHED';
-                        el.style.color = '#ff0000';
-                    } else {
-                        el.textContent = 'Normal';
-                        el.style.color = 'var(--accent)';
-                    }
+    // Special display elements (not echos but similar update pattern)
+    const specialDisplays = [
+        { key: 'DynamicShuntGainFactor', id: 'DynamicShuntGainFactor_display', transform: v => (v / 1000).toFixed(3) },
+        { key: 'DynamicAltCurrentZero', id: 'DynamicAltCurrentZero_display', transform: v => (v / 1000).toFixed(3) + ' A' },
+        { key: 'totalPowerCycles', id: 'totalPowerCyclesID', transform: v => v },
+        {
+            key: 'AlarmLatchState',
+            id: 'AlarmLatchState_display',
+            transform: v => v,
+            special: (el, value) => {
+                if (value === 1) {
+                    el.textContent = 'LATCHED';
+                    el.style.color = '#ff0000';
+                } else {
+                    el.textContent = 'Normal';
+                    el.style.color = 'var(--accent)';
                 }
             }
-        ];
+        }
+    ];
 
-        // Update only changed echo values
-        echoUpdates.forEach(update => {
-            if (update.key in data) {
-                const newValue = update.transform(data[update.key]);
-                if (updateEchoIfChanged(update.id, newValue)) {
-                    updatesCount++;
-                }
+    // Update only changed echo values
+    echoUpdates.forEach(update => {
+        if (update.key in data) {
+            const newValue = update.transform(data[update.key]);
+            if (updateEchoIfChanged(update.id, newValue)) {
+                updatesCount++;
             }
-        });
-
-        // Update special displays
-        specialDisplays.forEach(display => {
-            if (display.key in data) {
-                const el = document.getElementById(display.id);
-                if (el) {
-                    if (display.special) {
-                        display.special(el, data[display.key]);
-                        updatesCount++;
-                    } else {
-                        const newValue = display.transform(data[display.key]);
-                        if (updateEchoIfChanged(display.id, newValue)) {
-                            updatesCount++;
-                        }
-                    }
-                }
-            }
-        });
-
-        return updatesCount;
+        }
     });
-}
+
+    // Update special displays
+    specialDisplays.forEach(display => {
+        if (display.key in data) {
+            const el = document.getElementById(display.id);
+            if (el) {
+                if (display.special) {
+                    display.special(el, data[display.key]);
+                    updatesCount++;
+                } else {
+                    const newValue = display.transform(data[display.key]);
+                    if (updateEchoIfChanged(display.id, newValue)) {
+                        updatesCount++;
+                    }
+                }
+            }
+        }
+    });
+
+    return updatesCount;
+};
+
 
 // end axes configuration functions
 let rpmAmpsInitialized = false; // this is for the RPM/AMP speed based charging table
@@ -5756,14 +5831,14 @@ window.addEventListener("load", function () {
                             const p = pendingTableValues.get(capInput.id);
                             if (p) {
                                 const incoming = data[`rpmCapCurrentTable${i}`];
-                                const confirmed = incoming !== undefined && Math.round(incoming) === Number(p.value);
+                                const confirmed = incoming !== undefined && Math.round(incoming / 100) === Number(p.value);
                                 if (confirmed || Date.now() >= p.deadlineMs) {
                                     capInput.classList.remove('table-input-pending');
                                     pendingTableValues.delete(capInput.id);
-                                    if (incoming !== undefined) capInput.value = Math.round(incoming);
+                                    if (incoming !== undefined) capInput.value = Math.round(incoming / 100);
                                 }
                             } else if (data[`rpmCapCurrentTable${i}`] !== undefined) {
-                                capInput.value = Math.round(data[`rpmCapCurrentTable${i}`]);
+                                capInput.value = Math.round(data[`rpmCapCurrentTable${i}`] / 100);
                             }
                         }
                         if (kwInput) kwInput.value = ampsToKW(parseFloat(capInput?.value) || 0).toFixed(2);
@@ -5834,10 +5909,6 @@ window.addEventListener("load", function () {
             drawGlyphs();
             updatePidInitializedDisplay(data);
 
-            const processingTime = performance.now() - processingStart;
-            if (processingTime > 10) {
-                diagLog(`[CSV3] Processing took ${processingTime.toFixed(1)}ms`);
-            }
 
         }, false);
 
@@ -5857,6 +5928,26 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(TS_FIELDS.map((key, i) => [key, values[i]]));
+
+            window.sensorAges = {
+                heading: data.ts_HeadingNMEA,
+                latitude: data.ts_LatitudeNMEA,
+                longitude: data.ts_LongitudeNMEA,
+                satellites: data.ts_SatelliteCount,
+                victronVoltage: data.ts_VictronVoltage,
+                victronCurrent: data.ts_VictronCurrent,
+                alternatorTemp: data.ts_AlternatorTemp,
+                thermistorTemp: data.ts_ThermistorTemp,
+                rpm: data.ts_RPM,
+                measuredAmps: data.ts_MeasuredAmps,
+                batteryV: data.ts_BatteryV,
+                ibv: data.ts_IBV,
+                bcur: data.ts_Bcur,
+                channel3V: data.ts_Channel3V,
+                dutyCycle: data.ts_DutyCycle,
+                fieldVolts: data.ts_FieldVolts,
+                fieldAmps: data.ts_FieldAmps
+            };
         }, false);
 
 
@@ -5952,18 +6043,6 @@ max-width: 100%;     /* allow full width on mobile */
 
     updateFloatVisibility();
 
-    // Start frame time monitoring
-    if (ENABLE_DETAILED_PROFILING) {
-        startFrameTimeMonitoring();
-        // Log performance summary every 10 seconds during development
-        setTrackedInterval(() => {
-            const avgFrameTime = frameTimeTracker.frameTimes.reduce((a, b) => a + b, 0) / frameTimeTracker.frameTimes.length;
-            diagLog(`[PERF SUMMARY] Avg frame: ${avgFrameTime.toFixed(2)}ms, Worst: ${frameTimeTracker.worstFrame.toFixed(2)}ms, FPS: ${(1000 / avgFrameTime).toFixed(1)}`);
-            frameTimeTracker.worstFrame = 0; // Reset worst frame counter
-        }, 10000);
-    }
-
-    setTrackedInterval(reportPlotRenderingStats, plotRenderTracker.interval);
 
 
 });// <-- end of the window load event listener
