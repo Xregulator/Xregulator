@@ -1144,3 +1144,300 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
   }
   return false;
 }
+
+
+// ============================================================
+// systemID_tick() — plant delay measurement step test
+//
+// Architecture:
+//  • 8-phase state machine: BASELINE + 3× (UP / DOWN).
+//  • Each phase holds for 15 × InputFilterTC ms (floor 750 ms).
+//  • Called every CH1 fresh hit from AdjustFieldLearnMode.
+//  • Returns true while active; caller must:
+//      – force govMode = GOV_BYPASS_SLEW
+//      – set PID to MANUAL and reset integrator to dutyOut
+//      – use dutyOut as the duty command
+//  • On completion, post-processes buffer in-place (O(N) scan)
+//    and populates systemIDRise/FallDelay_ms[] and averages.
+//  • systemIDResultsReady → true signals UI to show popup.
+//  • Buffer (PSRAM) allocated once on first run, never freed.
+//
+// Mode gate: only starts from SYS_MODE_AUTO. Clears
+// systemIDRequested and returns false in all other modes.
+//
+// Detection thresholds:
+//  Rising : current must exceed quietMax × 1.2 (20% above prior-phase max)
+//  Falling: current must drop below upMin × 0.8  (20% below high-phase min)
+//  A delay of -1 ms means the threshold crossing was not found in the buffer.
+// ============================================================
+
+bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
+
+  // Phase enum. Values 1–7 map to phaseStartMs indices 0–6 via (phase – 1).
+  enum SysIDPhase : uint8_t {
+    SYSID_IDLE = 0,
+    SYSID_BASELINE = 1,
+    SYSID_UP_1 = 2,
+    SYSID_DOWN_1 = 3,
+    SYSID_UP_2 = 4,
+    SYSID_DOWN_2 = 5,
+    SYSID_UP_3 = 6,
+    SYSID_DOWN_3 = 7,
+    SYSID_PROCESSING = 8
+  };
+
+  static SysIDPhase phase = SYSID_IDLE;
+  static float baseDuty = 0.0f;
+  static uint32_t holdMs = 0;
+
+  // phaseStartMs[0..6] = start timestamps for BASELINE through DOWN_3.
+  // phaseStartMs[7] = timestamp when PROCESSING was entered (= end of DOWN_3).
+  static uint32_t phaseStartMs[8] = { 0 };
+
+  // ── Ignore re-triggers while a test is already running ──────────────────
+  if (phase != SYSID_IDLE && systemIDRequested) {
+    systemIDRequested = false;
+    queueConsoleMessage("SystemID: re-trigger ignored — test already in progress");
+  }
+
+  // ── IDLE: wait for trigger ───────────────────────────────────────────────
+  if (phase == SYSID_IDLE) {
+    if (!systemIDRequested) {
+      dutyOut = lastAppliedDuty;
+      return false;
+    }
+    systemIDRequested = false;
+
+    // Mode gate — only legal in AUTO
+    if (sysMode != SYS_MODE_AUTO) {
+      queueConsoleMessage("SystemID: requires AUTO mode — test not started");
+      dutyOut = lastAppliedDuty;
+      return false;
+    }
+
+    // Allocate PSRAM buffer on first use
+    if (sysIDBuffer == nullptr) {
+      sysIDBuffer = (SystemIDSample *)ps_malloc(SYSID_BUF_SIZE * sizeof(SystemIDSample));
+      if (sysIDBuffer == nullptr) {
+        queueConsoleMessage("SystemID: PSRAM alloc failed — test aborted");
+        dutyOut = lastAppliedDuty;
+        return false;
+      }
+    }
+    // Preflight: baseDuty must be high enough that the DOWN step lands above
+    // zero with meaningful amplitude. Silent clamping at rpmMinDuty would
+    // produce garbage fall measurements without any error indication.
+    if (lastAppliedDuty < 5.0f) {
+      queueConsoleMessageF(
+        "SystemID: baseDuty=%.1f%% too low for reliable step test — test aborted",
+        lastAppliedDuty);
+      dutyOut = lastAppliedDuty;
+      return false;
+    }
+
+    // Initialise test state
+    memset(phaseStartMs, 0, sizeof(phaseStartMs));
+    sysIDSampleCount = 0;
+    systemIDActive = true;
+    systemIDResultsReady = false;
+    baseDuty = lastAppliedDuty;
+    holdMs = (uint32_t)(15.0f * InputFilterTC);
+    if (holdMs < 750) holdMs = 750;  // absolute floor regardless of TC
+
+    queueConsoleMessageF(
+      "SystemID: starting | baseDuty=%.1f%% step=+%.1f%% holdMs=%u TC=%.0fms",
+      baseDuty, SystemIDStepAmplitude, holdMs, InputFilterTC);
+    Serial.printf(
+      "SystemID: starting | baseDuty=%.1f%% step=+%.1f%% holdMs=%u TC=%.0fms\n",
+      baseDuty, SystemIDStepAmplitude, holdMs, InputFilterTC);
+
+    phaseStartMs[0] = nowMs;  // BASELINE start
+    phase = SYSID_BASELINE;
+  }
+
+  // ── Determine commanded duty for current phase ───────────────────────────
+  // UP phases command baseDuty + amplitude; all others hold baseDuty.
+  bool isUpPhase = (phase == SYSID_UP_1 || phase == SYSID_UP_2 || phase == SYSID_UP_3);
+  float phaseDuty = isUpPhase
+                      ? constrain(baseDuty + SystemIDStepAmplitude, 0.0f, 100.0f)
+                      : baseDuty;
+  dutyOut = phaseDuty;
+
+  // ── Record sample ────────────────────────────────────────────────────────
+  if (sysIDSampleCount < SYSID_BUF_SIZE) {
+    sysIDBuffer[sysIDSampleCount++] = { nowMs, phaseDuty, ampsRaw };
+  }
+
+  // ── Phase advance ────────────────────────────────────────────────────────
+  // phase enum starts at 1, phaseStartMs index = phase - 1.
+  uint32_t elapsed = nowMs - phaseStartMs[phase - 1];
+  if (elapsed >= holdMs) {
+    switch (phase) {
+      case SYSID_BASELINE:
+        phaseStartMs[1] = nowMs;
+        phase = SYSID_UP_1;
+        queueConsoleMessage("SystemID: UP 1");
+        Serial.println("SystemID: UP 1");
+        break;
+      case SYSID_UP_1:
+        phaseStartMs[2] = nowMs;
+        phase = SYSID_DOWN_1;
+        queueConsoleMessage("SystemID: DOWN 1");
+        Serial.println("SystemID: DOWN 1");
+        break;
+      case SYSID_DOWN_1:
+        phaseStartMs[3] = nowMs;
+        phase = SYSID_UP_2;
+        queueConsoleMessage("SystemID: UP 2");
+        Serial.println("SystemID: UP 2");
+        break;
+      case SYSID_UP_2:
+        phaseStartMs[4] = nowMs;
+        phase = SYSID_DOWN_2;
+        queueConsoleMessage("SystemID: DOWN 2");
+        Serial.println("SystemID: DOWN 2");
+        break;
+      case SYSID_DOWN_2:
+        phaseStartMs[5] = nowMs;
+        phase = SYSID_UP_3;
+        queueConsoleMessage("SystemID: UP 3");
+        Serial.println("SystemID: UP 3");
+        break;
+      case SYSID_UP_3:
+        phaseStartMs[6] = nowMs;
+        phase = SYSID_DOWN_3;
+        queueConsoleMessage("SystemID: DOWN 3");
+        Serial.println("SystemID: DOWN 3");
+        break;
+      case SYSID_DOWN_3:
+        phaseStartMs[7] = nowMs;  // test end timestamp
+        phase = SYSID_PROCESSING;
+        queueConsoleMessage("SystemID: data collection complete — post-processing");
+        Serial.println("SystemID: data collection complete — post-processing");
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ── Post-processing (runs immediately when PROCESSING is entered) ────────
+  // phaseStartMs layout:
+  //   [0] BASELINE start    [1] UP_1 start    [2] DOWN_1 start
+  //   [3] UP_2 start        [4] DOWN_2 start  [5] UP_3 start
+  //   [6] DOWN_3 start      [7] test end (DOWN_3 end)
+  //
+  // Preceding quiet phase for each rise: BASELINE[0], DOWN_1[2], DOWN_2[4]
+  // UP phase starts:                     UP_1[1],    UP_2[3],   UP_3[5]
+  // UP phase ends (= next phase start):  DOWN_1[2],  DOWN_2[4], DOWN_3[6]
+  //
+  // Preceding UP phase for each fall:   UP_1[1],  UP_2[3],  UP_3[5]
+  // DOWN phase starts:                  DOWN_1[2],DOWN_2[4],DOWN_3[6]
+  // (No upper bound needed for falls — scan to end of buffer.)
+
+  if (phase == SYSID_PROCESSING) {
+
+    const uint8_t quietIdx[3] = { 0, 2, 4 };  // phaseStartMs index of pre-rise quiet phase
+    const uint8_t upIdx[3] = { 1, 3, 5 };     // phaseStartMs index of UP phase start
+    const uint8_t upEndIdx[3] = { 2, 4, 6 };  // phaseStartMs index of UP phase end
+    const uint8_t downIdx[3] = { 2, 4, 6 };   // phaseStartMs index of DOWN phase start
+
+    // ── Rise delays ─────────────────────────────────────────────────────
+    for (int i = 0; i < 3; i++) {
+      uint32_t t_quiet_start = phaseStartMs[quietIdx[i]];
+      uint32_t t_up_start = phaseStartMs[upIdx[i]];
+      uint32_t t_up_end = phaseStartMs[upEndIdx[i]];
+
+      // Max current during the preceding quiet phase
+      float quietMax = -1.0e9f;
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        if (sysIDBuffer[s].ts < t_quiet_start) continue;
+        if (sysIDBuffer[s].ts >= t_up_start) break;  // past window
+        if (sysIDBuffer[s].amps > quietMax) quietMax = sysIDBuffer[s].amps;
+      }
+      float riseThresh = quietMax * 1.2f;
+
+      // First sample in the UP phase that exceeds riseThresh
+      systemIDRiseDelay_ms[i] = -1.0f;  // -1 = not found
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        if (sysIDBuffer[s].ts < t_up_start) continue;
+        if (sysIDBuffer[s].ts >= t_up_end) break;  // past UP phase
+        if (sysIDBuffer[s].amps > riseThresh) {
+          systemIDRiseDelay_ms[i] = (float)(sysIDBuffer[s].ts - t_up_start);
+          break;
+        }
+      }
+
+      Serial.printf(
+        "SystemID rise %d | quietMax=%.1fA thresh=%.1fA delay=%.0f ms\n",
+        i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
+    }
+
+    // ── Fall delays ─────────────────────────────────────────────────────
+    for (int i = 0; i < 3; i++) {
+      uint32_t t_up_start = phaseStartMs[upIdx[i]];
+      uint32_t t_up_end = phaseStartMs[downIdx[i]];  // = DOWN phase start
+      uint32_t t_down_start = phaseStartMs[downIdx[i]];
+
+      // Minimum current during the UP phase (settled high level)
+      float upMin = 1.0e9f;
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        if (sysIDBuffer[s].ts < t_up_start) continue;
+        if (sysIDBuffer[s].ts >= t_up_end) break;
+        if (sysIDBuffer[s].amps < upMin) upMin = sysIDBuffer[s].amps;
+      }
+      float fallThresh = upMin * 0.8f;
+
+      // First sample after DOWN start that drops below fallThresh.
+      // No upper bound — scan to end of buffer; current is falling monotonically.
+      systemIDFallDelay_ms[i] = -1.0f;
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        if (sysIDBuffer[s].ts < t_down_start) continue;
+        if (sysIDBuffer[s].amps < fallThresh) {
+          systemIDFallDelay_ms[i] = (float)(sysIDBuffer[s].ts - t_down_start);
+          break;
+        }
+      }
+
+      Serial.printf(
+        "SystemID fall %d | upMin=%.1fA thresh=%.1fA delay=%.0f ms\n",
+        i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
+    }
+
+    // ── Averages (skip -1 not-found entries) ────────────────────────────
+    float riseSum = 0.0f;
+    int riseN = 0;
+    float fallSum = 0.0f;
+    int fallN = 0;
+    for (int i = 0; i < 3; i++) {
+      if (systemIDRiseDelay_ms[i] >= 0.0f) {
+        riseSum += systemIDRiseDelay_ms[i];
+        riseN++;
+      }
+      if (systemIDFallDelay_ms[i] >= 0.0f) {
+        fallSum += systemIDFallDelay_ms[i];
+        fallN++;
+      }
+    }
+    systemIDRiseAvg_ms = (riseN > 0) ? riseSum / (float)riseN : -1.0f;
+    systemIDFallAvg_ms = (fallN > 0) ? fallSum / (float)fallN : -1.0f;
+
+    queueConsoleMessageF(
+      "SystemID results | Rise: %.0f %.0f %.0f avg=%.0f ms | Fall: %.0f %.0f %.0f avg=%.0f ms | samples=%d",
+      systemIDRiseDelay_ms[0], systemIDRiseDelay_ms[1], systemIDRiseDelay_ms[2], systemIDRiseAvg_ms,
+      systemIDFallDelay_ms[0], systemIDFallDelay_ms[1], systemIDFallDelay_ms[2], systemIDFallAvg_ms,
+      sysIDSampleCount);
+    Serial.printf(
+      "SystemID results | Rise: %.0f %.0f %.0f avg=%.0f ms | Fall: %.0f %.0f %.0f avg=%.0f ms | samples=%d\n",
+      systemIDRiseDelay_ms[0], systemIDRiseDelay_ms[1], systemIDRiseDelay_ms[2], systemIDRiseAvg_ms,
+      systemIDFallDelay_ms[0], systemIDFallDelay_ms[1], systemIDFallDelay_ms[2], systemIDFallAvg_ms,
+      sysIDSampleCount);
+
+    systemIDResultsReady = true;
+    systemIDActive = false;
+    phase = SYSID_IDLE;  // reset for next run
+    dutyOut = baseDuty;  // restore base duty on exit tick
+    return false;
+  }
+
+  return true;  // test still in progress
+}

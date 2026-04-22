@@ -647,6 +647,20 @@ const CSV3_FIELDS = [
     "ft_buildConfigPayload_win",       // 238
     "ft_buildConfigPayload_ses",       // 239
     "VeTime2",                         // 240
+    "systemIDActive",           // 241
+    "systemIDResultsReady",     // 242
+    "systemIDRiseDelay_0",      // 243
+    "systemIDRiseDelay_1",      // 244
+    "systemIDRiseDelay_2",      // 245
+    "systemIDFallDelay_0",      // 246
+    "systemIDFallDelay_1",      // 247
+    "systemIDFallDelay_2",      // 248
+    "systemIDRiseAvg",          // 249
+    "systemIDFallAvg",          // 250
+    "InputFilterTC",            // 251
+    "SystemIDStepAmplitude",    // 252
+
+
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2581,7 +2595,8 @@ function updateAllEchosOptimized(data) {
         { key: 'anomalyAlarmEnable', id: 'anomalyAlarmEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'degradationThreshold', id: 'degradationThreshold_echo', transform: v => (v).toFixed(2) },
         { key: 'fsWriteQueueDropsID', id: 'fsWriteQueueDrops', transform: v => v },
-
+        { key: 'InputFilterTC', id: 'InputFilterTC_echo', transform: v => v },
+        { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
 
     ];
 
@@ -5701,7 +5716,17 @@ window.addEventListener("load", function () {
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
                 ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
-                ["VeTime2_ID", "VeTime2"]
+                ["VeTime2_ID", "VeTime2"],
+                ["systemIDActive_ID", "systemIDActive"],
+                ["systemIDResultsReady_ID", "systemIDResultsReady"],
+                ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
+                ["systemIDRiseDelay_1_ID", "systemIDRiseDelay_1"],
+                ["systemIDRiseDelay_2_ID", "systemIDRiseDelay_2"],
+                ["systemIDFallDelay_0_ID", "systemIDFallDelay_0"],
+                ["systemIDFallDelay_1_ID", "systemIDFallDelay_1"],
+                ["systemIDFallDelay_2_ID", "systemIDFallDelay_2"],
+                ["systemIDRiseAvg_ID", "systemIDRiseAvg"],
+                ["systemIDFallAvg_ID", "systemIDFallAvg"]
 
             ];
 
@@ -5867,7 +5892,7 @@ window.addEventListener("load", function () {
                         const p = pendingTableValues.get(minDutyInput.id);
                         if (p) {
                             const incoming = data[`rpmMinDutyTable${i}`] !== undefined
-                                ? data[`rpmMinDutyTable${i}`].toFixed(1)
+                                ? (data[`rpmMinDutyTable${i}`] / 100).toFixed(1)
                                 : undefined;
                             const confirmed = incoming !== undefined && Math.abs(Number(incoming) - Number(p.value)) < 0.05;
                             if (confirmed || Date.now() >= p.deadlineMs) {
@@ -5876,7 +5901,7 @@ window.addEventListener("load", function () {
                                 if (incoming !== undefined) minDutyInput.value = incoming;
                             }
                         } else if (data[`rpmMinDutyTable${i}`] !== undefined) {
-                            minDutyInput.value = data[`rpmMinDutyTable${i}`].toFixed(1);
+                            minDutyInput.value = (data[`rpmMinDutyTable${i}`] / 100).toFixed(1);
                         }
                     }
                 }
@@ -9177,7 +9202,66 @@ async function downloadCvLog() {
 }
 
 
+function startSystemIDTest() {
+  if (!confirm(
+    "WARNING: The step test will briefly override field duty directly.\n" +
+    "Run only with the engine running at normal operating RPM.\n" +
+    "Ensure battery voltage is stable and not near a protection threshold.\n\n" +
+    "Start the test?")) return;
 
+  fetch("/get?startSystemID=1&password=" + encodeURIComponent(getPassword()))
+    .then(() => {
+      console.log("SystemID test requested");
+      waitForSystemIDResults();
+    })
+    .catch(err => console.error("SystemID request failed:", err));
+}
+
+function waitForSystemIDResults() {
+  // Poll every 500ms until systemIDResultsReady == 1, then show dialog.
+  // Gives up after 120 seconds (well beyond worst-case test duration).
+  const maxWaitMs = 120000;
+  const pollMs    = 500;
+  let   elapsed   = 0;
+
+  const poll = setInterval(() => {
+    elapsed += pollMs;
+    if (elapsed > maxWaitMs) {
+      clearInterval(poll);
+      alert("SystemID: timed out waiting for results. Check serial console.");
+      return;
+    }
+    // latest_data is your existing live data object populated by the CSV stream
+    if (typeof latest_data === "undefined") return;
+    if (parseInt(latest_data.systemIDResultsReady) !== 1) return;
+
+    clearInterval(poll);
+
+    const r0 = latest_data.systemIDRiseDelay_0;
+    const r1 = latest_data.systemIDRiseDelay_1;
+    const r2 = latest_data.systemIDRiseDelay_2;
+    const ra = latest_data.systemIDRiseAvg;
+    const f0 = latest_data.systemIDFallDelay_0;
+    const f1 = latest_data.systemIDFallDelay_1;
+    const f2 = latest_data.systemIDFallDelay_2;
+    const fa = latest_data.systemIDFallAvg;
+
+    const msg =
+      "Plant Delay Measurement Results\n\n" +
+      "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
+      "Rise average: " + ra + " ms\n\n" +
+      "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
+      "Fall average: " + fa + " ms\n\n" +
+      "Apply rise average (" + ra + " ms) as Input Filter TC and save to flash?";
+
+    if (confirm(msg)) {
+      fetch("/get?InputFilterTC=" + encodeURIComponent(ra) +
+            "&password=" + encodeURIComponent(getPassword()))
+        .then(() => console.log("InputFilterTC updated to " + ra + " ms"))
+        .catch(err => console.error("InputFilterTC update failed:", err));
+    }
+  }, pollMs);
+}
 
 
 /* XREG_END */

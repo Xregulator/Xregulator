@@ -2619,6 +2619,201 @@
 
 
             <!-- ============================================================
+     SYSTEM ID — Plant Delay Measurement & Input Filter
+============================================================ -->
+            <details class="alt-top-section">
+              <summary class="alt-summary-top">System ID — Plant Delay &amp; Input Filter</summary>
+
+              <!-- Telemetry (open) -->
+              <details open class="alt-nested-section">
+                <summary class="alt-summary-nested">Telemetry</summary>
+
+                <div class="grid telemetry-groups">
+
+                  <div class="card-group telemetry-group">
+                    <p class="card-group-title">Test Status</p>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Test Active
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Whether a System ID step test is currently in progress. Duty is
+                            commanded directly by the test routine while this is true — all PID and setpoint
+                            machinery is bypassed.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDActive_ID">?</span></span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Results Ready
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Set to 1 when post-processing is complete and delay results are
+                            available. Cleared when a new test is started.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDResultsReady_ID">?</span></span>
+                    </div>
+
+                  </div>
+
+                  <div class="card-group telemetry-group">
+                    <p class="card-group-title">Rise Delays (ms)</p>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Rise 1
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Time from first UP duty step command to first confirmed current
+                            rise above threshold. -1 = threshold crossing not detected in buffer.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDRiseDelay_0_ID">?</span> ms</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Rise 2
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Second rising step delay.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDRiseDelay_1_ID">?</span> ms</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Rise 3
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Third rising step delay.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDRiseDelay_2_ID">?</span> ms</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Rise Average
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Average of the three rising delays. -1 entries (not detected)
+                            are excluded from the average.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDRiseAvg_ID">?</span> ms</span>
+                    </div>
+
+                  </div>
+
+                  <div class="card-group telemetry-group">
+                    <p class="card-group-title">Fall Delays (ms)</p>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Fall 1
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Time from first DOWN duty step command to first confirmed current
+                            drop below threshold. -1 = threshold crossing not detected in buffer.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDFallDelay_0_ID">?</span> ms</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Fall 2
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Second falling step delay.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDFallDelay_1_ID">?</span> ms</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Fall 3
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Third falling step delay.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDFallDelay_2_ID">?</span> ms</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">Fall Average
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Average of the three falling delays. -1 entries (not detected)
+                            are excluded from the average.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="systemIDFallAvg_ID">?</span> ms</span>
+                    </div>
+
+                  </div>
+
+                </div>
+
+              </details><!-- END Test Status Telemetry -->
+
+              <!-- Controller Parameters (closed) -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Parameters &amp; Controls</summary>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Input Filter Time Constant (ms) (<span id="InputFilterTC_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">EMA filter time constant applied to BatteryV, MeasuredAmps, and RPM
+                        before they reach the control loops. Higher values smooth out more disturbance but slow
+                        the control response. Set to match the measured plant delay from the step test. Default:
+                        100 ms. Safeties always use unfiltered values regardless of this setting.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="InputFilterTC" type="number" step="1" min="1" max="2000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Step Test Amplitude (% duty) (<span id="SystemIDStepAmplitude_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Duty cycle step size used during the plant delay measurement test.
+                        Larger steps produce a cleaner current signal above noise but disturb the system more.
+                        Default: 15%. Must be large enough that the current response is clearly visible above
+                        the baseline noise floor.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SystemIDStepAmplitude" type="number" step="1" min="5" max="40" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Run Plant Delay Measurement</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Runs a 3-step duty cycle test to measure the electrical delay between
+                        a field command and the current response. All PID and setpoint machinery is bypassed during
+                        the test. Requires AUTO mode and sufficient base duty. The test takes approximately
+                        15 × FilterTC × 7 ms to complete. Results are shown in a dialog on completion — you can
+                        then choose to apply the measured delay as the new filter time constant.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <button onclick="startSystemIDTest()" class="btn-primary">Start Test</button>
+                  </div>
+                </div>
+
+              </details><!-- END Parameters & Controls -->
+
+            </details><!-- END System ID tab -->
+
+
+
+            <!-- ============================================================
                  5. SAFETY (closed) — top-level, not inside Outer Loop
             ============================================================ -->
             <details class="alt-top-section">

@@ -1002,267 +1002,300 @@ void AdjustFieldLearnMode() {
     setpointInitialized = true;
   }
 
-  // ========== SETPOINT COMPUTATION (AUTO mode only) ==========
-  float setpointCommand = 0.0f;
+  // ========== SYSTEM ID OVERRIDE ==========
+  // When a plant delay measurement test is running, bypass all setpoint
+  // machinery and PID computation. Duty is commanded directly by
+  // systemID_tick(). govMode is forced to GOV_BYPASS_SLEW so the
+  // governor does not slew or clamp the step transitions.
+  // The integrator is parked at the commanded duty so the PID resumes
+  // smoothly from the operating point when the test ends.
+  // Note: g_iExcessDutyCap is a no-op placeholder (100%) and does not
+  // interfere with the step commands.
+  float sysIDDutyOut = lastAppliedDuty;
+  bool sysIDRunning = systemID_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs);
+  if (sysIDRunning) {
+    govMode = GOV_BYPASS_SLEW;
+    currentPID.SetMode(MANUAL);
+    currentPID.ResetIntegratorTo((double)sysIDDutyOut);
+    pidOutput = (double)sysIDDutyOut;
+  }
 
-  if (sysMode == SYS_MODE_AUTO) {
+  if (!sysIDRunning) {
 
-    static bool lastTuningMode = false;
+    // ========== SETPOINT COMPUTATION (AUTO mode only) ==========
+    float setpointCommand = 0.0f;
 
-    if (TuningMode) {
-      // ===== TUNING MODE (square-wave setpoint generator) =====
-      static bool tuningWaveHigh = false;
-      static uint32_t lastTuningWaveToggle = 0;
+    if (sysMode == SYS_MODE_AUTO) {
 
-      uint32_t halfPeriodMs = ((uint32_t)wavePeriod * 1000) / 2;
-      if (tick.nowMs - lastTuningWaveToggle >= halfPeriodMs) {
-        tuningWaveHigh = !tuningWaveHigh;
-        lastTuningWaveToggle = tick.nowMs;
-      }
+      static bool lastTuningMode = false;
 
-      uTargetAmps = tuningWaveHigh ? (5 + waveAmplitude) : 5;
-      setpointCommand = (float)uTargetAmps;
+      if (TuningMode) {
+        // ===== TUNING MODE (square-wave setpoint generator) =====
+        static bool tuningWaveHigh = false;
+        static uint32_t lastTuningWaveToggle = 0;
 
-      setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                     SetpointRiseRate, SetpointFallRate, actualDtSec);
+        uint32_t halfPeriodMs = ((uint32_t)wavePeriod * 1000) / 2;
+        if (tick.nowMs - lastTuningWaveToggle >= halfPeriodMs) {
+          tuningWaveHigh = !tuningWaveHigh;
+          lastTuningWaveToggle = tick.nowMs;
+        }
 
-      voltageControlActive = false;
+        uTargetAmps = tuningWaveHigh ? (5 + waveAmplitude) : 5;
+        setpointCommand = (float)uTargetAmps;
 
-      targetCurrent = getTargetAmps();
-      pidInput = (double)targetCurrent;
-      pidSetpoint = (double)setpointLimited;
-      pidError = setpointLimited - targetCurrent;
-      currentPID.Compute();
-      // TrackAppliedOutput() is NOT needed here — falls through to the shared
-      // call at the end of the normal-mode section.
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       SetpointRiseRate, SetpointFallRate, actualDtSec);
 
-      lastTuningMode = true;
+        voltageControlActive = false;
 
-    } else {
-      // ===== NORMAL AUTO =====
+        targetCurrent = getTargetAmps();
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
+        // TrackAppliedOutput() is NOT needed here — falls through to the shared
+        // call at the end of the normal-mode section.
 
-      // Detect TuningMode exit — fires exactly once.
-      if (lastTuningMode) {
-        tempPIDActive = false;
-        tempFilterNeedsReseed = true;
-      }
-      lastTuningMode = false;
+        lastTuningMode = true;
 
-      // Outer thermal PID. Library timer governs Compute() cadence.
-      tempPID_tick(currentMillis, actualDtSec);
-
-      // Thermal log runs after tempPID_tick() so outerAntiWindupFired and
-      // outerTermI reflect this tick's state, not the previous tick's.
-      thermalLog_tick(currentMillis);
-
-      // --- Command architecture ---
-      //
-      //   I_cap        RPM-dependent mechanical/electrical ceiling (table lookup).
-      //   thermalPenalty  Outer thermal PID output. Derates I_cap when hot;
-      //                   zero-floored in CV stages (enforced in tempPID_tick).
-      //   uTargetAmps  I_cap minus thermal penalty, clamped to [0, MaxTableValue],
-      //                with user overrides applied. This is the table+thermal limit
-      //                and the upper bound passed to the CV controller.
-      //   Icv          CV position-form PI output — the direct current setpoint in
-      //                absorption, float, and TargetVoltageMode. Clamped to
-      //                [0, uTargetAmps]. Never written back to thermalPenaltyAmps
-      //                or the thermal integrator.
-      //
-      // Execution order:
-      //   1. Subtract thermal penalty from I_cap; clamp to [0, MaxTableValue].
-      //   2. Apply user overrides (HiLow, MaintainMode).
-      //   In CV modes, far from target (inCCPhase): setpointCommand = uTargetAmps directly;
-      //      bumpless tracker keeps cv_I warm for handoff.
-      //   In CV modes, within CV_ENGAGE_MARGIN of target: position-form PI produces Icv;
-      //      setpointCommand = Icv.
-      //   In bulk/idle/MaintainMode: setpointCommand = uTargetAmps directly.
-
-      float I_cap;
-      if (capLimitMode == 1 && tick.currentBatteryVoltage > 0.5f) {
-        I_cap = interpolateRPMTable(RPM, rpmCapPowerTable) / tick.currentBatteryVoltage;
       } else {
-        I_cap = getCapCurrentForRPM(RPM);
-      }
+        // ===== NORMAL AUTO =====
 
-      float I_cmd = I_cap - thermalPenaltyAmps;
-      I_cmd = fminf(I_cmd, (float)MaxTableValue);
-      I_cmd = fmaxf(I_cmd, 0.0f);
-
-      uTargetAmps = I_cmd;
-
-      // User overrides
-      if (HiLow == 0) uTargetAmps = uTargetAmps / 2;
-      if (MaintainMode == 1) uTargetAmps = 0;
-
-      // TargetVoltageMode: run CV at a user-specified voltage target.
-      // Forces float-equivalent stage flags so voltageControlActive goes true
-      // below, then overrides ChargingVoltageTarget with the user value.
-      // All current limits (RPM cap, thermal penalty, MaxTableValue, user
-      // overrides) remain fully active — this only changes the voltage target.
-      // cv_I is seeded by bumpless transfer tracking on CV entry — no explicit reseed needed.
-      if (TargetVoltageMode == 1) {
-        inBulkStage = false;
-        inAbsorptionStage = false;
-        ChargingVoltageTarget = TargetVoltageSetpoint;
-        if (enteringTargetVoltageMode) {
-          pidLog_enteringTargetVoltageMode = 1;
-          queueConsoleMessageF("TargetVoltageMode: active, target=%.2fV", TargetVoltageSetpoint);
+        // Detect TuningMode exit — fires exactly once.
+        if (lastTuningMode) {
+          tempPIDActive = false;
+          tempFilterNeedsReseed = true;
         }
-      }
-      // Detect CV entry so the voltage loop fires immediately on the first CV tick.
-      static bool lastVoltageControlActive = false;
-      bool enteringCV = (!lastVoltageControlActive && voltageControlActive);
-      lastVoltageControlActive = voltageControlActive;
+        lastTuningMode = false;
 
-      // Voltage target rise governor.
-      // Now only active in the final CV_ENGAGE_MARGIN window before target (vGap <= 0.15V).
-      // During bulk approach, CC phase commands uTargetAmps directly and this governor
-      // is a mathematical no-op (e_needed >> vGap, so voltageTargetSlewed saturates to
-      // Falls are always instantaneous.
-      static float voltageTargetSlewed = 0.0f;
-      if (enteringCV) {
-        voltageTargetSlewed = ChargingVoltageTarget;
-      }
-      if (voltageControlActive) {
-        if (ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
-          float icvHi_gov = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
-          float e_needed = (icvHi_gov - cv_I) / VoltageKp;
-          e_needed = fmaxf(e_needed, 0.02f);
-          voltageTargetSlewed = fminf(ChargingVoltageTarget,
-                                      tick.currentBatteryVoltage + e_needed);
+        // Outer thermal PID. Library timer governs Compute() cadence.
+        tempPID_tick(currentMillis, actualDtSec);
+
+        // Thermal log runs after tempPID_tick() so outerAntiWindupFired and
+        // outerTermI reflect this tick's state, not the previous tick's.
+        thermalLog_tick(currentMillis);
+
+        // --- Command architecture ---
+        //
+        //   I_cap        RPM-dependent mechanical/electrical ceiling (table lookup).
+        //   thermalPenalty  Outer thermal PID output. Derates I_cap when hot;
+        //                   zero-floored in CV stages (enforced in tempPID_tick).
+        //   uTargetAmps  I_cap minus thermal penalty, clamped to [0, MaxTableValue],
+        //                with user overrides applied. This is the table+thermal limit
+        //                and the upper bound passed to the CV controller.
+        //   Icv          CV position-form PI output — the direct current setpoint in
+        //                absorption, float, and TargetVoltageMode. Clamped to
+        //                [0, uTargetAmps]. Never written back to thermalPenaltyAmps
+        //                or the thermal integrator.
+        //
+        // Execution order:
+        //   1. Subtract thermal penalty from I_cap; clamp to [0, MaxTableValue].
+        //   2. Apply user overrides (HiLow, MaintainMode).
+        //   In CV modes, far from target (inCCPhase): setpointCommand = uTargetAmps directly;
+        //      bumpless tracker keeps cv_I warm for handoff.
+        //   In CV modes, within CV_ENGAGE_MARGIN of target: position-form PI produces Icv;
+        //      setpointCommand = Icv.
+        //   In bulk/idle/MaintainMode: setpointCommand = uTargetAmps directly.
+
+        float I_cap;
+        if (capLimitMode == 1 && tick.currentBatteryVoltage > 0.5f) {
+          I_cap = interpolateRPMTable(RPM, rpmCapPowerTable) / tick.currentBatteryVoltage;
         } else {
-          voltageTargetSlewed = ChargingVoltageTarget;
+          I_cap = getCapCurrentForRPM(RPM);
         }
-      }
 
-      // CC/CV phase determination — must be after voltageTargetSlewed is updated.
-      const float CV_ENGAGE_MARGIN = 0.15f;
-      float vGap = voltageTargetSlewed - tick.currentBatteryVoltage;
-      bool inCCPhase = voltageControlActive && (vGap > CV_ENGAGE_MARGIN);
+        float I_cmd = I_cap - thermalPenaltyAmps;
+        I_cmd = fminf(I_cmd, (float)MaxTableValue);
+        I_cmd = fmaxf(I_cmd, 0.0f);
 
-      // Bumpless transfer: track cv_I toward the operating-point value when CV is
-      // inactive OR when in CC phase (far from target, vGap > CV_ENGAGE_MARGIN).
-      // By the time vGap drops below the margin and the PI takes over, cv_I already
-      // reflects what the alternator is producing at that voltage — no wind-up on entry.
-      // While CV is active and within margin, cv_I_track stays in sync for seamless re-entry.
-      {
-        static float cv_I_track = 0.0f;
-        float icvHi_bt = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
-        if (!voltageControlActive || inCCPhase) {
-          float e_bt = ChargingVoltageTarget - tick.currentBatteryVoltage;
-          float cv_I_target = clamp_f(MeasuredAmps - VoltageKp * e_bt, 0.0f, icvHi_bt);
-          const float Kt = 2.0f;
-          cv_I_track += Kt * (cv_I_target - cv_I_track) * actualDtSec;
-          cv_I_track = clamp_f(cv_I_track, 0.0f, icvHi_bt);
-          cv_I = cv_I_track;
-        } else {
-          cv_I_track = cv_I;
-        }
-      }
+        uTargetAmps = I_cmd;
 
-      if (voltageControlActive) {
-        if (inCCPhase) lastVoltageLoopMs = currentMillis;  // keep timestamp fresh so first CV tick gets correct dtSec
-        bool cvLoopFired = !inCCPhase && (enteringCV || ((currentMillis - lastVoltageLoopMs) >= VoltageLoopInterval));
+        // User overrides
+        if (HiLow == 0) uTargetAmps = uTargetAmps / 2;
+        if (MaintainMode == 1) uTargetAmps = 0;
 
-        if (cvLoopFired) {
-          uint32_t prevVoltageLoopMs = lastVoltageLoopMs;
-          lastVoltageLoopMs = currentMillis;
-          pidLog_voltageLoopRanThisTick = 1;
-          pidLog_enteringCV = enteringCV ? 1 : 0;
-
-          float e = voltageTargetSlewed - tick.currentBatteryVoltage;
-          float dtSec = (prevVoltageLoopMs == 0)
-                          ? ((float)VoltageLoopInterval / 1000.0f)
-                          : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
-          dtSec = constrain(dtSec, 0.001f, 0.5f);
-
-          float icvHi = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
-          float icvLo = 0.0f;
-
-          if (enteringCV) {
-            const char *stageName = inAbsorptionStage ? "ABSORPTION"
-                                                      : (TargetVoltageMode ? "TARGET_V" : "FLOAT");
-            Serial.printf(
-              "CVLoop ENTER %s | target=%.2fV slewed=%.2fV battV=%.2fV e=%.3fV "
-              "cv_I(tracked)=%.2fA limit=%.1fA\n",
-              stageName,
-              ChargingVoltageTarget, voltageTargetSlewed,
-              tick.currentBatteryVoltage, e, cv_I, icvHi);
-          } else {
-            float p = VoltageKp * e;
-            float unsat = p + cv_I;
-            Icv = clamp_f(unsat, icvLo, icvHi);
-
-            bool satHi = (Icv >= icvHi);
-            bool satLo = (Icv <= icvLo);
-            float KiDown = 7.0f * VoltageKi;
-            float dI = (e >= 0.0f ? VoltageKi : KiDown) * e * dtSec;
-
-            bool supervisorLimiting = fastOvClampActive && ((float)uTargetAmps < uTargetRaw_cached - 0.01f);
-            if (supervisorLimiting && dI > 0.0f) {
-              // fast OV supervisor is actively capping ceiling; freeze upward integration
-            } else if (!(satHi && dI > 0.0f) && !(satLo && dI < 0.0f)) {
-              cv_I += dI;
-            }
-
-            Icv = clamp_f(VoltageKp * e + cv_I, icvLo, icvHi);
-
-            const char *stageName = inAbsorptionStage ? "ABSORPTION"
-                                                      : (TargetVoltageMode ? "TARGET_V" : "FLOAT");
-            Serial.printf(
-              "CVLoop tick %s | target=%.2fV slewed=%.2fV battV=%.2fV e=%.3fV "
-              "p=%.3f cv_I=%.3f Icv=%.2fA limit=%.1fA\n",
-              stageName,
-              ChargingVoltageTarget, voltageTargetSlewed,
-              tick.currentBatteryVoltage, e,
-              p, cv_I, Icv, icvHi);
+        // TargetVoltageMode: run CV at a user-specified voltage target.
+        // Forces float-equivalent stage flags so voltageControlActive goes true
+        // below, then overrides ChargingVoltageTarget with the user value.
+        // All current limits (RPM cap, thermal penalty, MaxTableValue, user
+        // overrides) remain fully active — this only changes the voltage target.
+        // cv_I is seeded by bumpless transfer tracking on CV entry — no explicit reseed needed.
+        if (TargetVoltageMode == 1) {
+          inBulkStage = false;
+          inAbsorptionStage = false;
+          ChargingVoltageTarget = TargetVoltageSetpoint;
+          if (enteringTargetVoltageMode) {
+            pidLog_enteringTargetVoltageMode = 1;
+            queueConsoleMessageF("TargetVoltageMode: active, target=%.2fV", TargetVoltageSetpoint);
           }
         }
 
-        pidLog_uTargetBeforeVoltCap = uTargetRaw;
-        pidLog_uTargetAfterVoltCap = Icv;
-
-      } else {
-        pidLog_uTargetBeforeVoltCap = uTargetRaw;
-        pidLog_uTargetAfterVoltCap = (float)uTargetAmps;
-      }
-
-      // Per-tick Icv recompute — proportional path responds every inner-loop tick;
-      // cv_I still updates only on VoltageLoopInterval cadence.
-      {
-        float e_now = voltageTargetSlewed - tick.currentBatteryVoltage;
-        float icvHi_tick = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
-        if (!enteringCV) {
-          Icv = clamp_f(VoltageKp * e_now + cv_I, 0.0f, icvHi_tick);
+        // voltageControlActive: true in absorption, float, and TargetVoltageMode.
+        // False in idle and MaintainMode. CC phase (inCCPhase) handles bulk approach.
+        voltageControlActive = !inIdleStage;
+        if (MaintainMode == 1) {
+          voltageControlActive = false;
+          if (enteringMaintainMode) {
+            queueConsoleMessage("MaintainMode: active, targeting 0 net battery amps");
+          }
         }
+        // Detect CV entry so the voltage loop fires immediately on the first CV tick.
+        static bool lastVoltageControlActive = false;
+        bool enteringCV = (!lastVoltageControlActive && voltageControlActive);
+        lastVoltageControlActive = voltageControlActive;
+
+        // Voltage target rise governor.
+        // Now only active in the final CV_ENGAGE_MARGIN window before target (vGap <= 0.15V).
+        // During bulk approach, CC phase commands uTargetAmps directly and this governor
+        // is a mathematical no-op (e_needed >> vGap, so voltageTargetSlewed saturates to
+        // Falls are always instantaneous.
+        static float voltageTargetSlewed = 0.0f;
+        if (enteringCV) {
+          voltageTargetSlewed = ChargingVoltageTarget;
+        }
+        if (voltageControlActive) {
+          if (ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
+            float icvHi_gov = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+            float e_needed = (icvHi_gov - cv_I) / VoltageKp;
+            e_needed = fmaxf(e_needed, 0.02f);
+            voltageTargetSlewed = fminf(ChargingVoltageTarget,
+                                        getFiltV() + e_needed);  // filtered — control path
+          } else {
+            voltageTargetSlewed = ChargingVoltageTarget;
+          }
+        }
+
+        // CC/CV phase determination — must be after voltageTargetSlewed is updated.
+        const float CV_ENGAGE_MARGIN = 0.15f;
+        float vGap = voltageTargetSlewed - getFiltV();  // filtered — control path
+        bool inCCPhase = voltageControlActive && (vGap > CV_ENGAGE_MARGIN);
+
+        // Bumpless transfer: track cv_I toward the operating-point value when CV is
+        // inactive OR when in CC phase (far from target, vGap > CV_ENGAGE_MARGIN).
+        // By the time vGap drops below the margin and the PI takes over, cv_I already
+        // reflects what the alternator is producing at that voltage — no wind-up on entry.
+        // While CV is active and within margin, cv_I_track stays in sync for seamless re-entry.
+        {
+          static float cv_I_track = 0.0f;
+          float icvHi_bt = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+          if (!voltageControlActive || inCCPhase) {
+            float e_bt = ChargingVoltageTarget - getFiltV();  // filtered — control path
+            float cv_I_target = clamp_f(MeasuredAmps - VoltageKp * e_bt, 0.0f, icvHi_bt);
+            const float Kt = 2.0f;
+            cv_I_track += Kt * (cv_I_target - cv_I_track) * actualDtSec;
+            cv_I_track = clamp_f(cv_I_track, 0.0f, icvHi_bt);
+            cv_I = cv_I_track;
+          } else {
+            cv_I_track = cv_I;
+          }
+        }
+
+        if (voltageControlActive) {
+          if (inCCPhase) lastVoltageLoopMs = currentMillis;  // keep timestamp fresh so first CV tick gets correct dtSec
+          bool cvLoopFired = !inCCPhase && (enteringCV || ((currentMillis - lastVoltageLoopMs) >= VoltageLoopInterval));
+
+          if (cvLoopFired) {
+            uint32_t prevVoltageLoopMs = lastVoltageLoopMs;
+            lastVoltageLoopMs = currentMillis;
+            pidLog_voltageLoopRanThisTick = 1;
+            pidLog_enteringCV = enteringCV ? 1 : 0;
+
+            float e = voltageTargetSlewed - getFiltV();  // filtered — control path
+            float dtSec = (prevVoltageLoopMs == 0)
+                            ? ((float)VoltageLoopInterval / 1000.0f)
+                            : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
+            dtSec = constrain(dtSec, 0.001f, 0.5f);
+
+            float icvHi = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+            float icvLo = 0.0f;
+
+            if (enteringCV) {
+              const char *stageName = inAbsorptionStage ? "ABSORPTION"
+                                                        : (TargetVoltageMode ? "TARGET_V" : "FLOAT");
+              Serial.printf(
+                "CVLoop ENTER %s | target=%.2fV slewed=%.2fV battV=%.2fV e=%.3fV "
+                "cv_I(tracked)=%.2fA limit=%.1fA\n",
+                stageName,
+                ChargingVoltageTarget, voltageTargetSlewed,
+                tick.currentBatteryVoltage, e, cv_I, icvHi);
+            } else {
+              float p = VoltageKp * e;
+              float unsat = p + cv_I;
+              Icv = clamp_f(unsat, icvLo, icvHi);
+
+              bool satHi = (Icv >= icvHi);
+              bool satLo = (Icv <= icvLo);
+              float KiDown = 7.0f * VoltageKi;
+              float dI = (e >= 0.0f ? VoltageKi : KiDown) * e * dtSec;
+
+              bool supervisorLimiting = fastOvClampActive && ((float)uTargetAmps < uTargetRaw_cached - 0.01f);
+              if (supervisorLimiting && dI > 0.0f) {
+                // fast OV supervisor is actively capping ceiling; freeze upward integration
+              } else if (!(satHi && dI > 0.0f) && !(satLo && dI < 0.0f)) {
+                cv_I += dI;
+              }
+
+              Icv = clamp_f(VoltageKp * e + cv_I, icvLo, icvHi);
+
+              const char *stageName = inAbsorptionStage ? "ABSORPTION"
+                                                        : (TargetVoltageMode ? "TARGET_V" : "FLOAT");
+              Serial.printf(
+                "CVLoop tick %s | target=%.2fV slewed=%.2fV battV=%.2fV e=%.3fV "
+                "p=%.3f cv_I=%.3f Icv=%.2fA limit=%.1fA\n",
+                stageName,
+                ChargingVoltageTarget, voltageTargetSlewed,
+                tick.currentBatteryVoltage, e,
+                p, cv_I, Icv, icvHi);
+            }
+          }
+
+          pidLog_uTargetBeforeVoltCap = uTargetRaw;
+          pidLog_uTargetAfterVoltCap = Icv;
+
+        } else {
+          pidLog_uTargetBeforeVoltCap = uTargetRaw;
+          pidLog_uTargetAfterVoltCap = (float)uTargetAmps;
+        }
+
+        // Per-tick Icv recompute — proportional path responds every inner-loop tick;
+        // cv_I still updates only on VoltageLoopInterval cadence.
+        {
+          float e_now = voltageTargetSlewed - getFiltV();  // filtered — control path
+          float icvHi_tick = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+          if (!enteringCV) {
+            Icv = clamp_f(VoltageKp * e_now + cv_I, 0.0f, icvHi_tick);
+          }
+        }
+
+        if (inCCPhase) {
+          // Far from target: command ceiling directly; bumpless tracker keeps cv_I warm.
+          setpointCommand = (float)uTargetAmps;
+        } else {
+          setpointCommand = voltageControlActive ? Icv : (float)uTargetAmps;
+        }
+
+        float effectiveFallRate = fastOvClampActive ? 1.0e9f : SetpointFallRate;
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       SetpointRiseRate, effectiveFallRate, actualDtSec);
+
+        // Inner current PID compute.
+        // MaintainMode uses getBatteryCurrent() (net battery amps — no filtered
+        // equivalent yet). Normal AUTO uses filtered current for control.
+        targetCurrent = (MaintainMode == 1) ? getBatteryCurrent() : getFiltI();
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
       }
 
-      if (inCCPhase) {
-        // Far from target: command ceiling directly; bumpless tracker keeps cv_I warm.
-        setpointCommand = (float)uTargetAmps;
-      } else {
-        setpointCommand = voltageControlActive ? Icv : (float)uTargetAmps;
-      }
-
-      float effectiveFallRate = fastOvClampActive ? 1.0e9f : SetpointFallRate;
-      setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                     SetpointRiseRate, effectiveFallRate, actualDtSec);
-
-      // Inner current PID compute.
-      targetCurrent = (MaintainMode == 1) ? getBatteryCurrent() : getTargetAmps();
-      pidInput = (double)targetCurrent;
-      pidSetpoint = (double)setpointLimited;
-      pidError = setpointLimited - targetCurrent;
-      currentPID.Compute();
-    }
-
-  } else {
-    // ===== MANUAL mode: no setpoint management =====
-    voltageControlActive = false;
-    uTargetAmps = 0;
-    setpointLimited = 0.0f;
-    pidInput = (double)MeasuredAmps;
-  }
+    } else {
+      // ===== MANUAL mode: no setpoint management =====
+      voltageControlActive = false;
+      uTargetAmps = 0;
+      setpointLimited = 0.0f;
+      pidInput = (double)MeasuredAmps;
+    }  // end of MANUAL mode else
+  }    // end if (!sysIDRunning)
 
   // ===== CURRENT EXCESS SUPERVISOR (CV mode only) ========================
   // Detects RPM blip or load dump: iMA2 materially exceeds the active current
@@ -1324,7 +1357,8 @@ void AdjustFieldLearnMode() {
 
   // ========== APPLY THROUGH GOVERNOR ==========
   dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, govMode,
-                                tick.rpmMinDuty, true, actualDtSec);
+                                sysIDRunning ? 0.0f : tick.rpmMinDuty,
+                                true, actualDtSec);
   pidLog_dutyApplied = dutyNewFloat;
 
   // ========== TELL PID WHAT ACTUALLY HAPPENED ==========

@@ -801,6 +801,45 @@ bool inaOvervoltageLatched = false;
 unsigned long inaOvervoltageTime = 0;
 
 
+// ── Input filter (disturbance rejection) ─────────────────────────────────
+// IIR EMA applied to CH0 (BatteryV), CH1 (MeasuredAmps), CH2 (RPM).
+// α = dt / (TC + dt), computed per-sample from actual elapsed time so
+// variable loop cadence is handled correctly without a fixed assumption.
+// _filtered variables are the smoothed outputs; originals are unchanged.
+// Safeties continue to read originals. Control loops will migrate to
+// _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
+// Thermistor (CH3) is left on its own filter inside tempPID_tick().
+float InputFilterTC         = 100.0f;   // ms — web-configurable, LittleFS-backed
+float BatteryV_filtered     = 0.0f;
+float MeasuredAmps_filtered = 0.0f;
+float RPM_filtered          = 0.0f;
+
+// ── SystemID — plant delay measurement ───────────────────────────────────
+// Step test: baseline → 3× (duty up / duty down) → post-process.
+// Samples stored in PSRAM. Buffer allocated on first test run, never freed.
+// Results populate the JS popup and optionally update InputFilterTC in flash.
+// Only legal in SYS_MODE_AUTO; systemID_tick() enforces this.
+float SystemIDStepAmplitude = 15.0f;    // % duty step — will be web-configurable later
+
+bool  systemIDRequested     = false;    // set true by UI handler to trigger a test run
+bool  systemIDActive        = false;    // true while test is in progress
+bool  systemIDResultsReady  = false;    // set true when post-processing is complete
+
+float systemIDRiseDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // rising-step delays, ms
+float systemIDFallDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // falling-step delays, ms
+float systemIDRiseAvg_ms    = 0.0f;
+float systemIDFallAvg_ms    = 0.0f;
+
+struct SystemIDSample {
+  uint32_t ts;        // millis() at sample time
+  float    duty_cmd;  // duty commanded this tick (%)
+  float    amps;      // MeasuredAmps at sample time (raw, unfiltered)
+};
+// 15000 × 12 bytes = 180 KB in PSRAM. Covers TC up to ~714 ms at 5 ms CH1 cadence.
+static const int SYSID_BUF_SIZE = 15000;
+SystemIDSample*  sysIDBuffer    = nullptr;   // ps_malloc'd on first test run
+int              sysIDSampleCount = 0;
+
 // Weather Mode Global Variables (add with your other globals)
 float UVToday = 0.0;
 float UVTomorrow = 0.0;

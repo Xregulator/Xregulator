@@ -1322,6 +1322,21 @@ float getTargetAmps() {
 
   return targetValue;
 }
+float getFiltV() {
+  // Filtered battery voltage for control loops only.
+  // Never use for safety checks — use BatteryV directly.
+  return BatteryV_filtered;
+}
+
+float getFiltI() {
+  // Mirrors getTargetAmps() but returns filtered signals.
+  // AmpSrc cases using Bcur return raw — no filtered
+  // equivalent exists yet for the shunt.
+  switch (AmpSrc) {
+    case 0: case 3: case 5: case 7: return MeasuredAmps_filtered;
+    default: return getTargetAmps();  // Bcur sources: raw for now
+  }
+}
 int thermistorTempC(float V_thermistor) {
   float Vcc = 5.0;
   float R_thermistor = R_fixed * (V_thermistor / (Vcc - V_thermistor));
@@ -2119,6 +2134,23 @@ void _ReadAnalogInputs_inner() {
                            if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
                              MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
                              battVFreshFlag = true;
+                             // ── EMA filter ─────────────────────────────────────────────────────────
+                           // α = dt / (TC + dt); seeded on first valid reading so output
+                           // starts at measured value rather than ramping up from zero.
+                           {
+                             static bool     battV_filter_init = false;
+                             static uint32_t lastBattVFilterMs = 0;
+                             if (!battV_filter_init) {
+                               BatteryV_filtered = BatteryV;
+                               battV_filter_init = true;
+                             } else {
+                               float dt_f  = fmaxf(1.0f, (float)(now - lastBattVFilterMs));
+                               float alpha = dt_f / (InputFilterTC + dt_f);
+                               BatteryV_filtered = alpha * BatteryV
+                                                 + (1.0f - alpha) * BatteryV_filtered;
+                             }
+                             lastBattVFilterMs = now;
+                           }
                            }
                            break;
 
@@ -2160,6 +2192,21 @@ void _ReadAnalogInputs_inner() {
                            if (MeasuredAmps > -600 && MeasuredAmps < 600) {  // Sanity check
                              MARK_FRESH(IDX_MEASURED_AMPS);
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
+                             // ── EMA filter ─────────────────────────────────────────────────────────
+                           {
+                             static bool     amps_filter_init = false;
+                             static uint32_t lastAmpsFilterMs = 0;
+                             if (!amps_filter_init) {
+                               MeasuredAmps_filtered = MeasuredAmps;
+                               amps_filter_init = true;
+                             } else {
+                               float dt_f  = fmaxf(1.0f, (float)(now - lastAmpsFilterMs));
+                               float alpha = dt_f / (InputFilterTC + dt_f);
+                               MeasuredAmps_filtered = alpha * MeasuredAmps
+                                                     + (1.0f - alpha) * MeasuredAmps_filtered;
+                             }
+                             lastAmpsFilterMs = now;
+                           }
                            }
 
                            // ── Current amplitude ring + moving averages ──────────────────────────────
@@ -2248,6 +2295,23 @@ void _ReadAnalogInputs_inner() {
                            }
                            if (RPM >= 0 && RPM < 10000) {  // Sanity check
                              MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
+                             // ── EMA filter ─────────────────────────────────────────────────────────
+                           // RPM < 100 → 0 clamp already applied above, so filter sees
+                           // the zeroed value when the engine is stopped.
+                           {
+                             static bool     rpm_filter_init = false;
+                             static uint32_t lastRPMFilterMs = 0;
+                             if (!rpm_filter_init) {
+                               RPM_filtered = RPM;
+                               rpm_filter_init = true;
+                             } else {
+                               float dt_f  = fmaxf(1.0f, (float)(now - lastRPMFilterMs));
+                               float alpha = dt_f / (InputFilterTC + dt_f);
+                               RPM_filtered = alpha * RPM
+                                            + (1.0f - alpha) * RPM_filtered;
+                             }
+                             lastRPMFilterMs = now;
+                           }
                            }
                            break;
 

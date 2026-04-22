@@ -581,9 +581,22 @@ enum Csv3Index {
   CSV3_ft_buildConfigPayload_win,     // 238
   CSV3_ft_buildConfigPayload_ses,     // 239
   CSV3_VeTime2,                       // 240
+  CSV3_systemIDActive,                // 241
+  CSV3_systemIDResultsReady,          // 242
+  CSV3_systemIDRiseDelay_0,           // 243
+  CSV3_systemIDRiseDelay_1,           // 244
+  CSV3_systemIDRiseDelay_2,           // 245
+  CSV3_systemIDFallDelay_0,           // 246
+  CSV3_systemIDFallDelay_1,           // 247
+  CSV3_systemIDFallDelay_2,           // 248
+  CSV3_systemIDRiseAvg,               // 249
+  CSV3_systemIDFallAvg,               // 250
+  CSV3_InputFilterTC,                 // 251
+  CSV3_SystemIDStepAmplitude,         // 252
 
-  CSV3_FIELD_COUNT  // = 241
+  CSV3_FIELD_COUNT  // = 253
 };
+
 
 enum TsIndex {
   TS_HeadingNMEA,     // 0
@@ -1821,6 +1834,26 @@ void setupServer() {
     // All parameters below are processed independently — every
     // matching param in the request is handled, not just the first.
     // ---------------------------------------------------------------
+    else if (request->hasParam("InputFilterTC")) {
+      foundParameter = true;
+      inputMessage = request->getParam("InputFilterTC")->value();
+      writeFile(LittleFS, "/InputFilterTC.txt", inputMessage.c_str());
+      InputFilterTC = inputMessage.toFloat();
+    }
+
+    else if (request->hasParam("SystemIDStepAmplitude")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SystemIDStepAmplitude")->value();
+      writeFile(LittleFS, "/SystemIDStepAmplitude.txt", inputMessage.c_str());
+      SystemIDStepAmplitude = inputMessage.toFloat();
+    }
+
+else if (request->hasParam("startSystemID")) {
+      foundParameter = true;
+      systemIDRequested = true;
+      systemIDResultsReady = false;   // add this line
+      queueConsoleMessage("SystemID: test requested via web UI");
+    }
 
     if (request->hasParam("TemperatureLimitF")) {
       foundParameter = true;
@@ -4276,7 +4309,7 @@ void SendWifiData() {
     //WifiSendTime was 834uS before increasing csv3 payload size from 1100 to 1400     No change after.  Again, this separation into groups and worry about wifi packet size seems like AI nonsense.
 
     int payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -4523,7 +4556,19 @@ void SendWifiData() {
                                SafeInt(ft_uploadBufferedRecords.worstSession / 1000),  // 237 — Upload Buffered Records worst session (ms)
                                SafeInt(ft_buildConfigPayload.worstWindow / 1000),      // 238 — Build Config Payload worst 5s window (ms)
                                SafeInt(ft_buildConfigPayload.worstSession / 1000),     // 239 — Build Config Payload worst session (ms)
-                               SafeInt(VeTime2)                                        //240
+                               SafeInt(VeTime2),                                       //240
+                               (int)systemIDActive,                                    // 241
+                               (int)systemIDResultsReady,                              // 242
+                               (int)systemIDRiseDelay_ms[0],                           // 243
+                               (int)systemIDRiseDelay_ms[1],                           // 244
+                               (int)systemIDRiseDelay_ms[2],                           // 245
+                               (int)systemIDFallDelay_ms[0],                           // 246
+                               (int)systemIDFallDelay_ms[1],                           // 247
+                               (int)systemIDFallDelay_ms[2],                           // 248
+                               (int)systemIDRiseAvg_ms,                                // 249
+                               (int)systemIDFallAvg_ms,                                // 250
+                               (int)InputFilterTC,                                     // 251
+                               (int)SystemIDStepAmplitude,                             // 252
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

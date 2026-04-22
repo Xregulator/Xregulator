@@ -922,6 +922,19 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     wavePeriod = readFile(LittleFS, "/wavePeriod.txt").toInt();
   }
+
+  if (!fsExists("/InputFilterTC.txt")) {
+      writeFile(LittleFS, "/InputFilterTC.txt", String(InputFilterTC).c_str());
+    } else {
+      InputFilterTC = readFile(LittleFS, "/InputFilterTC.txt").toFloat();
+    }
+
+    if (!fsExists("/SystemIDStepAmplitude.txt")) {
+      writeFile(LittleFS, "/SystemIDStepAmplitude.txt", String(SystemIDStepAmplitude).c_str());
+    } else {
+      SystemIDStepAmplitude = readFile(LittleFS, "/SystemIDStepAmplitude.txt").toFloat();
+    }
+    
   if (!fsExists("/SwitchingFrequency.txt")) {
     writeFile(LittleFS, "/SwitchingFrequency.txt", String(SwitchingFrequency).c_str());
   } else {
