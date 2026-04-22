@@ -2890,6 +2890,9 @@ void pidLog_tick(uint32_t nowMs) {
   e.gainKi = (float)PidKi;
   e.gainKd = (float)PidKd;
 
+e.battV_filt = BatteryV_filtered;
+  e.iMeas_filt = MeasuredAmps_filtered;
+
   pidLogHead = (pidLogHead + 1) % PID_LOG_SIZE;
   if (pidLogCount < PID_LOG_SIZE) pidLogCount++;
 }

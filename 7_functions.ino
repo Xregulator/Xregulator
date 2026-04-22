@@ -903,8 +903,6 @@ void sendEfficiencyHistory() {
 }
 
 
-
-
 // ===========================================================================
 // VOLTAGE MODE SUPPORT FUNCTIONS
 // ===========================================================================
@@ -938,7 +936,7 @@ void cvLog_init() {
 
 void cvLog_tick(uint32_t nowMs) {
   if (!cvLogReady || !cvLog) return;
-  if (sysMode != SYS_MODE_AUTO) return;
+  // if (sysMode != SYS_MODE_AUTO) return;  // this was dumb, probably remove later
 
   // Pause watchdog — same pattern as thermalLog
   if (cvLogPaused) {
@@ -975,10 +973,9 @@ void cvLog_tick(uint32_t nowMs) {
 
   e.pad = 0;
   e.rpm = (int16_t)constrain((int)RPM, -32768, 32767);
-  e.iMA2_x10 = (int16_t)clamp_f(g_iMA2 * 10.0f, -32767.0f, 32767.0f);
-  e.iMA4_x10 = (int16_t)clamp_f(g_iMA4 * 10.0f, -32767.0f, 32767.0f);
-  e.dIdt2_x10 = (int16_t)clamp_f(g_dIdt2 * 10.0f, -32767.0f, 32767.0f);
-  e.dIdt4_x10 = (int16_t)clamp_f(g_dIdt4 * 10.0f, -32767.0f, 32767.0f);
+  e.battV_filt_x100 = (int16_t)clamp_f(BatteryV_filtered * 100.0f, -32767.0f, 32767.0f);
+  e.iMeas_filt_x10 = (int16_t)clamp_f(MeasuredAmps_filtered * 10.0f, -32767.0f, 32767.0f);
+  e.pad2 = 0;
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;
 
   if (g_iExcessActive) e.flags |= (1 << 5);
@@ -1067,7 +1064,6 @@ void ch1_record(uint32_t now) {
     ch1BktStart = now;
   }
 }
-
 void ch1_compute_stats() {
   if (ch1Count == 0) return;
 
@@ -1110,7 +1106,6 @@ void ch1_compute_stats() {
   ch1_avg_at = ch1AtCount > 0 ? (float)((double)ch1AtSum / ch1AtCount) : 0.0f;
   ch1_over2x_at = ch1AtOver2x;
 }
-
 void cacheGzFiles() {
   cachedIndex = loadFileToRAM("/index.html.gz");
   cachedCss = loadFileToRAM("/styles.css.gz");
@@ -1145,7 +1140,6 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
   return false;
 }
 
-
 // ============================================================
 // systemID_tick() — plant delay measurement step test
 //
@@ -1172,7 +1166,6 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
 // ============================================================
 
 bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
-
   // Phase enum. Values 1–7 map to phaseStartMs indices 0–6 via (phase – 1).
   enum SysIDPhase : uint8_t {
     SYSID_IDLE = 0,
@@ -1194,6 +1187,16 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // phaseStartMs[7] = timestamp when PROCESSING was entered (= end of DOWN_3).
   static uint32_t phaseStartMs[8] = { 0 };
 
+  // Debug: log every call when a request is pending so we can confirm
+  // systemID_tick() is actually being reached.
+  // One-shot: fires exactly once when request arrives
+  static bool lastReqState = false;
+  if (systemIDRequested && !lastReqState) {
+    Serial.printf("SystemID: REQUEST SEEN | phase=%d sysMode=%d lastAppliedDuty=%.1f\n",
+                  phase, sysMode, lastAppliedDuty);
+  }
+  lastReqState = systemIDRequested;
+
   // ── Ignore re-triggers while a test is already running ──────────────────
   if (phase != SYSID_IDLE && systemIDRequested) {
     systemIDRequested = false;
@@ -1208,31 +1211,20 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
     systemIDRequested = false;
 
-    // Mode gate — only legal in AUTO
-    if (sysMode != SYS_MODE_AUTO) {
-      queueConsoleMessage("SystemID: requires AUTO mode — test not started");
-      dutyOut = lastAppliedDuty;
-      return false;
-    }
+    Serial.printf("SystemID: starting | sysMode=%d lastAppliedDuty=%.1f\n",
+                  sysMode, lastAppliedDuty);
 
     // Allocate PSRAM buffer on first use
     if (sysIDBuffer == nullptr) {
       sysIDBuffer = (SystemIDSample *)ps_malloc(SYSID_BUF_SIZE * sizeof(SystemIDSample));
       if (sysIDBuffer == nullptr) {
-        queueConsoleMessage("SystemID: PSRAM alloc failed — test aborted");
+        Serial.println("SystemID: ABORTED — PSRAM alloc failed");
+        queueConsoleMessage("SystemID: ABORTED — PSRAM alloc failed");
         dutyOut = lastAppliedDuty;
         return false;
       }
-    }
-    // Preflight: baseDuty must be high enough that the DOWN step lands above
-    // zero with meaningful amplitude. Silent clamping at rpmMinDuty would
-    // produce garbage fall measurements without any error indication.
-    if (lastAppliedDuty < 5.0f) {
-      queueConsoleMessageF(
-        "SystemID: baseDuty=%.1f%% too low for reliable step test — test aborted",
-        lastAppliedDuty);
-      dutyOut = lastAppliedDuty;
-      return false;
+      Serial.printf("SystemID: PSRAM alloc OK — %d bytes\n",
+                    SYSID_BUF_SIZE * (int)sizeof(SystemIDSample));
     }
 
     // Initialise test state
@@ -1242,7 +1234,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     systemIDResultsReady = false;
     baseDuty = lastAppliedDuty;
     holdMs = (uint32_t)(15.0f * InputFilterTC);
-    if (holdMs < 750) holdMs = 750;  // absolute floor regardless of TC
+    if (holdMs < 5000) holdMs = 5000;  // minimum 5 seconds per phase regardless of TC
 
     queueConsoleMessageF(
       "SystemID: starting | baseDuty=%.1f%% step=+%.1f%% holdMs=%u TC=%.0fms",
@@ -1341,26 +1333,32 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     const uint8_t upEndIdx[3] = { 2, 4, 6 };  // phaseStartMs index of UP phase end
     const uint8_t downIdx[3] = { 2, 4, 6 };   // phaseStartMs index of DOWN phase start
 
+    const uint32_t REF_WINDOW_MS = 2000;  // last 2 seconds of each phase used as reference
+
     // ── Rise delays ─────────────────────────────────────────────────────
     for (int i = 0; i < 3; i++) {
       uint32_t t_quiet_start = phaseStartMs[quietIdx[i]];
       uint32_t t_up_start = phaseStartMs[upIdx[i]];
       uint32_t t_up_end = phaseStartMs[upEndIdx[i]];
 
-      // Max current during the preceding quiet phase
+      // Max current in the last 2 seconds of the preceding quiet phase.
+      // Current is settled here — not mid-transient.
+      uint32_t refWindowStart = (t_up_start > REF_WINDOW_MS)
+                                  ? (t_up_start - REF_WINDOW_MS)
+                                  : t_quiet_start;
       float quietMax = -1.0e9f;
       for (int s = 0; s < sysIDSampleCount; s++) {
-        if (sysIDBuffer[s].ts < t_quiet_start) continue;
-        if (sysIDBuffer[s].ts >= t_up_start) break;  // past window
+        if (sysIDBuffer[s].ts < refWindowStart) continue;
+        if (sysIDBuffer[s].ts >= t_up_start) break;
         if (sysIDBuffer[s].amps > quietMax) quietMax = sysIDBuffer[s].amps;
       }
       float riseThresh = quietMax * 1.2f;
 
-      // First sample in the UP phase that exceeds riseThresh
-      systemIDRiseDelay_ms[i] = -1.0f;  // -1 = not found
+      // First sample after UP command that crosses above threshold.
+      systemIDRiseDelay_ms[i] = -1.0f;
       for (int s = 0; s < sysIDSampleCount; s++) {
         if (sysIDBuffer[s].ts < t_up_start) continue;
-        if (sysIDBuffer[s].ts >= t_up_end) break;  // past UP phase
+        if (sysIDBuffer[s].ts >= t_up_end) break;
         if (sysIDBuffer[s].amps > riseThresh) {
           systemIDRiseDelay_ms[i] = (float)(sysIDBuffer[s].ts - t_up_start);
           break;
@@ -1368,27 +1366,30 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
 
       Serial.printf(
-        "SystemID rise %d | quietMax=%.1fA thresh=%.1fA delay=%.0f ms\n",
+        "SystemID rise %d | quietMax(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
         i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
     }
 
     // ── Fall delays ─────────────────────────────────────────────────────
     for (int i = 0; i < 3; i++) {
       uint32_t t_up_start = phaseStartMs[upIdx[i]];
-      uint32_t t_up_end = phaseStartMs[downIdx[i]];  // = DOWN phase start
+      uint32_t t_up_end = phaseStartMs[downIdx[i]];
       uint32_t t_down_start = phaseStartMs[downIdx[i]];
 
-      // Minimum current during the UP phase (settled high level)
+      // Min current in the last 2 seconds of the UP phase.
+      // Current is settled at the high level here.
+      uint32_t refWindowStart = (t_up_end > REF_WINDOW_MS)
+                                  ? (t_up_end - REF_WINDOW_MS)
+                                  : t_up_start;
       float upMin = 1.0e9f;
       for (int s = 0; s < sysIDSampleCount; s++) {
-        if (sysIDBuffer[s].ts < t_up_start) continue;
+        if (sysIDBuffer[s].ts < refWindowStart) continue;
         if (sysIDBuffer[s].ts >= t_up_end) break;
         if (sysIDBuffer[s].amps < upMin) upMin = sysIDBuffer[s].amps;
       }
       float fallThresh = upMin * 0.8f;
 
-      // First sample after DOWN start that drops below fallThresh.
-      // No upper bound — scan to end of buffer; current is falling monotonically.
+      // First sample after DOWN command that crosses below threshold.
       systemIDFallDelay_ms[i] = -1.0f;
       for (int s = 0; s < sysIDSampleCount; s++) {
         if (sysIDBuffer[s].ts < t_down_start) continue;
@@ -1399,7 +1400,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
 
       Serial.printf(
-        "SystemID fall %d | upMin=%.1fA thresh=%.1fA delay=%.0f ms\n",
+        "SystemID fall %d | upMin(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
         i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
     }
 

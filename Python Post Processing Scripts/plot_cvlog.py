@@ -178,7 +178,7 @@ numeric_cols = [
     "fastOvActive", "voltLoopFired", "cvActive",
     "softClamp", "hardClamp",
     "rpm",
-    "iMA2_A", "iMA4_A", "dIdt2_As", "dIdt4_As",
+    "battV_filt_V", "iMeas_filt_A",
     "ch1_interval_ms", "iExcess",
 ]
 
@@ -437,18 +437,16 @@ ax2.legend(lines2[:len(labels2)], labels2, loc="upper left")
 draw_state_strip(ax2s, df)
 # save_fig(fig2, "plot2_command_chain")
 
-
 # ---------------------------------------------------------------------------
-# PLOT 3 — Current signal quality & dI/dt
+# PLOT 3 — Filtered signal quality
 #
 # Three sub-panels:
-#   3a: iMeas_A vs iMA2_A vs iMA4_A — noise floor comparison
-#   3b: dIdt2_As vs dIdt4_As — which MA gives cleaner derivative?
-#       500 A/s threshold line shown for reference
-#   3c: ch1_interval_ms — ADC scheduling jitter (gaps → stale dI/dt risk)
+#   3a: battV vs battV_filt_V — voltage filter lag / noise rejection
+#   3b: iMeas_A vs iMeas_filt_A — current filter lag / noise rejection
+#   3c: ch1_interval_ms — ADC scheduling jitter (gaps → stale readings)
 # ---------------------------------------------------------------------------
-fig3 = plt.figure(figsize=(18, 11), num="Plot 3 — Current Signal")
-gs3  = gridspec.GridSpec(4, 1, height_ratios=[3, 2.5, 1.5, 1], hspace=0.10)
+fig3 = plt.figure(figsize=(18, 11), num="Plot 3 — Filtered Signal Quality")
+gs3  = gridspec.GridSpec(4, 1, height_ratios=[3, 3, 1.5, 1], hspace=0.10)
 ax3a = fig3.add_subplot(gs3[0])
 ax3b = fig3.add_subplot(gs3[1], sharex=ax3a)
 ax3c = fig3.add_subplot(gs3[2], sharex=ax3a)
@@ -457,29 +455,24 @@ ax3s = fig3.add_subplot(gs3[3], sharex=ax3a)
 plt.setp(ax3a.get_xticklabels(), visible=False)
 plt.setp(ax3b.get_xticklabels(), visible=False)
 plt.setp(ax3c.get_xticklabels(), visible=False)
-fig3.suptitle(f"Plot 3 — Current Signal Quality & dI/dt  |  {outer_label}", fontsize=14)
+fig3.suptitle(f"Plot 3 — Filtered Signal Quality  |  {outer_label}", fontsize=14)
 
-# 3a: raw vs MA overlays
-ax3a.plot(df["t_plot"], df["iMeas_A"],
-          color="#ef5350", lw=1.0, alpha=0.55, label="iMeas_A (raw)")
-ax3a.plot(df["t_plot"], df["iMA2_A"],
-          color="#ffb300", lw=1.6, label="iMA2_A (2-sample MA)")
-ax3a.plot(df["t_plot"], df["iMA4_A"],
-          color="#00c853", lw=1.8, linestyle="--", label="iMA4_A (4-sample MA)")
-ax3a.set_ylabel("Current (A)")
+# 3a: battery voltage raw vs filtered
+ax3a.plot(df["t_plot"], df["battV"],
+          color="#ef5350", lw=1.0, alpha=0.55, label="battV (raw)")
+ax3a.plot(df["t_plot"], df["battV_filt_V"],
+          color="#00bcd4", lw=1.8, label="battV_filt_V (filtered)")
+ax3a.set_ylabel("Voltage (V)")
 ax3a.grid(**GRID_KW)
 ax3a.legend(loc="upper left")
 add_ov_shading(ax3a, df)
 
-# 3b: dI/dt
-ax3b.plot(df["t_plot"], df["dIdt2_As"],
-          color="#ffb300", lw=1.4, alpha=0.75, label="dIdt2_As (2-sample)")
-ax3b.plot(df["t_plot"], df["dIdt4_As"],
-          color="#42a5f5", lw=1.8, label="dIdt4_As (4-sample)")
-ax3b.axhline(500, color="#ef5350", linewidth=1.2, linestyle="--",
-             alpha=0.70, label="500 A/s threshold (current placeholder)")
-ax3b.axhline(0, color="#ffffff", linewidth=0.5, alpha=0.25)
-ax3b.set_ylabel("dI/dt (A/s)")
+# 3b: measured current raw vs filtered
+ax3b.plot(df["t_plot"], df["iMeas_A"],
+          color="#ef5350", lw=1.0, alpha=0.55, label="iMeas_A (raw)")
+ax3b.plot(df["t_plot"], df["iMeas_filt_A"],
+          color="#00c853", lw=1.8, label="iMeas_filt_A (filtered)")
+ax3b.set_ylabel("Current (A)")
 ax3b.grid(**GRID_KW)
 ax3b.legend(loc="upper left")
 add_ov_shading(ax3b, df)
@@ -490,14 +483,13 @@ ax3c.plot(df["t_plot"], df["ch1_interval_ms"],
 ax3c.axhline(5, color="#ffb300", linewidth=0.8, linestyle=":",
              alpha=0.60, label="5 ms nominal")
 ax3c.axhline(15, color="#ef5350", linewidth=0.8, linestyle=":",
-             alpha=0.60, label="15 ms (3× — stale dI/dt risk)")
+             alpha=0.60, label="15 ms (3× — stale reading risk)")
 ax3c.set_ylabel("CH1 interval (ms)")
 ax3c.grid(**GRID_KW)
 ax3c.legend(loc="upper right", fontsize=10)
 
 draw_state_strip(ax3s, df)
-# save_fig(fig3, "plot3_current_signal")
-
+# save_fig(fig3, "plot3_filtered_signals")
 
 # ---------------------------------------------------------------------------
 # PLOT 4 — Duty pipeline + OV supervisor

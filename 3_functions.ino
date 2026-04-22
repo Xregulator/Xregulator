@@ -83,8 +83,11 @@ enum Csv1Index {
   CSV1_ch1_worst_at,             // 64
   CSV1_ch1_over2x_at,            // 65
   CSV1_ch1_n_at,                 // 66
+  CSV1_battV_filtered,           // 67
+  CSV1_iMeas_filtered,           // 68
 
-  CSV1_FIELD_COUNT  // = 67
+  CSV1_FIELD_COUNT  // = 69
+
 };
 
 enum Csv2Index {
@@ -1407,7 +1410,10 @@ void setupServer() {
                 "gainKp,"
                 "gainKi,"
                 "gainKd,"
+                "battV_filt_V,"
+                "iMeas_filt_A,"
                 "flags\n");
+
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
               // ── Row 2+: data rows ─────────────────────────────────────────
@@ -1437,6 +1443,7 @@ void setupServer() {
                 "%u,%u,"
                 "%.0f,%.2f,"
                 "%.4f,%.4f,%.4f,"
+                "%.3f,%.3f,"  // battV_filt, iMeas_filt
                 "%u\n",
                 (unsigned long)e.ts,
                 (unsigned)e.chargeStageDisplay,
@@ -1465,8 +1472,9 @@ void setupServer() {
                 e.gainKp,
                 e.gainKi,
                 e.gainKd,
+                e.battV_filt,
+                e.iMeas_filt,
                 (unsigned)e.flags);
-
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
             }
 
@@ -1848,10 +1856,10 @@ void setupServer() {
       SystemIDStepAmplitude = inputMessage.toFloat();
     }
 
-else if (request->hasParam("startSystemID")) {
+    else if (request->hasParam("startSystemID")) {
       foundParameter = true;
       systemIDRequested = true;
-      systemIDResultsReady = false;   // add this line
+      systemIDResultsReady = false;
       queueConsoleMessage("SystemID: test requested via web UI");
     }
 
@@ -3910,7 +3918,7 @@ void SendWifiData() {
                                "%d,"  // CSV1_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
@@ -3969,19 +3977,21 @@ void SendWifiData() {
                                SafeInt(g_fastOvSoftCount),              // 52
                                SafeInt(g_fastOvHardCount),              // 53
                                // CH1 interval diagnostics
-                               SafeInt(ch1_last_ms),       // 54
-                               SafeInt(ch1_avg_10s, 100),  // 55  — 2 decimal places
-                               SafeInt(ch1_worst_10s),     // 56
-                               SafeInt(ch1_over2x_10s),    // 57
-                               SafeInt(ch1_n_10s),         // 58
-                               SafeInt(ch1_avg_2m, 100),   // 59  — 2 decimal places
-                               SafeInt(ch1_worst_2m),      // 60
-                               SafeInt(ch1_over2x_2m),     // 61
-                               SafeInt(ch1_n_2m),          // 62
-                               SafeInt(ch1_avg_at, 100),   // 63  — 2 decimal places
-                               SafeInt(ch1_worst_at),      // 64
-                               SafeInt(ch1_over2x_at),     // 65
-                               SafeInt(ch1_n_at)           // 66
+                               SafeInt(ch1_last_ms),                // 54
+                               SafeInt(ch1_avg_10s, 100),           // 55  — 2 decimal places
+                               SafeInt(ch1_worst_10s),              // 56
+                               SafeInt(ch1_over2x_10s),             // 57
+                               SafeInt(ch1_n_10s),                  // 58
+                               SafeInt(ch1_avg_2m, 100),            // 59  — 2 decimal places
+                               SafeInt(ch1_worst_2m),               // 60
+                               SafeInt(ch1_over2x_2m),              // 61
+                               SafeInt(ch1_n_2m),                   // 62
+                               SafeInt(ch1_avg_at, 100),            // 63  — 2 decimal places
+                               SafeInt(ch1_worst_at),               // 64
+                               SafeInt(ch1_over2x_at),              // 65
+                               SafeInt(ch1_n_at),                   // 66
+                               SafeInt(BatteryV_filtered, 100),     // 67 — 2 decimal places
+                               SafeInt(MeasuredAmps_filtered, 100)  // 68 — 2 decimal places
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -4568,7 +4578,7 @@ void SendWifiData() {
                                (int)systemIDRiseAvg_ms,                                // 249
                                (int)systemIDFallAvg_ms,                                // 250
                                (int)InputFilterTC,                                     // 251
-                               (int)SystemIDStepAmplitude,                             // 252
+                               (int)SystemIDStepAmplitude                              // 252
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

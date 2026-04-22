@@ -155,6 +155,8 @@ const CSV1_FIELDS = [
     "ch1_worst_at",               // 64
     "ch1_over2x_at",              // 65
     "ch1_n_at",                   // 66
+    "BatteryV_filtered",          // 67
+    "MeasuredAmps_filtered",      // 68
 ];
 const CSV2_FIELDS = [
     "IBVMax",                           // 0
@@ -2181,27 +2183,29 @@ function processCSVDataOptimized(data) {
         if (pidTuningData) {
             const setpointLimited = 'setpointLimited' in data ? parseFloat(data.setpointLimited) / 100 : 0;
             const pidInput = 'pidInput' in data ? parseFloat(data.pidInput) / 100 : 0;
+            const iMeasFilt = 'MeasuredAmps_filtered' in data ? parseFloat(data.MeasuredAmps_filtered) / 100 : 0;
             const uTargetAmps = 'uTargetAmps' in data ? parseFloat(data.uTargetAmps) : 0;
             const dutyCycle = 'dutyCycle' in data ? parseFloat(data.dutyCycle) / 100 : 0;
             const pidOutput = 'pidOutput' in data ? parseFloat(data.pidOutput) / 100 : 0;
             const rpmScaled = rpmValue / 100;
 
-            // Shift all PID tuning data left and add new data at the end
             for (let i = 1; i < pidTuningData[1].length; i++) {
                 pidTuningData[1][i - 1] = pidTuningData[1][i]; // setpointLimited
-                pidTuningData[2][i - 1] = pidTuningData[2][i]; // pidInput
-                pidTuningData[3][i - 1] = pidTuningData[3][i]; // uTargetAmps
-                pidTuningData[4][i - 1] = pidTuningData[4][i]; // dutyCycle
-                pidTuningData[5][i - 1] = pidTuningData[5][i]; // pidOutput
-                pidTuningData[6][i - 1] = pidTuningData[6][i]; // RPM / 100
+                pidTuningData[2][i - 1] = pidTuningData[2][i]; // pidInput (raw)
+                pidTuningData[3][i - 1] = pidTuningData[3][i]; // iMeas_filt
+                pidTuningData[4][i - 1] = pidTuningData[4][i]; // uTargetAmps
+                pidTuningData[5][i - 1] = pidTuningData[5][i]; // dutyCycle
+                pidTuningData[6][i - 1] = pidTuningData[6][i]; // pidOutput
+                pidTuningData[7][i - 1] = pidTuningData[7][i]; // RPM / 100
             }
             const lastPidIndex = pidTuningData[1].length - 1;
             pidTuningData[1][lastPidIndex] = setpointLimited;
             pidTuningData[2][lastPidIndex] = pidInput;
-            pidTuningData[3][lastPidIndex] = uTargetAmps;
-            pidTuningData[4][lastPidIndex] = dutyCycle;
-            pidTuningData[5][lastPidIndex] = pidOutput;
-            pidTuningData[6][lastPidIndex] = rpmScaled;
+            pidTuningData[3][lastPidIndex] = iMeasFilt;
+            pidTuningData[4][lastPidIndex] = uTargetAmps;
+            pidTuningData[5][lastPidIndex] = dutyCycle;
+            pidTuningData[6][lastPidIndex] = pidOutput;
+            pidTuningData[7][lastPidIndex] = rpmScaled;
 
             if (typeof pidTuningPlot !== 'undefined') {
                 queuePidTuningPlotUpdate();
@@ -4861,7 +4865,7 @@ window.addEventListener("load", function () {
                     else if (["imu_vertical_accel_g", "imu_total_accel_g", "imu_hf_vibration_energy"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(3);
                     }
-                    else if (["BatteryV", "uTargetAmps", "AlternatorTemperatureF", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at"].includes(key)) {
+                    else if (["BatteryV", "uTargetAmps", "AlternatorTemperatureF", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "BatteryV_filtered", "MeasuredAmps_filtered"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -4977,7 +4981,9 @@ window.addEventListener("load", function () {
                 ["ch1_avg_at_ID", "ch1_avg_at"],
                 ["ch1_worst_at_ID", "ch1_worst_at"],
                 ["ch1_over2x_at_ID", "ch1_over2x_at"],
-                ["ch1_n_at_ID", "ch1_n_at"]
+                ["ch1_n_at_ID", "ch1_n_at"],
+                ["BatteryV_filtered_ID", "BatteryV_filtered"],
+                ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"]
             ];
 
             // Update critical fields every cycle
@@ -7004,6 +7010,7 @@ let pidTuningIndex = 0;
 let pidTuningSeriesVisible = {
     setpointLimited: true,
     pidInput: true,
+    iMeasFilt: true,
     uTargetAmps: true,
     dutyCycle: true,
     pidOutput: true,
@@ -7037,12 +7044,13 @@ function initPidTuningDataStructures() {
 
     pidTuningData = [
         [...xAxisData],                      // [0] X-axis (seconds ago)
-        new Array(maxPoints).fill(0),        // [1] setpointLimited (A)
-        new Array(maxPoints).fill(0),        // [2] pidInput (A)
-        new Array(maxPoints).fill(0),        // [3] uTargetAmps (A)
-        new Array(maxPoints).fill(0),        // [4] dutyCycle (%)
-        new Array(maxPoints).fill(0),        // [5] pidOutput (%)
-        new Array(maxPoints).fill(0)         // [6] RPM / 100
+        new Array(maxPoints).fill(0),        // [1] setpointLimited
+        new Array(maxPoints).fill(0),        // [2] pidInput (raw)
+        new Array(maxPoints).fill(0),        // [3] iMeas_filt  ← new, shift everything down
+        new Array(maxPoints).fill(0),        // [4] uTargetAmps
+        new Array(maxPoints).fill(0),        // [5] dutyCycle
+        new Array(maxPoints).fill(0),        // [6] pidOutput
+        new Array(maxPoints).fill(0)         // [7] RPM / 100
     ];
 
     pidTuningIndex = 0;
@@ -7069,9 +7077,15 @@ function initPidTuningPlot() {
                 dash: [5, 5]
             },
             {
-                label: "Measured Current",
+                label: "Measured Current (raw)",
                 stroke: pidTuningSeriesVisible.pidInput ? "#4CAF50" : "transparent",
                 width: 1,
+                scale: "amps"
+            },
+            {
+                label: "Measured Current (filtered)",
+                stroke: pidTuningSeriesVisible.iMeasFilt ? "#030c03" : "transparent",
+                width: 2,
                 scale: "amps"
             },
             {
@@ -7096,7 +7110,7 @@ function initPidTuningPlot() {
             },
             {
                 label: "RPM / 100",
-                stroke: pidTuningSeriesVisible.rpm ? "#00BCD4" : "transparent",
+                stroke: pidTuningSeriesVisible.rpm ? "#cbdd22" : "transparent",
                 width: 1,
                 scale: "amps"
             }
@@ -7193,11 +7207,12 @@ function createPidTuningLegend() {
 
     const legendItems = [
         { key: 'setpointLimited', label: 'Setpoint (slewed)', color: '#FF6B6B', seriesIdx: 1 },
-        { key: 'pidInput', label: 'Measured Current', color: '#4CAF50', seriesIdx: 2 },
-        { key: 'uTargetAmps', label: 'Setpoint (raw)', color: '#FFA726', seriesIdx: 3 },
-        { key: 'dutyCycle', label: 'Duty Applied', color: '#2196F3', seriesIdx: 4 },
-        { key: 'pidOutput', label: 'PID Output', color: '#9C27B0', seriesIdx: 5 },
-        { key: 'rpm', label: 'RPM / 100', color: '#00BCD4', seriesIdx: 6 }
+        { key: 'pidInput', label: 'Measured Current (raw)', color: '#4CAF50', seriesIdx: 2 },
+        { key: 'iMeasFilt', label: 'Measured Current (filtered)', color: '#81C784', seriesIdx: 3 },
+        { key: 'uTargetAmps', label: 'Setpoint (raw)', color: '#FFA726', seriesIdx: 4 },
+        { key: 'dutyCycle', label: 'Duty Applied', color: '#2196F3', seriesIdx: 5 },
+        { key: 'pidOutput', label: 'PID Output', color: '#9C27B0', seriesIdx: 6 },
+        { key: 'rpm', label: 'RPM / 100', color: '#00BCD4', seriesIdx: 7 },
     ];
 
     legendItems.forEach(item => {
@@ -9001,7 +9016,7 @@ function updateFloatVisibility() {
 // ===========================================================================
 
 const CV_LOG_HEADER_SIZE = 24;
-const CV_LOG_ENTRY_SIZE = 44;
+const CV_LOG_ENTRY_SIZE = 40;
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -9051,10 +9066,8 @@ function parseCvBin(buf) {
     const softClamp = new Array(count);
     const hardClamp = new Array(count);
     const rpm = new Array(count);
-    const iMA2 = new Array(count);
-    const iMA4 = new Array(count);
-    const dIdt2 = new Array(count);
-    const dIdt4 = new Array(count);
+    const battV_filt = new Array(count);
+    const iMeas_filt = new Array(count);
     const ch1Interval = new Array(count);
     const iExcess = new Array(count);
 
@@ -9084,10 +9097,9 @@ function parseCvBin(buf) {
         softClamp[i] = (f >> 3) & 1;
         hardClamp[i] = (f >> 4) & 1;
         rpm[i] = view.getInt16(b + 30, true);
-        iMA2[i] = view.getInt16(b + 32, true) / 10.0;
-        iMA4[i] = view.getInt16(b + 34, true) / 10.0;
-        dIdt2[i] = view.getInt16(b + 36, true) / 10.0;
-        dIdt4[i] = view.getInt16(b + 38, true) / 10.0;
+        battV_filt[i] = view.getInt16(b + 32, true) / 100.0;
+        iMeas_filt[i] = view.getInt16(b + 34, true) / 10.0;
+        ch1Interval[i] = view.getInt16(b + 36, true);
         ch1Interval[i] = view.getInt16(b + 40, true);
         iExcess[i] = (f >> 5) & 1;
     }
@@ -9098,8 +9110,7 @@ function parseCvBin(buf) {
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
         fastOvActive, voltLoopFired, cvActive, softClamp, hardClamp,
-        rpm, iMA2, iMA4, dIdt2, dIdt4, ch1Interval, iExcess,
-
+        rpm, battV_filt, iMeas_filt, ch1Interval, iExcess,
     };
 }
 
@@ -9127,7 +9138,7 @@ function cvBinToCsv(d) {
         'iMeas_A', 'duty_pct',
         'fastOvActive', 'voltLoopFired', 'cvActive', 'softClamp', 'hardClamp',
         'rpm',
-        'iMA2_A', 'iMA4_A', 'dIdt2_As', 'dIdt4_As', 'ch1_interval_ms', 'iExcess',  // new
+        'battV_filt_V', 'iMeas_filt_A', 'ch1_interval_ms', 'iExcess',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -9143,9 +9154,8 @@ function cvBinToCsv(d) {
             d.fastOvActive[i], d.voltLoopFired[i], d.cvActive[i],
             d.softClamp[i], d.hardClamp[i],
             d.rpm[i],
-            d.iMA2[i].toFixed(1), d.iMA4[i].toFixed(1),     // new
-            d.dIdt2[i].toFixed(1), d.dIdt4[i].toFixed(1),   // new
-            d.ch1Interval[i], d.iExcess[i],              // new            
+            d.battV_filt[i].toFixed(2), d.iMeas_filt[i].toFixed(1),
+            d.ch1Interval[i], d.iExcess[i],
         ].join(','));
     }
 
@@ -9203,64 +9213,76 @@ async function downloadCvLog() {
 
 
 function startSystemIDTest() {
-  if (!confirm(
-    "WARNING: The step test will briefly override field duty directly.\n" +
-    "Run only with the engine running at normal operating RPM.\n" +
-    "Ensure battery voltage is stable and not near a protection threshold.\n\n" +
-    "Start the test?")) return;
+    if (!confirm(
+        "WARNING: The step test will briefly override field duty directly.\n" +
+        "Run only with the engine running at normal operating RPM.\n" +
+        "Ensure battery voltage is stable and not near a protection threshold.\n\n" +
+        "Start the test?")) return;
 
-  fetch("/get?startSystemID=1&password=" + encodeURIComponent(getPassword()))
-    .then(() => {
-      console.log("SystemID test requested");
-      waitForSystemIDResults();
-    })
-    .catch(err => console.error("SystemID request failed:", err));
+    if (!currentAdminPassword) {
+        alert("Please unlock settings first");
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("password", currentAdminPassword);
+    formData.append("startSystemID", "1");
+
+    fetchWithTimeout(buildURL("/get?" + new URLSearchParams(formData).toString()), {}, 8000)
+        .then(() => {
+            console.log("SystemID test requested");
+            waitForSystemIDResults();
+        })
+        .catch(err => console.error("SystemID request failed:", err));
 }
 
 function waitForSystemIDResults() {
-  // Poll every 500ms until systemIDResultsReady == 1, then show dialog.
-  // Gives up after 120 seconds (well beyond worst-case test duration).
-  const maxWaitMs = 120000;
-  const pollMs    = 500;
-  let   elapsed   = 0;
+    // Poll every 500ms until systemIDResultsReady == 1, then show dialog.
+    // Gives up after 120 seconds (well beyond worst-case test duration).
+    const maxWaitMs = 120000;
+    const pollMs = 500;
+    let elapsed = 0;
 
-  const poll = setInterval(() => {
-    elapsed += pollMs;
-    if (elapsed > maxWaitMs) {
-      clearInterval(poll);
-      alert("SystemID: timed out waiting for results. Check serial console.");
-      return;
-    }
-    // latest_data is your existing live data object populated by the CSV stream
-    if (typeof latest_data === "undefined") return;
-    if (parseInt(latest_data.systemIDResultsReady) !== 1) return;
+    const poll = setInterval(() => {
+        elapsed += pollMs;
+        if (elapsed > maxWaitMs) {
+            clearInterval(poll);
+            alert("SystemID: timed out waiting for results. Check serial console.");
+            return;
+        }
+        // latest_data is your existing live data object populated by the CSV stream
+        if (typeof latest_data === "undefined") return;
+        if (parseInt(latest_data.systemIDResultsReady) !== 1) return;
 
-    clearInterval(poll);
+        clearInterval(poll);
 
-    const r0 = latest_data.systemIDRiseDelay_0;
-    const r1 = latest_data.systemIDRiseDelay_1;
-    const r2 = latest_data.systemIDRiseDelay_2;
-    const ra = latest_data.systemIDRiseAvg;
-    const f0 = latest_data.systemIDFallDelay_0;
-    const f1 = latest_data.systemIDFallDelay_1;
-    const f2 = latest_data.systemIDFallDelay_2;
-    const fa = latest_data.systemIDFallAvg;
+        const r0 = latest_data.systemIDRiseDelay_0;
+        const r1 = latest_data.systemIDRiseDelay_1;
+        const r2 = latest_data.systemIDRiseDelay_2;
+        const ra = latest_data.systemIDRiseAvg;
+        const f0 = latest_data.systemIDFallDelay_0;
+        const f1 = latest_data.systemIDFallDelay_1;
+        const f2 = latest_data.systemIDFallDelay_2;
+        const fa = latest_data.systemIDFallAvg;
 
-    const msg =
-      "Plant Delay Measurement Results\n\n" +
-      "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
-      "Rise average: " + ra + " ms\n\n" +
-      "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
-      "Fall average: " + fa + " ms\n\n" +
-      "Apply rise average (" + ra + " ms) as Input Filter TC and save to flash?";
+        const suggestedTC = Math.max(parseFloat(ra), parseFloat(fa));
 
-    if (confirm(msg)) {
-      fetch("/get?InputFilterTC=" + encodeURIComponent(ra) +
-            "&password=" + encodeURIComponent(getPassword()))
-        .then(() => console.log("InputFilterTC updated to " + ra + " ms"))
-        .catch(err => console.error("InputFilterTC update failed:", err));
-    }
-  }, pollMs);
+        const msg =
+            "Plant Delay Measurement Results\n\n" +
+            "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
+            "Rise average: " + ra + " ms\n\n" +
+            "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
+            "Fall average: " + fa + " ms\n\n" +
+            "Suggested filter TC (max of rise/fall): " + suggestedTC + " ms\n\n" +
+            "Apply " + suggestedTC + " ms as Input Filter TC and save to flash?";
+
+        if (confirm(msg)) {
+            fetch("/get?InputFilterTC=" + encodeURIComponent(suggestedTC) +
+                "&password=" + encodeURIComponent(currentAdminPassword))
+                .then(() => console.log("InputFilterTC updated to " + suggestedTC + " ms"))
+                .catch(err => console.error("InputFilterTC update failed:", err));
+        }
+    }, pollMs);
 }
 
 

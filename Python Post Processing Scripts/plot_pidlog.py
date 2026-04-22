@@ -198,6 +198,7 @@ numeric_cols = [
     "enteringCV", "enteringTargetVoltageMode",
     "rpm", "measAmps",
     "gainKp", "gainKi", "gainKd", "flags",
+    "battV_filt", "iMeas_filt",
 ]
 
 for col in numeric_cols:
@@ -378,9 +379,10 @@ ax1b = ax1.twinx()
 
 ax1.plot(df["t_plot"], df["battV"],
          color="#00bcd4", lw=2.0, label="battV")
+ax1.plot(df["t_plot"], df["battV_filt"],
+         color="#80deea", lw=1.6, linestyle="--", label="battV_filt", alpha=0.85)
 ax1.plot(df["t_plot"], df["ChargingVoltageTarget"],
          color="#ffb300", lw=1.8, linestyle="--", label="ChargingVoltageTarget")
-
 ax1b.plot(df["t_plot"], df["vError"],
           color="#ef5350", lw=1.6, label="vError", alpha=0.9)
 ax1b.axhline(0, color="#ef5350", linewidth=0.6, linestyle=":", alpha=0.4)
@@ -469,6 +471,8 @@ ax3a.plot(df["t_plot"], df["pidSetpoint"],
           color="#ffb300", lw=2.0, linestyle="--", label="pidSetpoint")
 ax3a.plot(df["t_plot"], df["pidInput"],
           color="#42a5f5", lw=1.8, label="pidInput (measAmps)")
+ax3a.plot(df["t_plot"], df["iMeas_filt"],
+          color="#81c784", lw=2.0, label="iMeas_filt (filtered)", alpha=0.90)
 ax3a.plot(df["t_plot"], df["pidOutput"],
           color="#00c853", lw=1.8, label="pidOutput (→ dutyReq)")
 ax3a.plot(df["t_plot"], df["pidUnsatOutput"],
@@ -527,6 +531,8 @@ ax4.fill_between(df["t_plot"], df["dutyRequest"], df["dutyApplied"],
 
 ax4b.plot(df["t_plot"], df["measAmps"],
           color="#ef5350", lw=1.8, label="measAmps", alpha=0.9)
+ax4b.plot(df["t_plot"], df["iMeas_filt"],
+          color="#81c784", lw=2.0, linestyle="--", label="iMeas_filt", alpha=0.85)
 
 ax4.set_ylabel("Duty (%)")
 ax4b.set_ylabel("Measured Amps (A)", color="#ef5350")

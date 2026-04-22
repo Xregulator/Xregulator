@@ -821,7 +821,7 @@ float RPM_filtered          = 0.0f;
 // Only legal in SYS_MODE_AUTO; systemID_tick() enforces this.
 float SystemIDStepAmplitude = 15.0f;    // % duty step — will be web-configurable later
 
-bool  systemIDRequested     = false;    // set true by UI handler to trigger a test run
+volatile bool  systemIDRequested     = false;    // set true by UI handler to trigger a test run
 bool  systemIDActive        = false;    // true while test is in progress
 bool  systemIDResultsReady  = false;    // set true when post-processing is complete
 
@@ -2271,14 +2271,17 @@ struct PidLogEntry {
   float gainKp;
   float gainKi;
   float gainKd;
-};  // 96 bytes — naturally aligned, no implicit holes
+  // ── Filtered signals ─────────────────────────────────────────────
+  float battV_filt;    // BatteryV_filtered
+  float iMeas_filt;    // MeasuredAmps_filtered
+};  // 104 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
   int oldest;
   int row;
   bool done;
-  char line[420];  // header row = 364 chars; comment block = 348 chars; was 320, too small
+  char line[440];  // header row = 364 chars; comment block = 348 chars; was 320, too small
   int lineLen;
   int linePos;
 };
@@ -2371,16 +2374,13 @@ struct CvLogEntry {
   uint8_t flags;
   uint8_t pad;
   int16_t rpm;
-  // New fields — append to end of struct to avoid disturbing existing layout
-  int16_t iMA2_x10;       // 2-sample current MA × 10  (A)
-  int16_t iMA4_x10;       // 4-sample current MA × 10  (A)
-  int16_t dIdt2_x10;      // dI/dt 2-sample × 10       (A/s)
-  int16_t dIdt4_x10;      // dI/dt 4-sample × 10       (A/s)
-  int16_t ch1IntervalMs;  // last CH1 inter-sample gap  (ms)
-  int16_t pad2;           // explicit alignment pad — keeps sizeof == 44
-  // pack into existing flags: bit 5 = fastIRisingActive
+  int16_t battV_filt_x100;  // BatteryV_filtered × 100    (V)
+  int16_t iMeas_filt_x10;   // MeasuredAmps_filtered × 10 (A)
+  int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
+  int16_t pad2;             // explicit alignment pad — keeps sizeof == 40
+  // pack into existing flags: bit 5 = iExcess
 };
-static_assert(sizeof(CvLogEntry) == 44, "CvLogEntry must be 44 bytes");
+static_assert(sizeof(CvLogEntry) == 40, "CvLogEntry must be 40 bytes");
 
 // ---------------------------------------------------------------------------
 // BINARY HEADER  (24 bytes)
@@ -3453,7 +3453,7 @@ TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   }
   // === FUNCTION TIMING DIGEST — Serial only, key spike candidates ===
   static unsigned long lastTimingPrint = 0;
-  if (millis() - lastTimingPrint >= 10000) {
+  if (millis() - lastTimingPrint >= 10000000) {
     lastTimingPrint = millis();
     Serial.println("--- Function Timing Worst-Case (ms) | 5s-win / session ---");
     Serial.printf("  Loop overall:           %4lu / %4lu\n",
