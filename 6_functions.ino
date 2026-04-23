@@ -316,7 +316,8 @@ void enter_sys_auto() {
  *  6.  Re-check critical faults and determine control/system mode
  *  7.  Handle mode transitions
  *  8.  Non-normal path: shutdown/fault state machine, then return
- *  9.  Normal path: setpoint management and PID compute
+//  9.  Normal path: iExcess supervisor, fastOvCurrentCap application,
+//                   setpoint management and PID compute
  *  10. Build duty request
  *  11. Apply through governor
  *  12. Tell PID what actually happened
@@ -361,9 +362,9 @@ void enter_sys_auto() {
 //   Runs every loop before the CH1 gate. Now secondary to the fast
 //   current rise supervisor for CV-mode transient protection.
 //   Still active as a last-resort voltage backstop (sensor glitch,
-//   non-CV modes, cases where dI/dt detection misses).
-//   battVFreshFlag fires at ~30ms cadence with new ADS sequence.
-//   dvdt EMA alpha=0.08 → effective time constant ~375ms.
+//   non-CV modes, cases where iExcess detection misses).
+// battVFreshFlag fires at ~15ms cadence (CH0 gets 1 of 6 ADS slots; CH1 interval ~5ms).
+// dvdt EMA alpha=0.08 → effective time constant ~190ms.
 //   Prediction horizon      80 ms        (TD_PRED = 0.08f)
 //   Soft correction zone    ChargingVoltageTarget + 0.08 V  (V_SOFT)
 //   Hard correction zone    ChargingVoltageTarget + 0.15 V  (V_HARD)
@@ -459,13 +460,22 @@ void AdjustFieldLearnMode() {
   float fastOvBaseCap = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
   float fastOvCurrentCap = fastOvBaseCap;
   bool fastOvClampActive = false;
-
+  static uint32_t ocTripStartMs = 0;
 
   updateCurrentRPMTableIndex(RPM);
   updateRPMBucketHistory(currentMillis);
 
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
+  bool hardOCActive = false;
 
+  if (MeasuredAmps > HardOCTripAmps) {
+    if (hardOCStartMs == 0) hardOCStartMs = currentMillis;
+    if ((currentMillis - hardOCStartMs) >= HardOCDebounceMs) {
+      hardOCActive = true;
+    }
+  } else {
+    hardOCStartMs = 0;
+  }
   // pidLog_tick() runs at the END of the normal control path, after all state is final.
 
   // thermalLog_tick() is called after tempPID_tick() in the normal-mode path so that
@@ -492,7 +502,6 @@ void AdjustFieldLearnMode() {
     applyImmediateCut(tick, preReason);
     return;
   }
-
 
 
   // ===== FAST VOLTAGE SAFETY OVERRIDE ==========
@@ -582,14 +591,14 @@ void AdjustFieldLearnMode() {
 
         ovActive = false;
 
-        queueConsoleMessageF(
-          "FastOV release | BattV=%.3fV e=%.3fV preEventIcv=%.2fA "
-          "cv_I_seed=%.2fA Icv=%.2fA spLim=%.2fA",
-          BatteryV, e, preEventIcv, cv_I, Icv, setpointLimited);
-        Serial.printf(
-          "FastOV release | BattV=%.3fV e=%.3fV preEventIcv=%.2fA "
-          "cv_I_seed=%.2fA Icv=%.2fA spLim=%.2fA\n",
-          BatteryV, e, preEventIcv, cv_I, Icv, setpointLimited);
+        // queueConsoleMessageF(
+        //   "FastOV release | BattV=%.3fV e=%.3fV preEventIcv=%.2fA "
+        //   "cv_I_seed=%.2fA Icv=%.2fA spLim=%.2fA",
+        //   BatteryV, e, preEventIcv, cv_I, Icv, setpointLimited);
+        // Serial.printf(
+        //   "FastOV release | BattV=%.3fV e=%.3fV preEventIcv=%.2fA "
+        //   "cv_I_seed=%.2fA Icv=%.2fA spLim=%.2fA\n",
+        //   BatteryV, e, preEventIcv, cv_I, Icv, setpointLimited);
       }
     } else {
       ovActive = false;
@@ -1009,15 +1018,95 @@ void AdjustFieldLearnMode() {
   // governor does not slew or clamp the step transitions.
   // The integrator is parked at the commanded duty so the PID resumes
   // smoothly from the operating point when the test ends.
-  // Note: g_iExcessDutyCap is a no-op placeholder (100%) and does not
-  // interfere with the step commands.
+  // ========== SYSTEM ID OVERRIDE ==========
   float sysIDDutyOut = lastAppliedDuty;
+
+  static bool prevSysIDRunning = false;
   bool sysIDRunning = systemID_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs);
+
+  bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
+  bool sysIDJustCompleted = prevSysIDRunning && !sysIDRunning;
+  prevSysIDRunning = sysIDRunning;
+
+  // ── Snapshot on test start (fires once, first tick sysIDRunning goes true) ──
+  // All pre-test values are still clean at this point — the override block below
+  // hasn't touched PID or setpoint yet this tick.
+  if (sysIDJustStarted) {
+    g_sysIDResume = {
+      .valid = true,
+      .sysMode = sysMode,
+      .setpointLimited_snap = setpointLimited,
+      .lastAppliedDuty_snap = lastAppliedDuty,
+      .cv_I_snap = cv_I,
+      .voltageControlActive_snap = voltageControlActive,
+    };
+    queueConsoleMessageF(
+      "SystemID: pre-test state captured | mode=%s duty=%.1f%% setpoint=%.2fA cv_I=%.2fA cvActive=%d",
+      (sysMode == SYS_MODE_MANUAL) ? "MANUAL" : "AUTO",
+      g_sysIDResume.lastAppliedDuty_snap,
+      g_sysIDResume.setpointLimited_snap,
+      g_sysIDResume.cv_I_snap,
+      g_sysIDResume.voltageControlActive_snap);
+  }
+
+  // ── While test is running: bypass all setpoint machinery ────────────────────
   if (sysIDRunning) {
     govMode = GOV_BYPASS_SLEW;
     currentPID.SetMode(MANUAL);
     currentPID.ResetIntegratorTo((double)sysIDDutyOut);
     pidOutput = (double)sysIDDutyOut;
+  }
+
+  // ── Restore on test completion ───────────────────────────────────────────────
+  // Hierarchy:
+  //   1. Safety wins — only restore if still in a legal normal-running state.
+  //   2. Restore control architecture (mode, setpoint tracker, CV integrator).
+  //   3. Bumpless seed — integrator gets CURRENT applied duty, NOT the pre-test
+  //      duty. Pre-test duty is stale; conditions (voltage, RPM, temp) may have
+  //      changed during the test. Current applied duty is the actual operating point.
+  //   4. Let the normal control path compute the next command immediately.
+  if (sysIDJustCompleted && g_sysIDResume.valid) {
+    bool legalToResume = (mode == MODE_NORMAL_AUTO_PID || mode == MODE_NORMAL_MANUAL);
+
+    if (!legalToResume) {
+      // A fault or disable arrived during the test. Do not force old state back;
+      // let the current fault path win on its own terms this tick and beyond.
+      queueConsoleMessage(
+        "SystemID: pre-test state NOT restored — system no longer in normal running state");
+    } else {
+
+      // Restore setpoint tracker, clamped to the current valid ceiling.
+      // This prevents re-asserting demand that was legal pre-test but is now
+      // above the RPM/thermal/user cap.
+      float restoredSetpoint = clamp_f(
+        g_sysIDResume.setpointLimited_snap, 0.0f, (float)MaxTableValue);
+      setpointLimited = restoredSetpoint;
+
+      // Restore CV integrator only when both pre- and post-test state are in CV.
+      // If we left or entered CV during the test, let the bumpless tracker
+      // re-derive cv_I naturally on the next tick instead of seeding stale state.
+      bool cvContextUnchanged = (g_sysIDResume.voltageControlActive_snap && voltageControlActive);
+      if (cvContextUnchanged) {
+        cv_I = g_sysIDResume.cv_I_snap;
+      }
+
+      // Reseed PID integrator to current applied duty (bumpless transfer).
+      if (g_sysIDResume.sysMode == SYS_MODE_AUTO) {
+        currentPID.SetMode(AUTOMATIC);
+      }
+      currentPID.ResetIntegratorTo((double)lastAppliedDuty);
+      pidOutput = (double)lastAppliedDuty;
+
+      queueConsoleMessageF(
+        "SystemID: restored to %s | duty=%.1f%% setpoint=%.2fA cv_I=%.2fA (cvRestored=%d)",
+        (g_sysIDResume.sysMode == SYS_MODE_MANUAL) ? "MANUAL" : "AUTO",
+        lastAppliedDuty,
+        restoredSetpoint,
+        cvContextUnchanged ? g_sysIDResume.cv_I_snap : cv_I,
+        cvContextUnchanged);
+    }
+
+    g_sysIDResume.valid = false;
   }
 
   if (!sysIDRunning) {
@@ -1048,7 +1137,7 @@ void AdjustFieldLearnMode() {
 
         voltageControlActive = false;
 
-        targetCurrent = getTargetAmps();
+        targetCurrent = getFiltI();
         pidInput = (double)targetCurrent;
         pidSetpoint = (double)setpointLimited;
         pidError = setpointLimited - targetCurrent;
@@ -1113,6 +1202,41 @@ void AdjustFieldLearnMode() {
         // User overrides
         if (HiLow == 0) uTargetAmps = uTargetAmps / 2;
         if (MaintainMode == 1) uTargetAmps = 0;
+
+        // ── iExcess supervisor ─────────────────────────────────────────
+        {
+          const float IEXCESS_K = 5.0f;
+          const float IEXCESS_GATE = 0.10f;
+          const float IEXCESS_HYST = 2.0f;
+          const float K_IE = 1.0f;
+
+          static bool iExcessActive = false;
+
+          if (voltageControlActive && (BatteryV > ChargingVoltageTarget - IEXCESS_GATE)) {
+            float excess = g_iMA2 - setpointLimited - IEXCESS_K;  // setpointLimited = previous tick — acceptable
+            bool aboveThreshold = (excess > 0.0f);
+            bool belowHysteresis = (g_iMA2 < setpointLimited + IEXCESS_K - IEXCESS_HYST);
+
+            if (aboveThreshold) {
+              float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
+              fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
+              fastOvClampActive = true;
+              iExcessActive = true;
+            } else if (iExcessActive && !belowHysteresis) {
+              fastOvClampActive = true;  // hold govBypass during hysteresis
+            } else {
+              iExcessActive = false;
+            }
+          } else {
+            iExcessActive = false;
+          }
+          g_iExcessActive = iExcessActive;
+          g_iExcessDutyCap = 100.0f;  // retired
+        }
+
+        // ── Apply fastOvCurrentCap to uTargetAmps (fastOV + iExcess combined) ──
+        uTargetAmps = fminf((float)uTargetAmps, fastOvCurrentCap);
+        // This line was missing — fastOvCurrentCap was computed but never applied.
 
         // TargetVoltageMode: run CV at a user-specified voltage target.
         // Forces float-equivalent stage flags so voltageControlActive goes true
@@ -1180,7 +1304,7 @@ void AdjustFieldLearnMode() {
           float icvHi_bt = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
           if (!voltageControlActive || inCCPhase) {
             float e_bt = ChargingVoltageTarget - getFiltV();  // filtered — control path
-            float cv_I_target = clamp_f(MeasuredAmps - VoltageKp * e_bt, 0.0f, icvHi_bt);
+            float cv_I_target = clamp_f(getFiltI() - VoltageKp * e_bt, 0.0f, icvHi_bt);
             const float Kt = 2.0f;
             cv_I_track += Kt * (cv_I_target - cv_I_track) * actualDtSec;
             cv_I_track = clamp_f(cv_I_track, 0.0f, icvHi_bt);
@@ -1239,13 +1363,6 @@ void AdjustFieldLearnMode() {
 
               const char *stageName = inAbsorptionStage ? "ABSORPTION"
                                                         : (TargetVoltageMode ? "TARGET_V" : "FLOAT");
-              Serial.printf(
-                "CVLoop tick %s | target=%.2fV slewed=%.2fV battV=%.2fV e=%.3fV "
-                "p=%.3f cv_I=%.3f Icv=%.2fA limit=%.1fA\n",
-                stageName,
-                ChargingVoltageTarget, voltageTargetSlewed,
-                tick.currentBatteryVoltage, e,
-                p, cv_I, Icv, icvHi);
             }
           }
 
@@ -1293,53 +1410,9 @@ void AdjustFieldLearnMode() {
       voltageControlActive = false;
       uTargetAmps = 0;
       setpointLimited = 0.0f;
-      pidInput = (double)MeasuredAmps;
+      pidInput = (double)getFiltI();
     }  // end of MANUAL mode else
   }    // end if (!sysIDRunning)
-
-  // ===== CURRENT EXCESS SUPERVISOR (CV mode only) ========================
-  // Detects RPM blip or load dump: iMA2 materially exceeds the active current
-  // command (setpointLimited). This means energy is arriving faster than the
-  // CV loop commanded — field reduction is warranted.
-  //
-  // Voltage proximity gate: only arm when battV is within IEXCESS_GATE_MARGIN
-  // of target. During a commanded rise from a lower voltage the gate stays
-  // closed, which eliminates false triggers from the inner PID response lag.
-  // Blips and load dumps occur at or near target, so gate does not impede them.
-  //
-  // K_EXCESS = 5 A derived from cvlog_20260419_1244:
-  //   iMA2 p99 in quiet pre-blip steady state = 24.1 A with setpointLimited
-  //   ~20.5–21 A → natural excess up to ~3–4 A. Floor of 5 A sits above that.
-  //   Characterise at additional RPM operating points before treating as final.
-  //
-  // Response law (duty cap) is a placeholder — field step-response measurement
-  // needed before designing the actual law. See Priority 3.
-  {
-    const float IEXCESS_K = 5.0f;      // A above setpointLimited — tune from logs
-    const float IEXCESS_GATE = 0.10f;  // V below target — supervisor armed above this
-    const int IEXCESS_N = 1;           // consecutive ticks to confirm (TBD)
-
-    static bool iExcessActive = false;
-    static int iExcessTicks = 0;
-
-    if (voltageControlActive && (BatteryV > ChargingVoltageTarget - IEXCESS_GATE)) {
-      if (g_iMA2 > setpointLimited + IEXCESS_K) {
-        iExcessTicks++;
-        if (iExcessTicks >= IEXCESS_N) iExcessActive = true;
-      } else {
-        iExcessTicks = 0;
-        iExcessActive = false;
-      }
-    } else {
-      iExcessTicks = 0;
-      iExcessActive = false;
-    }
-
-    g_iExcessActive = iExcessActive;
-    // TODO: replace placeholder with proportional/tiered law after field
-    // step-response measurement. "Cut to X%" needs the time constant first.
-    g_iExcessDutyCap = iExcessActive ? 100.0f : 100.0f;  // placeholder — no effect yet
-  }
 
 
   // ========== BUILD DUTY REQUEST ==========
@@ -1349,9 +1422,6 @@ void AdjustFieldLearnMode() {
   } else {
     dutyRequest = (float)pidOutput;
   }
-
-  // Fast current rise cap
-  dutyRequest = fminf(dutyRequest, g_iExcessDutyCap);
 
   pidLog_dutyRequest = dutyRequest;
 
@@ -1815,6 +1885,8 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_CHARGING_DISABLED: return "DISABLED";
     case REASON_MANUAL_MODE: return "MANUAL";
     case REASON_INA_OVERVOLTAGE: return "INA228 hardware overvoltage";
+    case REASON_HARD_OVERCURRENT: return "HARD_OVERCURRENT";
+
     default: return "UNKNOWN";
   }
 }
@@ -1879,6 +1951,15 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
 FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   // Priority 1: Hardware overvoltage - overrides everything
   if (tick.inaOvervoltageLatched) return REASON_INA_OVERVOLTAGE;
+
+  if (MeasuredAmps > HardOCTripAmps) {
+    if (hardOCStartMs == 0) hardOCStartMs = tick.nowMs;
+    if ((tick.nowMs - hardOCStartMs) >= HardOCDebounceMs) {
+      return REASON_HARD_OVERCURRENT;
+    }
+  } else {
+    hardOCStartMs = 0;
+  }
 
   // Priority 1a: Disabled (user control - always show this reason if off)
   if (!tick.chargingEnabled) return REASON_CHARGING_DISABLED;
@@ -1991,8 +2072,7 @@ void updateFieldTelemetry(float duty, float voltage, float fieldResistance) {
  */
 bool shouldImmediatelyCutGPIO4(FieldEventReason reason) {
   if (reason == REASON_INA_OVERVOLTAGE) return true;
-
-  // Immediate cut for extreme temperature (limit + TempCritExcess)
+  if (reason == REASON_HARD_OVERCURRENT) return true;
   if (reason == REASON_TEMP_CRITICAL) {
     return true;
   }
@@ -2041,6 +2121,7 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
     case REASON_VOLTAGE_IMPLAUSIBLE:
     case REASON_VOLTAGE_DISAGREE_CRITICAL:
     case REASON_TEMP_STALE:
+    case REASON_HARD_OVERCURRENT:
       return true;
 
     // Temperature sustained: cut after 2-minute timeout
@@ -2890,7 +2971,7 @@ void pidLog_tick(uint32_t nowMs) {
   e.gainKi = (float)PidKi;
   e.gainKd = (float)PidKd;
 
-e.battV_filt = BatteryV_filtered;
+  e.battV_filt = BatteryV_filtered;
   e.iMeas_filt = MeasuredAmps_filtered;
 
   pidLogHead = (pidLogHead + 1) % PID_LOG_SIZE;

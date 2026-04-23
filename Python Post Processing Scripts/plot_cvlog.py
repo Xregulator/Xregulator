@@ -490,7 +490,6 @@ ax3c.legend(loc="upper right", fontsize=10)
 
 draw_state_strip(ax3s, df)
 # save_fig(fig3, "plot3_filtered_signals")
-
 # ---------------------------------------------------------------------------
 # PLOT 4 — Duty pipeline + OV supervisor
 #

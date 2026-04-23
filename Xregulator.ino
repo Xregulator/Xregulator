@@ -809,36 +809,49 @@ unsigned long inaOvervoltageTime = 0;
 // Safeties continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC         = 100.0f;   // ms — web-configurable, LittleFS-backed
-float BatteryV_filtered     = 0.0f;
+float InputFilterTC = 100.0f;  // ms — web-configurable, LittleFS-backed
+float BatteryV_filtered = 0.0f;
 float MeasuredAmps_filtered = 0.0f;
-float RPM_filtered          = 0.0f;
+float RPM_filtered = 0.0f;
 
 // ── SystemID — plant delay measurement ───────────────────────────────────
 // Step test: baseline → 3× (duty up / duty down) → post-process.
 // Samples stored in PSRAM. Buffer allocated on first test run, never freed.
 // Results populate the JS popup and optionally update InputFilterTC in flash.
 // Only legal in SYS_MODE_AUTO; systemID_tick() enforces this.
-float SystemIDStepAmplitude = 15.0f;    // % duty step — will be web-configurable later
+float SystemIDStepAmplitude = 15.0f;  // % duty step — will be web-configurable later
 
-volatile bool  systemIDRequested     = false;    // set true by UI handler to trigger a test run
-bool  systemIDActive        = false;    // true while test is in progress
-bool  systemIDResultsReady  = false;    // set true when post-processing is complete
+volatile bool systemIDRequested = false;  // set true by UI handler to trigger a test run
+bool systemIDActive = false;              // true while test is in progress
+bool systemIDResultsReady = false;        // set true when post-processing is complete
 
 float systemIDRiseDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // rising-step delays, ms
 float systemIDFallDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // falling-step delays, ms
-float systemIDRiseAvg_ms    = 0.0f;
-float systemIDFallAvg_ms    = 0.0f;
+float systemIDRiseAvg_ms = 0.0f;
+float systemIDFallAvg_ms = 0.0f;
 
 struct SystemIDSample {
-  uint32_t ts;        // millis() at sample time
-  float    duty_cmd;  // duty commanded this tick (%)
-  float    amps;      // MeasuredAmps at sample time (raw, unfiltered)
+  uint32_t ts;     // millis() at sample time
+  float duty_cmd;  // duty commanded this tick (%)
+  float amps;      // MeasuredAmps at sample time (raw, unfiltered)
 };
 // 15000 × 12 bytes = 180 KB in PSRAM. Covers TC up to ~714 ms at 5 ms CH1 cadence.
 static const int SYSID_BUF_SIZE = 15000;
-SystemIDSample*  sysIDBuffer    = nullptr;   // ps_malloc'd on first test run
-int              sysIDSampleCount = 0;
+SystemIDSample *sysIDBuffer = nullptr;  // ps_malloc'd on first test run
+int sysIDSampleCount = 0;
+
+// ── SystemID pre-test state snapshot ─────────────────────────────────────────
+// Captured at test start; restored on clean exit so the user returns to
+// whatever mode they were in (AUTO, MANUAL, CV, bulk, etc.) without a jump.
+struct SystemIDResumeState {
+  bool valid = false;
+int sysMode = 0;
+  float setpointLimited_snap = 0.0f;
+  float lastAppliedDuty_snap = 0.0f;  // informational only; NOT replayed as a command
+  float cv_I_snap = 0.0f;
+  bool voltageControlActive_snap = false;
+};
+static SystemIDResumeState g_sysIDResume;
 
 // Weather Mode Global Variables (add with your other globals)
 float UVToday = 0.0;
@@ -937,11 +950,15 @@ int OnOff = 0;             // 0 is charger off, 1 is charger On (corresponds to 
 int Ignition = 0;          // Digital Input      NEED THIS TO HAVE WIFI ON , FOR NOW
 int IgnitionOverride = 1;  // to fake the ignition signal w/ software
 int HiLow = 1;             // 0 will be a low setting, 1 a high setting
-int AmpSrc = 0;            // 0=Alt Hall Effect, 1=Battery Shunt, 2=NMEA2K Batt, 3=NMEA2K Alt, 4=NMEA0183 Batt, 5=NMEA0183 Alt, 6=Victron Batt, 7=Other
+int AmpSrc = 0;            // OBSOLETE, NEEDS REMOVING
 int LimpHome = 0;          // 1 will set to limp home mode, whatever that gets set up to be
 int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
 int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
+// ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
+const float HardOCTripAmps = 180.0f;
+const uint32_t HardOCDebounceMs = 20;
+uint32_t hardOCStartMs = 0;
 //Field PWM stuff
 const int pwmPin = 14;  // field PWM pin # (was 32)
 //const int pwmChannel = 0;      //0–7 available for high-speed PWM  (ESP32)
@@ -1893,7 +1910,8 @@ enum FieldEventReason : uint8_t {
   REASON_LOCKOUT_ACTIVE,
   REASON_CHARGING_DISABLED,
   REASON_MANUAL_MODE,
-  REASON_INA_OVERVOLTAGE
+  REASON_INA_OVERVOLTAGE,
+  REASON_HARD_OVERCURRENT
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -2272,9 +2290,9 @@ struct PidLogEntry {
   float gainKi;
   float gainKd;
   // ── Filtered signals ─────────────────────────────────────────────
-  float battV_filt;    // BatteryV_filtered
-  float iMeas_filt;    // MeasuredAmps_filtered
-};  // 104 bytes — naturally aligned, no implicit holes
+  float battV_filt;  // BatteryV_filtered
+  float iMeas_filt;  // MeasuredAmps_filtered
+};                   // 104 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
@@ -2344,17 +2362,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //    b3  softClamp       K_SOFT correction applied
 //    b4  hardClamp       K_HARD or HARD_CLAMP_HYST block applied
 
-struct CvBinDLState {
-  uint8_t header[CV_LOG_HEADER_SIZE];
-  int headerPos;
-  uint32_t count;
-  uint32_t oldest;
-  uint32_t row;
-  bool done;
-  uint8_t entryBuf[CV_LOG_ENTRY_SIZE];
-  int entryLen;
-  int entryPos;
-};
+
 
 
 struct CvLogEntry {
@@ -2381,6 +2389,19 @@ struct CvLogEntry {
   // pack into existing flags: bit 5 = iExcess
 };
 static_assert(sizeof(CvLogEntry) == 40, "CvLogEntry must be 40 bytes");
+
+
+struct CvBinDLState {
+  uint8_t header[CV_LOG_HEADER_SIZE];
+  int headerPos;
+  uint32_t count;
+  uint32_t oldest;
+  uint32_t row;
+  bool done;
+  uint8_t entryBuf[sizeof(CvLogEntry)];
+  int entryLen;
+  int entryPos;
+};
 
 // ---------------------------------------------------------------------------
 // BINARY HEADER  (24 bytes)
@@ -2425,7 +2446,7 @@ float g_dIdt2 = 0.0f;              // A/s, newest-to-prev
 float g_dIdt4 = 0.0f;              // A/s, newest-to-oldest in ring
 uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
-bool  g_iExcessActive  = false;
+bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
 
 //additional leaderboard stuff
@@ -2900,7 +2921,7 @@ void setup() {
   memset(&ft_updateSensorWindow, 0, sizeof(FuncTiming));
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
-memset(&ft_FlushFileWriteQueue, 0, sizeof(FuncTiming));
+  memset(&ft_FlushFileWriteQueue, 0, sizeof(FuncTiming));
 
 
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
@@ -3150,7 +3171,7 @@ void loop() {
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   TIMED_CALL(ft_saveNVSData, saveNVSData());                    // Only save current operational data, not session stats
   TIMED_CALL(ft_saveNVSData, saveNVSData());
-TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
+  TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
   // Power management affects AP and CLIENT modes, but NOT CONFIG mode (CONFIG mode exits early below)
@@ -3447,13 +3468,13 @@ TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   //TempTask Debug
   // Temp debug status - print every 30 seconds
   static unsigned long lastTempDebugPrint = 0;
-  if (millis() - lastTempDebugPrint >= 121000) {
+  if (millis() - lastTempDebugPrint >= 300000) {  //5 minutes
     lastTempDebugPrint = millis();
     printTempDebugStatus();
   }
   // === FUNCTION TIMING DIGEST — Serial only, key spike candidates ===
   static unsigned long lastTimingPrint = 0;
-  if (millis() - lastTimingPrint >= 10000000) {
+  if (millis() - lastTimingPrint >= 300000) {  //5 minutes
     lastTimingPrint = millis();
     Serial.println("--- Function Timing Worst-Case (ms) | 5s-win / session ---");
     Serial.printf("  Loop overall:           %4lu / %4lu\n",
@@ -3523,7 +3544,7 @@ TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
                   ft_checkTimeSync.worstWindow / 1000, ft_checkTimeSync.worstSession / 1000);
     Serial.println("---");
     Serial.printf("  FlushFileWriteQueue:    %4lu / %4lu\n",
-              ft_FlushFileWriteQueue.worstWindow / 1000, ft_FlushFileWriteQueue.worstSession / 1000);
+                  ft_FlushFileWriteQueue.worstWindow / 1000, ft_FlushFileWriteQueue.worstSession / 1000);
   }
   // === END FUNCTION TIMING DIGEST ===
 

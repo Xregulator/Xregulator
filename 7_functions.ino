@@ -1139,13 +1139,12 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
   }
   return false;
 }
-
 // ============================================================
 // systemID_tick() — plant delay measurement step test
 //
 // Architecture:
 //  • 8-phase state machine: BASELINE + 3× (UP / DOWN).
-//  • Each phase holds for 15 × InputFilterTC ms (floor 750 ms).
+//  • Each phase holds for 15 × InputFilterTC ms (floor 5000 ms).
 //  • Called every CH1 fresh hit from AdjustFieldLearnMode.
 //  • Returns true while active; caller must:
 //      – force govMode = GOV_BYPASS_SLEW
@@ -1155,9 +1154,6 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
 //    and populates systemIDRise/FallDelay_ms[] and averages.
 //  • systemIDResultsReady → true signals UI to show popup.
 //  • Buffer (PSRAM) allocated once on first run, never freed.
-//
-// Mode gate: only starts from SYS_MODE_AUTO. Clears
-// systemIDRequested and returns false in all other modes.
 //
 // Detection thresholds:
 //  Rising : current must exceed quietMax × 1.2 (20% above prior-phase max)
@@ -1182,6 +1178,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static SysIDPhase phase = SYSID_IDLE;
   static float baseDuty = 0.0f;
   static uint32_t holdMs = 0;
+  static bool bufFullWarned = false;
 
   // phaseStartMs[0..6] = start timestamps for BASELINE through DOWN_3.
   // phaseStartMs[7] = timestamp when PROCESSING was entered (= end of DOWN_3).
@@ -1230,6 +1227,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // Initialise test state
     memset(phaseStartMs, 0, sizeof(phaseStartMs));
     sysIDSampleCount = 0;
+    bufFullWarned = false;
     systemIDActive = true;
     systemIDResultsReady = false;
     baseDuty = lastAppliedDuty;
@@ -1258,6 +1256,15 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // ── Record sample ────────────────────────────────────────────────────────
   if (sysIDSampleCount < SYSID_BUF_SIZE) {
     sysIDBuffer[sysIDSampleCount++] = { nowMs, phaseDuty, ampsRaw };
+  } else {
+    if (!bufFullWarned) {
+      bufFullWarned = true;
+      queueConsoleMessageF("SystemID: WARNING — sample buffer full at %d samples. "
+                           "Post-processing will use truncated data. "
+                           "Increase SYSID_BUF_SIZE or reduce call rate.",
+                           SYSID_BUF_SIZE);
+      Serial.printf("SystemID: buffer full at %d samples\n", SYSID_BUF_SIZE);
+    }
   }
 
   // ── Phase advance ────────────────────────────────────────────────────────
@@ -1268,43 +1275,50 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       case SYSID_BASELINE:
         phaseStartMs[1] = nowMs;
         phase = SYSID_UP_1;
-        queueConsoleMessage("SystemID: UP 1");
-        Serial.println("SystemID: UP 1");
+        queueConsoleMessageF("SystemID: BASELINE complete (%ums) — entering UP 1 | duty=%.1f%% amps=%.1fA",
+                             elapsed, phaseDuty + SystemIDStepAmplitude, ampsRaw);
+        Serial.printf("SystemID: UP 1\n");
         break;
       case SYSID_UP_1:
         phaseStartMs[2] = nowMs;
         phase = SYSID_DOWN_1;
-        queueConsoleMessage("SystemID: DOWN 1");
-        Serial.println("SystemID: DOWN 1");
+        queueConsoleMessageF("SystemID: UP 1 complete (%ums) — entering DOWN 1 | amps=%.1fA",
+                             elapsed, ampsRaw);
+        Serial.printf("SystemID: DOWN 1\n");
         break;
       case SYSID_DOWN_1:
         phaseStartMs[3] = nowMs;
         phase = SYSID_UP_2;
-        queueConsoleMessage("SystemID: UP 2");
-        Serial.println("SystemID: UP 2");
+        queueConsoleMessageF("SystemID: DOWN 1 complete (%ums) — entering UP 2 | amps=%.1fA",
+                             elapsed, ampsRaw);
+        Serial.printf("SystemID: UP 2\n");
         break;
       case SYSID_UP_2:
         phaseStartMs[4] = nowMs;
         phase = SYSID_DOWN_2;
-        queueConsoleMessage("SystemID: DOWN 2");
-        Serial.println("SystemID: DOWN 2");
+        queueConsoleMessageF("SystemID: UP 2 complete (%ums) — entering DOWN 2 | amps=%.1fA",
+                             elapsed, ampsRaw);
+        Serial.printf("SystemID: DOWN 2\n");
         break;
       case SYSID_DOWN_2:
         phaseStartMs[5] = nowMs;
         phase = SYSID_UP_3;
-        queueConsoleMessage("SystemID: UP 3");
-        Serial.println("SystemID: UP 3");
+        queueConsoleMessageF("SystemID: DOWN 2 complete (%ums) — entering UP 3 | amps=%.1fA",
+                             elapsed, ampsRaw);
+        Serial.printf("SystemID: UP 3\n");
         break;
       case SYSID_UP_3:
         phaseStartMs[6] = nowMs;
         phase = SYSID_DOWN_3;
-        queueConsoleMessage("SystemID: DOWN 3");
-        Serial.println("SystemID: DOWN 3");
+        queueConsoleMessageF("SystemID: UP 3 complete (%ums) — entering DOWN 3 | amps=%.1fA",
+                             elapsed, ampsRaw);
+        Serial.printf("SystemID: DOWN 3\n");
         break;
       case SYSID_DOWN_3:
         phaseStartMs[7] = nowMs;  // test end timestamp
         phase = SYSID_PROCESSING;
-        queueConsoleMessage("SystemID: data collection complete — post-processing");
+        queueConsoleMessageF("SystemID: DOWN 3 complete (%ums) — %d samples collected, post-processing",
+                             elapsed, sysIDSampleCount);
         Serial.println("SystemID: data collection complete — post-processing");
         break;
       default:
@@ -1347,11 +1361,21 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
                                   ? (t_up_start - REF_WINDOW_MS)
                                   : t_quiet_start;
       float quietMax = -1.0e9f;
+      int refSamples = 0;
       for (int s = 0; s < sysIDSampleCount; s++) {
         if (sysIDBuffer[s].ts < refWindowStart) continue;
         if (sysIDBuffer[s].ts >= t_up_start) break;
         if (sysIDBuffer[s].amps > quietMax) quietMax = sysIDBuffer[s].amps;
+        refSamples++;
       }
+
+      if (refSamples == 0) {
+        queueConsoleMessageF("SystemID rise %d: WARNING — no samples in 2s ref window "
+                             "(refWindowStart=%u t_up_start=%u). quietMax invalid, threshold unreliable.",
+                             i + 1, refWindowStart, t_up_start);
+        Serial.printf("SystemID rise %d: no samples in ref window\n", i + 1);
+      }
+
       float riseThresh = quietMax * 1.2f;
 
       // First sample after UP command that crosses above threshold.
@@ -1365,9 +1389,17 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         }
       }
 
-      Serial.printf(
-        "SystemID rise %d | quietMax(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
-        i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
+      if (systemIDRiseDelay_ms[i] < 0.0f) {
+        queueConsoleMessageF("SystemID rise %d: NOT FOUND | quietMax=%.1fA thresh=%.1fA — "
+                             "current never crossed threshold during UP phase. "
+                             "Step amplitude may be too small or sensor not responding.",
+                             i + 1, quietMax, riseThresh);
+      } else {
+        queueConsoleMessageF("SystemID rise %d | quietMax(2s)=%.1fA thresh=%.1fA delay=%.0f ms",
+                             i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
+      }
+      Serial.printf("SystemID rise %d | quietMax(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
+                    i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
     }
 
     // ── Fall delays ─────────────────────────────────────────────────────
@@ -1382,11 +1414,21 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
                                   ? (t_up_end - REF_WINDOW_MS)
                                   : t_up_start;
       float upMin = 1.0e9f;
+      int refSamples = 0;
       for (int s = 0; s < sysIDSampleCount; s++) {
         if (sysIDBuffer[s].ts < refWindowStart) continue;
         if (sysIDBuffer[s].ts >= t_up_end) break;
         if (sysIDBuffer[s].amps < upMin) upMin = sysIDBuffer[s].amps;
+        refSamples++;
       }
+
+      if (refSamples == 0) {
+        queueConsoleMessageF("SystemID fall %d: WARNING — no samples in 2s ref window "
+                             "(refWindowStart=%u t_up_end=%u). upMin invalid, threshold unreliable.",
+                             i + 1, refWindowStart, t_up_end);
+        Serial.printf("SystemID fall %d: no samples in ref window\n", i + 1);
+      }
+
       float fallThresh = upMin * 0.8f;
 
       // First sample after DOWN command that crosses below threshold.
@@ -1399,9 +1441,17 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         }
       }
 
-      Serial.printf(
-        "SystemID fall %d | upMin(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
-        i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
+      if (systemIDFallDelay_ms[i] < 0.0f) {
+        queueConsoleMessageF("SystemID fall %d: NOT FOUND | upMin=%.1fA thresh=%.1fA — "
+                             "current never dropped below threshold after DOWN command. "
+                             "Step amplitude may be too small or sensor not responding.",
+                             i + 1, upMin, fallThresh);
+      } else {
+        queueConsoleMessageF("SystemID fall %d | upMin(2s)=%.1fA thresh=%.1fA delay=%.0f ms",
+                             i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
+      }
+      Serial.printf("SystemID fall %d | upMin(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
+                    i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
     }
 
     // ── Averages (skip -1 not-found entries) ────────────────────────────
@@ -1421,6 +1471,20 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
     systemIDRiseAvg_ms = (riseN > 0) ? riseSum / (float)riseN : -1.0f;
     systemIDFallAvg_ms = (fallN > 0) ? fallSum / (float)fallN : -1.0f;
+
+    // ── Summarise outcome ────────────────────────────────────────────────
+    if (riseN == 0 && fallN == 0) {
+      queueConsoleMessage("SystemID: FAILED — no threshold crossings detected for rise or fall. "
+                          "Check ampsRaw signal, SystemIDStepAmplitude, and sensor wiring.");
+    } else if (riseN == 0) {
+      queueConsoleMessageF("SystemID: WARNING — rise crossings not found (%d/3). "
+                           "Fall avg=%.0f ms. Results partial.",
+                           3 - riseN, systemIDFallAvg_ms);
+    } else if (fallN == 0) {
+      queueConsoleMessageF("SystemID: WARNING — fall crossings not found (%d/3). "
+                           "Rise avg=%.0f ms. Results partial.",
+                           3 - fallN, systemIDRiseAvg_ms);
+    }
 
     queueConsoleMessageF(
       "SystemID results | Rise: %.0f %.0f %.0f avg=%.0f ms | Fall: %.0f %.0f %.0f avg=%.0f ms | samples=%d",

@@ -2180,14 +2180,18 @@ function processCSVDataOptimized(data) {
         }
 
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
+        // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
         if (pidTuningData) {
             const setpointLimited = 'setpointLimited' in data ? parseFloat(data.setpointLimited) / 100 : 0;
             const pidInput = 'pidInput' in data ? parseFloat(data.pidInput) / 100 : 0;
             const iMeasFilt = 'MeasuredAmps_filtered' in data ? parseFloat(data.MeasuredAmps_filtered) / 100 : 0;
-            const uTargetAmps = 'uTargetAmps' in data ? parseFloat(data.uTargetAmps) : 0;
+            const uTargetAmps = 'uTargetAmps' in data ? parseFloat(data.uTargetAmps) / 100 : 0;
             const dutyCycle = 'dutyCycle' in data ? parseFloat(data.dutyCycle) / 100 : 0;
             const pidOutput = 'pidOutput' in data ? parseFloat(data.pidOutput) / 100 : 0;
             const rpmScaled = rpmValue / 100;
+
+            // Keep latest real RPM for watermark
+            window._lastKnownRPM = rpmValue;
 
             for (let i = 1; i < pidTuningData[1].length; i++) {
                 pidTuningData[1][i - 1] = pidTuningData[1][i]; // setpointLimited
@@ -2198,6 +2202,7 @@ function processCSVDataOptimized(data) {
                 pidTuningData[6][i - 1] = pidTuningData[6][i]; // pidOutput
                 pidTuningData[7][i - 1] = pidTuningData[7][i]; // RPM / 100
             }
+
             const lastPidIndex = pidTuningData[1].length - 1;
             pidTuningData[1][lastPidIndex] = setpointLimited;
             pidTuningData[2][lastPidIndex] = pidInput;
@@ -2600,6 +2605,7 @@ function updateAllEchosOptimized(data) {
         { key: 'degradationThreshold', id: 'degradationThreshold_echo', transform: v => (v).toFixed(2) },
         { key: 'fsWriteQueueDropsID', id: 'fsWriteQueueDrops', transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_echo', transform: v => v },
+        { key: 'InputFilterTC', id: 'InputFilterTC_ID', transform: v => v },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
 
     ];
@@ -6931,10 +6937,10 @@ function drawPidWatermark(u) {
     const sampleTime = getEchoText('PidSampleDivisor_echo');
     const vLoopInt = getEchoText('VoltageLoopInterval_echo');
     const vKp = getEchoText('VoltageKp_echo');
-    const vTrim = getEchoText('VoltageTrimLimit_echo');   // <-- added
+    const vTrim = getEchoText('VoltageTrimLimit_echo');
     const wavePer = getEchoText('wavePeriod_echo');
     const waveAmp = getEchoText('waveAmplitude_echo');
-    const rpm = typeof RPM !== 'undefined' ? RPM : '?';
+    const rpm = typeof window._lastKnownRPM !== 'undefined' ? window._lastKnownRPM : '?';
 
     const col1 = [
         `Kp: ${kp}`,
@@ -6954,7 +6960,7 @@ function drawPidWatermark(u) {
         `PID: ${sampleTime} ms`,
         `VLoop: ${vLoopInt} ms`,
         `VKp: ${vKp} A/V`,
-        `VTrim: ±${vTrim} A`,   // <-- added
+        `VTrim: ±${vTrim} A`,
         `Wave: ${wavePer}s @ ${waveAmp}A`,
     ];
 
@@ -6972,7 +6978,6 @@ function drawPidWatermark(u) {
     const lineH = 24;
     const colSpacing = 220;
 
-    // Column 1
     let x = x0 + 14;
     let y = y0 + 14;
     for (let i = 0; i < col1.length; i++) {
@@ -6980,7 +6985,6 @@ function drawPidWatermark(u) {
         y += lineH;
     }
 
-    // Column 2
     x += colSpacing;
     y = y0 + 14;
     for (let i = 0; i < col2.length; i++) {
@@ -6988,7 +6992,6 @@ function drawPidWatermark(u) {
         y += lineH;
     }
 
-    // Column 3
     x += colSpacing;
     y = y0 + 14;
     for (let i = 0; i < col3.length; i++) {
@@ -6998,7 +7001,6 @@ function drawPidWatermark(u) {
 
     ctx.restore();
 }
-
 // Global variables for PID tuning plot
 let pidTuningPlot = null;
 let pidTuningData = null;
@@ -7067,24 +7069,23 @@ function initPidTuningPlot() {
         width: Math.min(plotEl.clientWidth, 800),
         height: 400,
         series: [
-            { label: null, points: { show: false }, stroke: "transparent", width: 0 },
-
+            {},
             {
                 label: "Setpoint (slewed)",
                 stroke: pidTuningSeriesVisible.setpointLimited ? "#FF6B6B" : "transparent",
-                width: 1,
-                scale: "amps",
-                dash: [5, 5]
+                width: 2,
+                scale: "amps"
             },
             {
                 label: "Measured Current (raw)",
                 stroke: pidTuningSeriesVisible.pidInput ? "#4CAF50" : "transparent",
                 width: 1,
-                scale: "amps"
+                scale: "amps",
+                dash: [4, 2]
             },
             {
                 label: "Measured Current (filtered)",
-                stroke: pidTuningSeriesVisible.iMeasFilt ? "#030c03" : "transparent",
+                stroke: pidTuningSeriesVisible.iMeasFilt ? "#0D47A1" : "transparent",
                 width: 2,
                 scale: "amps"
             },
@@ -7110,7 +7111,7 @@ function initPidTuningPlot() {
             },
             {
                 label: "RPM / 100",
-                stroke: pidTuningSeriesVisible.rpm ? "#cbdd22" : "transparent",
+                stroke: pidTuningSeriesVisible.rpm ? "#00BCD4" : "transparent",
                 width: 1,
                 scale: "amps"
             }
@@ -7137,7 +7138,7 @@ function initPidTuningPlot() {
             },
             {
                 scale: "amps",
-                label: "Current (A)",
+                label: "Current (A) / RPM (/100)",
                 grid: { show: true },
                 side: 3
             },
@@ -7208,7 +7209,7 @@ function createPidTuningLegend() {
     const legendItems = [
         { key: 'setpointLimited', label: 'Setpoint (slewed)', color: '#FF6B6B', seriesIdx: 1 },
         { key: 'pidInput', label: 'Measured Current (raw)', color: '#4CAF50', seriesIdx: 2 },
-        { key: 'iMeasFilt', label: 'Measured Current (filtered)', color: '#81C784', seriesIdx: 3 },
+        { key: 'iMeasFilt', label: 'Measured Current (filtered)', color: '#0D47A1', seriesIdx: 3 },
         { key: 'uTargetAmps', label: 'Setpoint (raw)', color: '#FFA726', seriesIdx: 4 },
         { key: 'dutyCycle', label: 'Duty Applied', color: '#2196F3', seriesIdx: 5 },
         { key: 'pidOutput', label: 'PID Output', color: '#9C27B0', seriesIdx: 6 },
@@ -8835,22 +8836,10 @@ function validateBatterySettings(proposedChanges) {
         };
     }
 
-    if (changedAny('TargetVoltageSetpoint', 'TargetVoltageMode') &&
-        state.TargetVoltageMode === 1) {
-        if (Number.isFinite(state.TargetVoltageSetpoint) &&
-            Number.isFinite(state.BulkVoltage) &&
-            state.TargetVoltageSetpoint > state.BulkVoltage) {
-            return { valid: false, error: 'Target Voltage Setpoint cannot exceed Bulk Voltage.' };
-        }
-        if (Number.isFinite(state.TargetVoltageSetpoint) &&
-            Number.isFinite(state.RebulkVoltage) &&
-            state.TargetVoltageSetpoint < state.RebulkVoltage) {
-            return {
-                valid: false,
-                error: 'Target Voltage Setpoint is below Rebulk Voltage. With Target Voltage Mode active, this creates a built-in contradiction: float/rebulk logic will immediately see the held voltage as a sag and return to Bulk.'
-            };
-        }
-    }
+if (changedAny('TargetVoltageSetpoint', 'TargetVoltageMode') &&
+    state.TargetVoltageMode === 1) {
+    // No range restrictions — TargetVoltageMode is independent of bulk/rebulk logic
+}
 
     if (changedAny('MaintainMode', 'TargetVoltageMode') &&
         state.MaintainMode === 1 &&
@@ -9099,9 +9088,9 @@ function parseCvBin(buf) {
         rpm[i] = view.getInt16(b + 30, true);
         battV_filt[i] = view.getInt16(b + 32, true) / 100.0;
         iMeas_filt[i] = view.getInt16(b + 34, true) / 10.0;
-        ch1Interval[i] = view.getInt16(b + 36, true);
-        ch1Interval[i] = view.getInt16(b + 40, true);
-        iExcess[i] = (f >> 5) & 1;
+       ch1Interval[i] = view.getInt16(b + 36, true);  // correct offset for ch1IntervalMs
+// pad2 at b+38 intentionally skipped
+        iExcess[i] = (f >> 5) & 1;                  // move up alongside other flag bits (optional but clean)
     }
 
     return {
@@ -9211,6 +9200,14 @@ async function downloadCvLog() {
         `Downloaded ${d.count} rows (Kp=${d.voltKp.toFixed(2)} Ki=${d.voltKi.toFixed(3)} interval=${d.voltInterval}ms)`;
 }
 
+//SYSTEMID System ID section
+
+function getField(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    if (el.value !== undefined && el.value !== "") return el.value.trim();
+    return (el.textContent ?? el.innerText ?? "").trim();
+}
 
 function startSystemIDTest() {
     if (!confirm(
@@ -9224,65 +9221,104 @@ function startSystemIDTest() {
         return;
     }
 
-    const formData = new FormData();
+    const formData = new URLSearchParams();
     formData.append("password", currentAdminPassword);
     formData.append("startSystemID", "1");
 
-    fetchWithTimeout(buildURL("/get?" + new URLSearchParams(formData).toString()), {}, 8000)
+    fetchWithTimeout(buildURL("/get?" + formData.toString()), {}, 8000)
         .then(() => {
             console.log("SystemID test requested");
             waitForSystemIDResults();
         })
-        .catch(err => console.error("SystemID request failed:", err));
+        .catch(err => {
+            console.error("SystemID request failed:", err);
+            alert("SystemID: failed to send start command.\n" + err);
+        });
 }
 
 function waitForSystemIDResults() {
-    // Poll every 500ms until systemIDResultsReady == 1, then show dialog.
-    // Gives up after 120 seconds (well beyond worst-case test duration).
-    const maxWaitMs = 120000;
     const pollMs = 500;
     let elapsed = 0;
+    let everSawActive = false;
+    let lastActive = null;
+    let lastReady = null;
+
+    const tcMs = parseFloat(getField("InputFilterTC_echo") ?? 1000);
+    const holdMs = Math.max(15 * tcMs, 5000);
+    const maxWaitMs = 7 * holdMs + 15000;
+
+    console.log("SystemID: polling started | TC=" + tcMs + "ms holdMs=" + holdMs + " maxWait=" + (maxWaitMs / 1000).toFixed(0) + "s");
 
     const poll = setInterval(() => {
         elapsed += pollMs;
+
+        const activeStr = getField("systemIDActive_ID");
+        const readyStr = getField("systemIDResultsReady_ID");
+        const active = parseInt(activeStr);
+        const ready = parseInt(readyStr);
+
+        // Debug every 5 seconds
+        if (elapsed % 5000 === 0) {
+            console.log("SystemID poll | elapsed=" + (elapsed / 1000).toFixed(0) + "s" +
+                " | active=" + activeStr + " | ready=" + readyStr);
+        }
+
+        if (active === 1) everSawActive = true;
+        lastActive = active;
+        lastReady = ready;
+
         if (elapsed > maxWaitMs) {
             clearInterval(poll);
-            alert("SystemID: timed out waiting for results. Check serial console.");
+            let diagnosis = "";
+            if (!everSawActive) {
+                diagnosis = "systemIDActive never went to 1.\n" +
+                    "The test likely never started — check mode, password, and that startSystemID was received.";
+            } else if (lastActive === 1) {
+                diagnosis = "Test was still running at timeout (" + (elapsed / 1000).toFixed(0) + "s).\n" +
+                    "Expected ~" + (7 * holdMs / 1000).toFixed(0) + "s. Check serial console for last phase.";
+            } else {
+                diagnosis = "Test finished (systemIDActive=0) but systemIDResultsReady never set.\n" +
+                    "Check serial console for post-processing errors.";
+            }
+            alert("SystemID: timed out.\n\n" + diagnosis +
+                "\n\nsystemIDActive=" + lastActive + "  systemIDResultsReady=" + lastReady);
             return;
         }
-        // latest_data is your existing live data object populated by the CSV stream
-        if (typeof latest_data === "undefined") return;
-        if (parseInt(latest_data.systemIDResultsReady) !== 1) return;
+
+        if (ready !== 1) return;
 
         clearInterval(poll);
-
-        const r0 = latest_data.systemIDRiseDelay_0;
-        const r1 = latest_data.systemIDRiseDelay_1;
-        const r2 = latest_data.systemIDRiseDelay_2;
-        const ra = latest_data.systemIDRiseAvg;
-        const f0 = latest_data.systemIDFallDelay_0;
-        const f1 = latest_data.systemIDFallDelay_1;
-        const f2 = latest_data.systemIDFallDelay_2;
-        const fa = latest_data.systemIDFallAvg;
-
-        const suggestedTC = Math.max(parseFloat(ra), parseFloat(fa));
-
-        const msg =
-            "Plant Delay Measurement Results\n\n" +
-            "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
-            "Rise average: " + ra + " ms\n\n" +
-            "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
-            "Fall average: " + fa + " ms\n\n" +
-            "Suggested filter TC (max of rise/fall): " + suggestedTC + " ms\n\n" +
-            "Apply " + suggestedTC + " ms as Input Filter TC and save to flash?";
-
-        if (confirm(msg)) {
-            fetch("/get?InputFilterTC=" + encodeURIComponent(suggestedTC) +
-                "&password=" + encodeURIComponent(currentAdminPassword))
-                .then(() => console.log("InputFilterTC updated to " + suggestedTC + " ms"))
-                .catch(err => console.error("InputFilterTC update failed:", err));
-        }
+        showSystemIDResults();
     }, pollMs);
+}
+
+function showSystemIDResults() {
+    const r0 = getField("systemIDRiseDelay_0_ID");
+    const r1 = getField("systemIDRiseDelay_1_ID");
+    const r2 = getField("systemIDRiseDelay_2_ID");
+    const ra = getField("systemIDRiseAvg_ID");
+    const f0 = getField("systemIDFallDelay_0_ID");
+    const f1 = getField("systemIDFallDelay_1_ID");
+    const f2 = getField("systemIDFallDelay_2_ID");
+    const fa = getField("systemIDFallAvg_ID");
+
+    const suggestedTC = Math.max(parseFloat(ra), parseFloat(fa));
+
+    const msg =
+        "Plant Delay Measurement Results\n\n" +
+        "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
+        "Rise average: " + ra + " ms\n\n" +
+        "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
+        "Fall average: " + fa + " ms\n\n" +
+        "Suggested filter TC (max of rise/fall avg): " + suggestedTC + " ms\n\n" +
+        "Apply " + suggestedTC + " ms as Input Filter TC and save to flash?";
+
+    if (confirm(msg)) {
+        fetch(buildURL("/get?InputFilterTC=" + encodeURIComponent(suggestedTC) +
+            "&password=" + encodeURIComponent(currentAdminPassword)))
+            .then(() => console.log("InputFilterTC updated to " + suggestedTC + " ms"))
+            .catch(err => console.error("InputFilterTC update failed:", err));
+    }
 }
 
 

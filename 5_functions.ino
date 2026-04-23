@@ -1251,76 +1251,11 @@ float getBatteryVoltage() {
   return BatteryV;
 }
 float getTargetAmps() {
-  float targetValue = 0;
-  static unsigned long lastTargetAmpsWarning = 0;
+  return MeasuredAmps;
+}
 
-  switch (AmpSrc) {
-    case 0:  // Alt Hall Effect Sensor
-      targetValue = MeasuredAmps;
-      break;
-
-    case 1:  // Battery Shunt
-      targetValue = Bcur;
-      break;
-
-    case 2:  // NMEA2K Batt
-      if (millis() - lastTargetAmpsWarning > 10000) {
-        queueConsoleMessage("C2a NMEA2K Battery current not implemented, using Battery Shunt");
-        lastTargetAmpsWarning = millis();
-      }
-      targetValue = Bcur;
-      break;
-
-    case 3:  // NMEA2K Alt
-      if (millis() - lastTargetAmpsWarning > 10000) {
-        queueConsoleMessage("C3a NMEA2K Alternator current not implemented, using Alt Hall Sensor");
-        lastTargetAmpsWarning = millis();
-      }
-      targetValue = MeasuredAmps;
-      break;
-
-    case 4:  // NMEA0183 Batt
-      if (millis() - lastTargetAmpsWarning > 10000) {
-        queueConsoleMessage("C4a NMEA0183 Battery current not implemented, using Battery Shunt");
-        lastTargetAmpsWarning = millis();
-      }
-      targetValue = Bcur;
-      break;
-
-    case 5:  // NMEA0183 Alt
-      if (millis() - lastTargetAmpsWarning > 10000) {
-        queueConsoleMessage("C5a NMEA0183 Alternator current not implemented, using Alt Hall Sensor");
-        lastTargetAmpsWarning = millis();
-      }
-      targetValue = MeasuredAmps;
-      break;
-
-    case 6:                             // Victron Batt
-      if (abs(VictronCurrent) > 0.1) {  // Valid reading
-        targetValue = VictronCurrent;
-      } else {
-        if (millis() - lastTargetAmpsWarning > 10000) {
-          queueConsoleMessage("C6a Victron current not available, using Battery Shunt");
-          lastTargetAmpsWarning = millis();
-        }
-        targetValue = Bcur;
-      }
-      break;
-
-    case 7:  // Other
-      targetValue = MeasuredAmps;
-      break;
-
-    default:
-      if (millis() - lastTargetAmpsWarning > 10000) {
-        queueConsoleMessageF("Invalid AmpSrc (%d), using Alt Hall Sensor", AmpSrc);
-        lastTargetAmpsWarning = millis();
-      }
-      targetValue = MeasuredAmps;
-      break;
-  }
-
-  return targetValue;
+float getFiltI() {
+  return MeasuredAmps_filtered;
 }
 float getFiltV() {
   // Filtered battery voltage for control loops only.
@@ -1328,15 +1263,6 @@ float getFiltV() {
   return BatteryV_filtered;
 }
 
-float getFiltI() {
-  // Mirrors getTargetAmps() but returns filtered signals.
-  // AmpSrc cases using Bcur return raw — no filtered
-  // equivalent exists yet for the shunt.
-  switch (AmpSrc) {
-    case 0: case 3: case 5: case 7: return MeasuredAmps_filtered;
-    default: return getTargetAmps();  // Bcur sources: raw for now
-  }
-}
 int thermistorTempC(float V_thermistor) {
   float Vcc = 5.0;
   float R_thermistor = R_fixed * (V_thermistor / (Vcc - V_thermistor));
@@ -2250,7 +2176,7 @@ void _ReadAnalogInputs_inner() {
                            }
 
                            // ── cvLog: write here, tied to actual CH1 sample arrival ──────────────────
-                           // Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
+// Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
                            // reflect the previous control tick — one-tick lag is acceptable for analysis.
                            cvLog_tick(millis());
 
@@ -2268,6 +2194,12 @@ void _ReadAnalogInputs_inner() {
                              char bufA2[32];
                              snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
                              writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
+                           }
+                           static unsigned long lastAmpEMADiag = 0;
+                           if (millis() - lastAmpEMADiag >= 10000) {
+                             Serial.printf("Amps EMA: raw=%.2f filt=%.2f\n",
+                                           MeasuredAmps, MeasuredAmps_filtered);
+                             lastAmpEMADiag = millis();
                            }
                            break;
 

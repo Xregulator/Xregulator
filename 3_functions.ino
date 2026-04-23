@@ -1509,7 +1509,7 @@ void setupServer() {
     memset(&state, 0, sizeof(state));
 
     uint32_t cnt = (uint32_t)cvLogCount;
-    uint32_t entrySize = CV_LOG_ENTRY_SIZE;
+    uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
     float kp = (float)VoltageKp;
     float ki = (float)VoltageKi;
     uint32_t interval = (uint32_t)VoltageLoopInterval;
@@ -1553,8 +1553,8 @@ void setupServer() {
               return written;
             }
             int idx = (state.oldest + state.row) % CV_LOG_SIZE;
-            memcpy(state.entryBuf, &cvLog[idx], CV_LOG_ENTRY_SIZE);
-            state.entryLen = CV_LOG_ENTRY_SIZE;
+            memcpy(state.entryBuf, &cvLog[idx], sizeof(CvLogEntry));
+            state.entryLen = (int)sizeof(CvLogEntry);
             state.entryPos = 0;
             state.row++;
           }
