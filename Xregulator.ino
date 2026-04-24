@@ -799,6 +799,11 @@ int SendWifiTime = 0;
 //Needed for ALERT pin on INA228 to shut off Field and delay 10 seconds before retrying if fault condition is gone
 bool inaOvervoltageLatched = false;
 unsigned long inaOvervoltageTime = 0;
+uint32_t inaOvervoltageClearedMs = 0;  // timestamp when INA OV latch last cleared; used to suppress disagreement check
+// How long after INA OV latch clears to keep suppressing the ADS/INA
+// voltage disagreement check. Long enough to cover field collapse + both
+// sensors resettling. Must be longer than INA228 averaged update rate.
+const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 
 
 // ── Input filter (disturbance rejection) ─────────────────────────────────

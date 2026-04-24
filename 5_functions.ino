@@ -1277,7 +1277,7 @@ int thermistorTempC(float V_thermistor) {
 void CheckAlarms() {
   Alarm_Status = digitalRead(21);
   static unsigned long lastRunTime = 0;
-  if (millis() - lastRunTime < 250) return;  // Run every 250ms
+  if (millis() - lastRunTime < 250) return;
   lastRunTime = millis();
 
   static bool previousAlarmState = false;
@@ -1304,14 +1304,12 @@ void CheckAlarms() {
 
   // ========== NORMAL ALARM CHECKING ==========
   if (AlarmActivate == 1) {
-    // Set temperature source
     if (TempSource == 0) {
       TempToUse = AlternatorTemperatureF;
     } else if (TempSource == 1) {
       TempToUse = temperatureThermistor;
     }
 
-    // Temperature alarm
     if (TempAlarm > 0 && TempToUse > TempAlarm) {
       currentAlarmCondition = true;
       alarmReason = "High alternator temperature";
@@ -1319,13 +1317,11 @@ void CheckAlarms() {
                            TempToUse, TempAlarm);
     }
 
-    // Efficiency anomaly alarm
     if (anomalyAlarmEnable && effAnomalyAlarmActive) {
       currentAlarmCondition = true;
       alarmReason = "Alternator efficiency anomaly";
     }
 
-    // Voltage alarms
     float currentVoltage = getBatteryVoltage();
 
     if (VoltageAlarmHigh > 0 && currentVoltage > VoltageAlarmHigh) {
@@ -1342,7 +1338,6 @@ void CheckAlarms() {
                            currentVoltage, VoltageAlarmLow);
     }
 
-    // High alternator current
     if (CurrentAlarmHigh > 0 && MeasuredAmps > CurrentAlarmHigh) {
       currentAlarmCondition = true;
       alarmReason = "High alternator current";
@@ -1350,7 +1345,6 @@ void CheckAlarms() {
                            MeasuredAmps, CurrentAlarmHigh);
     }
 
-    // High battery current
     if (MaximumAllowedBatteryAmps > 0 && abs(Bcur) > MaximumAllowedBatteryAmps) {
       currentAlarmCondition = true;
       alarmReason = "High battery current";
@@ -1360,67 +1354,111 @@ void CheckAlarms() {
   }
 
   // ========== INA228 HARDWARE OVERVOLTAGE PROTECTION ==========
-  // Only checks BUSOL (bus overvoltage) — the critical hardware protection.
-  // NOTE: This path is NOT governed by FIELD_COLLAPSE_DELAY. It uses its own
-  // independent latch timer and bypasses the normal lockout entirely via
-  // shouldImmediatelyCutGPIO4(). See CheckAlarms() and buildTickSnapshot().
-  // NOTE: Undervoltage (BUSUL) checking can be added here if needed in the future.
+  // The INA228 ALERT pin pulls GPIO4 low electrically the instant the bus
+  // voltage crosses VoltageHardwareLimit — before any software runs.
+  // This block manages the software latch that keeps the field suppressed
+  // until the condition is confirmed cleared, and produces clear messaging
+  // about what the hardware did and when it recovered.
+  //
+  // SLOW_ALERT is SET: the threshold comparison uses the averaged ADC value
+  // (~33ms filter with 4-sample averaging), not instantaneous readings.
+  // This prevents single-sample noise spikes from asserting the ALERT pin.
+  //
+  // New event detection: throttled to every 5s to avoid hammering I2C.
+  // Latch management (3s and 10s checks): runs every 250ms.
 
   if (INADisconnected == 0) {
     static unsigned long lastINA228Check = 0;
-    uint16_t alertStatus = 0;  // Declared once here — in scope for all blocks below
+    uint16_t alertStatus = 0;
 
-    // ---- Latch management (runs every 250ms while latched) ----
+    // ── Latch management — runs every 250ms while latched ────────────────
     if (inaOvervoltageLatched) {
       uint32_t latchAge = millis() - inaOvervoltageTime;
       static bool earlyCheckDone = false;
 
-      // Keep alarm active while latched
       currentAlarmCondition = true;
       alarmReason = "INA228 hardware overvoltage";
+
+      // Periodic reminder while latch is held — every 5s to avoid spam
       static unsigned long lastOVMessage = 0;
       if (millis() - lastOVMessage >= 5000) {
         lastOVMessage = millis();
         float busV = INA.getBusVoltage();
-        queueConsoleMessageF("INA228 Hardware Overvoltage active: %.2fV exceeds limit %.2fV",
-                             busV, VoltageHardwareLimit);
+        queueConsoleMessageF(
+          "INA228 OV LATCH HELD [%lus]: busV=%.3fV limit=%.3fV | "
+          "ALERT pin cut GPIO4 electrically. Field suppressed by SW latch. "
+          "Checking for clear at 3s and 10s.",
+          latchAge / 1000, busV, VoltageHardwareLimit);
       }
 
-      // One-shot early check at 3s — fast release for transient spikes
+      // ── 3s early check: fast release for genuine transient spikes ────
       if (!earlyCheckDone && latchAge >= 3000) {
         earlyCheckDone = true;
         clearINA228AlertLatch(INA.getAddress());
         alertStatus = readINA228AlertRegister(INA.getAddress());
+        float busV = INA.getBusVoltage();
+
         if (!(alertStatus & 0x0010)) {
+          // Cleared — was a transient. Release latch now.
           inaOvervoltageLatched = false;
+          inaOvervoltageClearedMs = millis();
           earlyCheckDone = false;
-          queueConsoleMessage("INA228: Overvoltage cleared early (transient spike)");
+          queueConsoleMessageF(
+            "INA228 OV CLEARED [3s early check]: busV=%.3fV limit=%.3fV | "
+            "ALERT pin was a transient spike. SW latch released. "
+            "Voltage disagreement check suppressed for %ds. "
+            "Field control returning to normal path.",
+            busV, VoltageHardwareLimit,
+            INA_OV_DISAGREE_SUPPRESS_MS / 1000);
+        } else {
+          // Still set — not a transient. Wait for 10s.
+          queueConsoleMessageF(
+            "INA228 OV STILL ACTIVE [3s check]: busV=%.3fV limit=%.3fV | "
+            "BUSOL bit still set after clear attempt. Sustained condition. "
+            "Will recheck at 10s.",
+            busV, VoltageHardwareLimit);
         }
-        // Still present — keep latched, full 10s wait applies
       }
 
-      // Full 10s timeout — definitive check
+      // ── 10s definitive check ─────────────────────────────────────────
       if (inaOvervoltageLatched && latchAge >= 10000) {
-        earlyCheckDone = false;  // Reset for next event
+        earlyCheckDone = false;
         clearINA228AlertLatch(INA.getAddress());
         alertStatus = readINA228AlertRegister(INA.getAddress());
+        float busV = INA.getBusVoltage();
+
         if (!(alertStatus & 0x0010)) {
           inaOvervoltageLatched = false;
-          queueConsoleMessage("INA228: Overvoltage condition cleared");
+          inaOvervoltageClearedMs = millis();
+          queueConsoleMessageF(
+            "INA228 OV CLEARED [10s timeout]: busV=%.3fV limit=%.3fV | "
+            "BUSOL bit cleared. SW latch released. "
+            "Voltage disagreement check suppressed for %ds. "
+            "Field control returning to normal path.",
+            busV, VoltageHardwareLimit,
+            INA_OV_DISAGREE_SUPPRESS_MS / 1000);
         } else {
+          // Still present — hold latch, will recheck on next 10s boundary
+          // by resetting inaOvervoltageTime so the 10s check re-arms.
+          inaOvervoltageTime = millis();
           currentAlarmCondition = true;
           alarmReason = "INA228 hardware overvoltage still present";
+          queueConsoleMessageF(
+            "INA228 OV SUSTAINED [10s check]: busV=%.3fV limit=%.3fV | "
+            "BUSOL bit still set. Latch held. Will recheck in 10s.",
+            busV, VoltageHardwareLimit);
         }
       }
     }
 
-    // ---- Throttled register polling — detect new overvoltage events ----
+    // ── New event detection — throttled to every 5s ───────────────────
+    // Hardware ALERT pin already cut GPIO4 before this runs.
+    // This block detects the event and engages the software latch
+    // so the field stays suppressed even if ALERT deasserts quickly.
     if (millis() - lastINA228Check >= 5000) {
       lastINA228Check = millis();
-
       alertStatus = readINA228AlertRegister(INA.getAddress());
 
-      // Check BUSOL bit (bit 4 = 0x0010)
       if (alertStatus & 0x0010) {
         if (!inaOvervoltageLatched) {
           inaOvervoltageLatched = true;
@@ -1429,8 +1467,18 @@ void CheckAlarms() {
 
           float busV = INA.getBusVoltage();
           alarmReason = "INA228 hardware overvoltage";
-          queueConsoleMessageF("INA228 Hardware Overvoltage: %.2fV exceeds limit %.2fV",
-                               busV, VoltageHardwareLimit);
+
+          // Note: busV here may be lower than the actual peak because
+          // the INA228 averaged value lags the instantaneous reading
+          // that triggered the ALERT pin. The hardware caught the real peak;
+          // this is a post-event averaged reading.
+          queueConsoleMessageF(
+            "INA228 HARDWARE ALERT PIN FIRED: busV(avg)=%.3fV limit=%.3fV | "
+            "GPIO4 was cut electrically by ALERT pin before this message. "
+            "SLOW_ALERT active: trigger used ~33ms averaged value. "
+            "SW latch engaged. Disagreement check suppressed for %ds.",
+            busV, VoltageHardwareLimit,
+            INA_OV_DISAGREE_SUPPRESS_MS / 1000);
         }
       }
     }
@@ -1821,7 +1869,7 @@ void updateINA228OvervoltageThreshold() {
   }
 
   // Update the hardware limit based on current BulkVoltage setting
-  VoltageHardwareLimit = BulkVoltage + 0.1;
+  VoltageHardwareLimit = BulkVoltage + 0.3;
 
   // Calculate threshold in LSB units for INA228 with proper rounding
   const double LSB = 0.003125;                                           // 3.125 mV/LSB
@@ -1836,7 +1884,7 @@ void updateINA228OvervoltageThreshold() {
   INA.setBusUndervoltageTH(0x0000);  // Clear under-voltage threshold (fix accidental setting)
 
   // Configure DIAG_ALRT behavior explicitly for predictable operation
-  INA.clearDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);      // Compare on instantaneous (non-averaged) readings for immediate response
+  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);      // Compare on instantaneous (non-averaged) readings for immediate response
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_LATCH);     // Transparent mode - alerts clear when condition clears
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_POLARITY);  // Active-low open-drain (default)
   INA.setDiagnoseAlertBit(INA228_DIAG_BUS_OVER_LIMIT);    // Enable BUSOL reporting
@@ -1857,7 +1905,9 @@ void updateINA228OvervoltageThreshold() {
     queueConsoleMessageF("WARNING: BUVL not cleared - still 0x%04X", (unsigned)readback_BUVL);
   }
 
-  queueConsoleMessageF("INA228: Overvoltage threshold updated to %.2fV", VoltageHardwareLimit);
+  queueConsoleMessageF(
+    "INA228: Overvoltage threshold=%.2fV | SLOW_ALERT ON (4-sample avg ~33ms filter)",
+    VoltageHardwareLimit);
 }
 
 void checkWebFilesExist() {

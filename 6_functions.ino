@@ -1460,8 +1460,6 @@ void AdjustFieldLearnMode() {
   // All outer loop, inner PID, and duty pipeline state is now final for this tick.
   // Called only in the normal-mode path — shutdown/fault paths do not log here.
   pidLog_tick(currentMillis);
-  // cvLog_tick(currentMillis);    //Moved to ReadAnalogInputs
-
   prevMode = mode;
 }
 
@@ -2149,6 +2147,8 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
   }
 }
 
+
+
 /**
  * buildTickSnapshot()
  * Constructs immutable snapshot of system state for pure decision functions
@@ -2228,12 +2228,42 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
 
   tick.tempDataVeryStale = tempDataVeryStale;
 
-  // Voltage validation
+// Voltage validation
   tick.voltagePlausible = isVoltageSensorPlausible();
   tick.voltageDisagreementCritical = isVoltageDisagreementCritical();
   tick.voltageDisagreementWarning = isVoltageDisagreementWarning(
     tick.nowMs, tick.batteryV, tick.ibv,
     tick.voltagePlausible, tick.voltageDisagreementCritical);
+
+  // ── Suppress disagreement check during and after INA OV event ───────────
+  // When the ALERT pin cuts the field, ADS1115 and INA228 will diverge
+  // naturally as the field collapses — ADS responds faster. Without
+  // suppression, VOLT_SPIKE fires on top of an already-handled hardware cut.
+  // Suppression holds for INA_OV_DISAGREE_SUPPRESS_MS after the latch clears
+  // to allow both sensors to resettle. 10s is deliberate — the INA228
+  // averaged value can lag for several update cycles during transients.
+  bool inaOvSuppressActive = inaOvervoltageLatched ||
+    (inaOvervoltageClearedMs > 0 &&
+     (tick.nowMs - inaOvervoltageClearedMs) < INA_OV_DISAGREE_SUPPRESS_MS);
+
+  if (inaOvSuppressActive) {
+    tick.voltageDisagreementWarning  = false;
+    tick.voltageDisagreementCritical = false;
+    // Log once on entry to suppression so it's visible in the console
+    static bool suppressLoggedThisCycle = false;
+    if (!suppressLoggedThisCycle) {
+      suppressLoggedThisCycle = true;
+      queueConsoleMessageF(
+        "VOLT_SPIKE check suppressed: INA OV %s | "
+        "ADS=%.2fV INA=%.2fV | Suppression holds for %ds after latch clears.",
+        inaOvervoltageLatched ? "latch active" : "recently cleared",
+        tick.batteryV, tick.ibv,
+        INA_OV_DISAGREE_SUPPRESS_MS / 1000);
+    }
+  } else {
+    static bool suppressLoggedThisCycle = false;
+    suppressLoggedThisCycle = false;  // reset for next OV event
+  }
 
   // Lockout
   tick.inLockout = (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) < FIELD_COLLAPSE_DELAY);
