@@ -402,6 +402,7 @@ void checkTempTaskHealth() {
   if (now - lastTempTaskHeartbeat > TEMP_TASK_TIMEOUT) {
     if (tempTaskHealthy) {  // First time detecting the problem
       tempTaskHealthy = false;
+      tempTaskAlarm = true;
       queueConsoleMessageF("CRITICAL: TempTask hung up - task not responding for %lu seconds", (now - lastTempTaskHeartbeat) / 1000);
 
       // Emergency safety action
@@ -410,15 +411,14 @@ void checkTempTaskHealth() {
         // Reduce field output as safety measure    ABSTRACT OUT THESE 3 LINES LATER
         digitalWrite(4, 0);      //  disable field
         dutyCycle = MinDuty;     // restart duty cycle from minimum
-        digitalWrite(21, HIGH);  // Sound alarm, 21 is buzzer GPIO
       }
     }
   } else {
     // TempTask is responding
     if (!tempTaskHealthy) {  // Was unhealthy, now recovered
       tempTaskHealthy = true;
+      tempTaskAlarm = false;
       queueConsoleMessage("TempTask: Recovered and responding normally");
-      digitalWrite(21, LOW);  // Clear alarm if only temp issue (21 is buzzer GPIO)
       //Later, does the field need to be re-enabled here??? Fix later
     }
   }

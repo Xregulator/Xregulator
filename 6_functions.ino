@@ -648,7 +648,7 @@ void AdjustFieldLearnMode() {
       currentPID.SetMode(MANUAL);
       pidOutput = 30.0;
       currentPID.ResetIntegratorTo(30.0);
-      digitalWrite(21, LOW);
+      // alarmOutputState cleared by CheckAlarms — do not write GPIO38 here
       updateFieldTelemetry(30.0f, tick.currentBatteryVoltage, FieldResistance);
       fieldActiveStatus = 1;
       static unsigned long lastLimpReport = 0;
@@ -882,7 +882,7 @@ void AdjustFieldLearnMode() {
   if (!isNormalMode) {
     voltageControlActive = false;
 
-    digitalWrite(21, (mode == MODE_DISABLED_RAMP) ? LOW : HIGH);
+    // GPIO38 driven solely by CheckAlarms — do not write here
 
     uTargetAmps = 0;
     setpointLimited = 0.0f;
@@ -1003,7 +1003,7 @@ void AdjustFieldLearnMode() {
   }
   digitalWrite(4, HIGH);
   gpio4IsLow = false;
-  digitalWrite(21, LOW);
+  // GPIO38 driven solely by CheckAlarms — do not write here
 
   // Seed setpoint tracking on first normal tick after startup or re-enable.
   if (!setpointInitialized) {

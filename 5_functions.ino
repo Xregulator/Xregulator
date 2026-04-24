@@ -1275,7 +1275,6 @@ int thermistorTempC(float V_thermistor) {
 // CheckAlarms() - Alarm monitoring and INA228 hardware protection
 // ============================================================================
 void CheckAlarms() {
-  Alarm_Status = digitalRead(21);
   static unsigned long lastRunTime = 0;
   if (millis() - lastRunTime < 250) return;
   lastRunTime = millis();
@@ -1350,6 +1349,18 @@ void CheckAlarms() {
       alarmReason = "High battery current";
       queueConsoleMessageF("High battery current: %.1fA (limit: %.0fA)",
                            abs(Bcur), MaximumAllowedBatteryAmps);
+    }
+  }
+
+  // ========== TEMP TASK FAILURE ALARM ==========
+  // Safety alarm — fires regardless of AlarmActivate. Throttled console reminder every 30s.
+  if (tempTaskAlarm) {
+    currentAlarmCondition = true;
+    alarmReason = "TempTask failure — temperature monitoring lost";
+    static unsigned long lastTempAlarmMsg = 0;
+    if (millis() - lastTempAlarmMsg >= 30000) {
+      lastTempAlarmMsg = millis();
+      queueConsoleMessage("ALARM: TempTask not responding — temperature monitoring lost. Field reduced as safety measure.");
     }
   }
 
@@ -1504,12 +1515,14 @@ void CheckAlarms() {
   // ========== FINAL OUTPUT CONTROL ==========
   bool finalOutput = false;
   if (AlarmTest == 1) {
-    finalOutput = outputAlarmState;
+    finalOutput = true;  // Force HIGH regardless of alarm state — test drives output directly
   } else if (AlarmActivate == 1) {
     finalOutput = outputAlarmState;
   }
 
   digitalWrite(21, finalOutput ? HIGH : LOW);
+  alarmOutputState = finalOutput;  // Keep shared state in sync
+  Alarm_Status = alarmOutputState ? 1 : 0;  // Set after finalOutput is computed
 
   // ========== CONSOLE MESSAGING ==========
   if (currentAlarmCondition != previousAlarmState) {

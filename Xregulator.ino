@@ -741,6 +741,7 @@ int totalPowerCycles = 0;    // Total number of power cycles (persistent)
 // These are health variables for the TempTask (digital temperature measurement)
 unsigned long lastTempTaskHeartbeat = 0;
 bool tempTaskHealthy = true;
+bool tempTaskAlarm = false;   // Set by checkTempTaskHealth() — triggers buzzer regardless of AlarmActivate
 const unsigned long TEMP_TASK_TIMEOUT = 20000;  // 20 seconds
 
 //Cloud Upload Stuff
@@ -1544,6 +1545,7 @@ int FactorySettings = 0;  // Reset Button
 bool alarmLatch = false;    // Current latched alarm state
 int AlarmLatchEnabled = 0;  // Whether latching is enabled (0/1 for consistency)
 int AlarmTest = 0;          // Momentary alarm test (1 = test active)
+bool alarmOutputState = false;  // Single source of truth for GPIO 21 state — mirrors every digitalWrite(21,...)
 int ResetAlarmLatch = 0;    // Momentary reset command
 unsigned long alarmTestStartTime = 0;
 const unsigned long ALARM_TEST_DURATION = 2000;  // 2 seconds test duration
@@ -2948,6 +2950,7 @@ void setup() {
   pinMode(1, INPUT);      // Ignition
   pinMode(21, OUTPUT);    // Alarm/Buzzer output (was 33)
   digitalWrite(21, LOW);  // Start with alarm off
+  alarmOutputState = false;
   pinMode(42, INPUT);     // bmsLogic
   // PWM setup (needed for basic operation)
   //ledcAttach(pwmPin, SwitchingFrequency, pwmResolution);
