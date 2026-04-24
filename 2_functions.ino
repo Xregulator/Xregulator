@@ -1108,9 +1108,13 @@ void saveToLocalBuffer(time_t collectionTime) {
     return;  // Skip during OTA
   }
   // Don't buffer if not registered or token is empty
-  if (!isRegistered || authToken.isEmpty()) {
-    Serial.println("Skipping buffer save - not registered or no token");
-    queueConsoleMessage("Skipped buffer save: not registered");
+if (!isRegistered || authToken.isEmpty()) {
+    static unsigned long lastNotRegisteredMsgMs = 0;
+    if (millis() - lastNotRegisteredMsgMs >= 30000) {
+      lastNotRegisteredMsgMs = millis();
+      Serial.println("Skipping buffer save - not registered or no token");
+      queueConsoleMessage("Skipped buffer save: not registered");
+    }
     return;
   }
   esp_task_wdt_reset();

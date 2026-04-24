@@ -214,8 +214,10 @@ void enter_sys_off() {
  * telemetry updated, fieldActiveStatus cleared.
  */
 void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
+  bool alreadyCut = gpio4IsLow;
   digitalWrite(4, LOW);
   gpio4IsLow = true;
+  if (alreadyCut) return;  // hardware already cut — skip logging, don't spam
   apply_pwm_float(0.0f);
   lastAppliedDuty = 0.0f;
   dutyCycle = 0.0f;
@@ -229,8 +231,12 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   shutdownPhase = SHUTDOWN_PHASE_4;
   shutdownPhaseEntryMs = tick.nowMs;
   prevMode = MODE_CRITICAL_RAMP;
-  queueConsoleMessageF("Field cut immediately: %s | ADS=%.2fV INA=%.2fV D=%.3fV",
-                       reasonToString(reason), BatteryV, IBV, fabsf(BatteryV - IBV));
+// inaOvervoltageLatched means HW ALERT pin fired first; SW is catching up.
+  // !inaOvervoltageLatched means SW caught it before hardware (e.g. hard OC, temp).
+  const char *caughtBy = inaOvervoltageLatched ? "HW ALERT pin fired first; SW latch active"
+                                               : "SW caught first (no HW alert)";
+  queueConsoleMessageF("Field cut immediately: %s | %s | ADS=%.2fV INA=%.2fV D=%.3fV",
+                       reasonToString(reason), caughtBy, BatteryV, IBV, fabsf(BatteryV - IBV));
 }
 
 /**
@@ -498,7 +504,7 @@ void AdjustFieldLearnMode() {
   // ========== PRE-GATE IMMEDIATE CUT CHECK ==========
   // Runs before the CH1 gate so INA overvoltage always cuts regardless of sensor freshness.
   FieldEventReason preReason = selectFieldEventReason(tick);
-  if (shouldImmediatelyCutGPIO4(preReason)) {
+  if (shouldImmediatelyCutGPIO4(preReason) && !gpio4IsLow) {
     applyImmediateCut(tick, preReason);
     return;
   }
@@ -640,9 +646,14 @@ void AdjustFieldLearnMode() {
     static uint32_t lastLimpTick = 0;
     if (currentMillis - lastLimpTick >= 100) {
       lastLimpTick = currentMillis;
-      digitalWrite(4, HIGH);
-      gpio4IsLow = false;
-      apply_pwm_float(30.0f);
+// Respect INA228 hardware OV latch even in limp home — prevents
+      // oscillation against the PRE-GATE cut. Hardware ALERT pin already
+      // pulled GPIO4 low; don't fight it.
+      if (!inaOvervoltageLatched) {
+        digitalWrite(4, HIGH);
+        gpio4IsLow = false;
+        apply_pwm_float(30.0f);
+      }
       lastAppliedDuty = 30.0f;
       dutyCycle = 30.0f;
       currentPID.SetMode(MANUAL);
@@ -740,7 +751,10 @@ void AdjustFieldLearnMode() {
   // Suppressed while either override is active — letting it run would fire
   // spurious re-bulk transitions and absorption timeouts. On override exit,
   // enter_sys_auto() re-evaluates stage from current voltage.
-  if (MaintainMode != 1 && TargetVoltageMode != 1) {
+// Stage tracking only meaningful in AUTO. In MANUAL, voltageControlActive=false
+  // and no CV loop runs, so stage state is meaningless and stage transitions are
+  // misleading. Also prevents stale stage state from contaminating the next AUTO entry.
+  if (MaintainMode != 1 && TargetVoltageMode != 1 && !tick.manualMode) {
     updateChargingStage();
   }
 
@@ -758,7 +772,11 @@ void AdjustFieldLearnMode() {
   }
 
   if ((mode != MODE_NORMAL_AUTO_PID && mode != MODE_NORMAL_MANUAL) && reason == REASON_NONE) {
-    Serial.println("ERROR: Shutdown mode with no reason specified");
+    static uint32_t lastNoReasonWarnMs = 0;
+    if ((uint32_t)(currentMillis - lastNoReasonWarnMs) >= 5000) {
+      lastNoReasonWarnMs = currentMillis;
+      Serial.println("ERROR: Shutdown mode with no reason specified");
+    }
   }
 
   chargingEnabled = tick.chargingEnabled;
@@ -814,13 +832,14 @@ void AdjustFieldLearnMode() {
   }
 
   // ========== MODE TRANSITION HANDLING ==========
-  bool isNormalMode = (mode == MODE_NORMAL_AUTO_PID || mode == MODE_NORMAL_MANUAL);
+  bool isNormalMode = (mode == MODE_NORMAL_AUTO_PID || mode == MODE_NORMAL_MANUAL) && !shouldImmediatelyCutGPIO4(reason);
   bool wasNormalMode = (prevMode == MODE_NORMAL_AUTO_PID || prevMode == MODE_NORMAL_MANUAL);
   bool enteringNormal = !wasNormalMode && isNormalMode;
   bool exitingNormal = wasNormalMode && !isNormalMode;
 
   SystemMode newSysMode;
   if (!tick.chargingEnabled) newSysMode = SYS_MODE_OFF;
+  else if (shouldImmediatelyCutGPIO4(reason)) newSysMode = SYS_MODE_FAULT;
   else if (mode == MODE_NORMAL_MANUAL) newSysMode = SYS_MODE_MANUAL;
   else if (mode == MODE_NORMAL_AUTO_PID) newSysMode = SYS_MODE_AUTO;
   else newSysMode = SYS_MODE_FAULT;
@@ -997,7 +1016,7 @@ void AdjustFieldLearnMode() {
 
   // ========== NORMAL MODES (MANUAL or AUTO) ==========
   // Re-check before enabling GPIO4 — fault could have arrived this tick.
-  if (shouldImmediatelyCutGPIO4(reason)) {
+  if (shouldImmediatelyCutGPIO4(reason) && !gpio4IsLow) {
     applyImmediateCut(tick, reason);
     return;
   }
@@ -2228,7 +2247,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
 
   tick.tempDataVeryStale = tempDataVeryStale;
 
-// Voltage validation
+  // Voltage validation
   tick.voltagePlausible = isVoltageSensorPlausible();
   tick.voltageDisagreementCritical = isVoltageDisagreementCritical();
   tick.voltageDisagreementWarning = isVoltageDisagreementWarning(
@@ -2242,12 +2261,10 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Suppression holds for INA_OV_DISAGREE_SUPPRESS_MS after the latch clears
   // to allow both sensors to resettle. 10s is deliberate — the INA228
   // averaged value can lag for several update cycles during transients.
-  bool inaOvSuppressActive = inaOvervoltageLatched ||
-    (inaOvervoltageClearedMs > 0 &&
-     (tick.nowMs - inaOvervoltageClearedMs) < INA_OV_DISAGREE_SUPPRESS_MS);
+  bool inaOvSuppressActive = inaOvervoltageLatched || (inaOvervoltageClearedMs > 0 && (tick.nowMs - inaOvervoltageClearedMs) < INA_OV_DISAGREE_SUPPRESS_MS);
 
   if (inaOvSuppressActive) {
-    tick.voltageDisagreementWarning  = false;
+    tick.voltageDisagreementWarning = false;
     tick.voltageDisagreementCritical = false;
     // Log once on entry to suppression so it's visible in the console
     static bool suppressLoggedThisCycle = false;

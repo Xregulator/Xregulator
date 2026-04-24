@@ -1309,11 +1309,17 @@ void CheckAlarms() {
       TempToUse = temperatureThermistor;
     }
 
+    static unsigned long lastTempAlarmMsgMs = 0;
     if (TempAlarm > 0 && TempToUse > TempAlarm) {
       currentAlarmCondition = true;
       alarmReason = "High alternator temperature";
-      queueConsoleMessageF("High alternator temperature: %.1f°F (limit: %d°F)",
-                           TempToUse, TempAlarm);
+      if (millis() - lastTempAlarmMsgMs >= 30000) {
+        lastTempAlarmMsgMs = millis();
+        queueConsoleMessageF("High alternator temperature: %.1f°F (limit: %d°F)",
+                             TempToUse, TempAlarm);
+      }
+    } else {
+      lastTempAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
     }
 
     if (anomalyAlarmEnable && effAnomalyAlarmActive) {
@@ -1323,32 +1329,56 @@ void CheckAlarms() {
 
     float currentVoltage = getBatteryVoltage();
 
+    static unsigned long lastVoltHighMsgMs = 0;
     if (VoltageAlarmHigh > 0 && currentVoltage > VoltageAlarmHigh) {
       currentAlarmCondition = true;
       alarmReason = "High battery voltage";
-      queueConsoleMessageF("High battery voltage: %.2fV (limit: %.0fV)",
-                           currentVoltage, VoltageAlarmHigh);
+      if (millis() - lastVoltHighMsgMs >= 30000) {
+        lastVoltHighMsgMs = millis();
+        queueConsoleMessageF("High battery voltage: %.2fV (limit: %.0fV)",
+                             currentVoltage, VoltageAlarmHigh);
+      }
+    } else {
+      lastVoltHighMsgMs = 0;
     }
 
+    static unsigned long lastVoltLowMsgMs = 0;
     if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0) {
       currentAlarmCondition = true;
       alarmReason = "Low battery voltage";
-      queueConsoleMessageF("Low battery voltage: %.2fV (limit: %.0fV)",
-                           currentVoltage, VoltageAlarmLow);
+      if (millis() - lastVoltLowMsgMs >= 30000) {
+        lastVoltLowMsgMs = millis();
+        queueConsoleMessageF("Low battery voltage: %.2fV (limit: %.0fV)",
+                             currentVoltage, VoltageAlarmLow);
+      }
+    } else {
+      lastVoltLowMsgMs = 0;
     }
 
+    static unsigned long lastCurHighMsgMs = 0;
     if (CurrentAlarmHigh > 0 && MeasuredAmps > CurrentAlarmHigh) {
       currentAlarmCondition = true;
       alarmReason = "High alternator current";
-      queueConsoleMessageF("High alternator current: %.1fA (limit: %.0fA)",
-                           MeasuredAmps, CurrentAlarmHigh);
+      if (millis() - lastCurHighMsgMs >= 30000) {
+        lastCurHighMsgMs = millis();
+        queueConsoleMessageF("High alternator current: %.1fA (limit: %.0fA)",
+                             MeasuredAmps, CurrentAlarmHigh);
+      }
+    } else {
+      lastCurHighMsgMs = 0;
     }
 
+    static unsigned long lastBatCurMsgMs = 0;
     if (MaximumAllowedBatteryAmps > 0 && abs(Bcur) > MaximumAllowedBatteryAmps) {
       currentAlarmCondition = true;
       alarmReason = "High battery current";
-      queueConsoleMessageF("High battery current: %.1fA (limit: %.0fA)",
-                           abs(Bcur), MaximumAllowedBatteryAmps);
+      if (millis() - lastBatCurMsgMs >= 30000) {
+        lastBatCurMsgMs = millis();
+        queueConsoleMessageF("High battery current: %.1fA (limit: %.0fA)",
+                             abs(Bcur), MaximumAllowedBatteryAmps);
+      }
+    } else {
+      lastBatCurMsgMs = 0;
     }
   }
 
@@ -1521,7 +1551,7 @@ void CheckAlarms() {
   }
 
   digitalWrite(21, finalOutput ? HIGH : LOW);
-  alarmOutputState = finalOutput;  // Keep shared state in sync
+  alarmOutputState = finalOutput;           // Keep shared state in sync
   Alarm_Status = alarmOutputState ? 1 : 0;  // Set after finalOutput is computed
 
   // ========== CONSOLE MESSAGING ==========
@@ -1897,7 +1927,7 @@ void updateINA228OvervoltageThreshold() {
   INA.setBusUndervoltageTH(0x0000);  // Clear under-voltage threshold (fix accidental setting)
 
   // Configure DIAG_ALRT behavior explicitly for predictable operation
-  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);      // Compare on instantaneous (non-averaged) readings for immediate response
+  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);        // Compare on instantaneous (non-averaged) readings for immediate response
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_LATCH);     // Transparent mode - alerts clear when condition clears
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_POLARITY);  // Active-low open-drain (default)
   INA.setDiagnoseAlertBit(INA228_DIAG_BUS_OVER_LIMIT);    // Enable BUSOL reporting
@@ -2124,22 +2154,22 @@ void _ReadAnalogInputs_inner() {
                              MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
                              battVFreshFlag = true;
                              // ── EMA filter ─────────────────────────────────────────────────────────
-                           // α = dt / (TC + dt); seeded on first valid reading so output
-                           // starts at measured value rather than ramping up from zero.
-                           {
-                             static bool     battV_filter_init = false;
-                             static uint32_t lastBattVFilterMs = 0;
-                             if (!battV_filter_init) {
-                               BatteryV_filtered = BatteryV;
-                               battV_filter_init = true;
-                             } else {
-                               float dt_f  = fmaxf(1.0f, (float)(now - lastBattVFilterMs));
-                               float alpha = dt_f / (InputFilterTC + dt_f);
-                               BatteryV_filtered = alpha * BatteryV
-                                                 + (1.0f - alpha) * BatteryV_filtered;
+                             // α = dt / (TC + dt); seeded on first valid reading so output
+                             // starts at measured value rather than ramping up from zero.
+                             {
+                               static bool battV_filter_init = false;
+                               static uint32_t lastBattVFilterMs = 0;
+                               if (!battV_filter_init) {
+                                 BatteryV_filtered = BatteryV;
+                                 battV_filter_init = true;
+                               } else {
+                                 float dt_f = fmaxf(1.0f, (float)(now - lastBattVFilterMs));
+                                 float alpha = dt_f / (InputFilterTC + dt_f);
+                                 BatteryV_filtered = alpha * BatteryV
+                                                     + (1.0f - alpha) * BatteryV_filtered;
+                               }
+                               lastBattVFilterMs = now;
                              }
-                             lastBattVFilterMs = now;
-                           }
                            }
                            break;
 
@@ -2182,20 +2212,20 @@ void _ReadAnalogInputs_inner() {
                              MARK_FRESH(IDX_MEASURED_AMPS);
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
                              // ── EMA filter ─────────────────────────────────────────────────────────
-                           {
-                             static bool     amps_filter_init = false;
-                             static uint32_t lastAmpsFilterMs = 0;
-                             if (!amps_filter_init) {
-                               MeasuredAmps_filtered = MeasuredAmps;
-                               amps_filter_init = true;
-                             } else {
-                               float dt_f  = fmaxf(1.0f, (float)(now - lastAmpsFilterMs));
-                               float alpha = dt_f / (InputFilterTC + dt_f);
-                               MeasuredAmps_filtered = alpha * MeasuredAmps
-                                                     + (1.0f - alpha) * MeasuredAmps_filtered;
+                             {
+                               static bool amps_filter_init = false;
+                               static uint32_t lastAmpsFilterMs = 0;
+                               if (!amps_filter_init) {
+                                 MeasuredAmps_filtered = MeasuredAmps;
+                                 amps_filter_init = true;
+                               } else {
+                                 float dt_f = fmaxf(1.0f, (float)(now - lastAmpsFilterMs));
+                                 float alpha = dt_f / (InputFilterTC + dt_f);
+                                 MeasuredAmps_filtered = alpha * MeasuredAmps
+                                                         + (1.0f - alpha) * MeasuredAmps_filtered;
+                               }
+                               lastAmpsFilterMs = now;
                              }
-                             lastAmpsFilterMs = now;
-                           }
                            }
 
                            // ── Current amplitude ring + moving averages ──────────────────────────────
@@ -2239,7 +2269,7 @@ void _ReadAnalogInputs_inner() {
                            }
 
                            // ── cvLog: write here, tied to actual CH1 sample arrival ──────────────────
-// Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
+                           // Removed from AdjustFieldLearnMode. Control-state globals (cv_I, Icv, etc.)
                            // reflect the previous control tick — one-tick lag is acceptable for analysis.
                            cvLog_tick(millis());
 
@@ -2258,18 +2288,11 @@ void _ReadAnalogInputs_inner() {
                              snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
                              writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
                            }
-                           static unsigned long lastAmpEMADiag = 0;
-                           if (millis() - lastAmpEMADiag >= 10000) {
-                             Serial.printf("Amps EMA: raw=%.2f filt=%.2f\n",
-                                           MeasuredAmps, MeasuredAmps_filtered);
-                             lastAmpEMADiag = millis();
-                           }
                            break;
 
                          case 2:
                            Channel2V = Raw / 32768.0 * 2 * 6.144 * RPMScalingFactor;
                            RPM = Channel2V;
-
                            if (RPM > RPMMax) {
                              RPMMax = RPM;
                              static unsigned long lastWrite_RPMMax = 0;
@@ -2284,29 +2307,28 @@ void _ReadAnalogInputs_inner() {
                              snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
                              writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
                            }
-
                            if (RPM < 100) {
                              RPM = 0;
                            }
                            if (RPM >= 0 && RPM < 10000) {  // Sanity check
                              MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
                              // ── EMA filter ─────────────────────────────────────────────────────────
-                           // RPM < 100 → 0 clamp already applied above, so filter sees
-                           // the zeroed value when the engine is stopped.
-                           {
-                             static bool     rpm_filter_init = false;
-                             static uint32_t lastRPMFilterMs = 0;
-                             if (!rpm_filter_init) {
-                               RPM_filtered = RPM;
-                               rpm_filter_init = true;
-                             } else {
-                               float dt_f  = fmaxf(1.0f, (float)(now - lastRPMFilterMs));
-                               float alpha = dt_f / (InputFilterTC + dt_f);
-                               RPM_filtered = alpha * RPM
-                                            + (1.0f - alpha) * RPM_filtered;
+                             // RPM < 100 → 0 clamp already applied above, so filter sees
+                             // the zeroed value when the engine is stopped.
+                             {
+                               static bool rpm_filter_init = false;
+                               static uint32_t lastRPMFilterMs = 0;
+                               if (!rpm_filter_init) {
+                                 RPM_filtered = RPM;
+                                 rpm_filter_init = true;
+                               } else {
+                                 float dt_f = fmaxf(1.0f, (float)(now - lastRPMFilterMs));
+                                 float alpha = dt_f / (InputFilterTC + dt_f);
+                                 RPM_filtered = alpha * RPM
+                                                + (1.0f - alpha) * RPM_filtered;
+                               }
+                               lastRPMFilterMs = now;
                              }
-                             lastRPMFilterMs = now;
-                           }
                            }
                            break;
 
