@@ -2129,20 +2129,20 @@ void setupServer() {
     if (request->hasParam("PeukertExponent")) {
       foundParameter = true;
       inputMessage = request->getParam("PeukertExponent")->value();
-      writeFile(LittleFS, "/PeukertExponent.txt", inputMessage.c_str());
       PeukertExponent_scaled = (int)(inputMessage.toFloat() * 100);
+      writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
     }
     if (request->hasParam("ChargeEfficiency")) {
       foundParameter = true;
       inputMessage = request->getParam("ChargeEfficiency")->value();
       writeFile(LittleFS, "/ChargeEfficiency.txt", inputMessage.c_str());
-      ChargeEfficiency_scaled = inputMessage.toInt();
+      ChargeEfficiency_scaled = (int)round(inputMessage.toFloat() * 10);  // store as % × 10
     }
     if (request->hasParam("ChargedVoltage")) {
       foundParameter = true;
       inputMessage = request->getParam("ChargedVoltage")->value();
-      writeFile(LittleFS, "/ChargedVoltage.txt", inputMessage.c_str());
       ChargedVoltage_Scaled = (int)(inputMessage.toFloat() * 100);
+      writeFile(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
     }
     if (request->hasParam("TailCurrent")) {
       foundParameter = true;
@@ -2682,6 +2682,21 @@ void setupServer() {
       inputMessage = request->getParam("accelEnabled")->value();
       writeFile(LittleFS, "/accelEnabled.txt", inputMessage.c_str());
       accelEnabled = inputMessage.toInt();
+    }
+    if (request->hasParam("CAPSIZE_THRESHOLD_DEG")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CAPSIZE_THRESHOLD_DEG")->value();
+      CAPSIZE_THRESHOLD_DEG = inputMessage.toFloat();  // NVS persistence handled by periodic save in 5_functions
+    }
+    if (request->hasParam("PITCHPOLE_THRESHOLD_DEG")) {
+      foundParameter = true;
+      inputMessage = request->getParam("PITCHPOLE_THRESHOLD_DEG")->value();
+      PITCHPOLE_THRESHOLD_DEG = inputMessage.toFloat();  // NVS persistence handled by periodic save in 5_functions
+    }
+    if (request->hasParam("SLAM_THRESHOLD_G")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SLAM_THRESHOLD_G")->value();
+      SLAM_THRESHOLD_G = inputMessage.toFloat();  // NVS persistence handled by periodic save in 5_functions
     }
     if (request->hasParam("LearningPaused")) {
       foundParameter = true;
@@ -4340,7 +4355,7 @@ void SendWifiData() {
                                SafeInt(PeukertExponent_scaled),                        // 11
                                SafeInt(ChargeEfficiency_scaled),                       // 12
                                SafeInt(ChargedVoltage_Scaled),                         // 13
-                               SafeInt(TailCurrent),                                   // 14
+                               SafeInt(TailCurrent, 10),                               // 14  (× 10 so JS can show 1 decimal)
                                SafeInt(ChargedDetectionTime),                          // 15
                                SafeInt(IgnoreTemperature),                             // 16
                                SafeInt(bmsLogic),                                      // 17
@@ -4506,7 +4521,7 @@ void SendWifiData() {
                                SafeInt(SetpointFallRate),                              // 177
                                SafeInt(PIDTrackingGain, 100),                          // 178
                                SafeInt(CAPSIZE_THRESHOLD_DEG),                         // 179
-                               SafeInt(PITCHPOLE_THRESHOLD_DEG, 100),                  // 180
+                               SafeInt(PITCHPOLE_THRESHOLD_DEG),                       // 180
                                SafeInt(SLAM_THRESHOLD_G, 10),                          // 181
                                SafeInt(imuMountOrientation),                           // 182
                                SafeInt(socInfoAvailable),                              // 183

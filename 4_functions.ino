@@ -850,12 +850,14 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   if (!fsExists("/ChargeEfficiency.txt")) {
     writeFile(LittleFS, "/ChargeEfficiency.txt", String(ChargeEfficiency_scaled).c_str());
   } else {
-    ChargeEfficiency_scaled = readFile(LittleFS, "/ChargeEfficiency.txt").toInt();
+    // File stores the raw user input string (e.g. "99.0"). Multiply by 10 to get scaled int.
+    // Handles migration from old integer storage (e.g. "99" → 990).
+    ChargeEfficiency_scaled = (int)round(readFile(LittleFS, "/ChargeEfficiency.txt").toFloat() * 10);
   }
   if (!fsExists("/TailCurrent.txt")) {
     writeFile(LittleFS, "/TailCurrent.txt", String(TailCurrent).c_str());
   } else {
-    TailCurrent = readFile(LittleFS, "/TailCurrent.txt").toInt();
+    TailCurrent = readFile(LittleFS, "/TailCurrent.txt").toFloat();
   }
   if (!fsExists("/FuelEfficiency.txt")) {
     writeFile(LittleFS, "/FuelEfficiency.txt", String(FuelEfficiency_scaled).c_str());
@@ -1038,12 +1040,26 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   if (!fsExists("/PeukertExponent.txt")) {
     writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
   } else {
-    PeukertExponent_scaled = readFile(LittleFS, "/PeukertExponent.txt").toInt();
+    float pv = readFile(LittleFS, "/PeukertExponent.txt").toFloat();
+    if (pv <= 2.0f) {
+      // old file stored raw user input (e.g. "1.12") — migrate to scaled int
+      PeukertExponent_scaled = (int)(pv * 100);
+      writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
+    } else {
+      PeukertExponent_scaled = (int)pv;
+    }
   }
   if (!fsExists("/ChargedVoltage.txt")) {
     writeFile(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
   } else {
-    ChargedVoltage_Scaled = readFile(LittleFS, "/ChargedVoltage.txt").toInt();
+    float cv = readFile(LittleFS, "/ChargedVoltage.txt").toFloat();
+    if (cv <= 70.0f) {
+      // old file stored raw user input (e.g. "14.50") — migrate to scaled int
+      ChargedVoltage_Scaled = (int)(cv * 100);
+      writeFile(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
+    } else {
+      ChargedVoltage_Scaled = (int)cv;
+    }
   }
   if (!fsExists("/ChargedDetectionTime.txt")) {
     writeFile(LittleFS, "/ChargedDetectionTime.txt", String(ChargedDetectionTime).c_str());

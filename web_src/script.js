@@ -2450,10 +2450,10 @@ function updateAllEchosOptimized(data) {
         { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v },
         { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
         { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
-        { key: 'PeukertExponent', id: 'PeukertExponent_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'ChargeEfficiency', id: 'ChargeEfficiency_echo', transform: v => v + '%' },
-        { key: 'ChargedVoltage', id: 'ChargedVoltage_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'TailCurrent', id: 'TailCurrent_echo', transform: v => v },
+        { key: 'PeukertExponent_scaled', id: 'PeukertExponent_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'ChargeEfficiency_scaled', id: 'ChargeEfficiency_echo', transform: v => (v / 10).toFixed(1) + '%' },
+        { key: 'ChargedVoltage_Scaled', id: 'ChargedVoltage_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'TailCurrent', id: 'TailCurrent_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'ChargedDetectionTime', id: 'ChargedDetectionTime_echo', transform: v => v },
         { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v },
         { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v },
@@ -2553,10 +2553,6 @@ function updateAllEchosOptimized(data) {
         { key: 'NeighborLearningFactor', id: 'NeighborLearningFactor_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
         { key: 'LearningTableSaveInterval', id: 'LearningTableSaveInterval_echo', transform: v => v },
-        { key: 'pidInput', id: 'pidInput_display', transform: v => (v / 100).toFixed(1) },
-        { key: 'pidSetpoint', id: 'pidSetpoint_display', transform: v => (v / 100).toFixed(1) },
-        { key: 'pidOutput', id: 'pidOutput_display', transform: v => (v / 100).toFixed(1) },
-        { key: 'pidError', id: 'pidError_display', transform: v => (v / 100).toFixed(1) },
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
         { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
         { key: 'SetpointRampRate', id: 'SetpointRampRate_echo', transform: v => v.toFixed(2) },
@@ -2612,8 +2608,6 @@ function updateAllEchosOptimized(data) {
 
     // Special display elements (not echos but similar update pattern)
     const specialDisplays = [
-        { key: 'DynamicShuntGainFactor', id: 'DynamicShuntGainFactor_display', transform: v => (v / 1000).toFixed(3) },
-        { key: 'DynamicAltCurrentZero', id: 'DynamicAltCurrentZero_display', transform: v => (v / 1000).toFixed(3) + ' A' },
         { key: 'totalPowerCycles', id: 'totalPowerCyclesID', transform: v => v },
         {
             key: 'AlarmLatchState',
@@ -5157,10 +5151,6 @@ window.addEventListener("load", function () {
                     else if (["LastSessionMaxLoopTime"].includes(key)) {
                         newTextContent = (value / 1000000).toFixed(3);
                     }
-                    // Upload Interval scaled by 60000 on server
-                    else if (["SENSOR_UPLOAD_INTERVAL"].includes(key)) {
-                        newTextContent = (value / 60000).toFixed(2);
-                    }
                     // absorptionCompleteTime: stored/sent as ms -> display seconds
                     else if (["bulkVoltageHoldMs"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(2);  // ms -> seconds
@@ -5379,7 +5369,6 @@ window.addEventListener("load", function () {
                 ["LeewayNMEA_ID", "LeewayNMEA"],
                 ["VMGNMEA_ID", "VMGNMEA"],
                 ["VMGTargetBearing_echo", "VMGTargetBearing"],
-                ["SENSOR_UPLOAD_INTERVAL_echo", "SENSOR_UPLOAD_INTERVAL"],
                 ["cpuLoadCore0_display", "cpuLoadCore0"],
                 ["cpuLoadCore0Max_display", "cpuLoadCore0Max"],
                 ["cpuLoadCore1_display", "cpuLoadCore1"],

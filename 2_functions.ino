@@ -1931,7 +1931,7 @@ bool buildConfigPayload() {
                      ",\"charged_detection_time\":%d,\"ignore_temperature\":%d",
                      AutoShuntGainCorrection, DynamicShuntGainFactor, AutoAltCurrentZero,
                      DynamicAltCurrentZero, CurrentThreshold, PeukertExponent_scaled,
-                     ChargeEfficiency_scaled, ChargedVoltage_Scaled, TailCurrent,
+                     ChargeEfficiency_scaled, ChargedVoltage_Scaled, (int)(TailCurrent * 10),
                      ShuntResistanceMicroOhm, ChargedDetectionTime, IgnoreTemperature);
 
   // BMS Integration

@@ -1555,9 +1555,9 @@ int Alarm_Status;                                // for alarm mirror light on Cl
 // SOC Parameters
 int CurrentThreshold = 1;             // Ignore currents below this (A × 100)
 int PeukertExponent_scaled = 105;     // Peukert exponent × 100 (112 = 1.12)
-int ChargeEfficiency_scaled = 99;     // Charging efficiency % (0-100)
+int ChargeEfficiency_scaled = 990;    // Charging efficiency % × 10 (990 = 99.0%)
 int ChargedVoltage_Scaled = 1450;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
-int TailCurrent = 2;                  // A percentage of battery capacity in amp hours
+float TailCurrent = 2.0f;             // % of battery Ah capacity (1 decimal place)
 int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
 int ChargedDetectionTime = 600;       // Time at charged state to consider 100% (seconds) (10 mins)
 int IgnoreTemperature = 0;            // If no temp sensor, set to 1
