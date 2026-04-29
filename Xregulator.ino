@@ -1571,7 +1571,7 @@ int VoltageAlarmHigh = 15;            // above this value, sound alarm
 int VoltageAlarmLow = 11;             // below this value, sound alarm
 int CurrentAlarmHigh = 100;           // above this value, sound alarm
 int MaximumAllowedBatteryAmps = 150;  // safety for battery, optional
-int FourWay = 0;                      // 0 voltage data source = INA228 , 1 voltage source = ADS1115, 2 voltage source = NMEA2k, 3 voltage source = Victron VeDirect
+int FourWay = 0;                      // OBSOLETE REMOVE
 int RPMScalingFactor = 1330;          // self explanatory, adjust until it matches your trusted tachometer
 float AlternatorCOffset = 0;          // tare for alt current
 float BatteryCOffset = 0;             // tare or batt current

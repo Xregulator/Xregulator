@@ -1293,7 +1293,7 @@
                     <span>Manual Field PWM (%) (<span id="ManualDutyTarget_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Direct
                         PWM duty cycle (0–100%) applied to the field winding when Manual mode is active. Has no effect
-                        in PID mode. Use with caution — Manual mode bypasses all thermal, voltage, and current
+                        in PID mode. Use with caution — Manual mode bypasses many thermal, voltage, and current
                         protections.</span></span>
                   </div>
                   <div class="form-input">
@@ -5162,7 +5162,7 @@
                       ℹ️
                       <span class="tooltip-box">DO NOT USE CASUALLY. Will ignore all sensors and set a field of 30%,
                         even
-                        with IGNITION OFF!</span>
+                        with IGNITION OFF!  Harware Over-voltage protection is still active.</span>
                     </span>
                   </div>
                   <div class="form-input">

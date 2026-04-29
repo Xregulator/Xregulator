@@ -1927,7 +1927,7 @@ void updateINA228OvervoltageThreshold() {
   INA.setBusUndervoltageTH(0x0000);  // Clear under-voltage threshold (fix accidental setting)
 
   // Configure DIAG_ALRT behavior explicitly for predictable operation
-  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);        // Compare on instantaneous (non-averaged) readings for immediate response
+  INA.setDiagnoseAlertBit(INA228_DIAG_SLOW_ALERT);        // Compare on SLOW\_ALERT uses the averaged value
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_LATCH);     // Transparent mode - alerts clear when condition clears
   INA.clearDiagnoseAlertBit(INA228_DIAG_ALERT_POLARITY);  // Active-low open-drain (default)
   INA.setDiagnoseAlertBit(INA228_DIAG_BUS_OVER_LIMIT);    // Enable BUSOL reporting

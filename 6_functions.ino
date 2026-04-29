@@ -633,7 +633,7 @@ void AdjustFieldLearnMode() {
   g_fastOvHardActive_prev = g_fastOvHardActive;
 
   // ========== EMERGENCY LIMP HOME MODE (runs every loop) ==========
-  // WARNING: BYPASSES ALL SAFETY SYSTEMS
+  // WARNING: BYPASSES ALL SAFETY SYSTEMS EXCEPT INA228 HARDCODED
   if (LimpHome == 1) {
     if (OnOff == 0) {
       digitalWrite(4, LOW);
