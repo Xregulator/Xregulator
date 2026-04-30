@@ -2007,7 +2007,6 @@ void updateAccelMetrics() {
 
   uint32_t samples_processed = 0;
   unsigned long now = millis();
-  static unsigned long last_slam_ms = 0;  // 200ms cooldown — one impact, one count
 
   // Process accel ring buffer
   while (imuRingBuffer->accel_tail != imuRingBuffer->accel_head) {
@@ -2069,12 +2068,8 @@ void updateAccelMetrics() {
 
       // Slam detection (positive vertical accel spike)
       if (vert_accel > SLAM_THRESHOLD_G) {
-        unsigned long sample_ms = (unsigned long)(now_us / 1000);
-        if (sample_ms - last_slam_ms >= 200) {
-          last_slam_ms = sample_ms;
-          imuWindow->slam_count++;
-          imu_slam_count_lifetime++;
-        }
+        imuWindow->slam_count++;
+        imu_slam_count_lifetime++;
         if (vert_accel_scaled > imuWindow->slam_peak_max) {
           imuWindow->slam_peak_max = vert_accel_scaled;
         }
@@ -2225,23 +2220,18 @@ void updateAccelMetrics() {
   }
 
   // Capsize/pitchpole detection
-  // Requires >1s continuous exceedance to count; 10s rearm lockout prevents
-  // re-counting while the boat stays inverted/pitchpoled. No console message —
-  // counters in the UI already provide feedback.
   static bool capsize_triggered = false;
   static bool pitchpole_triggered = false;
   static unsigned long capsize_start = 0;
   static unsigned long pitchpole_start = 0;
-  static unsigned long capsize_last_event = 0;
-  static unsigned long pitchpole_last_event = 0;
 
   if (abs(cf_heel) > CAPSIZE_THRESHOLD_DEG) {
-    if (!capsize_triggered && (now - capsize_last_event >= 10000)) {
+    if (!capsize_triggered) {
       capsize_triggered = true;
       capsize_start = now;
-    } else if (capsize_triggered && (now - capsize_start > 1000)) {
+    } else if (now - capsize_start > 1000) {  // >1s duration
       imu_capsize_count++;
-      capsize_last_event = now;
+      queueConsoleMessageF("CAPSIZE EVENT: %.1f deg", cf_heel);
       capsize_triggered = false;
     }
   } else {
@@ -2249,12 +2239,12 @@ void updateAccelMetrics() {
   }
 
   if (abs(cf_pitch) > PITCHPOLE_THRESHOLD_DEG) {
-    if (!pitchpole_triggered && (now - pitchpole_last_event >= 10000)) {
+    if (!pitchpole_triggered) {
       pitchpole_triggered = true;
       pitchpole_start = now;
-    } else if (pitchpole_triggered && (now - pitchpole_start > 1000)) {
+    } else if (now - pitchpole_start > 1000) {  // >1s duration
       imu_pitchpole_count++;
-      pitchpole_last_event = now;
+      queueConsoleMessageF("PITCHPOLE EVENT: %.1f deg", cf_pitch);
       pitchpole_triggered = false;
     }
   } else {

@@ -247,18 +247,15 @@ static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
 
 // --- Total matrix size ---
 #define NUM_MATRIX_CELLS (NUM_RPM_BUCKETS * NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS)
-// 8 × 7 × 7 = 392 cells
+// 8 × 3 × 7 = 168 cells
 
-// --- Reference bin selection criteria ---
-// LOWERED FOR TESTING — restore production values once session history is proven to work:
-//   NUM_REFERENCE_BINS=10, REF_MIN_SS_SECONDS=300, REF_FREEZE_TOTAL_SS=6000,
-//   REF_SPREAD_TEMP_DEG=50.0f, REF_SPREAD_FIELD_VOLTS=3.75f, REF_SPREAD_RPM=1000.0f
-#define NUM_REFERENCE_BINS 3          // TESTING: was 10 — only 3 bins needed to finalize
-#define REF_MIN_SS_SECONDS 30         // TESTING: was 300 — 30s per bin is enough
-#define REF_FREEZE_TOTAL_SS 120       // TESTING: was 6000 — 2 min total SS to freeze
-#define REF_SPREAD_TEMP_DEG 5.0f      // TESTING: was 50.0 — just a few °F variation needed
-#define REF_SPREAD_FIELD_VOLTS 0.5f   // TESTING: was 3.75 — just 0.5V field variation needed
-#define REF_SPREAD_RPM 100.0f         // TESTING: was 1000.0 — just 100 RPM variation needed
+// --- Reference bin selection criteria (all PLACEHOLDER — tune after first data) ---
+#define NUM_REFERENCE_BINS 10         // Top N bins by accumulated SS time
+#define REF_MIN_SS_SECONDS 300        // PLACEHOLDER: min SS seconds for a bin to be eligible (~5 min)
+#define REF_FREEZE_TOTAL_SS 6000      // PLACEHOLDER: total SS seconds across selected bins to trigger freeze (~100 min)
+#define REF_SPREAD_TEMP_DEG 50.0f     // PLACEHOLDER: min temp span across selected bins (°F)
+#define REF_SPREAD_FIELD_VOLTS 3.75f  // PLACEHOLDER: min field-drive span (25% of 15V range)
+#define REF_SPREAD_RPM 1000.0f        // PLACEHOLDER: min RPM span across selected bins
 
 // --- Anomaly detection — runtime, user-configurable via LittleFS ---
 float anomalyMarginAmps = 5.0f;   // Extra amps of tolerance beyond ref min/max (default: none)
