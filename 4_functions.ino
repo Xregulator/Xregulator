@@ -1035,7 +1035,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   if (!fsExists("/CurrentThreshold.txt")) {
     writeFile(LittleFS, "/CurrentThreshold.txt", String(CurrentThreshold).c_str());
   } else {
-    CurrentThreshold = readFile(LittleFS, "/CurrentThreshold.txt").toInt();
+    CurrentThreshold = readFile(LittleFS, "/CurrentThreshold.txt").toFloat();
   }
   if (!fsExists("/PeukertExponent.txt")) {
     writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());

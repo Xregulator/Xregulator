@@ -557,83 +557,29 @@
         <div id="settings-alternator" class="sub-tab-content active">
           <div class="settings-card">
 
-            <span id="alt-health-badge" class="alt-health-badge badge-neutral">ALT ◌</span>
-
-            <!-- Health percentage and session trend sparkline -->
-            <div id="eff-health-row"
-              style="display:flex;align-items:flex-start;gap:16px;margin-bottom:10px;flex-wrap:wrap;">
-
-              <!-- Live health number -->
-              <div style="min-width:90px;text-align:center;">
-                <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Live Health</div>
-                <div id="eff-health-pct" style="font-size:28px;font-weight:bold;color:#4CAF50;line-height:1;">
-                  --
-                </div>
-                <div style="font-size:10px;color:var(--text-muted);">vs reference avg</div>
-              </div>
-
-              <!-- Sparkline -->
-              <div style="flex:1;min-width:180px;">
-                <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">
-                  Session History
-                  <span style="font-size:10px;opacity:0.6;">(last 30 sessions)</span>
-                </div>
-                <div id="eff-sparkline-container" style="width:100%;"></div>
-              </div>
-
+            <!-- SINGLE TAB GROUP -->
+            <div class="alt-tabs alt-tabs-primary">
+              <button class="alt-tab-btn alt-tab-btn-primary active"
+                      onclick="showAltTab('primary', 'alt-panel-quick-view')">RPM Table</button>
+              <button class="alt-tab-btn alt-tab-btn-primary"
+                      onclick="showAltTab('primary', 'alt-panel-alt-setup')">Alternator Setup</button>
+              <button class="alt-tab-btn alt-tab-btn-primary"
+                      onclick="showAltTab('primary', 'alt-panel-inner-loop')">Inner Loop</button>
+              <button class="alt-tab-btn alt-tab-btn-primary"
+                      onclick="showAltTab('primary', 'alt-panel-outer-loop')">Outer Loop</button>
+              <button class="alt-tab-btn alt-tab-btn-primary"
+                      onclick="showAltTab('primary', 'alt-panel-vt-mode')">Voltage Target Mode</button>
+              <button class="alt-tab-btn alt-tab-btn-primary"
+                      onclick="showAltTab('primary', 'alt-panel-advanced')">Advanced</button>
+              <button class="alt-tab-btn alt-tab-btn-primary"
+                      onclick="showAltTab('primary', 'alt-panel-about')">About</button>
             </div>
 
-            <!-- ============================================================
-                 1. QUICK VIEW (open)
-            ============================================================ -->
-            <details open class="alt-top-section">
-              <summary class="alt-summary-top">Quick View</summary>
-
-              <!-- Alternator Temp Limit -->
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Alternator Temp Limit (°F) (<span id="TemperatureLimitF_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">Maximum safe temperature (°F) at the sensor location. The outer
-                      temperature PID begins reducing current as temperature approaches this value — intervention starts
-                      at (Limit − Temp PID Margin), defaulting to 15°F below. Hard warning and critical shutdowns
-                      trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
-                      this offset when setting this value.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <!-- Download Logs -->
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Download Logs:</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">Sends the last ~1 hour (133kb) of 2s interval data and the last ~1 minute
-                      (21kb) of 100ms interval data to CSV files to the Downloads folder (pc) or Files (mobile
-                      device). Logs are automatically cleared after download.</span>
-                  </span>
-                </div>
-                <div class="form-input" style="display: flex; gap: 8px; flex-wrap: wrap;">
-                  <button type="button" class="btn-primary" onclick="downloadLogs()">Download Logs</button>
-                  <button type="button" class="btn-danger" onclick="resetLogs()">Reset Logs</button>
-                </div>
-              </div>
+            <div id="alt-panel-quick-view" class="alt-panel alt-panel-primary active">
 
               <!-- RPM Cap Table -->
-              <hr />
-              <div style="font-weight: 600; font-size: 15px; margin: 14px 0 8px 0; color: var(--text-dark);">RPM Cap
-                Table</div>
+              <details open class="alt-nested-section">
+                <summary class="alt-summary-nested">RPM Cap Table</summary>
 
               <!-- Global cap mode toggles -->
               <div class="cap-mode-row">
@@ -938,7 +884,9 @@
                 </div>
               </div>
 
-              <!-- ── Table Details (default closed) ── -->
+              </details><!-- END RPM Cap Table -->
+
+              <!-- ── Table Details ── -->
               <details class="alt-nested-section" style="margin-top: 12px;">
                 <summary class="alt-summary-nested">Table Details</summary>
 
@@ -1066,201 +1014,9 @@
                 </div>
               </div>
 
-            </details><!-- END Quick View -->
+            </div>
 
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">Anomaly Detection &amp; Matrix</summary>
-              <!-- ============================================================
-     EFFICIENCY MATRIX — HOW IT WORKS
-============================================================ -->
-              <details class="alt-top-section">
-                <summary class="alt-summary-top">How it Works</summary>
-
-                <div
-                  style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
-                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>What This System Does:</strong> The efficiency matrix learns the normal
-                    relationship between alternator field drive and output current across
-                    engine operating conditions. Once enough data is accumulated, it can detect when
-                    the alternator is producing significantly more or less current than it historically
-                    has under the same conditions — an early warning of problem such as brush wear,
-                    diode failure, belt slip, etc.
-                  </p>
-                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>The Reference Matrix:</strong> Operating conditions are divided into bins
-                    along three axes — engine RPM, alternator case temperature, and field drive voltage
-                    (duty cycle × battery voltage). Every qualifying operating point is accumulated into
-                    the appropriate bin as a time-weighted running average, with minimum and maximum
-                    values tracked. This matrix persists across power cycles and accumulates forever.
-                    The more hours of operation, the more reliable each bin becomes.
-                  </p>
-                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>Reference Finalization:</strong> Once the matrix has accumulated enough
-                    data across a sufficiently wide spread of operating conditions, the system
-                    automatically selects the best-populated bins as reference bins and freezes their
-                    values. These frozen values become the permanent baseline for anomaly detection.
-                    The selection algorithm favors bins that collectively span a wide range of RPM,
-                    temperature, and field drive — ensuring the reference is not built from a single
-                    narrow operating region. Until finalization occurs, the plot displays available
-                    data at reduced opacity with a "Low Confidence" label.
-                  </p>
-                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>Two-Layer Anomaly Detection:</strong> Once reference bins are finalized,
-                    every qualifying operating point is checked against the reference for its current
-                    bin. <em>Layer 1</em> is instantaneous — if the current output falls outside the
-                    stored reference min/max range (plus your configured tolerance), an error is
-                    counted immediately. This catches sudden failures like a broken belt or failed
-                    diode. <em>Layer 2</em> is thermal — it accumulates a running average over
-                    approximately 90 seconds of operation in the same bin, then compares that settled
-                    average against the reference average. This catches gradual degradation that stays
-                    within the historical range on any individual reading but represents a sustained
-                    downward trend. Both layers check in both directions — unexpectedly high output
-                    is also flagged, as it can indicate a regulator fault or measurement error.
-                  </p>
-                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>The Plot:</strong> The scatter plot shows field drive voltage on the
-                    horizontal axis and alternator output current on the vertical axis. When a
-                    finalized reference bin is active, a gray shaded band shows the historical
-                    min/max range and a solid gray line shows the historical average for that
-                    operating region. The red dot shows the live operating point. If the red dot
-                    sits inside the band, the alternator is performing normally. If it drifts
-                    outside, the band color and the warning banner below reflect the deviation.
-                    When operating in a populated but non-finalized bin, the band is shown faded
-                    with a Low Confidence label. When no reference data exists for the current
-                    conditions, only the red dot is shown.
-                  </p>
-                  <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>Alarms and Reset:</strong> The session error count resets each power
-                    cycle. If the combined Layer 1 and Layer 2 error count exceeds the configured
-                    threshold in a single session, a warning banner appears on screen and optionally
-                    triggers the physical alarm output. The warning banner gives specific detail
-                    about which operating conditions triggered the anomaly, what the reference
-                    values were, and by how much the current output deviated. Use the Reset button
-                    only if you have replaced the alternator or made a mechanical change that
-                    invalidates the existing reference — it clears all accumulated matrix data and
-                    reference bins permanently.
-                  </p>
-                </div>
-
-              </details><!-- END Efficiency Matrix How it Works -->
-              <!-- Anomaly Tolerance -->
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                  <span>Anomaly Tolerance (A) (<span id="anomalyMarginAmps_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Extra amps of tolerance added beyond the stored reference
-                      min/max before a steady-state point is counted as an anomaly. 0 = any exceedance
-                      counts. Recommended: start at 3–5A to absorb natural measurement scatter and avoid
-                      false positives. Reduce once you have confidence in the reference data.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="anomalyMarginAmps" type="number" step="0.5" min="0" max="20" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <!-- Alarm Threshold -->
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                  <span>Alarm Threshold (errors) (<span id="anomalyAlarmThreshold_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Number of out-of-range steady-state points required in a
-                      single session before the alarm fires. Resets every power cycle. Recommended: 5.
-                      Lower values are more sensitive but risk false alarms from transient conditions
-                      like cold starts or sudden load changes. Raise to 10+ in rough sea conditions
-                      where RPM and load are less stable.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="anomalyAlarmThreshold" type="number" step="1" min="1" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <!-- Degradation Sensitivity -->
-              <div class="form-row">
-                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                  <span>Degradation Sensitivity (%) (<span id="degradationThreshold_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">How far the thermally-settled session average must drift
-                      from the reference average before a degradation alert fires. 15% means the
-                      alternator must be producing 15% more or less than its reference average,
-                      sustained over ~90 seconds, before Layer 2 triggers. Lower values are more
-                      sensitive. Recommended starting point: 15%. Reduce to 10% once you have
-                      confidence in the reference data quality.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="degradationThreshold" type="number" step="1" min="5" max="50" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <!-- Audible Alarm Enable -->
-              <hr />
-              <div class="form-row">
-                <div class="form-label">
-                  Enable Audible Alarm (<span id="anomalyAlarmEnable_echo">?</span>):
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">When ON, triggers the physical alarm output once the
-                      session anomaly count exceeds the threshold above. Leave OFF until the reference
-                      matrix is finalized and you have validated that the detection is not generating
-                      false positives. The on-screen banner warning is always shown regardless of
-                      this setting.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="anomalyAlarmEnable_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('anomalyAlarmEnable_checkbox', 'anomalyAlarmEnable', 'anomalyAlarmEnable')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="anomalyAlarmEnable" name="anomalyAlarmEnable" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <!-- Matrix Reset -->
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                  <span>Efficiency Matrix:</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Clears all accumulated matrix data, reference bins, and
-                      anomaly history. Use this if you have replaced the alternator, changed belt ratio,
-                      or changed any of the architect-level bucket settings in firmware. The system
-                      will need to re-learn from scratch over several hours of operation.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <button id="eff-reset-btn" class="btn-danger">Reset All Matrix Data</button>
-                </div>
-              </div>
-
-            </details><!-- END Anomaly Detection & Matrix -->
-            <!-- ============================================================
-                 2. ALTERNATOR SETUP (closed)
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">Alternator Setup</summary>
+            <div id="alt-panel-alt-setup" class="alt-panel alt-panel-primary">
 
               <!-- Output Control (closed) -->
               <details class="alt-nested-section">
@@ -1392,6 +1148,29 @@
               <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Temperature Settings</summary>
 
+                <!-- Alternator Temp Limit -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Alternator Temp Limit (°F) (<span id="TemperatureLimitF_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">
+                      ℹ️
+                      <span class="tooltip-box">Maximum safe temperature (°F) at the sensor location. The outer
+                        temperature PID begins reducing current as temperature approaches this value — intervention starts
+                        at (Limit − Temp PID Margin), defaulting to 15°F below. Hard warning and critical shutdowns
+                        trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
+                        this offset when setting this value.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp Source (<span id="TempSource_echo">?</span>):</span>
@@ -1567,7 +1346,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="CurrentThreshold" type="number" step="0.01" min="0.01" max="20" />
+                      <input name="CurrentThreshold" type="number" step="0.01" min="0" max="9999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1602,8 +1381,8 @@
 
               </details><!-- END Current Sensing -->
 
-              <!-- Alternator Health (closed) -->
-              <details class="alt-nested-section">
+              <!-- Alternator Health -->
+              <details open class="alt-nested-section">
                 <summary class="alt-summary-nested">Alternator Health</summary>
 
                 <div class="form-row">
@@ -1624,13 +1403,9 @@
 
               </details><!-- END Alternator Health -->
 
-            </details><!-- END Alternator Setup -->
+            </div>
 
-            <!-- ============================================================
-                 3. INNER LOOP — CURRENT PID (closed)
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">Inner Loop — Current PID</summary>
+            <div id="alt-panel-inner-loop" class="alt-panel alt-panel-primary">
 
               <!-- Telemetry (open) -->
               <details open class="alt-nested-section">
@@ -1748,9 +1523,14 @@
 
 
 
-                <!-- Reset Inner PID — inside Telemetry -->
-                <hr />
+              </details><!-- END Inner Telemetry -->
 
+              <!-- Controller Parameters (closed) -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Controller Parameters</summary>
+
+                <!-- Reset Inner PID -->
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Reset Inner PID</span>
@@ -1763,12 +1543,6 @@
                     <button onclick="resetInnerPID()" class="btn-primary">Reset Inner PID</button>
                   </div>
                 </div>
-
-              </details><!-- END Inner Telemetry -->
-
-              <!-- Controller Parameters (closed) -->
-              <details class="alt-nested-section">
-                <summary class="alt-summary-nested">Controller Parameters</summary>
 
                 <hr />
                 <div class="form-row">
@@ -1908,7 +1682,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="DutyRampRate" type="number" step="1" min="1" max="9999" />
+                      <input name="DutyRampRate" type="number" step="0.01" min="0" max="9999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2062,20 +1836,15 @@
 
               </details><!-- END Current Target Generator -->
 
-              <!-- Live Plot View (closed) -->
-              <details class="alt-nested-section">
+              <!-- Live Plot View -->
+              <details open class="alt-nested-section">
                 <summary class="alt-summary-nested">Live Plot View</summary>
                 <div class="plot-container" id="pid-tuning-plot"></div>
               </details>
 
-            </details><!-- END Inner Loop -->
+            </div>
 
-
-            <!-- ============================================================
-                 4. OUTER LOOP — TEMPERATURE PID (closed)
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">Outer Loop — Temperature PID</summary>
+            <div id="alt-panel-outer-loop" class="alt-panel alt-panel-primary">
 
               <!-- Telemetry (open) -->
               <details open class="alt-nested-section">
@@ -2182,7 +1951,240 @@
                     </div>
                   </div>
 
-                  <!-- Voltage Control Loop -->
+                </div>
+
+              </details><!-- END Outer Telemetry -->
+
+              <!-- Controller Parameters (closed) -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Controller Parameters</summary>
+
+                <!-- Reset Thermal PID -->
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Reset Thermal PID (Outer Loop)</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Clears the thermal PID integrator, filter, and derivative history. The
+                        controller will rebuild from current conditions on the next tick. Use if the integrator has
+                        wound up badly during tuning.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <button onclick="resetThermalPID()" class="btn-primary">Reset Thermal PID</button>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Proportional gain of the outer temperature loop. Units are amps per °F of
+                        error. Higher = more aggressive current reduction as temp approaches setpoint. Default:
+                        0.5.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKp" type="number" step="0.01" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
+                        gain of the outer temperature loop. Anti-windup tracking keeps the integrator parked near the
+                        active constraint when temp PID is not the binding limit. Default: 0.05.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKi" type="number" step="0.001" min="0" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Kd (library) (<span id="TempPIDKd_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Library
+                        derivative gain computed over one 5-second compute interval — too short to capture real thermal
+                        momentum. Keep at 0. Use Kd External instead, which computes over a 20-second window. Default:
+                        0.0.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKd" type="number" step="0.1" min="0" max="500" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Kd External (A/°F/s) (<span id="TempPIDKdExternal_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Derivative gain computed over a 20-second window. Increases thermal penalty
+                        when temperature is rising quickly, before the setpoint is reached. Zero disables. Start small
+                        (try 2.0–5.0). Default: 0.0.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKdExternal" type="number" step="0.1" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Margin (°F) (<span id="TempPIDMarginF_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
+                        below TemperatureLimitF that the outer PID targets. The PID works to hold temp at (Limit −
+                        Margin), giving it room to act before the hard safety threshold. Larger = earlier, gentler
+                        intervention. Default: 15°F.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDMarginF" type="number" step="0.01" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                        often the outer temperature PID computes. Independent of the inner loop rate. Longer intervals
+                        are appropriate given thermal time constants measured in seconds. Default: 5000ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDIntervalMs" type="number" step="1" min="500" max="60000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Filter Alpha (<span id="TempPIDFilterAlpha_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">IIR
+                        smoothing coefficient applied to temperature before it reaches the PID. 0 = frozen, 1 = raw
+                        unfiltered. Lower values reject sensor noise but slow reaction to real changes. Default:
+                        0.2.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDFilterAlpha" type="number" step="0.01" min="0.01" max="1.0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+
+              </details><!-- END Outer Controller Parameters -->
+
+              <!-- Live Plot View -->
+              <details id="thermallog-details" class="alt-nested-section">
+                <summary class="alt-summary-nested">Live Plot View</summary>
+
+                <div style="display:flex; justify-content:space-between; align-items:center;
+              margin: 8px 0 12px 0;">
+                  <span id="thermallog-status" style="font-size:12px; color:var(--text-muted);">Not loaded — open
+                    section to fetch.</span>
+                  <button type="button" class="btn-secondary" onclick="fetchAndRenderThermalLog()">↺ Refresh
+                    Now</button>
+                </div>
+
+                <div
+                  style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin:8px 0 12px 0;font-size:13px;">
+
+                  <label style="display:flex;align-items:center;gap:6px;color:var(--text-dark);">
+                    <input type="checkbox" id="thermal-autoscale" checked>
+                    Autoscale Y axes
+                  </label>
+
+                  <div id="thermal-manual-ranges" style="display:none;flex-wrap:wrap;gap:12px;">
+
+                    <span style="color:var(--text-muted);">Plot 1 Temp:</span>
+                    <input id="p1-temp-min" type="number" value="100" style="width:60px;" placeholder="min">
+                    <input id="p1-temp-max" type="number" value="250" style="width:60px;" placeholder="max">
+
+                    <span style="color:var(--text-muted);">Plot 1 Amps:</span>
+                    <input id="p1-amps-min" type="number" value="-5" style="width:60px;" placeholder="min">
+                    <input id="p1-amps-max" type="number" value="50" style="width:60px;" placeholder="max">
+
+                    <span style="color:var(--text-muted);">Plot 2:</span>
+                    <input id="p2-min" type="number" value="-20" style="width:60px;" placeholder="min">
+                    <input id="p2-max" type="number" value="80" style="width:60px;" placeholder="max">
+
+                    <span style="color:var(--text-muted);">Plot 3:</span>
+                    <input id="p3-min" type="number" value="0" style="width:60px;" placeholder="min">
+                    <input id="p3-max" type="number" value="100" style="width:60px;" placeholder="max">
+
+                    <button type="button" class="btn-secondary" onclick="applyThermalRanges()">Apply</button>
+                  </div>
+
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px 0;">
+                  <span style="font-size:13px;color:var(--text-muted);">Window:</span>
+                  <button type="button" class="btn-secondary" onclick="setThermalWindow(5)" id="tw-5">5m</button>
+                  <button type="button" class="btn-secondary" onclick="setThermalWindow(10)" id="tw-10">10m</button>
+                  <button type="button" class="btn-secondary" onclick="setThermalWindow(30)" id="tw-30">30m</button>
+                  <button type="button" class="btn-secondary" onclick="setThermalWindow(60)" id="tw-60">60m</button>
+                  <button type="button" class="btn-secondary" onclick="setThermalWindow(120)" id="tw-120">2h</button>
+                </div>
+
+                <button type="button" class="btn-secondary" onclick="resetThermalZoom()" id="tw-reset">↺ Reset
+                  Zoom</button>
+
+                <!-- Plot 1: Temp control & penalty -->
+                <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">
+                  Temperature Control &amp; Penalty
+                </div>
+                <div class="plot-container" id="thermallog-plot1" style="min-height:300px;"></div>
+
+                <div style="font-size:12px; color:var(--text-muted); margin:12px 0 4px 0;">
+                  Mode / Anti-Windup
+                </div>
+                <div class="plot-container" id="thermallog-plot-state" style="min-height:65px;"></div>
+
+                <!-- Plot 2: PID term decomposition -->
+                <div style="font-size:12px; color:var(--text-muted); margin:12px 0 4px 0;">
+                  Outer PID Term Decomposition
+                </div>
+                <div class="plot-container" id="thermallog-plot2" style="min-height:300px;"></div>
+
+              </details>
+
+            </div>
+
+            <div id="alt-panel-vt-mode" class="alt-panel alt-panel-primary">
+
+              <!-- Telemetry -->
+              <details open class="alt-nested-section">
+                <summary class="alt-summary-nested">Telemetry</summary>
+
+                <div class="grid telemetry-groups">
                   <div class="card-group telemetry-group" data-mode="cv">
                     <p class="card-group-title">Voltage Control Loop</p>
 
@@ -2221,18 +2223,20 @@
                       <span class="metric-value telemetry-value"><span id="Icv_display">?</span> A</span>
                     </div>
 
-                    <span class="metric-label telemetry-label">CV Integrator
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                        <span class="tooltip-box">cv_I — integrator state for the position-form CV voltage PI.
-                          Units are amps. Seeded on CV entry so Icv starts at setpointLimited with no step.
-                          The fast voltage safety override clamps cv_I ≤ Icv when correcting a predicted
-                          overshoot, and forces cv_I ≤ 0 while BatteryV is above target — preventing the
-                          integrator from rebuilding Icv immediately after a pullback. Should drift slowly
-                          toward the value that holds voltage at target. Large sustained values mean Kp alone
-                          cannot reach target — Ki is carrying the load.</span>
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">CV Integrator
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">cv_I — integrator state for the position-form CV voltage PI.
+                            Units are amps. Seeded on CV entry so Icv starts at setpointLimited with no step.
+                            The fast voltage safety override clamps cv_I ≤ Icv when correcting a predicted
+                            overshoot, and forces cv_I ≤ 0 while BatteryV is above target — preventing the
+                            integrator from rebuilding Icv immediately after a pullback. Should drift slowly
+                            toward the value that holds voltage at target. Large sustained values mean Kp alone
+                            cannot reach target — Ki is carrying the load.</span>
+                        </span>
                       </span>
-                    </span>
-                    <span class="metric-value telemetry-value"><span id="cv_I_display">?</span> A</span>
+                      <span class="metric-value telemetry-value"><span id="cv_I_display">?</span> A</span>
+                    </div>
 
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Voltage Ctrl Active
@@ -2318,155 +2322,58 @@
                     </div>
 
                   </div>
-
                 </div>
 
-                <!-- Reset Thermal PID — inside Telemetry -->
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Reset Thermal PID (Outer Loop)</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Clears the thermal PID integrator, filter, and derivative history. The
-                        controller will rebuild from current conditions on the next tick. Use if the integrator has
-                        wound up badly during tuning.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <button onclick="resetThermalPID()" class="btn-primary">Reset Thermal PID</button>
-                  </div>
-                </div>
+              </details><!-- END Telemetry -->
 
-              </details><!-- END Outer Telemetry -->
-
-              <!-- Controller Parameters (closed) -->
-              <details class="alt-nested-section">
+              <!-- Controller Parameters -->
+              <details open class="alt-nested-section">
                 <summary class="alt-summary-nested">Controller Parameters</summary>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain of the outer temperature loop. Units are amps per °F of
-                        error. Higher = more aggressive current reduction as temp approaches setpoint. Default:
-                        0.5.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKp" type="number" step="0.01" min="0" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Target Voltage Mode (<span id="TargetVoltageMode_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">⚠️ <strong>Not safe for Lithium batteries.</strong> This mode bypasses the normal charge algorithm — use only with flooded or AGM batteries, or in consultation with your battery manufacturer.<br><br>Overrides normal charging with fixed voltage control- mainly useful for
+                      tuning Voltage control PID parameters or simulating an old-school automotive alternator voltage
+                      regulator.</span>
+                  </span>
                 </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
-                        gain of the outer temperature loop. Anti-windup tracking keeps the integrator parked near the
-                        active constraint when temp PID is not the binding limit. Default: 0.05.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKi" type="number" step="0.001" min="0" max="10" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="TargetVoltageMode_checkbox" type="checkbox"
+                        onchange="if(validateAndSubmitBatteryToggle(this, 'TargetVoltageMode') && handleUserToggle('TargetVoltageMode_checkbox', 'TargetVoltageMode', 'TargetVoltageMode')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="TargetVoltageMode" name="TargetVoltageMode" type="number" value=""
+                      style="display:none;" />
+                  </form>
                 </div>
+              </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Kd (library) (<span id="TempPIDKd_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Library
-                        derivative gain computed over one 5-second compute interval — too short to capture real thermal
-                        momentum. Keep at 0. Use Kd External instead, which computes over a 20-second window. Default:
-                        0.0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKd" type="number" step="0.1" min="0" max="500" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Target Voltage Setpoint (V) (<span id="TargetVoltageSetpoint_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">Voltage target when mode is enabled.</span>
+                  </span>
                 </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Kd External (A/°F/s) (<span id="TempPIDKdExternal_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Derivative gain computed over a 20-second window. Increases thermal penalty
-                        when temperature is rising quickly, before the setpoint is reached. Zero disables. Start small
-                        (try 2.0–5.0). Default: 0.0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKdExternal" type="number" step="0.1" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'TargetVoltageSetpoint')">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="TargetVoltageSetpoint" type="number" step="0.01" min="1" max="100" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
                 </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Margin (°F) (<span id="TempPIDMarginF_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                        below TemperatureLimitF that the outer PID targets. The PID works to hold temp at (Limit −
-                        Margin), giving it room to act before the hard safety threshold. Larger = earlier, gentler
-                        intervention. Default: 15°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDMarginF" type="number" step="1" min="1" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the outer temperature PID computes. Independent of the inner loop rate. Longer intervals
-                        are appropriate given thermal time constants measured in seconds. Default: 5000ms.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDIntervalMs" type="number" step="1" min="500" max="60000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Filter Alpha (<span id="TempPIDFilterAlpha_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">IIR
-                        smoothing coefficient applied to temperature before it reaches the PID. 0 = frozen, 1 = raw
-                        unfiltered. Lower values reject sensor noise but slow reaction to real changes. Default:
-                        0.2.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDFilterAlpha" type="number" step="0.01" min="0.01" max="1.0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
+              </div>
 
                 <hr />
                 <div class="form-row">
@@ -2479,24 +2386,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKp" type="number" step="0.01" min="0" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the voltage outer loop recalculates. Active in absorption and float only. Typical:
-                        500ms.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="9000" />
+                      <input name="VoltageKp" type="number" step="0.01" min="0" max="9999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2514,102 +2404,215 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKi" type="number" step="0.01" min="0" max="50" />
+                      <input name="VoltageKi" type="number" step="0.01" min="0" max="9999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
 
-
-
-              </details><!-- END Outer Controller Parameters -->
-
-              <!-- Thermal Log Plot (closed) -->
-              <details id="thermallog-details" class="alt-nested-section">
-                <summary class="alt-summary-nested">Thermal Log Plot</summary>
-
-                <div style="display:flex; justify-content:space-between; align-items:center;
-              margin: 8px 0 12px 0;">
-                  <span id="thermallog-status" style="font-size:12px; color:var(--text-muted);">Not loaded — open
-                    section to fetch.</span>
-                  <button type="button" class="btn-secondary" onclick="fetchAndRenderThermalLog()">↺ Refresh
-                    Now</button>
-                </div>
-
-                <div
-                  style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin:8px 0 12px 0;font-size:13px;">
-
-                  <label style="display:flex;align-items:center;gap:6px;color:var(--text-dark);">
-                    <input type="checkbox" id="thermal-autoscale" checked>
-                    Autoscale Y axes
-                  </label>
-
-                  <div id="thermal-manual-ranges" style="display:none;flex-wrap:wrap;gap:12px;">
-
-                    <span style="color:var(--text-muted);">Plot 1 Temp:</span>
-                    <input id="p1-temp-min" type="number" value="100" style="width:60px;" placeholder="min">
-                    <input id="p1-temp-max" type="number" value="250" style="width:60px;" placeholder="max">
-
-                    <span style="color:var(--text-muted);">Plot 1 Amps:</span>
-                    <input id="p1-amps-min" type="number" value="-5" style="width:60px;" placeholder="min">
-                    <input id="p1-amps-max" type="number" value="50" style="width:60px;" placeholder="max">
-
-                    <span style="color:var(--text-muted);">Plot 2:</span>
-                    <input id="p2-min" type="number" value="-20" style="width:60px;" placeholder="min">
-                    <input id="p2-max" type="number" value="80" style="width:60px;" placeholder="max">
-
-                    <span style="color:var(--text-muted);">Plot 3:</span>
-                    <input id="p3-min" type="number" value="0" style="width:60px;" placeholder="min">
-                    <input id="p3-max" type="number" value="100" style="width:60px;" placeholder="max">
-
-                    <button type="button" class="btn-secondary" onclick="applyThermalRanges()">Apply</button>
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                        often the voltage outer loop recalculates. Active in absorption and float only. Typical:
+                        500ms.</span></span>
                   </div>
-
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
                 </div>
 
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px 0;">
-                  <span style="font-size:13px;color:var(--text-muted);">Window:</span>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(5)" id="tw-5">5m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(10)" id="tw-10">10m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(30)" id="tw-30">30m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(60)" id="tw-60">60m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(120)" id="tw-120">2h</button>
-                </div>
+              </details><!-- END VTM Controller Parameters -->
 
-                <button type="button" class="btn-secondary" onclick="resetThermalZoom()" id="tw-reset">↺ Reset
-                  Zoom</button>
+            </div>
 
-                <!-- Plot 1: Temp control & penalty -->
-                <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">
-                  Temperature Control &amp; Penalty
-                </div>
-                <div class="plot-container" id="thermallog-plot1" style="min-height:300px;"></div>
+            <div id="alt-panel-advanced" class="alt-panel alt-panel-primary">
 
-                <div style="font-size:12px; color:var(--text-muted); margin:12px 0 4px 0;">
-                  Mode / Anti-Windup
-                </div>
-                <div class="plot-container" id="thermallog-plot-state" style="min-height:65px;"></div>
+              <!-- Safety -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Safety</summary>
 
-                <!-- Plot 2: PID term decomposition -->
-                <div style="font-size:12px; color:var(--text-muted); margin:12px 0 4px 0;">
-                  Outer PID Term Decomposition
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Settle Time Before Cut (ms) (<span id="SettleTimeBeforeCut_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                      duty must be at 0% before GPIO4 field enable goes LOW. Prevents relay chatter during brief dips.
+                      Typical: 500ms.</span></span>
                 </div>
-                <div class="plot-container" id="thermallog-plot2" style="min-height:300px;"></div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="SettleTimeBeforeCut" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Temp Warning Excess (°F) (<span id="TempWarnExcess_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
+                      above TemperatureLimitF that triggers WARNING state. System ramps down duty cycle and begins
+                      lockout timer. Allows graceful response before critical shutdown. Typical: 10°F.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Temp Critical Excess (°F) (<span id="TempCritExcess_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
+                      above TemperatureLimitF that triggers IMMEDIATE GPIO4 cut (skips gradual ramp). Emergency
+                      protection. Typical: 30°F.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">If WARNING
+                      temperature is sustained this long, triggers GPIO4 cut. Catches slow-to-cool situations. Default:
+                      120s.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Voltage Spike Margin (V) (<span id="VoltageSpikeMargin_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts
+                      above BulkVoltage that triggers fast-response mode (bypasses slew limiting). Allows aggressive
+                      duty reduction during voltage spikes or load dump events. Typical: 0.2V.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="VoltageSpikeMargin" type="number" step="0.01" min="0" max="999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Voltage Disagree Threshold (V) (<span id="VoltageDisagreeThreshold_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
+                      difference between BatteryV and IBV that indicates sensor disagreement. Helps detect wiring or
+                      sensor issues. Typical: 0.15V.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="VoltageDisagreeThreshold" type="number" step="0.01" min="0" max="999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Voltage Disagree Timeout (s) (<span id="VoltageDisagreeTimeout_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                      voltage disagreement must persist before triggering warning. Filters transient differences.
+                      Default: 10s.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="VoltageDisagreeTimeout" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Field Collapse Delay (s) (<span id="FIELD_COLLAPSE_DELAY_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                      class="tooltip-box">Lockout/cooldown duration after WARNING or CRITICAL fault. System will not
+                      restart charging until this time elapses, even if fault clears. Default: 30s.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="FIELD_COLLAPSE_DELAY" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hard OC Trip Threshold (A) (<span id="HardOCTripAmps_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Alternator
+                      output current above which the hard overcurrent fuse trips. GPIO4 is cut immediately — no ramp, no
+                      phases. Acts in all modes including Manual. Default: 180A.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="HardOCTripAmps" type="number" step="0.1" min="0" max="9999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hard OC Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                      current must continuously exceed the trip threshold before the fuse fires. Guards against
+                      single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively
+                      met by any qualifying sample. Default: 20ms.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
 
               </details>
 
-            </details><!-- END Outer Loop -->
-
-
-            <!-- ============================================================
-     SYSTEM ID — Plant Delay Measurement & Input Filter
-============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">System ID — Plant Delay &amp; Input Filter</summary>
-
-              <!-- Telemetry (open) -->
-              <details open class="alt-nested-section">
-                <summary class="alt-summary-nested">Telemetry</summary>
+              <!-- Plant Time Delay -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Plant Time Delay</summary>
 
                 <div class="grid telemetry-groups">
 
@@ -2727,12 +2730,6 @@
 
                 </div>
 
-              </details><!-- END Test Status Telemetry -->
-
-              <!-- Controller Parameters (closed) -->
-              <details class="alt-nested-section">
-                <summary class="alt-summary-nested">Parameters &amp; Controls</summary>
-
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -2790,197 +2787,191 @@
                   </div>
                 </div>
 
-              </details><!-- END Parameters & Controls -->
+              </details><!-- END Plant Time Delay -->
 
-            </details><!-- END System ID tab -->
+              <!-- Anomaly Detection (settings) -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Anomaly Detection</summary>
 
+                <p style="font-size:12px;color:var(--text-muted);margin:8px 0 12px 0;">
+                  The live scatter plot for anomaly detection is shown in
+                  <strong>Live Data → Alternator</strong> (Field vs Output for this RPM and Temperature Bucket).
+                  The reset button is also there, just below the plot.
+                </p>
 
-
-            <!-- ============================================================
-                 5. SAFETY (closed) — top-level, not inside Outer Loop
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">Safety</summary>
-
-              <hr />
+              <!-- Anomaly Tolerance -->
               <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Settle Time Before Cut (ms) (<span id="SettleTimeBeforeCut_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      duty must be at 0% before GPIO4 field enable goes LOW. Prevents relay chatter during brief dips.
-                      Typical: 500ms.</span></span>
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Anomaly Tolerance (A) (<span id="anomalyMarginAmps_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Extra amps of tolerance added beyond the stored reference
+                      min/max before a steady-state point is counted as an anomaly. 0 = any exceedance
+                      counts. Recommended: start at 3–5A to absorb natural measurement scatter and avoid
+                      false positives. Reduce once you have confidence in the reference data.</span>
+                  </span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
-                    <input name="SettleTimeBeforeCut" type="number" step="1" min="0" max="10000" />
+                    <input name="anomalyMarginAmps" type="number" step="0.5" min="0" max="20" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <!-- Alarm Threshold -->
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Alarm Threshold (errors) (<span id="anomalyAlarmThreshold_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Number of out-of-range steady-state points required in a
+                      single session before the alarm fires. Resets every power cycle. Recommended: 5.
+                      Lower values are more sensitive but risk false alarms from transient conditions
+                      like cold starts or sudden load changes. Raise to 10+ in rough sea conditions
+                      where RPM and load are less stable.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="anomalyAlarmThreshold" type="number" step="1" min="1" max="100" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
               </div>
 
               <hr />
+              <!-- Degradation Sensitivity -->
               <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Temp Warning Excess (°F) (<span id="TempWarnExcess_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                      above TemperatureLimitF that triggers WARNING state. System ramps down duty cycle and begins
-                      lockout timer. Allows graceful response before critical shutdown. Typical: 10°F.</span></span>
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Degradation Sensitivity (%) (<span id="degradationThreshold_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">How far the thermally-settled session average must drift
+                      from the reference average before a degradation alert fires. 15% means the
+                      alternator must be producing 15% more or less than its reference average,
+                      sustained over ~90 seconds, before Layer 2 triggers. Lower values are more
+                      sensitive. Recommended starting point: 15%. Reduce to 10% once you have
+                      confidence in the reference data quality.</span>
+                  </span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
-                    <input name="TempWarnExcess" type="number" step="1" min="1" max="100" />
+                    <input name="degradationThreshold" type="number" step="1" min="5" max="50" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
               </div>
 
+              <!-- Audible Alarm Enable -->
               <hr />
               <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Temp Critical Excess (°F) (<span id="TempCritExcess_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                      above TemperatureLimitF that triggers IMMEDIATE GPIO4 cut (skips gradual ramp). Emergency
-                      protection. Typical: 30°F.</span></span>
+                <div class="form-label">
+                  Enable Audible Alarm (<span id="anomalyAlarmEnable_echo">?</span>):
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">When ON, triggers the physical alarm output once the
+                      session anomaly count exceeds the threshold above. Leave OFF until the reference
+                      matrix is finalized and you have validated that the detection is not generating
+                      false positives. The on-screen banner warning is always shown regardless of
+                      this setting.</span>
+                  </span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
-                    <input name="TempCritExcess" type="number" step="1" min="1" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="anomalyAlarmEnable_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('anomalyAlarmEnable_checkbox', 'anomalyAlarmEnable', 'anomalyAlarmEnable')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="anomalyAlarmEnable" name="anomalyAlarmEnable" type="number" value=""
+                      style="display:none;" />
                   </form>
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">If WARNING
-                      temperature is sustained this long, triggers GPIO4 cut. Catches slow-to-cool situations. Default:
-                      120s.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="TempSustainedTimeout" type="number" step="1" min="10" max="600" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
+              </details>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Voltage Spike Margin (V) (<span id="VoltageSpikeMargin_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts
-                      above BulkVoltage that triggers fast-response mode (bypasses slew limiting). Allows aggressive
-                      duty reduction during voltage spikes or load dump events. Typical: 0.2V.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageSpikeMargin" type="number" step="0.01" min="0.05" max="2.0" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
+              <!-- How Anomaly Detection Works (reference) -->
+              <details class="alt-nested-section" open>
+                <summary class="alt-summary-nested">How Anomaly Detection Works</summary>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Voltage Disagree Threshold (V) (<span id="VoltageDisagreeThreshold_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
-                      difference between BatteryV and IBV that indicates sensor disagreement. Helps detect wiring or
-                      sensor issues. Typical: 0.15V.</span></span>
+                <div
+                  style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
+                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                    <strong>What This System Does:</strong> The efficiency matrix learns the normal
+                    relationship between alternator field drive and output current across
+                    engine operating conditions. Once enough data is accumulated, it can detect when
+                    the alternator is producing significantly more or less current than it historically
+                    has under the same conditions — an early warning of problem such as brush wear,
+                    diode failure, belt slip, etc.
+                  </p>
+                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                    <strong>The Reference Matrix:</strong> Operating conditions are divided into bins
+                    along three axes — engine RPM, alternator case temperature, and field drive voltage
+                    (duty cycle × battery voltage). Every qualifying operating point is accumulated into
+                    the appropriate bin as a time-weighted running average, with minimum and maximum
+                    values tracked. This matrix persists across power cycles and accumulates forever.
+                    The more hours of operation, the more reliable each bin becomes.
+                  </p>
+                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                    <strong>Reference Finalization:</strong> Once the matrix has accumulated enough
+                    data across a sufficiently wide spread of operating conditions, the system
+                    automatically selects the best-populated bins as reference bins and freezes their
+                    values. These frozen values become the permanent baseline for anomaly detection.
+                    The selection algorithm favors bins that collectively span a wide range of RPM,
+                    temperature, and field drive — ensuring the reference is not built from a single
+                    narrow operating region. Until finalization occurs, the plot displays available
+                    data at reduced opacity with a "Low Confidence" label.
+                  </p>
+                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                    <strong>Two-Layer Anomaly Detection:</strong> Once reference bins are finalized,
+                    every qualifying operating point is checked against the reference for its current
+                    bin. <em>Layer 1</em> is instantaneous — if the current output falls outside the
+                    stored reference min/max range (plus your configured tolerance), an error is
+                    counted immediately. This catches sudden failures like a broken belt or failed
+                    diode. <em>Layer 2</em> is thermal — it accumulates a running average over
+                    approximately 90 seconds of operation in the same bin, then compares that settled
+                    average against the reference average. This catches gradual degradation that stays
+                    within the historical range on any individual reading but represents a sustained
+                    downward trend. Both layers check in both directions — unexpectedly high output
+                    is also flagged, as it can indicate a regulator fault or measurement error.
+                  </p>
+                  <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                    <strong>The Plot:</strong> The scatter plot shows field drive voltage on the
+                    horizontal axis and alternator output current on the vertical axis. When a
+                    finalized reference bin is active, a gray shaded band shows the historical
+                    min/max range and a solid gray line shows the historical average for that
+                    operating region. The red dot shows the live operating point. If the red dot
+                    sits inside the band, the alternator is performing normally. If it drifts
+                    outside, the band color and the warning banner below reflect the deviation.
+                    When operating in a populated but non-finalized bin, the band is shown faded
+                    with a Low Confidence label. When no reference data exists for the current
+                    conditions, only the red dot is shown.
+                  </p>
+                  <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
+                    <strong>Alarms and Reset:</strong> The session error count resets each power
+                    cycle. If the combined Layer 1 and Layer 2 error count exceeds the configured
+                    threshold in a single session, a warning banner appears on screen and optionally
+                    triggers the physical alarm output. The warning banner gives specific detail
+                    about which operating conditions triggered the anomaly, what the reference
+                    values were, and by how much the current output deviated. Use the Reset button
+                    only if you have replaced the alternator or made a mechanical change that
+                    invalidates the existing reference — it clears all accumulated matrix data and
+                    reference bins permanently.
+                  </p>
                 </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageDisagreeThreshold" type="number" step="0.01" min="0.05" max="2.0" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Voltage Disagree Timeout (s) (<span id="VoltageDisagreeTimeout_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      voltage disagreement must persist before triggering warning. Filters transient differences.
-                      Default: 10s.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageDisagreeTimeout" type="number" step="1" min="1" max="120" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
+              </details><!-- END How Anomaly Detection Works -->
+            </div>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Field Collapse Delay (s) (<span id="FIELD_COLLAPSE_DELAY_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                      class="tooltip-box">Lockout/cooldown duration after WARNING or CRITICAL fault. System will not
-                      restart charging until this time elapses, even if fault clears. Default: 30s.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="FIELD_COLLAPSE_DELAY" type="number" step="1" min="1" max="600" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
+            <div id="alt-panel-about" class="alt-panel alt-panel-primary">
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Hard OC Trip Threshold (A) (<span id="HardOCTripAmps_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Alternator
-                      output current above which the hard overcurrent fuse trips. GPIO4 is cut immediately — no ramp, no
-                      phases. Acts in all modes including Manual. Default: 180A.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="HardOCTripAmps" type="number" step="0.1" min="10" max="500" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Hard OC Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      current must continuously exceed the trip threshold before the fuse fires. Guards against
-                      single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively
-                      met by any qualifying sample. Default: 20ms.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="HardOCDebounceMs" type="number" step="1" min="0" max="500" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-            </details><!-- END Safety -->
-
-
-            <!-- ============================================================
-                 6. HOW IT WORKS (closed) — top-level
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">How it Works</summary>
+            <details class="alt-nested-section">
+              <summary class="alt-summary-nested">PID Control Architecture</summary>
 
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
@@ -3048,14 +3039,10 @@
                 </p>
               </div>
 
-            </details><!-- END How it Works -->
+            </details>
 
-
-            <!-- ============================================================
-                 7. HOW TO TUNE THE PID CONTROLLER (closed) — top-level
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">How to Tune the PID Controller</summary>
+            <details class="alt-nested-section" open>
+              <summary class="alt-summary-nested">How to Tune the PID Controller</summary>
 
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
@@ -3099,399 +3086,9 @@
                 </p>
               </div>
 
-            </details><!-- END How to Tune -->
+            </details>
 
-
-            <!-- ============================================================
-                 8. OBSOLETE (closed) — top-level
-            ============================================================ -->
-            <details class="alt-top-section">
-              <summary class="alt-summary-top">⚠️ Obsolete — Do Not Use</summary>
-
-              <p style="color: var(--text-muted); font-style: italic; margin: 10px 0 16px 0;">
-                These variables are no longer used by the firmware. They are preserved here for reference only and have
-                no effect.
-              </p>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Setpoint Ramp Rate (A/s) (<span id="SetpointRampRate_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="SetpointRampRate" type="number" step="0.1" min="0.1" max="9999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Voltage Trim Limit (A) (<span id="VoltageTrimLimit_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                      allowable trim (±A) applied by the voltage loop around measured current. Limits how aggressively
-                      the controller can push up or pull down current in CV modes.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageTrimLimit" type="number" step="0.1" min="0" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Learning Mode Enable (<span id="LearningMode_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="LearningMode_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('LearningMode_checkbox', 'LearningMode', 'LearningMode')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="LearningMode" name="LearningMode" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Pause Learning (<span id="LearningPaused_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="LearningPaused_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('LearningPaused_checkbox', 'LearningPaused', 'LearningPaused')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="LearningPaused" name="LearningPaused" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Test Mode (<span id="LearningDryRunMode_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="LearningDryRunMode_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('LearningDryRunMode_checkbox', 'LearningDryRunMode', 'LearningDryRunMode')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="LearningDryRunMode" name="LearningDryRunMode" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Learning Upward Enabled (<span id="LearningUpwardEnabled_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="LearningUpwardEnabled_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('LearningUpwardEnabled_checkbox', 'LearningUpwardEnabled', 'LearningUpwardEnabled')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="LearningUpwardEnabled" name="LearningUpwardEnabled" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Learning Downward Enabled (<span id="LearningDownwardEnabled_echo">?</span>):
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="LearningDownwardEnabled_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('LearningDownwardEnabled_checkbox', 'LearningDownwardEnabled', 'LearningDownwardEnabled')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="LearningDownwardEnabled" name="LearningDownwardEnabled" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Ignore Learning During Penalty (<span
-                    id="IgnoreLearningDuringPenalty_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="IgnoreLearningDuringPenalty_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('IgnoreLearningDuringPenalty_checkbox', 'IgnoreLearningDuringPenalty', 'IgnoreLearningDuringPenalty')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="IgnoreLearningDuringPenalty" name="IgnoreLearningDuringPenalty" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Enable Neighbor Learning (<span id="EnableNeighborLearning_echo">?</span>):
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="EnableNeighborLearning_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('EnableNeighborLearning_checkbox', 'EnableNeighborLearning', 'EnableNeighborLearning')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="EnableNeighborLearning" name="EnableNeighborLearning" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Enable Ambient Correction (<span id="EnableAmbientCorrection_echo">?</span>):
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="EnableAmbientCorrection_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('EnableAmbientCorrection_checkbox', 'EnableAmbientCorrection', 'EnableAmbientCorrection')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="EnableAmbientCorrection" name="EnableAmbientCorrection" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Show Learning Debug Messages (<span
-                    id="ShowLearningDebugMessages_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="ShowLearningDebugMessages_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('ShowLearningDebugMessages_checkbox', 'ShowLearningDebugMessages', 'ShowLearningDebugMessages')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="ShowLearningDebugMessages" name="ShowLearningDebugMessages" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Alternator Nominal Amps (<span id="AlternatorNominalAmps_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="AlternatorNominalAmps" type="number" step="1" min="1" max="5000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Learning Up Step (A) (<span id="LearningUpStep_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LearningUpStep" type="number" step="0.01" min="0" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Learning Down Step (A) (<span id="LearningDownStep_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LearningDownStep" type="number" step="0.01" min="0" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Min Learning Interval (s) (<span id="MinLearningInterval_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="MinLearningInterval" type="number" step="1" min="1" max="600000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Safe Time Required (s) (<span id="SafeOperationThreshold_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="SafeOperationThreshold" type="number" step="1" min="1" max="40000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Ambient Temp Correction Factor (A/°F) (<span
-                    id="AmbientTempCorrectionFactor_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="AmbientTempCorrectionFactor" type="number" step="0.01" min="-1000" max="1000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Max Penalty Percent (<span id="MaxPenaltyPercent_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="MaxPenaltyPercent" type="number" step="1" min="0" max="100" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Max Penalty Duration (s) (<span id="MaxPenaltyDuration_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="MaxPenaltyDuration" type="number" step="1" min="0" max="360000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Neighbor Learning Factor (<span id="NeighborLearningFactor_echo">?</span>):
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="NeighborLearningFactor" type="number" step="0.01" min="0" max="10000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Learning Settling Period (s) (<span id="LearningSettlingPeriod_echo">?</span>):
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LearningSettlingPeriod" type="number" step="1" min="0" max="600" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">RPM Change Threshold (<span id="LearningRPMChangeThreshold_display">?</span>):
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LearningRPMChangeThreshold" type="number" step="1" min="0" max="1000" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Temperature Hysteresis (°F) (<span
-                    id="LearningTempHysteresis_display">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LearningTempHysteresis" type="number" step="1" min="0" max="50" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="learning-info-grid">
-                <div class="learning-info-item">
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Learning Target From
-                      RPM:</span><span class="learning-info-value"><span
-                        id="learningTargetFromRPM_display">?</span>A</span></div>
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Ambient Temp
-                      Correction:</span><span class="learning-info-value"><span
-                        id="ambientTempCorrection_display">?</span>A</span></div>
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Final Learning
-                      Target:</span><span class="learning-info-value"><span
-                        id="finalLearningTarget_display">?</span>A</span></div>
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Penalty Timer:</span><span
-                      class="learning-info-value"><span id="overheatingPenaltyTimer_display">?</span>s</span></div>
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Penalty
-                      Reduction:</span><span class="learning-info-value"><span
-                        id="overheatingPenaltyAmps_display">?</span>A</span></div>
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Total Learning
-                      Events:</span><span class="learning-info-value"><span
-                        id="totalLearningEvents_display">?</span></span></div>
-                  <div class="learning-info-value-pair"><span class="learning-info-label">Average Table
-                      Value:</span><span class="learning-info-value"><span
-                        id="averageTableValue_display">?</span>A</span></div>
-                </div>
-              </div>
-
-            </details><!-- END Obsolete -->
+            </div> <!-- close alt-panel-about -->
 
           </div> <!-- close settings-card -->
         </div> <!-- close settings-alternator -->
@@ -3932,59 +3529,6 @@
 
             </details>
 
-            <!-- Voltage Target Mode -->
-            <details open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Voltage Target Mode
-              </summary>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Target Voltage Mode (<span id="TargetVoltageMode_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">Overrides normal charging with fixed voltage control- mainly useful for
-                      tuning Voltage control PID parameters or simulating an old-school automotive alternator voltage
-                      regulator.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="TargetVoltageMode_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'TargetVoltageMode') && handleUserToggle('TargetVoltageMode_checkbox', 'TargetVoltageMode', 'TargetVoltageMode')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="TargetVoltageMode" name="TargetVoltageMode" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Target Voltage Setpoint (V) (<span id="TargetVoltageSetpoint_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">Voltage target when mode is enabled.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'TargetVoltageSetpoint')">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="TargetVoltageSetpoint" type="number" step="0.01" min="1" max="100" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-            </details>
 
             <!-- SoC Integration Section -->
             <details open style="margin-top: 20px;">
@@ -5290,6 +4834,34 @@
     <div id="livedata-alternator" class="sub-tab-content">
 
       <div class="settings-card">
+        <span id="alt-health-badge" class="alt-health-badge badge-neutral">ALT ◌</span>
+
+        <!-- Health percentage and session trend sparkline -->
+        <div id="eff-health-row"
+          style="display:flex;align-items:flex-start;gap:16px;margin-bottom:10px;flex-wrap:wrap;">
+
+          <!-- Live health number -->
+          <div style="min-width:90px;text-align:center;">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Live Health</div>
+            <div id="eff-health-pct" style="font-size:28px;font-weight:bold;color:#4CAF50;line-height:1;">
+              --
+            </div>
+            <div style="font-size:10px;color:var(--text-muted);">vs reference avg</div>
+          </div>
+
+          <!-- Sparkline -->
+          <div style="flex:1;min-width:180px;">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">
+              Session History
+              <span style="font-size:10px;opacity:0.6;">(last 30 sessions)</span>
+            </div>
+            <div id="eff-sparkline-container" style="width:100%;"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="settings-card">
         <div class="grid">
 
           <div class="card">
@@ -5334,7 +4906,10 @@
       </div> <!-- closes .settings-card -->
       <div class="settings-card" style="margin-top:16px;">
         <p class="card-group-title">Field vs Output for this RPM and Temperature Bucket</p>
-
+        <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px 0;">
+          Anomaly detection settings (tolerance, alarm threshold, degradation sensitivity) live in
+          <strong>Settings → Alternator → Advanced → Anomaly Detection</strong>.
+        </p>
 
         <!-- Efficiency anomaly warning — shown by JS when deviation detected -->
         <div id="eff-anomaly-banner" class="eff-anomaly-banner" style="display:none;">
@@ -5354,7 +4929,7 @@
 
         <span class="metric-value"
           style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;">
-          <input type="button" id="eff-reset-btn" value="Clear" class="btn-secondary"
+          <input type="button" id="eff-reset-btn" value="Reset All Matrix Data" class="btn-danger"
             title="Delete all learned efficiency matrix data and reference bins" />
         </span>
 
@@ -6668,6 +6243,23 @@
 
     <!-- Plot Displays Sub-tab - This should be active by default -->
     <div id="plots-displays" class="sub-tab-content active">
+      <div class="settings-card">
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Download Logs:</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Sends the last ~1 hour (133kb) of 2s interval data and the last ~1 minute
+                (21kb) of 100ms interval data to CSV files to the Downloads folder (pc) or Files (mobile
+                device). Logs are automatically cleared after download.</span>
+            </span>
+          </div>
+          <div class="form-input" style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="btn-primary" onclick="downloadLogs()">Download Logs</button>
+            <button type="button" class="btn-danger" onclick="resetLogs()">Reset Logs</button>
+          </div>
+        </div>
+      </div>
       <div class="settings-card">
         <div class="plot-container" id="current-temp-plot"></div>
       </div>

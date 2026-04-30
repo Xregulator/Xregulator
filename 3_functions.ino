@@ -3171,6 +3171,21 @@ void setupServer() {
       DutyRampRate = inputMessage.toFloat();
       queueConsoleMessageF("Duty ramp rate set to: %.1f %%/sec", DutyRampRate);
     }
+    if (request->hasParam("DutySlowRampRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("DutySlowRampRate")->value();
+      writeFile(LittleFS, "/DutySlowRampRate.txt", inputMessage.c_str());
+      DutySlowRampRate = inputMessage.toFloat();
+      queueConsoleMessageF("Shutdown slow ramp rate set to: %.2f %%/s", DutySlowRampRate);
+    }
+    if (request->hasParam("ShutdownPhase2HoldMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("ShutdownPhase2HoldMs")->value();
+      uint32_t ms = (uint32_t)inputMessage.toInt();
+      writeFile(LittleFS, "/ShutdownPhase2HoldMs.txt", String(ms).c_str());
+      ShutdownPhase2HoldMs = ms;
+      queueConsoleMessageF("Shutdown phase 2 hold set to: %u ms", ShutdownPhase2HoldMs);
+    }
     if (request->hasParam("SettleTimeBeforeCut")) {
       foundParameter = true;
       inputMessage = request->getParam("SettleTimeBeforeCut")->value();
@@ -4593,8 +4608,8 @@ void SendWifiData() {
                                SafeInt(VoltageKp, 100),                                // 173
                                SafeInt(VoltageLoopInterval),                           // 174
                                SafeInt(FIELD_COLLAPSE_DELAY),                          // 175
-                               SafeInt(SetpointRiseRate),                              // 176
-                               SafeInt(SetpointFallRate),                              // 177
+                               SafeInt(SetpointRiseRate, 100),                         // 176
+                               SafeInt(SetpointFallRate, 100),                         // 177
                                SafeInt(PIDTrackingGain, 100),                          // 178
                                SafeInt(CAPSIZE_THRESHOLD_DEG),                         // 179
                                SafeInt(PITCHPOLE_THRESHOLD_DEG),                       // 180

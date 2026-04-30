@@ -1553,7 +1553,7 @@ int Alarm_Status;                                // for alarm mirror light on Cl
 
 //More Settings
 // SOC Parameters
-int CurrentThreshold = 1;             // Ignore currents below this (A × 100)
+float CurrentThreshold = 0.01f;       // Ignore currents below this (amps)
 int PeukertExponent_scaled = 105;     // Peukert exponent × 100 (112 = 1.12)
 int ChargeEfficiency_scaled = 990;    // Charging efficiency % × 10 (990 = 99.0%)
 int ChargedVoltage_Scaled = 1450;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)

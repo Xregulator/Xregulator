@@ -1300,6 +1300,75 @@ h2 {
   display: block;
 }
 
+/* Alt tab groups (inside Alternator settings) */
+.alt-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 0 8px 0;
+  border-bottom: 2px solid var(--accent);
+  margin-bottom: 0;
+}
+
+.alt-tabs-primary {
+  margin-top: 12px;
+}
+
+.alt-tabs-secondary {
+  margin-top: 24px;
+  border-bottom-color: var(--border);
+}
+
+.alt-tab-btn {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-light);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dark);
+  border-radius: 20px;
+  transition: all 0.2s ease;
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+
+.alt-tab-btn:hover {
+  background: rgba(0, 161, 154, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.alt-tab-btn-primary.active {
+  background: var(--accent);
+  color: var(--card-light);
+  border-color: var(--accent);
+}
+
+.alt-tab-btn-secondary {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.alt-tab-btn-secondary.active {
+  background: var(--border);
+  color: var(--text-dark);
+  border-color: var(--border);
+  opacity: 1;
+}
+
+.alt-panel {
+  display: none;
+  padding-top: 16px;
+}
+
+.alt-panel.active {
+  display: block;
+}
+
+.alt-bottom-details {
+  margin-top: 24px;
+}
+
 /* For fixing plot legend appearance */
 .u-legend .u-value {
   display: none !important;

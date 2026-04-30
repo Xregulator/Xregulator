@@ -2521,60 +2521,40 @@ function updateAllEchosOptimized(data) {
         { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
         { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
-        { key: 'LearningMode', id: 'LearningMode_echo', transform: v => v },
         { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v },
-        { key: 'LearningPaused', id: 'LearningPaused_echo', transform: v => v },
-        { key: 'LearningDryRunMode', id: 'LearningDryRunMode_echo', transform: v => v },
-        { key: 'LearningUpwardEnabled', id: 'LearningUpwardEnabled_echo', transform: v => v },
-        { key: 'LearningDownwardEnabled', id: 'LearningDownwardEnabled_echo', transform: v => v },
-        { key: 'EnableNeighborLearning', id: 'EnableNeighborLearning_echo', transform: v => v },
-        { key: 'EnableAmbientCorrection', id: 'EnableAmbientCorrection_echo', transform: v => v },
         { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v },
         { key: 'AutoSaveLearningTable', id: 'AutoSaveLearningTable_echo', transform: v => v },
-        { key: 'ShowLearningDebugMessages', id: 'ShowLearningDebugMessages_echo', transform: v => v },
         { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v },
-        { key: 'AlternatorNominalAmps', id: 'AlternatorNominalAmps_echo', transform: v => v },
-        { key: 'LearningUpStep', id: 'LearningUpStep_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'LearningDownStep', id: 'LearningDownStep_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'MinLearningInterval', id: 'MinLearningInterval_echo', transform: v => (v / 1000).toFixed(2) },
-        { key: 'SafeOperationThreshold', id: 'SafeOperationThreshold_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'PidKi', id: 'PidKi_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'PidKd', id: 'PidKd_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'DutySlowRampRate', id: 'DutySlowRampRate_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => v.toFixed(2) },
+        { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => Math.round(v) },
         { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
-        { key: 'IgnoreLearningDuringPenalty', id: 'IgnoreLearningDuringPenalty_echo', transform: v => v },
-        { key: 'AmbientTempCorrectionFactor', id: 'AmbientTempCorrectionFactor_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'xTime', id: 'xTime_echo', transform: v => v },
         { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'MinTableValue', id: 'MinTableValue_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'MaxPenaltyPercent', id: 'MaxPenaltyPercent_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'MaxPenaltyDuration', id: 'MaxPenaltyDuration_echo', transform: v => v },
-        { key: 'NeighborLearningFactor', id: 'NeighborLearningFactor_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
         { key: 'LearningTableSaveInterval', id: 'LearningTableSaveInterval_echo', transform: v => v },
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
         { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
-        { key: 'SetpointRampRate', id: 'SetpointRampRate_echo', transform: v => v.toFixed(2) },
-        { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => v.toFixed(2) },
+        { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
-        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => v.toFixed(1) },
-        { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => v.toFixed(1) },
-        { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v / 1000) },
-        { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => v.toFixed(2) },
+        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => (v / 100).toFixed(1) },
+        { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => (v / 100).toFixed(1) },
+        { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v) },
+        { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
-        { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => v.toFixed(2) },
-        { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v / 1000) },
-        { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => v.toFixed(2) },
-        { key: 'VoltageTrimLimit', id: 'VoltageTrimLimit_echo', transform: v => v.toFixed(2) },
+        { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v) },
+        { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'VoltageLoopInterval', id: 'VoltageLoopInterval_echo', transform: v => Math.round(v) },
         { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
         { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
         { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => v.toFixed(2) },
-        { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => v.toFixed(2) },
+        { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'CAPSIZE_THRESHOLD_DEG', id: 'CAPSIZE_THRESHOLD_DEG_echo', transform: v => v },
         { key: 'PITCHPOLE_THRESHOLD_DEG', id: 'PITCHPOLE_THRESHOLD_DEG_echo', transform: v => v },
@@ -4261,32 +4241,14 @@ function updateTogglesFromData(data) {
         updateCheckbox("UseFloat_checkbox", data.UseFloat, "UseFloat");
 
 
-        updateCheckbox("LearningMode_checkbox", data.LearningMode, "LearningMode");
-        // Only apply LearningMode side-effects when NOT pending, or when the echo matches the desired value.
-        {
-            const p = pendingToggles.get("LearningMode");
-            if (!p || (data.LearningMode !== undefined && data.LearningMode === p.desiredValue)) {
-                if (data.LearningMode !== undefined) {
-                    updateLearningTableEditability(data.LearningMode === 1);
-                }
-            }
-        }
-        updateCheckbox("LearningPaused_checkbox", data.LearningPaused, "LearningPaused");
         updateCheckbox("anomalyAlarmEnable_checkbox", data.anomalyAlarmEnable, "anomalyAlarmEnable");
-        updateCheckbox("LearningDryRunMode_checkbox", data.LearningDryRunMode, "LearningDryRunMode");
-        updateCheckbox("LearningUpwardEnabled_checkbox", data.LearningUpwardEnabled, "LearningUpwardEnabled");
-        updateCheckbox("LearningDownwardEnabled_checkbox", data.LearningDownwardEnabled, "LearningDownwardEnabled");
-        updateCheckbox("EnableNeighborLearning_checkbox", data.EnableNeighborLearning, "EnableNeighborLearning");
-        updateCheckbox("EnableAmbientCorrection_checkbox", data.EnableAmbientCorrection, "EnableAmbientCorrection");
         updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
         updateCheckbox("AutoSaveLearningTable_checkbox", data.AutoSaveLearningTable, "AutoSaveLearningTable");
-        updateCheckbox("ShowLearningDebugMessages_checkbox", data.ShowLearningDebugMessages, "ShowLearningDebugMessages");
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
         if (data.CloudFeatures !== undefined) {
             updateCloudFeaturesTabVisibility(data.CloudFeatures === 1);
         }
-        updateCheckbox("IgnoreLearningDuringPenalty_checkbox", data.IgnoreLearningDuringPenalty, "IgnoreLearningDuringPenalty"); // was commented out i don't know why
         updateCheckbox("VMGUseTrueWind_checkbox", data.VMGUseTrueWind, "VMGUseTrueWind");
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
         // // Apply the ESP32 state to the plot system
@@ -4503,8 +4465,6 @@ window.addEventListener("load", function () {
         if (darkToggle) darkToggle.checked = true;
     }
 
-    updateLearningTableEditability(document.getElementById('LearningMode_checkbox').checked);
-
     // Load Settings > Vessel Info if incomplete, otherwise Live Data > Alternator
     if (!vesselInfoComplete) {
         showMainTab('settings');
@@ -4528,29 +4488,7 @@ window.addEventListener("load", function () {
     initPidTuningDataStructures();
     initPidTuningPlot();
     initEffPlot();
-    //initEffPlotAxisListeners();  
-
-    // Initialize learning table editability based on initial state
-    // Note: This reads from hidden input which may not be populated yet
-    const initialLearningMode = document.getElementById("LearningMode")?.value === "1";
-    updateLearningTableEditability(initialLearningMode); // Safe to call with undefined
-
-    // Set up one-time listener for when actual state arrives from ESP32
-    let editabilityInitialized = false;
-    const editabilityCheck = setTrackedInterval(() => {
-        if (!editabilityInitialized) {
-            const checkbox = document.getElementById("LearningMode_checkbox");
-            // Check if checkbox exists and has been set by CSVData2
-            if (checkbox && checkbox.checked !== null) {  // Changed this line
-                updateLearningTableEditability(checkbox.checked);
-                editabilityInitialized = true;
-                clearInterval(editabilityCheck);
-            }
-        }
-    }, 100); // Check every 100ms until CSVData2 arrives
-
-    // Clean up if taking too long
-    setTrackedTimeout(() => clearInterval(editabilityCheck), 5000);
+    //initEffPlotAxisListeners();
 
     // Add change listener for manual CloudFeatures toggle
     const cloudFeaturesCheckbox = document.getElementById("CloudFeatures_checkbox");
@@ -5049,21 +4987,6 @@ window.addEventListener("load", function () {
                     const weatherTab = document.querySelector('.sub-tab[onclick*="weather"]');
                     if (weatherTab) {
                         weatherTab.style.display = 'none';
-                    }
-                }
-            }
-
-            // Update learning table editability immediately when mode changes
-            // (Don't wait for 4th cycle - user needs instant visual feedback)
-            if (data.LearningMode !== undefined) {
-                const checkbox = document.getElementById("LearningMode_checkbox");
-                if (checkbox) {
-                    const currentUIState = checkbox.checked;
-                    const incomingState = (data.LearningMode === 1);
-
-                    // Only update editability if mode actually changed
-                    if (currentUIState !== incomingState) {
-                        updateLearningTableEditability(incomingState);
                     }
                 }
             }
@@ -5748,17 +5671,7 @@ window.addEventListener("load", function () {
                 ["safeHours7_display", "safeHours7"],
                 ["safeHours8_display", "safeHours8"],
                 ["safeHours9_display", "safeHours9"],
-                ["totalLearningEvents_display", "totalLearningEvents"],
-                ["averageTableValue_display", "averageTableValue"],
-                ["learningTargetFromRPM_display", "learningTargetFromRPM"],
-                ["ambientTempCorrection_display", "ambientTempCorrection"],
-                ["finalLearningTarget_display", "finalLearningTarget"],
-                ["overheatingPenaltyTimer_display", "overheatingPenaltyTimer"],
-                ["overheatingPenaltyAmps_display", "overheatingPenaltyAmps"],
                 ["pidSetpoint_display", "pidSetpoint"],
-                ["LearningSettlingPeriod_echo", "LearningSettlingPeriod"],
-                ["LearningRPMChangeThreshold_display", "LearningRPMChangeThreshold"],
-                ["LearningTempHysteresis_display", "LearningTempHysteresis"],
                 ["FreeInternalRamID", "FreeInternalRam"],
                 ["TotalInternalRamID", "TotalInternalRam"],
                 ["LargestInternalBlockID", "LargestInternalBlock"],
@@ -6104,21 +6017,13 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("admin_password").addEventListener("change", updatePasswordFields);
     document.getElementById("timeAxisModeChanging_checkbox").checked = (document.getElementById("timeAxisModeChanging").value === "1");
     document.getElementById("weatherModeEnabled_checkbox").checked = (document.getElementById("weatherModeEnabled").value === "1");
-    document.getElementById("LearningMode_checkbox").checked = (document.getElementById("LearningMode").value === "1");
-    document.getElementById("LearningPaused_checkbox").checked = (document.getElementById("LearningPaused").value === "1");
     document.getElementById("anomalyAlarmEnable_checkbox").checked = (document.getElementById("anomalyAlarmEnable").value === "1");
-    document.getElementById("LearningDryRunMode_checkbox").checked = (document.getElementById("LearningDryRunMode").value === "1");
-    document.getElementById("LearningUpwardEnabled_checkbox").checked = (document.getElementById("LearningUpwardEnabled").value === "1");
-    document.getElementById("LearningDownwardEnabled_checkbox").checked = (document.getElementById("LearningDownwardEnabled").value === "1");
-    document.getElementById("EnableNeighborLearning_checkbox").checked = (document.getElementById("EnableNeighborLearning").value === "1");
     document.getElementById("TuningMode_checkbox").checked = (document.getElementById("TuningMode").value === "1");
     document.getElementById("socInfoAvailable_checkbox").checked = (document.getElementById("socInfoAvailable").value === "1");
     document.getElementById("accelEnabled_checkbox").checked = (document.getElementById("accelEnabled").value === "1");
     document.getElementById("AutoSaveLearningTable_checkbox").checked = (document.getElementById("AutoSaveLearningTable").value === "1");
-    document.getElementById("ShowLearningDebugMessages_checkbox").checked = (document.getElementById("ShowLearningDebugMessages").value === "1");
     document.getElementById("CloudFeatures_checkbox").checked = (document.getElementById("CloudFeatures").value === "1");
     document.getElementById("AutoAltCurrentZero_checkbox").checked = (document.getElementById("AutoAltCurrentZero").value === "1");
-    document.getElementById("IgnoreLearningDuringPenalty_checkbox").checked = (document.getElementById("IgnoreLearningDuringPenalty").value === "1");
     document.getElementById("HardwarePresent_checkbox").checked = (document.getElementById("hardwarePresent").value === "1");
 
     setupInputValidation(); // Client side input validation of settings
@@ -6409,6 +6314,25 @@ function showSubTab(parentTab, subTabName, evt = null) {
             header.classList.add('permanent-header-sticky');
         }
     }
+}
+
+function showAltTab(group, panelId) {
+    // Deactivate all panels and buttons in this group
+    document.querySelectorAll('#settings-alternator .alt-panel-' + group)
+        .forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('#settings-alternator .alt-tab-btn-' + group)
+        .forEach(t => t.classList.remove('active'));
+    // Show selected panel
+    const panel = document.getElementById(panelId);
+    if (panel) panel.classList.add('active');
+    // Activate matching button
+    document.querySelectorAll('#settings-alternator .alt-tab-btn-' + group)
+        .forEach(t => {
+            if ((t.getAttribute('onclick') || '').includes(panelId)) {
+                t.classList.add('active');
+            }
+        });
+
 }
 
 // Frozen page response stuff
@@ -6705,32 +6629,6 @@ function resetDynamicAltZero() {
 }
 
 
-function updateLearningTableEditability(learningModeEnabled) {
-    const rpmInputs = document.querySelectorAll('[id^="rpmTableRPMPoints"][id$="_input"]');
-    const submitButtons = document.querySelectorAll('.learning-table-edit-form input[type="submit"]');
-
-    const isEditable = !learningModeEnabled; // Editable when learning is OFF
-
-    // Enable/disable RPM inputs
-    rpmInputs.forEach(input => {
-        input.disabled = !isEditable;
-        input.style.opacity = isEditable ? '1' : '0.5';
-        input.style.cursor = isEditable ? 'text' : 'not-allowed';
-    });
-
-    // Enable/disable submit buttons
-    submitButtons.forEach(button => {
-        button.disabled = !isEditable;
-        button.style.opacity = isEditable ? '1' : '0.5';
-        button.title = isEditable ? '' : 'Disable Learning Mode to edit table manually';
-    });
-
-    // Redraw glyphs when editability changes
-    if (typeof drawGlyphs === 'function') {
-        drawGlyphs();
-    }
-}
-
 function updateCloudFeaturesTabVisibility(enabled) {
     const cloudTab = document.querySelector('.main-tab[onclick*="cloudfeatures"]');
     if (cloudTab) {
@@ -7011,7 +6909,6 @@ function drawPidWatermark(u) {
     const sampleTime = getEchoText('PidSampleDivisor_echo');
     const vLoopInt = getEchoText('VoltageLoopInterval_echo');
     const vKp = getEchoText('VoltageKp_echo');
-    const vTrim = getEchoText('VoltageTrimLimit_echo');
     const wavePer = getEchoText('wavePeriod_echo');
     const waveAmp = getEchoText('waveAmplitude_echo');
     const rpm = typeof window._lastKnownRPM !== 'undefined' ? window._lastKnownRPM : '?';
@@ -7034,7 +6931,6 @@ function drawPidWatermark(u) {
         `PID: ${sampleTime} ms`,
         `VLoop: ${vLoopInt} ms`,
         `VKp: ${vKp} A/V`,
-        `VTrim: ±${vTrim} A`,
         `Wave: ${wavePer}s @ ${waveAmp}A`,
     ];
 
