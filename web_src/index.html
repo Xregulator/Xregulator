@@ -2777,13 +2777,49 @@
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                       <span class="tooltip-box">Runs a 3-step duty cycle test to measure the electrical delay between
                         a field command and the current response. All PID and setpoint machinery is bypassed during
-                        the test. Requires AUTO mode and sufficient base duty. The test takes approximately
-                        15 × FilterTC × 7 ms to complete. Results are shown in a dialog on completion — you can
-                        then choose to apply the measured delay as the new filter time constant.</span>
+                        the test. Requires AUTO mode, engine running (RPM &gt; 0), and active field duty. The test
+                        takes approximately 15 × FilterTC × 7 ms to complete. Results appear inline — check the
+                        Plots tab first to confirm the steps look clean before applying.</span>
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="startSystemIDTest()" class="btn-primary">Start Test</button>
+                    <button id="systemIDStartBtn" onclick="startSystemIDTest()" class="btn-primary">Start Test</button>
+                  </div>
+                </div>
+
+                <div id="systemIDStatusDiv" style="display:none; margin:6px 0 0 0; font-size:13px; padding:6px 10px; border-radius:4px;"></div>
+
+                <div id="systemIDResultsCard" style="display:none; margin-top:12px; background:var(--card-bg,#fff); border:1px solid var(--border-color,#ddd); border-radius:8px; padding:14px;">
+                  <p style="font-weight:600; margin:0 0 10px 0; font-size:13px; color:var(--text-dark);">Plant Delay Results</p>
+                  <table style="width:100%; font-size:13px; border-collapse:collapse; margin-bottom:10px;">
+                    <tr>
+                      <td style="padding:3px 12px 3px 0; color:var(--text-muted); white-space:nowrap;">Rise 1 / 2 / 3:</td>
+                      <td><span id="sysid_r0">--</span> / <span id="sysid_r1">--</span> / <span id="sysid_r2">--</span> ms</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:3px 12px 3px 0; color:var(--text-muted);">Rise average:</td>
+                      <td><span id="sysid_ra">--</span> ms</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:3px 12px 3px 0; color:var(--text-muted); white-space:nowrap;">Fall 1 / 2 / 3:</td>
+                      <td><span id="sysid_f0">--</span> / <span id="sysid_f1">--</span> / <span id="sysid_f2">--</span> ms</td>
+                    </tr>
+                    <tr>
+                      <td style="padding:3px 12px 3px 0; color:var(--text-muted);">Fall average:</td>
+                      <td><span id="sysid_fa">--</span> ms</td>
+                    </tr>
+                    <tr style="border-top:1px solid var(--border-color,#e0e0e0);">
+                      <td style="padding:8px 12px 4px 0; font-weight:600; color:var(--text-dark);">Suggested Filter TC:</td>
+                      <td style="padding-top:8px; font-weight:600;"><span id="sysid_suggested_tc">--</span></td>
+                    </tr>
+                  </table>
+                  <p id="sysid_last2_tip" style="display:none; font-size:12px; color:var(--text-muted); background:var(--bg-highlight,#e8f4fd); border-left:3px solid var(--accent,#1976d2); padding:8px 10px; margin:0 0 10px 0; border-radius:0 4px 4px 0; line-height:1.4;"></p>
+                  <p style="font-size:12px; color:var(--text-muted); margin:0 0 12px 0; line-height:1.4;">
+                    Tip: Open the <strong>Plots</strong> tab and verify the steps look clean before applying. If the first step is noisy or an outlier, type in the last-two average manually instead of clicking Apply.
+                  </p>
+                  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <button id="sysid_apply_btn" onclick="applySystemIDTC()" class="btn-primary">Apply</button>
+                    <button onclick="dismissSystemIDResults()" class="btn-secondary">Dismiss</button>
                   </div>
                 </div>
 

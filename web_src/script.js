@@ -5704,6 +5704,7 @@ window.addEventListener("load", function () {
 
             // CSVData3
             updateFields(otherFields);   // Step 3: Process the whitelist
+            updateSystemIDTelemetryLabels(data.systemIDActive, data.systemIDResultsReady);
             updatePidTuningConfiguration(data);  // ADD THIS LINE - Update PID plot config
 
             // Update learning table inputs
@@ -8190,25 +8191,18 @@ async function fetchAndRenderThermalLog() {
 // ---------------------------------------------------------------------------
 function parseThermalBin(buf) {
     const view = new DataView(buf);
-    if (buf.byteLength < 8) {
-        const el = document.getElementById('thermallog-status');
-        if (el) el.textContent = 'No log data yet — waiting for AUTO control tick…';
-        return;
-    }
-
-    const count = view.getUint32(0, true);
-    const intervalMs = view.getUint32(4, true);
-
-    if (count === 0) {
-        const el = document.getElementById('thermallog-status');
-        if (el) el.textContent = 'Log empty — data will appear once alternator is running in AUTO mode.';
-        return;
-    }
-
     const ENTRY_SIZE = 48;
     const HEADER_SIZE = 8;
 
-    if (buf.byteLength < HEADER_SIZE + count * ENTRY_SIZE) {
+    // No-data path: render plots with empty data so axes draw instead of blank space.
+    let count = 0;
+    let intervalMs = 1000;
+    if (buf.byteLength >= 8) {
+        count = view.getUint32(0, true);
+        intervalMs = view.getUint32(4, true);
+    }
+
+    if (count > 0 && buf.byteLength < HEADER_SIZE + count * ENTRY_SIZE) {
         console.error('thermallog.bin: truncated response', buf.byteLength, 'need', HEADER_SIZE + count * ENTRY_SIZE);
         return;
     }
@@ -9180,16 +9174,33 @@ function getField(id) {
 }
 
 function startSystemIDTest() {
-    if (!confirm(
-        "WARNING: The step test will briefly override field duty directly.\n" +
-        "Run only with the engine running at normal operating RPM.\n" +
-        "Ensure battery voltage is stable and not near a protection threshold.\n\n" +
-        "Start the test?")) return;
-
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        showSystemIDStatus('error', 'Settings must be unlocked first.');
         return;
     }
+
+    // Pre-flight validation — catch obvious failures before wasting time
+    const rpm = parseFloat(getField("RPMID")) || 0;
+    const duty = parseFloat(getField("dutyCycleID")) || 0;
+    if (rpm < 50) {
+        showSystemIDStatus('error', 'Engine does not appear to be running (RPM = ' + rpm.toFixed(0) + '). Start engine first.');
+        return;
+    }
+    if (duty < 5) {
+        showSystemIDStatus('error', 'Field duty too low (' + duty.toFixed(1) + '%). Alternator must be active with a load.');
+        return;
+    }
+
+    // Compute estimated duration from current TC so user knows what to expect
+    const tcMs = parseFloat(getField("InputFilterTC_echo")) || 1000;
+    const holdMs = Math.max(15 * tcMs, 5000);
+    const estSecs = Math.round(7 * holdMs / 1000);
+
+    dismissSystemIDResults();
+    showSystemIDStatus('running', 'Starting… estimated duration: ~' + estSecs + 's');
+
+    const btn = document.getElementById('systemIDStartBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
 
     const formData = new URLSearchParams();
     formData.append("password", currentAdminPassword);
@@ -9202,7 +9213,8 @@ function startSystemIDTest() {
         })
         .catch(err => {
             console.error("SystemID request failed:", err);
-            alert("SystemID: failed to send start command.\n" + err);
+            showSystemIDStatus('error', 'Failed to send start command: ' + err.message);
+            resetSystemIDButton();
         });
 }
 
@@ -9210,84 +9222,166 @@ function waitForSystemIDResults() {
     const pollMs = 500;
     let elapsed = 0;
     let everSawActive = false;
-    let lastActive = null;
-    let lastReady = null;
 
-    const tcMs = parseFloat(getField("InputFilterTC_echo") ?? 1000);
+    // Fix: use || not ?? so parseFloat("?") → NaN falls back to default instead of using "?" as-is
+    const tcMs = parseFloat(getField("InputFilterTC_echo")) || 1000;
     const holdMs = Math.max(15 * tcMs, 5000);
     const maxWaitMs = 7 * holdMs + 15000;
+    const estSecs = Math.round(7 * holdMs / 1000);
 
-    console.log("SystemID: polling started | TC=" + tcMs + "ms holdMs=" + holdMs + " maxWait=" + (maxWaitMs / 1000).toFixed(0) + "s");
+    console.log("SystemID: polling | TC=" + tcMs + "ms  holdMs=" + holdMs + "  maxWait=" + (maxWaitMs / 1000).toFixed(0) + "s");
 
     const poll = setInterval(() => {
         elapsed += pollMs;
 
-        const activeStr = getField("systemIDActive_ID");
-        const readyStr = getField("systemIDResultsReady_ID");
-        const active = parseInt(activeStr);
-        const ready = parseInt(readyStr);
-
-        // Debug every 5 seconds
-        if (elapsed % 5000 === 0) {
-            console.log("SystemID poll | elapsed=" + (elapsed / 1000).toFixed(0) + "s" +
-                " | active=" + activeStr + " | ready=" + readyStr);
-        }
+        // Read raw numeric value from dataset.raw (set by updateSystemIDTelemetryLabels),
+        // or fall back to textContent for the initial "?" state before first CSVData3 update
+        const activeEl = document.getElementById('systemIDActive_ID');
+        const readyEl  = document.getElementById('systemIDResultsReady_ID');
+        const active = parseInt(activeEl?.dataset?.raw ?? activeEl?.textContent ?? '0') || 0;
+        const ready  = parseInt(readyEl?.dataset?.raw  ?? readyEl?.textContent  ?? '0') || 0;
 
         if (active === 1) everSawActive = true;
-        lastActive = active;
-        lastReady = ready;
+
+        // Keep button text and status line updated with elapsed time
+        const btn = document.getElementById('systemIDStartBtn');
+        if (btn) btn.textContent = 'Running… (' + (elapsed / 1000).toFixed(0) + 's)';
+        showSystemIDStatus('running',
+            'Test in progress — ' + (elapsed / 1000).toFixed(0) + 's elapsed (est. ~' + estSecs + 's)');
 
         if (elapsed > maxWaitMs) {
             clearInterval(poll);
-            let diagnosis = "";
+            resetSystemIDButton();
+            let msg;
             if (!everSawActive) {
-                diagnosis = "systemIDActive never went to 1.\n" +
-                    "The test likely never started — check mode, password, and that startSystemID was received.";
-            } else if (lastActive === 1) {
-                diagnosis = "Test was still running at timeout (" + (elapsed / 1000).toFixed(0) + "s).\n" +
-                    "Expected ~" + (7 * holdMs / 1000).toFixed(0) + "s. Check serial console for last phase.";
+                msg = 'Timed out — test never started. Check that system is in AUTO mode and alternator is active.';
+            } else if (active === 1) {
+                msg = 'Timed out after ' + (elapsed / 1000).toFixed(0) + 's — test still running. Check serial console.';
             } else {
-                diagnosis = "Test finished (systemIDActive=0) but systemIDResultsReady never set.\n" +
-                    "Check serial console for post-processing errors.";
+                msg = 'Timed out — test finished but results never posted. Check serial console.';
             }
-            alert("SystemID: timed out.\n\n" + diagnosis +
-                "\n\nsystemIDActive=" + lastActive + "  systemIDResultsReady=" + lastReady);
+            showSystemIDStatus('error', msg);
             return;
         }
 
         if (ready !== 1) return;
 
         clearInterval(poll);
+        resetSystemIDButton();
+        showSystemIDStatus('done', 'Test complete — results below.');
         showSystemIDResults();
     }, pollMs);
 }
 
 function showSystemIDResults() {
-    const r0 = getField("systemIDRiseDelay_0_ID");
-    const r1 = getField("systemIDRiseDelay_1_ID");
-    const r2 = getField("systemIDRiseDelay_2_ID");
-    const ra = getField("systemIDRiseAvg_ID");
-    const f0 = getField("systemIDFallDelay_0_ID");
-    const f1 = getField("systemIDFallDelay_1_ID");
-    const f2 = getField("systemIDFallDelay_2_ID");
-    const fa = getField("systemIDFallAvg_ID");
+    const r0 = parseFloat(getField("systemIDRiseDelay_0_ID") ?? '-1');
+    const r1 = parseFloat(getField("systemIDRiseDelay_1_ID") ?? '-1');
+    const r2 = parseFloat(getField("systemIDRiseDelay_2_ID") ?? '-1');
+    const ra = parseFloat(getField("systemIDRiseAvg_ID")     ?? '-1');
+    const f0 = parseFloat(getField("systemIDFallDelay_0_ID") ?? '-1');
+    const f1 = parseFloat(getField("systemIDFallDelay_1_ID") ?? '-1');
+    const f2 = parseFloat(getField("systemIDFallDelay_2_ID") ?? '-1');
+    const fa = parseFloat(getField("systemIDFallAvg_ID")     ?? '-1');
 
-    const suggestedTC = Math.max(parseFloat(ra), parseFloat(fa));
+    // Suggested TC is max of rise/fall averages; only valid if at least one is positive
+    const suggestedTC = (ra > 0 || fa > 0) ? Math.max(ra, fa) : -1;
 
-    const msg =
-        "Plant Delay Measurement Results\n\n" +
-        "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
-        "Rise average: " + ra + " ms\n\n" +
-        "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
-        "Fall average: " + fa + " ms\n\n" +
-        "Suggested filter TC (max of rise/fall avg): " + suggestedTC + " ms\n\n" +
-        "Apply " + suggestedTC + " ms as Input Filter TC and save to flash?";
+    // Compute last-two average for rise and fall (indices 1 and 2, skip -1 = not detected)
+    const last2Rise = [r1, r2].filter(v => v >= 0);
+    const last2Fall = [f1, f2].filter(v => v >= 0);
+    const avgLast2Rise = last2Rise.length ? last2Rise.reduce((a, b) => a + b, 0) / last2Rise.length : -1;
+    const avgLast2Fall = last2Fall.length ? last2Fall.reduce((a, b) => a + b, 0) / last2Fall.length : -1;
+    const suggestedLast2TC = (avgLast2Rise > 0 || avgLast2Fall > 0) ? Math.max(avgLast2Rise, avgLast2Fall) : -1;
 
-    if (confirm(msg)) {
-        fetch(buildURL("/get?InputFilterTC=" + encodeURIComponent(suggestedTC) +
-            "&password=" + encodeURIComponent(currentAdminPassword)))
-            .then(() => console.log("InputFilterTC updated to " + suggestedTC + " ms"))
-            .catch(err => console.error("InputFilterTC update failed:", err));
+    const card = document.getElementById('systemIDResultsCard');
+    if (!card) return;
+
+    const fmt = v => v < 0 ? '<span style="color:var(--warning,#e65100)">n/d</span>' : v.toFixed(0);
+
+    document.getElementById('sysid_r0').innerHTML = fmt(r0);
+    document.getElementById('sysid_r1').innerHTML = fmt(r1);
+    document.getElementById('sysid_r2').innerHTML = fmt(r2);
+    document.getElementById('sysid_ra').innerHTML = fmt(ra);
+    document.getElementById('sysid_f0').innerHTML = fmt(f0);
+    document.getElementById('sysid_f1').innerHTML = fmt(f1);
+    document.getElementById('sysid_f2').innerHTML = fmt(f2);
+    document.getElementById('sysid_fa').innerHTML = fmt(fa);
+
+    const tcEl    = document.getElementById('sysid_suggested_tc');
+    const applyBtn = document.getElementById('sysid_apply_btn');
+    if (suggestedTC > 0) {
+        tcEl.textContent        = suggestedTC.toFixed(0) + ' ms';
+        applyBtn.textContent    = 'Apply ' + suggestedTC.toFixed(0) + ' ms as Filter TC';
+        applyBtn.disabled       = false;
+        applyBtn.dataset.tc     = suggestedTC.toFixed(0);
+    } else {
+        tcEl.innerHTML          = '<span style="color:var(--warning,#e65100)">Detection failed — check step amplitude and baseline stability</span>';
+        applyBtn.disabled       = true;
+        applyBtn.textContent    = 'Apply (unavailable)';
+    }
+
+    // Show the last-two tip only when first step is a meaningful outlier (>5 ms difference)
+    const tipEl = document.getElementById('sysid_last2_tip');
+    if (tipEl) {
+        if (suggestedLast2TC > 0 && Math.abs(suggestedLast2TC - suggestedTC) > 5) {
+            tipEl.style.display = '';
+            tipEl.textContent =
+                'The first step differs noticeably from the others. If it looks noisy in the Plots tab, ' +
+                'you can type in ' + suggestedLast2TC.toFixed(0) + ' ms manually instead ' +
+                '(average of the last two readings: Rise ' + avgLast2Rise.toFixed(0) +
+                ' ms / Fall ' + avgLast2Fall.toFixed(0) + ' ms).';
+        } else {
+            tipEl.style.display = 'none';
+        }
+    }
+
+    card.style.display = '';
+}
+
+function applySystemIDTC() {
+    const btn = document.getElementById('sysid_apply_btn');
+    const tc = parseFloat(btn?.dataset?.tc);
+    if (!tc || tc <= 0 || !currentAdminPassword) return;
+    fetch(buildURL("/get?InputFilterTC=" + encodeURIComponent(tc) +
+        "&password=" + encodeURIComponent(currentAdminPassword)))
+        .then(() => showSystemIDStatus('done', 'Filter TC updated to ' + tc + ' ms — saved to flash.'))
+        .catch(err => showSystemIDStatus('error', 'Failed to apply TC: ' + err.message));
+}
+
+function dismissSystemIDResults() {
+    const card = document.getElementById('systemIDResultsCard');
+    if (card) card.style.display = 'none';
+}
+
+function resetSystemIDButton() {
+    const btn = document.getElementById('systemIDStartBtn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Start Test'; }
+}
+
+function showSystemIDStatus(type, msg) {
+    const el = document.getElementById('systemIDStatusDiv');
+    if (!el) return;
+    el.style.display = '';
+    el.style.color   = type === 'error'   ? 'var(--warning, #e65100)' :
+                       type === 'done'    ? 'var(--green,   #2e7d32)' :
+                       /* running */        'var(--text-dark)';
+    el.textContent = msg;
+}
+
+function updateSystemIDTelemetryLabels(active, ready) {
+    // Store numeric values in dataset.raw so the polling loop can read them
+    // even after textContent is changed to human-readable labels
+    const activeEl = document.getElementById('systemIDActive_ID');
+    const readyEl  = document.getElementById('systemIDResultsReady_ID');
+    if (activeEl) {
+        activeEl.dataset.raw = active;
+        activeEl.textContent = active === 1 ? 'Active' : 'Idle';
+        activeEl.style.color = active === 1 ? 'var(--warning, #f57c00)' : '';
+    }
+    if (readyEl) {
+        readyEl.dataset.raw = ready;
+        readyEl.textContent = ready === 1 ? 'Yes' : 'No';
+        readyEl.style.color = ready === 1 ? 'var(--green, #2e7d32)' : '';
     }
 }
 

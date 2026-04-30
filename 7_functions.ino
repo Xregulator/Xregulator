@@ -752,7 +752,7 @@ void sendEfficiencyData() {
   lastT = activeTempBucket;
   lastF = activeFieldBucket;
   lastSS = cell.ss_seconds;
-  lastErr = sessionErrorCount;
+  lastErr = currentErrors;
 }
 
 void sendEfficiencyRedDot() {

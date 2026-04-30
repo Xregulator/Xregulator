@@ -727,23 +727,40 @@ void AdjustFieldLearnMode() {
     queueConsoleMessage(msg3);
   }
 
-  // ========== OVERRIDE MODE ENTRY DETECTION ==========
+  // ========== OVERRIDE MODE ENTRY/EXIT DETECTION ==========
   // Rising-edge detection so one-shot actions (log messages, integrator seeds)
   // fire exactly once on activation, not every tick.
   static bool lastMaintainMode = false;
   static bool lastTargetVoltageMode = false;
   bool enteringMaintainMode = (MaintainMode == 1) && !lastMaintainMode;
   bool enteringTargetVoltageMode = (TargetVoltageMode == 1) && !lastTargetVoltageMode;
+  bool exitingTargetVoltageMode = (TargetVoltageMode == 0) && lastTargetVoltageMode;
   lastMaintainMode = (MaintainMode == 1);
   lastTargetVoltageMode = (TargetVoltageMode == 1);
 
+  // ========== TVM EXIT STAGE RESET ==========
+  // While TVM is active it forces inBulkStage=false, inAbsorptionStage=false on every
+  // tick. Without this reset, the first call to updateChargingStage() after TVM exits
+  // sees {bulk=false, abs=false, idle=false} — identical to the float state — and sets
+  // ChargingVoltageTarget = FloatVoltage even when UseFloat=0.
+  // Reset to BULK (same policy as enter_sys_auto): overshoot detection in
+  // updateChargingStage() advances to absorption within seconds if the battery is
+  // already at voltage.
+  if (exitingTargetVoltageMode) {
+    inBulkStage = true;
+    inAbsorptionStage = false;
+    inIdleStage = false;
+    bulkVoltageHoldTimer = 0;
+    absorptionTailTimer = 0;
+    rebulkTimer = 0;
+    floatStartTime = tick.nowMs;
+    queueConsoleMessageF("TargetVoltageMode: disabled, restarting from BULK (%.2fV)", BatteryV);
+  }
+
   // ========== CHARGING STAGE (bulk/absorption/float) ==========
   // Suppressed while either override is active — letting it run would fire
-  // spurious re-bulk transitions and absorption timeouts. On override exit,
-  // enter_sys_auto() re-evaluates stage from current voltage.
-// Stage tracking only meaningful in AUTO. In MANUAL, voltageControlActive=false
-  // and no CV loop runs, so stage state is meaningless and stage transitions are
-  // misleading. Also prevents stale stage state from contaminating the next AUTO entry.
+  // spurious re-bulk transitions and absorption timeouts. Stage tracking is only
+  // meaningful in AUTO; in MANUAL, voltageControlActive=false and no CV loop runs.
   if (MaintainMode != 1 && TargetVoltageMode != 1 && !tick.manualMode) {
     updateChargingStage();
   }
@@ -1256,6 +1273,7 @@ void AdjustFieldLearnMode() {
         if (TargetVoltageMode == 1) {
           inBulkStage = false;
           inAbsorptionStage = false;
+          inIdleStage = false;  // must clear — voltageControlActive = !inIdleStage; CV loop won't fire if this is stale-true
           ChargingVoltageTarget = TargetVoltageSetpoint;
           if (enteringTargetVoltageMode) {
             pidLog_enteringTargetVoltageMode = 1;
