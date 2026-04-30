@@ -661,6 +661,8 @@ const CSV3_FIELDS = [
     "systemIDFallAvg",          // 250
     "InputFilterTC",            // 251
     "SystemIDStepAmplitude",    // 252
+    "HardOCTripAmps",           // 253
+    "HardOCDebounceMs",         // 254
 
 
 ];
@@ -2443,7 +2445,6 @@ function updateAllEchosOptimized(data) {
         { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v },
         { key: 'OnOff', id: 'OnOff_echo', transform: v => v },
         { key: 'ManualFieldToggle', id: 'ManualFieldToggle_echo', transform: v => v === 0 ? 1 : 0 },
-        { key: 'HiLow', id: 'HiLow_echo', transform: v => v },
         { key: 'LimpHome', id: 'LimpHome_echo', transform: v => v },
         { key: 'VeData', id: 'VeData_echo', transform: v => v },
         { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v },
@@ -2562,6 +2563,8 @@ function updateAllEchosOptimized(data) {
         { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => v.toFixed(1) },
         { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v / 1000) },
         { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => v.toFixed(2) },
+        { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
         { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => v.toFixed(2) },
         { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v / 1000) },
         { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => v.toFixed(2) },
@@ -4235,7 +4238,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("SwitchControlOverride_checkbox", data.SwitchControlOverride, "SwitchControlOverride");
         updateCheckbox("header-alternator-enable", data.OnOff, "OnOff");
         updateCheckbox("LimpHome_checkbox", data.LimpHome, "LimpHome");
-        updateCheckbox("HiLow_checkbox", data.HiLow, "HiLow");
+        // HiLow / charge rate mode handled via pendingToggles in CSVData2 handler
         updateCheckbox("VeData_checkbox", data.VeData, "VeData");
         updateCheckbox("NMEA0183Data_checkbox", data.NMEA0183Data, "NMEA0183Data");
         updateCheckbox("NMEA2KData_checkbox", data.NMEA2KData, "NMEA2KData");
@@ -4328,6 +4331,36 @@ if (typeof window.learningTableInitialized === 'undefined') {
 // ===========================================================================
 
 let currentCapMode = 'amps'; // tracks active mode; updated by setCapMode()
+
+// ===========================================================================
+// CAP TABLE — NORMAL / LOW CHARGE RATE MODE  (HiLow: 1=Normal, 0=Low)
+// ===========================================================================
+
+let currentChargeRateMode = 'normal'; // tracks active mode; updated by setChargeRateMode()
+
+async function submitChargeRateModeImmediately(desiredValue) {
+    const passwordField = document.querySelector('.password_field');
+    const password = passwordField ? passwordField.value : '';
+    const params = new URLSearchParams();
+    params.set('HiLow', String(desiredValue));
+    if (password) params.set('password', password);
+    return fetchWithTimeout(buildURL(`/get?${params.toString()}`), { method: 'GET', cache: 'no-store' }, 4000);
+}
+
+function setChargeRateMode(mode) {
+    currentChargeRateMode = mode;
+    const normalBtn = document.getElementById('chargeRateNormalBtn');
+    const lowBtn = document.getElementById('chargeRateLowBtn');
+    if (normalBtn) normalBtn.classList.toggle('cap-mode-active', mode === 'normal');
+    if (lowBtn) lowBtn.classList.toggle('cap-mode-active', mode === 'low');
+}
+
+function handleChargeRateModeToggle(mode) {
+    const desiredValue = (mode === 'low') ? 0 : 1;
+    pendingToggles.set('HiLow', { desiredValue: desiredValue, baseRev: lastSeenRev });
+    setChargeRateMode(mode); // optimistic UI immediately
+    submitChargeRateModeImmediately(desiredValue).catch(err => diagLog('chargeRateMode submit failed: ' + err));
+}
 
 function getLiveBatteryV() {
     // BatteryV in CSVData1 is scaled ×100; fall back to 12V if not yet received
@@ -5540,6 +5573,27 @@ window.addEventListener("load", function () {
                     setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
                 }
             }
+            if (data.HiLow !== undefined) {
+                const pending = pendingToggles.get('HiLow');
+                if (pending) {
+                    if (data.HiLow === pending.desiredValue) {
+                        pendingToggles.delete('HiLow');
+                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'normal');
+                    } else if (
+                        (data.stateRevision !== undefined && data.stateRevision > pending.baseRev) ||
+                        (pending.deadlineMs !== undefined && Date.now() > pending.deadlineMs)
+                    ) {
+                        pendingToggles.delete('HiLow');
+                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'normal');
+                    } else {
+                        if (pending.deadlineMs === undefined) {
+                            pending.deadlineMs = Date.now() + 2500;
+                        }
+                    }
+                } else {
+                    setChargeRateMode(data.HiLow === 0 ? 'low' : 'normal');
+                }
+            }
 
             // Update life indicators
             updateLifeIndicators(data);
@@ -5649,6 +5703,10 @@ window.addEventListener("load", function () {
                     // Values scaled by 3600000 for hours
                     else if (key.startsWith("safeHours")) {
                         newTextContent = (value / 3600).toFixed(2);
+                    }
+                    // Function timing values sent as raw µs — divide by 1000 to display ms
+                    else if (key.startsWith("ft_") || key === "VeTime2") {
+                        newTextContent = (value / 1000).toFixed(1);
                     }
                     else {
                         newTextContent = Math.round(value);
@@ -6032,7 +6090,6 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("SwitchControlOverride_checkbox").checked = (document.getElementById("SwitchControlOverride").value === "1");
     //document.getElementById("OnOff_checkbox").checked = (document.getElementById("OnOff").value === "1");
     document.getElementById("LimpHome_checkbox").checked = (document.getElementById("LimpHome").value === "1");
-    document.getElementById("HiLow_checkbox").checked = (document.getElementById("HiLow").value === "1");
     document.getElementById("VeData_checkbox").checked = (document.getElementById("VeData").value === "1");
     document.getElementById("NMEA0183Data_checkbox").checked = (document.getElementById("NMEA0183Data").value === "1");
     document.getElementById("NMEA2KData_checkbox").checked = (document.getElementById("NMEA2KData").value === "1");
@@ -6102,6 +6159,34 @@ function handleClearBuffer() {
         "Are you sure?"
     );
     return confirmation;
+}
+
+function handleResetPerfCounters() {
+    if (!currentAdminPassword) {
+        alert("Please unlock settings first");
+        return;
+    }
+
+    const params = new URLSearchParams({ password: currentAdminPassword, ResetPerfCounters: '1' });
+    fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
+        .then(() => {
+            const ids = [
+                'ft_ReadAnalogInputs_ses_ID', 'ft_rai_total_ses_ID', 'ft_rai_ina228_ses_ID',
+                'ft_rai_ads_state_ses_ID', 'ft_rai_bmp_state_ses_ID', 'ft_rai_imu_ses_ID',
+                'VeTime2_ID', 'ft_AdjustFieldLearnMode_ses_ID', 'ft_uploadSensorHistory_ses_ID',
+                'ft_uploadBufferedRecords_ses_ID', 'ft_buildConfigPayload_ses_ID',
+                'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
+                'MaximumLoopTimeID',
+                'ch1_worst_10s_ID', 'ch1_over2x_10s_ID', 'ch1_avg_10s_ID', 'ch1_n_10s_ID',
+                'ch1_worst_2m_ID', 'ch1_over2x_2m_ID', 'ch1_avg_2m_ID', 'ch1_n_2m_ID',
+                'ch1_worst_at_ID', 'ch1_over2x_at_ID', 'ch1_avg_at_ID', 'ch1_n_at_ID'
+            ];
+            ids.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = '0';
+            });
+        })
+        .catch(err => diagError('Reset peaks failed:', err));
 }
 
 function handleClearToken() {

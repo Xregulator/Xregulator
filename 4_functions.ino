@@ -1670,6 +1670,16 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     VoltageSpikeMargin = readFile(LittleFS, "/VoltageSpikeMargin.txt").toFloat();
   }
+  if (!fsExists("/HardOCTripAmps.txt")) {
+    writeFile(LittleFS, "/HardOCTripAmps.txt", String(HardOCTripAmps, 1).c_str());
+  } else {
+    HardOCTripAmps = readFile(LittleFS, "/HardOCTripAmps.txt").toFloat();
+  }
+  if (!fsExists("/HardOCDebounceMs.txt")) {
+    writeFile(LittleFS, "/HardOCDebounceMs.txt", String(HardOCDebounceMs).c_str());
+  } else {
+    HardOCDebounceMs = (uint32_t)readFile(LittleFS, "/HardOCDebounceMs.txt").toInt();
+  }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());
   } else {

@@ -962,8 +962,8 @@ int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
 int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
-const float HardOCTripAmps = 180.0f;
-const uint32_t HardOCDebounceMs = 20;
+float HardOCTripAmps = 180.0f;       // user-adjustable, persisted in LittleFS
+uint32_t HardOCDebounceMs = 20;      // user-adjustable, persisted in LittleFS
 uint32_t hardOCStartMs = 0;
 //Field PWM stuff
 const int pwmPin = 14;  // field PWM pin # (was 32)

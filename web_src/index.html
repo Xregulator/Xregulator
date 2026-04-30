@@ -635,7 +635,7 @@
               <div style="font-weight: 600; font-size: 15px; margin: 14px 0 8px 0; color: var(--text-dark);">RPM Cap
                 Table</div>
 
-              <!-- Global cap mode toggle -->
+              <!-- Global cap mode toggles -->
               <div class="cap-mode-row">
                 <span class="cap-mode-label">Limit by:</span>
                 <div class="cap-mode-toggle">
@@ -643,6 +643,13 @@
                     onclick="handleCapModeToggle('amps')">Amps</button>
                   <button type="button" id="capModeKWBtn" class="cap-mode-btn"
                     onclick="handleCapModeToggle('kw')">kW</button>
+                </div>
+                <span class="cap-mode-label" style="margin-left: 16px;">Charge Rate:</span>
+                <div class="cap-mode-toggle">
+                  <button type="button" id="chargeRateNormalBtn" class="cap-mode-btn cap-mode-active"
+                    onclick="handleChargeRateModeToggle('normal')">Normal</button>
+                  <button type="button" id="chargeRateLowBtn" class="cap-mode-btn"
+                    onclick="handleChargeRateModeToggle('low')">Low</button>
                 </div>
               </div>
 
@@ -1305,30 +1312,6 @@
                   </div>
                 </div>
 
-                <!-- Target Alternator Output Low/Normal -->
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Target Alternator Output (<span id="HiLow_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">
-                      ℹ️
-                      <span class="tooltip-box">Not yet implemented.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Low</span>
-                      <label class="switch">
-                        <input id="HiLow_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('HiLow_checkbox', 'HiLow', 'HiLow')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">Normal</span>
-                      <input id="HiLow" name="HiLow" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
 
                 <!-- Min Field -->
                 <hr />
@@ -2950,6 +2933,41 @@
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
                     <input name="FIELD_COLLAPSE_DELAY" type="number" step="1" min="1" max="600" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hard OC Trip Threshold (A) (<span id="HardOCTripAmps_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Alternator
+                      output current above which the hard overcurrent fuse trips. GPIO4 is cut immediately — no ramp, no
+                      phases. Acts in all modes including Manual. Default: 180A.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="HardOCTripAmps" type="number" step="0.1" min="10" max="500" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Hard OC Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                      current must continuously exceed the trip threshold before the fuse fires. Guards against
+                      single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively
+                      met by any qualifying sample. Default: 20ms.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="HardOCDebounceMs" type="number" step="1" min="0" max="500" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -5970,6 +5988,9 @@
     <!-- ESP32 Live Data Sub-tab -->
     <div id="livedata-esp32" class="sub-tab-content">
       <div class="settings-card">
+        <div style="margin-bottom: 12px;">
+          <button type="button" class="btn-secondary" onclick="handleResetPerfCounters()">Reset Peak Values</button>
+        </div>
         <div class="grid">
 
           <!-- MEMORY -->
@@ -7673,7 +7694,6 @@
     <span id="ManualDutyTarget_echo" style="display:none;">0</span>
     <span id="SwitchControlOverride_echo" style="display:none;">0</span>
     <span id="OnOff_echo" style="display:none;">0</span>
-    <span id="HiLow_echo" style="display:none;">0</span>
     <span id="LimpHome_echo" style="display:none;">0</span>
     <span id="VeData_echo" style="display:none;">0</span>
     <span id="NMEA0183Data_echo" style="display:none;">0</span>

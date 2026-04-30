@@ -472,16 +472,6 @@ void AdjustFieldLearnMode() {
   updateRPMBucketHistory(currentMillis);
 
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
-  bool hardOCActive = false;
-
-  if (MeasuredAmps > HardOCTripAmps) {
-    if (hardOCStartMs == 0) hardOCStartMs = currentMillis;
-    if ((currentMillis - hardOCStartMs) >= HardOCDebounceMs) {
-      hardOCActive = true;
-    }
-  } else {
-    hardOCStartMs = 0;
-  }
   // pidLog_tick() runs at the END of the normal control path, after all state is final.
 
   // thermalLog_tick() is called after tempPID_tick() in the normal-mode path so that
@@ -2311,7 +2301,23 @@ void resetLearningTableToDefaults() {
   // Reset diagnostics
   totalLearningEvents = 0;
   totalOverheats = 0;
-  saveUserTableEdits();  // User-initiated reset, save immediately
+  // Reset to Normal mode so saveUserTableEdits() writes Normal defaults to "capTable"
+  HiLow = 1;
+  writeFile(LittleFS, "/HiLow.txt", "1");
+  saveUserTableEdits();  // saves Normal defaults to capTable / capPowerTable
+  // Also write Lo defaults to capTableLo so that mode starts clean
+  {
+    float loDefaults[RPM_TABLE_SIZE];
+    float loDefaultsPwr[RPM_TABLE_SIZE] = { 0 };
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) loDefaults[i] = defaultCapCurrentValues[i] * 0.5f;
+    nvs_handle_t nvs_lo;
+    if (nvs_open("learning", NVS_READWRITE, &nvs_lo) == ESP_OK) {
+      nvs_set_blob(nvs_lo, "capTableLo",      loDefaults,     sizeof(loDefaults));
+      nvs_set_blob(nvs_lo, "capPowerTableLo", loDefaultsPwr,  sizeof(loDefaultsPwr));
+      nvs_commit(nvs_lo);
+      nvs_close(nvs_lo);
+    }
+  }
   queueConsoleMessage("Learning: All tables reset to factory defaults");
 }
 void loadLearningTableFromNVS() {
@@ -2333,25 +2339,24 @@ void loadLearningTableFromNVS() {
     allValid = false;
   }
 
-  // Load cap current table
-  required_size = sizeof(rpmCapCurrentTable);
-  err = nvs_get_blob(nvs_handle, "capTable", rpmCapCurrentTable, &required_size);
-  if (err != ESP_OK || required_size != sizeof(rpmCapCurrentTable)) {
-    // Not critical - just use defaults
-    for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-      rpmCapCurrentTable[i] = defaultCapCurrentValues[i];
+  // Load cap current table — key depends on HiLow mode (already loaded from LittleFS before this call)
+  {
+    const char* capKey    = (HiLow == 1) ? "capTable"      : "capTableLo";
+    const char* capPwrKey = (HiLow == 1) ? "capPowerTable" : "capPowerTableLo";
+    required_size = sizeof(rpmCapCurrentTable);
+    err = nvs_get_blob(nvs_handle, capKey, rpmCapCurrentTable, &required_size);
+    if (err != ESP_OK || required_size != sizeof(rpmCapCurrentTable)) {
+      for (int i = 0; i < RPM_TABLE_SIZE; i++)
+        rpmCapCurrentTable[i] = (HiLow == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * 0.5f;
+    }
+    required_size = sizeof(rpmCapPowerTable);
+    err = nvs_get_blob(nvs_handle, capPwrKey, rpmCapPowerTable, &required_size);
+    if (err != ESP_OK || required_size != sizeof(rpmCapPowerTable)) {
+      for (int i = 0; i < RPM_TABLE_SIZE; i++) rpmCapPowerTable[i] = 0.0f;
     }
   }
 
-  required_size = sizeof(rpmCapPowerTable);
-  err = nvs_get_blob(nvs_handle, "capPowerTable", rpmCapPowerTable, &required_size);
-  if (err != ESP_OK || required_size != sizeof(rpmCapPowerTable)) {
-    for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-      rpmCapPowerTable[i] = 0.0f;
-    }
-  }
-
-  // ADD: Load cap limit mode (non-critical, default to amps)
+  // Load cap limit mode (non-critical, default to amps)
   err = nvs_get_u8(nvs_handle, "capLimitMode", &capLimitMode);
   if (err != ESP_OK) {
     capLimitMode = 0;
@@ -2429,6 +2434,36 @@ void loadLearningTableFromNVS() {
   queueConsoleMessage("Learning: Table loaded from NVS");
 }
 
+// Loads the correct cap tables from NVS into the active arrays based on HiLow mode.
+// HiLow=1 → Normal (key "capTable"), HiLow=0 → Low Charge Rate (key "capTableLo").
+// Falls back to defaults if no saved data exists for that mode.
+void loadCapTablesForMode(int mode) {
+  nvs_handle_t nvs_handle;
+  esp_err_t err = nvs_open("learning", NVS_READONLY, &nvs_handle);
+  if (err != ESP_OK) {
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+      rpmCapCurrentTable[i] = (mode == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * 0.5f;
+      rpmCapPowerTable[i] = 0.0f;
+    }
+    return;
+  }
+  const char* capKey    = (mode == 1) ? "capTable"      : "capTableLo";
+  const char* capPwrKey = (mode == 1) ? "capPowerTable" : "capPowerTableLo";
+
+  size_t sz = sizeof(rpmCapCurrentTable);
+  err = nvs_get_blob(nvs_handle, capKey, rpmCapCurrentTable, &sz);
+  if (err != ESP_OK || sz != sizeof(rpmCapCurrentTable)) {
+    for (int i = 0; i < RPM_TABLE_SIZE; i++)
+      rpmCapCurrentTable[i] = (mode == 1) ? defaultCapCurrentValues[i] : defaultCapCurrentValues[i] * 0.5f;
+  }
+  sz = sizeof(rpmCapPowerTable);
+  err = nvs_get_blob(nvs_handle, capPwrKey, rpmCapPowerTable, &sz);
+  if (err != ESP_OK || sz != sizeof(rpmCapPowerTable)) {
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) rpmCapPowerTable[i] = 0.0f;
+  }
+  nvs_close(nvs_handle);
+}
+
 // Immediate save of all user-editable columns (no throttle)
 // Used when user clicks Save button or Reset button
 void saveUserTableEdits() {
@@ -2445,11 +2480,14 @@ void saveUserTableEdits() {
   err = nvs_set_blob(nvs_handle, "rpmPoints", rpmTableRPMPoints, sizeof(rpmTableRPMPoints));
   if (err != ESP_OK) success = false;
 
-  err = nvs_set_blob(nvs_handle, "capTable", rpmCapCurrentTable, sizeof(rpmCapCurrentTable));
-  if (err != ESP_OK) success = false;
-
-  err = nvs_set_blob(nvs_handle, "capPowerTable", rpmCapPowerTable, sizeof(rpmCapPowerTable));
-  if (err != ESP_OK) success = false;
+  {
+    const char* capKey    = (HiLow == 1) ? "capTable"      : "capTableLo";
+    const char* capPwrKey = (HiLow == 1) ? "capPowerTable" : "capPowerTableLo";
+    err = nvs_set_blob(nvs_handle, capKey, rpmCapCurrentTable, sizeof(rpmCapCurrentTable));
+    if (err != ESP_OK) success = false;
+    err = nvs_set_blob(nvs_handle, capPwrKey, rpmCapPowerTable, sizeof(rpmCapPowerTable));
+    if (err != ESP_OK) success = false;
+  }
 
   err = nvs_set_u8(nvs_handle, "capLimitMode", capLimitMode);
   if (err != ESP_OK) success = false;

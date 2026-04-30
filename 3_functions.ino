@@ -596,8 +596,10 @@ enum Csv3Index {
   CSV3_systemIDFallAvg,               // 250
   CSV3_InputFilterTC,                 // 251
   CSV3_SystemIDStepAmplitude,         // 252
+  CSV3_HardOCTripAmps,                // 253
+  CSV3_HardOCDebounceMs,              // 254
 
-  CSV3_FIELD_COUNT  // = 253
+  CSV3_FIELD_COUNT  // = 255
 };
 
 
@@ -628,6 +630,7 @@ enum TsIndex {
 float getCapCurrentForRPM(float rpm);
 void saveCapCurrentTableToNVS();
 void loadCapCurrentTableFromNVS();
+void loadCapTablesForMode(int mode);
 
 int SafeInt(float f, int scale = 1) {
   // where this is matters!!   Put utility functions like SafeInt() above setup() and loop() , according to ChatGPT.  And I proved it matters.
@@ -2055,8 +2058,14 @@ void setupServer() {
     if (request->hasParam("HiLow")) {
       foundParameter = true;
       inputMessage = request->getParam("HiLow")->value();
-      writeFile(LittleFS, "/HiLow.txt", inputMessage.c_str());
-      HiLow = inputMessage.toInt();
+      int newMode = inputMessage.toInt();
+      if (newMode != HiLow) {
+        HiLow = newMode;
+        writeFile(LittleFS, "/HiLow.txt", inputMessage.c_str());
+        loadCapTablesForMode(HiLow);  // swap active cap tables to match new mode
+        stateRevision++;              // force immediate CSVData echo of new table values
+        queueConsoleMessageF("Charge rate mode: switched to %s", HiLow == 1 ? "Normal" : "Low");
+      }
     }
     if (request->hasParam("InvertAltAmps")) {
       foundParameter = true;
@@ -3198,6 +3207,20 @@ void setupServer() {
       VoltageSpikeMargin = inputMessage.toFloat();
       queueConsoleMessageF("Voltage spike margin set to: %.2fV above bulk", VoltageSpikeMargin);
     }
+    if (request->hasParam("HardOCTripAmps")) {
+      foundParameter = true;
+      inputMessage = request->getParam("HardOCTripAmps")->value();
+      writeFile(LittleFS, "/HardOCTripAmps.txt", inputMessage.c_str());
+      HardOCTripAmps = inputMessage.toFloat();
+      queueConsoleMessageF("Hard OC trip threshold set to: %.1fA", HardOCTripAmps);
+    }
+    if (request->hasParam("HardOCDebounceMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("HardOCDebounceMs")->value();
+      writeFile(LittleFS, "/HardOCDebounceMs.txt", inputMessage.c_str());
+      HardOCDebounceMs = (uint32_t)inputMessage.toInt();
+      queueConsoleMessageF("Hard OC debounce set to: %ums", HardOCDebounceMs);
+    }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeThreshold")->value();
@@ -3255,6 +3278,59 @@ void setupServer() {
       inputMessage = request->getParam("EffYMax")->value();
       writeFile(LittleFS, "/EffYMax.txt", inputMessage.c_str());
       EffYMax = inputMessage.toFloat();
+    }
+    if (request->hasParam("ResetPerfCounters")) {
+      foundParameter = true;
+      // Function timing — session worsts
+      ft_ReadAnalogInputs.worstSession = 0;
+      ft_rai_total.worstSession = 0;
+      ft_rai_ina228.worstSession = 0;
+      ft_rai_ads_state.worstSession = 0;
+      ft_rai_bmp_state.worstSession = 0;
+      ft_rai_imu.worstSession = 0;
+      ft_AdjustFieldLearnMode.worstSession = 0;
+      ft_uploadSensorHistory.worstSession = 0;
+      ft_uploadBufferedRecords.worstSession = 0;
+      ft_buildConfigPayload.worstSession = 0;
+      ft_ReadVEData.worstSession = 0;
+      VeTime2 = 0;
+      // CPU load maxes
+      cpuLoadCore0Max = 0;
+      cpuLoadCore1Max = 0;
+      // Session max loop time (this session only — last session is preserved)
+      MaximumLoopTime = 0;
+      // CH1 all-time accumulators
+      ch1AtWorst = 0;
+      ch1AtOver2x = 0;
+      ch1AtSum = 0;
+      ch1AtCount = 0;
+      ch1_worst_at = 0;
+      ch1_over2x_at = 0;
+      ch1_avg_at = 0.0f;
+      ch1_n_at = 0;
+      // CH1 10s ring buffer
+      ch1Head = 0;
+      ch1Count = 0;
+      ch1_avg_10s = 0.0f;
+      ch1_worst_10s = 0;
+      ch1_over2x_10s = 0;
+      ch1_n_10s = 0;
+      // CH1 2m bucket ring
+      ch1BktHead = 0;
+      ch1BktCount = 0;
+      ch1BktStart = millis();
+      ch1_avg_2m = 0.0f;
+      ch1_worst_2m = 0;
+      ch1_over2x_2m = 0;
+      ch1_n_2m = 0;
+      // CH1 1s mini-buckets
+      ch1Bkt1sCount = 0;
+      ch1Bkt1sHead = 0;
+      ch1Bkt1sCurrent = { 0, 0, 0, 0 };
+      ch1Bkt1sStart = millis();
+      // Reset interval baseline so first post-reset sample doesn't carry stale timestamp gap
+      ch1HasPrev = false;
+      queueConsoleMessage("Peak counters reset from web interface");
     }
 
     if (foundParameter) {
@@ -4338,7 +4414,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4571,16 +4647,16 @@ void SendWifiData() {
                                (int)rpmCapPowerTable[8],                               // 227
                                (int)rpmCapPowerTable[9],                               // 228
                                SafeInt(VoltageTrimLimit, 100),                         // 229
-                               SafeInt(ft_ReadAnalogInputs.worstWindow / 1000),        // 230 — Read Analog Inputs worst 5s window (ms)
-                               SafeInt(ft_ReadAnalogInputs.worstSession / 1000),       // 231 — Read Analog Inputs worst session (ms)
-                               SafeInt(ft_AdjustFieldLearnMode.worstWindow / 1000),    // 232 — Alternator Control Logic worst 5s window (ms)
-                               SafeInt(ft_AdjustFieldLearnMode.worstSession / 1000),   // 233 — Alternator Control Logic worst session (ms)
-                               SafeInt(ft_uploadSensorHistory.worstWindow / 1000),     // 234 — Upload Sensor History worst 5s window (ms)
-                               SafeInt(ft_uploadSensorHistory.worstSession / 1000),    // 235 — Upload Sensor History worst session (ms)
-                               SafeInt(ft_uploadBufferedRecords.worstWindow / 1000),   // 236 — Upload Buffered Records worst 5s window (ms)
-                               SafeInt(ft_uploadBufferedRecords.worstSession / 1000),  // 237 — Upload Buffered Records worst session (ms)
-                               SafeInt(ft_buildConfigPayload.worstWindow / 1000),      // 238 — Build Config Payload worst 5s window (ms)
-                               SafeInt(ft_buildConfigPayload.worstSession / 1000),     // 239 — Build Config Payload worst session (ms)
+                               SafeInt(ft_ReadAnalogInputs.worstWindow),        // 230 — Read Analog Inputs worst 5s window (µs)
+                               SafeInt(ft_ReadAnalogInputs.worstSession),       // 231 — Read Analog Inputs worst session (µs)
+                               SafeInt(ft_AdjustFieldLearnMode.worstWindow),    // 232 — Alternator Control Logic worst 5s window (µs)
+                               SafeInt(ft_AdjustFieldLearnMode.worstSession),   // 233 — Alternator Control Logic worst session (µs)
+                               SafeInt(ft_uploadSensorHistory.worstWindow),     // 234 — Upload Sensor History worst 5s window (µs)
+                               SafeInt(ft_uploadSensorHistory.worstSession),    // 235 — Upload Sensor History worst session (µs)
+                               SafeInt(ft_uploadBufferedRecords.worstWindow),   // 236 — Upload Buffered Records worst 5s window (µs)
+                               SafeInt(ft_uploadBufferedRecords.worstSession),  // 237 — Upload Buffered Records worst session (µs)
+                               SafeInt(ft_buildConfigPayload.worstWindow),      // 238 — Build Config Payload worst 5s window (µs)
+                               SafeInt(ft_buildConfigPayload.worstSession),     // 239 — Build Config Payload worst session (µs)
                                SafeInt(VeTime2),                                       //240
                                (int)systemIDActive,                                    // 241
                                (int)systemIDResultsReady,                              // 242
@@ -4593,7 +4669,9 @@ void SendWifiData() {
                                (int)systemIDRiseAvg_ms,                                // 249
                                (int)systemIDFallAvg_ms,                                // 250
                                (int)InputFilterTC,                                     // 251
-                               (int)SystemIDStepAmplitude                              // 252
+                               (int)SystemIDStepAmplitude,                             // 252
+                               SafeInt(HardOCTripAmps, 10),                            // 253 — ×10, 1 decimal
+                               SafeInt(HardOCDebounceMs)                               // 254 — raw ms
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
