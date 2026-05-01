@@ -6,6 +6,8 @@ from tkinter import Tk, filedialog
 from pathlib import Path
 
 
+AMPS_PER_VOLT = 250.0   # sensor scale factor — adjust to match your current probe
+
 # =========================
 # Sensor conversion
 # =========================
@@ -14,7 +16,7 @@ def volts_to_amps(volts: np.ndarray) -> np.ndarray:
     AC-coupled current signal:
     no 2.5 V offset subtraction
     """
-    return volts * 250.0
+    return volts * AMPS_PER_VOLT
 
 
 # =========================

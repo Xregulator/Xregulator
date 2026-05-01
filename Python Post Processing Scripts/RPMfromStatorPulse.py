@@ -495,6 +495,29 @@ def main():
     fig2 = plot_rpm(rpm_df)
     fig3 = plot_rpm_fft(rpm_df)
 
+    # Link fig1 (raw waveform) and fig2 (RPM vs time) — both share a time (s)
+    # x-axis. fig3 is frequency domain so it is intentionally excluded.
+    _ax_sanity = fig1.axes[0]
+    _ax_rpm    = fig2.axes[0]
+    _syncing   = [False]
+
+    def _on_xlim_changed(changed_ax):
+        if _syncing[0]:
+            return
+        _syncing[0] = True
+        try:
+            new_xlim = changed_ax.get_xlim()
+            for ax in (_ax_sanity, _ax_rpm):
+                if ax is not changed_ax:
+                    ax.set_xlim(new_xlim)
+            for fig in (fig1, fig2):
+                fig.canvas.draw_idle()
+        finally:
+            _syncing[0] = False
+
+    _ax_sanity.callbacks.connect("xlim_changed", _on_xlim_changed)
+    _ax_rpm.callbacks.connect("xlim_changed", _on_xlim_changed)
+
     plt.show()
 
 

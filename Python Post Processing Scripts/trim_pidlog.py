@@ -1,14 +1,18 @@
 """
 trim_pidlog.py
-Time-range trimmer for pidlog*.csv files.
+Time-range trimmer for any ESP32 regulator log CSV (pidlog, thermallog, cvlog, etc.).
 
-1. File picker searches ~/Downloads for pidlog*.csv  (same as plot_pidlog.py)
+1. File picker searches ~/Downloads for *.csv
 2. Time-range dialog lets the user enter Start and End in seconds
    (relative to the first row of the file, same as t_s in the plotter)
 3. All rows outside [start, end] are dropped.
 4. Trimmed CSV is saved to ~/Downloads as:
        <originalbasename>_<start_s>s_<end_s>s.csv
    with the original header row preserved exactly.
+
+Supports both time column formats:
+  ts_ms  — pidlog / thermallog  (milliseconds, converted to seconds internally)
+  t_s    — cvlog                (already in seconds)
 """
 
 import glob
@@ -23,21 +27,21 @@ DOWNLOADS = os.path.expanduser("~/Downloads")
 
 
 # ---------------------------------------------------------------------------
-# 1. File selector  (identical style to plot_pidlog.py)
+# 1. File selector
 # ---------------------------------------------------------------------------
 def pick_file():
     files = sorted(
-        glob.glob(os.path.join(DOWNLOADS, "pidlog*.csv")),
+        glob.glob(os.path.join(DOWNLOADS, "*.csv")),
         reverse=True,
     )
     if not files:
-        messagebox.showerror("No files", f"No pidlog*.csv found in {DOWNLOADS}")
+        messagebox.showerror("No files", f"No *.csv files found in {DOWNLOADS}")
         return None
 
     selected = []
 
     root = tk.Tk()
-    root.title("Select PID Log to Trim")
+    root.title("Select Log to Trim")
     root.resizable(False, False)
     root.configure(bg="#1e1e1e")
 
@@ -226,7 +230,7 @@ def pick_time_range(total_s: float):
 
 
 # ---------------------------------------------------------------------------
-# 3. Robust CSV loader  (same logic as plot_pidlog.py)
+# 3. Robust CSV loader — handles pidlog/thermallog (ts_ms) and cvlog (t_s)
 # ---------------------------------------------------------------------------
 def load_csv(path):
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -234,28 +238,41 @@ def load_csv(path):
 
     header_idx  = None
     header_line = None
+    time_col    = None
+
     for i, raw in enumerate(lines):
         if "ts_ms" in raw:
             header_idx  = i
             header_line = raw[raw.find("ts_ms"):].strip()
+            time_col    = "ts_ms"
+            break
+        if "t_s" in raw and "battV" in raw:
+            header_idx  = i
+            header_line = raw[raw.find("t_s"):].strip()
+            time_col    = "t_s"
             break
 
     if header_idx is None:
         raise SystemExit(
-            f"ERROR: No line containing 'ts_ms' found in {path}.\n"
-            "The CSV may be empty or the header row was never written."
+            f"ERROR: No recognised header found in {path}.\n"
+            "Expected a line containing 'ts_ms' (pidlog/thermallog) "
+            "or 't_s' + 'battV' (cvlog)."
         )
 
-    col_names = [c.strip() for c in header_line.split(",")]
+    _sep = "\t" if "\t" in header_line else ","
+    col_names = [c.strip() for c in header_line.split(_sep)]
     data_text = "".join(lines[header_idx + 1:])
-    df = pd.read_csv(StringIO(data_text), names=col_names, on_bad_lines="skip")
+    df = pd.read_csv(StringIO(data_text), sep=_sep, names=col_names, on_bad_lines="skip")
 
-    df["ts_ms"] = pd.to_numeric(df["ts_ms"], errors="coerce")
-    df.dropna(subset=["ts_ms"], inplace=True)
+    df[time_col] = pd.to_numeric(df[time_col], errors="coerce")
+    df.dropna(subset=[time_col], inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # t_s: seconds from first row
-    df["t_s"] = (df["ts_ms"] - df["ts_ms"].iloc[0]) / 1000.0
+    # t_s: zero-referenced seconds — synthesized from ts_ms or zero-referenced from t_s
+    if time_col == "ts_ms":
+        df["t_s"] = (df["ts_ms"] - df["ts_ms"].iloc[0]) / 1000.0
+    else:
+        df["t_s"] = df["t_s"] - df["t_s"].iloc[0]
 
     return df, col_names, header_line, lines[:header_idx]   # also return preamble lines
 
@@ -298,9 +315,6 @@ if df_trim.empty:
 
 print(f"Kept {len(df_trim)} of {len(df)} rows.")
 
-# Drop the helper column we added
-df_out = df_trim.drop(columns=["t_s"])
-
 # ---------------------------------------------------------------------------
 # 6. Build output filename and save
 #    Format: originalname_<start>s_<end>s.csv
@@ -312,15 +326,17 @@ def fmt_t(t):
 out_name = f"{basename}_{fmt_t(start_s)}s_{fmt_t(end_s)}s.csv"
 out_path = os.path.join(DOWNLOADS, out_name)
 
-# Write: preserve any preamble comment lines, then the header, then data
+# Write: preserve any preamble comment lines, then the header, then data.
+# to_csv(columns=col_names) ensures only original columns are written —
+# the synthesized t_s helper is automatically excluded for ts_ms-based logs.
 with open(out_path, "w", encoding="utf-8", newline="") as f:
     # Original comment/preamble lines (if any)
     for line in preamble_lines:
         f.write(line)
     # Header row exactly as found in the source file
     f.write(header_line + "\n")
-    # Data rows — only the original columns (no t_s helper)
-    df_out.to_csv(f, index=False, header=False, columns=col_names)
+    # Data rows
+    df_trim.to_csv(f, index=False, header=False, columns=col_names)
 
 print(f"Saved: {out_path}")
 

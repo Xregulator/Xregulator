@@ -330,14 +330,6 @@ void enter_sys_auto() {
  *  13. Update state, telemetry, and logging
  */
 
-
-// ============================================================
-// PID / CONTROL LOOP TUNING CONSTANTS — ALL LOOPS
-// Web-configurable values stored in LittleFS; compile-time
-// defaults shown. LittleFS values override on boot.
-// "hardcoded" = not exposed in web UI, only changeable here.
-// ============================================================
-//
 // ── INNER CURRENT PID ────────────────────────────────────────
 //   Runs every CH1 ADS1115 sample (÷ PidSampleDivisor).
 //   ADS sequence {1,0,1,2,1,3}: CH1 fires 3× per 6-step cycle.
@@ -348,17 +340,7 @@ void enter_sys_auto() {
 //   PidSampleDivisor=1 (default) → PID runs every CH1 hit.
 //   PidSampleDivisor=2           → every other CH1 hit.
 //
-//   Kp (proportional)          0.500       web UI default
-//   Ki (integral)              2.000       web UI default
-//   Kd (derivative)            0.010       web UI default
-//   Tracking gain (1/s)        4.00        anti-windup back-calculation
-//   Max duty output            MinDuty=1% … MaxDuty=99%
-//
 // ── VOLTAGE / CV OUTER LOOP ──────────────────────────────────
-//   Kp (A/V)                 25.00        web UI  (globals default: 20.0)
-//   Ki                       2.500        web UI  (globals default: 2.0)
-//   Loop interval            100 ms        web UI
-
 //   Asymmetric Ki: unwind rate = 7× Ki above target (K_DOWN — hardcoded in CV loop body)
 //   History: baseline 3× (too slow, cv_I drifted high), tried 10× (over-wound, integrator
 //   froze), settled at 7× as interpolated middle. Do not reduce below 5× or cv_I
@@ -369,69 +351,14 @@ void enter_sys_auto() {
 //   current rise supervisor for CV-mode transient protection.
 //   Still active as a last-resort voltage backstop (sensor glitch,
 //   non-CV modes, cases where iExcess detection misses).
-// battVFreshFlag fires at ~15ms cadence (CH0 gets 1 of 6 ADS slots; CH1 interval ~5ms).
-// dvdt EMA alpha=0.08 → effective time constant ~190ms.
-//   Prediction horizon      80 ms        (TD_PRED = 0.08f)
-//   Soft correction zone    ChargingVoltageTarget + 0.08 V  (V_SOFT)
-//   Hard correction zone    ChargingVoltageTarget + 0.15 V  (V_HARD)
-//   Soft gain               12.0 A/V     (K_SOFT)
-//   Hard gain               35.0 A/V     (K_HARD)
-//   Predictive guard band   0.06 V       (PRED_GUARD)
-//   Hard clamp hysteresis   0.08 V       (HARD_CLAMP_HYST)
+//   battVFreshFlag fires at ~15ms cadence (CH0 gets 1 of 6 ADS slots; CH1 interval ~5ms).
+//   dvdt EMA alpha=0.08 → effective time constant ~190ms.
 //
 // ── TEMPERATURE PID (outer thermal loop) ─────────────────────
-//   Kp (A/°F)                  3.000       web UI
-//   Ki                         0.025       web UI
-//   Kd (library term)          0.000       web UI  (effectively disabled)
-//   Kd External (A/°F/s)     200.000       web UI  (globals default: 200.0 — this basically creates noise, needs updating)
-//   Setpoint margin           15.00 °F     web UI  (SP = TemperatureLimitF - margin)
-//   Loop interval           5000 ms        web UI (may need toa djust this to fix the Kd External noise mentioned above??)
-//   Filter alpha               0.200       web UI  (IIR on raw temp; 0=frozen, 1=raw)
-//   Stale hold threshold    15000 ms        (hardcoded TempPIDStaleMs)
-//   Thermal penalty rise rate 60.0 A/s     (hardcoded ThermalPenaltyRiseRate)
-//   Thermal penalty fall rate 20.0 A/s     (hardcoded ThermalPenaltyFallRate)
-//   Temperature limit         150 °F        web UI  (TemperatureLimitF), changes frequently while i tune
-//   Temp warn excess          10.0 °F       above limit → WARNING ramp + lockout
-//   Temp crit excess          30.0 °F       above limit → immediate GPIO4 cut
-//   Sustained warn timeout 120000 ms        WARNING held this long → GPIO4 cut
+//   Kd External creates noise at current defaults — needs tuning/updating.
+//   Loop interval may need adjustment to address Kd External noise.
 //
-// ── SETPOINT / GOVERNOR RATES ────────────────────────────────
-//   Setpoint rise rate        30.00 A/s     web UI
-//   Setpoint fall rate        50.00 A/s     web UI
-//   Duty ramp rate            80.00 %/s     web UI  (globals default: 50.0)
-//   Shutdown slow ramp         1.00 %/s     web UI  (DutySlowRampRate, phase 3)
-//   Shutdown phase 2 hold      0    ms      web UI  (0 = skip phase 2)
-//   Settle time before GPIO4 cut 1000 ms    (hardcoded SettleTimeBeforeCut)
-//
-// ── RPM / CURRENT TABLE (learning baseline) ──────────────────
-//   Table size: 10 points  (hardcoded RPM_TABLE_SIZE)
-//   RPM breakpoints: {100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600}
-//   Default current targets:  {0, 70, 70, 80, 80, 90, 90, 90, 90, 90} A
-//   Default cap current:      {120 × 10} A  (flat 120A ceiling, all RPM points)
-//   Default min duty table:   {18, 18, 18, 10, 10, 5, 5, 5, 5, 5} %
-//   MaxTableValue             150.0 A       (absolute ceiling, web UI)
-//   MinTableValue               0.0 A       (hardcoded)
-//
-// ── VOLTAGE SPIKE / DISAGREEMENT THRESHOLDS ─────────────────
-//   Voltage spike margin       0.30 V       above BulkVoltage → warning
-//   Voltage disagree threshold 0.15 V       between BatteryV and IBV
-//   Voltage disagree timeout  10000 ms      → warning
-//   Voltage disagree critical  3000 ms      → immediate cut
-//
-// ── LEARNING / PENALTY (thermal overheat response) ──────────
-//   Max penalty %             15.0          of AlternatorNominalAmps
-//   Max penalty duration   60000 ms
-//   Min learning interval  30000 ms
-//   Safe operation threshold 30000 ms       before upward learning allowed
-//   Neighbor learning factor   0.25         adjacent RPM point reduction
-//   Learning up step           1.0 A
-//   Learning down step         2.0 A
-//   Learning settling period 30000 ms       after RPM change > 500 RPM
-//
-// ── FIELD COLLAPSE / LOCKOUT ─────────────────────────────────
-//   Field collapse delay      30000 ms      before restart after fault
-//
-//// ── ADS1115 TIMING (inner loop clock source) ─────────────────
+// ── ADS1115 TIMING (inner loop clock source) ─────────────────
 //   Conversion time    ~1.16 ms theoretical at 860 SPS.
 //   Sequence {1,0,1,2,1,3}: CH1 at positions 0,2,4 → 3× per cycle.
 //   Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
@@ -448,8 +375,6 @@ void enter_sys_auto() {
 //   Channel assignments: CH0=BatteryV  CH1=MeasuredAmps  CH2=RPM  CH3=Thermistor
 //   PidSampleDivisor=1 (default) → inner PID runs every CH1 hit.
 //   ADS_TIMEOUT_MS = 50          → conversion timeout before retry.
-//
-// ============================================================
 
 void AdjustFieldLearnMode() {
 
@@ -549,14 +474,16 @@ void AdjustFieldLearnMode() {
 
       if (BatteryV > ChargingVoltageTarget - PRED_GUARD) {
         if (Vpred > V_SOFT) {
-          float softCap = fmaxf(0.0f, fastOvBaseCap - K_SOFT * (Vpred - V_SOFT));
+          // H1: baseline anchored to setpointLimited (actual operating point) not fastOvBaseCap
+          // (theoretical ceiling). Cap is now binding and proportional to overshoot magnitude.
+          float softCap = fmaxf(0.0f, setpointLimited - K_SOFT * (Vpred - V_SOFT));
           fastOvCurrentCap = fminf(fastOvCurrentCap, softCap);
           fastOvClampActive = true;
           ovActive = true;
           g_fastOvSoftActive = true;
         }
         if (Vpred > V_HARD) {
-          float hardCap = fmaxf(0.0f, fastOvBaseCap - K_HARD * (Vpred - V_HARD));
+          float hardCap = fmaxf(0.0f, setpointLimited - K_HARD * (Vpred - V_HARD));
           fastOvCurrentCap = fminf(fastOvCurrentCap, hardCap);
           fastOvClampActive = true;
           g_fastOvHardActive = true;
@@ -566,7 +493,7 @@ void AdjustFieldLearnMode() {
       const float HARD_CLAMP_HYST = 0.08f;
       if (BatteryV > ChargingVoltageTarget + HARD_CLAMP_HYST) {
         float ovExcess = BatteryV - (ChargingVoltageTarget + HARD_CLAMP_HYST);
-        float hystCap = fmaxf(0.0f, fastOvBaseCap - K_HARD * ovExcess);
+        float hystCap = fmaxf(0.0f, setpointLimited - K_HARD * ovExcess);
         fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
         fastOvClampActive = true;
         ovActive = true;
@@ -1213,30 +1140,53 @@ void AdjustFieldLearnMode() {
         if (MaintainMode == 1) uTargetAmps = 0;
 
         // ── iExcess supervisor ─────────────────────────────────────────
+        // IExcessK and IExcessN are user-adjustable globals (LittleFS-persisted).
+        // N consecutive ticks above threshold required before response fires —
+        // separates brief resonance peaks (~3-4 ticks) from sustained RPM-step excess.
         {
-          const float IEXCESS_K = 5.0f;
           const float IEXCESS_GATE = 0.10f;
           const float IEXCESS_HYST = 2.0f;
           const float K_IE = 1.0f;
 
           static bool iExcessActive = false;
+          static int iExcessPersistCount = 0;
 
           if (voltageControlActive && (BatteryV > ChargingVoltageTarget - IEXCESS_GATE)) {
-            float excess = g_iMA2 - setpointLimited - IEXCESS_K;  // setpointLimited = previous tick — acceptable
+            float excess = g_iMA2 - setpointLimited - IExcessK;  // setpointLimited = previous tick — acceptable
             bool aboveThreshold = (excess > 0.0f);
-            bool belowHysteresis = (g_iMA2 < setpointLimited + IEXCESS_K - IEXCESS_HYST);
+            bool belowHysteresis = (g_iMA2 < setpointLimited + IExcessK - IEXCESS_HYST);
 
             if (aboveThreshold) {
+              iExcessPersistCount++;
+            } else {
+              iExcessPersistCount = 0;
+            }
+
+            if (iExcessPersistCount >= IExcessN) {
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
               fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
               fastOvClampActive = true;
               iExcessActive = true;
+              // IExcessKBleed = 0: snap to zero (maximum response — field falls at 100ms physics TC).
+              // IExcessKBleed > 0: proportional bleed at K_bleed × excess A/s each 5ms tick.
+              // Both modes drive inner loop to minimum duty within one tick; difference is recovery depth.
+              // Recovery is seeded on event release below regardless of mode.
+              if (IExcessKBleed <= 0.0f) {
+                cv_I = 0.0f;
+              } else {
+                cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * excess * actualDtSec);
+              }
             } else if (iExcessActive && !belowHysteresis) {
               fastOvClampActive = true;  // hold govBypass during hysteresis
             } else {
+              if (iExcessActive) {
+                // Seed recovery to actual operating point — avoids winding up from zero.
+                cv_I = setpointLimited;
+              }
               iExcessActive = false;
             }
           } else {
+            iExcessPersistCount = 0;
             iExcessActive = false;
           }
           g_iExcessActive = iExcessActive;
@@ -2228,7 +2178,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     }
   } else {
     uint32_t tempAge = tick.nowMs - tempTimestamp;
-    tempDataVeryStale = (tempAge > 30000);
+    tempDataVeryStale = (tempAge > 20000);
   }
 
   if (isnan(tempSelected) || tempSelected < -50.0f || tempSelected > 400.0f) {

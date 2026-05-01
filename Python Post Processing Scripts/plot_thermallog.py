@@ -172,7 +172,8 @@ numeric_cols = [
 ]
 
 for col in numeric_cols:
-    df[col] = pd.to_numeric(df[col], errors="coerce")
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
 df.dropna(subset=["ts_ms"], inplace=True)
 df.reset_index(drop=True, inplace=True)
@@ -325,11 +326,10 @@ lines1  = ax1a.get_lines() + ax1b.get_lines()
 labels1 = [l.get_label() for l in lines1]
 ax1a.legend(lines1, labels1, loc="upper left")
 
-fig1.canvas.draw()
 add_mode_vlines(ax1a, df, state_changes)
 draw_state_strip(ax1s, df, state_changes)
 fig1.suptitle(f"Temp Control & Penalty  |  {const_label}")
-save_fig(fig1, "plot1_temp")
+# save_fig(fig1, "plot1_temp")
 
 # ---------------------------------------------------------------------------
 # PLOT 2 — PID term decomposition
@@ -350,11 +350,10 @@ ax2.grid(**GRID_KW)
 ax2.legend(loc="upper left")
 plt.setp(ax2.get_xticklabels(), visible=False)
 
-fig2.canvas.draw()
 add_mode_vlines(ax2, df, state_changes)
 draw_state_strip(ax2s, df, state_changes)
 fig2.suptitle(f"PID Term Decomposition  |  {const_label}")
-save_fig(fig2, "plot2_pid")
+# save_fig(fig2, "plot2_pid")
 
 # ---------------------------------------------------------------------------
 # PLOT 3 — Constraint context
@@ -376,11 +375,10 @@ ax3.grid(**GRID_KW)
 ax3.legend(loc="upper left")
 plt.setp(ax3.get_xticklabels(), visible=False)
 
-fig3.canvas.draw()
 add_mode_vlines(ax3, df, state_changes)
 draw_state_strip(ax3s, df, state_changes)
 fig3.suptitle(f"Constraint Context  |  {const_label}")
-save_fig(fig3, "plot3_constraints")
+# save_fig(fig3, "plot3_constraints")
 
 # ---------------------------------------------------------------------------
 
@@ -412,12 +410,37 @@ lines4  = ax4a.get_lines() + ax4b.get_lines()
 labels4 = [l.get_label() for l in lines4]
 ax4a.legend(lines4, labels4, loc="upper left")
 
-fig4.canvas.draw()
 add_mode_vlines(ax4a, df, state_changes)
 draw_state_strip(ax4s, df, state_changes)
 
 fig4.suptitle(f"Battery Voltage & RPM  |  {const_label}")
-save_fig(fig4, "plot4_batt_rpm")
+# save_fig(fig4, "plot4_batt_rpm")
 
+# ---------------------------------------------------------------------------
+# Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
+# Registers xlim_changed on the primary (top) axes of each figure; sub-axes
+# within a figure already share x via sharex so only one per figure is needed.
+# ---------------------------------------------------------------------------
+_all_primary_axes = [ax1a, ax2, ax3, ax4a]
+_all_figs         = [fig1, fig2, fig3, fig4]
+_syncing = [False]   # mutable container so the closure can write to it
 
+def _on_xlim_changed(changed_ax):
+    if _syncing[0]:
+        return
+    _syncing[0] = True
+    try:
+        new_xlim = changed_ax.get_xlim()
+        for ax in _all_primary_axes:
+            if ax is not changed_ax:
+                ax.set_xlim(new_xlim)
+        for fig in _all_figs:
+            fig.canvas.draw_idle()
+    finally:
+        _syncing[0] = False
+
+for _ax in _all_primary_axes:
+    _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
+
+# ---------------------------------------------------------------------------
 plt.show()

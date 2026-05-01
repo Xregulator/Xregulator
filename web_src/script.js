@@ -663,6 +663,9 @@ const CSV3_FIELDS = [
     "SystemIDStepAmplitude",    // 252
     "HardOCTripAmps",           // 253
     "HardOCDebounceMs",         // 254
+    "IExcessK",                 // 255
+    "IExcessN",                 // 256
+    "IExcessKBleed",            // 257
 
 
 ];
@@ -2546,6 +2549,9 @@ function updateAllEchosOptimized(data) {
         { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
+        { key: 'IExcessK', id: 'IExcessK_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'IExcessN', id: 'IExcessN_echo', transform: v => Math.round(v) },
+        { key: 'IExcessKBleed', id: 'IExcessKBleed_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v) },
         { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => (v / 100).toFixed(2) },
@@ -3084,6 +3090,13 @@ function resetInnerPID() {
     if (!confirm('Reset inner PID? Integrator will be zeroed and duty will ramp up from 0 via slew limiter.')) return;
     fetch('/resetInnerPID', { method: 'POST' })
         .then(r => r.ok ? console.log('Inner PID reset') : console.warn('Reset failed'))
+        .catch(err => console.warn('Reset error:', err));
+}
+
+function resetFastOvCounters() {
+    if (!confirm('Reset FastOV event counters? Soft, hard, and total counts will be cleared.')) return;
+    fetch('/resetFastOvCounters', { method: 'POST' })
+        .then(r => r.ok ? console.log('FastOV counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 

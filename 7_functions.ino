@@ -27,6 +27,19 @@
 
 
 // ============================================================
+// EFFICIENCY TRACKER DIAGNOSTICS — Serial-only, 30s cadence
+// Counters reset each print cycle. checkPointValid increments on rejection/pass.
+// ============================================================
+static uint32_t eff_reject_duty = 0;
+static uint32_t eff_reject_amps = 0;
+static uint32_t eff_reject_battNaN = 0;
+static uint32_t eff_reject_battLow = 0;
+static uint32_t eff_reject_rpmDelta = 0;
+static uint32_t eff_reject_bucket = 0;
+static uint32_t eff_pass = 0;
+
+
+// ============================================================
 // BUCKET LOOKUP
 // ============================================================
 
@@ -115,19 +128,20 @@ static bool checkPointValid(float amps, float battV, float &fieldVolts,
   float rpmDelta = fabsf(RPM - prevRPM);
   prevRPM = RPM;
 
-  if (dutyCycle < 5.0f) return false;
-  if (amps < 2.0f) return false;
-  if (isnan(battV)) return false;
-  if (battV < EFF_MIN_BATT_V) return false;
-  if (rpmDelta > 200.0f) return false;  // PLACEHOLDER: tune if too restrictive
+  if (dutyCycle < 5.0f) { eff_reject_duty++; return false; }
+  if (amps < 2.0f) { eff_reject_amps++; return false; }
+  if (isnan(battV)) { eff_reject_battNaN++; return false; }
+  if (battV < EFF_MIN_BATT_V) { eff_reject_battLow++; return false; }
+  if (rpmDelta > 200.0f) { eff_reject_rpmDelta++; return false; }  // PLACEHOLDER: tune if too restrictive
 
   rBucket = getRPMBucket(RPM);
   tBucket = getTempBucket(TempToUse);
   fieldVolts = dutyCycle * battV / 100.0f;
   fBucket = getFieldBucket(fieldVolts);
 
-  if (rBucket < 0 || tBucket < 0 || fBucket < 0) return false;
+  if (rBucket < 0 || tBucket < 0 || fBucket < 0) { eff_reject_bucket++; return false; }
 
+  eff_pass++;
   return true;
 }
 
@@ -414,6 +428,12 @@ static void mergeWindowIntoMatrix() {
       cell.min_amps = win.min_amps;
     if (win.max_amps > cell.max_amps)
       cell.max_amps = win.max_amps;
+
+    Serial.printf("[EffMerge] bin[%d,%d,%d] +%lus => total=%lus avg=%.1fA min=%.1f max=%.1f (need %ds for eligible)\n",
+      (int)win.r, (int)win.t, (int)win.f,
+      (unsigned long)win.ss_seconds, (unsigned long)newSS,
+      cell.avg_amps, cell.min_amps, cell.max_amps,
+      REF_MIN_SS_SECONDS);
 
     saveEfficiencyMatrix();
     selectReferenceBins();
@@ -772,10 +792,72 @@ void sendEfficiencyRedDot() {
 // TICK — call from loop() every iteration, self-timed
 // ============================================================
 
+// ── 30s Serial diagnostic dump ──────────────────────────────
+// Prints checkPointValid rejection breakdown, active window slots,
+// matrix summary, referenceFinalized status, and sparkline state.
+// All eff_reject_* counters reset after each print.
+static void printEffDiagnostics() {
+  uint32_t total = eff_pass + eff_reject_duty + eff_reject_amps +
+                   eff_reject_battNaN + eff_reject_battLow +
+                   eff_reject_rpmDelta + eff_reject_bucket;
+  float fv = dutyCycle * getBatteryVoltage() / 100.0f;
+  Serial.printf("[EffDiag] checkPoint: %lu pass / %lu total | duty<5%%=%lu amps<2A=%lu battNaN=%lu battLow=%lu rpmD>200=%lu bucket=-1=%lu\n",
+    (unsigned long)eff_pass, (unsigned long)total,
+    (unsigned long)eff_reject_duty, (unsigned long)eff_reject_amps,
+    (unsigned long)eff_reject_battNaN, (unsigned long)eff_reject_battLow,
+    (unsigned long)eff_reject_rpmDelta, (unsigned long)eff_reject_bucket);
+  Serial.printf("[EffDiag]   live: RPM=%.0f duty=%.1f%% amps=%.1fA battV=%.2fV tempF=%.1f fieldV=%.2fV\n",
+    RPM, dutyCycle, isnan(MeasuredAmps) ? 0.0f : MeasuredAmps,
+    getBatteryVoltage(), TempToUse, fv);
+  Serial.printf("[EffDiag]   buckets: r=%d t=%d f=%d | refFinalized=%d sessionHealthCnt=%lu\n",
+    activeRPMBucket, activeTempBucket, activeFieldBucket,
+    (int)referenceFinalized, (unsigned long)sessionHealthCount);
+  eff_pass = 0; eff_reject_duty = 0; eff_reject_amps = 0;
+  eff_reject_battNaN = 0; eff_reject_battLow = 0;
+  eff_reject_rpmDelta = 0; eff_reject_bucket = 0;
+
+  // Active window slots
+  int activeSlots = 0;
+  for (int i = 0; i < MAX_ACTIVE_BINS_PER_WINDOW; i++) {
+    if (!effWindow || !effWindow[i].active) continue;
+    activeSlots++;
+    Serial.printf("[EffDiag]   window[%d]: bin[%d,%d,%d] ss=%lus avg=%.1fA\n",
+      i, (int)effWindow[i].r, (int)effWindow[i].t, (int)effWindow[i].f,
+      (unsigned long)effWindow[i].ss_seconds, effWindow[i].wt_avg_amps);
+  }
+  if (activeSlots == 0) Serial.println("[EffDiag]   window: no active slots");
+
+  // Matrix summary
+  if (effMatrix) {
+    int populated = 0, eligible = 0, refBins = 0;
+    uint32_t totalSS = 0;
+    for (int i = 0; i < NUM_MATRIX_CELLS; i++) {
+      if (effMatrix[i].ss_seconds > 0) populated++;
+      if (effMatrix[i].ss_seconds >= REF_MIN_SS_SECONDS) eligible++;
+      if (effMatrix[i].is_reference_bin) refBins++;
+      totalSS += effMatrix[i].ss_seconds;
+    }
+    Serial.printf("[EffDiag] matrix: %d/%d bins populated | %d eligible(>=%ds) | %d ref bins | totalSS=%lus\n",
+      populated, NUM_MATRIX_CELLS, eligible, REF_MIN_SS_SECONDS,
+      refBins, (unsigned long)totalSS);
+    Serial.printf("[EffDiag]   need %d ref bins to finalize (have %d eligible) | finalized=%d\n",
+      NUM_REFERENCE_BINS, eligible, (int)referenceFinalized);
+  }
+
+  // Sparkline / session health
+  Serial.printf("[EffDiag] sparkline: history=%d sessions stored | this session: healthCnt=%lu",
+    (int)effHistory.count, (unsigned long)sessionHealthCount);
+  if (sessionHealthCount > 0)
+    Serial.printf(" ratio=%.3f (commits on next boot)\n", sessionHealthSum / (float)sessionHealthCount);
+  else
+    Serial.println(" — no health yet (needs refFinalized + is_reference_bin)");
+}
+
 void efficiencyTracker_tick() {
   static uint32_t last1Hz = 0;
   static uint32_t last5s = 0;
   static uint32_t last2min = 0;
+  static uint32_t last30s = 0;
   uint32_t now = millis();
 
   if (now - last1Hz >= 1000) {
@@ -794,6 +876,11 @@ void efficiencyTracker_tick() {
   if (now - last2min >= 120000) {
     last2min = now;
     mergeWindowIntoMatrix();
+  }
+
+  if (now - last30s >= 30000) {
+    last30s = now;
+    printEffDiagnostics();
   }
 }
 
@@ -821,6 +908,8 @@ static void saveEffHistory() {
 static void saveCurrentSessionHealth() {
   if (sessionHealthCount == 0) return;
   float ratio = sessionHealthSum / (float)sessionHealthCount;
+  Serial.printf("[EffSession] saving health ratio=%.3f (count=%lu) — commits to sparkline on next boot\n",
+    ratio, (unsigned long)sessionHealthCount);
 
   nvs_handle_t handle;
   if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) return;
@@ -843,6 +932,9 @@ static void loadEffHistory() {
   esp_err_t err = nvs_get_blob(handle, "eff_cs", &prevSessionRatio, &fsz);
   nvs_close(handle);
 
+  Serial.printf("[EffHistory] boot load: count=%d head=%d | eff_cs err=%d ratio=%.3f\n",
+    effHistory.count, effHistory.head, (int)err, prevSessionRatio);
+
   if (err == ESP_OK && prevSessionRatio > 0.1f && prevSessionRatio < 3.0f) {
     // Valid previous session — commit it to history
     effHistory.values[effHistory.head] = prevSessionRatio;
@@ -862,8 +954,13 @@ static void loadEffHistory() {
     queueConsoleMessageF(
       "EffHistory: committed previous session health=%.2f (%d sessions stored)",
       prevSessionRatio, effHistory.count);
+    Serial.printf("[EffHistory] committed ratio=%.3f -> history now %d sessions\n",
+      prevSessionRatio, effHistory.count);
 
     effHistoryDirty = true;
+  } else {
+    Serial.printf("[EffHistory] no previous session committed (ratio=%.3f out of [0.1,3.0] or err=%d)\n",
+      prevSessionRatio, (int)err);
   }
 }
 

@@ -405,13 +405,8 @@ void checkTempTaskHealth() {
       tempTaskAlarm = true;
       queueConsoleMessageF("CRITICAL: TempTask hung up - task not responding for %lu seconds", (now - lastTempTaskHeartbeat) / 1000);
 
-      // Emergency safety action
-      if (!IgnoreTemperature) {
-        queueConsoleMessage("SAFETY: Reducing field due to temp monitoring failure");
-        // Reduce field output as safety measure    ABSTRACT OUT THESE 3 LINES LATER
-        digitalWrite(4, 0);      //  disable field
-        dutyCycle = MinDuty;     // restart duty cycle from minimum
-      }
+      // Field cut is handled by the regulation loop: tempDataVeryStale fires at 20s of no
+      // MARK_FRESH call, which produces REASON_TEMP_STALE → MODE_CRITICAL_RAMP → GPIO4 cut.
     }
   } else {
     // TempTask is responding
@@ -419,7 +414,8 @@ void checkTempTaskHealth() {
       tempTaskHealthy = true;
       tempTaskAlarm = false;
       queueConsoleMessage("TempTask: Recovered and responding normally");
-      //Later, does the field need to be re-enabled here??? Fix later
+      // Field re-enable is automatic: regulation loop re-enables GPIO4 as soon as
+      // tempDataVeryStale clears, which happens on the first MARK_FRESH after a good read.
     }
   }
 }
@@ -1679,6 +1675,21 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/HardOCDebounceMs.txt", String(HardOCDebounceMs).c_str());
   } else {
     HardOCDebounceMs = (uint32_t)readFile(LittleFS, "/HardOCDebounceMs.txt").toInt();
+  }
+  if (!fsExists("/IExcessK.txt")) {
+    writeFile(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());
+  } else {
+    IExcessK = readFile(LittleFS, "/IExcessK.txt").toFloat();
+  }
+  if (!fsExists("/IExcessN.txt")) {
+    writeFile(LittleFS, "/IExcessN.txt", String(IExcessN).c_str());
+  } else {
+    IExcessN = (int)readFile(LittleFS, "/IExcessN.txt").toInt();
+  }
+  if (!fsExists("/IExcessKBleed.txt")) {
+    writeFile(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
+  } else {
+    IExcessKBleed = readFile(LittleFS, "/IExcessKBleed.txt").toFloat();
   }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());

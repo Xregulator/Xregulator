@@ -251,7 +251,7 @@ static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
 
 // --- Reference bin selection criteria (all PLACEHOLDER — tune after first data) ---
 #define NUM_REFERENCE_BINS 10         // Top N bins by accumulated SS time
-#define REF_MIN_SS_SECONDS 300        // PLACEHOLDER: min SS seconds for a bin to be eligible (~5 min)
+#define REF_MIN_SS_SECONDS 30         // PLACEHOLDER: min SS seconds for a bin to be eligible (lowered for testing)
 #define REF_FREEZE_TOTAL_SS 6000      // PLACEHOLDER: total SS seconds across selected bins to trigger freeze (~100 min)
 #define REF_SPREAD_TEMP_DEG 50.0f     // PLACEHOLDER: min temp span across selected bins (°F)
 #define REF_SPREAD_FIELD_VOLTS 3.75f  // PLACEHOLDER: min field-drive span (25% of 15V range)
@@ -2455,6 +2455,10 @@ uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
 bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
+
+float IExcessK = 5.0f;      // current excess threshold — amps above setpoint before supervisor fires
+int IExcessN = 1;           // consecutive ticks required before supervisor fires
+float IExcessKBleed = 0.0f; // K_bleed — 0 = snap-to-zero on iExcess trigger; >0 = proportional bleed (A/s per A of excess)
 
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)

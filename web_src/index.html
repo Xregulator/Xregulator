@@ -2321,6 +2321,19 @@
                       <span class="metric-value telemetry-value"><span id="fastOvHardCountID">?</span></span>
                     </div>
 
+                    <hr />
+                    <div class="form-row">
+                      <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                        <span>Reset FastOV Event Counters</span>
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">Clears the soft, hard, and total FastOV event counters. Use after tuning changes to establish a fresh baseline for characterising false-fire rates.</span>
+                        </span>
+                      </div>
+                      <div class="form-input">
+                        <button onclick="resetFastOvCounters()" class="btn-secondary">Reset Counters</button>
+                      </div>
+                    </div>
+
                   </div>
                 </div>
 
@@ -2422,6 +2435,57 @@
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="VoltageLoopInterval" type="number" step="1" min="1" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>K_excess — Current Excess Threshold (A) (<span id="IExcessK_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">How many amps above the commanded setpoint the measured current must exceed before the fast current supervisor fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default: 5.0 A.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="IExcessK" type="number" step="0.1" min="0.5" max="50" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>N — Current Excess Persistence (ticks) (<span id="IExcessN_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Consecutive measurement ticks the current must remain above threshold before the supervisor responds. Each tick is ~5ms. Higher values filter brief noise spikes but cost lead time. Default: 1.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="IExcessN" type="number" step="1" min="1" max="20" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Controls how the voltage loop integrator is driven down when current excess is confirmed. 0 = snap to zero immediately (maximum response, default). Any value above 0 = proportional bleed at that rate in A/s per amp of excess — gentler, less undershoot risk on recovery. Try 2–5 if snap-to-zero causes unacceptable voltage dip after a blip.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="IExcessKBleed" type="number" step="0.1" min="0" max="50" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>

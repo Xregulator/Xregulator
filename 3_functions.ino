@@ -598,8 +598,11 @@ enum Csv3Index {
   CSV3_SystemIDStepAmplitude,         // 252
   CSV3_HardOCTripAmps,                // 253
   CSV3_HardOCDebounceMs,              // 254
+  CSV3_IExcessK,                      // 255
+  CSV3_IExcessN,                      // 256
+  CSV3_IExcessKBleed,                 // 257
 
-  CSV3_FIELD_COUNT  // = 255
+  CSV3_FIELD_COUNT  // = 258
 };
 
 
@@ -3236,6 +3239,27 @@ void setupServer() {
       HardOCDebounceMs = (uint32_t)inputMessage.toInt();
       queueConsoleMessageF("Hard OC debounce set to: %ums", HardOCDebounceMs);
     }
+    if (request->hasParam("IExcessK")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessK")->value();
+      IExcessK = inputMessage.toFloat();
+      writeFile(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());
+      queueConsoleMessageF("IExcess threshold set to: %.1fA above setpoint", IExcessK);
+    }
+    if (request->hasParam("IExcessN")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessN")->value();
+      IExcessN = (int)inputMessage.toInt();
+      writeFile(LittleFS, "/IExcessN.txt", String(IExcessN).c_str());
+      queueConsoleMessageF("IExcess persistence set to: %d ticks", IExcessN);
+    }
+    if (request->hasParam("IExcessKBleed")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessKBleed")->value();
+      IExcessKBleed = inputMessage.toFloat();
+      writeFile(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
+      queueConsoleMessageF("K_bleed set to: %.2f A/s per A", IExcessKBleed);
+    }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeThreshold")->value();
@@ -3789,6 +3813,13 @@ void setupServer() {
 
   server.on("/resetInnerPID", HTTP_POST, [](AsyncWebServerRequest *request) {
     innerPIDResetRequested = true;
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resetFastOvCounters", HTTP_POST, [](AsyncWebServerRequest *request) {
+    g_fastOvClampCount = 0;
+    g_fastOvSoftCount = 0;
+    g_fastOvHardCount = 0;
     request->send(200, "text/plain", "OK");
   });
 
@@ -4429,7 +4460,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4686,7 +4717,10 @@ void SendWifiData() {
                                (int)InputFilterTC,                                     // 251
                                (int)SystemIDStepAmplitude,                             // 252
                                SafeInt(HardOCTripAmps, 10),                            // 253 — ×10, 1 decimal
-                               SafeInt(HardOCDebounceMs)                               // 254 — raw ms
+                               SafeInt(HardOCDebounceMs),                              // 254 — raw ms
+                               SafeInt(IExcessK, 10),                                  // 255 — ×10, 1 decimal
+                               SafeInt(IExcessN),                                       // 256 — raw int
+                               SafeInt(IExcessKBleed, 100)                              // 257 — ×100, 2 decimals
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

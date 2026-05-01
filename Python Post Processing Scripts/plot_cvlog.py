@@ -565,4 +565,55 @@ draw_state_strip(ax4s, df)
 # save_fig(fig4, "plot4_duty_ov")
 
 # ---------------------------------------------------------------------------
+# PLOT 5 — RPM
+#
+# Shows engine/alternator RPM over time so you can correlate speed changes
+# with voltage/current behaviour in the other plots.
+# ---------------------------------------------------------------------------
+fig5, ax5, ax5s = make_fig("Plot 5 — Engine RPM", "Plot 5 — RPM")
+
+if "rpm" in df.columns:
+    ax5.plot(df["t_plot"], df["rpm"],
+             color="#ffb300", lw=1.8, label="rpm")
+else:
+    ax5.text(0.5, 0.5, "rpm column not present in this log",
+             ha="center", va="center", transform=ax5.transAxes,
+             color="#888888", fontsize=13)
+
+ax5.set_ylabel("RPM")
+ax5.grid(**GRID_KW)
+ax5.legend(loc="upper left")
+add_voltloop_vlines(ax5, df)
+
+draw_state_strip(ax5s, df)
+# save_fig(fig5, "plot5_rpm")
+
+# ---------------------------------------------------------------------------
+# Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
+# Registers xlim_changed on the primary (top) axes of each figure; because
+# sub-axes within a figure already share x via sharex, only one representative
+# per figure is needed.
+# ---------------------------------------------------------------------------
+_all_primary_axes = [ax1, ax2, ax3a, ax4a, ax5]
+_all_figs         = [fig1, fig2, fig3, fig4, fig5]
+_syncing = [False]   # mutable container so the closure can write to it
+
+def _on_xlim_changed(changed_ax):
+    if _syncing[0]:
+        return
+    _syncing[0] = True
+    try:
+        new_xlim = changed_ax.get_xlim()
+        for ax in _all_primary_axes:
+            if ax is not changed_ax:
+                ax.set_xlim(new_xlim)
+        for fig in _all_figs:
+            fig.canvas.draw_idle()
+    finally:
+        _syncing[0] = False
+
+for _ax in _all_primary_axes:
+    _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
+
+# ---------------------------------------------------------------------------
 plt.show()
