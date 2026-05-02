@@ -583,19 +583,19 @@
 
               <!-- Global cap mode toggles -->
               <div class="cap-mode-row">
-                <span class="cap-mode-label">Limit by:</span>
+                <span class="cap-mode-label">Charge Rate:</span>
+                <div class="cap-mode-toggle">
+                  <button type="button" id="chargeRateLowBtn" class="cap-mode-btn"
+                    onclick="handleChargeRateModeToggle('low')">Low</button>
+                  <button type="button" id="chargeRateNormalBtn" class="cap-mode-btn cap-mode-active"
+                    onclick="handleChargeRateModeToggle('normal')">Normal</button>
+                </div>
+                <span class="cap-mode-label" style="margin-left: 16px;">Limit by:</span>
                 <div class="cap-mode-toggle">
                   <button type="button" id="capModeAmpsBtn" class="cap-mode-btn cap-mode-active"
                     onclick="handleCapModeToggle('amps')">Amps</button>
                   <button type="button" id="capModeKWBtn" class="cap-mode-btn"
                     onclick="handleCapModeToggle('kw')">kW</button>
-                </div>
-                <span class="cap-mode-label" style="margin-left: 16px;">Charge Rate:</span>
-                <div class="cap-mode-toggle">
-                  <button type="button" id="chargeRateNormalBtn" class="cap-mode-btn cap-mode-active"
-                    onclick="handleChargeRateModeToggle('normal')">Normal</button>
-                  <button type="button" id="chargeRateLowBtn" class="cap-mode-btn"
-                    onclick="handleChargeRateModeToggle('low')">Low</button>
                 </div>
               </div>
 
@@ -928,81 +928,6 @@
                   </form>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Auto Save Table (<span id="AutoSaveLearningTable_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Auto-save
-                        — Automatically save table to flash memory. Keeps table across power cycles.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="AutoSaveLearningTable_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('AutoSaveLearningTable_checkbox', 'AutoSaveLearningTable', 'AutoSaveLearningTable')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="AutoSaveLearningTable" name="AutoSaveLearningTable" type="number" value=""
-                        style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Table Save Interval (s) (<span id="LearningTableSaveInterval_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often
-                        to save table to flash memory. More frequent = less learning loss on power
-                        failure.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="LearningTableSaveInterval" type="number" step="1" min="1" max="36000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Max Current Setpoint (A) (<span id="MaxTableValue_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        current limit any RPM range can be set to. Safety ceiling to prevent accidental runaway
-                        targets.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="MaxTableValue" type="number" step="1" min="0" max="500000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Min Current Setpoint (A) (<span id="MinTableValue_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Minimum
-                        current limit any RPM range can be set to.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="MinTableValue" type="number" step="1" min="0" max="5000000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
               </details><!-- END Table Details -->
 
               <!-- Sticky Header -->
@@ -1023,7 +948,6 @@
                 <summary class="alt-summary-nested">Output Control</summary>
 
                 <!-- Field Control -->
-                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Field Control (<span id="ManualFieldToggle_echo">?</span>):</span>
@@ -1137,6 +1061,38 @@
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="SwitchingFrequency" type="number" step="1" min="50" max="19500" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Alternator Current Limit -->
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Alternator Current Limit (A) (<span id="MaxTableValue_echo">?</span>) — OC trips at <span id="HardOCTripAmps_echo">?</span>A:</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard ceiling on commanded output current. No RPM range or control loop can command above this value. Set to the continuous current rating of your alternator. The hard overcurrent trip threshold is automatically set 10A above this value — if measured current exceeds that level for the debounce duration, GPIO4 is cut immediately in all modes.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="MaxTableValue" type="number" step="1" min="0" max="500000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Overcurrent Trip Debounce -->
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Overcurrent Trip Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long measured current must continuously exceed the OC trip threshold (Alternator Current Limit + 10A) before GPIO4 is cut. Guards against single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively met by any qualifying sample. Default: 20ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1530,7 +1486,6 @@
                 <summary class="alt-summary-nested">Controller Parameters</summary>
 
                 <!-- Reset Inner PID -->
-                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Reset Inner PID</span>
@@ -1636,7 +1591,6 @@
               <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Rate Limiting</summary>
 
-                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Setpoint Rise Rate (A/s) (<span id="SetpointRiseRate_echo">?</span>):</span>
@@ -1728,7 +1682,6 @@
               <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Current Target Generator</summary>
 
-                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Waveform (<span id="TuningMode_echo">?</span>):</span>
@@ -1960,7 +1913,6 @@
                 <summary class="alt-summary-nested">Controller Parameters</summary>
 
                 <!-- Reset Thermal PID -->
-                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Reset Thermal PID (Outer Loop)</span>
@@ -2033,14 +1985,27 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kd External (A/°F/s) (<span id="TempPIDKdExternal_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Derivative gain computed over a 20-second window. Increases thermal penalty
-                        when temperature is rising quickly, before the setpoint is reached. Zero disables. Start small
-                        (try 2.0–5.0). Default: 0.0.</span></span>
+                        class="tooltip-box">Derivative gain applied to each DS18B20 step. Increases thermal penalty
+                        when temperature is rising quickly, before the setpoint is reached. Zero disables. Default: 200.0.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="TempPIDKdExternal" type="number" step="0.1" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermal Time Constant (s) (<span id="ThermalTimeConstantSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Time between commanding a field change and first sensing a temperature difference at the measurement point, in seconds. Controls how quickly the derivative term decays to zero when temperature stabilizes — longer values mean the derivative holds its estimate longer before fading. Default: 100.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ThermalTimeConstantSec" type="number" step="1" min="5" max="600" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2637,40 +2602,6 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Hard OC Trip Threshold (A) (<span id="HardOCTripAmps_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Alternator
-                      output current above which the hard overcurrent fuse trips. GPIO4 is cut immediately — no ramp, no
-                      phases. Acts in all modes including Manual. Default: 180A.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="HardOCTripAmps" type="number" step="0.1" min="0" max="9999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Hard OC Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      current must continuously exceed the trip threshold before the fuse fires. Guards against
-                      single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively
-                      met by any qualifying sample. Default: 20ms.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
 
               </details>
 
@@ -3246,6 +3177,11 @@
                   <input type="submit" value="Save" id="fuel-table-save-button"
                     onclick="return validateFuelTable() && submitMessage.call(this)" class="btn-primary">
                 </div>
+
+                <p style="margin-top: 14px; font-size: 13px; color: #888; text-align: center; line-height: 1.5;">
+                  These values are used to estimate fuel burned based on engine RPM. Fuel consumption totals appear in
+                  <strong>Cloud Features → Statistics</strong>.
+                </p>
               </form>
             </div>
 
@@ -3742,8 +3678,50 @@
 
             </details>
 
-            <!-- How It Works (collapsed) -->
-            <details style="margin-top: 30px;">
+            <!-- BMS Integration Section -->
+            <details style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                BMS Integration</summary>
+
+              <div class="form-row">
+                <div class="form-label">Defer to BMS Control (<span id="bmsLogic_echo">?</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <span class="toggle-label">No</span>
+                    <label class="switch">
+                      <input id="bmsLogic_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('bmsLogic_checkbox', 'bmsLogic', 'bmsLogic')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">Yes</span>
+                    <input id="bmsLogic" name="bmsLogic" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Charge on ___ BMS Signal (<span id="bmsLogicLevelOff_echo">?</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <span class="toggle-label">Low</span>
+                    <label class="switch">
+                      <input id="bmsLogicLevelOff_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('bmsLogicLevelOff_checkbox', 'bmsLogicLevelOff', 'bmsLogicLevelOff')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">High</span>
+                    <input id="bmsLogicLevelOff" name="bmsLogicLevelOff" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+            </details>
+
+            <!-- How It Works -->
+            <details open style="margin-top: 30px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 How It Works
@@ -3784,48 +3762,6 @@
                   If <strong>Use Float is OFF</strong>, charging stops after Absorption and the system idles until
                   rebulk criteria are met — better for lithium longevity in cycling applications.
                 </p>
-              </div>
-            </details>
-
-            <!-- BMS Integration Section -->
-            <details open style="margin-top: 20px;">
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                BMS Integration</summary>
-
-              <div class="form-row">
-                <div class="form-label">Defer to BMS Control (<span id="bmsLogic_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">No</span>
-                    <label class="switch">
-                      <input id="bmsLogic_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('bmsLogic_checkbox', 'bmsLogic', 'bmsLogic')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">Yes</span>
-                    <input id="bmsLogic" name="bmsLogic" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Charge on ___ BMS Signal (<span id="bmsLogicLevelOff_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Low</span>
-                    <label class="switch">
-                      <input id="bmsLogicLevelOff_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('bmsLogicLevelOff_checkbox', 'bmsLogicLevelOff', 'bmsLogicLevelOff')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">High</span>
-                    <input id="bmsLogicLevelOff" name="bmsLogicLevelOff" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
               </div>
             </details>
 
@@ -4185,6 +4121,17 @@
               </div>
             </div>
 
+            <div class="form-row">
+              <div class="form-label">Low Temp Alarm (F) (<span id="TempAlarmLow_echo">0</span>):</div>
+              <div class="form-input">
+                <form action="/get" method="GET" target="hidden-form">
+                  <input type="hidden" name="password" class="password_field">
+                  <input name="TempAlarmLow" type="number" step="1" min="0" max="350" />
+                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                </form>
+              </div>
+            </div>
+
             <!-- Voltage Alarms Section -->
             <details open style="margin-top: 20px;">
               <summary
@@ -4315,7 +4262,10 @@
 
 
               <div class="form-row">
-                <div class="form-label">Battery Capacity (Amp hr) (<span id="BatteryCapacity_Ah_echo">?</span>):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Capacity (Amp hr) (<span id="BatteryCapacity_Ah_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total usable capacity of your battery bank in amp-hours. Used by the coulomb counter to calculate State of Charge. Set to your battery's rated AH at the 20-hour rate. This does not affect alternator output — it only affects the SoC display and rebulk logic.</span></span>
+                </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
@@ -4325,8 +4275,12 @@
                 </div>
               </div>
 
+              <hr />
               <div class="form-row">
-                <div class="form-label">Max Charge Detection Voltage (<span id="ChargedVoltage_echo">?</span>):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Max Charge Detection Voltage (<span id="ChargedVoltage_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Battery voltage must be at or above this level for full-charge detection to trigger. Set slightly below your Absorption voltage. If voltage never reaches this threshold during charging, SoC will never be reset to 100%.</span></span>
+                </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
@@ -4357,7 +4311,9 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label">Max Charge Detection Time (s) (<span id="ChargedDetectionTime_echo">?</span>):
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Max Charge Detection Time (s) (<span id="ChargedDetectionTime_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Seconds the battery must simultaneously hold at or above Charged Voltage AND at or below the Tail Current before full charge is declared and SoC is reset to 100%. Longer values reduce false-positive full-charge detections.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -4376,7 +4332,10 @@
                 Efficiency Parameters</summary>
 
               <div class="form-row">
-                <div class="form-label">Peukert Exponent (<span id="PeukertExponent_echo">?</span>):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Peukert Exponent (<span id="PeukertExponent_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Corrects for capacity reduction at high discharge rates. Lead acid: 1.15–1.35. AGM: 1.05–1.15. Lithium: 1.0–1.05. A value of 1.0 disables the correction. Higher values mean more capacity is lost at high current draws.</span></span>
+                </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
@@ -4388,7 +4347,10 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label">Charge Efficiency (%) (<span id="ChargeEfficiency_echo">?</span>):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Charge Efficiency (%) (<span id="ChargeEfficiency_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Accounts for energy lost as heat during charging — not all current put in gets stored. Lead acid: 85–90%. AGM: 92–95%. Lithium: 97–99%. Setting too high overstates SoC; too low understates it.</span></span>
+                </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
@@ -4435,7 +4397,10 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label">SOC Gain Factor (Current Value):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>SOC Gain Factor (Current Value):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Live read-only multiplier applied to the shunt current measurement. Adjusted automatically by SOC Auto-Correction each time a full charge is detected. Above 1.0 means the shunt was reading low; below 1.0 means it was reading high. Use Reset Factor to return to 1.0.</span></span>
+                </div>
                 <div class="form-input">
                   <span id="DynamicShuntGainFactor_display"
                     style="font-weight: bold; color: var(--accent); font-size: 14px;">?</span>
@@ -4454,7 +4419,7 @@
                   <span>Shunt Resitance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
-                    <span class="tooltip-box">Most common (Victron) = 100u</span>
+                    <span class="tooltip-box">Resistance of your current shunt in micro-ohms (µΩ). The INA228 uses this value to convert measured voltage drop to amps. Victron SmartShunt / BMV shunts = 100µΩ. Check your shunt's datasheet if unsure — an incorrect value will scale all current and SoC readings proportionally.</span></span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -4468,7 +4433,10 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label">Set SoC (%) Manually (<span id="ManualSOCPoint_echo">?</span>):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Set SoC (%) Manually (<span id="ManualSOCPoint_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Force the State of Charge to a specific value. Use this to seed the SoC after a known full or partial charge, or to correct a badly drifted reading. The coulomb counter resumes from this point immediately.</span></span>
+                </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
@@ -4480,7 +4448,10 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label">Battery Current Source (<span id="BatteryCurrentSource_echo">?</span>):</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Battery Current Source (<span id="BatteryCurrentSource_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which data source provides battery current for SoC tracking. INA228 Shunt = onboard high-precision sensor (most accurate, no network required). NMEA2K = current from your chartplotter network. NMEA0183 = serial NMEA. Victron = VE.Direct or Victron network data.</span></span>
+                </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
@@ -4509,7 +4480,6 @@
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
                 Data & Communication</summary>
 
-              <hr />
               <div class="form-row">
                 <div class="form-label">Cloud Features (<span id="CloudFeatures_echo">?</span>):</div>
                 <div class="form-input">
@@ -4704,7 +4674,6 @@
               <div class="emergency-section-content">
                 <div class="emergency-section-title">⚠️ Caution!</div>
 
-                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Ignition Override (<span id="IgnitionOverride_echo">0</span>):</span>
@@ -4776,6 +4745,47 @@
                       <span class="toggle-label">Yes</span>
                       <input id="IgnoreTemperature" name="IgnoreTemperature" type="number" value=""
                         style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Ignore RPM (<span id="IgnoreRPM_echo">0</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">
+                      ℹ️
+                      <span class="tooltip-box">For emergency use only. Bypasses the RPM gate — field will be enabled regardless of RPM. Use if RPM sensor is absent or malfunctioning.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">No</span>
+                      <label class="switch">
+                        <input id="IgnoreRPM_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('IgnoreRPM_checkbox', 'IgnoreRPM', 'IgnoreRPM')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">Yes</span>
+                      <input id="IgnoreRPM" name="IgnoreRPM" type="number" value=""
+                        style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Min RPM For Field (RPM) (<span id="MinRPMForField_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">
+                      ℹ️
+                      <span class="tooltip-box">Field is cut immediately when RPM falls below this threshold. Default 200 RPM. Set to 0 to disable (not recommended — use Ignore RPM instead).</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="MinRPMForField" type="number" step="1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
@@ -4942,6 +4952,13 @@
             <div class="metric-row">
               <span class="metric-label">Thermistor</span>
               <span class="metric-value"><span id="temperatureThermistorID">0</span> °C</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label" style="display:flex;align-items:center;gap:4px;">
+                Since Last Overheat
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hours elapsed without an overheat event this boot session. Resets to zero on reboot and on any new overheat. Does not persist across power cycles.</span></span>
+              </span>
+              <span class="metric-value"><span id="timeSinceLastOverheat_display">—</span> hr</span>
             </div>
           </div>
 
@@ -6406,7 +6423,6 @@
         <hr />
         <div class="section-title" style="margin-top: 20px;">Y-Axis Ranges</div>
 
-        <hr />
         <div class="form-row">
           <div class="form-label">Y Axis Min (Current) (<span id="Ymin1_echo">?</span>):</div>
           <div class="form-input">
@@ -7366,6 +7382,7 @@
     <span id="bmsLogicLevelOff_echo" style="display:none;">0</span>
     <span id="AlarmActivate_echo" style="display:none;">0</span>
     <span id="TempAlarm_echo" style="display:none;">0</span>
+    <span id="TempAlarmLow_echo" style="display:none;">0</span>
     <span id="VoltageAlarmHigh_echo" style="display:none;">0</span>
     <span id="VoltageAlarmLow_echo" style="display:none;">0</span>
     <span id="CurrentAlarmHigh_echo" style="display:none;">0</span>
@@ -7511,6 +7528,7 @@
     <input id="bmsLogicLevelOff" name="bmsLogicLevelOff" type="number" value style="display:none;" />
     <input id="AlarmActivate" name="AlarmActivate" type="number" value style="display:none;" />
     <input id="TempAlarm" style="display:none;" value="0" />
+    <input id="TempAlarmLow" style="display:none;" value="0" />
     <input id="VoltageAlarmHigh" style="display:none;" value="0" />
     <input id="VoltageAlarmLow" style="display:none;" value="0" />
     <input id="CurrentAlarmHigh" style="display:none;" value="0" />
@@ -7573,7 +7591,6 @@
     <input id="LearningUpwardEnabled" name="LearningUpwardEnabled" type="number" value="" style="display:none;" />
     <input id="LearningDownwardEnabled" name="LearningDownwardEnabled" type="number" value="" style="display:none;" />
     <input id="EnableNeighborLearning" name="EnableNeighborLearning" type="number" value="" style="display:none;" />
-    <input id="AutoSaveLearningTable" name="AutoSaveLearningTable" type="number" value="" style="display:none;" />
     <input id="ShowLearningDebugMessages" name="ShowLearningDebugMessages" type="number" value=""
       style="display:none;" />
     <input id="AlternatorNominalAmps" style="display:none;" value="0" />

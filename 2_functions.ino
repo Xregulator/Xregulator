@@ -1909,15 +1909,14 @@ bool buildConfigPayload() {
                      ",\"learning_memory_duration\":%lu,\"ignore_learning_during_penalty\":%d"
                      ",\"enable_neighbor_learning\":%d,\"enable_ambient_correction\":%d"
                      ",\"learning_failsafe_mode\":%d,\"learning_dry_run_mode\":%d"
-                     ",\"auto_save_learning_table\":%d,\"learning_table_save_interval\":%lu"
+                     // auto_save_learning_table and learning_table_save_interval — OBSOLETE REMOVE LATER
                      ",\"clear_overheat_history\":%d,\"overheating_penalty_timer\":%lu"
                      ",\"overheating_penalty_amps\":%.1f,\"total_learning_events\":%lu"
                      ",\"total_overheats\":%lu,\"total_safe_hours\":%lu"
                      ",\"average_table_value\":%.2f",
                      NeighborLearningFactor, yyMax, LearningMemoryDuration,
                      IgnoreLearningDuringPenalty, EnableNeighborLearning, EnableAmbientCorrection,
-                     TuningMode, LearningDryRunMode, AutoSaveLearningTable,
-                     LearningTableSaveInterval, ClearOverheatHistory, overheatingPenaltyTimer,
+                     TuningMode, LearningDryRunMode, ClearOverheatHistory, overheatingPenaltyTimer,
                      overheatingPenaltyAmps, totalLearningEvents, totalOverheats,
                      totalSafeHours, averageTableValue);
 

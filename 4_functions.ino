@@ -844,10 +844,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   }
   PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // executes ever time InitSystemSettings runs, regardless of which branches are taken.  Correct.
   if (!fsExists("/ChargeEfficiency.txt")) {
-    writeFile(LittleFS, "/ChargeEfficiency.txt", String(ChargeEfficiency_scaled).c_str());
+    // Save user-readable form (e.g. "99.0"), NOT the scaled integer, so the load path always
+    // sees a value ≤ 100 and can safely apply × 10 to reconstruct the scaled integer.
+    writeFile(LittleFS, "/ChargeEfficiency.txt", String(ChargeEfficiency_scaled / 10.0f, 1).c_str());
   } else {
-    // File stores the raw user input string (e.g. "99.0"). Multiply by 10 to get scaled int.
-    // Handles migration from old integer storage (e.g. "99" → 990).
+    // File stores the user-readable percentage string (e.g. "99.0"). Multiply by 10 to get scaled int.
     ChargeEfficiency_scaled = (int)round(readFile(LittleFS, "/ChargeEfficiency.txt").toFloat() * 10);
   }
   if (!fsExists("/TailCurrent.txt")) {
@@ -1067,6 +1068,16 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     IgnoreTemperature = readFile(LittleFS, "/IgnoreTemperature.txt").toInt();
   }
+  if (!fsExists("/IgnoreRPM.txt")) {
+    writeFile(LittleFS, "/IgnoreRPM.txt", String(IgnoreRPM).c_str());
+  } else {
+    IgnoreRPM = readFile(LittleFS, "/IgnoreRPM.txt").toInt();
+  }
+  if (!fsExists("/MinRPMForField.txt")) {
+    writeFile(LittleFS, "/MinRPMForField.txt", String(MinRPMForField).c_str());
+  } else {
+    MinRPMForField = readFile(LittleFS, "/MinRPMForField.txt").toInt();
+  }
   if (!fsExists("/bmsLogic.txt")) {
     writeFile(LittleFS, "/bmsLogic.txt", String(bmsLogic).c_str());
   } else {
@@ -1086,6 +1097,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/TempAlarm.txt", String(TempAlarm).c_str());
   } else {
     TempAlarm = readFile(LittleFS, "/TempAlarm.txt").toInt();
+  }
+  if (!fsExists("/TempAlarmLow.txt")) {
+    writeFile(LittleFS, "/TempAlarmLow.txt", String(TempAlarmLow).c_str());
+  } else {
+    TempAlarmLow = readFile(LittleFS, "/TempAlarmLow.txt").toInt();
   }
   if (!fsExists("/VoltageAlarmHigh.txt")) {
     writeFile(LittleFS, "/VoltageAlarmHigh.txt", String(VoltageAlarmHigh).c_str());
@@ -1376,11 +1392,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     LearningDryRunMode = readFile(LittleFS, "/LearningDryRunMode.txt").toInt();
   }
-  if (!fsExists("/AutoSaveLearningTable.txt")) {
-    writeFile(LittleFS, "/AutoSaveLearningTable.txt", String(AutoSaveLearningTable).c_str());
-  } else {
-    AutoSaveLearningTable = readFile(LittleFS, "/AutoSaveLearningTable.txt").toInt();
-  }
+  // AutoSaveLearningTable — OBSOLETE REMOVE LATER (LittleFS init removed)
   if (!fsExists("/LearningUpwardEnabled.txt")) {
     writeFile(LittleFS, "/LearningUpwardEnabled.txt", String(LearningUpwardEnabled).c_str());
   } else {
@@ -1508,6 +1520,12 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     TempPIDKdExternal = readFile(LittleFS, "/TempPIDKdExternal.txt").toFloat();
   }
+  if (!fsExists("/ThermalTimeConstantSec.txt")) {
+    writeFile(LittleFS, "/ThermalTimeConstantSec.txt", String(ThermalTimeConstantSec, 1).c_str());
+  } else {
+    ThermalTimeConstantSec = readFile(LittleFS, "/ThermalTimeConstantSec.txt").toFloat();
+  }
+  edgeDecayFactor = powf(0.5f, 5.0f / ThermalTimeConstantSec);
 
   if (!fsExists("/TempPIDKi.txt")) {
     writeFile(LittleFS, "/TempPIDKi.txt", String(TempPIDKi, 6).c_str());
@@ -1596,11 +1614,8 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     MaxTableValue = readFile(LittleFS, "/MaxTableValue.txt").toFloat();
   }
-  if (!fsExists("/MinTableValue.txt")) {
-    writeFile(LittleFS, "/MinTableValue.txt", String(MinTableValue, 2).c_str());
-  } else {
-    MinTableValue = readFile(LittleFS, "/MinTableValue.txt").toFloat();
-  }
+  HardOCTripAmps = MaxTableValue + 10.0f;  // always derived, not persisted
+  // MinTableValue — OBSOLETE REMOVE LATER (LittleFS init removed)
   if (!fsExists("/MaxPenaltyPercent.txt")) {
     writeFile(LittleFS, "/MaxPenaltyPercent.txt", String(MaxPenaltyPercent, 2).c_str());
   } else {
@@ -1626,11 +1641,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     LearningMemoryDuration = readFile(LittleFS, "/LearningMemoryDuration.txt").toInt();
   }
-  if (!fsExists("/LearningTableSaveInterval.txt")) {
-    writeFile(LittleFS, "/LearningTableSaveInterval.txt", String(LearningTableSaveInterval).c_str());
-  } else {
-    LearningTableSaveInterval = readFile(LittleFS, "/LearningTableSaveInterval.txt").toInt();
-  }
+  // LearningTableSaveInterval — OBSOLETE REMOVE LATER (LittleFS init removed)
   if (!fsExists("/SetpointRampRate.txt")) {
     writeFile(LittleFS, "/SetpointRampRate.txt", String(SetpointRampRate, 1).c_str());
   } else {
@@ -1665,11 +1676,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/VoltageSpikeMargin.txt", String(VoltageSpikeMargin, 2).c_str());
   } else {
     VoltageSpikeMargin = readFile(LittleFS, "/VoltageSpikeMargin.txt").toFloat();
-  }
-  if (!fsExists("/HardOCTripAmps.txt")) {
-    writeFile(LittleFS, "/HardOCTripAmps.txt", String(HardOCTripAmps, 1).c_str());
-  } else {
-    HardOCTripAmps = readFile(LittleFS, "/HardOCTripAmps.txt").toFloat();
   }
   if (!fsExists("/HardOCDebounceMs.txt")) {
     writeFile(LittleFS, "/HardOCDebounceMs.txt", String(HardOCDebounceMs).c_str());

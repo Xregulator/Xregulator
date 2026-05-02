@@ -918,7 +918,7 @@ uint32_t bulkVoltageHoldTimer = 0;  // millis() timestamp, 0 = inactive
 
 // Float->Bulk (rebulk) based on sag + debounce
 float RebulkVoltage = 13.2f;
-uint32_t rebulkDebounceTime = 60UL * 1000UL;  // ms
+uint32_t rebulkDebounceTime = 10UL * 1000UL;  // ms
 uint32_t rebulkTimer = 0;                     // millis() timestamp, 0 = inactive
 
 // Optional: don't allow immediate rebulk right after entering float
@@ -933,7 +933,7 @@ uint32_t floatStartTime = 0;
 
 float RebulkCurrent_A = 5.0f;  // net discharge current threshold to trigger rebulk
 bool inIdleStage = false;      // true when UseFloat=0 and absorption complete, waiting for rebulk
-int UseFloat = 1;              // 1 = enter float after absorption, 0 = idle until rebulk criteria met
+int UseFloat = 0;              // 1 = enter float after absorption, 0 = idle until rebulk criteria met
 
 
 // Absorption stage
@@ -962,7 +962,7 @@ int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
 int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
-float HardOCTripAmps = 180.0f;       // user-adjustable, persisted in LittleFS
+float HardOCTripAmps = 160.0f;       // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
 uint32_t HardOCDebounceMs = 20;      // user-adjustable, persisted in LittleFS
 uint32_t hardOCStartMs = 0;
 //Field PWM stuff
@@ -1376,7 +1376,7 @@ int ManualSOCPoint = 25;              // Used to set it manually
 int CoulombCount_Ah_scaled = 7500;    // Current energy in battery (Ah × 100 for precision)
 float PeukertRatedCurrent_A = 15.0f;  // Standard discharge rate for Peukert (C/20), will be calculated from capacity
 bool FullChargeDetected = false;      // Flag for full charge detection
-unsigned long FullChargeTimer = 600;  // Timer for full charge detection, 10 minutes
+unsigned long FullChargeTimer = 0;    // Accumulates elapsed seconds while full-charge conditions hold; compared against ChargedDetectionTime
 // Timing variables
 unsigned long currentTime = 0;
 unsigned long elapsedMillis = 0;
@@ -1556,17 +1556,20 @@ int Alarm_Status;                                // for alarm mirror light on Cl
 float CurrentThreshold = 0.01f;       // Ignore currents below this (amps)
 int PeukertExponent_scaled = 105;     // Peukert exponent × 100 (112 = 1.12)
 int ChargeEfficiency_scaled = 990;    // Charging efficiency % × 10 (990 = 99.0%)
-int ChargedVoltage_Scaled = 1450;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
+int ChargedVoltage_Scaled = 1380;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
 float TailCurrent = 2.0f;             // % of battery Ah capacity (1 decimal place)
 int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
-int ChargedDetectionTime = 600;       // Time at charged state to consider 100% (seconds) (10 mins)
+int ChargedDetectionTime = 180;       // Time at charged state to consider 100% (seconds) (3 mins, industry standard for lithium)
 int IgnoreTemperature = 0;            // If no temp sensor, set to 1
+int IgnoreRPM = 0;                    // If RPM sensor absent or malfunctioning, set to 1 to bypass RPM gate
+int MinRPMForField = 200;             // Field is cut when RPM is below this threshold (RPM)
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
 int bmsLogicLevelOff = 0;             // set to 0 if the BMS gives a low signal (<3V?) when no charging is desired
 bool chargingEnabled;                 // defined from other variables
 bool bmsSignalActive;                 // Read from GPIO34
 int AlarmActivate = 0;                // set to 1 to enable alarm conditions
 int TempAlarm = 190;                  // above this value, sound alarm
+int TempAlarmLow = 32;               // below this value, sound alarm (0 = disabled)
 int VoltageAlarmHigh = 15;            // above this value, sound alarm
 int VoltageAlarmLow = 11;             // below this value, sound alarm
 int CurrentAlarmHigh = 100;           // above this value, sound alarm
@@ -1867,7 +1870,7 @@ float VoltageKi = 2.5f;              // Voltage loop integral gain (A per V per 
 float VoltageTargetRiseRate = 0.3f;  // V/s — slew rate for voltage target rise only ADD TO WEB INTERFACE LATER
 // Table Bounds & Safety
 float MaxTableValue = 150.0;               // Maximum table entry (A)
-float MinTableValue = 0.0;                 // Minimum table entry (A)
+float MinTableValue = 0.0;                 // OBSOLETE REMOVE LATER
 float MaxPenaltyPercent = 15.0;            // Max penalty as % of nominal
 unsigned long MaxPenaltyDuration = 60000;  // Max penalty time (ms)
 
@@ -1887,8 +1890,8 @@ int CloudFeatures = 1;
 int LearningDryRunMode = 0;  // Calculate but don't apply changes
 
 // Data Management
-int AutoSaveLearningTable = 1;                     // Auto-save to NVS
-unsigned long LearningTableSaveInterval = 300000;  // How often to save (5 min in ms)
+int AutoSaveLearningTable = 1;                     // OBSOLETE REMOVE LATER — kept = 1 so 6_functions autosave gate always passes
+unsigned long LearningTableSaveInterval = 300000;  // OBSOLETE REMOVE LATER
 
 // Momentary Actions (Reset to 0 after execution)
 int ResetLearningTable = 0;    // OBSOLETE LEGACY EXTRA
@@ -1918,7 +1921,8 @@ enum FieldEventReason : uint8_t {
   REASON_CHARGING_DISABLED,
   REASON_MANUAL_MODE,
   REASON_INA_OVERVOLTAGE,
-  REASON_HARD_OVERCURRENT
+  REASON_HARD_OVERCURRENT,
+  REASON_RPM_TOO_LOW
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -1938,6 +1942,8 @@ struct TickSnapshot {
 
   bool tempDataVeryStale;
   bool ignoreTemperature;
+  bool ignoreRPM;
+  bool rpmBelowMinimum;
 
   bool voltagePlausible;
   bool voltageDisagreementCritical;
@@ -2016,28 +2022,46 @@ uint32_t g_fastOvClampCount = 0;   // rising-edge counter — watch for incremen
 
 
 
-// ===== "TARGET" TABLE DATA =====
+// ===== RPM TABLE BREAKPOINTS =====
+// 10 evenly-spaced RPM points covering the alternator's full operating range.
+// Linear interpolation is used between points. Values at or below the first
+// breakpoint (100 RPM) use the first entry directly — no extrapolation below it.
 #define RPM_TABLE_SIZE 10
-float rpmCurrentTable[RPM_TABLE_SIZE] = { 0, 70, 70, 80, 80, 90, 90, 90, 90, 90 };
-int rpmTableRPMPoints[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
-// Reset for conservative factory defaults for current limits
-float defaultCurrentValues[RPM_TABLE_SIZE] = { 0, 70, 70, 80, 80, 90, 90, 90, 90, 90 };
-// Reset for factory defaults for RPM breakpoints
-int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
+int rpmTableRPMPoints[RPM_TABLE_SIZE]  = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
+// Factory defaults for RPM breakpoints
+int defaultRPMValues[RPM_TABLE_SIZE]   = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
 
+// ===== TARGET CURRENT TABLE =====
+// Maximum amps the regulator will command at each RPM breakpoint in Normal mode (HiLow=1).
+// In Low mode (HiLow=0) the regulator halves these values before sending to the PID,
+// so Normal=50A → Low=25A automatically — no separate Low-mode table is needed.
+// The first entry (≤100 RPM = effectively stopped) is 0 to guarantee no field
+// current when the alternator is not spinning. The factory reset button restores
+// defaultCurrentValues below.
+float rpmCurrentTable[RPM_TABLE_SIZE]     = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float defaultCurrentValues[RPM_TABLE_SIZE] = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
 
-// ===== CAP CURRENT TABLE (always enabled) =====
-// RPM-dependent ceiling for belt/shaft/mounting limits
-float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 120, 120, 120, 120, 120, 120, 120, 120, 120, 120 };
-// Factory defaults for cap current table
+// ===== CAP CURRENT TABLE =====
+// Hard ceiling on commanded current at each RPM, always enforced regardless of
+// mode or PID output. Exists to protect the belt, shaft, and mounting hardware
+// from mechanical overload at any RPM. The target table above cannot push current
+// above this ceiling. Factory reset restores defaultCapCurrentValues.
+float rpmCapCurrentTable[RPM_TABLE_SIZE]      = { 120, 120, 120, 120, 120, 120, 120, 120, 120, 120 };
 float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 120, 120, 120, 120, 120, 120, 120, 120, 120, 120 };
 
-float rpmCapPowerTable[RPM_TABLE_SIZE] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+// ===== CAP POWER TABLE =====
+// Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
+// The firmware converts to an equivalent amp limit using live battery voltage.
+// All zeros = disabled (no power cap). capLimitMode selects which cap is active.
+float rpmCapPowerTable[RPM_TABLE_SIZE]      = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 float defaultCapPowerValues[RPM_TABLE_SIZE] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-uint8_t capLimitMode = 0;  // 0 = amps, 1 = kW
+uint8_t capLimitMode = 0;  // 0 = use amp cap (rpmCapCurrentTable), 1 = use kW cap (rpmCapPowerTable)
 
-// ===== MINIMUM FIELD TABLE  =====
-float rpmMinDutyTable[RPM_TABLE_SIZE] = { 18.0, 18.0, 18.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0 };
+// ===== MINIMUM FIELD DUTY TABLE =====
+// Minimum PWM duty cycle (%) applied to the field at each RPM breakpoint.
+// Prevents the RPM signal from dropping out due to rapid stator signal changes. Higher values at low RPM because the alternator needs more field
+// excitation to produce useful output when spinning slowly.
+float rpmMinDutyTable[RPM_TABLE_SIZE]    = { 18.0, 18.0, 18.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0 };
 float defaultMinDutyValues[RPM_TABLE_SIZE] = { 18.0, 18.0, 18.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0 };
 
 unsigned long lastOverheatTime[RPM_TABLE_SIZE] = { 0 };          // Timestamp of last overheat per RPM
@@ -2080,8 +2104,9 @@ volatile bool innerPIDResetRequested = false;
 
 float tempFiltered = NAN;
 float thermalPenaltyLastValid = 0.0f;
-float dBuf[6] = { NAN, NAN, NAN, NAN, NAN, NAN };
-uint8_t dHead = 0;
+float edgePrevRaw = NAN;    // raw DS18B20 value at the last edge-derivative sample
+uint32_t edgePrevMs = 0;    // timestamp of that sample
+uint32_t edgeLastReadMs = 0; // last tempLastSuccessMillis seen — detects new DS18B20 readings
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -2121,7 +2146,9 @@ uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp 
 float TempPIDKp = 3.0f;            // A/°F proportional gain
 float TempPIDKi = 0.025f;          // Integral gain
 float TempPIDKd = 0.0f;            // Derivative gain (provides predictive feel via dT/dt)
-float TempPIDKdExternal = 200.0f;  // external D gain, 20s window
+float TempPIDKdExternal = 200.0f;    // external D gain (A per °F/s)
+float ThermalTimeConstantSec = 100.0f; // seconds from field change to first sensed temp delta
+float edgeDecayFactor = 0.9659f;     // precomputed: 0.5^(5/ThermalTimeConstantSec); update on change
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
@@ -2457,7 +2484,7 @@ bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
 
 float IExcessK = 5.0f;      // current excess threshold — amps above setpoint before supervisor fires
-int IExcessN = 1;           // consecutive ticks required before supervisor fires
+int IExcessN = 3;           // consecutive ticks required before supervisor fires
 float IExcessKBleed = 0.0f; // K_bleed — 0 = snap-to-zero on iExcess trigger; >0 = proportional bleed (A/s per A of excess)
 
 //additional leaderboard stuff

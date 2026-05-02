@@ -735,7 +735,8 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   float deltaAh = (batteryCurrent_A * elapsedSeconds) / 3600.0f;  // A × hours = Ah
   if (BatteryCurrent_scaled >= 0) {
     // Charging - apply charge efficiency (not all energy makes it in)
-    float batteryDeltaAh = deltaAh * (ChargeEfficiency_scaled / 100.0f);
+    // ChargeEfficiency_scaled is % × 10 (e.g. 990 = 99.0%), so divide by 1000 to get the multiplier.
+    float batteryDeltaAh = deltaAh * (ChargeEfficiency_scaled / 1000.0f);
     coulombAccumulator_Ah += batteryDeltaAh;
   } else {
     // Discharging - apply Peukert compensation for high discharge rates
@@ -1320,6 +1321,19 @@ void CheckAlarms() {
       }
     } else {
       lastTempAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
+    }
+
+    static unsigned long lastTempLowAlarmMsgMs = 0;
+    if (TempAlarmLow > 0 && TempToUse < TempAlarmLow) {
+      currentAlarmCondition = true;
+      alarmReason = "Low alternator temperature";
+      if (millis() - lastTempLowAlarmMsgMs >= 30000) {
+        lastTempLowAlarmMsgMs = millis();
+        queueConsoleMessageF("Low alternator temperature: %.1f°F (limit: %d°F)",
+                             TempToUse, TempAlarmLow);
+      }
+    } else {
+      lastTempLowAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
     }
 
     if (anomalyAlarmEnable && effAnomalyAlarmActive) {

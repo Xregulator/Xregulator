@@ -1150,19 +1150,27 @@ void AdjustFieldLearnMode() {
 
           static bool iExcessActive = false;
           static int iExcessPersistCount = 0;
+          static float preEventCvI = 0.0f;  // cv_I captured just before snap, used to seed recovery
 
           if (voltageControlActive && (BatteryV > ChargingVoltageTarget - IEXCESS_GATE)) {
             float excess = g_iMA2 - setpointLimited - IExcessK;  // setpointLimited = previous tick — acceptable
             bool aboveThreshold = (excess > 0.0f);
             bool belowHysteresis = (g_iMA2 < setpointLimited + IExcessK - IEXCESS_HYST);
 
-            if (aboveThreshold) {
+            // Only count persistence when fastOV is NOT already active — iExcess is a
+            // pre-voltage detector. If fastOV has already fired, it is handling the event;
+            // letting iExcess also fire on the fastOV-collapsed setpointLimited causes
+            // spurious snap-to-zero and traps the integrator.
+            if (aboveThreshold && !fastOvClampActive) {
               iExcessPersistCount++;
             } else {
               iExcessPersistCount = 0;
             }
 
             if (iExcessPersistCount >= IExcessN) {
+              if (iExcessPersistCount == IExcessN) {
+                preEventCvI = cv_I;  // rising edge — capture before any snap or bleed
+              }
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
               fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
               fastOvClampActive = true;
@@ -1170,7 +1178,7 @@ void AdjustFieldLearnMode() {
               // IExcessKBleed = 0: snap to zero (maximum response — field falls at 100ms physics TC).
               // IExcessKBleed > 0: proportional bleed at K_bleed × excess A/s each 5ms tick.
               // Both modes drive inner loop to minimum duty within one tick; difference is recovery depth.
-              // Recovery is seeded on event release below regardless of mode.
+              // Recovery is seeded with preEventCvI on release regardless of mode.
               if (IExcessKBleed <= 0.0f) {
                 cv_I = 0.0f;
               } else {
@@ -1180,12 +1188,18 @@ void AdjustFieldLearnMode() {
               fastOvClampActive = true;  // hold govBypass during hysteresis
             } else {
               if (iExcessActive) {
-                // Seed recovery to actual operating point — avoids winding up from zero.
-                cv_I = setpointLimited;
+                // Seed recovery to pre-event value — avoids winding up from zero
+                // and avoids re-triggering on the suppressed post-snap setpointLimited.
+                cv_I = preEventCvI;
               }
               iExcessActive = false;
             }
           } else {
+            // Gate closed (battV dropped below targV - IEXCESS_GATE) — still seed recovery
+            // if an event was active, otherwise cv_I stays at zero and the trap persists.
+            if (iExcessActive) {
+              cv_I = preEventCvI;
+            }
             iExcessPersistCount = 0;
             iExcessActive = false;
           }
@@ -1260,7 +1274,21 @@ void AdjustFieldLearnMode() {
         // While CV is active and within margin, cv_I_track stays in sync for seamless re-entry.
         {
           static float cv_I_track = 0.0f;
-          float icvHi_bt = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+
+          // Anti-windup ceiling: bleeds down while fastOV is active so the bumpless
+          // tracker cannot immediately re-wind cv_I to the bulk-charging level after
+          // each overshoot. Recovers gradually after fastOV clears, giving the battery
+          // time to settle before full current ramps back up.
+          static float cv_I_aw_cap = 100.0f;
+          const float AW_BLEED_RATE   = 100.0f;  // A/s — cv_I reduction rate while fastOV active
+          const float AW_RECOVER_RATE =   5.0f;  // A/s — ceiling recovery rate after fastOV clears
+          if (fastOvClampActive && voltageControlActive) {
+            cv_I_aw_cap = fmaxf(0.0f, cv_I_aw_cap - AW_BLEED_RATE * actualDtSec);
+          } else {
+            cv_I_aw_cap = fminf(cv_I_aw_cap + AW_RECOVER_RATE * actualDtSec, (float)MaxTableValue);
+          }
+
+          float icvHi_bt = fminf(clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue), cv_I_aw_cap);
           if (!voltageControlActive || inCCPhase) {
             float e_bt = ChargingVoltageTarget - getFiltV();  // filtered — control path
             float cv_I_target = clamp_f(getFiltI() - VoltageKp * e_bt, 0.0f, icvHi_bt);
@@ -1270,6 +1298,12 @@ void AdjustFieldLearnMode() {
             cv_I = cv_I_track;
           } else {
             cv_I_track = cv_I;
+            // Per-tick cv_I bleed during active fastOV: voltage PI fires at 100ms but
+            // the integrator needs to reduce every 5ms tick to counteract bulk-phase wind-up.
+            if (fastOvClampActive) {
+              cv_I = fmaxf(0.0f, cv_I - AW_BLEED_RATE * actualDtSec);
+              cv_I_track = cv_I;
+            }
           }
         }
 
@@ -1843,6 +1877,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_MANUAL_MODE: return "MANUAL";
     case REASON_INA_OVERVOLTAGE: return "INA228 hardware overvoltage";
     case REASON_HARD_OVERCURRENT: return "HARD_OVERCURRENT";
+    case REASON_RPM_TOO_LOW: return "RPM_TOO_LOW";
 
     default: return "UNKNOWN";
   }
@@ -1865,7 +1900,12 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
     return MODE_NORMAL_MANUAL;
   }
 
-  // PRIORITY 3: CRITICAL CONDITIONS (auto mode only)
+  // PRIORITY 3: RPM GATE (field must be cut when engine is not running)
+  if (tick.rpmBelowMinimum) {
+    return MODE_CRITICAL_RAMP;
+  }
+
+  // PRIORITY 4: CRITICAL CONDITIONS (auto mode only)
   if (tick.tempDataVeryStale && !tick.ignoreTemperature) {
     return MODE_CRITICAL_RAMP;
   }
@@ -1876,7 +1916,7 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
     return MODE_CRITICAL_RAMP;
   }
 
-  // PRIORITY 4: WARNING CONDITIONS (all start lockout)
+  // PRIORITY 5: WARNING CONDITIONS (all start lockout)
   if (tick.currentBatteryVoltage > (tick.bulkVoltage + tick.voltageSpikeMargin)) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
@@ -1887,17 +1927,17 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
 
-  // PRIORITY 5: AUTO-ZERO
+  // PRIORITY 6: AUTO-ZERO
   if (tick.autoZeroActive) {
     return MODE_LOCKOUT_RAMP;
   }
 
-  // PRIORITY 6: LOCKOUT
+  // PRIORITY 7: LOCKOUT
   if (tick.inLockout) {
     return MODE_LOCKOUT_RAMP;
   }
 
-  // PRIORITY 7: NORMAL AUTO
+  // PRIORITY 8: NORMAL AUTO
   return MODE_NORMAL_AUTO_PID;
 }
 
@@ -1924,7 +1964,10 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   // Priority 2: Manual mode
   if (tick.manualMode) return REASON_MANUAL_MODE;
 
-  // Priority 3: Critical (auto mode only)
+  // Priority 3: RPM gate
+  if (tick.rpmBelowMinimum) return REASON_RPM_TOO_LOW;
+
+  // Priority 4: Critical (auto mode only)
   if (tick.tempDataVeryStale && !tick.ignoreTemperature) return REASON_TEMP_STALE;
   if (!tick.voltagePlausible) return REASON_VOLTAGE_IMPLAUSIBLE;
   if (tick.voltageDisagreementCritical) return REASON_VOLTAGE_DISAGREE_CRITICAL;
@@ -1932,7 +1975,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
     return REASON_TEMP_CRITICAL;
   }
 
-  // Priority 4: Warning
+  // Priority 5: Warning
   if (tick.currentBatteryVoltage > (tick.bulkVoltage + tick.voltageSpikeMargin)) return REASON_VOLTAGE_SPIKE;
   if (tick.voltageDisagreementWarning) return REASON_VOLTAGE_DISAGREE_WARNING;
   if (!tick.ignoreTemperature && tick.tempToUseF > (tick.tempLimitF + tick.tempWarnExcessF)) {
@@ -1942,10 +1985,10 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
     return REASON_TEMP_WARNING;
   }
 
-  // Priority 5: Auto-zero
+  // Priority 6: Auto-zero
   if (tick.autoZeroActive) return REASON_AUTOZERO_ACTIVE;
 
-  // Priority 6: Lockout
+  // Priority 7: Lockout
   if (tick.inLockout) return REASON_LOCKOUT_ACTIVE;
 
   return REASON_NONE;
@@ -2030,6 +2073,7 @@ void updateFieldTelemetry(float duty, float voltage, float fieldResistance) {
 bool shouldImmediatelyCutGPIO4(FieldEventReason reason) {
   if (reason == REASON_INA_OVERVOLTAGE) return true;
   if (reason == REASON_HARD_OVERCURRENT) return true;
+  if (reason == REASON_RPM_TOO_LOW) return true;
   if (reason == REASON_TEMP_CRITICAL) {
     return true;
   }
@@ -2079,6 +2123,7 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
     case REASON_VOLTAGE_DISAGREE_CRITICAL:
     case REASON_TEMP_STALE:
     case REASON_HARD_OVERCURRENT:
+    case REASON_RPM_TOO_LOW:
       return true;
 
     // Temperature sustained: cut after 2-minute timeout
@@ -2135,6 +2180,8 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   tick.manualMode = (ManualFieldToggle == 1);
   tick.autoZeroActive = (autoZeroStartTime > 0);
   tick.ignoreTemperature = (IgnoreTemperature != 0);
+  tick.ignoreRPM = (IgnoreRPM != 0);
+  tick.rpmBelowMinimum = (!tick.ignoreRPM && RPM < (float)MinRPMForField);
 
   // Charging enabled (with BMS and weather mode overrides)
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
@@ -2551,6 +2598,7 @@ void clearOverheatHistoryAction() {
   totalOverheats = 0;
   totalSafeMs = 0;        // ADD
   totalSafeHours = 0.0f;  // ADD
+  timeSinceLastOverheat = 0;
   saveHistoricalDataImmediate();
   queueConsoleMessage("Overheat History: All history and safe time cleared");
 }
@@ -2684,8 +2732,10 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     tempPID.ResetIntegratorTo(0.0);
     tempPIDActive = false;
     tempFilterNeedsReseed = true;
-    for (int i = 0; i < 6; i++) dBuf[i] = NAN;
-    dHead = 0;
+    edgePrevRaw = NAN;
+    edgePrevMs = 0;
+    edgeLastReadMs = 0;
+    outerTermDExternal = 0.0f;
     queueConsoleMessage("ThermalPID: manual reset requested - integrator and filter cleared");
     return;
   }
@@ -2794,8 +2844,10 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalPenaltyLastValid = resumePenalty;
 
     tempPIDActive = true;
-    for (int i = 0; i < 6; i++) dBuf[i] = tempFiltered;
-    dHead = 0;
+    edgePrevRaw = TempToUse;
+    edgePrevMs = nowMs;
+    edgeLastReadMs = (uint32_t)tempLastSuccessMillis;
+    outerTermDExternal = 0.0f;
     queueConsoleMessageF("TempPID: resumed | temp=%.1f°F setpoint=%.1f°F penalty=%.1fA (was %.1fA) stage=%s",
                          tempFiltered, TemperatureLimitF - TempPIDMarginF, resumePenalty,
                          stalePenalty, inPureBulk ? "bulk" : "CV");
@@ -2820,22 +2872,31 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   if (pidComputed) {
     thermalPenaltyAmps = (float)thermalPenaltyAmps_d;
 
-    // External 20-second derivative.
-    // Ring buffer always advances; gain gate controls whether it is applied.
-    float oldest = dBuf[dHead];
-    dBuf[dHead] = tempFiltered;
-    dHead = (dHead + 1) % 6;
+    // Edge-detection derivative: fires on each new DS18B20 reading.
+    // dTdt = (rawNow - rawPrev) / elapsed_seconds — instant response, zero noise floor.
+    // On no-change reads, decays 50% per 5s interval toward zero (temperature stable).
+    // outerTermDExternal is held between readings and applied every PID tick.
+    uint32_t readMs = (uint32_t)tempLastSuccessMillis;
+    if (TempPIDKdExternal != 0.0f && readMs != 0 && readMs != edgeLastReadMs) {
+      float rawNow = TempToUse;
+      edgeLastReadMs = readMs;
 
-    if (TempPIDKdExternal != 0.0f && !isnan(oldest)) {
-      float dWindowSec = (TempPIDIntervalMs * 6) / 1000.0f;
-      float dTdt = (tempFiltered - oldest) / dWindowSec;
-
-      outerTermDExternal = TempPIDKdExternal * dTdt;
-      thermalPenaltyAmps += outerTermDExternal;
-      thermalPenaltyAmps = clamp_f(thermalPenaltyAmps, penaltyMin, penaltyMax);
-    } else {
-      outerTermDExternal = 0.0f;
+      if (!isnan(edgePrevRaw) && edgePrevMs != 0) {
+        float delta = rawNow - edgePrevRaw;
+        float dtSec = (readMs - edgePrevMs) / 1000.0f;
+        if (delta != 0.0f && dtSec > 0.1f) {
+          outerTermDExternal = TempPIDKdExternal * (delta / dtSec);
+        } else {
+          // No step — decay toward zero at rate set by ThermalTimeConstantSec
+          outerTermDExternal *= edgeDecayFactor;
+        }
+      }
+      edgePrevRaw = rawNow;
+      edgePrevMs = readMs;
     }
+    // Always apply last outerTermDExternal (held between DS18B20 readings)
+    thermalPenaltyAmps += outerTermDExternal;
+    thermalPenaltyAmps = clamp_f(thermalPenaltyAmps, penaltyMin, penaltyMax);
 
     // Asymmetric slew limiter, then re-clamp with same bounds.
     thermalPenaltyAmps = slew_limit_f(prevThermalPenalty, thermalPenaltyAmps,

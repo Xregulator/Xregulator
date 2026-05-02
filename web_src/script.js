@@ -225,7 +225,7 @@ const CSV2_FIELDS = [
     "LogAllLearningEvents",             // 63
     "CloudFeatures",                    // 64
     "LearningDryRunMode",               // 65
-    "AutoSaveLearningTable",            // 66
+    "_unused66",                        // 66 — AutoSaveLearningTable removed from UI
     "ResetLearningTable",               // 67
     "ClearOverheatHistory",             // 68
     "AutoShuntGainCorrection",          // 69
@@ -406,6 +406,7 @@ const CSV2_FIELDS = [
     "ft_rai_imu_win",                   // 244
     "ft_rai_imu_ses",                   // 245
     "fsWriteQueueDrops",                // 246
+    "TempAlarmLow",                     // 247
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -445,7 +446,7 @@ const CSV3_FIELDS = [
     "PidKd",                           // 34
     "PidSampleDivisor",                // 35
     "MaxTableValue",                   // 36
-    "MinTableValue",                   // 37
+    "_unused37",                       // 37 — MinTableValue removed from UI
     "MaxPenaltyPercent",               // 38
     "MaxPenaltyDuration",              // 39
     "NeighborLearningFactor",          // 40
@@ -454,7 +455,7 @@ const CSV3_FIELDS = [
     "EnableNeighborLearning",          // 43
     "EnableAmbientCorrection",         // 44
     "TuningMode",                      // 45
-    "LearningTableSaveInterval",       // 46
+    "_unused46",                       // 46 — LearningTableSaveInterval removed from UI
     "rpmCurrentTable0",                // 47
     "rpmCurrentTable1",                // 48
     "rpmCurrentTable2",                // 49
@@ -666,6 +667,9 @@ const CSV3_FIELDS = [
     "IExcessK",                 // 255
     "IExcessN",                 // 256
     "IExcessKBleed",            // 257
+    "IgnoreRPM",                // 258
+    "MinRPMForField",           // 259
+    "ThermalTimeConstantSec",   // 260
 
 
 ];
@@ -2460,10 +2464,13 @@ function updateAllEchosOptimized(data) {
         { key: 'TailCurrent', id: 'TailCurrent_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'ChargedDetectionTime', id: 'ChargedDetectionTime_echo', transform: v => v },
         { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v },
+        { key: 'IgnoreRPM', id: 'IgnoreRPM_echo', transform: v => v },
+        { key: 'MinRPMForField', id: 'MinRPMForField_echo', transform: v => v },
         { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v },
         { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v },
         { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v },
         { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => v },
+        { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => v },
         { key: 'VoltageAlarmHigh', id: 'VoltageAlarmHigh_echo', transform: v => v },
         { key: 'VoltageAlarmLow', id: 'VoltageAlarmLow_echo', transform: v => v },
         { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
@@ -2526,7 +2533,6 @@ function updateAllEchosOptimized(data) {
         { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
         { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v },
         { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v },
-        { key: 'AutoSaveLearningTable', id: 'AutoSaveLearningTable_echo', transform: v => v },
         { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v },
         { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'PidKi', id: 'PidKi_echo', transform: v => (v / 1000).toFixed(3) },
@@ -2536,9 +2542,7 @@ function updateAllEchosOptimized(data) {
         { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
         { key: 'xTime', id: 'xTime_echo', transform: v => v },
         { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'MinTableValue', id: 'MinTableValue_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
-        { key: 'LearningTableSaveInterval', id: 'LearningTableSaveInterval_echo', transform: v => v },
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
         { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
         { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => (v / 100).toFixed(2) },
@@ -2579,6 +2583,7 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'ThermalTimeConstantSec', id: 'ThermalTimeConstantSec_echo', transform: v => v },
         { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
@@ -4236,6 +4241,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("NMEA0183Data_checkbox", data.NMEA0183Data, "NMEA0183Data");
         updateCheckbox("NMEA2KData_checkbox", data.NMEA2KData, "NMEA2KData");
         updateCheckbox("IgnoreTemperature_checkbox", data.IgnoreTemperature, "IgnoreTemperature");
+        updateCheckbox("IgnoreRPM_checkbox", data.IgnoreRPM, "IgnoreRPM");
         updateCheckbox("bmsLogic_checkbox", data.bmsLogic, "bmsLogic");
         updateCheckbox("bmsLogicLevelOff_checkbox", data.bmsLogicLevelOff, "bmsLogicLevelOff");
         updateCheckbox("AlarmActivate_checkbox", data.AlarmActivate, "AlarmActivate");
@@ -4256,7 +4262,6 @@ function updateTogglesFromData(data) {
 
         updateCheckbox("anomalyAlarmEnable_checkbox", data.anomalyAlarmEnable, "anomalyAlarmEnable");
         updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
-        updateCheckbox("AutoSaveLearningTable_checkbox", data.AutoSaveLearningTable, "AutoSaveLearningTable");
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
         if (data.CloudFeatures !== undefined) {
@@ -4328,6 +4333,11 @@ function setChargeRateMode(mode) {
     const lowBtn = document.getElementById('chargeRateLowBtn');
     if (normalBtn) normalBtn.classList.toggle('cap-mode-active', mode === 'normal');
     if (lowBtn) lowBtn.classList.toggle('cap-mode-active', mode === 'low');
+    const container = document.getElementById('ltScroll');
+    if (container) {
+        container.classList.toggle('rate-normal', mode === 'normal');
+        container.classList.toggle('rate-low', mode === 'low');
+    }
 }
 
 function handleChargeRateModeToggle(mode) {
@@ -4481,13 +4491,9 @@ window.addEventListener("load", function () {
     // Load Settings > Vessel Info if incomplete, otherwise Live Data > Alternator
     if (!vesselInfoComplete) {
         showMainTab('settings');
-        setTimeout(() => showSubTab('settings', 'vessel-info'), 100);
+        showSubTab('settings', 'vessel-info');
     } else {
-        showMainTab('livedata');
-        setTimeout(() => {
-            const defaultLiveDataSubTab = document.querySelector('#livedata .sub-tab[onclick*="alternator"]');
-            if (defaultLiveDataSubTab) defaultLiveDataSubTab.click();
-        }, 100);
+        showMainTab('livedata');  // safety net inside showMainTab activates alternator sub-tab
     }
     // // Simple WiFi disconnect tracking - ping every 10 seconds
     // setTrackedInterval(() => {
@@ -5623,9 +5629,13 @@ window.addEventListener("load", function () {
 
                         newTextContent = "—";
                     }
-                    // Values already pre-divided by 1000 in C++ — multiply to restore if needed, or just display raw
-                    else if (["timeSinceLastOverheat", "overheatingPenaltyTimer"].includes(key)) {
-                        newTextContent = (value).toFixed(0);  // already in seconds from C++
+                    // timeSinceLastOverheat is pre-divided by 1000 in C++ (seconds) — convert to hours for display
+                    else if (key === "timeSinceLastOverheat") {
+                        newTextContent = (value / 3600).toFixed(2);
+                    }
+                    // overheatingPenaltyTimer is pre-divided by 1000 in C++ — display raw seconds
+                    else if (key === "overheatingPenaltyTimer") {
+                        newTextContent = (value).toFixed(0);
                     }
                     // Values sent as raw milliseconds — divide by 1000 to display in seconds
                     else if (["LearningSettlingPeriod", "rebulkDebounceTime", "MinFloatTime"].includes(key)) {
@@ -5685,6 +5695,7 @@ window.addEventListener("load", function () {
                 ["safeHours8_display", "safeHours8"],
                 ["safeHours9_display", "safeHours9"],
                 ["pidSetpoint_display", "pidSetpoint"],
+                ["timeSinceLastOverheat_display", "timeSinceLastOverheat"],
                 ["FreeInternalRamID", "FreeInternalRam"],
                 ["TotalInternalRamID", "TotalInternalRam"],
                 ["LargestInternalBlockID", "LargestInternalBlock"],
@@ -6020,6 +6031,7 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("NMEA0183Data_checkbox").checked = (document.getElementById("NMEA0183Data").value === "1");
     document.getElementById("NMEA2KData_checkbox").checked = (document.getElementById("NMEA2KData").value === "1");
     document.getElementById("IgnoreTemperature_checkbox").checked = (document.getElementById("IgnoreTemperature").value === "1");
+    document.getElementById("IgnoreRPM_checkbox").checked = (document.getElementById("IgnoreRPM").value === "1");
     document.getElementById("bmsLogic_checkbox").checked = (document.getElementById("bmsLogic").value === "1");
     document.getElementById("bmsLogicLevelOff_checkbox").checked = (document.getElementById("bmsLogicLevelOff").value === "1");
     document.getElementById("AlarmActivate_checkbox").checked = (document.getElementById("AlarmActivate").value === "1");
@@ -6034,7 +6046,6 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("TuningMode_checkbox").checked = (document.getElementById("TuningMode").value === "1");
     document.getElementById("socInfoAvailable_checkbox").checked = (document.getElementById("socInfoAvailable").value === "1");
     document.getElementById("accelEnabled_checkbox").checked = (document.getElementById("accelEnabled").value === "1");
-    document.getElementById("AutoSaveLearningTable_checkbox").checked = (document.getElementById("AutoSaveLearningTable").value === "1");
     document.getElementById("CloudFeatures_checkbox").checked = (document.getElementById("CloudFeatures").value === "1");
     document.getElementById("AutoAltCurrentZero_checkbox").checked = (document.getElementById("AutoAltCurrentZero").value === "1");
     document.getElementById("HardwarePresent_checkbox").checked = (document.getElementById("hardwarePresent").value === "1");
@@ -6224,6 +6235,10 @@ function showMainTab(tabName) {
                 initEffPlot();
             }
         }, 0);
+        // Ensure a sub-tab is always visible; on first visit none may be active yet
+        if (!document.querySelector('#livedata .sub-tab-content.active')) {
+            showSubTab('livedata', 'alternator');
+        }
     }
 
     // Control sticky header based on active tab

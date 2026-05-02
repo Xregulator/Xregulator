@@ -338,8 +338,9 @@ enum Csv2Index {
   CSV2_ft_rai_imu_win,                     // 244
   CSV2_ft_rai_imu_ses,                     // 245
   CSV2_fsWriteQueueDrops,                  // 246
+  CSV2_TempAlarmLow,                       // 247
 
-  CSV2_FIELD_COUNT  // ← always last, = 247
+  CSV2_FIELD_COUNT  // ← always last, = 248
 };
 
 enum Csv3Index {
@@ -601,8 +602,11 @@ enum Csv3Index {
   CSV3_IExcessK,                      // 255
   CSV3_IExcessN,                      // 256
   CSV3_IExcessKBleed,                 // 257
+  CSV3_IgnoreRPM,                     // 258
+  CSV3_MinRPMForField,                // 259
+  CSV3_ThermalTimeConstantSec,        // 260
 
-  CSV3_FIELD_COUNT  // = 258
+  CSV3_FIELD_COUNT  // = 261
 };
 
 
@@ -2174,6 +2178,18 @@ void setupServer() {
       writeFile(LittleFS, "/IgnoreTemperature.txt", inputMessage.c_str());
       IgnoreTemperature = inputMessage.toInt();
     }
+    if (request->hasParam("IgnoreRPM")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IgnoreRPM")->value();
+      writeFile(LittleFS, "/IgnoreRPM.txt", inputMessage.c_str());
+      IgnoreRPM = inputMessage.toInt();
+    }
+    if (request->hasParam("MinRPMForField")) {
+      foundParameter = true;
+      inputMessage = request->getParam("MinRPMForField")->value();
+      writeFile(LittleFS, "/MinRPMForField.txt", inputMessage.c_str());
+      MinRPMForField = inputMessage.toInt();
+    }
     if (request->hasParam("bmsLogic")) {
       foundParameter = true;
       inputMessage = request->getParam("bmsLogic")->value();
@@ -2197,6 +2213,12 @@ void setupServer() {
       inputMessage = request->getParam("TempAlarm")->value();
       writeFile(LittleFS, "/TempAlarm.txt", inputMessage.c_str());
       TempAlarm = inputMessage.toInt();
+    }
+    if (request->hasParam("TempAlarmLow")) {
+      foundParameter = true;
+      inputMessage = request->getParam("TempAlarmLow")->value();
+      writeFile(LittleFS, "/TempAlarmLow.txt", inputMessage.c_str());
+      TempAlarmLow = inputMessage.toInt();
     }
     if (request->hasParam("VoltageAlarmHigh")) {
       foundParameter = true;
@@ -2734,12 +2756,7 @@ void setupServer() {
       writeFile(LittleFS, "/LearningDryRunMode.txt", inputMessage.c_str());
       LearningDryRunMode = inputMessage.toInt();
     }
-    if (request->hasParam("AutoSaveLearningTable")) {
-      foundParameter = true;
-      inputMessage = request->getParam("AutoSaveLearningTable")->value();
-      writeFile(LittleFS, "/AutoSaveLearningTable.txt", inputMessage.c_str());
-      AutoSaveLearningTable = inputMessage.toInt();
-    }
+    // AutoSaveLearningTable handler — OBSOLETE REMOVE LATER
     if (request->hasParam("LearningUpwardEnabled")) {
       foundParameter = true;
       inputMessage = request->getParam("LearningUpwardEnabled")->value();
@@ -3014,6 +3031,14 @@ void setupServer() {
       TempPIDKdExternal = inputMessage.toFloat();
       queueConsoleMessageF("TempPIDKdExternal updated to: %.6f", TempPIDKdExternal);
     }
+    if (request->hasParam("ThermalTimeConstantSec")) {
+      foundParameter = true;
+      inputMessage = request->getParam("ThermalTimeConstantSec")->value();
+      ThermalTimeConstantSec = max(1.0f, inputMessage.toFloat());
+      writeFile(LittleFS, "/ThermalTimeConstantSec.txt", String(ThermalTimeConstantSec, 1).c_str());
+      edgeDecayFactor = powf(0.5f, 5.0f / ThermalTimeConstantSec);
+      queueConsoleMessageF("ThermalTimeConstantSec set to: %.1f s  edgeDecayFactor=%.4f", ThermalTimeConstantSec, edgeDecayFactor);
+    }
     if (request->hasParam("TempPIDKi")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKi")->value();
@@ -3115,13 +3140,10 @@ void setupServer() {
       inputMessage = request->getParam("MaxTableValue")->value();
       writeFile(LittleFS, "/MaxTableValue.txt", inputMessage.c_str());
       MaxTableValue = inputMessage.toFloat();
+      HardOCTripAmps = MaxTableValue + 10.0f;  // always 10A above current limit
+      queueConsoleMessageF("Alternator current limit set to %.1fA — OC trip threshold: %.1fA", MaxTableValue, HardOCTripAmps);
     }
-    if (request->hasParam("MinTableValue")) {
-      foundParameter = true;
-      inputMessage = request->getParam("MinTableValue")->value();
-      writeFile(LittleFS, "/MinTableValue.txt", inputMessage.c_str());
-      MinTableValue = inputMessage.toFloat();
-    }
+    // MinTableValue handler — OBSOLETE REMOVE LATER
     if (request->hasParam("MaxPenaltyPercent")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxPenaltyPercent")->value();
@@ -3153,13 +3175,7 @@ void setupServer() {
       writeFile(LittleFS, "/LearningMemoryDuration.txt", inputMessage.c_str());
       LearningMemoryDuration = inputMessage.toInt();
     }
-    if (request->hasParam("LearningTableSaveInterval")) {
-      foundParameter = true;
-      inputMessage = request->getParam("LearningTableSaveInterval")->value();
-      int temp = inputMessage.toInt() * 1000;
-      writeFile(LittleFS, "/LearningTableSaveInterval.txt", String(temp).c_str());
-      LearningTableSaveInterval = temp;
-    }
+    // LearningTableSaveInterval handler — OBSOLETE REMOVE LATER
     if (request->hasParam("SetpointRampRate")) {
       foundParameter = true;
       inputMessage = request->getParam("SetpointRampRate")->value();
@@ -3225,19 +3241,12 @@ void setupServer() {
       VoltageSpikeMargin = inputMessage.toFloat();
       queueConsoleMessageF("Voltage spike margin set to: %.2fV above bulk", VoltageSpikeMargin);
     }
-    if (request->hasParam("HardOCTripAmps")) {
-      foundParameter = true;
-      inputMessage = request->getParam("HardOCTripAmps")->value();
-      writeFile(LittleFS, "/HardOCTripAmps.txt", inputMessage.c_str());
-      HardOCTripAmps = inputMessage.toFloat();
-      queueConsoleMessageF("Hard OC trip threshold set to: %.1fA", HardOCTripAmps);
-    }
     if (request->hasParam("HardOCDebounceMs")) {
       foundParameter = true;
       inputMessage = request->getParam("HardOCDebounceMs")->value();
       writeFile(LittleFS, "/HardOCDebounceMs.txt", inputMessage.c_str());
       HardOCDebounceMs = (uint32_t)inputMessage.toInt();
-      queueConsoleMessageF("Hard OC debounce set to: %ums", HardOCDebounceMs);
+      queueConsoleMessageF("Overcurrent trip debounce set to: %ums", HardOCDebounceMs);
     }
     if (request->hasParam("IExcessK")) {
       foundParameter = true;
@@ -4179,7 +4188,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4248,7 +4257,7 @@ void SendWifiData() {
                                SafeInt(LogAllLearningEvents),                                                                                                                            //63
                                SafeInt(CloudFeatures),                                                                                                                                   //64
                                SafeInt(LearningDryRunMode),                                                                                                                              //65
-                               SafeInt(AutoSaveLearningTable),                                                                                                                           //66
+                               0,                                                                                                                                                 //66 OBSOLETE AutoSaveLearningTable
                                SafeInt(ResetLearningTable),                                                                                                                              //67
                                SafeInt(ClearOverheatHistory),                                                                                                                            //68
                                SafeInt(AutoShuntGainCorrection),                                                                                                                         //69
@@ -4428,7 +4437,8 @@ void SendWifiData() {
                                SafeInt(ft_rai_bmp_state.worstSession),  // 243
                                SafeInt(ft_rai_imu.worstWindow),         // 244
                                SafeInt(ft_rai_imu.worstSession),        // 245
-                               SafeInt(fsWriteQueueDrops)               // 246
+                               SafeInt(fsWriteQueueDrops),              // 246
+                               SafeInt(TempAlarmLow)                    // 247
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -4460,7 +4470,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4500,7 +4510,7 @@ void SendWifiData() {
                                SafeInt(PidKd, 1000),                                   // 34
                                SafeInt(PidSampleDivisor),                              // 35
                                SafeInt(MaxTableValue, 100),                            // 36
-                               SafeInt(MinTableValue, 100),                            // 37
+                               0,                                                      // 37 OBSOLETE MinTableValue
                                SafeInt(MaxPenaltyPercent, 100),                        // 38
                                SafeInt(MaxPenaltyDuration / 1000),                     // 39
                                SafeInt(NeighborLearningFactor, 1000),                  // 40
@@ -4509,7 +4519,7 @@ void SendWifiData() {
                                SafeInt(EnableNeighborLearning),                        // 43
                                SafeInt(EnableAmbientCorrection),                       // 44
                                SafeInt(TuningMode),                                    // 45
-                               SafeInt(LearningTableSaveInterval / 1000),              // 46
+                               0,                                                      // 46 OBSOLETE LearningTableSaveInterval
                                SafeInt(rpmCurrentTable[0]),                            // 47
                                SafeInt(rpmCurrentTable[1]),                            // 48
                                SafeInt(rpmCurrentTable[2]),                            // 49
@@ -4720,7 +4730,10 @@ void SendWifiData() {
                                SafeInt(HardOCDebounceMs),                              // 254 — raw ms
                                SafeInt(IExcessK, 10),                                  // 255 — ×10, 1 decimal
                                SafeInt(IExcessN),                                       // 256 — raw int
-                               SafeInt(IExcessKBleed, 100)                              // 257 — ×100, 2 decimals
+                               SafeInt(IExcessKBleed, 100),                             // 257 — ×100, 2 decimals
+                               SafeInt(IgnoreRPM),                                      // 258
+                               SafeInt(MinRPMForField),                                 // 259
+                               SafeInt(ThermalTimeConstantSec)                          // 260
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

@@ -327,6 +327,17 @@ textarea {
   background: #fff;
   overflow: visible;
   margin-bottom: 15px;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+/* Charge rate mode — border + wash color tracks the active mode */
+.learning-table-container.rate-normal {
+  border: 2px solid var(--accent);
+  background: rgba(0, 161, 154, 0.05);
+}
+.learning-table-container.rate-low {
+  border: 2px solid #ff9800;
+  background: rgba(255, 152, 0, 0.06);
 }
 
 .learning-table-xscroll {
@@ -2596,6 +2607,10 @@ input:checked+.slider:before {
   }
   .cap-mode-btn.cap-mode-active {
     background: var(--teal, #00a19a);
+    color: #fff;
+  }
+  #chargeRateLowBtn.cap-mode-active {
+    background: #ff9800;
     color: #fff;
   }
   /* Derived (calculated) inputs — visually subordinate, not editable */
