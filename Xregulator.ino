@@ -2486,6 +2486,8 @@ float g_iExcessDutyCap = 100.0f;
 float IExcessK = 5.0f;      // current excess threshold — amps above setpoint before supervisor fires
 int IExcessN = 3;           // consecutive ticks required before supervisor fires
 float IExcessKBleed = 0.0f; // K_bleed — 0 = snap-to-zero on iExcess trigger; >0 = proportional bleed (A/s per A of excess)
+float AwBleedRate   = 2.0f;  // fraction of MaxTableValue per second — bleed rate while fastOV active (2.0 × 50A = 100 A/s)
+float AwRecoverRate = 0.1f;  // fraction of MaxTableValue per second — recovery rate after fastOV clears (0.1 × 50A = 5 A/s)
 
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)

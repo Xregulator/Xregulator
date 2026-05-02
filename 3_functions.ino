@@ -605,8 +605,10 @@ enum Csv3Index {
   CSV3_IgnoreRPM,                     // 258
   CSV3_MinRPMForField,                // 259
   CSV3_ThermalTimeConstantSec,        // 260
+  CSV3_AwBleedRate,                   // 261
+  CSV3_AwRecoverRate,                 // 262
 
-  CSV3_FIELD_COUNT  // = 261
+  CSV3_FIELD_COUNT  // = 263
 };
 
 
@@ -3269,6 +3271,20 @@ void setupServer() {
       writeFile(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
       queueConsoleMessageF("K_bleed set to: %.2f A/s per A", IExcessKBleed);
     }
+    if (request->hasParam("AwBleedRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("AwBleedRate")->value();
+      AwBleedRate = inputMessage.toFloat();
+      writeFile(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 1).c_str());
+      queueConsoleMessageF("AW bleed rate set to: %.1f A/s", AwBleedRate);
+    }
+    if (request->hasParam("AwRecoverRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("AwRecoverRate")->value();
+      AwRecoverRate = inputMessage.toFloat();
+      writeFile(LittleFS, "/AwRecoverRate.txt", String(AwRecoverRate, 1).c_str());
+      queueConsoleMessageF("AW recovery rate set to: %.1f A/s", AwRecoverRate);
+    }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeThreshold")->value();
@@ -4470,7 +4486,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4733,7 +4749,9 @@ void SendWifiData() {
                                SafeInt(IExcessKBleed, 100),                             // 257 — ×100, 2 decimals
                                SafeInt(IgnoreRPM),                                      // 258
                                SafeInt(MinRPMForField),                                 // 259
-                               SafeInt(ThermalTimeConstantSec)                          // 260
+                               SafeInt(ThermalTimeConstantSec),                         // 260
+                               SafeInt(AwBleedRate, 10),                                // 261 — ×10, 1 decimal
+                               SafeInt(AwRecoverRate, 10)                               // 262 — ×10, 1 decimal
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

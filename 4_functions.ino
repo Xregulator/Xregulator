@@ -1697,6 +1697,16 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     IExcessKBleed = readFile(LittleFS, "/IExcessKBleed.txt").toFloat();
   }
+  if (!fsExists("/AwBleedRate.txt")) {
+    writeFile(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 2).c_str());
+  } else {
+    AwBleedRate = readFile(LittleFS, "/AwBleedRate.txt").toFloat();
+  }
+  if (!fsExists("/AwRecoverRate.txt")) {
+    writeFile(LittleFS, "/AwRecoverRate.txt", String(AwRecoverRate, 2).c_str());
+  } else {
+    AwRecoverRate = readFile(LittleFS, "/AwRecoverRate.txt").toFloat();
+  }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());
   } else {

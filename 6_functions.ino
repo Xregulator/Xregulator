@@ -1139,6 +1139,9 @@ void AdjustFieldLearnMode() {
         if (HiLow == 0) uTargetAmps = uTargetAmps / 2;
         if (MaintainMode == 1) uTargetAmps = 0;
 
+        // Hoisted here so iExcess block can reset it on event onset.
+        static float cv_I_aw_cap = 100.0f;
+
         // ── iExcess supervisor ─────────────────────────────────────────
         // IExcessK and IExcessN are user-adjustable globals (LittleFS-persisted).
         // N consecutive ticks above threshold required before response fires —
@@ -1157,11 +1160,34 @@ void AdjustFieldLearnMode() {
             bool aboveThreshold = (excess > 0.0f);
             bool belowHysteresis = (g_iMA2 < setpointLimited + IExcessK - IEXCESS_HYST);
 
-            // Only count persistence when fastOV is NOT already active — iExcess is a
-            // pre-voltage detector. If fastOV has already fired, it is handling the event;
-            // letting iExcess also fire on the fastOV-collapsed setpointLimited causes
-            // spurious snap-to-zero and traps the integrator.
-            if (aboveThreshold && !fastOvClampActive) {
+            // Post-fastOV mismatch gate: block iExcess counting while g_iMA2 is still
+            // elevated from the fastOV event itself. When fastOV fires, setpointLimited
+            // instantly collapses (1e9 A/s fall rate) but field inductance keeps g_iMA2
+            // high for ~1 field TC. That mismatch looks identical to a real iExcess event
+            // but is entirely caused by fastOV's own action — firing here cascades into
+            // a spurious cv_I snap and a full oscillation cycle.
+            //
+            // Arm on fastOV rising edge. Release when g_iMA2 has actually fallen back to
+            // within IExcessK of setpointLimited — i.e., when the mismatch is physically
+            // gone. This is installation-agnostic: slow-TC alternators hold the gate
+            // longer naturally; fast-TC alternators release sooner. If AwBleed permanently
+            // lowers the operating point, the gate still releases once g_iMA2 matches the
+            // new level — a subsequent real RPM step is then correctly detected.
+            static bool postFastOvMismatch = false;
+            static bool prevFastOvActive_ie = false;
+            if (fastOvClampActive && !prevFastOvActive_ie) {
+              postFastOvMismatch = true;  // rising edge: arm the gate
+            }
+            prevFastOvActive_ie = fastOvClampActive;
+            if (postFastOvMismatch && !fastOvClampActive
+                && (g_iMA2 <= setpointLimited + IExcessK)) {
+              postFastOvMismatch = false;  // mismatch gone — release gate
+            }
+
+            // Only count persistence when fastOV is NOT already active and the
+            // post-fastOV mismatch has cleared — iExcess is a pre-voltage detector;
+            // it must not fire on conditions created by fastOV's own action.
+            if (aboveThreshold && !fastOvClampActive && !postFastOvMismatch) {
               iExcessPersistCount++;
             } else {
               iExcessPersistCount = 0;
@@ -1170,6 +1196,7 @@ void AdjustFieldLearnMode() {
             if (iExcessPersistCount >= IExcessN) {
               if (iExcessPersistCount == IExcessN) {
                 preEventCvI = cv_I;  // rising edge — capture before any snap or bleed
+                cv_I_aw_cap = cv_I;  // cap the bumpless tracker ceiling to pre-event level — prevents CC-phase rewind
               }
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
               fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
@@ -1274,18 +1301,44 @@ void AdjustFieldLearnMode() {
         // While CV is active and within margin, cv_I_track stays in sync for seamless re-entry.
         {
           static float cv_I_track = 0.0f;
+          static bool lastInCCPhase_bt = true;  // assume CC phase on first tick
+
+          // ── CC→CV bumpless entry seed ──────────────────────────────────────────────
+          // The bumpless tracker formula (getFiltI() - Kp*e_bt) evaluates to zero for
+          // most of the CC approach — Kp*e_bt exceeds getFiltI() when voltage is far below
+          // target. cv_I is near zero at the CC→CV transition. Without this seed,
+          // setpointCommand collapses from 40+ A to ~4 A on CV entry, which collapses
+          // spLimited, and the resulting spLimited/iMeas mismatch triggers the iExcess
+          // cascade. Seed cv_I so that Icv = Kp*e + cv_I ≈ getFiltI() at transition:
+          //   seed = getFiltI() - Kp*e  →  Icv = getFiltI()  →  no step in setpointLimited.
+          // Also fires on direct CV entry (enteringCV && !inCCPhase) for stage changes.
+          // Resets cv_I_aw_cap so a stale post-event cap does not constrain the CV loop.
+          if (voltageControlActive && !inCCPhase && (lastInCCPhase_bt || enteringCV)) {
+            float e_cv = ChargingVoltageTarget - getFiltV();
+            float seed = clamp_f(getFiltI() - VoltageKp * e_cv, 0.0f, (float)uTargetAmps);
+            cv_I       = seed;
+            cv_I_track = seed;
+            cv_I_aw_cap = (float)MaxTableValue;  // clear AW cap — stale values constrain CV entry
+          }
+          lastInCCPhase_bt = inCCPhase;
 
           // Anti-windup ceiling: bleeds down while fastOV is active so the bumpless
           // tracker cannot immediately re-wind cv_I to the bulk-charging level after
           // each overshoot. Recovers gradually after fastOV clears, giving the battery
           // time to settle before full current ramps back up.
-          static float cv_I_aw_cap = 100.0f;
-          const float AW_BLEED_RATE   = 100.0f;  // A/s — cv_I reduction rate while fastOV active
-          const float AW_RECOVER_RATE =   5.0f;  // A/s — ceiling recovery rate after fastOV clears
+          // cv_I_aw_cap is declared above the iExcess block so both blocks share it.
+          // AwBleedRate and AwRecoverRate are user-adjustable globals (LittleFS-persisted).
+          // Scale bleed/recover rates by MaxTableValue so a fixed fraction-per-second
+          // applies the same proportional aggression regardless of alternator size.
+          // AwBleedRate=2.0 at 50A table → 100 A/s; at 150A table → 300 A/s.
+          // AwRecoverRate=0.1 at 50A table → 5 A/s; at 150A table → 15 A/s.
+          float awBleedAmpS   = AwBleedRate   * (float)MaxTableValue;
+          float awRecoverAmpS = AwRecoverRate * (float)MaxTableValue;
+
           if (fastOvClampActive && voltageControlActive) {
-            cv_I_aw_cap = fmaxf(0.0f, cv_I_aw_cap - AW_BLEED_RATE * actualDtSec);
+            cv_I_aw_cap = fmaxf(0.0f, cv_I_aw_cap - awBleedAmpS * actualDtSec);
           } else {
-            cv_I_aw_cap = fminf(cv_I_aw_cap + AW_RECOVER_RATE * actualDtSec, (float)MaxTableValue);
+            cv_I_aw_cap = fminf(cv_I_aw_cap + awRecoverAmpS * actualDtSec, (float)MaxTableValue);
           }
 
           float icvHi_bt = fminf(clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue), cv_I_aw_cap);
@@ -1301,7 +1354,7 @@ void AdjustFieldLearnMode() {
             // Per-tick cv_I bleed during active fastOV: voltage PI fires at 100ms but
             // the integrator needs to reduce every 5ms tick to counteract bulk-phase wind-up.
             if (fastOvClampActive) {
-              cv_I = fmaxf(0.0f, cv_I - AW_BLEED_RATE * actualDtSec);
+              cv_I = fmaxf(0.0f, cv_I - awBleedAmpS * actualDtSec);
               cv_I_track = cv_I;
             }
           }

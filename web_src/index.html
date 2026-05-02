@@ -2456,6 +2456,40 @@
                   </div>
                 </div>
 
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Anti-windup bleed rate as a fraction of the RPM table ceiling per second. Scales automatically with alternator size. Default 2.0: at a 50A table ceiling this gives 100 A/s; at a 150A table it gives 300 A/s. A 100ms fastOV event at default bleeds ~10% of the ceiling.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>AW Recovery Rate (×Table/s) (<span id="AwRecoverRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Anti-windup ceiling recovery rate as a fraction of the RPM table ceiling per second. Default 0.1: at a 50A table this gives 5 A/s (~2s to restore 10A); at a 150A table it gives 15 A/s. Lower = more inter-event damping; higher = faster current restoration after transients.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
               </details><!-- END VTM Controller Parameters -->
 
             </div>

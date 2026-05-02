@@ -670,8 +670,8 @@ const CSV3_FIELDS = [
     "IgnoreRPM",                // 258
     "MinRPMForField",           // 259
     "ThermalTimeConstantSec",   // 260
-
-
+    "AwBleedRate",              // 261
+    "AwRecoverRate",            // 262
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2584,6 +2584,8 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'ThermalTimeConstantSec', id: 'ThermalTimeConstantSec_echo', transform: v => v },
+        { key: 'AwBleedRate',   id: 'AwBleedRate_echo',   transform: v => (v / 10).toFixed(1) },
+        { key: 'AwRecoverRate', id: 'AwRecoverRate_echo', transform: v => (v / 10).toFixed(2) },
         { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
