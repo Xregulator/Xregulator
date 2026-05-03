@@ -49,6 +49,11 @@ void reportFieldModeEvent(uint32_t nowMs, FieldControlMode mode, FieldEventReaso
 // String conversion for logging
 const char *modeToString(FieldControlMode mode);
 const char *reasonToString(FieldEventReason r);
+// Control loop sub-path helpers
+void handleLimpHome(uint32_t currentMillis, const TickSnapshot& tick);
+void logPeriodicStatus(uint32_t currentMillis, const TickSnapshot& tick);
+void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEventReason reason,
+                    float actualDtSec, bool exitingNormal);
 
 // ====================================================================================
 // FIELD CONTROL MODULE - Refactored with Unified Actuator Governor
@@ -307,6 +312,189 @@ void enter_sys_auto() {
   setpointInitialized = true;
 }
 
+// ==================== CONTROL LOOP SUB-PATH HELPERS ====================
+// Each function handles one complete early-exit case from AdjustFieldLearnMode.
+// None of these touch the CV integrator (cv_I), bumpless tracker, or iExcess state.
+
+// handleLimpHome — Emergency limp-home path. Bypasses all safeties except INA228.
+// Call only when LimpHome==1. Caller returns immediately after.
+void handleLimpHome(uint32_t currentMillis, const TickSnapshot& tick) {
+  if (OnOff == 0) {
+    digitalWrite(4, LOW);
+    gpio4IsLow = true;
+    apply_pwm_float(0.0f);
+    lastAppliedDuty = 0.0f;
+    dutyCycle = 0.0f;
+    return;
+  }
+  static uint32_t lastLimpTick = 0;
+  static uint32_t lastLimpReport = 0;
+  if (currentMillis - lastLimpTick >= 100) {
+    lastLimpTick = currentMillis;
+    // Respect INA228 hardware OV latch even in limp home — prevents
+    // oscillation against the PRE-GATE cut. Hardware ALERT pin already
+    // pulled GPIO4 low; don't fight it.
+    if (!inaOvervoltageLatched) {
+      digitalWrite(4, HIGH);
+      gpio4IsLow = false;
+      apply_pwm_float(30.0f);
+    }
+    lastAppliedDuty = 30.0f;
+    dutyCycle = 30.0f;
+    currentPID.SetMode(MANUAL);
+    pidOutput = 30.0;
+    currentPID.ResetIntegratorTo(30.0);
+    // alarmOutputState cleared by CheckAlarms — do not write GPIO38 here
+    updateFieldTelemetry(30.0f, tick.currentBatteryVoltage, FieldResistance);
+    fieldActiveStatus = 1;
+    if (currentMillis - lastLimpReport >= 30000) {
+      lastLimpReport = currentMillis;
+      queueConsoleMessage("LIMP HOME MODE: 30% duty, all safeties bypassed");
+      Serial.println("LIMP HOME MODE: 30% duty, all safeties bypassed");
+    }
+  }
+}
+
+// logPeriodicStatus — 30-minute heartbeat dump to Serial and console.
+// Pure read/log — no control state changes.
+void logPeriodicStatus(uint32_t currentMillis, const TickSnapshot& tick) {
+  static uint32_t lastDebugDump = 0;
+  if (currentMillis - lastDebugDump < 1800000) return;
+  lastDebugDump = currentMillis;
+  char msg1[100], msg2[80], msg3[100];
+  snprintf(msg1, sizeof(msg1), "System State: Ignition=%d OnOff=%d Manual=%d",
+           Ignition, OnOff, ManualFieldToggle);
+  snprintf(msg2, sizeof(msg2), "Charging: %s Mode=%s",
+           tick.chargingEnabled ? "ENABLED" : "DISABLED",
+           tick.manualMode ? "MANUAL" : "AUTO");
+  snprintf(msg3, sizeof(msg3), "Sensors: RPM=%.0f Volts=%.2f Temp=%.0f°F",
+           RPM, tick.currentBatteryVoltage, tick.tempToUseF);
+  Serial.println("=== STATUS ===");
+  Serial.println(msg1);
+  Serial.println(msg2);
+  Serial.println(msg3);
+  Serial.println("==============");
+  queueConsoleMessage(msg1);
+  queueConsoleMessage(msg2);
+  queueConsoleMessage(msg3);
+}
+
+// runShutdownPath — Fault / non-normal mode state machine.
+// Runs the full shutdown ramp (phases 1→3→4→GPIO4 cut) and returns.
+// Never reaches the CV control path. prevMode and return are handled by caller.
+void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEventReason reason,
+                     float actualDtSec, bool exitingNormal) {
+  voltageControlActive = false;
+
+  // GPIO38 driven solely by CheckAlarms — do not write here
+
+  uTargetAmps = 0;
+  setpointLimited = 0.0f;
+
+  if (exitingNormal) {
+    shutdownPhase = SHUTDOWN_PHASE_1;
+    shutdownPhaseEntryMs = tick.nowMs;
+  }
+  if (shutdownPhase == SHUTDOWN_PHASE_NONE) {
+    shutdownPhase = SHUTDOWN_PHASE_1;
+    shutdownPhaseEntryMs = tick.nowMs;
+  }
+
+  float effectiveMin = 0.0f;
+  float dutyRequest = 0.0f;
+
+  // Critical faults skip the slow ramp entirely
+  bool isCriticalFault = (reason == REASON_VOLTAGE_DISAGREE_CRITICAL || reason == REASON_VOLTAGE_IMPLAUSIBLE);
+
+  if (isCriticalFault) {
+    shutdownPhase = SHUTDOWN_PHASE_4;
+    effectiveMin = 0.0f;
+    dutyRequest = 0.0f;
+  } else {
+    // Phase 1: ramp to rpmMinDuty at DutyRampRate
+    if (shutdownPhase == SHUTDOWN_PHASE_1) {
+      effectiveMin = 0.0f;
+      dutyRequest = tick.rpmMinDuty;
+      if (lastAppliedDuty <= tick.rpmMinDuty + 0.1f) {
+        if (ShutdownPhase2HoldMs > 0) {
+          if (shutdownPhase2EntryMs == 0) shutdownPhase2EntryMs = tick.nowMs;
+          if (tick.nowMs - shutdownPhase2EntryMs >= ShutdownPhase2HoldMs) {
+            shutdownPhase = SHUTDOWN_PHASE_3;
+            shutdownPhaseEntryMs = tick.nowMs;
+            shutdownPhase2EntryMs = 0;
+          }
+        } else {
+          shutdownPhase = SHUTDOWN_PHASE_3;
+          shutdownPhaseEntryMs = tick.nowMs;
+          shutdownPhase2EntryMs = 0;
+        }
+      }
+    }
+
+    // Phase 3: slow ramp from rpmMinDuty to 0
+    if (shutdownPhase == SHUTDOWN_PHASE_3) {
+      float slowDuty = slew_limit_f(lastAppliedDuty, 0.0f,
+                                    DutySlowRampRate, DutySlowRampRate, actualDtSec);
+      effectiveMin = 0.0f;
+      dutyRequest = slowDuty;
+      if (lastAppliedDuty <= 0.01f) {
+        shutdownPhase = SHUTDOWN_PHASE_4;
+        shutdownPhaseEntryMs = tick.nowMs;
+      }
+    }
+
+    // Phase 4: hold at 0, wait for flux collapse, then cut GPIO4
+    if (shutdownPhase == SHUTDOWN_PHASE_4) {
+      effectiveMin = 0.0f;
+      dutyRequest = 0.0f;
+    }
+  }
+
+  bool writeToHardware = !gpio4IsLow;
+  // Phase 3: slew already applied above — bypass governor's own slew, but keep clamping.
+  GovernorMode shutdownGovMode = (shutdownPhase == SHUTDOWN_PHASE_3) ? GOV_BYPASS_SLEW : govMode;
+
+  float dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, shutdownGovMode,
+                                      effectiveMin, writeToHardware, actualDtSec);
+  currentPID.ResetIntegratorTo((double)dutyNewFloat);
+  pidOutput = (double)dutyNewFloat;
+
+  if (writeToHardware) lastAppliedDuty = dutyNewFloat;
+  dutyCycle = dutyNewFloat;
+
+  if (!gpio4IsLow) {
+    if (shutdownPhase == SHUTDOWN_PHASE_4 && shouldCutGPIO4AfterSettle(reason, tick.nowMs, dutyNewFloat)) {
+      digitalWrite(4, LOW);
+      gpio4IsLow = true;
+      queueConsoleMessageF("Field disabled: %s | ADS=%.2fV INA=%.2fV D=%.3fV",
+                           reasonToString(reason), BatteryV, IBV, fabsf(BatteryV - IBV));
+    } else {
+      digitalWrite(4, HIGH);
+    }
+  }
+
+  updateFieldTelemetry(dutyCycle, tick.currentBatteryVoltage, FieldResistance);
+
+  if (gpio4IsLow) {
+    fieldActiveStatus = 0;
+  } else if (shutdownPhase == SHUTDOWN_PHASE_1 || shutdownPhase == SHUTDOWN_PHASE_3) {
+    fieldActiveStatus = 2;
+  } else if (lastAppliedDuty > 0.01f) {
+    fieldActiveStatus = 1;
+  } else {
+    fieldActiveStatus = 0;
+  }
+  chargeStageDisplay = getChargeStageDisplayCode();
+
+  if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
+    fieldCollapseTime = tick.nowMs;
+    queueConsoleMessageF("Charging stopped - %.1fs cooldown before restart",
+                         FIELD_COLLAPSE_DELAY / 1000.0f);
+  }
+
+  reportFieldModeEvent(tick.nowMs, mode, reason, tick, gpio4IsLow, dutyCycle);
+}
+
 // ==================== MAIN CONTROL FUNCTION ====================
 
 
@@ -317,13 +505,13 @@ void enter_sys_auto() {
  *  1.  Build TickSnapshot and timing state
  *  2.  Pre-gate immediate-cut fault check
  *  3.  Fast voltage safety override (runs every loop, before CH1 gate)
- *  4.  Limp-home handling
+ *  4.  Limp-home: handleLimpHome() → return
  *  5.  Gate on fresh CH1 ADC data, with optional PidSampleDivisor
  *  6.  Re-check critical faults and determine control/system mode
  *  7.  Handle mode transitions
- *  8.  Non-normal path: shutdown/fault state machine, then return
-//  9.  Normal path: iExcess supervisor, fastOvCurrentCap application,
-//                   setpoint management and PID compute
+ *  8.  Non-normal path: runShutdownPath() → return
+ *  9.  Normal path: iExcess supervisor, fastOvCurrentCap application,
+ *                   setpoint management and PID compute
  *  10. Build duty request
  *  11. Apply through governor
  *  12. Tell PID what actually happened
@@ -386,8 +574,8 @@ void AdjustFieldLearnMode() {
   if (actualDtMs > 500) actualDtMs = 500;
   float actualDtSec = (float)actualDtMs / 1000.0f;
 
-  static float uTargetRaw_cached = 50.0f;   // pre-OV ceiling from last normal tick; used by fast OV supervisor
-  float uTargetRaw = (float)MaxTableValue;  // pre-OV ceiling this tick, set in AUTO path
+  static float uTargetRaw_cached = 50.0f;   // always MaxTableValue (assigned from uTargetRaw); used only for supervisorLimiting gate
+  float uTargetRaw = (float)MaxTableValue;  // always MaxTableValue; kept for uTargetRaw_cached lineage only
   float fastOvBaseCap = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
   float fastOvCurrentCap = fastOvBaseCap;
   bool fastOvClampActive = false;
@@ -559,40 +747,7 @@ void AdjustFieldLearnMode() {
   // ========== EMERGENCY LIMP HOME MODE (runs every loop) ==========
   // WARNING: BYPASSES ALL SAFETY SYSTEMS EXCEPT INA228 HARDCODED
   if (LimpHome == 1) {
-    if (OnOff == 0) {
-      digitalWrite(4, LOW);
-      gpio4IsLow = true;
-      apply_pwm_float(0.0f);
-      lastAppliedDuty = 0.0f;
-      dutyCycle = 0.0f;
-      return;
-    }
-    static uint32_t lastLimpTick = 0;
-    if (currentMillis - lastLimpTick >= 100) {
-      lastLimpTick = currentMillis;
-      // Respect INA228 hardware OV latch even in limp home — prevents
-      // oscillation against the PRE-GATE cut. Hardware ALERT pin already
-      // pulled GPIO4 low; don't fight it.
-      if (!inaOvervoltageLatched) {
-        digitalWrite(4, HIGH);
-        gpio4IsLow = false;
-        apply_pwm_float(30.0f);
-      }
-      lastAppliedDuty = 30.0f;
-      dutyCycle = 30.0f;
-      currentPID.SetMode(MANUAL);
-      pidOutput = 30.0;
-      currentPID.ResetIntegratorTo(30.0);
-      // alarmOutputState cleared by CheckAlarms — do not write GPIO38 here
-      updateFieldTelemetry(30.0f, tick.currentBatteryVoltage, FieldResistance);
-      fieldActiveStatus = 1;
-      static unsigned long lastLimpReport = 0;
-      if (currentMillis - lastLimpReport >= 30000) {
-        lastLimpReport = currentMillis;
-        queueConsoleMessage("LIMP HOME MODE: 30% duty, all safeties bypassed");
-        Serial.println("LIMP HOME MODE: 30% duty, all safeties bypassed");
-      }
-    }
+    handleLimpHome(currentMillis, tick);
     return;
   }
 
@@ -640,26 +795,7 @@ void AdjustFieldLearnMode() {
   }
 
   // ========== PERIODIC STATE DUMP (30 min) ==========
-  static unsigned long lastDebugDump = 0;
-  if (currentMillis - lastDebugDump >= 1800000) {
-    lastDebugDump = currentMillis;
-    char msg1[100], msg2[80], msg3[100];
-    snprintf(msg1, sizeof(msg1), "System State: Ignition=%d OnOff=%d Manual=%d",
-             Ignition, OnOff, ManualFieldToggle);
-    snprintf(msg2, sizeof(msg2), "Charging: %s Mode=%s",
-             tick.chargingEnabled ? "ENABLED" : "DISABLED",
-             tick.manualMode ? "MANUAL" : "AUTO");
-    snprintf(msg3, sizeof(msg3), "Sensors: RPM=%.0f Volts=%.2f Temp=%.0f°F",
-             RPM, tick.currentBatteryVoltage, tick.tempToUseF);
-    Serial.println("=== STATUS ===");
-    Serial.println(msg1);
-    Serial.println(msg2);
-    Serial.println(msg3);
-    Serial.println("==============");
-    queueConsoleMessage(msg1);
-    queueConsoleMessage(msg2);
-    queueConsoleMessage(msg3);
-  }
+  logPeriodicStatus(currentMillis, tick);
 
   // ========== OVERRIDE MODE ENTRY DETECTION ==========
   // Rising-edge detection so one-shot actions (log messages, integrator seeds)
@@ -819,123 +955,12 @@ void AdjustFieldLearnMode() {
   if (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) >= FIELD_COLLAPSE_DELAY) {
     fieldCollapseTime = 0;
   }
-  float dutyNewFloat = 0.0f;
-
   // ========== NON-NORMAL MODE: SHUTDOWN / FAULT HANDLING ==========
+  // NOTE: pidLog_tick() is NOT called in the shutdown/fault path.
   if (!isNormalMode) {
-    voltageControlActive = false;
-
-    // GPIO38 driven solely by CheckAlarms — do not write here
-
-    uTargetAmps = 0;
-    setpointLimited = 0.0f;
-
-    if (exitingNormal) {
-      shutdownPhase = SHUTDOWN_PHASE_1;
-      shutdownPhaseEntryMs = tick.nowMs;
-    }
-    if (shutdownPhase == SHUTDOWN_PHASE_NONE) {
-      shutdownPhase = SHUTDOWN_PHASE_1;
-      shutdownPhaseEntryMs = tick.nowMs;
-    }
-
-    float effectiveMin = 0.0f;
-    float dutyRequest = 0.0f;
-
-    // Critical faults skip the slow ramp entirely
-    bool isCriticalFault = (reason == REASON_VOLTAGE_DISAGREE_CRITICAL || reason == REASON_VOLTAGE_IMPLAUSIBLE);
-
-    if (isCriticalFault) {
-      shutdownPhase = SHUTDOWN_PHASE_4;
-      effectiveMin = 0.0f;
-      dutyRequest = 0.0f;
-    } else {
-      // Phase 1: ramp to rpmMinDuty at DutyRampRate
-      if (shutdownPhase == SHUTDOWN_PHASE_1) {
-        effectiveMin = 0.0f;
-        dutyRequest = tick.rpmMinDuty;
-        if (lastAppliedDuty <= tick.rpmMinDuty + 0.1f) {
-          if (ShutdownPhase2HoldMs > 0) {
-            if (shutdownPhase2EntryMs == 0) shutdownPhase2EntryMs = tick.nowMs;
-            if (tick.nowMs - shutdownPhase2EntryMs >= ShutdownPhase2HoldMs) {
-              shutdownPhase = SHUTDOWN_PHASE_3;
-              shutdownPhaseEntryMs = tick.nowMs;
-              shutdownPhase2EntryMs = 0;
-            }
-          } else {
-            shutdownPhase = SHUTDOWN_PHASE_3;
-            shutdownPhaseEntryMs = tick.nowMs;
-            shutdownPhase2EntryMs = 0;
-          }
-        }
-      }
-
-      // Phase 3: slow ramp from rpmMinDuty to 0
-      if (shutdownPhase == SHUTDOWN_PHASE_3) {
-        float slowDuty = slew_limit_f(lastAppliedDuty, 0.0f,
-                                      DutySlowRampRate, DutySlowRampRate, actualDtSec);
-        effectiveMin = 0.0f;
-        dutyRequest = slowDuty;
-        if (lastAppliedDuty <= 0.01f) {
-          shutdownPhase = SHUTDOWN_PHASE_4;
-          shutdownPhaseEntryMs = tick.nowMs;
-        }
-      }
-
-      // Phase 4: hold at 0, wait for flux collapse, then cut GPIO4
-      if (shutdownPhase == SHUTDOWN_PHASE_4) {
-        effectiveMin = 0.0f;
-        dutyRequest = 0.0f;
-      }
-    }
-
-    bool writeToHardware = !gpio4IsLow;
-    // Phase 3: slew already applied above — bypass governor's own slew,
-    // but keep clamping.
-    GovernorMode shutdownGovMode = (shutdownPhase == SHUTDOWN_PHASE_3) ? GOV_BYPASS_SLEW : govMode;
-
-    dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, shutdownGovMode,
-                                  effectiveMin, writeToHardware, actualDtSec);
-    currentPID.ResetIntegratorTo((double)dutyNewFloat);
-    pidOutput = (double)dutyNewFloat;
-
-    if (writeToHardware) lastAppliedDuty = dutyNewFloat;
-    dutyCycle = dutyNewFloat;
-
-    if (!gpio4IsLow) {
-      if (shutdownPhase == SHUTDOWN_PHASE_4 && shouldCutGPIO4AfterSettle(reason, tick.nowMs, dutyNewFloat)) {
-        digitalWrite(4, LOW);
-        gpio4IsLow = true;
-        queueConsoleMessageF("Field disabled: %s | ADS=%.2fV INA=%.2fV D=%.3fV",
-                             reasonToString(reason), BatteryV, IBV, fabsf(BatteryV - IBV));
-      } else {
-        digitalWrite(4, HIGH);
-      }
-    }
-
-    updateFieldTelemetry(dutyCycle, tick.currentBatteryVoltage, FieldResistance);
-
-    if (gpio4IsLow) {
-      fieldActiveStatus = 0;
-    } else if (shutdownPhase == SHUTDOWN_PHASE_1 || shutdownPhase == SHUTDOWN_PHASE_3) {
-      fieldActiveStatus = 2;
-    } else if (lastAppliedDuty > 0.01f) {
-      fieldActiveStatus = 1;
-    } else {
-      fieldActiveStatus = 0;
-    }
-    chargeStageDisplay = getChargeStageDisplayCode();
-
-    if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
-      fieldCollapseTime = tick.nowMs;
-      queueConsoleMessageF("Charging stopped - %.1fs cooldown before restart",
-                           FIELD_COLLAPSE_DELAY / 1000.0f);
-    }
-
-    reportFieldModeEvent(tick.nowMs, mode, reason, tick, gpio4IsLow, dutyCycle);
+    runShutdownPath(tick, mode, reason, actualDtSec, exitingNormal);
     prevMode = mode;
     return;
-    // NOTE: pidLog_tick() is NOT called in the shutdown/fault path.
   }
 
   // ========== NORMAL MODES (MANUAL or AUTO) ==========
@@ -1145,6 +1170,10 @@ void AdjustFieldLearnMode() {
         // User overrides
         if (HiLow == 0) uTargetAmps = uTargetAmps / 2;
         if (MaintainMode == 1) uTargetAmps = 0;
+
+        // Actual RPM/thermal/override ceiling — the true pre-OV current limit for logging.
+        // uTargetRaw remains MaxTableValue and is not used for telemetry.
+        float i_ceiling_pre_ov = (float)uTargetAmps;
 
         // Hoisted here so iExcess block can reset it on event onset.
         static float cv_I_aw_cap = 100.0f;
@@ -1431,11 +1460,11 @@ void AdjustFieldLearnMode() {
             }
           }
 
-          pidLog_uTargetBeforeVoltCap = uTargetRaw;
+          pidLog_uTargetBeforeVoltCap = i_ceiling_pre_ov;
           pidLog_uTargetAfterVoltCap = Icv;
 
         } else {
-          pidLog_uTargetBeforeVoltCap = uTargetRaw;
+          pidLog_uTargetBeforeVoltCap = i_ceiling_pre_ov;
           pidLog_uTargetAfterVoltCap = (float)uTargetAmps;
         }
 
@@ -1491,9 +1520,9 @@ void AdjustFieldLearnMode() {
   pidLog_dutyRequest = dutyRequest;
 
   // ========== APPLY THROUGH GOVERNOR ==========
-  dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, govMode,
-                                sysIDRunning ? 0.0f : tick.rpmMinDuty,
-                                true, actualDtSec);
+  float dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, govMode,
+                                     sysIDRunning ? 0.0f : tick.rpmMinDuty,
+                                     true, actualDtSec);
   pidLog_dutyApplied = dutyNewFloat;
 
   // ========== TELL PID WHAT ACTUALLY HAPPENED ==========

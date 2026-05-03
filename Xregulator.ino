@@ -2147,7 +2147,7 @@ uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp 
 float TempPIDKp = 3.0f;            // A/°F proportional gain
 float TempPIDKi = 0.025f;          // Integral gain
 float TempPIDKd = 0.0f;            // Derivative gain (provides predictive feel via dT/dt)
-float TempPIDKdExternal = 200.0f;    // external D gain (A per °F/s)
+float TempPIDKdExternal = 20.0f;    // external D gain (A per °F/s)
 float ThermalTimeConstantSec = 100.0f; // seconds from field change to first sensed temp delta
 float edgeDecayFactor = 0.9659f;     // precomputed: 0.5^(5/ThermalTimeConstantSec); update on change
 
