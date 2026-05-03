@@ -611,8 +611,9 @@ enum Csv3Index {
   CSV3_KHard,                         // 264
   CSV3_IExcessReseedFrac,             // 265
   CSV3_AwSeedProtectMs,               // 266
+  CSV3_VoltageKd,                     // 267
 
-  CSV3_FIELD_COUNT  // = 267
+  CSV3_FIELD_COUNT  // = 268
 };
 
 
@@ -1528,15 +1529,15 @@ void setupServer() {
     uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
     float kp = (float)VoltageKp;
     float ki = (float)VoltageKi;
+    float kd = (float)VoltageKd;
     uint32_t interval = (uint32_t)VoltageLoopInterval;
-    uint32_t reserved = 0;
 
     memcpy(state.header + 0, &cnt, 4);
     memcpy(state.header + 4, &entrySize, 4);
     memcpy(state.header + 8, &kp, 4);
     memcpy(state.header + 12, &ki, 4);
     memcpy(state.header + 16, &interval, 4);
-    memcpy(state.header + 20, &reserved, 4);
+    memcpy(state.header + 20, &kd, 4);
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -3021,6 +3022,12 @@ void setupServer() {
       inputMessage = request->getParam("VoltageKi")->value();
       VoltageKi = inputMessage.toFloat();
       writeFile(LittleFS, "/VoltageKi.txt", String(VoltageKi).c_str());
+    }
+    if (request->hasParam("VoltageKd")) {
+      foundParameter = true;
+      inputMessage = request->getParam("VoltageKd")->value();
+      VoltageKd = inputMessage.toFloat();
+      writeFile(LittleFS, "/VoltageKd.txt", String(VoltageKd).c_str());
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
@@ -4792,7 +4799,8 @@ void SendWifiData() {
                                SafeInt(KSoft, 10),                                      // 263 — ×10, 1 decimal
                                SafeInt(KHard, 10),                                      // 264 — ×10, 1 decimal
                                SafeInt(IExcessReseedFrac, 100),                         // 265 — ×100, 2 decimal
-                               (int)AwSeedProtectMs                                     // 266
+                               (int)AwSeedProtectMs,                                    // 266
+                               SafeInt(VoltageKd, 100)                                  // 267
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

@@ -228,9 +228,10 @@ df["softClamp"]     = _to_int("softClamp")
 df["hardClamp"]     = _to_int("hardClamp")
 df["iExcess"]   = _to_int("iExcess")
 
-# Extract Kp/Ki from comment line in header if present
+# Extract Kp/Ki/Kd from comment line in header if present
 _kp = float("nan")
 _ki = float("nan")
+_kd = float("nan")
 for _raw in _lines[:_header_idx]:
     if "VoltageKp" in _raw:
         import re
@@ -238,9 +239,11 @@ for _raw in _lines[:_header_idx]:
         if m: _kp = float(m.group(1))
         m = re.search(r"VoltageKi=([\d.]+)", _raw)
         if m: _ki = float(m.group(1))
+        m = re.search(r"VoltageKd=([\d.]+)", _raw)
+        if m: _kd = float(m.group(1))
         break
 
-outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}"
+outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}  VoltageKd={_kd:.4g}"
 print(f"Voltage loop gains: {outer_label}")
 
 # ---------------------------------------------------------------------------
@@ -248,10 +251,10 @@ print(f"Voltage loop gains: {outer_label}")
 # ---------------------------------------------------------------------------
 GRID_KW = dict(alpha=0.4, linewidth=0.7)
 
-EV_COLOR_VLOOP = "#e91e63"   # voltLoopFired ticks
-EV_COLOR_SOFT  = "#f9a825"   # softClamp ticks
-EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks
-EV_COLOR_FAST  = "#00838f"   # iExcess ticks
+EV_COLOR_VLOOP = "#e91e63"   # voltLoopFired ticks  (hot pink)
+EV_COLOR_SOFT  = "#ffeb3b"   # softClamp ticks      (bright yellow — distinct from red fastOV overlay and blue palette)
+EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks      (purple)
+EV_COLOR_FAST  = "#00838f"   # iExcess ticks        (teal)
 
 
 def draw_state_strip(ax, df):
@@ -260,10 +263,10 @@ def draw_state_strip(ax, df):
       Top band   — cvActive bar (green=active, grey=inactive)
       OV overlay — red fill where fastOvActive=1
       Tick lanes:
-        row ~0.9  orange = voltLoopFired
-        row ~0.5  orange = softClamp
-        row ~0.3  red    = hardClamp
-        row ~0.1  purple = iExcess
+        row ~0.9  hot pink  = voltLoopFired
+        row ~0.5  yellow    = softClamp
+        row ~0.3  purple    = hardClamp
+        row ~0.1  teal      = iExcess
     """
     ax.set_ylim(0, 3)
     ax.set_yticks([])
@@ -467,11 +470,13 @@ plt.setp(ax3b.get_xticklabels(), visible=False)
 plt.setp(ax3c.get_xticklabels(), visible=False)
 fig3.suptitle(f"Plot 3 — Filtered Signal Quality  |  {outer_label}", fontsize=14)
 
-# 3a: battery voltage raw vs filtered
+# 3a: battery voltage raw vs filtered, plus target reference
 ax3a.plot(df["t_plot"], df["battV"],
           color="#64b5f6", lw=1.6, alpha=0.70, label="battV (raw)")
 ax3a.plot(df["t_plot"], df["battV_filt_V"],
           color="#1565c0", lw=2.2, label="battV_filt_V (filtered)")
+ax3a.plot(df["t_plot"], df["targV"],
+          color="#e91e63", lw=1.8, linestyle="--", alpha=0.85, label="targV")
 ax3a.set_ylabel("Voltage (V)")
 ax3a.grid(**GRID_KW)
 ax3a.legend(loc="upper left")
@@ -479,9 +484,9 @@ add_ov_shading(ax3a, df)
 
 # 3b: measured current raw vs filtered
 ax3b.plot(df["t_plot"], df["iMeas_A"],
-          color="#f9a825", lw=1.6, alpha=0.70, label="iMeas_A (raw)")
+          color="#43a047", lw=1.6, alpha=0.70, label="iMeas_A (raw)")
 ax3b.plot(df["t_plot"], df["iMeas_filt_A"],
-          color="#c62828", lw=2.2, label="iMeas_filt_A (filtered)")
+          color="#1b5e20", lw=2.2, label="iMeas_filt_A (filtered)")
 ax3b.set_ylabel("Current (A)")
 ax3b.grid(**GRID_KW)
 ax3b.legend(loc="upper left")
@@ -540,7 +545,7 @@ ax4a.legend(lines4[:len(labels4)], labels4, loc="upper left")
 flag_h = 0.8
 for offset, col, color, label in [
     (3.0, "fastOvActive", "#c62828",  "fastOvActive"),
-    (2.0, "softClamp",    "#f9a825",  "softClamp"),
+    (2.0, "softClamp",    "#0277bd",  "softClamp"),
     (1.0, "hardClamp",    "#6a1b9a",  "hardClamp"),
     (0.0, "iExcess",      "#00838f",  "iExcess"),
 ]:

@@ -2616,6 +2616,10 @@ input:checked+.slider:before {
     background: #ff9800;
     color: #fff;
   }
+  #capModeRow.rate-low .cap-mode-btn.cap-mode-active {
+    background: #ff9800;
+    color: #fff;
+  }
   /* Derived (calculated) inputs — visually subordinate, not editable */
   .learning-table input.cap-derived {
     background: var(--input-bg-disabled, #f0f0f0);

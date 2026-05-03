@@ -559,10 +559,10 @@
 
             <!-- SINGLE TAB GROUP -->
             <div class="alt-tabs alt-tabs-primary">
-              <button class="alt-tab-btn alt-tab-btn-primary active"
-                      onclick="showAltTab('primary', 'alt-panel-quick-view')">RPM Table</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
                       onclick="showAltTab('primary', 'alt-panel-alt-setup')">Setup</button>
+              <button class="alt-tab-btn alt-tab-btn-primary active"
+                      onclick="showAltTab('primary', 'alt-panel-quick-view')">RPM Table</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
                       onclick="showAltTab('primary', 'alt-panel-inner-loop')">Current Loop</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
@@ -582,7 +582,7 @@
                 <summary class="alt-summary-nested">RPM Cap Table</summary>
 
               <!-- Global cap mode toggles -->
-              <div class="cap-mode-row">
+              <div class="cap-mode-row" id="capModeRow">
                 <span class="cap-mode-label">Charge Rate:</span>
                 <div class="cap-mode-toggle">
                   <button type="button" id="chargeRateLowBtn" class="cap-mode-btn"
@@ -2400,6 +2400,21 @@
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="VoltageKi" type="number" step="0.01" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Kd (A per V/s) (<span id="VoltageKd_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop. Subtracts Kd × (voltage rise rate) from the current setpoint, preemptively reducing current as voltage rises toward target. Higher values reduce overshoot on target step-ups. Default: 40.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageKd" type="number" step="1" min="0" max="9999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>

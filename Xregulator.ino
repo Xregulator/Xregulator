@@ -250,8 +250,9 @@ static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
 // 8 × 3 × 7 = 168 cells
 
 // --- Reference bin selection criteria (all PLACEHOLDER — tune after first data) ---
-#define NUM_REFERENCE_BINS 10         // Top N bins by accumulated SS time
-#define REF_MIN_SS_SECONDS 30         // PLACEHOLDER: min SS seconds for a bin to be eligible (lowered for testing)
+// DEV: reduced for bench/dockside testing where only 1 bin accumulates. PRODUCTION: restore NUM_REFERENCE_BINS to 10, REF_MIN_SS_SECONDS to 30
+#define NUM_REFERENCE_BINS 1          // DEV ONLY — production value: 10
+#define REF_MIN_SS_SECONDS 5          // DEV ONLY — production value: 30
 #define REF_FREEZE_TOTAL_SS 6000      // PLACEHOLDER: total SS seconds across selected bins to trigger freeze (~100 min)
 #define REF_SPREAD_TEMP_DEG 50.0f     // PLACEHOLDER: min temp span across selected bins (°F)
 #define REF_SPREAD_FIELD_VOLTS 3.75f  // PLACEHOLDER: min field-drive span (25% of 15V range)
@@ -1855,19 +1856,41 @@ int LearningMode = 0;    // 0=disabled, 1=enabled
 
 int accelEnabled = 0;  // Set to false to block accelerometer related calcs
 
-float PidKp = 0.5;   // Proportional gain
-float PidKi = 2.0;   // Integral gain
-float PidKd = 0.01;  // Derivative gain
-// ===== VOLTAGE CONTROL (Float Stage) =====
-float VoltageTrimLimit = 5.0f;       // max trim authority in amps.   OBSOLETE DELETE LATER
-float VoltageKp = 25.0f;             // Voltage loop gain (A per V error), user adjustable
-uint32_t VoltageLoopInterval = 100;  // Voltage loop update interval (ms), user adjustable
-uint32_t lastVoltageLoopMs = 0;      // Last voltage loop update timestamp
-float Icv = 0.0f;                    // CV velocity-form PI output (A) — direct current setpoint in CV modes
-float cv_I = 0.0f;                   // CV position-form PI integrator state
-bool voltageControlActive = false;   // True when in float stage (suppresses learning)
-float VoltageKi = 2.5f;              // Voltage loop integral gain (A per V per second)
-float VoltageTargetRiseRate = 0.3f;  // V/s — slew rate for voltage target rise only ADD TO WEB INTERFACE LATER
+// =====================================================================================
+// === CV LOOP PARAMETERS — all tunable values consolidated here
+// === Note: fastOV thresholds (V_SOFT=+0.08V, V_HARD=+0.15V, PRED_GUARD=0.06V,
+// ===       TD_PRED=0.08s, HARD_CLAMP_HYST=0.08V) are local const float inside
+// ===       AdjustFieldLearnMode() in 6_functions.ino — not globals.
+// =====================================================================================
+// --- Output current PID ---
+float PidKp = 0.5f;   // A/% duty — proportional gain
+float PidKi = 2.0f;   // integral gain
+float PidKd = 0.01f;  // derivative gain
+// --- Voltage (CV) PID ---
+float VoltageKp = 25.0f;             // A/V — proportional gain
+float VoltageKi = 2.5f;              // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
+float VoltageKd = 40.0f;             // A/(V/s) — derivative gain; at dvdt=0.5V/s subtracts 20A from Icv
+uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
+float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
+// --- FastOV supervisor ---
+float KSoft = 12.0f;            // A/V — soft OV cap slope (fires when Vpred > target+0.08V)
+float KHard = 35.0f;            // A/V — hard OV cap slope (fires when Vpred > target+0.15V)
+// --- iExcess current supervisor ---
+float IExcessK = 5.0f;          // A above setpoint to arm supervisor
+int   IExcessN = 3;             // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
+float IExcessKBleed = 0.0f;     // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
+float IExcessReseedFrac = 0.5f; // fraction of pre-event cv_I to seed on iExcess recovery
+// --- Anti-windup ---
+float AwBleedRate    = 2.0f;    // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
+float AwRecoverRate  = 0.1f;    // fraction of MaxTableValue/s — cv_I_aw_cap recovery after fastOV clears
+uint16_t AwSeedProtectMs = 150; // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
+// --- CV loop runtime state ---
+float VoltageTrimLimit = 5.0f;       // OBSOLETE DELETE LATER
+uint32_t lastVoltageLoopMs = 0;      // timestamp of last voltage loop update
+float Icv = 0.0f;                    // CV PID output — direct current setpoint (A)
+float cv_I = 0.0f;                   // CV integrator state (A)
+bool voltageControlActive = false;   // true when voltage PID is active (non-idle stages)
+// =====================================================================================
 // Table Bounds & Safety
 float MaxTableValue = 150.0;               // Maximum table entry (A)
 float MinTableValue = 0.0;                 // OBSOLETE REMOVE LATER
@@ -2446,7 +2469,7 @@ struct CvBinDLState {
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     reserved        uint32    0
+//  20     voltageKd       float     VoltageKd at download time
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -2484,15 +2507,7 @@ uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
 
-float IExcessK = 5.0f;      // current excess threshold — amps above setpoint before supervisor fires
-int IExcessN = 3;           // consecutive ticks required before supervisor fires
-float IExcessKBleed = 0.0f; // K_bleed — 0 = snap-to-zero on iExcess trigger; >0 = proportional bleed (A/s per A of excess)
-float AwBleedRate   = 2.0f;  // fraction of MaxTableValue per second — bleed rate while fastOV active (2.0 × 50A = 100 A/s)
-float AwRecoverRate = 0.1f;  // fraction of MaxTableValue per second — recovery rate after fastOV clears (0.1 × 50A = 5 A/s)
-uint16_t AwSeedProtectMs = 150; // ms to suppress cv_I AwBleed + CC-tracker after a bumpless seed fires; 0 = disabled
-float KSoft = 12.0f;            // soft OV current cap slope (A per V of overshoot above V_SOFT)
-float KHard = 35.0f;            // hard OV current cap slope (A per V of overshoot above V_HARD)
-float IExcessReseedFrac = 0.5f; // fraction of pre-event cv_I to seed on iExcess recovery
+// CV loop tunable parameters moved to the CV LOOP PARAMETERS block above (~line 1860)
 
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)

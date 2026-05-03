@@ -1505,6 +1505,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     VoltageKi = readFile(LittleFS, "/VoltageKi.txt").toFloat();
   }
+  if (!fsExists("/VoltageKd.txt")) {
+    writeFile(LittleFS, "/VoltageKd.txt", String(VoltageKd).c_str());
+  } else {
+    VoltageKd = readFile(LittleFS, "/VoltageKd.txt").toFloat();
+  }
   if (!fsExists("/PidKp.txt")) {
     writeFile(LittleFS, "/PidKp.txt", String(PidKp, 3).c_str());
   } else {

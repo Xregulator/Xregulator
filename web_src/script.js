@@ -676,6 +676,7 @@ const CSV3_FIELDS = [
     "KHard",                    // 264
     "IExcessReseedFrac",        // 265
     "AwSeedProtectMs",          // 266
+    "VoltageKd",                // 267
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2567,6 +2568,7 @@ function updateAllEchosOptimized(data) {
         { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
         { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
         { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'VoltageKd', id: 'VoltageKd_echo', transform: v => (v / 100).toFixed(1) },
         { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
@@ -4355,6 +4357,10 @@ function setChargeRateMode(mode) {
         container.classList.toggle('rate-normal', mode === 'high');
         container.classList.toggle('rate-low', mode === 'low');
     }
+    const capRow = document.getElementById('capModeRow');
+    if (capRow) {
+        capRow.classList.toggle('rate-low', mode === 'low');
+    }
 }
 
 function handleChargeRateModeToggle(mode) {
@@ -5659,7 +5665,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 1000).toFixed(0);
                     }
                     // Values scaled by 100 
-                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
+                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp", "VoltageKd"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
 
@@ -9040,6 +9046,7 @@ function parseCvBin(buf) {
     const voltKp = view.getFloat32(8, true);
     const voltKi = view.getFloat32(12, true);
     const voltInterval = view.getUint32(16, true);
+    const voltKd = view.getFloat32(20, true);
 
     if (count === 0) return null;
 
@@ -9109,7 +9116,7 @@ function parseCvBin(buf) {
     }
 
     return {
-        count, voltKp, voltKi, voltInterval,
+        count, voltKp, voltKi, voltKd, voltInterval,
         ts, battV, targV, vError, dvdt, vPred,
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
@@ -9129,7 +9136,7 @@ function cvBinToCsv(d) {
 
     // Settings header row — hardcoded OV constants match AdjustFieldLearnMode()
     lines.push(
-        `# VoltageKp=${d.voltKp.toFixed(2)} VoltageKi=${d.voltKi.toFixed(3)}` +
+        `# VoltageKp=${d.voltKp.toFixed(2)} VoltageKi=${d.voltKi.toFixed(3)} VoltageKd=${d.voltKd.toFixed(1)}` +
         ` VoltageLoopInterval=${d.voltInterval}ms` +
         ` | FastOV constants not logged — ask firmware for values`
     );
