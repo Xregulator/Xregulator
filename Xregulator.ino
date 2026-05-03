@@ -969,7 +969,7 @@ uint32_t hardOCStartMs = 0;
 const int pwmPin = 14;  // field PWM pin # (was 32)
 //const int pwmChannel = 0;      //0–7 available for high-speed PWM  (ESP32)
 const int pwmResolution = 12;          // Error = +0.010%    PWM Resolution = ±0.024% (1/4096)
-float SwitchingFrequency = 100;        // Field switching frequency (doesn't much matter, avoid human hearing range is nice depending on install location)
+float SwitchingFrequency = 400;        // Field switching frequency (doesn't much matter, avoid human hearing range is nice depending on install location)
 const int MIN_SAFE_FREQUENCY = 50;     // Above most audible issues // set to 2000 later
 const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
 float MaxDuty = 99.0;
@@ -2046,8 +2046,8 @@ float defaultCurrentValues[RPM_TABLE_SIZE] = {  0, 50, 50, 50, 50, 50, 50, 50, 5
 // mode or PID output. Exists to protect the belt, shaft, and mounting hardware
 // from mechanical overload at any RPM. The target table above cannot push current
 // above this ceiling. Factory reset restores defaultCapCurrentValues.
-float rpmCapCurrentTable[RPM_TABLE_SIZE]      = { 120, 120, 120, 120, 120, 120, 120, 120, 120, 120 };
-float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 120, 120, 120, 120, 120, 120, 120, 120, 120, 120 };
+float rpmCapCurrentTable[RPM_TABLE_SIZE]      = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float defaultCapCurrentValues[RPM_TABLE_SIZE] = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
 
 // ===== CAP POWER TABLE =====
 // Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
@@ -2085,13 +2085,13 @@ PID currentPID(&pidInput, &pidOutput, &pidSetpoint, PidKp, PidKi, PidKd, DIRECT)
 bool pidInitialized = false;                                                       // PID initialization status
 
 // ===== PID Term Contributions (telemetry/visualization) =====
-// Inner current loop (currentPID) — units: duty cycle %
+// Output current loop (currentPID) — units: duty cycle %
 // P is exact. D is from error derivative. I is residual (output - P - D).
 float innerTermP = 0.0f;
 float innerTermI = 0.0f;
 float innerTermD = 0.0f;
 
-// Outer temperature loop (tempPID) — units: amps
+// Temperature loop (tempPID) — units: amps
 // Only updated when tempPID.Compute() returns true (~every TempPIDIntervalMs).
 // Values hold between computes, which is correct — the integrator state is stable.
 float outerTermP = 0.0f;
@@ -2101,6 +2101,7 @@ float outerTermDExternal = 0.0f;  //the more interesting one
 
 volatile bool tempPIDResetRequested = false;
 volatile bool innerPIDResetRequested = false;
+volatile bool cvLoopResetRequested = false;
 
 float tempFiltered = NAN;
 float thermalPenaltyLastValid = 0.0f;
@@ -2141,7 +2142,7 @@ uint32_t shutdownPhase2EntryMs = 0;  // add with other shutdown globals
 float DutySlowRampRate = 1.0f;      // %/sec - Phase 3 slow ramp to 0
 uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp (0 = skip)
 
-// ===== TEMPERATURE PID (Outer Loop - replaces thermal model) =====
+// ===== TEMPERATURE LOOP PID (replaces thermal model) =====
 // Tuning — all web UI configurable
 float TempPIDKp = 3.0f;            // A/°F proportional gain
 float TempPIDKi = 0.025f;          // Integral gain
@@ -2155,7 +2156,7 @@ float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease 
 float prevThermalPenalty = 0.0f;       // file-scope, tracks previous slew-limited value
 
 float TempPIDMarginF = 15;              //15.0f;           // °F below TemperatureLimitF — PID targets this, not the limit itself
-uint32_t TempPIDIntervalMs = 5000;      // Outer loop update period (ms) — independent of inner loop and sensor rate
+uint32_t TempPIDIntervalMs = 5000;      // Temperature loop update period (ms) — independent of output current loop and sensor rate
 float TempPIDFilterAlpha = 0.2f;        // IIR smoothing on temp input (0=frozen, 1=raw)
 uint32_t TempPIDStaleMs = 15000;        // Hold-last if temp older than this (ms)
 float TempPIDAntiWindupMarginA = 5.0f;  // OBSOLETE REMOVE
@@ -2164,10 +2165,10 @@ double tempPIDInput_d = 77.0;        // Filtered temp (°F), PID input
 double tempCapAmps_d = 9999.0;       // OBSOLETE
 double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF - TempPIDMarginF
 float tempCapAmps = 9999.0f;         // OBSOLETE
-bool tempPIDActive = false;          // true when outer PID is in AUTO
+bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
 
-float thermalPenaltyAmps = 0.0f;    // outer PID output: amps subtracted from target table
+float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted from target table
 double thermalPenaltyAmps_d = 0.0;  // double version for PID library
 
 //REVERSE because rising temperature should increase the penalty
@@ -2289,7 +2290,7 @@ struct PidLogEntry {
   uint8_t flags;               // bit0=AUTO bit1=voltCtrl bit4=govBypass
   uint8_t pad0;
 
-  // ── CV outer loop ────────────────────────────────────────────────
+  // ── CV loop ──────────────────────────────────────────────────────
   float battV;                  // tick.currentBatteryVoltage
   float ChargingVoltageTarget;  // target voltage this tick
   float vError;                 // ChargingVoltageTarget - battV (always fresh)
@@ -2304,7 +2305,7 @@ struct PidLogEntry {
   uint8_t enteringTargetVoltageMode;  // 1 on mode entry tick only
   uint8_t pad1;
 
-  // ── Inner current PID ────────────────────────────────────────────
+  // ── Output current PID ───────────────────────────────────────────
   float pidSetpoint;     // setpointLimited — slew-filtered command to PID
   float pidInput;        // measured current fed to PID
   float pidUnsatOutput;  // pre-clamp PID output (saturation detector)
@@ -2361,7 +2362,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 
 // ===========================================================================
 // CV / Voltage Tuner Log
-// Logs every AUTO-mode inner-loop tick (~16.7 Hz) while voltageControlActive.
+// Logs every AUTO-mode output current loop tick (~16.7 Hz) while voltageControlActive.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
 // 32 bytes/entry × 6000 entries = 192 KB PSRAM → ~6 min at full rate.
 // ===========================================================================
@@ -2380,7 +2381,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  12      vPred          ×100       BatteryV + TD_PRED*max(0,dvdt)
 //  14      fastOvCap      ×10        fastOvCurrentCap ceiling this tick
 //  16      cv_I_x10       ×10        cv_I integrator state
-//  18      Icv_x10        ×10        Icv PI output (current setpoint to inner loop)
+//  18      Icv_x10        ×10        Icv PI output (current setpoint to output current loop)
 //  20      uTarget        ×10        uTargetAmps (table+thermal+user ceiling)
 //  22      spLimited      ×10        setpointLimited (slewed command to PID)
 //  24      iMeas          ×10        MeasuredAmps
@@ -2488,6 +2489,10 @@ int IExcessN = 3;           // consecutive ticks required before supervisor fire
 float IExcessKBleed = 0.0f; // K_bleed — 0 = snap-to-zero on iExcess trigger; >0 = proportional bleed (A/s per A of excess)
 float AwBleedRate   = 2.0f;  // fraction of MaxTableValue per second — bleed rate while fastOV active (2.0 × 50A = 100 A/s)
 float AwRecoverRate = 0.1f;  // fraction of MaxTableValue per second — recovery rate after fastOV clears (0.1 × 50A = 5 A/s)
+uint16_t AwSeedProtectMs = 150; // ms to suppress cv_I AwBleed + CC-tracker after a bumpless seed fires; 0 = disabled
+float KSoft = 12.0f;            // soft OV current cap slope (A per V of overshoot above V_SOFT)
+float KHard = 35.0f;            // hard OV current cap slope (A per V of overshoot above V_HARD)
+float IExcessReseedFrac = 0.5f; // fraction of pre-event cv_I to seed on iExcess recovery
 
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)
@@ -2770,7 +2775,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
 
   "<div class=\"info-box\">"
   "<strong>Preferred Option:</strong><br>"
-  "Enter your ship's network WiFi credentials below. The regulator will henceforth run in Client Mode and the user interface will be accessible via your local wifi.  Navigate to alternator.local in any browser, just like you'd go to google.com."
+  "Enter your ship's network WiFi credentials below. The regulator will run in Client Mode and the user interface will be accessible via your local wifi.  Navigate to alternator.local in any browser, just like you'd go to google.com."
   "</div>"
 
   "<form action=\"/wifi\" method=\"POST\">"
@@ -2781,7 +2786,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
 
   "<div class=\"info-box\">"
   "<strong>Non-Preferred Option:</strong><br>"
-  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast a new WiFi network which you can connect to from any device.  The same interface and functionality will exist at alternator.local, but due to lack of internet connection, you won't be able to use Solar mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, blue wire) to Ground.  I recommend to just leave it connected forever if you prefer this mode."
+  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, blue wire) to Ground.  I recommend to just leave it connected to GND forever if you prefer this mode."
   "</div>"
 
   "<label>New Alt. Reg. Hotspot Name (SSID):</label>"

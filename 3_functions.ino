@@ -607,8 +607,12 @@ enum Csv3Index {
   CSV3_ThermalTimeConstantSec,        // 260
   CSV3_AwBleedRate,                   // 261
   CSV3_AwRecoverRate,                 // 262
+  CSV3_KSoft,                         // 263
+  CSV3_KHard,                         // 264
+  CSV3_IExcessReseedFrac,             // 265
+  CSV3_AwSeedProtectMs,               // 266
 
-  CSV3_FIELD_COUNT  // = 263
+  CSV3_FIELD_COUNT  // = 267
 };
 
 
@@ -1382,7 +1386,7 @@ void setupServer() {
             if (state.row == 0) {
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
-                "# PID diagnostic log — CV outer loop / inner current PID / duty pipeline\n"
+                "# PID diagnostic log — CV loop / output current PID / duty pipeline\n"
                 "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass\n"
                 "# voltageLoopRanThisTick=1 means Icv/cv_I updated this row\n"
                 "# vError: always fresh every tick regardless of loop interval\n"
@@ -3285,6 +3289,34 @@ void setupServer() {
       writeFile(LittleFS, "/AwRecoverRate.txt", String(AwRecoverRate, 1).c_str());
       queueConsoleMessageF("AW recovery rate set to: %.1f A/s", AwRecoverRate);
     }
+    if (request->hasParam("AwSeedProtectMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("AwSeedProtectMs")->value();
+      AwSeedProtectMs = (uint16_t)constrain(inputMessage.toInt(), 0, 2000);
+      writeFile(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
+      queueConsoleMessageF("AW seed protect window set to: %u ms", (unsigned)AwSeedProtectMs);
+    }
+    if (request->hasParam("KSoft")) {
+      foundParameter = true;
+      inputMessage = request->getParam("KSoft")->value();
+      KSoft = inputMessage.toFloat();
+      writeFile(LittleFS, "/KSoft.txt", String(KSoft, 1).c_str());
+      queueConsoleMessageF("KSoft set to: %.1f A/V", KSoft);
+    }
+    if (request->hasParam("KHard")) {
+      foundParameter = true;
+      inputMessage = request->getParam("KHard")->value();
+      KHard = inputMessage.toFloat();
+      writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
+      queueConsoleMessageF("KHard set to: %.1f A/V", KHard);
+    }
+    if (request->hasParam("IExcessReseedFrac")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessReseedFrac")->value();
+      IExcessReseedFrac = inputMessage.toFloat();
+      writeFile(LittleFS, "/IExcessReseedFrac.txt", String(IExcessReseedFrac, 2).c_str());
+      queueConsoleMessageF("IExcess reseed fraction set to: %.2f", IExcessReseedFrac);
+    }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeThreshold")->value();
@@ -3838,6 +3870,11 @@ void setupServer() {
 
   server.on("/resetInnerPID", HTTP_POST, [](AsyncWebServerRequest *request) {
     innerPIDResetRequested = true;
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resetVoltageLoop", HTTP_POST, [](AsyncWebServerRequest *request) {
+    cvLoopResetRequested = true;
     request->send(200, "text/plain", "OK");
   });
 
@@ -4486,7 +4523,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4751,7 +4788,11 @@ void SendWifiData() {
                                SafeInt(MinRPMForField),                                 // 259
                                SafeInt(ThermalTimeConstantSec),                         // 260
                                SafeInt(AwBleedRate, 10),                                // 261 — ×10, 1 decimal
-                               SafeInt(AwRecoverRate, 10)                               // 262 — ×10, 1 decimal
+                               SafeInt(AwRecoverRate, 10),                              // 262 — ×10, 1 decimal
+                               SafeInt(KSoft, 10),                                      // 263 — ×10, 1 decimal
+                               SafeInt(KHard, 10),                                      // 264 — ×10, 1 decimal
+                               SafeInt(IExcessReseedFrac, 100),                         // 265 — ×100, 2 decimal
+                               (int)AwSeedProtectMs                                     // 266
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

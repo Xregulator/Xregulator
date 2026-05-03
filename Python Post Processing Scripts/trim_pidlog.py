@@ -25,6 +25,20 @@ import pandas as pd
 
 DOWNLOADS = os.path.expanduser("~/Downloads")
 
+# ---------------------------------------------------------------------------
+# Shared GUI theme
+# ---------------------------------------------------------------------------
+_BG      = "#f5f5f5"
+_FG      = "#1a1a1a"
+_FG2     = "#555555"
+_LBG     = "#ffffff"
+_SEL_BG  = "#1565c0"
+_BTN_BG  = "#1565c0"
+_BTN_ABG = "#0d47a1"
+_CAN_BG  = "#ffffff"
+_CAN_FG  = "#1a1a1a"
+_CAN_ABG = "#f0f0f0"
+
 
 # ---------------------------------------------------------------------------
 # 1. File selector
@@ -32,6 +46,7 @@ DOWNLOADS = os.path.expanduser("~/Downloads")
 def pick_file():
     files = sorted(
         glob.glob(os.path.join(DOWNLOADS, "*.csv")),
+        key=os.path.getmtime,
         reverse=True,
     )
     if not files:
@@ -41,19 +56,24 @@ def pick_file():
     selected = []
 
     root = tk.Tk()
+    try:  # force light appearance on macOS regardless of system dark-mode setting
+        root.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
+                     root._w, "NSAppearanceNameAqua")
+    except Exception:
+        pass
     root.title("Select Log to Trim")
     root.resizable(False, False)
-    root.configure(bg="#1e1e1e")
+    root.configure(bg=_BG)
 
     tk.Label(
         root,
         text="Select a log file:",
         font=("Helvetica", 16, "bold"),
-        bg="#1e1e1e",
-        fg="#f0f0f0",
+        bg=_BG,
+        fg=_FG,
     ).pack(padx=20, pady=(16, 8))
 
-    frame = tk.Frame(root, bg="#1e1e1e")
+    frame = tk.Frame(root, bg=_BG)
     frame.pack(padx=20, pady=8)
 
     scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL)
@@ -64,12 +84,12 @@ def pick_file():
         height=min(len(files), 16),
         font=("Courier", 15),
         selectmode=tk.SINGLE,
-        bg="#111111",
-        fg="#f0f0f0",
-        selectbackground="#42a5f5",
+        bg=_LBG,
+        fg=_FG,
+        selectbackground=_SEL_BG,
         selectforeground="#ffffff",
-        highlightbackground="#555555",
-        highlightcolor="#42a5f5",
+        highlightbackground="#cccccc",
+        highlightcolor=_SEL_BG,
     )
     scrollbar.config(command=listbox.yview)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -90,24 +110,27 @@ def pick_file():
     def on_cancel():
         root.destroy()
 
-    btn_frame = tk.Frame(root, bg="#1e1e1e")
+    btn_frame = tk.Frame(root, bg=_BG)
     btn_frame.pack(pady=16)
 
-    tk.Button(
+    # tk.Label used instead of tk.Button — macOS ignores bg/fg on native buttons
+    _lbl_open = tk.Label(
         btn_frame, text="Open",
-        font=("Helvetica", 15, "bold"), command=on_go,
-        bg="#42a5f5", fg="#ffffff",
-        activebackground="#1e88e5", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10,
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 15, "bold"),
+        bg=_BTN_BG, fg="#ffffff",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2",
+    )
+    _lbl_open.bind("<Button-1>", lambda e: on_go())
+    _lbl_open.pack(side=tk.LEFT, padx=10)
 
-    tk.Button(
+    _lbl_cancel = tk.Label(
         btn_frame, text="Cancel",
-        font=("Helvetica", 14), command=on_cancel,
-        bg="#3a3a3a", fg="#f0f0f0",
-        activebackground="#555555", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10,
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 14),
+        bg=_CAN_BG, fg=_CAN_FG,
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2",
+    )
+    _lbl_cancel.bind("<Button-1>", lambda e: on_cancel())
+    _lbl_cancel.pack(side=tk.LEFT, padx=10)
 
     root.mainloop()
     return selected[0] if selected else None
@@ -124,34 +147,39 @@ def pick_time_range(total_s: float):
     result = [None, None]
 
     win = tk.Tk()
+    try:  # force light appearance on macOS regardless of system dark-mode setting
+        win.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
+                    win._w, "NSAppearanceNameAqua")
+    except Exception:
+        pass
     win.title("Select Time Range")
     win.resizable(False, False)
-    win.configure(bg="#1e1e1e")
+    win.configure(bg=_BG)
 
     tk.Label(
         win,
         text="Trim Time Range",
         font=("Helvetica", 17, "bold"),
-        bg="#1e1e1e",
-        fg="#f0f0f0",
+        bg=_BG,
+        fg=_FG,
     ).pack(padx=30, pady=(18, 4))
 
     tk.Label(
         win,
         text=f"File duration: {total_s:.2f} s",
         font=("Helvetica", 13),
-        bg="#1e1e1e",
-        fg="#aaaaaa",
+        bg=_BG,
+        fg=_FG2,
     ).pack(pady=(0, 14))
 
-    field_frame = tk.Frame(win, bg="#1e1e1e")
+    field_frame = tk.Frame(win, bg=_BG)
     field_frame.pack(padx=30, pady=4)
 
     def _label(text, row):
         tk.Label(
             field_frame, text=text,
             font=("Helvetica", 14),
-            bg="#1e1e1e", fg="#f0f0f0",
+            bg=_BG, fg=_FG,
             anchor="e", width=14,
         ).grid(row=row, column=0, padx=(0, 10), pady=8, sticky="e")
 
@@ -162,10 +190,10 @@ def pick_time_range(total_s: float):
             textvariable=var,
             font=("Courier", 14),
             width=12,
-            bg="#111111", fg="#f0f0f0",
-            insertbackground="#f0f0f0",
+            bg=_LBG, fg=_FG,
+            insertbackground=_FG,
             relief=tk.FLAT,
-            highlightbackground="#555555",
+            highlightbackground="#cccccc",
             highlightthickness=1,
         )
         e.grid(row=row, column=1, pady=8, sticky="w")
@@ -179,11 +207,11 @@ def pick_time_range(total_s: float):
 
     tk.Label(
         field_frame, text="seconds",
-        font=("Helvetica", 13), bg="#1e1e1e", fg="#888888",
+        font=("Helvetica", 13), bg=_BG, fg=_FG2,
     ).grid(row=0, column=2, padx=6)
     tk.Label(
         field_frame, text="seconds",
-        font=("Helvetica", 13), bg="#1e1e1e", fg="#888888",
+        font=("Helvetica", 13), bg=_BG, fg=_FG2,
     ).grid(row=1, column=2, padx=6)
 
     def on_trim():
@@ -206,24 +234,27 @@ def pick_time_range(total_s: float):
     def on_cancel():
         win.destroy()
 
-    btn_frame = tk.Frame(win, bg="#1e1e1e")
+    btn_frame = tk.Frame(win, bg=_BG)
     btn_frame.pack(pady=18)
 
-    tk.Button(
+    # tk.Label used instead of tk.Button — macOS ignores bg/fg on native buttons
+    _lbl_trim = tk.Label(
         btn_frame, text="Trim & Save",
-        font=("Helvetica", 15, "bold"), command=on_trim,
-        bg="#42a5f5", fg="#ffffff",
-        activebackground="#1e88e5", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=12,
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 15, "bold"),
+        bg=_BTN_BG, fg="#ffffff",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=12, cursor="hand2",
+    )
+    _lbl_trim.bind("<Button-1>", lambda e: on_trim())
+    _lbl_trim.pack(side=tk.LEFT, padx=10)
 
-    tk.Button(
+    _lbl_cancel2 = tk.Label(
         btn_frame, text="Cancel",
-        font=("Helvetica", 14), command=on_cancel,
-        bg="#3a3a3a", fg="#f0f0f0",
-        activebackground="#555555", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10,
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 14),
+        bg=_CAN_BG, fg=_CAN_FG,
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2",
+    )
+    _lbl_cancel2.bind("<Button-1>", lambda e: on_cancel())
+    _lbl_cancel2.pack(side=tk.LEFT, padx=10)
 
     win.mainloop()
     return tuple(result)

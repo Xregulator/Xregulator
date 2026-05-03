@@ -562,13 +562,13 @@
               <button class="alt-tab-btn alt-tab-btn-primary active"
                       onclick="showAltTab('primary', 'alt-panel-quick-view')">RPM Table</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
-                      onclick="showAltTab('primary', 'alt-panel-alt-setup')">Alternator Setup</button>
+                      onclick="showAltTab('primary', 'alt-panel-alt-setup')">Setup</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
-                      onclick="showAltTab('primary', 'alt-panel-inner-loop')">Inner Loop</button>
+                      onclick="showAltTab('primary', 'alt-panel-inner-loop')">Current Loop</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
-                      onclick="showAltTab('primary', 'alt-panel-outer-loop')">Outer Loop</button>
+                      onclick="showAltTab('primary', 'alt-panel-outer-loop')">Temp Loop</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
-                      onclick="showAltTab('primary', 'alt-panel-vt-mode')">Voltage Target Mode</button>
+                      onclick="showAltTab('primary', 'alt-panel-vt-mode')">CV Mode</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
                       onclick="showAltTab('primary', 'alt-panel-advanced')">Advanced</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
@@ -587,8 +587,8 @@
                 <div class="cap-mode-toggle">
                   <button type="button" id="chargeRateLowBtn" class="cap-mode-btn"
                     onclick="handleChargeRateModeToggle('low')">Low</button>
-                  <button type="button" id="chargeRateNormalBtn" class="cap-mode-btn cap-mode-active"
-                    onclick="handleChargeRateModeToggle('normal')">Normal</button>
+                  <button type="button" id="chargeRateHighBtn" class="cap-mode-btn cap-mode-active"
+                    onclick="handleChargeRateModeToggle('high')">High</button>
                 </div>
                 <span class="cap-mode-label" style="margin-left: 16px;">Limit by:</span>
                 <div class="cap-mode-toggle">
@@ -903,7 +903,7 @@
                     <span class="learning-info-label">PID Initialized:
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                           class="tooltip-box">Whether
-                          the inner current PID has been initialized for the current operating point. Briefly false on
+                          the output current PID has been initialized for the current operating point. Briefly false on
                           startup or after mode transitions; the PID performs a bumpless transfer before resuming AUTO
                           control.</span></span>
                     </span>
@@ -1110,8 +1110,8 @@
                     <span>Alternator Temp Limit (°F) (<span id="TemperatureLimitF_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">
                       ℹ️
-                      <span class="tooltip-box">Maximum safe temperature (°F) at the sensor location. The outer
-                        temperature PID begins reducing current as temperature approaches this value — intervention starts
+                      <span class="tooltip-box">Maximum safe temperature (°F) at the sensor location. The temperature
+                        PID begins reducing current as temperature approaches this value — intervention starts
                         at (Limit − Temp PID Margin), defaulting to 15°F below. Hard warning and critical shutdowns
                         trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
                         this offset when setting this value.</span>
@@ -1377,7 +1377,7 @@
                       <span class="metric-label telemetry-label">PID Input
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Measured alternator current (A) from the selected amp source. This
-                            is the process variable fed to the inner PID each sample cycle (~16Hz).</span>
+                            is the process variable fed to the output current PID each sample cycle (~16Hz).</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="pidInput_display">?</span> A</span>
@@ -1386,7 +1386,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">PID Setpoint
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">The slew-limited current target (A) the inner PID is chasing.</span>
+                          <span class="tooltip-box">The slew-limited current target (A) the output current PID is chasing.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="pidSetpoint_display">?</span> A</span>
@@ -1395,7 +1395,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">PID Output
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Raw duty cycle (%) computed by the inner PID before clamping.</span>
+                          <span class="tooltip-box">Raw duty cycle (%) computed by the output current PID before clamping.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="pidOutput_display">?</span> %</span>
@@ -1416,7 +1416,7 @@
                     <p class="card-group-title">Term Contributions</p>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Inner P Term
+                      <span class="metric-label telemetry-label">Current P Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Proportional contribution.</span>
                         </span>
@@ -1425,7 +1425,7 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Inner I Term
+                      <span class="metric-label telemetry-label">Current I Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Integral contribution.</span>
                         </span>
@@ -1434,7 +1434,7 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Inner D Term
+                      <span class="metric-label telemetry-label">Current D Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Derivative contribution.</span>
                         </span>
@@ -1479,23 +1479,23 @@
 
 
 
-              </details><!-- END Inner Telemetry -->
+              </details><!-- END Output Current Telemetry -->
 
               <!-- Controller Parameters (closed) -->
               <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Controller Parameters</summary>
 
-                <!-- Reset Inner PID -->
+                <!-- Reset Output Current PID -->
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Reset Inner PID</span>
+                    <span>Reset Output Current PID</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Zeros the inner current PID integrator. Duty will ramp back up from 0
+                      <span class="tooltip-box">Zeros the output current PID integrator. Duty will ramp back up from 0
                         via the slew limiter. Use if the integrator has accumulated badly during manual tuning.</span>
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="resetInnerPID()" class="btn-primary">Reset Inner PID</button>
+                    <button onclick="resetInnerPID()" class="btn-primary">Reset Output Current PID</button>
                   </div>
                 </div>
 
@@ -1585,7 +1585,7 @@
                   </div>
                 </div>
 
-              </details><!-- END Inner Controller Parameters -->
+              </details><!-- END Output Current Controller Parameters -->
 
               <!-- Rate Limiting (closed) -->
               <details class="alt-nested-section">
@@ -1806,10 +1806,10 @@
                 <div class="grid telemetry-groups">
 
                   <div class="card-group telemetry-group">
-                    <p class="card-group-title">Outer Loop Status</p>
+                    <p class="card-group-title">Temp Loop Status</p>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Outer PID Active
+                      <span class="metric-label telemetry-label">Temperature PID Active
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Whether the temperature PID is currently running in AUTO. Goes
                             MANUAL when temp data is stale; resumes with bumpless transfer on recovery.</span>
@@ -1821,7 +1821,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Filtered Temp Input
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">IIR-smoothed temperature fed to the outer PID. Alpha=1.0 means raw
+                          <span class="tooltip-box">IIR-smoothed temperature fed to the temperature PID. Alpha=1.0 means raw
                             sensor, Alpha=0.0 means frozen. Lower values reject noise but slow response. This is what
                             the PID actually sees.</span>
                         </span>
@@ -1851,12 +1851,12 @@
                     </div>
                   </div>
 
-                  <!-- Term Contributions (renamed from Outer PID Terms) -->
+                  <!-- Temperature PID Term Contributions -->
                   <div class="card-group telemetry-group">
                     <p class="card-group-title">Term Contributions</p>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Outer P Term
+                      <span class="metric-label telemetry-label">Temperature P Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Proportional contribution to thermal penalty (A). = Kp × (filtered
                             temp − PID setpoint). Positive when above setpoint (reduces current), negative when below
@@ -1867,7 +1867,7 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Outer I Term
+                      <span class="metric-label telemetry-label">Temperature I Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Integral accumulator (A). Builds positive as temperature stays
                             elevated. Allowed to go negative when temp is below setpoint and no non-thermal constraints
@@ -1880,7 +1880,7 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Outer D Term (library)
+                      <span class="metric-label telemetry-label">Temperature D Term (library)
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Library derivative term (A). Recommended to keep at 0 — the 5-second
                             compute interval is too short to capture meaningful thermal momentum. Use Kd External
@@ -1891,7 +1891,7 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Outer D External
+                      <span class="metric-label telemetry-label">Temperature D External
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">External 20-second derivative contribution to thermal penalty (A). =
                             KdExternal × (tempFiltered − sample from 20s ago) / 20s. Positive when temperature is rising
@@ -1906,7 +1906,7 @@
 
                 </div>
 
-              </details><!-- END Outer Telemetry -->
+              </details><!-- END Temperature Telemetry -->
 
               <!-- Controller Parameters (closed) -->
               <details class="alt-nested-section">
@@ -1915,7 +1915,7 @@
                 <!-- Reset Thermal PID -->
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Reset Thermal PID (Outer Loop)</span>
+                    <span>Reset Thermal PID</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                       <span class="tooltip-box">Clears the thermal PID integrator, filter, and derivative history. The
                         controller will rebuild from current conditions on the next tick. Use if the integrator has
@@ -1932,7 +1932,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain of the outer temperature loop. Units are amps per °F of
+                        class="tooltip-box">Proportional gain of the temperature loop. Units are amps per °F of
                         error. Higher = more aggressive current reduction as temp approaches setpoint. Default:
                         0.5.</span></span>
                   </div>
@@ -1950,7 +1950,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
-                        gain of the outer temperature loop. Anti-windup tracking keeps the integrator parked near the
+                        gain of the temperature loop. Anti-windup tracking keeps the integrator parked near the
                         active constraint when temp PID is not the binding limit. Default: 0.05.</span></span>
                   </div>
                   <div class="form-input">
@@ -1996,6 +1996,8 @@
                     </form>
                   </div>
                 </div>
+
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Time Constant (s) (<span id="ThermalTimeConstantSec_echo">?</span>):</span>
@@ -2016,7 +2018,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Margin (°F) (<span id="TempPIDMarginF_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                        below TemperatureLimitF that the outer PID targets. The PID works to hold temp at (Limit −
+                        below TemperatureLimitF that the temperature PID targets. The PID works to hold temp at (Limit −
                         Margin), giving it room to act before the hard safety threshold. Larger = earlier, gentler
                         intervention. Default: 15°F.</span></span>
                   </div>
@@ -2034,7 +2036,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the outer temperature PID computes. Independent of the inner loop rate. Longer intervals
+                        often the temperature PID computes. Independent of the output current loop rate. Longer intervals
                         are appropriate given thermal time constants measured in seconds. Default: 5000ms.</span></span>
                   </div>
                   <div class="form-input">
@@ -2065,7 +2067,7 @@
                 </div>
 
 
-              </details><!-- END Outer Controller Parameters -->
+              </details><!-- END Temperature Controller Parameters -->
 
               <!-- Live Plot View -->
               <details id="thermallog-details" class="alt-nested-section">
@@ -2135,7 +2137,7 @@
 
                 <!-- Plot 2: PID term decomposition -->
                 <div style="font-size:12px; color:var(--text-muted); margin:12px 0 4px 0;">
-                  Outer PID Term Decomposition
+                  Temperature PID Term Decomposition
                 </div>
                 <div class="plot-container" id="thermallog-plot2" style="min-height:300px;"></div>
 
@@ -2144,6 +2146,34 @@
             </div>
 
             <div id="alt-panel-vt-mode" class="alt-panel alt-panel-primary">
+
+              <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:0 0 14px 0;font-size:13px;line-height:1.55;">
+                <strong>CV Mode</strong> holds the alternator output to a fixed user-specified voltage target, bypassing the normal bulk/absorption/float charge algorithm. The voltage loop PI controller adjusts the current setpoint every 100 ms to eliminate steady-state voltage error. Use this tab to tune voltage loop parameters or simulate a fixed-voltage regulator. <strong>⚠️ Not intended for lithium batteries.</strong> 
+              </div>
+
+              <div class="form-row" style="margin-bottom:8px;">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>CV Mode On/Off (<span id="TargetVoltageMode_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">⚠️ <strong>Not safe for Lithium batteries.</strong> This mode bypasses the normal charge algorithm — use only with flooded or AGM batteries, or in consultation with your battery manufacturer.<br><br>Overrides normal charging with fixed voltage control — mainly useful for tuning voltage loop parameters or simulating an old-school automotive alternator voltage regulator.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="TargetVoltageMode_checkbox" type="checkbox"
+                        onchange="if(validateAndSubmitBatteryToggle(this, 'TargetVoltageMode') && handleUserToggle('TargetVoltageMode_checkbox', 'TargetVoltageMode', 'TargetVoltageMode')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="TargetVoltageMode" name="TargetVoltageMode" type="number" value=""
+                      style="display:none;" />
+                  </form>
+                </div>
+              </div>
 
               <!-- Telemetry -->
               <details open class="alt-nested-section">
@@ -2156,7 +2186,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Voltage Target
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">ChargingVoltageTarget — the voltage the outer loop is holding the
+                          <span class="tooltip-box">ChargingVoltageTarget — the voltage the CV loop is holding the
                             battery to. BulkVoltage in bulk, AbsorptionVoltage in absorption, FloatVoltage in float,
                             or TargetVoltageSetpoint when TargetVoltageMode is active.</span>
                         </span>
@@ -2178,11 +2208,11 @@
                       <span class="metric-label telemetry-label">Icv
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Icv — position-form PI output of the CV voltage loop. The direct
-                            current setpoint fed to the inner loop in absorption, float, and TargetVoltageMode.
+                            current setpoint fed to the output current loop in absorption, float, and TargetVoltageMode.
                             Seeded from setpointLimited on CV entry for bumpless transfer. Clamped to
                             [0, tableThermalLimit]. Also pulled down by the fast voltage safety override when
                             BatteryV is approaching or above target. In bulk this value is stale from the
-                            previous CV exit and has no effect on the inner loop.</span>
+                            previous CV exit and has no effect on the output current loop.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="Icv_display">?</span> A</span>
@@ -2206,7 +2236,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Voltage Ctrl Active
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">voltageControlActive — whether the CV outer loop is running this
+                          <span class="tooltip-box">voltageControlActive — whether the CV loop is running this
                             tick. True in absorption and float. False in bulk, idle (UseFloat=0 post-absorption
                             rest), and when MaintainMode=1 (MaintainMode targets 0 net battery amps directly
                             without a voltage reference).</span>
@@ -2241,7 +2271,7 @@
                             What is suspicious: fast growth during truly steady operation, especially if hard events are
                             also increasing or if the system shows visible current or voltage pulsing. A high event rate
                             at steady state can mean the FastOV thresholds are too aggressive, prediction is too jumpy,
-                            or the outer voltage loop still needs more tuning.
+                            or the voltage loop still needs more tuning.
                           </span>
                         </span>
                       </span>
@@ -2259,7 +2289,7 @@
                             voltage target.<br><br>
                             What is suspicious: frequent soft events during stable running with no meaningful overshoot.
                             That usually means V_SOFT is too low, the prediction horizon is too aggressive, dv/dt is too
-                            noisy, or the outer CV loop is still pushing too hard near target.
+                            noisy, or the CV loop is still pushing too hard near target.
                           </span>
                         </span>
                       </span>
@@ -2308,33 +2338,20 @@
               <details open class="alt-nested-section">
                 <summary class="alt-summary-nested">Controller Parameters</summary>
 
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Target Voltage Mode (<span id="TargetVoltageMode_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">⚠️ <strong>Not safe for Lithium batteries.</strong> This mode bypasses the normal charge algorithm — use only with flooded or AGM batteries, or in consultation with your battery manufacturer.<br><br>Overrides normal charging with fixed voltage control- mainly useful for
-                      tuning Voltage control PID parameters or simulating an old-school automotive alternator voltage
-                      regulator.</span>
-                  </span>
+                <!-- Reset CV Integrator -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Reset CV Integrator</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Zeroes the voltage loop integrator (cv_I). Use if the integrator is stuck at zero or wound up to a bad value — the PI will rebuild from scratch on the next tick. Useful after changing Kp/Ki during a tuning session.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <button onclick="resetVoltageLoop()" class="btn-primary">Reset CV Integrator</button>
+                  </div>
                 </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="TargetVoltageMode_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'TargetVoltageMode') && handleUserToggle('TargetVoltageMode_checkbox', 'TargetVoltageMode', 'TargetVoltageMode')) { this.form.submit(); submitMessage(); }" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="TargetVoltageMode" name="TargetVoltageMode" type="number" value=""
-                      style="display:none;" />
-                  </form>
-                </div>
-              </div>
 
-              <hr />
+                <hr />
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Target Voltage Setpoint (V) (<span id="TargetVoltageSetpoint_echo">?</span>):</span>
@@ -2358,7 +2375,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
-                        outer loop gain. Active in absorption and float only — caps current setpoint based on voltage
+                        Voltage loop gain. Active in absorption and float only — caps current setpoint based on voltage
                         error.</span></span>
                   </div>
                   <div class="form-input">
@@ -2375,7 +2392,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
-                        gain for the voltage outer loop. Accumulates over time to eliminate steady-state voltage error.
+                        Integral gain for the voltage loop. Accumulates over time to eliminate steady-state voltage error.
                         Active in absorption and float only. Integrator is reset to zero on CV entry. Start small —
                         try 0.1. Set to 0 to disable.</span></span>
                   </div>
@@ -2393,7 +2410,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the voltage outer loop recalculates. Active in absorption and float only. Typical:
+                        often the voltage loop recalculates. Active in absorption and float only. Typical:
                         500ms.</span></span>
                   </div>
                   <div class="form-input">
@@ -2485,6 +2502,70 @@
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Soft OV Current Cap Slope (A/V) (<span id="KSoft_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">KSoft: slope of the current ceiling when predicted voltage exceeds the soft OV threshold (ChargingTarget + 80mV). For every volt of overshoot above that threshold, the current ceiling drops by this many amps below the current operating point. Default 12. Higher = sharper initial current ramp-down.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="KSoft" type="number" step="0.5" min="1" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Hard OV Current Cap Slope (A/V) (<span id="KHard_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">KHard: slope of the current ceiling when predicted voltage exceeds the hard OV threshold (ChargingTarget + 150mV). Applied additively — hard clamp engages on top of soft. Also used for the hysteresis recovery clamp (BattV above target + 80mV). Default 35. Higher = faster field reduction on severe transients.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="KHard" type="number" step="0.5" min="1" max="200" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>iExcess Recovery Seed Fraction (<span id="IExcessReseedFrac_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Fraction of the pre-event integrator level (cv_I) to use when seeding recovery after an iExcess event. 0.5 = restart at half the pre-event current — conservative enough to avoid re-triggering, while rebuilding naturally. Lower values are safer but slower to recover. Range 0.1–0.9.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="IExcessReseedFrac" type="number" step="0.05" min="0.1" max="0.9" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>AW Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Milliseconds after a bumpless seed fires (at the transition from current-limited to voltage-regulated) during which the AwBleed and current-limited bumpless tracker are suppressed. Prevents the seeded cv_I from being immediately destroyed by a brief fastOV event at that transition, which causes the bulk oscillation limit cycle. 0 = disabled. Default 150. Range 0–2000.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -3006,11 +3087,11 @@
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Two-Loop Control Architecture:</strong> The system uses two PID controllers running at
-                  different speeds. The <em>inner loop</em> runs fast — roughly 16 times per second — and continuously
-                  adjusts the alternator field duty cycle to hit a current target. The <em>outer loop</em> runs every 5
-                  seconds and watches temperature. When temperature climbs toward the configured limit, the outer loop
-                  accumulates a thermal penalty that reduces the current the inner loop is allowed to chase. The two
-                  loops are cascaded: the outer loop constrains what the inner loop can do, but never interferes with
+                  different speeds. The <em>output current loop</em> runs fast — roughly 16 times per second — and continuously
+                  adjusts the alternator field duty cycle to hit a current target. The <em>temperature loop</em> runs every 5
+                  seconds and watches temperature. When temperature climbs toward the configured limit, the temperature loop
+                  accumulates a thermal penalty that reduces the current the output current loop is allowed to chase. The two
+                  loops are cascaded: the temperature loop constrains what the output current loop can do, but never interferes with
                   how it does it.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
@@ -3024,11 +3105,11 @@
                   voltage sag or rise during charging.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Thermal Penalty:</strong> The outer temperature PID outputs a single number — thermal penalty
+                  <strong>Thermal Penalty:</strong> The temperature PID outputs a single number — thermal penalty
                   in amps. Zero means no restriction. As temperature climbs toward the configured limit, the penalty
                   grows and current is reduced. When the alternator cools, the penalty shrinks and current recovers.
                   Because the penalty is relative rather than absolute, it transfers intelligently across RPM changes. A
-                  20-second derivative window allows the outer loop to react to rising thermal momentum before the
+                  20-second derivative window allows the temperature loop to react to rising thermal momentum before the
                   setpoint is actually reached.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
@@ -3057,10 +3138,10 @@
 
                 </p>
                 <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Stability and Recovery:</strong> All mode transitions are bumpless: the inner PID integrator
+                  <strong>Stability and Recovery:</strong> All mode transitions are bumpless: the output current PID integrator
                   is aligned to the current operating point before switching. If the temperature sensor goes stale, the
-                  outer loop freezes its last penalty value until fresh data returns. The anti-windup system ensures the
-                  outer loop's integrator stays correctly positioned — parked near any tighter non-thermal constraint
+                  temperature loop freezes its last penalty value until fresh data returns. The anti-windup system ensures the
+                  temperature loop's integrator stays correctly positioned — parked near any tighter non-thermal constraint
                   when thermals are not the binding limit, and free to drive the penalty upward the moment temperature
                   demands it. Independent hard protection layers — warning ramp-down and critical immediate shutdown via
                   GPIO4 — operate completely separately from the PID and remain active regardless of PID state. Any
@@ -3078,7 +3159,7 @@
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Overview:</strong> This system uses a three-phase tuning process. The goal is to tune the
                   core PID loop first, then verify it handles the rate limiters gracefully with anti-windup tracking.
-                  Tuning is done in bulk stage — absorption and float use the same inner loop but with the voltage
+                  Tuning is done in bulk stage — absorption and float use the same output current loop but with the voltage
                   controller constraining the setpoint, so a well-tuned bulk response carries through automatically.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">

@@ -3,18 +3,18 @@ plot_pidlog.py
 Diagnostic plotter for TargetVoltageMode instability.
 
 4 plot windows, each with a state strip below:
-  Plot 1 — Voltage: what the outer loop sees (battV, target, vError)
-  Plot 2 — Outer loop command chain (rawVoltageCap → voltageCapAmps → uTarget)
-  Plot 3 — Inner PID internals (setpoint, input, terms, saturation)
+  Plot 1 — Voltage: what the voltage loop sees (battV, target, vError)
+  Plot 2 — Voltage loop command chain (rawVoltageCap → voltageCapAmps → uTarget)
+  Plot 3 — Output current PID internals (setpoint, input, terms, saturation)
   Plot 4 — Duty pipeline + actual amps (dutyRequest vs dutyApplied vs measAmps)
 
 State strip shows:
   - Color-coded charge stage bar
-  - Orange tick marks where voltageLoopRanThisTick=1 (outer loop fired)
+  - Orange tick marks where voltageLoopRanThisTick=1 (voltage loop fired)
   - Cyan dashed vlines for enteringCV
   - Blue dashed vlines for enteringTargetVoltageMode
 
-File picker searches ~/Downloads for pidlog*.csv
+File picker searches ~/Downloads for *.csv, newest first.
 PNGs saved to Downloads alongside source CSV.
 """
 
@@ -40,6 +40,8 @@ plt.rcParams.update({
     "ytick.labelsize": 13,
     "legend.fontsize": 12,
     "figure.titlesize": 16,
+    "legend.handlelength": 3.5,
+    "legend.handleheight": 1.5,
 })
 
 # ---------------------------------------------------------------------------
@@ -47,29 +49,35 @@ plt.rcParams.update({
 # ---------------------------------------------------------------------------
 def pick_file():
     files = sorted(
-        glob.glob(os.path.join(DOWNLOADS, "pidlog*.csv")),
+        glob.glob(os.path.join(DOWNLOADS, "*.csv")),
+        key=os.path.getmtime,
         reverse=True
     )
     if not files:
-        messagebox.showerror("No files", f"No pidlog*.csv found in {DOWNLOADS}")
+        messagebox.showerror("No files", f"No *.csv found in {DOWNLOADS}")
         return None
 
     selected = []
 
     root = tk.Tk()
+    try:  # force light appearance on macOS regardless of system dark-mode setting
+        root.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
+                     root._w, "NSAppearanceNameAqua")
+    except Exception:
+        pass
     root.title("Select PID Log")
     root.resizable(False, False)
-    root.configure(bg="#1e1e1e")
+    root.configure(bg="#f5f5f5")
 
     tk.Label(
         root,
         text="Select a log file:",
         font=("Helvetica", 16, "bold"),
-        bg="#1e1e1e",
-        fg="#f0f0f0"
+        bg="#f5f5f5",
+        fg="#1a1a1a"
     ).pack(padx=20, pady=(16, 8))
 
-    frame = tk.Frame(root, bg="#1e1e1e")
+    frame = tk.Frame(root, bg="#f5f5f5")
     frame.pack(padx=20, pady=8)
 
     scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL)
@@ -80,12 +88,12 @@ def pick_file():
         height=min(len(files), 16),
         font=("Courier", 15),
         selectmode=tk.SINGLE,
-        bg="#111111",
-        fg="#f0f0f0",
-        selectbackground="#42a5f5",
+        bg="#ffffff",
+        fg="#1a1a1a",
+        selectbackground="#1565c0",
         selectforeground="#ffffff",
-        highlightbackground="#555555",
-        highlightcolor="#42a5f5"
+        highlightbackground="#cccccc",
+        highlightcolor="#1565c0"
     )
     scrollbar.config(command=listbox.yview)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -106,24 +114,27 @@ def pick_file():
     def on_cancel():
         root.destroy()
 
-    btn_frame = tk.Frame(root, bg="#1e1e1e")
+    btn_frame = tk.Frame(root, bg="#f5f5f5")
     btn_frame.pack(pady=16)
 
-    tk.Button(
+    # tk.Label used instead of tk.Button — macOS ignores bg/fg on native buttons
+    _lbl_open = tk.Label(
         btn_frame, text="Open",
-        font=("Helvetica", 15, "bold"), command=on_go,
-        bg="#42a5f5", fg="#ffffff",
-        activebackground="#1e88e5", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 15, "bold"),
+        bg="#1565c0", fg="#ffffff",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
+    )
+    _lbl_open.bind("<Button-1>", lambda e: on_go())
+    _lbl_open.pack(side=tk.LEFT, padx=10)
 
-    tk.Button(
+    _lbl_cancel = tk.Label(
         btn_frame, text="Cancel",
-        font=("Helvetica", 14), command=on_cancel,
-        bg="#3a3a3a", fg="#f0f0f0",
-        activebackground="#555555", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 14),
+        bg="#ffffff", fg="#1a1a1a",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
+    )
+    _lbl_cancel.bind("<Button-1>", lambda e: on_cancel())
+    _lbl_cancel.pack(side=tk.LEFT, padx=10)
 
     root.mainloop()
     return selected[0] if selected else None
@@ -252,7 +263,7 @@ df["duty_clamp"]     = (df["dutyRequest"] - df["dutyApplied"]).abs()
 kp_inner = df["gainKp"].dropna().iloc[0] if "gainKp" in df.columns and not df["gainKp"].dropna().empty else float("nan")
 ki_inner = df["gainKi"].dropna().iloc[0] if "gainKi" in df.columns and not df["gainKi"].dropna().empty else float("nan")
 kd_inner = df["gainKd"].dropna().iloc[0] if "gainKd" in df.columns and not df["gainKd"].dropna().empty else float("nan")
-inner_label = f"Inner PID  Kp={kp_inner:.4g}  Ki={ki_inner:.4g}  Kd={kd_inner:.4g}"
+inner_label = f"Output Current PID  Kp={kp_inner:.4g}  Ki={ki_inner:.4g}  Kd={kd_inner:.4g}"
 print(f"Gains: {inner_label}")
 
 def _to_int(col):
@@ -271,22 +282,22 @@ df["f_govBypass"] = (_flags_num // 16 % 2).astype(int)
 # 3. Stage colors and mode helpers
 # ---------------------------------------------------------------------------
 STAGE_COLORS = {
-    0: ("#666666", "NONE"),
-    1: ("#00c853", "BULK"),
-    2: ("#7e57c2", "ABSORPTION"),
-    3: ("#ffb300", "FLOAT"),
-    4: ("#ef5350", "MANUAL"),
-    5: ("#66bb6a", "MAINTAIN"),
-    6: ("#42a5f5", "TARGET-V"),
+    0: ("#777777", "NONE"),
+    1: ("#2e7d32", "BULK"),
+    2: ("#6a1b9a", "ABSORPTION"),
+    3: ("#e91e63", "FLOAT"),
+    4: ("#c62828", "MANUAL"),
+    5: ("#388e3c", "MAINTAIN"),
+    6: ("#1565c0", "TARGET-V"),
     7: ("#888888", "IDLE"),
 }
 
-EV_COLOR_CV     = "#00e5ff"
-EV_COLOR_TVM    = "#1565c0"
-EV_COLOR_VLOOP  = "#ff9800"
+EV_COLOR_CV     = "#00838f"   # enteringCV vlines
+EV_COLOR_TVM    = "#1565c0"   # enteringTargetVoltageMode vlines
+EV_COLOR_VLOOP  = "#e91e63"   # voltageLoopRanThisTick ticks
 
 def stage_color_label(stage_int):
-    return STAGE_COLORS.get(int(stage_int), ("#666666", "?"))
+    return STAGE_COLORS.get(int(stage_int), ("#777777", "?"))
 
 state_changes = df.index[
     (df["chargeStageDisplay"] != df["chargeStageDisplay"].shift()) |
@@ -298,9 +309,7 @@ if state_changes and state_changes[0] == 0:
 # ---------------------------------------------------------------------------
 # 4. Reusable drawing helpers
 # ---------------------------------------------------------------------------
-GRID_KW = dict(alpha=0.2, linewidth=0.5)
-
-plt.style.use("dark_background")
+GRID_KW = dict(alpha=0.4, linewidth=0.7)
 
 
 def draw_state_strip(ax, df, state_changes):
@@ -358,7 +367,7 @@ def add_mode_vlines(ax, df, state_changes):
         t = df.loc[idx, "t_plot"]
         color, _ = stage_color_label(df.loc[idx, "chargeStageDisplay"])
         ax.axvline(x=t, color=color, linewidth=1.0,
-                   linestyle="--", alpha=0.5)
+                   linestyle="--", alpha=0.4)
 
 
 def save_fig(fig, suffix):
@@ -378,23 +387,23 @@ def make_fig(title_suffix, num):
 
 
 # ---------------------------------------------------------------------------
-# PLOT 1 — Voltage: what the outer loop sees
+# PLOT 1 — Voltage: what the voltage loop sees
 # ---------------------------------------------------------------------------
 fig1, ax1, ax1s = make_fig("Plot 1 — Voltage Loop Input", "Plot 1 — Voltage")
 ax1b = ax1.twinx()
 
 ax1.plot(df["t_plot"], df["battV"],
-         color="#00bcd4", lw=2.0, label="battV")
+         color="#1565c0", lw=2.5, label="battV")
 ax1.plot(df["t_plot"], df["battV_filt"],
-         color="#80deea", lw=1.6, linestyle="--", label="battV_filt", alpha=0.85)
+         color="#64b5f6", lw=2.0, linestyle="--", label="battV_filt", alpha=0.85)
 ax1.plot(df["t_plot"], df["ChargingVoltageTarget"],
-         color="#ffb300", lw=1.8, linestyle="--", label="ChargingVoltageTarget")
+         color="#e91e63", lw=2.2, linestyle="--", label="ChargingVoltageTarget")
 ax1b.plot(df["t_plot"], df["vError"],
-          color="#ef5350", lw=1.6, label="vError", alpha=0.9)
-ax1b.axhline(0, color="#ef5350", linewidth=0.6, linestyle=":", alpha=0.4)
+          color="#c62828", lw=2.0, label="vError", alpha=0.9)
+ax1b.axhline(0, color="#c62828", linewidth=0.6, linestyle=":", alpha=0.4)
 
-ax1.set_ylabel("Voltage (V)", color="#00bcd4")
-ax1b.set_ylabel("vError (V)", color="#ef5350")
+ax1.set_ylabel("Voltage (V)", color="#1565c0")
+ax1b.set_ylabel("vError (V)", color="#c62828")
 ax1.grid(**GRID_KW)
 
 lines1  = ax1.get_lines() + ax1b.get_lines()
@@ -415,21 +424,21 @@ for t in df.loc[df["enteringTargetVoltageMode"] == 1, "t_plot"]:
 # save_fig(fig1, "plot1_voltage")
 
 # ---------------------------------------------------------------------------
-# PLOT 2 — CV outer loop
+# PLOT 2 — CV loop
 # ---------------------------------------------------------------------------
-fig2, ax2, ax2s = make_fig("Plot 2 — CV Outer Loop (Icv, cv_I, limits)  [NOTE: post-OV-cap uTargetAmps not logged]", "Plot 2 — Outer Loop")
+fig2, ax2, ax2s = make_fig("Plot 2 — CV Loop (Icv, cv_I, limits)  [NOTE: post-OV-cap uTargetAmps not logged]", "Plot 2 — CV Loop")
 ax2b = ax2.twinx()
 
 ax2.plot(df["t_plot"], df["tableThermalLimit"],
-         color="#42a5f5", lw=2.0, label="tableThermalLimit (RPM/thermal ceiling — pre-OV cap)")
+         color="#1565c0", lw=2.5, label="tableThermalLimit (RPM/thermal ceiling — pre-OV cap)")
 ax2.plot(df["t_plot"], df["setpointCmd"],
-         color="#00c853", lw=2.0, label="setpointCmd (=Icv in CV, =tableThermalLimit in bulk)")
+         color="#2e7d32", lw=2.5, label="setpointCmd (=Icv in CV, =tableThermalLimit in bulk)")
 ax2.plot(df["t_plot"], df["Icv"],
-         color="#ffb300", lw=1.8, linestyle="--", label="Icv (CV setpoint)")
+         color="#e91e63", lw=2.2, linestyle="--", label="Icv (CV setpoint)")
 
 ax2b.plot(df["t_plot"], df["cv_I"],
-          color="#ce93d8", lw=1.6, label="cv_I (integrator state, A)", alpha=0.85)
-ax2b.set_ylabel("cv_I (A) — integrator state", color="#ce93d8")
+          color="#6a1b9a", lw=2.0, label="cv_I (integrator state, A)", alpha=0.85)
+ax2b.set_ylabel("cv_I (A) — integrator state", color="#6a1b9a")
 ax2.grid(**GRID_KW)
 
 lines2  = ax2.get_lines() + ax2b.get_lines()
@@ -446,9 +455,9 @@ for t in df.loc[df["voltageLoopRanThisTick"] == 1, "t_plot"]:
 # save_fig(fig2, "plot2_outer_loop")
 
 # ---------------------------------------------------------------------------
-# PLOT 3 — Inner PID internals
+# PLOT 3 — Output current PID internals
 # ---------------------------------------------------------------------------
-fig3 = plt.figure(figsize=(18, 10), num="Plot 3 — Inner PID")
+fig3 = plt.figure(figsize=(18, 10), num="Plot 3 — Output Current PID")
 gs3  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 1], hspace=0.10)
 ax3a = fig3.add_subplot(gs3[0])
 ax3b = fig3.add_subplot(gs3[1], sharex=ax3a)
@@ -456,34 +465,34 @@ ax3s = fig3.add_subplot(gs3[2], sharex=ax3a)
 
 plt.setp(ax3a.get_xticklabels(), visible=False)
 plt.setp(ax3b.get_xticklabels(), visible=False)
-fig3.suptitle(f"Plot 3 — Inner PID Internals  |  {inner_label}", fontsize=14)
+fig3.suptitle(f"Plot 3 — Output Current PID Internals  |  {inner_label}", fontsize=14)
 
 ax3a.plot(df["t_plot"], df["pidSetpoint"],
-          color="#ffb300", lw=2.0, linestyle="--", label="pidSetpoint")
+          color="#e91e63", lw=2.5, linestyle="--", label="pidSetpoint")
 ax3a.plot(df["t_plot"], df["pidInput"],
-          color="#42a5f5", lw=1.8, label="pidInput (measAmps)")
+          color="#c62828", lw=2.2, label="pidInput (measAmps)")
 ax3a.plot(df["t_plot"], df["iMeas_filt"],
-          color="#c9c12d", lw=2.0, label="iMeas_filt (filtered)", alpha=0.90)
+          color="#00838f", lw=2.5, label="iMeas_filt (filtered)", alpha=0.90)
 ax3a.plot(df["t_plot"], df["pidOutput"],
-          color="#00c853", lw=1.8, label="pidOutput (→ dutyReq)")
+          color="#2e7d32", lw=2.2, label="pidOutput (→ dutyReq)")
 ax3a.plot(df["t_plot"], df["pidUnsatOutput"],
-          color="#ef5350", lw=1.4, linestyle=":", label="pidUnsatOutput", alpha=0.85)
+          color="#455a64", lw=1.8, linestyle=":", label="pidUnsatOutput", alpha=0.85)
 
 ax3a.fill_between(df["t_plot"], df["pidOutput"], df["pidUnsatOutput"],
                   where=(df["pid_saturation"] > 0.1),
-                  color="#ef5350", alpha=0.18, label="saturation zone")
+                  color="#455a64", alpha=0.18, label="saturation zone")
 
 ax3a.set_ylabel("Amps / Duty %")
 ax3a.grid(**GRID_KW)
 ax3a.legend(loc="upper left")
 
 ax3b.plot(df["t_plot"], df["innerTermP"],
-          color="#42a5f5", lw=1.8, label="innerTermP")
+          color="#1565c0", lw=2.2, label="innerTermP")
 ax3b.plot(df["t_plot"], df["innerTermI"],
-          color="#ffb300", lw=1.8, label="innerTermI")
+          color="#f9a825", lw=2.2, label="innerTermI")
 ax3b.plot(df["t_plot"], df["innerTermD"],
-          color="#7e57c2", lw=1.6, label="innerTermD")
-ax3b.axhline(0, color="#ffffff", linewidth=0.5, alpha=0.3)
+          color="#6a1b9a", lw=2.0, label="innerTermD")
+ax3b.axhline(0, color="#888888", linewidth=0.5, alpha=0.5)
 ax3b.set_ylabel("PID Term Value")
 ax3b.grid(**GRID_KW)
 ax3b.legend(loc="upper left")
@@ -503,21 +512,21 @@ fig4, ax4, ax4s = make_fig("Plot 4 — Duty Pipeline & Measured Amps", "Plot 4 �
 ax4b = ax4.twinx()
 
 ax4.plot(df["t_plot"], df["dutyRequest"],
-         color="#ffb300", lw=1.8, linestyle="--", label="dutyRequest")
+         color="#f9a825", lw=2.2, linestyle="--", label="dutyRequest")
 ax4.plot(df["t_plot"], df["dutyApplied"],
-         color="#00c853", lw=2.0, label="dutyApplied")
+         color="#2e7d32", lw=2.5, label="dutyApplied")
 
 ax4.fill_between(df["t_plot"], df["dutyRequest"], df["dutyApplied"],
                  where=(df["duty_clamp"] > 0.5),
-                 color="#ff9800", alpha=0.22, label="governor clip zone")
+                 color="#f9a825", alpha=0.22, label="governor clip zone")
 
 ax4b.plot(df["t_plot"], df["measAmps"],
-          color="#ef5350", lw=1.8, label="measAmps", alpha=0.9)
+          color="#c62828", lw=2.2, label="measAmps", alpha=0.9)
 ax4b.plot(df["t_plot"], df["iMeas_filt"],
-          color="#81c784", lw=2.0, linestyle="--", label="iMeas_filt", alpha=0.85)
+          color="#00838f", lw=2.5, linestyle="--", label="iMeas_filt", alpha=0.85)
 
 ax4.set_ylabel("Duty (%)")
-ax4b.set_ylabel("Measured Amps (A)", color="#ef5350")
+ax4b.set_ylabel("Measured Amps (A)", color="#c62828")
 ax4.grid(**GRID_KW)
 
 lines4  = ax4.get_lines() + ax4b.get_lines()
@@ -537,7 +546,7 @@ fig5, ax5, ax5s = make_fig("Plot 5 — Engine RPM", "Plot 5 — RPM")
 
 if "rpm" in df.columns:
     ax5.plot(df["t_plot"], df["rpm"],
-             color="#ffb300", lw=1.8, label="rpm")
+             color="#f9a825", lw=2.2, label="rpm")
 else:
     ax5.text(0.5, 0.5, "rpm column not present in this log",
              ha="center", va="center", transform=ax5.transAxes,

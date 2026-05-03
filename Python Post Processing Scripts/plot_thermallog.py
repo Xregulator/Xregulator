@@ -1,6 +1,6 @@
 """
 plot_thermallog.py
-- File selector GUI (tkinter) — pick any thermallog_*.csv from Downloads
+- File selector GUI (tkinter) — pick any *.csv from Downloads, newest first
 - 3 plot windows, each with a state strip below for binary/low-integer signals
 - PNGs saved to Downloads alongside the source CSV
 """
@@ -26,6 +26,8 @@ plt.rcParams.update({
     "ytick.labelsize": 13,
     "legend.fontsize": 12,
     "figure.titlesize": 16,
+    "legend.handlelength": 3.5,
+    "legend.handleheight": 1.5,
 })
 
 # ---------------------------------------------------------------------------
@@ -33,29 +35,35 @@ plt.rcParams.update({
 # ---------------------------------------------------------------------------
 def pick_file():
     files = sorted(
-        glob.glob(os.path.join(DOWNLOADS, "thermallog_*.csv")),
+        glob.glob(os.path.join(DOWNLOADS, "*.csv")),
+        key=os.path.getmtime,
         reverse=True
     )
     if not files:
-        messagebox.showerror("No files", f"No thermallog_*.csv found in {DOWNLOADS}")
+        messagebox.showerror("No files", f"No *.csv found in {DOWNLOADS}")
         return None
 
     selected = []
 
     root = tk.Tk()
+    try:  # force light appearance on macOS regardless of system dark-mode setting
+        root.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
+                     root._w, "NSAppearanceNameAqua")
+    except Exception:
+        pass
     root.title("Select Thermal Log")
     root.resizable(False, False)
-    root.configure(bg="#1e1e1e")
+    root.configure(bg="#f5f5f5")
 
     tk.Label(
         root,
         text="Select a log file:",
         font=("Helvetica", 16, "bold"),
-        bg="#1e1e1e",
-        fg="#f0f0f0"
+        bg="#f5f5f5",
+        fg="#1a1a1a"
     ).pack(padx=20, pady=(16, 8))
 
-    frame = tk.Frame(root, bg="#1e1e1e")
+    frame = tk.Frame(root, bg="#f5f5f5")
     frame.pack(padx=20, pady=8)
 
     scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL)
@@ -66,12 +74,12 @@ def pick_file():
         height=min(len(files), 16),
         font=("Courier", 15),
         selectmode=tk.SINGLE,
-        bg="#111111",
-        fg="#f0f0f0",
-        selectbackground="#42a5f5",
+        bg="#ffffff",
+        fg="#1a1a1a",
+        selectbackground="#1565c0",
         selectforeground="#ffffff",
-        highlightbackground="#555555",
-        highlightcolor="#42a5f5"
+        highlightbackground="#cccccc",
+        highlightcolor="#1565c0"
     )
     scrollbar.config(command=listbox.yview)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -92,40 +100,27 @@ def pick_file():
     def on_cancel():
         root.destroy()
 
-    btn_frame = tk.Frame(root, bg="#1e1e1e")
+    btn_frame = tk.Frame(root, bg="#f5f5f5")
     btn_frame.pack(pady=16)
 
-    tk.Button(
-        btn_frame,
-        text="Open",
+    # tk.Label used instead of tk.Button — macOS ignores bg/fg on native buttons
+    _lbl_open = tk.Label(
+        btn_frame, text="Open",
         font=("Helvetica", 15, "bold"),
-        command=on_go,
-        bg="#42a5f5",
-        fg="#ffffff",
-        activebackground="#1e88e5",
-        activeforeground="#ffffff",
-        relief=tk.FLAT,
-        bd=0,
-        padx=18,
-        pady=8,
-        width=10
-    ).pack(side=tk.LEFT, padx=10)
+        bg="#1565c0", fg="#ffffff",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
+    )
+    _lbl_open.bind("<Button-1>", lambda e: on_go())
+    _lbl_open.pack(side=tk.LEFT, padx=10)
 
-    tk.Button(
-        btn_frame,
-        text="Cancel",
+    _lbl_cancel = tk.Label(
+        btn_frame, text="Cancel",
         font=("Helvetica", 14),
-        command=on_cancel,
-        bg="#3a3a3a",
-        fg="#f0f0f0",
-        activebackground="#555555",
-        activeforeground="#ffffff",
-        relief=tk.FLAT,
-        bd=0,
-        padx=18,
-        pady=8,
-        width=10
-    ).pack(side=tk.LEFT, padx=10)
+        bg="#ffffff", fg="#1a1a1a",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
+    )
+    _lbl_cancel.bind("<Button-1>", lambda e: on_cancel())
+    _lbl_cancel.pack(side=tk.LEFT, padx=10)
 
     root.mainloop()
     return selected[0] if selected else None
@@ -203,15 +198,15 @@ df["f_shutdown"]      = ((flags // (2**5)) % 2).astype(int)
 # 3. Mode-change events
 # ---------------------------------------------------------------------------
 THERMAL_MODE_COLORS = {
-    "shutdown":   "#d9534f",
-    "bulk":       "#00c853",
-    "absorption": "#7e57c2",
-    "float":      "#ffb300",
-    "manual":     "#ef5350",
-    "maintain":   "#66bb6a",
-    "targetV":    "#42a5f5",
-    "idle":       "#666666",
-    "antiWindup": "#d9534f",
+    "shutdown":   "#c62828",
+    "bulk":       "#2e7d32",
+    "absorption": "#6a1b9a",
+    "float":      "#e91e63",
+    "manual":     "#c62828",
+    "maintain":   "#388e3c",
+    "targetV":    "#1565c0",
+    "idle":       "#777777",
+    "antiWindup": "#c62828",
 }
 
 state_changes = df.index[
@@ -289,7 +284,7 @@ def add_mode_vlines(ax, df, state_changes):
     for idx in state_changes:
         t = df.loc[idx, "t_plot"]
         _, color = mode_label_color(df.loc[idx])
-        ax.axvline(x=t, color=color, linewidth=1.0, linestyle="--", alpha=0.6)
+        ax.axvline(x=t, color=color, linewidth=1.0, linestyle="--", alpha=0.5)
 
 
 def save_fig(fig, suffix):
@@ -301,8 +296,7 @@ def save_fig(fig, suffix):
 # ---------------------------------------------------------------------------
 # Shared style
 # ---------------------------------------------------------------------------
-plt.style.use("dark_background")
-GRID_KW = dict(alpha=0.2, linewidth=0.5)
+GRID_KW = dict(alpha=0.4, linewidth=0.7)
 
 # ---------------------------------------------------------------------------
 # PLOT 1 — Temperature control & penalty output
@@ -313,12 +307,12 @@ ax1a = fig1.add_subplot(gs1[0])
 ax1b = ax1a.twinx()
 ax1s = fig1.add_subplot(gs1[1], sharex=ax1a)
 
-ax1a.plot(df["t_plot"], df["tempFilt_F"],    color="#d9534f", lw=2.0, label="tempFilt_F")
-ax1a.plot(df["t_plot"], df["tempSP_F"],      color="#ffb300", lw=1.8, linestyle="--", label="tempSP_F")
-ax1b.plot(df["t_plot"], df["penaltyAmps_A"], color="#00c853", lw=1.8, label="penaltyAmps_A")
+ax1a.plot(df["t_plot"], df["tempFilt_F"],    color="#c62828", lw=2.5, label="tempFilt_F")
+ax1a.plot(df["t_plot"], df["tempSP_F"],      color="#e91e63", lw=2.2, linestyle="--", label="tempSP_F")
+ax1b.plot(df["t_plot"], df["penaltyAmps_A"], color="#2e7d32", lw=2.2, label="penaltyAmps_A")
 
-ax1a.set_ylabel("Temperature (°F)", color="#d9534f")
-ax1b.set_ylabel("Penalty Amps (A)", color="#00c853")
+ax1a.set_ylabel("Temperature (°F)", color="#c62828")
+ax1b.set_ylabel("Penalty Amps (A)", color="#2e7d32")
 ax1a.grid(**GRID_KW)
 plt.setp(ax1a.get_xticklabels(), visible=False)
 
@@ -339,11 +333,11 @@ gs2  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax2  = fig2.add_subplot(gs2[0])
 ax2s = fig2.add_subplot(gs2[1], sharex=ax2)
 
-ax2.plot(df["t_plot"], df["outerP"],          color="#42a5f5", lw=1.8, label="outerP")
-ax2.plot(df["t_plot"], df["outerI"],          color="#ffb300", lw=1.8, label="outerI")
-ax2.plot(df["t_plot"], df["outerD"],          color="#7e57c2", lw=1.8, label="outerD")
-ax2.plot(df["t_plot"], df["impliedPenalty"],  color="#00c853", lw=2.0, label="impliedPenalty")
-ax2.plot(df["t_plot"], df["outerDExternal"],  color="#66bb6a", lw=1.6, linestyle=":", label="outerDExternal")
+ax2.plot(df["t_plot"], df["outerP"],          color="#1565c0", lw=2.2, label="outerP")
+ax2.plot(df["t_plot"], df["outerI"],          color="#f9a825", lw=2.2, label="outerI")
+ax2.plot(df["t_plot"], df["outerD"],          color="#6a1b9a", lw=2.2, label="outerD")
+ax2.plot(df["t_plot"], df["impliedPenalty"],  color="#2e7d32", lw=2.5, label="impliedPenalty")
+ax2.plot(df["t_plot"], df["outerDExternal"],  color="#00838f", lw=2.0, linestyle=":", label="outerDExternal")
 
 ax2.set_ylabel("PID Terms")
 ax2.grid(**GRID_KW)
@@ -363,12 +357,12 @@ gs3  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax3  = fig3.add_subplot(gs3[0])
 ax3s = fig3.add_subplot(gs3[1], sharex=ax3)
 
-ax3.plot(df["t_plot"], df["measAmps_A"],  color="#d9534f", lw=2.0, label="measAmps_A")
-ax3.plot(df["t_plot"], df["uTarget_A"],   color="#42a5f5", lw=1.8, label="uTarget_A")
-ax3.plot(df["t_plot"], df["spLimited_A"], color="#ffb300", lw=1.8, linestyle="--", label="spLimited_A")
-ax3.plot(df["t_plot"], df["voltCap_A"],   color="#7e57c2", lw=1.6, linestyle=":", label="voltCap_A")
+ax3.plot(df["t_plot"], df["measAmps_A"],  color="#c62828", lw=2.5, label="measAmps_A")
+ax3.plot(df["t_plot"], df["uTarget_A"],   color="#1565c0", lw=2.2, label="uTarget_A")
+ax3.plot(df["t_plot"], df["spLimited_A"], color="#e91e63", lw=2.2, linestyle="--", label="spLimited_A")
+ax3.plot(df["t_plot"], df["voltCap_A"],   color="#6a1b9a", lw=2.0, linestyle=":", label="voltCap_A")
 ax3.plot(df["t_plot"], df["duty_pct"],
-         color="#ffffff", lw=1.4, linestyle="-.", label="duty_pct")
+         color="#455a64", lw=1.8, linestyle="-.", label="duty_pct")
 
 ax3.set_ylabel("Amps (A)")
 ax3.grid(**GRID_KW)
@@ -393,14 +387,14 @@ ax4s = fig4.add_subplot(gs4[1], sharex=ax4a)
 
 # Left axis: battery voltage
 ax4a.plot(df["t_plot"], df["battV"],
-          color="#00bcd4", lw=2.0, label="battV")
+          color="#1565c0", lw=2.5, label="battV")
 
 # Right axis: RPM / 100
 ax4b.plot(df["t_plot"], df["RPM"] / 100.0,
-          color="#8bc34a", lw=1.8, label="RPM/100")
+          color="#f9a825", lw=2.2, label="RPM/100")
 
-ax4a.set_ylabel("Battery Voltage (V)", color="#00bcd4")
-ax4b.set_ylabel("RPM / 100", color="#8bc34a")
+ax4a.set_ylabel("Battery Voltage (V)", color="#1565c0")
+ax4b.set_ylabel("RPM / 100", color="#f9a825")
 
 ax4a.grid(**GRID_KW)
 plt.setp(ax4a.get_xticklabels(), visible=False)

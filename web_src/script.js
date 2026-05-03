@@ -45,7 +45,7 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 // STALENESS DISPLAY THRESHOLDS
 // These control when sensor readings gray out in the UI only.
 // They have zero effect on the regulator or field control logic —
-// that staleness is governed by TempPIDStaleMs (15s, outer PID)
+// that staleness is governed by TempPIDStaleMs (15s, temperature PID)
 // and the hardcoded 30s in buildTickSnapshot() on the ESP32.
 //
 // The timestamp payload sends every 3s, so any threshold below
@@ -672,6 +672,10 @@ const CSV3_FIELDS = [
     "ThermalTimeConstantSec",   // 260
     "AwBleedRate",              // 261
     "AwRecoverRate",            // 262
+    "KSoft",                    // 263
+    "KHard",                    // 264
+    "IExcessReseedFrac",        // 265
+    "AwSeedProtectMs",          // 266
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2584,8 +2588,12 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'ThermalTimeConstantSec', id: 'ThermalTimeConstantSec_echo', transform: v => v },
-        { key: 'AwBleedRate',   id: 'AwBleedRate_echo',   transform: v => (v / 10).toFixed(1) },
-        { key: 'AwRecoverRate', id: 'AwRecoverRate_echo', transform: v => (v / 10).toFixed(2) },
+        { key: 'AwBleedRate',       id: 'AwBleedRate_echo',       transform: v => (v / 10).toFixed(1) },
+        { key: 'AwRecoverRate',     id: 'AwRecoverRate_echo',     transform: v => (v / 10).toFixed(2) },
+        { key: 'KSoft',             id: 'KSoft_echo',             transform: v => (v / 10).toFixed(1) },
+        { key: 'KHard',             id: 'KHard_echo',             transform: v => (v / 10).toFixed(1) },
+        { key: 'IExcessReseedFrac', id: 'IExcessReseedFrac_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'AwSeedProtectMs',   id: 'AwSeedProtectMs_echo',   transform: v => v },
         { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
@@ -3094,9 +3102,16 @@ function resetThermalPID() {
 }
 
 function resetInnerPID() {
-    if (!confirm('Reset inner PID? Integrator will be zeroed and duty will ramp up from 0 via slew limiter.')) return;
+    if (!confirm('Reset output current PID? Integrator will be zeroed and duty will ramp up from 0 via slew limiter.')) return;
     fetch('/resetInnerPID', { method: 'POST' })
-        .then(r => r.ok ? console.log('Inner PID reset') : console.warn('Reset failed'))
+        .then(r => r.ok ? console.log('Output current PID reset') : console.warn('Reset failed'))
+        .catch(err => console.warn('Reset error:', err));
+}
+
+function resetVoltageLoop() {
+    if (!confirm('Reset CV integrator (cv_I)? The voltage loop will rebuild from zero on the next tick.')) return;
+    fetch('/resetVoltageLoop', { method: 'POST' })
+        .then(r => r.ok ? console.log('Voltage loop reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
@@ -4318,7 +4333,7 @@ let currentCapMode = 'amps'; // tracks active mode; updated by setCapMode()
 // CAP TABLE — NORMAL / LOW CHARGE RATE MODE  (HiLow: 1=Normal, 0=Low)
 // ===========================================================================
 
-let currentChargeRateMode = 'normal'; // tracks active mode; updated by setChargeRateMode()
+let currentChargeRateMode = 'high'; // tracks active mode; updated by setChargeRateMode()
 
 async function submitChargeRateModeImmediately(desiredValue) {
     const passwordField = document.querySelector('.password_field');
@@ -4331,13 +4346,13 @@ async function submitChargeRateModeImmediately(desiredValue) {
 
 function setChargeRateMode(mode) {
     currentChargeRateMode = mode;
-    const normalBtn = document.getElementById('chargeRateNormalBtn');
+    const highBtn = document.getElementById('chargeRateHighBtn');
     const lowBtn = document.getElementById('chargeRateLowBtn');
-    if (normalBtn) normalBtn.classList.toggle('cap-mode-active', mode === 'normal');
+    if (highBtn) highBtn.classList.toggle('cap-mode-active', mode === 'high');
     if (lowBtn) lowBtn.classList.toggle('cap-mode-active', mode === 'low');
     const container = document.getElementById('ltScroll');
     if (container) {
-        container.classList.toggle('rate-normal', mode === 'normal');
+        container.classList.toggle('rate-normal', mode === 'high');
         container.classList.toggle('rate-low', mode === 'low');
     }
 }
@@ -5430,7 +5445,7 @@ window.addEventListener("load", function () {
                 ["IMUReadTime_ID", "IMUReadTime"],
                 ["adsI2CErrorCount_ID", "adsI2CErrorCount"],
 
-                //Outer PID loop (temp)
+                //Temperature PID loop
                 ["tempPIDActive_display", "tempPIDActive"],
                 ["tempPIDInput_display", "tempPIDInput_d"],
                 ["tempPIDSetpoint_display", "tempPIDSetpoint_d"],
@@ -5463,7 +5478,7 @@ window.addEventListener("load", function () {
             // Update other fields every cycle
             updateFields(otherFields);
 
-            // Outer PID terms displayed as current contributions (sign-flipped:
+            // Temperature PID terms displayed as current contributions (sign-flipped:
             // positive = adding amps, negative = removing amps)
             for (const [id, key] of [
                 ["outerTermP_display", "outerTermP"],
@@ -5522,20 +5537,20 @@ window.addEventListener("load", function () {
                 if (pending) {
                     if (data.HiLow === pending.desiredValue) {
                         pendingToggles.delete('HiLow');
-                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'normal');
+                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
                     } else if (
                         (data.stateRevision !== undefined && data.stateRevision > pending.baseRev) ||
                         (pending.deadlineMs !== undefined && Date.now() > pending.deadlineMs)
                     ) {
                         pendingToggles.delete('HiLow');
-                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'normal');
+                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
                     } else {
                         if (pending.deadlineMs === undefined) {
                             pending.deadlineMs = Date.now() + 2500;
                         }
                     }
                 } else {
-                    setChargeRateMode(data.HiLow === 0 ? 'low' : 'normal');
+                    setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
                 }
             }
 

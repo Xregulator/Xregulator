@@ -14,7 +14,7 @@ State strip shows:
   - Orange tick marks where voltLoopFired=1
   - softClamp / hardClamp / iExcess tick marks
 
-File picker searches ~/Downloads for cvlog*.csv
+File picker searches ~/Downloads for *.csv, newest first.
 PNGs saved to Downloads alongside source CSV.
 """
 
@@ -40,6 +40,8 @@ plt.rcParams.update({
     "ytick.labelsize": 13,
     "legend.fontsize": 12,
     "figure.titlesize": 16,
+    "legend.handlelength": 3.5,
+    "legend.handleheight": 1.5,
 })
 
 # ---------------------------------------------------------------------------
@@ -47,29 +49,35 @@ plt.rcParams.update({
 # ---------------------------------------------------------------------------
 def pick_file():
     files = sorted(
-        glob.glob(os.path.join(DOWNLOADS, "cvlog*.csv")),
+        glob.glob(os.path.join(DOWNLOADS, "*.csv")),
+        key=os.path.getmtime,
         reverse=True
     )
     if not files:
-        messagebox.showerror("No files", f"No cvlog*.csv found in {DOWNLOADS}")
+        messagebox.showerror("No files", f"No *.csv found in {DOWNLOADS}")
         return None
 
     selected = []
 
     root = tk.Tk()
+    try:  # force light appearance on macOS regardless of system dark-mode setting
+        root.tk.call("::tk::unsupported::MacWindowStyle", "appearance",
+                     root._w, "NSAppearanceNameAqua")
+    except Exception:
+        pass
     root.title("Select CV Log")
     root.resizable(False, False)
-    root.configure(bg="#1e1e1e")
+    root.configure(bg="#f5f5f5")
 
     tk.Label(
         root,
         text="Select a log file:",
         font=("Helvetica", 16, "bold"),
-        bg="#1e1e1e",
-        fg="#f0f0f0"
+        bg="#f5f5f5",
+        fg="#1a1a1a"
     ).pack(padx=20, pady=(16, 8))
 
-    frame = tk.Frame(root, bg="#1e1e1e")
+    frame = tk.Frame(root, bg="#f5f5f5")
     frame.pack(padx=20, pady=8)
 
     scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL)
@@ -80,12 +88,12 @@ def pick_file():
         height=min(len(files), 16),
         font=("Courier", 15),
         selectmode=tk.SINGLE,
-        bg="#111111",
-        fg="#f0f0f0",
-        selectbackground="#42a5f5",
+        bg="#ffffff",
+        fg="#1a1a1a",
+        selectbackground="#1565c0",
         selectforeground="#ffffff",
-        highlightbackground="#555555",
-        highlightcolor="#42a5f5"
+        highlightbackground="#cccccc",
+        highlightcolor="#1565c0"
     )
     scrollbar.config(command=listbox.yview)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -106,24 +114,27 @@ def pick_file():
     def on_cancel():
         root.destroy()
 
-    btn_frame = tk.Frame(root, bg="#1e1e1e")
+    btn_frame = tk.Frame(root, bg="#f5f5f5")
     btn_frame.pack(pady=16)
 
-    tk.Button(
+    # tk.Label used instead of tk.Button — macOS ignores bg/fg on native buttons
+    _lbl_open = tk.Label(
         btn_frame, text="Open",
-        font=("Helvetica", 15, "bold"), command=on_go,
-        bg="#42a5f5", fg="#ffffff",
-        activebackground="#1e88e5", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 15, "bold"),
+        bg="#1565c0", fg="#ffffff",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
+    )
+    _lbl_open.bind("<Button-1>", lambda e: on_go())
+    _lbl_open.pack(side=tk.LEFT, padx=10)
 
-    tk.Button(
+    _lbl_cancel = tk.Label(
         btn_frame, text="Cancel",
-        font=("Helvetica", 14), command=on_cancel,
-        bg="#3a3a3a", fg="#f0f0f0",
-        activebackground="#555555", activeforeground="#ffffff",
-        relief=tk.FLAT, bd=0, padx=18, pady=8, width=10
-    ).pack(side=tk.LEFT, padx=10)
+        font=("Helvetica", 14),
+        bg="#ffffff", fg="#1a1a1a",
+        relief=tk.SOLID, bd=1, padx=18, pady=8, width=10, cursor="hand2"
+    )
+    _lbl_cancel.bind("<Button-1>", lambda e: on_cancel())
+    _lbl_cancel.pack(side=tk.LEFT, padx=10)
 
     root.mainloop()
     return selected[0] if selected else None
@@ -230,18 +241,17 @@ for _raw in _lines[:_header_idx]:
         break
 
 outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}"
-print(f"Outer loop gains: {outer_label}")
+print(f"Voltage loop gains: {outer_label}")
 
 # ---------------------------------------------------------------------------
 # 3. Shared drawing helpers
 # ---------------------------------------------------------------------------
-GRID_KW = dict(alpha=0.2, linewidth=0.5)
-plt.style.use("dark_background")
+GRID_KW = dict(alpha=0.4, linewidth=0.7)
 
-EV_COLOR_VLOOP = "#ff9800"   # voltLoopFired ticks
-EV_COLOR_SOFT  = "#ffb300"   # softClamp ticks
-EV_COLOR_HARD  = "#ef5350"   # hardClamp ticks
-EV_COLOR_FAST  = "#ce93d8"   # iExcess ticks
+EV_COLOR_VLOOP = "#e91e63"   # voltLoopFired ticks
+EV_COLOR_SOFT  = "#f9a825"   # softClamp ticks
+EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks
+EV_COLOR_FAST  = "#00838f"   # iExcess ticks
 
 
 def draw_state_strip(ax, df):
@@ -251,7 +261,7 @@ def draw_state_strip(ax, df):
       OV overlay — red fill where fastOvActive=1
       Tick lanes:
         row ~0.9  orange = voltLoopFired
-        row ~0.5  yellow = softClamp
+        row ~0.5  orange = softClamp
         row ~0.3  red    = hardClamp
         row ~0.1  purple = iExcess
     """
@@ -269,11 +279,11 @@ def draw_state_strip(ax, df):
         val = df["cvActive"].iloc[i]
         if val != prev_val or i == len(df) - 1:
             t = df["t_plot"].iloc[i]
-            color  = "#00c853" if prev_val else "#444444"
+            color  = "#2e7d32" if prev_val else "#cccccc"
             label  = "CV" if prev_val else ""
             width  = t - prev_t
             ax.barh(2, width, left=prev_t, height=0.75,
-                    color=color, alpha=0.80, align="center")
+                    color=color, alpha=0.85, align="center")
             if prev_val and width > span * 0.04:
                 ax.text(prev_t + width / 2, 2, label,
                         ha="center", va="center",
@@ -285,7 +295,7 @@ def draw_state_strip(ax, df):
     ov_rows = df[df["fastOvActive"] == 1]
     for t in ov_rows["t_plot"]:
         ax.axvspan(t - 0.002 * span, t + 0.002 * span,
-                   ymin=0.5, ymax=1.0, color="#ef5350", alpha=0.4)
+                   ymin=0.5, ymax=1.0, color="#c62828", alpha=0.4)
 
     # --- Tick lanes ---
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
@@ -306,7 +316,7 @@ def draw_state_strip(ax, df):
 
     # Legend text
     ax.text(df["t_plot"].iloc[0] + span * 0.01, 2.55,
-            "cvActive", fontsize=7, color="#00c853", va="center")
+            "cvActive", fontsize=7, color="#1b5e20", va="center")
     ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.68,
             "VLoop▲", fontsize=7, color=EV_COLOR_VLOOP, va="center")
     ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.35,
@@ -331,15 +341,15 @@ def add_ov_shading(ax, df):
             in_ov    = True
         elif not row["fastOvActive"] and in_ov:
             ax.axvspan(ov_start, row["t_plot"],
-                       color="#ef5350", alpha=0.10)
+                       color="#c62828", alpha=0.08)
             in_ov = False
     if in_ov:
         ax.axvspan(ov_start, df["t_plot"].iloc[-1],
-                   color="#ef5350", alpha=0.10)
+                   color="#c62828", alpha=0.08)
 
 
 def add_voltloop_vlines(ax, df):
-    """Faint orange vlines where outer voltage loop fired."""
+    """Faint orange vlines where voltage loop fired."""
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
         ax.axvline(x=t, color=EV_COLOR_VLOOP, linewidth=0.6, alpha=0.35)
 
@@ -361,7 +371,7 @@ def make_fig(title_suffix, num):
 
 
 # ---------------------------------------------------------------------------
-# PLOT 1 — Voltage: what the outer loop sees
+# PLOT 1 — Voltage: what the voltage loop sees
 #
 # Diagnoses: battV vs target, vError sign/magnitude, vPred vs battV,
 #            dvdt_Vs sign (rising/falling), OV shading.
@@ -370,28 +380,28 @@ fig1, ax1, ax1s = make_fig("Plot 1 — Voltage Loop Input", "Plot 1 — Voltage"
 ax1b = ax1.twinx()
 
 ax1.plot(df["t_plot"], df["battV"],
-         color="#00bcd4", lw=2.0, label="battV")
+         color="#1565c0", lw=2.5, label="battV")
 ax1.plot(df["t_plot"], df["targV"],
-         color="#ffb300", lw=1.8, linestyle="--", label="targV")
+         color="#e91e63", lw=2.2, linestyle="--", label="targV")
 ax1.plot(df["t_plot"], df["vPred"],
-         color="#80cbc4", lw=1.4, linestyle=":", label="vPred (battV + TD·dvdt⁺)", alpha=0.85)
+         color="#00838f", lw=2.0, linestyle="-.", label="vPred (battV + TD·dvdt⁺)", alpha=0.85)
 
 ax1b.plot(df["t_plot"], df["vError_V"],
-          color="#ef5350", lw=1.6, label="vError_V", alpha=0.9)
+          color="#c62828", lw=2.0, label="vError_V", alpha=0.9)
 ax1b.plot(df["t_plot"], df["dvdt_Vs"],
-          color="#f06292", lw=1.2, linestyle=":", label="dvdt_Vs (EMA)", alpha=0.75)
-ax1b.axhline(0, color="#ef5350", linewidth=0.6, linestyle=":", alpha=0.4)
+          color="#37474f", lw=2.2, linestyle="--", label="dvdt_Vs (EMA)", alpha=0.95)
+ax1b.axhline(0, color="#c62828", linewidth=0.6, linestyle=":", alpha=0.4)
 
-ax1.set_ylabel("Voltage (V)", color="#00bcd4")
-ax1b.set_ylabel("vError (V) / dvdt (V/s)", color="#ef5350")
+ax1.set_ylabel("Voltage (V)", color="#1565c0")
+ax1b.set_ylabel("vError (V) / dvdt (V/s)", color="#c62828")
 ax1.grid(**GRID_KW)
+
+# Collect handles before decorative vlines are added to ax1
+_h1 = [l for l in ax1.get_lines() + ax1b.get_lines() if not l.get_label().startswith("_")]
+ax1.legend(_h1, [l.get_label() for l in _h1], loc="upper left")
 
 add_ov_shading(ax1, df)
 add_voltloop_vlines(ax1, df)
-
-lines1  = ax1.get_lines() + ax1b.get_lines()
-labels1 = [l.get_label() for l in lines1 if not l.get_label().startswith("_")]
-ax1.legend(lines1[:len(labels1)], labels1, loc="upper left")
 
 draw_state_strip(ax1s, df)
 # save_fig(fig1, "plot1_voltage")
@@ -409,30 +419,30 @@ fig2, ax2, ax2s = make_fig("Plot 2 — CV Command Chain (cv_I, Icv, limits, iMea
 ax2b = ax2.twinx()
 
 ax2.plot(df["t_plot"], df["uTarget_A"],
-         color="#42a5f5", lw=2.0, label="uTarget_A (RPM/thermal ceiling, post-OV cap)")
+         color="#1565c0", lw=2.5, label="uTarget_A (RPM/thermal ceiling, post-OV cap)")
 ax2.plot(df["t_plot"], df["Icv_A"],
-         color="#ffb300", lw=1.8, linestyle="--", label="Icv_A (CV setpoint)")
+         color="#e91e63", lw=2.2, linestyle="--", label="Icv_A (CV setpoint)")
 ax2.plot(df["t_plot"], df["spLimited_A"],
-         color="#00c853", lw=1.6, label="spLimited_A (slew-limited → inner PID)")
+         color="#2e7d32", lw=2.0, label="spLimited_A (slew-limited → output current PID)")
 ax2.plot(df["t_plot"], df["fastOvCap_A"],
-         color="#ef9a9a", lw=1.2, linestyle=":", label="fastOvCap_A (OV ceiling)", alpha=0.80)
+         color="#455a64", lw=1.6, linestyle=":", label="fastOvCap_A (OV ceiling)", alpha=0.80)
 
 ax2b.plot(df["t_plot"], df["cv_I_A"],
-          color="#ce93d8", lw=1.6, label="cv_I_A (integrator state)", alpha=0.85)
-ax2b.set_ylabel("cv_I (A) — integrator", color="#ce93d8")
+          color="#6a1b9a", lw=2.0, label="cv_I_A (integrator state)", alpha=0.85)
+ax2b.set_ylabel("cv_I (A) — integrator", color="#6a1b9a")
 ax2.set_ylabel("Current (A)")
 ax2.grid(**GRID_KW)
 
-add_ov_shading(ax2, df)
-add_voltloop_vlines(ax2, df)
-
 # iMeas on right axis too — overlay with cv_I axis
 ax2b.plot(df["t_plot"], df["iMeas_A"],
-          color="#ef5350", lw=1.4, linestyle="--", label="iMeas_A", alpha=0.75)
+          color="#c62828", lw=1.8, linestyle="--", label="iMeas_A", alpha=0.75)
 
-lines2  = ax2.get_lines() + ax2b.get_lines()
-labels2 = [l.get_label() for l in lines2 if not l.get_label().startswith("_")]
-ax2.legend(lines2[:len(labels2)], labels2, loc="upper left")
+# Collect handles before decorative vlines are added to ax2
+_h2 = [l for l in ax2.get_lines() + ax2b.get_lines() if not l.get_label().startswith("_")]
+ax2.legend(_h2, [l.get_label() for l in _h2], loc="upper left")
+
+add_ov_shading(ax2, df)
+add_voltloop_vlines(ax2, df)
 
 draw_state_strip(ax2s, df)
 # save_fig(fig2, "plot2_command_chain")
@@ -459,9 +469,9 @@ fig3.suptitle(f"Plot 3 — Filtered Signal Quality  |  {outer_label}", fontsize=
 
 # 3a: battery voltage raw vs filtered
 ax3a.plot(df["t_plot"], df["battV"],
-          color="#ef5350", lw=1.0, alpha=0.55, label="battV (raw)")
+          color="#64b5f6", lw=1.6, alpha=0.70, label="battV (raw)")
 ax3a.plot(df["t_plot"], df["battV_filt_V"],
-          color="#00bcd4", lw=1.8, label="battV_filt_V (filtered)")
+          color="#1565c0", lw=2.2, label="battV_filt_V (filtered)")
 ax3a.set_ylabel("Voltage (V)")
 ax3a.grid(**GRID_KW)
 ax3a.legend(loc="upper left")
@@ -469,9 +479,9 @@ add_ov_shading(ax3a, df)
 
 # 3b: measured current raw vs filtered
 ax3b.plot(df["t_plot"], df["iMeas_A"],
-          color="#ef5350", lw=1.0, alpha=0.55, label="iMeas_A (raw)")
+          color="#f9a825", lw=1.6, alpha=0.70, label="iMeas_A (raw)")
 ax3b.plot(df["t_plot"], df["iMeas_filt_A"],
-          color="#00c853", lw=1.8, label="iMeas_filt_A (filtered)")
+          color="#c62828", lw=2.2, label="iMeas_filt_A (filtered)")
 ax3b.set_ylabel("Current (A)")
 ax3b.grid(**GRID_KW)
 ax3b.legend(loc="upper left")
@@ -479,11 +489,11 @@ add_ov_shading(ax3b, df)
 
 # 3c: CH1 interval
 ax3c.plot(df["t_plot"], df["ch1_interval_ms"],
-          color="#80cbc4", lw=1.4, label="ch1_interval_ms")
-ax3c.axhline(5, color="#ffb300", linewidth=0.8, linestyle=":",
-             alpha=0.60, label="5 ms nominal")
-ax3c.axhline(15, color="#ef5350", linewidth=0.8, linestyle=":",
-             alpha=0.60, label="15 ms (3× — stale reading risk)")
+          color="#00838f", lw=1.8, label="ch1_interval_ms")
+ax3c.axhline(5, color="#2e7d32", linewidth=0.8, linestyle=":",
+             alpha=0.70, label="5 ms nominal")
+ax3c.axhline(15, color="#c62828", linewidth=0.8, linestyle=":",
+             alpha=0.70, label="15 ms (3× — stale reading risk)")
 ax3c.set_ylabel("CH1 interval (ms)")
 ax3c.grid(**GRID_KW)
 ax3c.legend(loc="upper right", fontsize=10)
@@ -510,15 +520,15 @@ fig4.suptitle(f"Plot 4 — Duty Pipeline & OV Supervisor  |  {outer_label}", fon
 # 4a: duty + OV cap + iMeas
 ax4a_r = ax4a.twinx()
 ax4a.plot(df["t_plot"], df["duty_pct"],
-          color="#00c853", lw=2.0, label="duty_pct")
+          color="#2e7d32", lw=2.5, label="duty_pct")
 ax4a.plot(df["t_plot"], df["spLimited_A"],
-          color="#ffb300", lw=1.4, linestyle="--", label="spLimited_A (inner PID setpoint)", alpha=0.80)
+          color="#e91e63", lw=1.8, linestyle="--", label="spLimited_A (output current PID setpoint)", alpha=0.80)
 ax4a_r.plot(df["t_plot"], df["iMeas_A"],
-            color="#ef5350", lw=1.6, label="iMeas_A", alpha=0.85)
+            color="#c62828", lw=2.0, label="iMeas_A", alpha=0.85)
 ax4a_r.plot(df["t_plot"], df["fastOvCap_A"],
-            color="#ef9a9a", lw=1.2, linestyle=":", label="fastOvCap_A", alpha=0.75)
+            color="#455a64", lw=1.6, linestyle=":", label="fastOvCap_A", alpha=0.75)
 ax4a.set_ylabel("Duty (%) / Setpoint (A)")
-ax4a_r.set_ylabel("iMeas / OV cap (A)", color="#ef5350")
+ax4a_r.set_ylabel("iMeas / OV cap (A)", color="#c62828")
 ax4a.grid(**GRID_KW)
 add_ov_shading(ax4a, df)
 
@@ -529,10 +539,10 @@ ax4a.legend(lines4[:len(labels4)], labels4, loc="upper left")
 # 4b: binary flag lanes stacked as bar-style fills
 flag_h = 0.8
 for offset, col, color, label in [
-    (3.0, "fastOvActive", "#ef5350",  "fastOvActive"),
-    (2.0, "softClamp",    "#ffb300",  "softClamp"),
-    (1.0, "hardClamp",    "#ef5350",  "hardClamp"),
-    (0.0, "iExcess",  "#ce93d8",  "iExcess"),
+    (3.0, "fastOvActive", "#c62828",  "fastOvActive"),
+    (2.0, "softClamp",    "#f9a825",  "softClamp"),
+    (1.0, "hardClamp",    "#6a1b9a",  "hardClamp"),
+    (0.0, "iExcess",      "#00838f",  "iExcess"),
 ]:
     vals = df[col].values
     t    = df["t_plot"].values
@@ -574,7 +584,7 @@ fig5, ax5, ax5s = make_fig("Plot 5 — Engine RPM", "Plot 5 — RPM")
 
 if "rpm" in df.columns:
     ax5.plot(df["t_plot"], df["rpm"],
-             color="#ffb300", lw=1.8, label="rpm")
+             color="#f9a825", lw=2.2, label="rpm")
 else:
     ax5.text(0.5, 0.5, "rpm column not present in this log",
              ha="center", va="center", transform=ax5.transAxes,

@@ -1707,6 +1707,26 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     AwRecoverRate = readFile(LittleFS, "/AwRecoverRate.txt").toFloat();
   }
+  if (!fsExists("/AwSeedProtectMs.txt")) {
+    writeFile(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
+  } else {
+    AwSeedProtectMs = (uint16_t)readFile(LittleFS, "/AwSeedProtectMs.txt").toInt();
+  }
+  if (!fsExists("/KSoft.txt")) {
+    writeFile(LittleFS, "/KSoft.txt", String(KSoft, 1).c_str());
+  } else {
+    KSoft = readFile(LittleFS, "/KSoft.txt").toFloat();
+  }
+  if (!fsExists("/KHard.txt")) {
+    writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
+  } else {
+    KHard = readFile(LittleFS, "/KHard.txt").toFloat();
+  }
+  if (!fsExists("/IExcessReseedFrac.txt")) {
+    writeFile(LittleFS, "/IExcessReseedFrac.txt", String(IExcessReseedFrac, 2).c_str());
+  } else {
+    IExcessReseedFrac = readFile(LittleFS, "/IExcessReseedFrac.txt").toFloat();
+  }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());
   } else {
