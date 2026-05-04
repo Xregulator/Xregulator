@@ -249,14 +249,16 @@ static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
 #define NUM_MATRIX_CELLS (NUM_RPM_BUCKETS * NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS)
 // 8 × 3 × 7 = 168 cells
 
-// --- Reference bin selection criteria (all PLACEHOLDER — tune after first data) ---
-// DEV: reduced for bench/dockside testing where only 1 bin accumulates. PRODUCTION: restore NUM_REFERENCE_BINS to 10, REF_MIN_SS_SECONDS to 30
+// --- Reference bin selection criteria ---
+// DEV: ALL thresholds relaxed to near-zero for sparkline testing. PRODUCTION: restore all values below.
+// PRODUCTION values: NUM_REFERENCE_BINS=10, REF_MIN_SS_SECONDS=30, REF_FREEZE_TOTAL_SS=6000,
+//                    REF_SPREAD_TEMP_DEG=50.0f, REF_SPREAD_FIELD_VOLTS=3.75f, REF_SPREAD_RPM=1000.0f
 #define NUM_REFERENCE_BINS 1          // DEV ONLY — production value: 10
 #define REF_MIN_SS_SECONDS 5          // DEV ONLY — production value: 30
-#define REF_FREEZE_TOTAL_SS 6000      // PLACEHOLDER: total SS seconds across selected bins to trigger freeze (~100 min)
-#define REF_SPREAD_TEMP_DEG 50.0f     // PLACEHOLDER: min temp span across selected bins (°F)
-#define REF_SPREAD_FIELD_VOLTS 3.75f  // PLACEHOLDER: min field-drive span (25% of 15V range)
-#define REF_SPREAD_RPM 1000.0f        // PLACEHOLDER: min RPM span across selected bins
+#define REF_FREEZE_TOTAL_SS 10        // DEV ONLY — production value: 6000
+#define REF_SPREAD_TEMP_DEG 1.0f      // DEV ONLY — production value: 50.0f
+#define REF_SPREAD_FIELD_VOLTS 0.1f   // DEV ONLY — production value: 3.75f
+#define REF_SPREAD_RPM 1.0f           // DEV ONLY — production value: 1000.0f
 
 // --- Anomaly detection — runtime, user-configurable via LittleFS ---
 float anomalyMarginAmps = 5.0f;   // Extra amps of tolerance beyond ref min/max (default: none)
@@ -828,9 +830,15 @@ float RPM_filtered = 0.0f;
 // Only legal in SYS_MODE_AUTO; systemID_tick() enforces this.
 float SystemIDStepAmplitude = 15.0f;  // % duty step — will be web-configurable later
 
-volatile bool systemIDRequested = false;  // set true by UI handler to trigger a test run
-bool systemIDActive = false;              // true while test is in progress
-bool systemIDResultsReady = false;        // set true when post-processing is complete
+volatile bool systemIDRequested = false;       // set true by UI handler to trigger a test run
+volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
+uint8_t systemIDActive = 0;                    // 0=idle, 1-9=current phase (sent to UI for progress)
+bool systemIDResultsReady = false;             // set true when post-processing is complete
+
+// ── Stabilize-phase constants ────────────────────────────────────────────────
+#define SYSID_STABILIZE_AMPS       10.0f   // target alternator output before baseline begins
+#define SYSID_STABILIZE_SETTLE_MS  5000    // must hold within ±2A for this long before proceeding
+#define SYSID_STABILIZE_TIMEOUT_MS 30000   // abort if can't stabilize within this window
 
 float systemIDRiseDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // rising-step delays, ms
 float systemIDFallDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // falling-step delays, ms
@@ -957,7 +965,7 @@ int OnOff = 0;             // 0 is charger off, 1 is charger On (corresponds to 
 int Ignition = 0;          // Digital Input      NEED THIS TO HAVE WIFI ON , FOR NOW
 int IgnitionOverride = 1;  // to fake the ignition signal w/ software
 int HiLow = 1;             // 0 will be a low setting, 1 a high setting
-int AmpSrc = 0;            // OBSOLETE, NEEDS REMOVING
+int AmpSensorRange = 1;    // 0=±200A, 1=±300A (default), 2=±500A — hall effect sensor range
 int LimpHome = 0;          // 1 will set to limp home mode, whatever that gets set up to be
 int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
@@ -1500,7 +1508,7 @@ int LifeIndicatorColor = 0;           // 0=green, 1=yellow, 2=red
 
 // Timing
 unsigned long lastThermalUpdateTime = 0;  // Last thermal calculation time
-const int AnalogInputReadInterval = 900;
+const int AnalogInputReadInterval = 1100;  // INA228 poll interval — must exceed register update time (1054ms at AVG=128)
 
 // Physical Constants
 const float EA_INSULATION = 1.0f;     // eV, activation energy
@@ -2180,8 +2188,8 @@ float prevThermalPenalty = 0.0f;       // file-scope, tracks previous slew-limit
 
 float TempPIDMarginF = 15;              //15.0f;           // °F below TemperatureLimitF — PID targets this, not the limit itself
 uint32_t TempPIDIntervalMs = 5000;      // Temperature loop update period (ms) — independent of output current loop and sensor rate
-float TempPIDFilterAlpha = 0.2f;        // IIR smoothing on temp input (0=frozen, 1=raw)
-uint32_t TempPIDStaleMs = 15000;        // Hold-last if temp older than this (ms)
+float TempPIDFilterAlpha = 0.2f;        // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
+float ThermistorFilterAlpha = 0.02f;    // IIR smoothing for thermistor (0=frozen, 1=raw); heavy by default — raw signal is noisy at 16Hz
 float TempPIDAntiWindupMarginA = 5.0f;  // OBSOLETE REMOVE
 // Runtime state — expose via telemetry
 double tempPIDInput_d = 77.0;        // Filtered temp (°F), PID input
@@ -2385,9 +2393,9 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 
 // ===========================================================================
 // CV / Voltage Tuner Log
-// Logs every AUTO-mode output current loop tick (~16.7 Hz) while voltageControlActive.
+// Logs every CH1 sample (~213 Hz / ~4.7ms interval) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 32 bytes/entry × 6000 entries = 192 KB PSRAM → ~6 min at full rate.
+// 32 bytes/entry × 6000 entries = 192 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -2737,16 +2745,17 @@ enum ADS1115_State {
 };
 
 ADS1115_State adsState = ADS_IDLE;
-uint8_t adsCurrentChannel = 0;  // Driven by adsSeq[] = {0,1,0,1,2,3}; CH1 fires 2× per cycle (~16.7 Hz)
+uint8_t adsCurrentChannel = 0;  // Driven by adsSeq[] = {1,0,1,2,1,3}; CH1 fires 3× per cycle (~213 Hz / ~4.7ms)
 int adsTriggeredChannel = 0;
 unsigned long adsStateEntered = 0;
-const unsigned long ADS_TIMEOUT_MS = 50;
+const unsigned long ADS_CONVERSION_MS = 3;   // 1.16ms at 860SPS + millis() granularity margin
+const unsigned long ADS_TIMEOUT_MS    = 10;  // hardware fault catcher
 
 volatile bool ch1FreshFlag = false;  // Set when CH1 result is ready, consumed by AdjustFieldLearnMode()
 
-uint8_t PidSampleDivisor = 1;  // 1=PID runs every CH1 sample (~16.7 Hz / 60ms), 2=every other (~8.3 Hz), etc.
-                               // CH1 fires at positions 1 and 3 in adsSeq[] {0,1,0,1,2,3};
-                               // 6 steps × ~20ms/step = 120ms cycle → CH1 every ~60ms
+uint8_t PidSampleDivisor = 1;  // 1=PID runs every CH1 sample (~213 Hz / ~4.7ms), 2=every other (~107 Hz), etc.
+                               // CH1 fires at positions 0, 2, 4 in adsSeq[] {1,0,1,2,1,3};
+                               // 6 steps × ~2.35ms/step = ~14ms full cycle → CH1 every ~4.7ms
 
 const uint16_t adsMuxCodes[4] = {
   ADS1115_REG_CONFIG_MUX_SINGLE_0,
@@ -3363,6 +3372,7 @@ void loop() {
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       efficiencyTracker_tick();
+      drainIMUFifo();  // Isolated after control path — Wire stall only delays telemetry, not control
 
       // Sync legacy display variables
       totalSafeHours = (float)totalSafeMs / 3600000.0f;  // Fractional hours for UI
@@ -3381,9 +3391,18 @@ void loop() {
       TIMED_CALL(ft_logDashboardValues, logDashboardValues());  //  nice to have some history in the Console
       TIMED_CALL(ft_printSystemHealth, printSystemHealth());
       TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());  // Update sensor aggregation (after sensor reads)
-      if (accelEnabled == 1) {
-        updateAccelMetrics();  // accelerometer
-      };
+      {
+        static int lastAccelEnabled = 0;
+        if (accelEnabled == 1) {
+          if (lastAccelEnabled == 0) {
+            // Flush stale samples accumulated while disabled — avoids draining 2000 samples in one shot
+            imuRingBuffer->accel_tail = imuRingBuffer->accel_head;
+            imuRingBuffer->gyro_tail  = imuRingBuffer->gyro_head;
+          }
+          updateAccelMetrics();
+        }
+        lastAccelEnabled = accelEnabled;
+      }
 
       if (CloudFeatures == 1) {
         if (otaInProgress) {

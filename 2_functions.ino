@@ -237,6 +237,7 @@ void TempTask(void *parameter) {
 
   static uint8_t scratchPad[9];
   static unsigned long lastTempRead = 0;
+  static bool lastReadWasSuccess = true;  // false after any failure; drives 1s retry vs 5s normal poll
   static float lastValidTemp = -99;  // Track last valid reading (-99 = uninitialized)
   static bool sensorEnumerated = false;
 
@@ -280,12 +281,14 @@ void TempTask(void *parameter) {
       continue;
     }
 
-    if (now - lastTempRead < 5000) {
+    uint32_t pollInterval = lastReadWasSuccess ? 5000 : 1000;
+    if (now - lastTempRead < pollInterval) {
       tempStaleSkipCount++;
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
 
+    bool thisReadSucceeded = false;
     bool writeMaxTemp = false;
     bool writeMaxTempAllTime = false;
     float pendingMaxTemp = 0.0f;
@@ -438,6 +441,7 @@ void TempTask(void *parameter) {
         AlternatorTemperatureF = tempF;
         lastValidTemp = tempF;
         tempTaskHealthy = true;
+        thisReadSucceeded = true;
         MARK_FRESH(IDX_ALTERNATOR_TEMP);
 
         if (AlternatorTemperatureF > MaxAlternatorTemperatureF) {
@@ -458,6 +462,7 @@ void TempTask(void *parameter) {
     }
 
 cleanup:
+    lastReadWasSuccess = thisReadSucceeded;
     core0Busy = false;
     lastTempRead = millis();
     lastTempTaskHeartbeat = millis();
@@ -1850,8 +1855,8 @@ bool buildConfigPayload() {
   // Control Switches
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
                      ",\"on_off\":%d,\"ignition\":%d,\"ignition_override\":%d"
-                     ",\"hi_low\":%d,\"amp_src\":%d",
-                     OnOff, Ignition, IgnitionOverride, HiLow, AmpSrc);
+                     ",\"hi_low\":%d,\"amp_sensor_range\":%d",
+                     OnOff, Ignition, IgnitionOverride, HiLow, AmpSensorRange);
 
   // Field Control
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,

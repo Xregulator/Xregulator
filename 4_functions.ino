@@ -674,9 +674,11 @@ Serial.println("BMP388 found");
   } else {
     INADisconnected = 0;
 
-    // Configure ADC settings (529ms update time with these settings)
+    // Configure ADC settings (527ms update time with these settings)
+    // setAverage() takes raw register value: 0=1, 1=4, 2=16, 3=64, 4=128, 5=256, 6=512, 7=1024 samples
+    // Previous code used setAverage(4)=128 samples (1054ms) — register update exceeded 900ms poll interval.
     INA.setMode(11);                       // Continuous shunt and bus voltage measurement
-    INA.setAverage(4);                     // 4-sample averaging
+    INA.setAverage(4);                     // 128-sample averaging — 128 × 8.24ms = 1054ms register update
     INA.setBusVoltageConversionTime(7);    // 4120 µs conversion time
     INA.setShuntVoltageConversionTime(7);  // 4120 µs conversion time
 
@@ -989,10 +991,10 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     HiLow = readFile(LittleFS, "/HiLow.txt").toInt();
   }
-  if (!fsExists("/AmpSrc.txt")) {
-    writeFile(LittleFS, "/AmpSrc.txt", String(AmpSrc).c_str());
+  if (!fsExists("/AmpSensorRange.txt")) {
+    writeFile(LittleFS, "/AmpSensorRange.txt", String(AmpSensorRange).c_str());
   } else {
-    AmpSrc = readFile(LittleFS, "/AmpSrc.txt").toInt();
+    AmpSensorRange = readFile(LittleFS, "/AmpSensorRange.txt").toInt();
   }
   if (!fsExists("/InvertAltAmps.txt")) {
     writeFile(LittleFS, "/InvertAltAmps.txt", String(InvertAltAmps).c_str());
@@ -1562,10 +1564,10 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     TempPIDFilterAlpha = readFile(LittleFS, "/TempPIDFilterAlpha.txt").toFloat();
   }
 
-  if (!fsExists("/TempPIDStaleMs.txt")) {
-    writeFile(LittleFS, "/TempPIDStaleMs.txt", String(TempPIDStaleMs).c_str());
+  if (!fsExists("/ThermistorFilterAlpha.txt")) {
+    writeFile(LittleFS, "/ThermistorFilterAlpha.txt", String(ThermistorFilterAlpha, 3).c_str());
   } else {
-    TempPIDStaleMs = readFile(LittleFS, "/TempPIDStaleMs.txt").toInt();
+    ThermistorFilterAlpha = readFile(LittleFS, "/ThermistorFilterAlpha.txt").toFloat();
   }
 
   if (!fsExists("/TempPIDAntiWindupMarginA.txt")) {
@@ -2060,8 +2062,10 @@ void updateAccelMetrics() {
   uint32_t samples_processed = 0;
   unsigned long now = millis();
 
-  // Process accel ring buffer
-  while (imuRingBuffer->accel_tail != imuRingBuffer->accel_head) {
+  // Process accel ring buffer — cap per call as a safety net against edge cases
+  uint16_t accel_cap = 0;
+  while (imuRingBuffer->accel_tail != imuRingBuffer->accel_head && accel_cap < 50) {
+    accel_cap++;
     IMUSample *s = &imuRingBuffer->accel[imuRingBuffer->accel_tail];
 
     // Calculate time delta for area accumulation
@@ -2146,8 +2150,10 @@ void updateAccelMetrics() {
     samples_processed++;
   }
 
-  // Process gyro ring buffer
-  while (imuRingBuffer->gyro_tail != imuRingBuffer->gyro_head) {
+  // Process gyro ring buffer — cap per call as a safety net
+  uint16_t gyro_cap = 0;
+  while (imuRingBuffer->gyro_tail != imuRingBuffer->gyro_head && gyro_cap < 20) {
+    gyro_cap++;
     IMUSample *s = &imuRingBuffer->gyro[imuRingBuffer->gyro_tail];
 
     // Calculate time delta (uses separate gyro tracker, not shared with accel)
@@ -2294,10 +2300,9 @@ void updateAccelMetrics() {
     if (!pitchpole_triggered) {
       pitchpole_triggered = true;
       pitchpole_start = now;
-    } else if (now - pitchpole_start > 1000) {  // >1s duration
+    } else if (now - pitchpole_start > 1000) {  // >1s duration — fires once; stays triggered until pitch clears
       imu_pitchpole_count++;
       queueConsoleMessageF("PITCHPOLE EVENT: %.1f deg", cf_pitch);
-      pitchpole_triggered = false;
     }
   } else {
     pitchpole_triggered = false;

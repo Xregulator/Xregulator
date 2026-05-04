@@ -339,8 +339,9 @@ enum Csv2Index {
   CSV2_ft_rai_imu_ses,                     // 245
   CSV2_fsWriteQueueDrops,                  // 246
   CSV2_TempAlarmLow,                       // 247
+  CSV2_cv_D,                               // 248 — D term contribution: VoltageKd × dV/dt (amps, ×100)
 
-  CSV2_FIELD_COUNT  // ← always last, = 248
+  CSV2_FIELD_COUNT  // ← always last, = 249
 };
 
 enum Csv3Index {
@@ -413,7 +414,7 @@ enum Csv3Index {
   CSV3_AlternatorCOffset,             // 66
   CSV3_BatteryCOffset,                // 67
   CSV3_BatteryCapacity_Ah,            // 68
-  CSV3_AmpSrc,                        // 69
+  CSV3_AmpSensorRange,                // 69
   CSV3_R_fixed,                       // 70
   CSV3_Beta,                          // 71
   CSV3_T0_C,                          // 72
@@ -553,7 +554,7 @@ enum Csv3Index {
   CSV3_TempPIDMarginF,                // 206
   CSV3_TempPIDIntervalMs,             // 207
   CSV3_TempPIDFilterAlpha,            // 208
-  CSV3_TempPIDStaleMs,                // 209
+  CSV3_UNUSED_209,                    // 209 (was TempPIDStaleMs, removed)
   CSV3_TempPIDAntiWindupMarginA,      // 210
   CSV3_FreeInternalRam,               // 211
   CSV3_TotalInternalRam,              // 212
@@ -612,8 +613,9 @@ enum Csv3Index {
   CSV3_IExcessReseedFrac,             // 265
   CSV3_AwSeedProtectMs,               // 266
   CSV3_VoltageKd,                     // 267
+  CSV3_ThermistorFilterAlpha,         // 268
 
-  CSV3_FIELD_COUNT  // = 268
+  CSV3_FIELD_COUNT  // = 269
 };
 
 
@@ -1880,6 +1882,12 @@ void setupServer() {
       queueConsoleMessage("SystemID: test requested via web UI");
     }
 
+    else if (request->hasParam("cancelSystemID")) {
+      foundParameter = true;
+      systemIDAbortRequested = true;
+      queueConsoleMessage("SystemID: abort requested via web UI");
+    }
+
     if (request->hasParam("TemperatureLimitF")) {
       foundParameter = true;
       inputMessage = request->getParam("TemperatureLimitF")->value();
@@ -2077,6 +2085,7 @@ void setupServer() {
         HiLow = newMode;
         writeFile(LittleFS, "/HiLow.txt", inputMessage.c_str());
         loadCapTablesForMode(HiLow);  // swap active cap tables to match new mode
+        tempPIDActive = false;        // re-seeds thermal integrator for new cap on next tick
         stateRevision++;              // force immediate CSVData echo of new table values
         queueConsoleMessageF("Charge rate mode: switched to %s", HiLow == 1 ? "Normal" : "Low");
       }
@@ -2275,12 +2284,12 @@ void setupServer() {
       writeFile(LittleFS, "/BatteryCOffset.txt", inputMessage.c_str());
       BatteryCOffset = inputMessage.toFloat();
     }
-    if (request->hasParam("AmpSrc")) {
+    if (request->hasParam("AmpSensorRange")) {
       foundParameter = true;
-      inputMessage = request->getParam("AmpSrc")->value();
-      writeFile(LittleFS, "/AmpSrc.txt", inputMessage.c_str());
-      AmpSrc = inputMessage.toInt();
-      queueConsoleMessageF("AmpSrc changed to: %d", AmpSrc);
+      inputMessage = request->getParam("AmpSensorRange")->value();
+      writeFile(LittleFS, "/AmpSensorRange.txt", inputMessage.c_str());
+      AmpSensorRange = inputMessage.toInt();
+      queueConsoleMessageF("AmpSensorRange changed to: %d", AmpSensorRange);
     }
     if (request->hasParam("BatteryVoltageSource")) {
       foundParameter = true;
@@ -3089,12 +3098,12 @@ void setupServer() {
       TempPIDFilterAlpha = inputMessage.toFloat();
       queueConsoleMessageF("Temp PID filter alpha updated to: %.3f", TempPIDFilterAlpha);
     }
-    if (request->hasParam("TempPIDStaleMs")) {
+    if (request->hasParam("ThermistorFilterAlpha")) {
       foundParameter = true;
-      inputMessage = request->getParam("TempPIDStaleMs")->value();
-      writeFile(LittleFS, "/TempPIDStaleMs.txt", inputMessage.c_str());
-      TempPIDStaleMs = inputMessage.toInt();
-      queueConsoleMessageF("Temp PID stale timeout updated to: %d ms", TempPIDStaleMs);
+      inputMessage = request->getParam("ThermistorFilterAlpha")->value();
+      writeFile(LittleFS, "/ThermistorFilterAlpha.txt", inputMessage.c_str());
+      ThermistorFilterAlpha = inputMessage.toFloat();
+      queueConsoleMessageF("Thermistor filter alpha updated to: %.3f", ThermistorFilterAlpha);
     }
     if (request->hasParam("TempPIDAntiWindupMarginA")) {
       foundParameter = true;
@@ -4146,7 +4155,7 @@ void SendWifiData() {
                                SafeInt(MaximumLoopTime),                // 15
                                SafeInt(HeadingNMEA),                    // 16
                                SafeInt(vvout, 100),                     // 17
-                               SafeInt(iiout, 10),                      // 18
+                               SafeInt(iiout, 100),                     // 18
                                SafeInt(FreeHeap),                       // 19
                                SafeInt(EngineCycles),                   // 20
                                SafeInt(Alarm_Status),                   // 21
@@ -4498,7 +4507,8 @@ void SendWifiData() {
                                SafeInt(ft_rai_imu.worstWindow),         // 244
                                SafeInt(ft_rai_imu.worstSession),        // 245
                                SafeInt(fsWriteQueueDrops),              // 246
-                               SafeInt(TempAlarmLow)                    // 247
+                               SafeInt(TempAlarmLow),                   // 247
+                               SafeInt(VoltageKd * g_fastOvDvdt, 100)  // 248
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -4530,7 +4540,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4602,7 +4612,7 @@ void SendWifiData() {
                                SafeInt(AlternatorCOffset, 100),                        // 66
                                SafeInt(BatteryCOffset, 100),                           // 67
                                SafeInt(BatteryCapacity_Ah),                            // 68
-                               SafeInt(AmpSrc),                                        // 69
+                               SafeInt(AmpSensorRange),                                // 69
                                SafeInt(R_fixed, 100),                                  // 70
                                SafeInt(Beta, 100),                                     // 71
                                SafeInt(T0_C, 100),                                     // 72
@@ -4742,7 +4752,7 @@ void SendWifiData() {
                                SafeInt(TempPIDMarginF, 100),                           // 206
                                SafeInt(TempPIDIntervalMs),                             // 207
                                SafeInt(TempPIDFilterAlpha, 1000),                      // 208
-                               SafeInt(TempPIDStaleMs),                                // 209
+                               0,                                                      // 209 (was TempPIDStaleMs, removed)
                                SafeInt(TempPIDAntiWindupMarginA, 100),                 // 210
                                SafeInt(FreeInternalRam),                               // 211
                                SafeInt(TotalInternalRam),                              // 212
@@ -4800,7 +4810,8 @@ void SendWifiData() {
                                SafeInt(KHard, 10),                                      // 264 — ×10, 1 decimal
                                SafeInt(IExcessReseedFrac, 100),                         // 265 — ×100, 2 decimal
                                (int)AwSeedProtectMs,                                    // 266
-                               SafeInt(VoltageKd, 100)                                  // 267
+                               SafeInt(VoltageKd, 100),                                 // 267
+                               SafeInt(ThermistorFilterAlpha, 1000)                     // 268 — ×1000, 3 decimal
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

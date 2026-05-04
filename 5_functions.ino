@@ -796,8 +796,8 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       FullChargeDetected = true;
       coulombAccumulator_Ah = 0.0f;
 
-      // Apply shunt gain correction ONLY if using INA228 battery shunt
-      if (AutoShuntGainCorrection == 1 && AmpSrc == 1) {
+      // Apply shunt gain correction — battery current always comes from INA228
+      if (AutoShuntGainCorrection == 1) {
         applySocGainCorrection();
       }
     }
@@ -1238,11 +1238,8 @@ float getBatteryCurrent() {
   // Return battery current from appropriate source
   // Variables are populated by ReadAnalogInputs() or ReadAnalogInputs_Fake()
   switch (BatteryCurrentSource) {
-    case 0: return Bcur;            // INA228
-    case 1: return Bcur;            // NMEA2K (not implemented yet fix later, uses INA228)
-    case 2: return Bcur;            // NMEA0183 (not implemented yet fx later, uses INA228)
     case 3: return VictronCurrent;  // Victron VE.Direct
-    default: return Bcur;
+    default: return Bcur;           // INA228 (case 0, and fallback)
   }
 }
 float getBatteryVoltage() {
@@ -1408,6 +1405,27 @@ void CheckAlarms() {
     }
   }
 
+  // ========== TEMP DATA STALE ALARM ==========
+  // Fires when no valid reading for 20s (sensor disconnected or persistent comm failure).
+  // Gated by AlarmActivate. Complements the field cut that fires at the same threshold.
+  if (AlarmActivate == 1) {
+    uint32_t tempIdx = (TempSource == 0) ? IDX_ALTERNATOR_TEMP : IDX_THERMISTOR_TEMP;
+    uint32_t ts = dataTimestamps[tempIdx];
+    bool tempStale = (ts != 0 && (millis() - ts) > 20000) ||
+                     (ts == 0 && millis() > 60000);  // never-connected grace period matches tick logic
+    static unsigned long lastTempStaleAlarmMsg = 0;
+    if (tempStale) {
+      currentAlarmCondition = true;
+      alarmReason = "Temperature sensor not responding";
+      if (millis() - lastTempStaleAlarmMsg >= 30000) {
+        lastTempStaleAlarmMsg = millis();
+        queueConsoleMessage("ALARM: No temperature reading for 20s — sensor may be disconnected.");
+      }
+    } else {
+      lastTempStaleAlarmMsg = 0;
+    }
+  }
+
   // ========== INA228 HARDWARE OVERVOLTAGE PROTECTION ==========
   // The INA228 ALERT pin pulls GPIO4 low electrically the instant the bus
   // voltage crosses VoltageHardwareLimit — before any software runs.
@@ -1416,7 +1434,7 @@ void CheckAlarms() {
   // about what the hardware did and when it recovered.
   //
   // SLOW_ALERT is SET: the threshold comparison uses the averaged ADC value
-  // (~33ms filter with 4-sample averaging), not instantaneous readings.
+  // (~1054ms filter with 128-sample averaging), not instantaneous readings.
   // This prevents single-sample noise spikes from asserting the ALERT pin.
   //
   // New event detection: throttled to every 5s to avoid hammering I2C.
@@ -1530,7 +1548,7 @@ void CheckAlarms() {
           queueConsoleMessageF(
             "INA228 HARDWARE ALERT PIN FIRED: busV(avg)=%.3fV limit=%.3fV | "
             "GPIO4 was cut electrically by ALERT pin before this message. "
-            "SLOW_ALERT active: trigger used ~33ms averaged value. "
+            "SLOW_ALERT active: trigger used ~1054ms averaged value (128 samples). "
             "SW latch engaged. Disagreement check suppressed for %ds.",
             busV, VoltageHardwareLimit,
             INA_OV_DISAGREE_SUPPRESS_MS / 1000);
@@ -1591,8 +1609,8 @@ void logDashboardValues() {
 }
 
 void applySocGainCorrection() {
-  // Only apply if feature is enabled AND using INA228 battery shunt
-  if (AutoShuntGainCorrection == 0 || AmpSrc != 1) {
+  // Only apply if feature is enabled — battery current always comes from INA228
+  if (AutoShuntGainCorrection == 0) {
     return;
   }
 
@@ -1774,7 +1792,7 @@ void calculateChargeTimes() {
   if (now - lastCalcTime < AnalogInputReadInterval) return;  // Only run every X seconds
   lastCalcTime = now;
 
-  // Get the current amperage based on AmpSrc setting
+  // Get the current amperage from INA228 battery shunt
   float currentAmps = getBatteryCurrent();  // this is for battery state
 
   if (currentAmps > 0.01) {  // charging
@@ -1963,7 +1981,7 @@ void updateINA228OvervoltageThreshold() {
   }
 
   queueConsoleMessageF(
-    "INA228: Overvoltage threshold=%.2fV | SLOW_ALERT ON (4-sample avg ~33ms filter)",
+    "INA228: Overvoltage threshold=%.2fV | SLOW_ALERT ON (128-sample avg ~1054ms filter)",
     VoltageHardwareLimit);
 }
 
@@ -2042,8 +2060,8 @@ void _ReadAnalogInputs_inner() {
                        if (InvertBattAmps == 1) {
                          Bcur = -Bcur;
                        }
-                       // Apply dynamic gain correction only when enabled AND using INA228 shunt
-                       if (AutoShuntGainCorrection == 1 && AmpSrc == 1) {
+                       // Apply dynamic gain correction only when enabled — battery current always from INA228
+                       if (AutoShuntGainCorrection == 1) {
                          Bcur = Bcur * DynamicShuntGainFactor;
                        }
                        BatteryCurrent_scaled = Bcur * 100;  // Store raw value for battery monitoring
@@ -2097,9 +2115,11 @@ void _ReadAnalogInputs_inner() {
   }
 
   // ── ADS1115 non-blocking state machine ───────────────────────────────────
-  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples
+  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples (~213 Hz / ~4.7ms interval)
+  // ADS_WAIT uses time-based 3ms delay — no isConversionDone() I²C poll.
   // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
-  // saving one loop() call per channel. Falls back to ADS_IDLE if <2ms elapsed.
+  // saving one loop() call per step. Falls back to ADS_IDLE if <2ms elapsed.
+  // Full 6-step cycle ≈ 14ms; CH0/CH2/CH3 each update every ~14ms.
   //
   // ft_rai_ads_state measures cost per state step (not a full logical read cycle),
   // which is the correct unit for a non-blocking state machine.
@@ -2123,13 +2143,14 @@ void _ReadAnalogInputs_inner() {
                    adsTriggeredChannel = adsCurrentChannel;
                    adc.setMux(adsMuxCodes[adsTriggeredChannel]);
                    adc.triggerConversion();
-                   adsStateEntered = now;
+                   adsStateEntered = millis();  // capture AFTER triggerConversion() write completes
                    adsState = ADS_WAIT;
                    break;
 
                  case ADS_WAIT:
-                   // Poll OS bit until conversion complete or timeout
-                   if (adc.isConversionDone()) {
+                   // Time-based ready check — eliminates isConversionDone() I²C poll (requestFrom blindspot)
+                   // 860 SPS = 1.16ms/conversion; 3ms gives millis() granularity margin
+                   if (now - adsStateEntered >= ADS_CONVERSION_MS) {
                      adsState = ADS_READ_RESULT;
                    } else if (now - adsStateEntered > ADS_TIMEOUT_MS) {
                      queueConsoleMessage("ADS1115 timeout ch" + String(adsTriggeredChannel));
@@ -2211,7 +2232,13 @@ void _ReadAnalogInputs_inner() {
                            ch1_record(millis());
                            //Clamp On Sensor QNHCK1-21
                            Channel1V = Raw / 32768.0 * 6.144 * 2.0;  // divider is 768kΩ / 768kΩ, ratio = 0.5, scale = 2.000
-                           MeasuredAmps = (Channel1V - 2.5) * 250;   // alternator current (500A sensor)
+                           // Scale factor: sensor outputs 2.5V±2V over its rated range
+                           // 0=±200A→100 A/V, 1=±300A→150 A/V, 2=±500A→250 A/V
+                           {
+                             static const float kAmpScale[]  = {100.0f, 150.0f, 250.0f};
+                             static const float kSanityLim[] = {250.0f, 370.0f, 600.0f};
+                             int rIdx = (AmpSensorRange >= 0 && AmpSensorRange <= 2) ? AmpSensorRange : 1;
+                             MeasuredAmps = (Channel1V - 2.5f) * kAmpScale[rIdx];
 
                            if (InvertAltAmps == 1) {
                              MeasuredAmps = MeasuredAmps * -1;  // swap sign if necessary
@@ -2222,7 +2249,7 @@ void _ReadAnalogInputs_inner() {
                              MeasuredAmps = MeasuredAmps - DynamicAltCurrentZero;
                            }
 
-                           if (MeasuredAmps > -600 && MeasuredAmps < 600) {  // Sanity check
+                           if (MeasuredAmps > -kSanityLim[rIdx] && MeasuredAmps < kSanityLim[rIdx]) {  // Sanity check
                              MARK_FRESH(IDX_MEASURED_AMPS);
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
                              // ── EMA filter ─────────────────────────────────────────────────────────
@@ -2302,6 +2329,7 @@ void _ReadAnalogInputs_inner() {
                              snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
                              writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
                            }
+                           }  // end AmpSensorRange scale block
                            break;
 
                          case 2:
@@ -2480,131 +2508,113 @@ void _ReadAnalogInputs_inner() {
                }()));
   }
 
-  // ── LSM6DSOX IMU FIFO Polling ─────────────────────────────────────────────
-  // ft_rai_imu / IMUReadTime aliases: worstWindow + lastCall updated by macro.
-  // Collision avoidance and goto remain outside the lambda — goto cannot cross
-  // into a lambda scope. IMUReadTime2 = 0 on skip path zeroes lastCall via alias.
-  if (imuEnabled && (millis() - lastIMUPoll >= IMU_POLL_INTERVAL)) {
+  // IMU FIFO drain runs in drainIMUFifo(), called from loop() after AdjustFieldLearnMode()
+}
 
-    // Collision avoidance: skip IMU drain if analog reads just took too long
-    if (AnalogReadTime2 > ANALOG_READ_COLLISION_THRESHOLD) {
-      lastIMUPoll = millis();  // Reset timer but skip this poll
-      IMUReadTime2 = 0;        // Zero lastCall via alias; don't pollute timing stats with skipped polls
-      goto imu_done;
-    }
+// ── IMU FIFO Drain ────────────────────────────────────────────────────────────
+// Called from loop() AFTER AdjustFieldLearnMode() so a Wire stall on the IMU
+// cannot delay control-critical voltage/current reads or the field control decision.
+// No collision-avoidance needed here — a slow drain only delays telemetry, not control.
+void drainIMUFifo() {
+  if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
+  lastIMUPoll = millis();
 
-    lastIMUPoll = millis();
+  TIMED_CALL(ft_rai_imu, ([&]() {
+               uint16_t fifo_samples = 0;
 
-    TIMED_CALL(ft_rai_imu, ([&]() {
-                 uint16_t fifo_samples = 0;
-
-                 // Read FIFO status (quick operation, ~50 µs)
-                 if (imu.Get_FIFO_Num_Samples(&fifo_samples) != LSM6DSOX_OK) {
-                   imu_i2c_error_count++;
-                   // Throttled error message
-                   static unsigned long last_i2c_error = 0;
-                   if (millis() - last_i2c_error > 60000) {  // Once per minute max
-                     queueConsoleMessageF("IMU I2C error count: %u", imu_i2c_error_count);
-                     last_i2c_error = millis();
-                   }
-                   return;  // exits lambda; TIMED_CALL still records this short duration
+               // Read FIFO status (quick operation, ~50 µs)
+               if (imu.Get_FIFO_Num_Samples(&fifo_samples) != LSM6DSOX_OK) {
+                 imu_i2c_error_count++;
+                 static unsigned long last_i2c_error = 0;
+                 if (millis() - last_i2c_error > 60000) {
+                   queueConsoleMessageF("IMU I2C error count: %u", imu_i2c_error_count);
+                   last_i2c_error = millis();
                  }
+                 return;
+               }
 
-                 // Check for FIFO overrun
-                 uint8_t fifo_ovr = 0;
-                 if (imu.Get_FIFO_Overrun_Status(&fifo_ovr) == LSM6DSOX_OK && fifo_ovr) {
-                   imu_fifo_overrun_count++;
-                   // One-time warning on first overrun, then throttled
-                   static bool first_overrun = true;
-                   static unsigned long last_overrun_msg = 0;
-                   if (first_overrun) {
-                     queueConsoleMessageF("IMU FIFO overrun detected (increase drain rate)");
-                     first_overrun = false;
-                     last_overrun_msg = millis();
-                   } else if (millis() - last_overrun_msg > 300000) {  // Every 5 minutes after first
-                     queueConsoleMessageF("IMU FIFO overruns: %u total", imu_fifo_overrun_count);
-                     last_overrun_msg = millis();
-                   }
+               // Check for FIFO overrun
+               uint8_t fifo_ovr = 0;
+               if (imu.Get_FIFO_Overrun_Status(&fifo_ovr) == LSM6DSOX_OK && fifo_ovr) {
+                 imu_fifo_overrun_count++;
+                 static bool first_overrun = true;
+                 static unsigned long last_overrun_msg = 0;
+                 if (first_overrun) {
+                   queueConsoleMessageF("IMU FIFO overrun detected (increase drain rate)");
+                   first_overrun = false;
+                   last_overrun_msg = millis();
+                 } else if (millis() - last_overrun_msg > 300000) {
+                   queueConsoleMessageF("IMU FIFO overruns: %u total", imu_fifo_overrun_count);
+                   last_overrun_msg = millis();
                  }
+               }
 
-                 if (fifo_samples == 0) {
-                   return;  // No data available - fast path exit; TIMED_CALL records this short duration
-                 }
+               if (fifo_samples == 0) return;
 
-                 // Cap drain to budget
-                 uint16_t samples_to_read = (fifo_samples > MAX_FIFO_DRAIN_PER_POLL)
-                                              ? MAX_FIFO_DRAIN_PER_POLL
-                                              : fifo_samples;
+               uint16_t samples_to_read = (fifo_samples > MAX_FIFO_DRAIN_PER_POLL)
+                                            ? MAX_FIFO_DRAIN_PER_POLL
+                                            : fifo_samples;
 
-                 // Burst read from FIFO (efficient single I²C transaction)
-                 if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
-                   imu_i2c_error_count++;
-                   return;  // exits lambda; TIMED_CALL still records this duration
-                 }
+               if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
+                 imu_i2c_error_count++;
+                 return;
+               }
 
-                 // Timestamp the batch end, then backdate each sample by its nominal interval.
-                 // The sensor's internal timestamp register (0x40-0x42, 25µs resolution) would give
-                 // true sample times but requires FIFO timestamp batching config. Using nominal ODR
-                 // intervals instead - error is negligible (<1% at these rates) and avoids the
-                 // batch_timestamp=same_value problem which caused dt_us=0 for all but the first
-                 // sample, effectively stalling the complementary filter.
-                 uint32_t batch_end_us = micros();
-                 constexpr uint32_t ACCEL_INTERVAL_US = 2398;  // 1,000,000 / 417 Hz
-                 constexpr uint32_t GYRO_INTERVAL_US = 19231;  // 1,000,000 / 52 Hz
+               // Timestamp the batch end, then backdate each sample by its nominal interval.
+               // The sensor's internal timestamp register (0x40-0x42, 25µs resolution) would give
+               // true sample times but requires FIFO timestamp batching config. Using nominal ODR
+               // intervals instead - error is negligible (<1% at these rates) and avoids the
+               // batch_timestamp=same_value problem which caused dt_us=0 for all but the first
+               // sample, effectively stalling the complementary filter.
+               uint32_t batch_end_us = micros();
+               constexpr uint32_t ACCEL_INTERVAL_US = 2398;  // 1,000,000 / 417 Hz
+               constexpr uint32_t GYRO_INTERVAL_US = 19231;  // 1,000,000 / 52 Hz
 
-                 // Pre-count each sensor type so we can backdate oldest-first
-                 uint16_t accel_in_batch = 0, gyro_in_batch = 0;
-                 for (uint16_t i = 0; i < samples_to_read; i++) {
-                   uint8_t tag = fifoBuffer[i * 7] >> 3;
-                   if (tag == TAG_SENSOR_ACCEL) accel_in_batch++;
-                   else if (tag == TAG_SENSOR_GYRO) gyro_in_batch++;
-                 }
+               uint16_t accel_in_batch = 0, gyro_in_batch = 0;
+               for (uint16_t i = 0; i < samples_to_read; i++) {
+                 uint8_t tag = fifoBuffer[i * 7] >> 3;
+                 if (tag == TAG_SENSOR_ACCEL) accel_in_batch++;
+                 else if (tag == TAG_SENSOR_GYRO) gyro_in_batch++;
+               }
 
-                 // Parse FIFO buffer
-                 uint16_t accel_idx = 0, gyro_idx = 0;
-                 for (uint16_t i = 0; i < samples_to_read; i++) {
-                   uint8_t raw_tag = fifoBuffer[i * 7];
-                   uint8_t tag_sensor = raw_tag >> 3;
+               uint16_t accel_idx = 0, gyro_idx = 0;
+               for (uint16_t i = 0; i < samples_to_read; i++) {
+                 uint8_t raw_tag = fifoBuffer[i * 7];
+                 uint8_t tag_sensor = raw_tag >> 3;
 
-                   int16_t raw_x = (int16_t)((fifoBuffer[i * 7 + 2] << 8) | fifoBuffer[i * 7 + 1]);
-                   int16_t raw_y = (int16_t)((fifoBuffer[i * 7 + 4] << 8) | fifoBuffer[i * 7 + 3]);
-                   int16_t raw_z = (int16_t)((fifoBuffer[i * 7 + 6] << 8) | fifoBuffer[i * 7 + 5]);
+                 int16_t raw_x = (int16_t)((fifoBuffer[i * 7 + 2] << 8) | fifoBuffer[i * 7 + 1]);
+                 int16_t raw_y = (int16_t)((fifoBuffer[i * 7 + 4] << 8) | fifoBuffer[i * 7 + 3]);
+                 int16_t raw_z = (int16_t)((fifoBuffer[i * 7 + 6] << 8) | fifoBuffer[i * 7 + 5]);
 
-                   if (tag_sensor == TAG_SENSOR_ACCEL) {
-                     int16_t x = raw_x * ACCEL_X_SIGN;
-                     int16_t y = raw_y * ACCEL_Y_SIGN;
-                     int16_t z = raw_z * ACCEL_Z_SIGN;
-                     uint32_t ts = batch_end_us - (uint32_t)(accel_in_batch - 1 - accel_idx) * ACCEL_INTERVAL_US;
-                     pushAccelSample(x, y, z, ts);
-                     accel_idx++;
+                 if (tag_sensor == TAG_SENSOR_ACCEL) {
+                   int16_t x = raw_x * ACCEL_X_SIGN;
+                   int16_t y = raw_y * ACCEL_Y_SIGN;
+                   int16_t z = raw_z * ACCEL_Z_SIGN;
+                   uint32_t ts = batch_end_us - (uint32_t)(accel_in_batch - 1 - accel_idx) * ACCEL_INTERVAL_US;
+                   pushAccelSample(x, y, z, ts);
+                   accel_idx++;
 
-                   } else if (tag_sensor == TAG_SENSOR_GYRO) {
-                     int16_t x = raw_x * GYRO_X_SIGN;
-                     int16_t y = raw_y * GYRO_Y_SIGN;
-                     int16_t z = raw_z * GYRO_Z_SIGN;
-                     uint32_t ts = batch_end_us - (uint32_t)(gyro_in_batch - 1 - gyro_idx) * GYRO_INTERVAL_US;
-                     pushGyroSample(x, y, z, ts);
-                     gyro_idx++;
+                 } else if (tag_sensor == TAG_SENSOR_GYRO) {
+                   int16_t x = raw_x * GYRO_X_SIGN;
+                   int16_t y = raw_y * GYRO_Y_SIGN;
+                   int16_t z = raw_z * GYRO_Z_SIGN;
+                   uint32_t ts = batch_end_us - (uint32_t)(gyro_in_batch - 1 - gyro_idx) * GYRO_INTERVAL_US;
+                   pushGyroSample(x, y, z, ts);
+                   gyro_idx++;
 
-                   } else if (tag_sensor == TAG_SENSOR_TEMP) {
-                     // Temperature samples explicitly ignored (we're not batching temp in FIFO)
-                     // This is expected and not an error
+                 } else if (tag_sensor == TAG_SENSOR_TEMP) {
+                   // Temperature samples explicitly ignored — not batching temp in FIFO
 
-                   } else {
-                     // Truly unknown tag_sensor - possibly compression artifact or config error
-                     imu_unknown_tag_count++;
-                     // One-time warning on first unknown tag
-                     static bool unknown_tag_warned = false;
-                     if (!unknown_tag_warned) {
-                       queueConsoleMessageF("IMU: unknown tag_sensor=%d (raw=0x%02X)", tag_sensor, raw_tag);
-                       unknown_tag_warned = true;
-                     }
+                 } else {
+                   imu_unknown_tag_count++;
+                   static bool unknown_tag_warned = false;
+                   if (!unknown_tag_warned) {
+                     queueConsoleMessageF("IMU: unknown tag_sensor=%d (raw=0x%02X)", tag_sensor, raw_tag);
+                     unknown_tag_warned = true;
                    }
                  }
-               }()));
-  }
-
-imu_done:;  // Label target for collision-avoidance skip and IMU block exit
+               }
+             }()));
 }
 
 void ReadAnalogInputs_Fake() {

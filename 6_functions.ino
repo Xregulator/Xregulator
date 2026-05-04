@@ -1735,6 +1735,18 @@ void updateChargingStage() {
 
   } else {
     // ===== FLOAT =====
+    // UseFloat may have been disabled at runtime while already in float, or all
+    // stage flags may be false for another reason (e.g. override mode exit).
+    // Either way: if float is not wanted, move to IDLE now rather than charging
+    // an already-full battery at an unregulated float voltage.
+    if (UseFloat == 0) {
+      inIdleStage = true;
+      floatStartTime = now;
+      rebulkTimer = 0;
+      queueConsoleMessage("Stage: FLOAT→IDLE (UseFloat disabled)");
+      return;
+    }
+
     ChargingVoltageTarget = FloatVoltage;
 
     const uint32_t tFloat = (uint32_t)(now - floatStartTime);
@@ -2282,6 +2294,12 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
       chargingEnabledLocal = chargingEnabledLocal && !bmsSignalActiveLocal;
     }
   }
+  // Idle stage (UseFloat=0, post-absorption): battery is full, stop charging.
+  // Rebulk logic in updateChargingStage() still runs and clears inIdleStage when
+  // voltage sags or discharge current threshold is hit — chargingEnabled recovers
+  // automatically on the next tick.
+  if (inIdleStage) chargingEnabledLocal = false;
+
   tick.chargingEnabled = chargingEnabledLocal;
 
   // Temperature selection
@@ -2858,22 +2876,18 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   const float penaltyMin = 0.0f;  //Cold boost is gone as a concept now. You're already commanding I_cap at thermal neutral — there's nowhere to boost to. Penalty only derates downward from there. The inPureBulk distinction for penaltyMin is now meaningless.
 
   // ---------------------------------------------------------------------------
-  //  Temperature freshness
+  //  Temperature sanity guard — only stops PID on invalid value (NaN / out of range).
+  //  Stale data (no new reading) is handled at 20s by tempDataVeryStale → field cut;
+  //  no intermediate hold needed here.
   // ---------------------------------------------------------------------------
-  uint32_t tempTimestampIdx = (TempSource == 0) ? IDX_ALTERNATOR_TEMP : IDX_THERMISTOR_TEMP;
-  bool tempTimestampValid = (dataTimestamps[tempTimestampIdx] != 0);
-  uint32_t tempAge = tempTimestampValid
-                       ? (nowMs - dataTimestamps[tempTimestampIdx])
-                       : 999999;
-  bool tempFresh = tempTimestampValid && (tempAge <= TempPIDStaleMs);
   bool tempValueSane = !isnan(TempToUse) && (TempToUse > -50.0f) && (TempToUse < 400.0f);
 
-  if (!tempFresh || !tempValueSane) {
+  if (!tempValueSane) {
     if (tempPIDActive) {
       tempPID.SetMode(MANUAL);
       tempPIDActive = false;
-      queueConsoleMessageF("TempPID: temp stale (age=%lums), holding penalty at %.1fA",
-                           (unsigned long)tempAge, thermalPenaltyLastValid);
+      queueConsoleMessageF("TempPID: temp value invalid, holding penalty at %.1fA",
+                           thermalPenaltyLastValid);
     }
     return;  // Hold last valid penalty — do not touch thermalPenaltyAmps.
   }
@@ -2885,7 +2899,8 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     tempFiltered = TempToUse;
     tempFilterNeedsReseed = false;
   } else {
-    tempFiltered = TempPIDFilterAlpha * TempToUse + (1.0f - TempPIDFilterAlpha) * tempFiltered;
+    float alpha = (TempSource == 0) ? TempPIDFilterAlpha : ThermistorFilterAlpha;
+    tempFiltered = alpha * TempToUse + (1.0f - alpha) * tempFiltered;
   }
 
   // ---------------------------------------------------------------------------
@@ -2927,9 +2942,9 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalPenaltyLastValid = resumePenalty;
 
     tempPIDActive = true;
-    edgePrevRaw = TempToUse;
+    edgePrevRaw = (TempSource == 0) ? TempToUse : tempFiltered;
     edgePrevMs = nowMs;
-    edgeLastReadMs = (uint32_t)tempLastSuccessMillis;
+    edgeLastReadMs = (TempSource == 0) ? (uint32_t)tempLastSuccessMillis : nowMs;
     outerTermDExternal = 0.0f;
     queueConsoleMessageF("TempPID: resumed | temp=%.1f°F setpoint=%.1f°F penalty=%.1fA (was %.1fA) stage=%s",
                          tempFiltered, TemperatureLimitF - TempPIDMarginF, resumePenalty,
@@ -2955,29 +2970,48 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   if (pidComputed) {
     thermalPenaltyAmps = (float)thermalPenaltyAmps_d;
 
-    // Edge-detection derivative: fires on each new DS18B20 reading.
-    // dTdt = (rawNow - rawPrev) / elapsed_seconds — instant response, zero noise floor.
-    // On no-change reads, decays 50% per 5s interval toward zero (temperature stable).
-    // outerTermDExternal is held between readings and applied every PID tick.
-    uint32_t readMs = (uint32_t)tempLastSuccessMillis;
-    if (TempPIDKdExternal != 0.0f && readMs != 0 && readMs != edgeLastReadMs) {
-      float rawNow = TempToUse;
-      edgeLastReadMs = readMs;
+    // Decay outerTermDExternal every pidComputed tick unconditionally.
+    // For DS18B20: this means decay continues even when readings stop (sensor failure),
+    // preventing the D term from freezing at a stale high-penalty value.
+    // For thermistor: decay still fires each tick; the fresh delta computation below
+    // overwrites it immediately if there is a real step.
+    outerTermDExternal *= edgeDecayFactor;
 
-      if (!isnan(edgePrevRaw) && edgePrevMs != 0) {
-        float delta = rawNow - edgePrevRaw;
-        float dtSec = (readMs - edgePrevMs) / 1000.0f;
+    if (TempSource == 0) {
+      // DS18B20: update D term only when a new reading arrives with a real step.
+      // No-change reads: decay above already handled, no explicit action needed.
+      uint32_t readMs = (uint32_t)tempLastSuccessMillis;
+      if (TempPIDKdExternal != 0.0f && readMs != 0 && readMs != edgeLastReadMs) {
+        float rawNow = TempToUse;
+        edgeLastReadMs = readMs;
+
+        if (!isnan(edgePrevRaw) && edgePrevMs != 0) {
+          float delta = rawNow - edgePrevRaw;
+          float dtSec = (readMs - edgePrevMs) / 1000.0f;
+          if (delta != 0.0f && dtSec > 0.1f) {
+            outerTermDExternal = TempPIDKdExternal * (delta / dtSec);
+          }
+          // No step: decay above already reduced outerTermDExternal this tick
+        }
+        edgePrevRaw = rawNow;
+        edgePrevMs = readMs;
+      }
+    } else {
+      // Thermistor: pidComputed-tick derivative, fires every PID interval (~5s).
+      // Operates on filtered signal to reject 16Hz electrical noise.
+      // Shares TempPIDKdExternal and edgeDecayFactor with DS18B20 path.
+      if (TempPIDKdExternal != 0.0f && !isnan(edgePrevRaw) && edgePrevMs != 0) {
+        float delta = tempFiltered - edgePrevRaw;
+        float dtSec = (nowMs - edgePrevMs) / 1000.0f;
         if (delta != 0.0f && dtSec > 0.1f) {
           outerTermDExternal = TempPIDKdExternal * (delta / dtSec);
-        } else {
-          // No step — decay toward zero at rate set by ThermalTimeConstantSec
-          outerTermDExternal *= edgeDecayFactor;
         }
+        // No step: decay above already reduced outerTermDExternal this tick
       }
-      edgePrevRaw = rawNow;
-      edgePrevMs = readMs;
+      edgePrevRaw = tempFiltered;
+      edgePrevMs = nowMs;
     }
-    // Always apply last outerTermDExternal (held between DS18B20 readings)
+    // Apply outerTermDExternal
     thermalPenaltyAmps += outerTermDExternal;
     thermalPenaltyAmps = clamp_f(thermalPenaltyAmps, penaltyMin, penaltyMax);
 

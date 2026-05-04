@@ -1259,31 +1259,33 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
 // ============================================================
 
 bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
-  // Phase enum. Values 1–7 map to phaseStartMs indices 0–6 via (phase – 1).
+  // Phase enum. Values 1–9 map to phaseStartMs indices 0–8 via (phase – 1).
+  // STABILIZE(1) runs first and is handled with its own early-return block.
   enum SysIDPhase : uint8_t {
-    SYSID_IDLE = 0,
-    SYSID_BASELINE = 1,
-    SYSID_UP_1 = 2,
-    SYSID_DOWN_1 = 3,
-    SYSID_UP_2 = 4,
-    SYSID_DOWN_2 = 5,
-    SYSID_UP_3 = 6,
-    SYSID_DOWN_3 = 7,
-    SYSID_PROCESSING = 8
+    SYSID_IDLE        = 0,
+    SYSID_STABILIZE   = 1,
+    SYSID_BASELINE    = 2,
+    SYSID_UP_1        = 3,
+    SYSID_DOWN_1      = 4,
+    SYSID_UP_2        = 5,
+    SYSID_DOWN_2      = 6,
+    SYSID_UP_3        = 7,
+    SYSID_DOWN_3      = 8,
+    SYSID_PROCESSING  = 9
   };
 
   static SysIDPhase phase = SYSID_IDLE;
   static float baseDuty = 0.0f;
   static uint32_t holdMs = 0;
   static bool bufFullWarned = false;
+  static uint32_t stabilizeLastAdjMs = 0;   // last 1Hz duty adjustment in STABILIZE
+  static uint32_t stabilizeSettledMs = 0;   // when amps first entered ±2A window
 
-  // phaseStartMs[0..6] = start timestamps for BASELINE through DOWN_3.
-  // phaseStartMs[7] = timestamp when PROCESSING was entered (= end of DOWN_3).
-  static uint32_t phaseStartMs[8] = { 0 };
+  // phaseStartMs[0..8]: STABILIZE[0] BASELINE[1] UP_1[2] DOWN_1[3]
+  //                     UP_2[4] DOWN_2[5] UP_3[6] DOWN_3[7] test-end[8]
+  static uint32_t phaseStartMs[9] = { 0 };
 
-  // Debug: log every call when a request is pending so we can confirm
-  // systemID_tick() is actually being reached.
-  // One-shot: fires exactly once when request arrives
+  // One-shot debug on request arrival
   static bool lastReqState = false;
   if (systemIDRequested && !lastReqState) {
     Serial.printf("SystemID: REQUEST SEEN | phase=%d sysMode=%d lastAppliedDuty=%.1f\n",
@@ -1295,6 +1297,18 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   if (phase != SYSID_IDLE && systemIDRequested) {
     systemIDRequested = false;
     queueConsoleMessage("SystemID: re-trigger ignored — test already in progress");
+  }
+
+  // ── Abort check ─────────────────────────────────────────────────────────
+  if (phase != SYSID_IDLE && systemIDAbortRequested) {
+    systemIDAbortRequested = false;
+    queueConsoleMessage("SystemID: test aborted by user");
+    systemIDActive = 0;
+    phase = SYSID_IDLE;
+    stabilizeLastAdjMs = 0;
+    stabilizeSettledMs = 0;
+    dutyOut = lastAppliedDuty;
+    return false;
   }
 
   // ── IDLE: wait for trigger ───────────────────────────────────────────────
@@ -1325,21 +1339,67 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     memset(phaseStartMs, 0, sizeof(phaseStartMs));
     sysIDSampleCount = 0;
     bufFullWarned = false;
-    systemIDActive = true;
+    stabilizeLastAdjMs = 0;
+    stabilizeSettledMs = 0;
     systemIDResultsReady = false;
     baseDuty = lastAppliedDuty;
     holdMs = (uint32_t)(15.0f * InputFilterTC);
     if (holdMs < 5000) holdMs = 5000;  // minimum 5 seconds per phase regardless of TC
 
     queueConsoleMessageF(
-      "SystemID: starting | baseDuty=%.1f%% step=+%.1f%% holdMs=%u TC=%.0fms",
-      baseDuty, SystemIDStepAmplitude, holdMs, InputFilterTC);
-    Serial.printf(
-      "SystemID: starting | baseDuty=%.1f%% step=+%.1f%% holdMs=%u TC=%.0fms\n",
-      baseDuty, SystemIDStepAmplitude, holdMs, InputFilterTC);
+      "SystemID: stabilizing to %.0fA | step=+%.1f%% holdMs=%u TC=%.0fms",
+      SYSID_STABILIZE_AMPS, SystemIDStepAmplitude, holdMs, InputFilterTC);
 
-    phaseStartMs[0] = nowMs;  // BASELINE start
-    phase = SYSID_BASELINE;
+    phaseStartMs[0] = nowMs;  // STABILIZE start
+    phase = SYSID_STABILIZE;
+    systemIDActive = (uint8_t)SYSID_STABILIZE;
+  }
+
+  // ── STABILIZE phase: P-control to SYSID_STABILIZE_AMPS before baseline ──
+  // Adjust duty once per second; advance when settled within ±2A for 5s.
+  // Abort if timeout exceeded.
+  if (phase == SYSID_STABILIZE) {
+    if (nowMs - stabilizeLastAdjMs >= 1000) {
+      float err = SYSID_STABILIZE_AMPS - ampsRaw;
+      baseDuty = constrain(baseDuty + err * 0.5f, 5.0f, 80.0f);
+      stabilizeLastAdjMs = nowMs;
+    }
+    dutyOut = baseDuty;
+
+    float stabErr = SYSID_STABILIZE_AMPS - ampsRaw;
+    if (fabsf(stabErr) < 2.0f) {
+      if (stabilizeSettledMs == 0) stabilizeSettledMs = nowMs;
+    } else {
+      stabilizeSettledMs = 0;
+    }
+
+    if (stabilizeSettledMs > 0 && (nowMs - stabilizeSettledMs) >= SYSID_STABILIZE_SETTLE_MS) {
+      stabilizeLastAdjMs = 0;
+      stabilizeSettledMs = 0;
+      phaseStartMs[1] = nowMs;  // BASELINE start
+      phase = SYSID_BASELINE;
+      systemIDActive = (uint8_t)SYSID_BASELINE;
+      queueConsoleMessageF(
+        "SystemID: stabilized at %.1fA (duty=%.1f%%) — starting baseline | holdMs=%u",
+        ampsRaw, baseDuty, holdMs);
+      Serial.printf("SystemID: BASELINE\n");
+    }
+
+    if ((nowMs - phaseStartMs[0]) >= SYSID_STABILIZE_TIMEOUT_MS) {
+      stabilizeLastAdjMs = 0;
+      stabilizeSettledMs = 0;
+      queueConsoleMessageF(
+        "SystemID: ABORTED — could not stabilize at %.0fA within %us "
+        "(last reading: %.1fA duty=%.1f%%)",
+        SYSID_STABILIZE_AMPS, SYSID_STABILIZE_TIMEOUT_MS / 1000,
+        ampsRaw, baseDuty);
+      systemIDActive = 0;
+      phase = SYSID_IDLE;
+      dutyOut = baseDuty;
+      return false;
+    }
+
+    return true;
   }
 
   // ── Determine commanded duty for current phase ───────────────────────────
@@ -1370,50 +1430,57 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   if (elapsed >= holdMs) {
     switch (phase) {
       case SYSID_BASELINE:
-        phaseStartMs[1] = nowMs;
+        phaseStartMs[2] = nowMs;
         phase = SYSID_UP_1;
+        systemIDActive = (uint8_t)SYSID_UP_1;
         queueConsoleMessageF("SystemID: BASELINE complete (%ums) — entering UP 1 | duty=%.1f%% amps=%.1fA",
                              elapsed, phaseDuty + SystemIDStepAmplitude, ampsRaw);
         Serial.printf("SystemID: UP 1\n");
         break;
       case SYSID_UP_1:
-        phaseStartMs[2] = nowMs;
+        phaseStartMs[3] = nowMs;
         phase = SYSID_DOWN_1;
+        systemIDActive = (uint8_t)SYSID_DOWN_1;
         queueConsoleMessageF("SystemID: UP 1 complete (%ums) — entering DOWN 1 | amps=%.1fA",
                              elapsed, ampsRaw);
         Serial.printf("SystemID: DOWN 1\n");
         break;
       case SYSID_DOWN_1:
-        phaseStartMs[3] = nowMs;
+        phaseStartMs[4] = nowMs;
         phase = SYSID_UP_2;
+        systemIDActive = (uint8_t)SYSID_UP_2;
         queueConsoleMessageF("SystemID: DOWN 1 complete (%ums) — entering UP 2 | amps=%.1fA",
                              elapsed, ampsRaw);
         Serial.printf("SystemID: UP 2\n");
         break;
       case SYSID_UP_2:
-        phaseStartMs[4] = nowMs;
+        phaseStartMs[5] = nowMs;
         phase = SYSID_DOWN_2;
+        systemIDActive = (uint8_t)SYSID_DOWN_2;
         queueConsoleMessageF("SystemID: UP 2 complete (%ums) — entering DOWN 2 | amps=%.1fA",
                              elapsed, ampsRaw);
         Serial.printf("SystemID: DOWN 2\n");
         break;
       case SYSID_DOWN_2:
-        phaseStartMs[5] = nowMs;
+        phaseStartMs[6] = nowMs;
         phase = SYSID_UP_3;
+        systemIDActive = (uint8_t)SYSID_UP_3;
         queueConsoleMessageF("SystemID: DOWN 2 complete (%ums) — entering UP 3 | amps=%.1fA",
                              elapsed, ampsRaw);
         Serial.printf("SystemID: UP 3\n");
         break;
       case SYSID_UP_3:
-        phaseStartMs[6] = nowMs;
+        phaseStartMs[7] = nowMs;
         phase = SYSID_DOWN_3;
+        systemIDActive = (uint8_t)SYSID_DOWN_3;
         queueConsoleMessageF("SystemID: UP 3 complete (%ums) — entering DOWN 3 | amps=%.1fA",
                              elapsed, ampsRaw);
         Serial.printf("SystemID: DOWN 3\n");
         break;
       case SYSID_DOWN_3:
-        phaseStartMs[7] = nowMs;  // test end timestamp
+        phaseStartMs[8] = nowMs;  // test end timestamp
         phase = SYSID_PROCESSING;
+        systemIDActive = (uint8_t)SYSID_PROCESSING;
         queueConsoleMessageF("SystemID: DOWN 3 complete (%ums) — %d samples collected, post-processing",
                              elapsed, sysIDSampleCount);
         Serial.println("SystemID: data collection complete — post-processing");
@@ -1424,25 +1491,24 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   }
 
   // ── Post-processing (runs immediately when PROCESSING is entered) ────────
-  // phaseStartMs layout:
-  //   [0] BASELINE start    [1] UP_1 start    [2] DOWN_1 start
-  //   [3] UP_2 start        [4] DOWN_2 start  [5] UP_3 start
-  //   [6] DOWN_3 start      [7] test end (DOWN_3 end)
+  // phaseStartMs layout (with STABILIZE prefix):
+  //   [0] STABILIZE start  [1] BASELINE start  [2] UP_1 start   [3] DOWN_1 start
+  //   [4] UP_2 start       [5] DOWN_2 start    [6] UP_3 start   [7] DOWN_3 start
+  //   [8] test end (DOWN_3 end)
   //
-  // Preceding quiet phase for each rise: BASELINE[0], DOWN_1[2], DOWN_2[4]
-  // UP phase starts:                     UP_1[1],    UP_2[3],   UP_3[5]
-  // UP phase ends (= next phase start):  DOWN_1[2],  DOWN_2[4], DOWN_3[6]
+  // Preceding quiet phase for each rise: BASELINE[1], DOWN_1[3], DOWN_2[5]
+  // UP phase starts:                     UP_1[2],     UP_2[4],   UP_3[6]
+  // UP phase ends (= next phase start):  DOWN_1[3],   DOWN_2[5], DOWN_3[7]
   //
-  // Preceding UP phase for each fall:   UP_1[1],  UP_2[3],  UP_3[5]
-  // DOWN phase starts:                  DOWN_1[2],DOWN_2[4],DOWN_3[6]
-  // (No upper bound needed for falls — scan to end of buffer.)
+  // Preceding UP phase for each fall:    UP_1[2],  UP_2[4],  UP_3[6]
+  // DOWN phase starts:                   DOWN_1[3],DOWN_2[5],DOWN_3[7]
 
   if (phase == SYSID_PROCESSING) {
 
-    const uint8_t quietIdx[3] = { 0, 2, 4 };  // phaseStartMs index of pre-rise quiet phase
-    const uint8_t upIdx[3] = { 1, 3, 5 };     // phaseStartMs index of UP phase start
-    const uint8_t upEndIdx[3] = { 2, 4, 6 };  // phaseStartMs index of UP phase end
-    const uint8_t downIdx[3] = { 2, 4, 6 };   // phaseStartMs index of DOWN phase start
+    const uint8_t quietIdx[3] = { 1, 3, 5 };  // phaseStartMs index of pre-rise quiet phase
+    const uint8_t upIdx[3] = { 2, 4, 6 };     // phaseStartMs index of UP phase start
+    const uint8_t upEndIdx[3] = { 3, 5, 7 };  // phaseStartMs index of UP phase end
+    const uint8_t downIdx[3] = { 3, 5, 7 };   // phaseStartMs index of DOWN phase start
 
     const uint32_t REF_WINDOW_MS = 2000;  // last 2 seconds of each phase used as reference
 
@@ -1595,7 +1661,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       sysIDSampleCount);
 
     systemIDResultsReady = true;
-    systemIDActive = false;
+    systemIDActive = 0;
     phase = SYSID_IDLE;  // reset for next run
     dutyOut = baseDuty;  // restore base duty on exit tick
     return false;

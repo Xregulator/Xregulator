@@ -1227,24 +1227,17 @@
 
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Amp Target Source (<span id="AmpSrc_echo">?</span>):</span>
+                    <span>Hall Effect Sensor Range (<span id="AmpSensorRange_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Controller will use this selection for feedback. The only recommended sensor
-                        is "Alt Hall Effect" for now, as the PID loop will need extensive re-tuning for any
-                        other.</span></span>
+                        class="tooltip-box">Select the rated current range of your QNHCK1-21 clamp-on hall effect sensor. Choosing the wrong range will scale all alternator current readings incorrectly.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <select name="AmpSrc">
-                        <option value="0">Alt Hall Effect Sensor</option>
-                        <option value="1">Battery Shunt</option>
-                        <option value="2">NMEA2K Batt</option>
-                        <option value="3">NMEA2K Alt</option>
-                        <option value="4">NMEA0183 Batt</option>
-                        <option value="5">NMEA0183 Alt</option>
-                        <option value="6">Victron Batt</option>
-                        <option value="7">Other</option>
+                      <select name="AmpSensorRange">
+                        <option value="0">±200A</option>
+                        <option value="1">±300A (default)</option>
+                        <option value="2">±500A</option>
                       </select>
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
@@ -1985,8 +1978,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kd External (A/°F/s) (<span id="TempPIDKdExternal_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Derivative gain applied to each DS18B20 step. Increases thermal penalty
-                        when temperature is rising quickly, before the setpoint is reached. Zero disables. Default: 200.0.</span></span>
+                        class="tooltip-box">External derivative gain — applies to both DS18B20 and Thermistor sources, but the mechanism differs. DS18B20: fires on each new sensor reading (~5s when healthy), using raw temperature. Thermistor: fires on each PID computation tick (~5s), using the filtered signal. Increases thermal penalty when temperature is rising quickly before the setpoint is reached. Zero disables. Default: 200.0.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -2002,7 +1994,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Time Constant (s) (<span id="ThermalTimeConstantSec_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Time between commanding a field change and first sensing a temperature difference at the measurement point, in seconds. Controls how quickly the derivative term decays to zero when temperature stabilizes — longer values mean the derivative holds its estimate longer before fading. Default: 100.</span></span>
+                        class="tooltip-box">DS18B20 only. Controls how quickly the external derivative term decays toward zero between discrete sensor readings — longer values mean the D term holds its estimate longer before fading. Not relevant to the Thermistor path, which computes a fresh derivative on every PID tick and has no hold period to decay. Default: 100.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -2052,15 +2044,27 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Filter Alpha (<span id="TempPIDFilterAlpha_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">IIR
-                        smoothing coefficient applied to temperature before it reaches the PID. 0 = frozen, 1 = raw
-                        unfiltered. Lower values reject sensor noise but slow reaction to real changes. Default:
-                        0.2.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">DS18B20 only. IIR smoothing coefficient applied to the raw DS18B20 reading before it reaches the PID. 0 = frozen, 1 = unfiltered. Lower values reject noise but slow reaction. Has no effect when Thermistor source is selected — use Thermistor Filter Alpha instead. Default: 0.2.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="TempPIDFilterAlpha" type="number" step="0.01" min="0.01" max="1.0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermistor Filter Alpha (<span id="ThermistorFilterAlpha_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Thermistor only. IIR smoothing coefficient applied to the raw thermistor reading before it reaches the PID and derivative calculation. Much heavier than the DS18B20 filter — the thermistor samples at ~16Hz and picks up significant electrical noise from the alternator environment. 0 = frozen, 1 = unfiltered. Lower values reject noise more aggressively but slow thermal reaction. Has no effect when DS18B20 source is selected. Default: 0.02 (~3s time constant at 16Hz).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ThermistorFilterAlpha" type="number" step="0.001" min="0.001" max="1.0" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2231,6 +2235,17 @@
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="cv_I_display">?</span> A</span>
+                    </div>
+
+                    <div class="metric-row telemetry-row">
+                      <span class="metric-label telemetry-label">CV D Term
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                          <span class="tooltip-box">cv_D — derivative contribution to Icv: VoltageKd × dV/dt.
+                            Positive means voltage is rising and the D term is pulling Icv down.
+                            Icv ≈ Kp×error + cv_I − cv_D. Zero when VoltageKd=0 or voltage is not changing.</span>
+                        </span>
+                      </span>
+                      <span class="metric-value telemetry-value"><span id="cv_D_display">?</span> A</span>
                     </div>
 
                     <div class="metric-row telemetry-row">
@@ -2901,18 +2916,95 @@
                     <span>Run Plant Delay Measurement</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                       <span class="tooltip-box">Runs a 3-step duty cycle test to measure the electrical delay between
-                        a field command and the current response. All PID and setpoint machinery is bypassed during
-                        the test. Requires AUTO mode and sufficient base duty. The test takes approximately
-                        15 × FilterTC × 7 ms to complete. Results are shown in a dialog on completion — you can
-                        then choose to apply the measured delay as the new filter time constant.</span>
+                        a field command and the current response. The regulator will first stabilize alternator
+                        output at 10A, then run 7 timed phases. Results let you set the Input Filter TC correctly.</span>
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="startSystemIDTest()" class="btn-primary">Start Test</button>
+                    <button onclick="openSystemIDModal()" class="btn-primary">Run Test...</button>
                   </div>
                 </div>
 
               </details><!-- END Plant Time Delay -->
+
+              <!-- System ID Modal -->
+              <div id="sysid-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.6); z-index:9000; overflow-y:auto;">
+                <div style="background:#1e1e1e; color:#ddd; max-width:480px; margin:40px auto; border-radius:8px; padding:24px; box-sizing:border-box;">
+
+                  <!-- SCREEN 1: Pre-flight -->
+                  <div id="sysid-screen-preflight">
+                    <h3 style="margin-top:0; color:#fff;">Plant Delay Measurement</h3>
+                    <p style="margin:0 0 12px; font-size:0.92em; line-height:1.5;">
+                      This test makes small step changes to the field duty and measures how quickly alternator output responds.
+                      Before starting, the regulator will ramp to <strong>10A</strong> and hold there for 5 seconds to establish a stable baseline.
+                    </p>
+                    <p style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
+                      ⚠️ <strong>Bring the engine to your typical operating RPM</strong> before clicking Start. The test is most accurate at normal cruising speed.
+                    </p>
+
+                    <div style="margin-bottom:16px; font-size:0.9em;">
+                      <div style="margin-bottom:6px; font-weight:bold; color:#aaa;">Pre-flight checks</div>
+                      <div id="sysid-check-rpm"    style="padding:4px 0;">⬜ Engine running</div>
+                      <div id="sysid-check-amps"   style="padding:4px 0;">⬜ Alternator producing current</div>
+                      <div id="sysid-check-volt"   style="padding:4px 0;">⬜ Battery voltage OK</div>
+                    </div>
+
+                    <div id="sysid-est-time" style="font-size:0.88em; color:#aaa; margin-bottom:20px;"></div>
+
+                    <div style="display:flex; gap:10px; justify-content:flex-end;">
+                      <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Cancel</button>
+                      <button id="sysid-start-btn" onclick="confirmSystemIDStart()" class="btn-primary" style="flex:1;" disabled>Start Test</button>
+                    </div>
+                  </div>
+
+                  <!-- SCREEN 2: Progress -->
+                  <div id="sysid-screen-progress" style="display:none;">
+                    <h3 style="margin-top:0; color:#fff;">Test Running…</h3>
+                    <div id="sysid-phase-list" style="font-size:0.9em; margin-bottom:16px;">
+                      <div id="sysid-p1" class="sysid-phase-row">⬜ Stabilizing at 10A</div>
+                      <div id="sysid-p2" class="sysid-phase-row">⬜ Baseline measurement</div>
+                      <div id="sysid-p3" class="sysid-phase-row">⬜ Step up 1/3</div>
+                      <div id="sysid-p4" class="sysid-phase-row">⬜ Step down 1/3</div>
+                      <div id="sysid-p5" class="sysid-phase-row">⬜ Step up 2/3</div>
+                      <div id="sysid-p6" class="sysid-phase-row">⬜ Step down 2/3</div>
+                      <div id="sysid-p7" class="sysid-phase-row">⬜ Step up 3/3</div>
+                      <div id="sysid-p8" class="sysid-phase-row">⬜ Step down 3/3</div>
+                      <div id="sysid-p9" class="sysid-phase-row">⬜ Processing results</div>
+                    </div>
+                    <div style="margin-bottom:8px; font-size:0.85em; color:#aaa;">Current phase progress</div>
+                    <div style="background:#333; border-radius:4px; height:10px; overflow:hidden; margin-bottom:16px;">
+                      <div id="sysid-phase-bar" style="height:100%; width:0%; background:#4a9eff; transition:width 0.5s;"></div>
+                    </div>
+                    <div id="sysid-elapsed" style="font-size:0.85em; color:#aaa; margin-bottom:20px;"></div>
+                    <div style="display:flex; justify-content:flex-end;">
+                      <button onclick="abortSystemIDTest()" style="background:#8b0000; color:#fff; border:none; padding:8px 18px; border-radius:4px; cursor:pointer;">Abort</button>
+                    </div>
+                  </div>
+
+                  <!-- SCREEN 3: Results -->
+                  <div id="sysid-screen-results" style="display:none;">
+                    <h3 style="margin-top:0; color:#fff;">Results</h3>
+                    <table id="sysid-results-table" style="width:100%; border-collapse:collapse; font-size:0.9em; margin-bottom:12px;">
+                      <thead>
+                        <tr style="color:#aaa; text-align:left; border-bottom:1px solid #444;">
+                          <th style="padding:6px 4px;">Trial</th>
+                          <th style="padding:6px 4px;">Rise (ms)</th>
+                          <th style="padding:6px 4px;">Fall (ms)</th>
+                        </tr>
+                      </thead>
+                      <tbody id="sysid-results-body"></tbody>
+                    </table>
+                    <div id="sysid-results-summary" style="font-size:0.9em; margin-bottom:8px;"></div>
+                    <div id="sysid-results-warning" style="font-size:0.85em; color:#f0a500; margin-bottom:16px; display:none;"></div>
+                    <div style="display:flex; gap:10px; justify-content:flex-end;">
+                      <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Dismiss</button>
+                      <button id="sysid-apply-btn" onclick="applySystemIDResults()" class="btn-primary" style="flex:1;">Apply &amp; Save</button>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+              <!-- END System ID Modal -->
 
               <!-- Anomaly Detection (settings) -->
               <details class="alt-nested-section">
@@ -3750,31 +3842,6 @@
                 Measurement Sources
               </summary>
 
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Battery Voltage Source (<span id="BatteryVoltageSource_echo">?</span>)</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">Expect a temporary interruption in Battery Monitor accuracy after changing
-                      this.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'BatteryVoltageSource')">
-                    <input type="hidden" name="password" class="password_field">
-                    <select name="BatteryVoltageSource">
-                      <option value="0">0 INA228</option>
-                      <option value="1">1 ADS1115</option>
-                      <option value="2">2 VictronVeDirect</option>
-                      <option value="3">3 NMEA0183</option>
-                      <option value="4">4 NMEA2K</option>
-                    </select>
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
               <hr />
               <div class="form-row">
                 <div class="form-label">Invert Battery Amps (<span id="InvertBattAmps_echo">?</span>):</div>
@@ -4503,7 +4570,7 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
                     <span class="tooltip-box">Automatically corrects battery current readings when full charge is
-                      detected. Only works with Battery Shunt (AmpSrc=1).</span>
+                      detected. Requires INA228 battery shunt to be installed.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -4580,16 +4647,14 @@
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Battery Current Source (<span id="BatteryCurrentSource_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which data source provides battery current for SoC tracking. INA228 Shunt = onboard high-precision sensor (most accurate, no network required). NMEA2K = current from your chartplotter network. NMEA0183 = serial NMEA. Victron = VE.Direct or Victron network data.</span></span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which data source provides battery current for SoC tracking. INA228 Shunt = onboard high-precision sensor (most accurate, recommended). Victron = VE.Direct serial data from a Victron BMV or smart shunt.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
                     <select name="BatteryCurrentSource">
                       <option value="0">INA228 Shunt</option>
-                      <option value="1">NMEA2K Battery</option>
-                      <option value="2">NMEA0183 Battery</option>
-                      <option value="3">Victron Battery</option>
+                      <option value="3">Victron VE.Direct</option>
                     </select>
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
@@ -7543,7 +7608,7 @@
     <span id="BatteryCOffset_echo" style="display:none;">0</span>
     <span id="AlternatorCOffset_echo" style="display:none;">0</span>
     <span id="BatteryCapacity_Ah_echo" style="display:none;">0</span>
-    <span id="AmpSrc_echo" style="display:none;">0</span>
+    <span id="AmpSensorRange_echo" style="display:none;">0</span>
     <span id="R_fixed_echo" style="display:none;">0</span>
     <span id="Beta_echo" style="display:none;">0</span>
     <span id="T0_C_echo" style="display:none;">0</span>
@@ -7680,7 +7745,7 @@
     <input id="MaximumAllowedBatteryAmps" style="display:none;" value="0" />
     <input id="ManualSOCPoint" style="display:none;" value="0" />
     <input id="BatteryVoltageSource" style="display:none;" value="0" />
-    <input id="AmpSrc" style="display:none;" value="0" />
+    <input id="AmpSensorRange" style="display:none;" value="0" />
     <input id="ShuntResistanceMicroOhm" style="display:none;" value="0" />
     <input id="InvertAltAmps" name="InvertAltAmps" type="number" value style="display:none;" />
     <input id="InvertBattAmps" name="InvertBattAmps" type="number" value style="display:none;" />

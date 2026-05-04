@@ -45,7 +45,7 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 // STALENESS DISPLAY THRESHOLDS
 // These control when sensor readings gray out in the UI only.
 // They have zero effect on the regulator or field control logic —
-// that staleness is governed by TempPIDStaleMs (15s, temperature PID)
+// that staleness is governed by the hardcoded 20s temp-stale threshold
 // and the hardcoded 30s in buildTickSnapshot() on the ESP32.
 //
 // The timestamp payload sends every 3s, so any threshold below
@@ -407,6 +407,7 @@ const CSV2_FIELDS = [
     "ft_rai_imu_ses",                   // 245
     "fsWriteQueueDrops",                // 246
     "TempAlarmLow",                     // 247
+    "cv_D",                             // 248
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -478,7 +479,7 @@ const CSV3_FIELDS = [
     "AlternatorCOffset",               // 66
     "BatteryCOffset",                  // 67
     "BatteryCapacity_Ah",              // 68
-    "AmpSrc",                          // 69
+    "AmpSensorRange",                  // 69
     "R_fixed",                         // 70
     "Beta",                            // 71
     "T0_C",                            // 72
@@ -618,7 +619,7 @@ const CSV3_FIELDS = [
     "TempPIDMarginF",                  // 206
     "TempPIDIntervalMs",               // 207
     "TempPIDFilterAlpha",              // 208
-    "TempPIDStaleMs",                  // 209
+    "_unused_209",                     // 209 (was TempPIDStaleMs, removed)
     "TempPIDAntiWindupMarginA",        // 210
     "FreeInternalRam",                 // 211
     "TotalInternalRam",                // 212
@@ -677,6 +678,7 @@ const CSV3_FIELDS = [
     "IExcessReseedFrac",        // 265
     "AwSeedProtectMs",          // 266
     "VoltageKd",                // 267
+    "ThermistorFilterAlpha",    // 268
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2110,7 +2112,7 @@ function processCSVDataOptimized(data) {
         // ALWAYS UPDATE DATA STRUCTURES - Current/Temperature plot data
         const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
         const altCurrent = 'MeasuredAmps' in data ? parseFloat(data.MeasuredAmps) / 100 : 0;
-        const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 10 : 0;
+        const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
 
         // Shift all current data left and add new data at the end
         for (let i = 1; i < currentTempData[1].length; i++) {
@@ -2505,7 +2507,7 @@ function updateAllEchosOptimized(data) {
         { key: 'T0_C', id: 'T0_C_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TempSource', id: 'TempSource_echo', transform: v => v },
         { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v },
-        { key: 'AmpSrc', id: 'AmpSrc_echo', transform: v => v },
+        { key: 'AmpSensorRange', id: 'AmpSensorRange_echo', transform: v => v },
         { key: 'AlarmLatchEnabled', id: 'AlarmLatchEnabled_echo', transform: v => v },
         { key: 'AlarmTest', id: 'AlarmTest_echo', transform: v => v },
         { key: 'ResetAlarmLatch', id: 'ResetAlarmLatch_echo', transform: v => v },
@@ -2588,6 +2590,7 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDMarginF', id: 'TempPIDMarginF_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'ThermistorFilterAlpha', id: 'ThermistorFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'ThermalTimeConstantSec', id: 'ThermalTimeConstantSec_echo', transform: v => v },
         { key: 'AwBleedRate',       id: 'AwBleedRate_echo',       transform: v => (v / 10).toFixed(1) },
@@ -4787,21 +4790,16 @@ window.addEventListener("load", function () {
             const values = raw.slice(1);
 
             if (values.length !== declaredCount) {
-                console.log('CSV1 bail:', declaredCount, values.length, raw.slice(0, 5));
-                if (!window.lastCsvWarningTime) window.lastCsvWarningTime = 0;
-                const now = Date.now();
-                if ((now - window.lastCsvWarningTime) > 10000) {
-                    diagWarn(`CSV1 length mismatch: declared=${declaredCount}, actual=${values.length}`);
-                    window.lastCsvWarningTime = now;
+                if (!window.lastCsv1WarnTime || Date.now() - window.lastCsv1WarnTime > 10000) {
+                    console.warn(`[CSV1] length mismatch: declared=${declaredCount}, actual=${values.length}`, raw.slice(0, 5));
+                    window.lastCsv1WarnTime = Date.now();
                 }
                 return;
             }
             if (declaredCount !== CSV1_FIELDS.length) {
-                if (!window.lastCsvWarningTime) window.lastCsvWarningTime = 0;
-                const now = Date.now();
-                if ((now - window.lastCsvWarningTime) > 10000) {
-                    diagWarn(`CSV1 schema mismatch: ESP32=${declaredCount}, UI=${CSV1_FIELDS.length}`);
-                    window.lastCsvWarningTime = now;
+                if (!window.lastCsv1WarnTime || Date.now() - window.lastCsv1WarnTime > 10000) {
+                    console.warn(`[CSV1] schema mismatch: ESP32=${declaredCount}, UI=${CSV1_FIELDS.length}`);
+                    window.lastCsv1WarnTime = Date.now();
                 }
                 return;
             }
@@ -4885,9 +4883,9 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(2) + "%";
                     }
 
-                    // Values scaled by 10 on server  
+                    // Values scaled by 100 on server
                     else if (["iiout"].includes(key)) {
-                        newTextContent = (value / 10).toFixed(1);
+                        newTextContent = (value / 100).toFixed(2);
                     }
 
                     // Value scaled by 1000000 on server  
@@ -5057,11 +5055,17 @@ window.addEventListener("load", function () {
             const values = raw.slice(1);
 
             if (values.length !== declaredCount) {
-                diagWarn(`CSV2 length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                if (!window.lastCsv2WarnTime || Date.now() - window.lastCsv2WarnTime > 10000) {
+                    console.warn(`[CSV2] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    window.lastCsv2WarnTime = Date.now();
+                }
                 return;
             }
             if (declaredCount !== CSV2_FIELDS.length) {
-                diagWarn(`CSV2 schema mismatch: ESP32=${declaredCount}, UI=${CSV2_FIELDS.length}`);
+                if (!window.lastCsv2WarnTime || Date.now() - window.lastCsv2WarnTime > 10000) {
+                    console.warn(`[CSV2] schema mismatch: ESP32=${declaredCount}, UI=${CSV2_FIELDS.length}`);
+                    window.lastCsv2WarnTime = Date.now();
+                }
                 return;
             }
 
@@ -5173,7 +5177,7 @@ window.addEventListener("load", function () {
                     else if (["voltageTarget", "voltageError"].includes(key)) {
                         newTextContent = (value / 100).toFixed(3);    // *100 int -> volts, 3dp for error
                     }
-                    else if (["Icv", "cv_I"].includes(key)) {
+                    else if (["Icv", "cv_I", "cv_D"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);    // *100 int -> amps
                     }
                     else if (key === "voltageControlActive") {
@@ -5468,6 +5472,7 @@ window.addEventListener("load", function () {
                 ["voltageError_display", "voltageError"],
                 ["Icv_display", "Icv"],
                 ["cv_I_display", "cv_I"],
+                ["cv_D_display", "cv_D"],
                 ["ft_rai_total_win_ID", "ft_rai_total_win"],
                 ["ft_rai_total_ses_ID", "ft_rai_total_ses"],
                 ["ft_rai_ina228_win_ID", "ft_rai_ina228_win"],
@@ -5605,11 +5610,17 @@ window.addEventListener("load", function () {
             const values = raw.slice(1);
 
             if (values.length !== declaredCount) {
-                diagWarn(`CSV3 length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                if (!window.lastCsv3WarnTime || Date.now() - window.lastCsv3WarnTime > 10000) {
+                    console.warn(`[CSV3] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    window.lastCsv3WarnTime = Date.now();
+                }
                 return;
             }
             if (declaredCount !== CSV3_FIELDS.length) {
-                diagWarn(`CSV3 schema mismatch: ESP32=${declaredCount}, UI=${CSV3_FIELDS.length}`);
+                if (!window.lastCsv3WarnTime || Date.now() - window.lastCsv3WarnTime > 10000) {
+                    console.warn(`[CSV3] schema mismatch: ESP32=${declaredCount}, UI=${CSV3_FIELDS.length}`);
+                    window.lastCsv3WarnTime = Date.now();
+                }
                 return;
             }
 
@@ -5963,11 +5974,17 @@ window.addEventListener("load", function () {
             const values = raw.slice(1);
 
             if (values.length !== declaredCount) {
-                diagWarn(`TimestampData length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                if (!window.lastTsWarnTime || Date.now() - window.lastTsWarnTime > 10000) {
+                    console.warn(`[TimestampData] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    window.lastTsWarnTime = Date.now();
+                }
                 return;
             }
             if (declaredCount !== TS_FIELDS.length) {
-                diagWarn(`TimestampData schema mismatch: ESP32=${declaredCount}, UI=${TS_FIELDS.length}`);
+                if (!window.lastTsWarnTime || Date.now() - window.lastTsWarnTime > 10000) {
+                    console.warn(`[TimestampData] schema mismatch: ESP32=${declaredCount}, UI=${TS_FIELDS.length}`);
+                    window.lastTsWarnTime = Date.now();
+                }
                 return;
             }
 
@@ -9231,17 +9248,78 @@ function getField(id) {
     return (el.textContent ?? el.innerText ?? "").trim();
 }
 
-function startSystemIDTest() {
-    if (!confirm(
-        "WARNING: The step test will briefly override field duty directly.\n" +
-        "Run only with the engine running at normal operating RPM.\n" +
-        "Ensure battery voltage is stable and not near a protection threshold.\n\n" +
-        "Start the test?")) return;
+// ── System ID Modal ────────────────────────────────────────────────────────
 
+let sysidPollInterval = null;
+let sysidPhaseStartWall = 0;   // wall-clock ms when current phase began
+let sysidLastPhase = -1;
+let sysidSuggestedTC = 0;
+let sysidPreflightInterval = null;
+
+// Phase numbers from firmware enum
+const SYSID_PHASE_NAMES = {
+    1: 'Stabilizing at 10A',
+    2: 'Baseline measurement',
+    3: 'Step up 1/3',
+    4: 'Step down 1/3',
+    5: 'Step up 2/3',
+    6: 'Step down 2/3',
+    7: 'Step up 3/3',
+    8: 'Step down 3/3',
+    9: 'Processing results'
+};
+
+function openSystemIDModal() {
     if (!currentAdminPassword) {
-        alert("Please unlock settings first");
+        alert("Please unlock settings first.");
         return;
     }
+    sysidShowScreen('preflight');
+    document.getElementById('sysid-modal-overlay').style.display = 'block';
+    sysidUpdatePreflight();
+    sysidPreflightInterval = setInterval(sysidUpdatePreflight, 1000);
+}
+
+function closeSystemIDModal() {
+    document.getElementById('sysid-modal-overlay').style.display = 'none';
+    if (sysidPreflightInterval) { clearInterval(sysidPreflightInterval); sysidPreflightInterval = null; }
+    if (sysidPollInterval)      { clearInterval(sysidPollInterval);      sysidPollInterval = null; }
+}
+
+function sysidShowScreen(name) {
+    document.getElementById('sysid-screen-preflight').style.display = (name === 'preflight') ? '' : 'none';
+    document.getElementById('sysid-screen-progress').style.display  = (name === 'progress')  ? '' : 'none';
+    document.getElementById('sysid-screen-results').style.display   = (name === 'results')   ? '' : 'none';
+}
+
+function sysidUpdatePreflight() {
+    const rpm     = parseFloat(getField("RPMID") ?? 0);
+    const minRpm  = parseFloat(getField("MinRPMForField_echo") ?? 500);
+    const amps    = parseFloat(getField("MeasAmpsID") ?? 0);
+    const battV   = parseFloat(getField("BatteryVID") ?? 0);
+    const bulkV   = parseFloat(getField("BulkVoltage_echo") ?? 14.8);
+
+    const rpmOK   = rpm >= minRpm;
+    const ampsOK  = amps > 2.0;
+    const voltOK  = battV > 11.0 && battV < (bulkV - 0.3);
+    const allOK   = rpmOK && ampsOK && voltOK;
+
+    document.getElementById('sysid-check-rpm').textContent  = (rpmOK  ? '✅' : '❌') + ' Engine running (RPM: ' + rpm.toFixed(0) + ' / min ' + minRpm.toFixed(0) + ')';
+    document.getElementById('sysid-check-amps').textContent = (ampsOK ? '✅' : '❌') + ' Alternator producing current (' + amps.toFixed(1) + 'A)';
+    document.getElementById('sysid-check-volt').textContent = (voltOK ? '✅' : '❌') + ' Battery voltage OK (' + battV.toFixed(2) + 'V)';
+
+    // Estimated duration: 20s stabilize overhead + 7 hold phases
+    const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
+    const holdMs = Math.max(15 * tcMs, 5000);
+    const estSec = Math.round(20 + 7 * holdMs / 1000);
+    const estStr = estSec >= 90 ? (estSec / 60).toFixed(1) + ' min' : estSec + ' sec';
+    document.getElementById('sysid-est-time').textContent = 'Estimated test duration: ~' + estStr;
+
+    document.getElementById('sysid-start-btn').disabled = !allOK;
+}
+
+function confirmSystemIDStart() {
+    if (sysidPreflightInterval) { clearInterval(sysidPreflightInterval); sysidPreflightInterval = null; }
 
     const formData = new URLSearchParams();
     formData.append("password", currentAdminPassword);
@@ -9250,97 +9328,167 @@ function startSystemIDTest() {
     fetchWithTimeout(buildURL("/get?" + formData.toString()), {}, 8000)
         .then(() => {
             console.log("SystemID test requested");
-            waitForSystemIDResults();
+            sysidShowScreen('progress');
+            sysidLastPhase = -1;
+            sysidPhaseStartWall = Date.now();
+            sysidStartProgressPoll();
         })
         .catch(err => {
-            console.error("SystemID request failed:", err);
-            alert("SystemID: failed to send start command.\n" + err);
+            alert("Failed to send start command: " + err);
         });
 }
 
-function waitForSystemIDResults() {
-    const pollMs = 500;
-    let elapsed = 0;
-    let everSawActive = false;
-    let lastActive = null;
-    let lastReady = null;
+function abortSystemIDTest() {
+    if (sysidPollInterval) { clearInterval(sysidPollInterval); sysidPollInterval = null; }
+    const formData = new URLSearchParams();
+    formData.append("password", currentAdminPassword);
+    formData.append("cancelSystemID", "1");
+    fetchWithTimeout(buildURL("/get?" + formData.toString()), {}, 5000)
+        .then(() => console.log("SystemID: abort sent"))
+        .catch(err => console.warn("SystemID abort send failed:", err));
+    closeSystemIDModal();
+}
 
-    const tcMs = parseFloat(getField("InputFilterTC_echo") ?? 1000);
+function sysidStartProgressPoll() {
+    const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
     const holdMs = Math.max(15 * tcMs, 5000);
-    const maxWaitMs = 7 * holdMs + 15000;
+    const maxWaitMs = (SYSID_STABILIZE_TIMEOUT_HINT + 7 * holdMs + 10000);
+    let elapsed = 0;
+    const pollMs = 400;
 
-    console.log("SystemID: polling started | TC=" + tcMs + "ms holdMs=" + holdMs + " maxWait=" + (maxWaitMs / 1000).toFixed(0) + "s");
+    // Reset all phase rows
+    for (let i = 1; i <= 9; i++) {
+        const el = document.getElementById('sysid-p' + i);
+        if (el) { el.textContent = '⬜ ' + SYSID_PHASE_NAMES[i]; el.style.color = ''; }
+    }
+    document.getElementById('sysid-phase-bar').style.width = '0%';
 
-    const poll = setInterval(() => {
+    sysidPollInterval = setInterval(() => {
         elapsed += pollMs;
 
-        const activeStr = getField("systemIDActive_ID");
-        const readyStr = getField("systemIDResultsReady_ID");
-        const active = parseInt(activeStr);
-        const ready = parseInt(readyStr);
+        const phase = parseInt(getField("systemIDActive_ID") ?? 0);
+        const ready = parseInt(getField("systemIDResultsReady_ID") ?? 0);
 
-        // Debug every 5 seconds
-        if (elapsed % 5000 === 0) {
-            console.log("SystemID poll | elapsed=" + (elapsed / 1000).toFixed(0) + "s" +
-                " | active=" + activeStr + " | ready=" + readyStr);
+        // Mark completed phases
+        for (const [p, name] of Object.entries(SYSID_PHASE_NAMES)) {
+            const pNum = parseInt(p);
+            const el = document.getElementById('sysid-p' + pNum);
+            if (!el) continue;
+            if (phase > pNum) {
+                el.textContent = '✅ ' + name;
+                el.style.color = '#4caf50';
+            } else if (phase === pNum) {
+                el.textContent = '▶ ' + name + '…';
+                el.style.color = '#4a9eff';
+            } else {
+                el.textContent = '⬜ ' + name;
+                el.style.color = '';
+            }
         }
 
-        if (active === 1) everSawActive = true;
-        lastActive = active;
-        lastReady = ready;
+        // Phase bar: for stabilize use 30s window, for measured phases use holdMs
+        if (phase !== sysidLastPhase) {
+            sysidPhaseStartWall = Date.now();
+            sysidLastPhase = phase;
+        }
+        const phaseMs = (phase === 1) ? 30000 : holdMs;
+        const phasePct = Math.min(100, ((Date.now() - sysidPhaseStartWall) / phaseMs) * 100);
+        document.getElementById('sysid-phase-bar').style.width = phasePct.toFixed(0) + '%';
 
-        if (elapsed > maxWaitMs) {
-            clearInterval(poll);
-            let diagnosis = "";
-            if (!everSawActive) {
-                diagnosis = "systemIDActive never went to 1.\n" +
-                    "The test likely never started — check mode, password, and that startSystemID was received.";
-            } else if (lastActive === 1) {
-                diagnosis = "Test was still running at timeout (" + (elapsed / 1000).toFixed(0) + "s).\n" +
-                    "Expected ~" + (7 * holdMs / 1000).toFixed(0) + "s. Check serial console for last phase.";
-            } else {
-                diagnosis = "Test finished (systemIDActive=0) but systemIDResultsReady never set.\n" +
-                    "Check serial console for post-processing errors.";
+        document.getElementById('sysid-elapsed').textContent = 'Elapsed: ' + (elapsed / 1000).toFixed(0) + 's';
+
+        if (ready === 1) {
+            clearInterval(sysidPollInterval); sysidPollInterval = null;
+            // Mark all phases complete
+            for (let i = 1; i <= 9; i++) {
+                const el = document.getElementById('sysid-p' + i);
+                if (el) { el.textContent = '✅ ' + SYSID_PHASE_NAMES[i]; el.style.color = '#4caf50'; }
             }
-            alert("SystemID: timed out.\n\n" + diagnosis +
-                "\n\nsystemIDActive=" + lastActive + "  systemIDResultsReady=" + lastReady);
+            document.getElementById('sysid-phase-bar').style.width = '100%';
+            setTimeout(showSystemIDResults, 400);
             return;
         }
 
-        if (ready !== 1) return;
-
-        clearInterval(poll);
-        showSystemIDResults();
+        if (elapsed > maxWaitMs) {
+            clearInterval(sysidPollInterval); sysidPollInterval = null;
+            alert("SystemID timed out after " + (elapsed / 1000).toFixed(0) + "s. Check serial console for details.");
+            closeSystemIDModal();
+        }
     }, pollMs);
 }
 
+// Hint used by progress poll for stabilize phase timeout window (must match firmware #define)
+const SYSID_STABILIZE_TIMEOUT_HINT = 30000;
+
 function showSystemIDResults() {
-    const r0 = getField("systemIDRiseDelay_0_ID");
-    const r1 = getField("systemIDRiseDelay_1_ID");
-    const r2 = getField("systemIDRiseDelay_2_ID");
-    const ra = getField("systemIDRiseAvg_ID");
-    const f0 = getField("systemIDFallDelay_0_ID");
-    const f1 = getField("systemIDFallDelay_1_ID");
-    const f2 = getField("systemIDFallDelay_2_ID");
-    const fa = getField("systemIDFallAvg_ID");
+    const r = [
+        parseFloat(getField("systemIDRiseDelay_0_ID") ?? -1),
+        parseFloat(getField("systemIDRiseDelay_1_ID") ?? -1),
+        parseFloat(getField("systemIDRiseDelay_2_ID") ?? -1)
+    ];
+    const f = [
+        parseFloat(getField("systemIDFallDelay_0_ID") ?? -1),
+        parseFloat(getField("systemIDFallDelay_1_ID") ?? -1),
+        parseFloat(getField("systemIDFallDelay_2_ID") ?? -1)
+    ];
+    const ra = parseFloat(getField("systemIDRiseAvg_ID") ?? -1);
+    const fa = parseFloat(getField("systemIDFallAvg_ID") ?? -1);
 
-    const suggestedTC = Math.max(parseFloat(ra), parseFloat(fa));
+    sysidSuggestedTC = Math.max(ra, fa);
 
-    const msg =
-        "Plant Delay Measurement Results\n\n" +
-        "Rise delays:  " + r0 + " ms,  " + r1 + " ms,  " + r2 + " ms\n" +
-        "Rise average: " + ra + " ms\n\n" +
-        "Fall delays:  " + f0 + " ms,  " + f1 + " ms,  " + f2 + " ms\n" +
-        "Fall average: " + fa + " ms\n\n" +
-        "Suggested filter TC (max of rise/fall avg): " + suggestedTC + " ms\n\n" +
-        "Apply " + suggestedTC + " ms as Input Filter TC and save to flash?";
-
-    if (confirm(msg)) {
-        fetch(buildURL("/get?InputFilterTC=" + encodeURIComponent(suggestedTC) +
-            "&password=" + encodeURIComponent(currentAdminPassword)))
-            .then(() => console.log("InputFilterTC updated to " + suggestedTC + " ms"))
-            .catch(err => console.error("InputFilterTC update failed:", err));
+    // Build results table
+    const tbody = document.getElementById('sysid-results-body');
+    tbody.innerHTML = '';
+    for (let i = 0; i < 3; i++) {
+        const tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid #333';
+        tr.innerHTML = '<td style="padding:6px 4px;">Trial ' + (i + 1) + '</td>' +
+            '<td style="padding:6px 4px;">' + (r[i] >= 0 ? r[i].toFixed(0) : '—') + '</td>' +
+            '<td style="padding:6px 4px;">' + (f[i] >= 0 ? f[i].toFixed(0) : '—') + '</td>';
+        tbody.appendChild(tr);
     }
+    const avgRow = document.createElement('tr');
+    avgRow.style.fontWeight = 'bold';
+    avgRow.innerHTML = '<td style="padding:8px 4px; color:#aaa;">Average</td>' +
+        '<td style="padding:8px 4px;">' + (ra >= 0 ? ra.toFixed(0) : '—') + '</td>' +
+        '<td style="padding:8px 4px;">' + (fa >= 0 ? fa.toFixed(0) : '—') + '</td>';
+    tbody.appendChild(avgRow);
+
+    document.getElementById('sysid-results-summary').innerHTML =
+        'Suggested Input Filter TC: <strong style="color:#4a9eff;">' + sysidSuggestedTC.toFixed(0) + ' ms</strong>' +
+        ' (max of rise/fall average)';
+
+    // Variance check: if spread within rise or fall trials > 35%, flag it
+    const warnEl = document.getElementById('sysid-results-warning');
+    const validR = r.filter(v => v >= 0);
+    const validF = f.filter(v => v >= 0);
+    function spreadPct(arr) {
+        if (arr.length < 2) return 0;
+        const mn = Math.min(...arr), mx = Math.max(...arr), avg = arr.reduce((a,b)=>a+b,0)/arr.length;
+        return avg > 0 ? (mx - mn) / avg * 100 : 0;
+    }
+    const rSpread = spreadPct(validR);
+    const fSpread = spreadPct(validF);
+    if (rSpread > 35 || fSpread > 35) {
+        warnEl.textContent = '⚠ High variance between trials (rise: ' + rSpread.toFixed(0) + '%, fall: ' + fSpread.toFixed(0) + '%). ' +
+            'Try again, or try again with different parameters if this happens multiple times.';
+        warnEl.style.display = '';
+    } else {
+        warnEl.style.display = 'none';
+    }
+
+    sysidShowScreen('results');
+}
+
+function applySystemIDResults() {
+    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    fetch(buildURL("/get?InputFilterTC=" + encodeURIComponent(sysidSuggestedTC) +
+        "&password=" + encodeURIComponent(currentAdminPassword)))
+        .then(() => {
+            console.log("InputFilterTC updated to " + sysidSuggestedTC + " ms");
+            closeSystemIDModal();
+        })
+        .catch(err => console.error("InputFilterTC update failed:", err));
 }
 
 
