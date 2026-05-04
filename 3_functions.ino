@@ -85,8 +85,19 @@ enum Csv1Index {
   CSV1_ch1_n_at,                 // 66
   CSV1_battV_filtered,           // 67
   CSV1_iMeas_filtered,           // 68
+  CSV1_g_iExcessCount,           // 69
+  CSV1_g_inaOVCount,             // 70
+  CSV1_g_hardOCCount,            // 71
+  CSV1_g_voltSpikeCount,         // 72
+  CSV1_g_voltDisagreeCritCount,  // 73
+  CSV1_g_voltDisagreeWarnCount,  // 74
+  CSV1_g_voltImplausibleCount,   // 75
+  CSV1_g_tempCritCount,          // 76
+  CSV1_g_tempSustainedCount,     // 77
+  CSV1_g_tempStaleCount,         // 78
+  CSV1_g_currentStaleCount,      // 79
 
-  CSV1_FIELD_COUNT  // = 69
+  CSV1_FIELD_COUNT  // = 80
 
 };
 
@@ -305,7 +316,7 @@ enum Csv2Index {
   CSV2_outerTermP,                         // 211
   CSV2_outerTermI,                         // 212
   CSV2_outerTermD,                         // 213
-  CSV2_outerTermDExternal,                 // 214
+  CSV2_thermalSlopeFPerSec,                // 214
   CSV2_AbsorptionVoltage,                  // 215
   CSV2_AbsorptionTimeoutMs,                // 216
   CSV2_bulkVoltageHoldMs,                  // 217
@@ -340,8 +351,20 @@ enum Csv2Index {
   CSV2_fsWriteQueueDrops,                  // 246
   CSV2_TempAlarmLow,                       // 247
   CSV2_cv_D,                               // 248 — D term contribution: VoltageKd × dV/dt (amps, ×100)
+  CSV2_tempReadFailCount,                  // 249
+  CSV2_tempCrcFailCount,                   // 250
+  CSV2_tempCrcRecoveredCount,              // 251
+  CSV2_tempAllFFCount,                     // 252
+  CSV2_tempPowerOn85Count,                 // 253
+  CSV2_tempOutOfRangeCount,               // 254
+  CSV2_tempRequestFailCount,               // 255
+  CSV2_tempConnectedFailCount,             // 256
+  CSV2_tempResolutionFixCount,             // 257
+  CSV2_tempRereadFailCount,                // 258
+  CSV2_tempResolutionFixCrcFailCount,      // 259
+  CSV2_tempEnumerateFailCount,             // 260
 
-  CSV2_FIELD_COUNT  // ← always last, = 249
+  CSV2_FIELD_COUNT  // ← always last, = 261
 };
 
 enum Csv3Index {
@@ -550,19 +573,19 @@ enum Csv3Index {
   CSV3_learningUpCount_9,             // 202
   CSV3_TempPIDKp,                     // 203
   CSV3_TempPIDKi,                     // 204
-  CSV3_TempPIDKd,                     // 205
-  CSV3_TempPIDMarginF,                // 206
+  CSV3_UNUSED_205,                    // 205 (was TempPIDKd, removed)
+  CSV3_ThermalLookaheadSec,          // 206 (was TempPIDMarginF — same conceptual slot)
   CSV3_TempPIDIntervalMs,             // 207
   CSV3_TempPIDFilterAlpha,            // 208
   CSV3_UNUSED_209,                    // 209 (was TempPIDStaleMs, removed)
-  CSV3_TempPIDAntiWindupMarginA,      // 210
+  CSV3_UNUSED_210,                    // 210 (was TempPIDAntiWindupMarginA, removed)
   CSV3_FreeInternalRam,               // 211
   CSV3_TotalInternalRam,              // 212
   CSV3_LargestInternalBlock,          // 213
   CSV3_FreePSRAM,                     // 214
   CSV3_TotalPSRAM,                    // 215
   CSV3_Heapfrag,                      // 216
-  CSV3_TempPIDKdExternal,             // 217
+  CSV3_UNUSED_217,                    // 217 (was TempPIDKdExternal, removed)
   CSV3_VoltageKi,                     // 218
   CSV3_rpmCapPowerTable_0,            // 219
   CSV3_rpmCapPowerTable_1,            // 220
@@ -605,7 +628,7 @@ enum Csv3Index {
   CSV3_IExcessKBleed,                 // 257
   CSV3_IgnoreRPM,                     // 258
   CSV3_MinRPMForField,                // 259
-  CSV3_ThermalTimeConstantSec,        // 260
+  CSV3_UNUSED_260,                    // 260 (was ThermalTimeConstantSec, removed)
   CSV3_AwBleedRate,                   // 261
   CSV3_AwRecoverRate,                 // 262
   CSV3_KSoft,                         // 263
@@ -613,7 +636,7 @@ enum Csv3Index {
   CSV3_IExcessReseedFrac,             // 265
   CSV3_AwSeedProtectMs,               // 266
   CSV3_VoltageKd,                     // 267
-  CSV3_ThermistorFilterAlpha,         // 268
+  CSV3_UNUSED_268,                    // 268 (was ThermistorFilterAlpha, removed)
 
   CSV3_FIELD_COUNT  // = 269
 };
@@ -1214,21 +1237,20 @@ void setupServer() {
               // Header row — tempRaw and gains removed
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
-                "ts_ms,tempFilt_F,tempSP_F,nominalTarget_A,"
+                "ts_ms,tempFilt_F,tempProj_F,nominalTarget_A,"
                 "rpmCap_A,voltCap_A,uTarget_A,spLimited_A,"
                 "pidErr_A,pidOut_pct,duty_pct,RPM,battV,measAmps_A,"
                 "penaltyAmps_A,flags,chargeStageDisplay,"
-                "outerP,outerI,outerD,impliedPenalty,antiWindupFired,outerDExternal\n");
+                "outerP,outerI,outerD,impliedPenalty,antiWindupFired,thermalSlope_F_sec\n");
 
             } else if (state.row == 1) {
               // Constants row — written once, Python detects via "CONST" in ts_ms field
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
-                "CONST,kp=%.6g,ki=%.6g,kd=%.6g,kdExt=%.6g\n",
+                "CONST,kp=%.6g,ki=%.6g,lookahead=%.1f\n",
                 TempPIDKp,
                 TempPIDKi,
-                TempPIDKd,
-                TempPIDKdExternal);
+                ThermalLookaheadSec);
 
             } else {
               // Data rows — index offset by 2 (header + constants row)
@@ -1243,7 +1265,7 @@ void setupServer() {
                 "%.1f,%.1f,%.1f,%.1f,%u,%.1f\n",
                 (unsigned long)e.ts,
                 e.tempFiltered / 10.0f,
-                e.tempSetpoint / 10.0f,
+                e.tempProjected / 10.0f,
                 e.nominalTarget / 10.0f,
                 e.rpmCap / 10.0f,
                 e.voltCap / 10.0f,
@@ -1263,7 +1285,7 @@ void setupServer() {
                 e.outerTermD / 10.0f,
                 e.impliedPenalty / 10.0f,
                 (unsigned)e.antiWindupFired,
-                e.outerTermDExternal / 10.0f);
+                e.thermalSlope / 1000.0f);
             }
 
             state.linePos = 0;
@@ -3043,46 +3065,23 @@ void setupServer() {
       inputMessage = request->getParam("TempPIDKp")->value();
       writeFile(LittleFS, "/TempPIDKp.txt", inputMessage.c_str());
       TempPIDKp = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, TempPIDKd);
+      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
       queueConsoleMessageF("Temp PID Kp updated to: %.6f", TempPIDKp);
-    }
-    if (request->hasParam("TempPIDKdExternal")) {
-      foundParameter = true;
-      inputMessage = request->getParam("TempPIDKdExternal")->value();
-      writeFile(LittleFS, "/TempPIDKdExternal.txt", inputMessage.c_str());
-      TempPIDKdExternal = inputMessage.toFloat();
-      queueConsoleMessageF("TempPIDKdExternal updated to: %.6f", TempPIDKdExternal);
-    }
-    if (request->hasParam("ThermalTimeConstantSec")) {
-      foundParameter = true;
-      inputMessage = request->getParam("ThermalTimeConstantSec")->value();
-      ThermalTimeConstantSec = max(1.0f, inputMessage.toFloat());
-      writeFile(LittleFS, "/ThermalTimeConstantSec.txt", String(ThermalTimeConstantSec, 1).c_str());
-      edgeDecayFactor = powf(0.5f, 5.0f / ThermalTimeConstantSec);
-      queueConsoleMessageF("ThermalTimeConstantSec set to: %.1f s  edgeDecayFactor=%.4f", ThermalTimeConstantSec, edgeDecayFactor);
     }
     if (request->hasParam("TempPIDKi")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKi")->value();
       writeFile(LittleFS, "/TempPIDKi.txt", inputMessage.c_str());
       TempPIDKi = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, TempPIDKd);
+      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
       queueConsoleMessageF("Temp PID Ki updated to: %.6f", TempPIDKi);
     }
-    if (request->hasParam("TempPIDKd")) {
+    if (request->hasParam("ThermalLookaheadSec")) {
       foundParameter = true;
-      inputMessage = request->getParam("TempPIDKd")->value();
-      writeFile(LittleFS, "/TempPIDKd.txt", inputMessage.c_str());
-      TempPIDKd = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, TempPIDKd);
-      queueConsoleMessageF("Temp PID Kd updated to: %.6f", TempPIDKd);
-    }
-    if (request->hasParam("TempPIDMarginF")) {
-      foundParameter = true;
-      inputMessage = request->getParam("TempPIDMarginF")->value();
-      writeFile(LittleFS, "/TempPIDMarginF.txt", inputMessage.c_str());
-      TempPIDMarginF = inputMessage.toFloat();
-      queueConsoleMessageF("Temp PID margin updated to: %.2f F", TempPIDMarginF);
+      inputMessage = request->getParam("ThermalLookaheadSec")->value();
+      ThermalLookaheadSec = clamp_f(inputMessage.toFloat(), 0.0f, 300.0f);
+      writeFile(LittleFS, "/ThermalLookaheadSec.txt", String(ThermalLookaheadSec, 1).c_str());
+      queueConsoleMessageF("ThermalLookaheadSec set to: %.1f s", ThermalLookaheadSec);
     }
     if (request->hasParam("TempPIDIntervalMs")) {
       foundParameter = true;
@@ -3097,20 +3096,6 @@ void setupServer() {
       writeFile(LittleFS, "/TempPIDFilterAlpha.txt", inputMessage.c_str());
       TempPIDFilterAlpha = inputMessage.toFloat();
       queueConsoleMessageF("Temp PID filter alpha updated to: %.3f", TempPIDFilterAlpha);
-    }
-    if (request->hasParam("ThermistorFilterAlpha")) {
-      foundParameter = true;
-      inputMessage = request->getParam("ThermistorFilterAlpha")->value();
-      writeFile(LittleFS, "/ThermistorFilterAlpha.txt", inputMessage.c_str());
-      ThermistorFilterAlpha = inputMessage.toFloat();
-      queueConsoleMessageF("Thermistor filter alpha updated to: %.3f", ThermistorFilterAlpha);
-    }
-    if (request->hasParam("TempPIDAntiWindupMarginA")) {
-      foundParameter = true;
-      inputMessage = request->getParam("TempPIDAntiWindupMarginA")->value();
-      writeFile(LittleFS, "/TempPIDAntiWindupMarginA.txt", inputMessage.c_str());
-      TempPIDAntiWindupMarginA = inputMessage.toFloat();
-      queueConsoleMessageF("Temp PID anti-windup margin updated to: %.2f A", TempPIDAntiWindupMarginA);
     }
     if (request->hasParam("PidKi")) {
       foundParameter = true;
@@ -3443,6 +3428,40 @@ void setupServer() {
       // Reset interval baseline so first post-reset sample doesn't carry stale timestamp gap
       ch1HasPrev = false;
       queueConsoleMessage("Peak counters reset from web interface");
+    }
+
+    if (request->hasParam("ResetAccelSession")) {
+      foundParameter = true;
+      imu_total_samples_accel      = 0;
+      imu_total_samples_gyro       = 0;
+      imuRingBuffer->accel_dropped = 0;
+      imuRingBuffer->gyro_dropped  = 0;
+      imu_fifo_overrun_count       = 0;
+      imu_i2c_error_count          = 0;
+      imu_unknown_tag_count        = 0;
+      imu_slam_count               = 0;
+      imu_slam_peak_max            = 0;
+      imuWindow->slam_count        = 0;
+      imuWindow->slam_peak_max     = 0;
+      queueConsoleMessage("Accel session stats reset from web interface");
+    }
+
+    if (request->hasParam("ResetAccelLifetime")) {
+      foundParameter = true;
+      imu_heel_max_lifetime        = 0;
+      imu_pitch_max_lifetime       = 0;
+      imu_slam_peak_lifetime       = 0;
+      imu_slam_count_lifetime      = 0;
+      imu_capsize_count            = 0;
+      imu_pitchpole_count          = 0;
+      // Reset shadow vars so saveNVSData() sees a change and writes 0s to NVS
+      prev_imu_heel_max_lifetime   = -1;
+      prev_imu_pitch_max_lifetime  = -1;
+      prev_imu_slam_peak_lifetime  = -1;
+      prev_imu_slam_count_lifetime = UINT32_MAX;
+      prev_imu_capsize_count       = UINT32_MAX;
+      prev_imu_pitchpole_count     = UINT32_MAX;
+      queueConsoleMessage("Accel lifetime stats reset from web interface");
     }
 
     if (foundParameter) {
@@ -3894,10 +3913,41 @@ void setupServer() {
     request->send(200, "text/plain", "OK");
   });
 
-  server.on("/resetFastOvCounters", HTTP_POST, [](AsyncWebServerRequest *request) {
+  server.on("/resetVoltageProtectionCounters", HTTP_POST, [](AsyncWebServerRequest *request) {
     g_fastOvClampCount = 0;
     g_fastOvSoftCount = 0;
     g_fastOvHardCount = 0;
+    g_iExcessCount = 0;
+    g_inaOVCount = 0;
+    g_hardOCCount = 0;
+    g_voltSpikeCount = 0;
+    g_voltDisagreeCritCount = 0;
+    g_voltDisagreeWarnCount = 0;
+    g_voltImplausibleCount = 0;
+    g_currentStaleCount = 0;
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resetThermalProtectionCounters", HTTP_POST, [](AsyncWebServerRequest *request) {
+    g_tempCritCount = 0;
+    g_tempSustainedCount = 0;
+    g_tempStaleCount = 0;
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resetTempTaskCounters", HTTP_POST, [](AsyncWebServerRequest *request) {
+    tempReadFailCount = 0;
+    tempCrcFailCount = 0;
+    tempCrcRecoveredCount = 0;
+    tempAllFFCount = 0;
+    tempPowerOn85Count = 0;
+    tempOutOfRangeCount = 0;
+    tempRequestFailCount = 0;
+    tempConnectedFailCount = 0;
+    tempResolutionFixCount = 0;
+    tempRereadFailCount = 0;
+    tempResolutionFixCrcFailCount = 0;
+    tempEnumerateFailCount = 0;
     request->send(200, "text/plain", "OK");
   });
 
@@ -4134,7 +4184,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),    // 0
@@ -4206,7 +4257,18 @@ void SendWifiData() {
                                SafeInt(ch1_over2x_at),              // 65
                                SafeInt(ch1_n_at),                   // 66
                                SafeInt(BatteryV_filtered, 100),     // 67 — 2 decimal places
-                               SafeInt(MeasuredAmps_filtered, 100)  // 68 — 2 decimal places
+                               SafeInt(MeasuredAmps_filtered, 100), // 68 — 2 decimal places
+                               SafeInt(g_iExcessCount),             // 69
+                               SafeInt(g_inaOVCount),               // 70
+                               SafeInt(g_hardOCCount),              // 71
+                               SafeInt(g_voltSpikeCount),           // 72
+                               SafeInt(g_voltDisagreeCritCount),    // 73
+                               SafeInt(g_voltDisagreeWarnCount),    // 74
+                               SafeInt(g_voltImplausibleCount),     // 75
+                               SafeInt(g_tempCritCount),            // 76
+                               SafeInt(g_tempSustainedCount),       // 77
+                               SafeInt(g_tempStaleCount),           // 78
+                               SafeInt(g_currentStaleCount)         // 79
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -4224,7 +4286,7 @@ void SendWifiData() {
   // PRIORITY 3: CSVData2 (status data - every 2 seconds)
   if (!sentSomething && now - lastpayload2send >= 2000 && events.count() > 0) {
     static char *payload2 = nullptr;
-    static const size_t PAYLOAD2_SIZE = 2400;
+    static const size_t PAYLOAD2_SIZE = 2550;
     if (!payload2) {
       payload2 = (char *)ps_malloc(PAYLOAD2_SIZE);  // allocated to PSRAM
       if (!payload2) {
@@ -4257,7 +4319,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4474,7 +4537,7 @@ void SendWifiData() {
                                SafeInt(outerTermP, 100),                                                                                                                                 //211
                                SafeInt(outerTermI, 100),                                                                                                                                 //212
                                SafeInt(outerTermD, 100),                                                                                                                                 //213
-                               SafeInt(outerTermDExternal, 100),                                                                                                                         //214
+                               SafeInt(thermalSlopeFPerSec, 1000),                                                                                                                       //214
                                SafeInt(AbsorptionVoltage * 100),                                                                                                                         // 215
                                SafeInt(AbsorptionTimeoutMs),                                                                                                                             // 216
                                SafeInt(bulkVoltageHoldMs),                                                                                                                               // 217
@@ -4508,7 +4571,19 @@ void SendWifiData() {
                                SafeInt(ft_rai_imu.worstSession),        // 245
                                SafeInt(fsWriteQueueDrops),              // 246
                                SafeInt(TempAlarmLow),                   // 247
-                               SafeInt(VoltageKd * g_fastOvDvdt, 100)  // 248
+                               SafeInt(VoltageKd * g_fastOvDvdt, 100), // 248
+                               SafeInt(tempReadFailCount),              // 249
+                               SafeInt(tempCrcFailCount),               // 250
+                               SafeInt(tempCrcRecoveredCount),          // 251
+                               SafeInt(tempAllFFCount),                 // 252
+                               SafeInt(tempPowerOn85Count),             // 253
+                               SafeInt(tempOutOfRangeCount),            // 254
+                               SafeInt(tempRequestFailCount),           // 255
+                               SafeInt(tempConnectedFailCount),         // 256
+                               SafeInt(tempResolutionFixCount),         // 257
+                               SafeInt(tempRereadFailCount),            // 258
+                               SafeInt(tempResolutionFixCrcFailCount),  // 259
+                               SafeInt(tempEnumerateFailCount)          // 260
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -4748,19 +4823,19 @@ void SendWifiData() {
                                SafeInt(learningUpCount[9]),                            // 202
                                SafeInt(TempPIDKp, 1000),                               // 203
                                SafeInt(TempPIDKi, 1000),                               // 204
-                               SafeInt(TempPIDKd, 1000),                               // 205
-                               SafeInt(TempPIDMarginF, 100),                           // 206
+                               0,                                                      // 205 (was TempPIDKd, removed)
+                               SafeInt(ThermalLookaheadSec),                           // 206
                                SafeInt(TempPIDIntervalMs),                             // 207
                                SafeInt(TempPIDFilterAlpha, 1000),                      // 208
                                0,                                                      // 209 (was TempPIDStaleMs, removed)
-                               SafeInt(TempPIDAntiWindupMarginA, 100),                 // 210
+                               0,                                                      // 210 (was TempPIDAntiWindupMarginA, removed)
                                SafeInt(FreeInternalRam),                               // 211
                                SafeInt(TotalInternalRam),                              // 212
                                SafeInt(LargestInternalBlock),                          // 213
                                SafeInt(FreePSRAM),                                     // 214
                                SafeInt(TotalPSRAM),                                    // 215
                                SafeInt(Heapfrag),                                      // 216
-                               SafeInt(TempPIDKdExternal, 1000),                       // 217
+                               0,                                                      // 217 (was TempPIDKdExternal, removed)
                                SafeInt(VoltageKi, 100),                                // 218
                                (int)rpmCapPowerTable[0],                               // 219
                                (int)rpmCapPowerTable[1],                               // 220
@@ -4803,7 +4878,7 @@ void SendWifiData() {
                                SafeInt(IExcessKBleed, 100),                             // 257 — ×100, 2 decimals
                                SafeInt(IgnoreRPM),                                      // 258
                                SafeInt(MinRPMForField),                                 // 259
-                               SafeInt(ThermalTimeConstantSec),                         // 260
+                               0,                                                       // 260 (was ThermalTimeConstantSec, removed)
                                SafeInt(AwBleedRate, 10),                                // 261 — ×10, 1 decimal
                                SafeInt(AwRecoverRate, 10),                              // 262 — ×10, 1 decimal
                                SafeInt(KSoft, 10),                                      // 263 — ×10, 1 decimal
@@ -4811,7 +4886,7 @@ void SendWifiData() {
                                SafeInt(IExcessReseedFrac, 100),                         // 265 — ×100, 2 decimal
                                (int)AwSeedProtectMs,                                    // 266
                                SafeInt(VoltageKd, 100),                                 // 267
-                               SafeInt(ThermistorFilterAlpha, 1000)                     // 268 — ×1000, 3 decimal
+                               0                                                        // 268 (was ThermistorFilterAlpha, removed)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

@@ -504,7 +504,7 @@ textarea {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-dark);
-  padding-right: 16px;
+  padding-right: 4px;
   line-height: 1.25;
 }
 
@@ -668,37 +668,34 @@ input[type="submit"] {
   transform: translateY(1px);
 }
 
-/* Red save button when dirty */
-.btn-save-table {
-  background: #f44336 !important;
-  border-color: #d32f2f !important;
-  animation: pulseRed 2s ease-in-out infinite;
-}
-
-@keyframes pulseRed {
-
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(244, 67, 54, 0.4);
-  }
-
-  50% {
-    box-shadow: 0 0 0 4px rgba(244, 67, 54, 0);
-  }
-}
 
 .btn-secondary {
   padding: 6px 12px;
   border-radius: 4px;
-  border: 1px solid var(--border);
-  background: #fff;
-  color: #000;
+  border: 1px solid #555;
+  background: #666;
+  color: #fff;
   font-weight: 800;
   cursor: pointer;
   font-size: 14px;
 }
 
 .btn-secondary:active {
+  transform: translateY(1px);
+}
+
+.btn-danger {
+  padding: 6px 12px;
+  border-radius: 4px;
+  border: 1px solid #a93226;
+  background: #dc3545;
+  color: #fff;
+  font-weight: 800;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn-danger:active {
   transform: translateY(1px);
 }
 
@@ -812,6 +809,9 @@ input[type="submit"] {
   background: #fff;
   border-bottom: 2px solid #000;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 .dark-mode #stickyHeader {
@@ -860,7 +860,8 @@ input[type="submit"] {
   }
 
   .btn-primary,
-  .btn-secondary {
+  .btn-secondary,
+  .btn-danger {
     width: 100%;
   }
 }
@@ -990,13 +991,44 @@ input[type="submit"] {
   .readings-section {
     gap: 15px;
   }
+
+  /* Force single-column card grids on narrow screens — prevents label/tooltip wrapping.
+     !important needed because the base .grid rule is defined later in the file (line ~1436)
+     and would otherwise win the cascade.
+     max-width caps the grid at viewport width so 1fr can't inherit a wider-than-viewport
+     container (e.g. caused by cap-mode-row overflow on another panel). */
+  .telemetry-groups,
+  .grid {
+    grid-template-columns: 1fr !important;
+    max-width: calc(100vw - 1rem);
+  }
+
+  /* Anchor tooltip box to left edge of icon so it can't overflow the right side of the screen */
+  .tooltip-box {
+    left: 0;
+    right: auto;
+    transform: none;
+    max-width: min(280px, calc(100vw - 32px));
+  }
+
+  /* Pull absolutely-positioned reset/clear buttons back into their flex rows */
+  form[style*="left:100%"] {
+    position: static !important;
+    margin-left: 4px !important;
+  }
+
+  /* RPM Cap Table mode toggles — wrap "Charge Rate" and "Limit by" onto separate lines */
+  .cap-mode-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
 }
 
 .alternator-control {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px;
+  padding: 12px 20px;
   background: var(--bg-light);
   border-radius: var(--radius);
   border: 1px solid var(--border);
@@ -1174,12 +1206,36 @@ input[type="submit"] {
 /* Tool tip tooltip stuff */
 .tooltip {
   cursor: pointer;
-  color: var(--accent);
-  font-weight: bold;
-  font-size: 13px;
   position: relative;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: #e0e0e0;
+  border-radius: 50%;
+  font-size: 0;
+  flex-shrink: 0;
+  vertical-align: middle;
   margin-left: 4px;
+  user-select: none;
+}
+
+.tooltip::before {
+  content: "i";
+  font-size: 11px;
+  font-weight: bold;
+  font-style: italic;
+  font-family: Georgia, serif;
+  color: #555;
+}
+
+.dark-mode .tooltip {
+  background: #444;
+}
+
+.dark-mode .tooltip::before {
+  color: #bbb;
 }
 
 .tooltip-box {
@@ -1200,7 +1256,6 @@ input[type="submit"] {
   min-width: 180px;
   width: fit-content;
 }
-
 
 .tooltip.active .tooltip-box {
   display: block;
@@ -1453,9 +1508,8 @@ input:focus {
 }
 
 .settings-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 10px;
+  max-width: 620px;
+  margin: 0 auto;
 }
 
 .settings-card {
@@ -1494,6 +1548,17 @@ hr {
 
 .confirm-msg.fade-out {
   opacity: 0;
+}
+
+/* Echo values in setting labels — monospace, dimmed */
+[id$="_echo"] {
+  font-family: 'Courier New', monospace;
+  font-size: 0.85em;
+  color: #888;
+}
+
+.dark-mode [id$="_echo"] {
+  color: #777;
 }
 
 .form-row {
@@ -1591,17 +1656,17 @@ hr {
 @keyframes button-pulse {
   0% {
     transform: scale(1);
-    box-shadow: 0 0 0 0 rgba(0, 161, 154, 0.4);
+    box-shadow: 0 0 0 0 rgba(102, 102, 102, 0.4);
   }
 
   50% {
     transform: scale(1.02);
-    box-shadow: 0 0 0 4px rgba(0, 161, 154, 0.2);
+    box-shadow: 0 0 0 4px rgba(102, 102, 102, 0.2);
   }
 
   100% {
     transform: scale(1);
-    box-shadow: 0 0 0 0 rgba(0, 161, 154, 0);
+    box-shadow: 0 0 0 0 rgba(102, 102, 102, 0);
   }
 }
 
@@ -1611,21 +1676,18 @@ hr {
 
 /* Dark mode styles */
 .dark-mode .btn-secondary {
-  background-color: #333333;
-  color: #aaaaaa;
-  border: 1px solid #555555;
+  background-color: #555555;
+  color: #ffffff;
+  border: 1px solid #444444;
 }
 
 .dark-mode .btn-secondary:hover {
-  background-color: #444444;
-  border-color: var(--accent);
-  color: var(--accent);
+  background-color: #666666;
+  border-color: #777777;
 }
 
 .dark-mode .btn-secondary:active {
-  background-color: #2a2a2a;
-  border-color: var(--accent);
-  color: var(--accent);
+  background-color: #444444;
   transform: translateY(0);
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
 }
@@ -1636,8 +1698,9 @@ hr {
 }
 
 
+/* Red save button when dirty — !important beats btn-primary */
 .btn-save-table {
-  background-color: #f44336;
+  background-color: #f44336 !important;
   color: white;
   border: none;
   padding: 10px 30px;
@@ -1674,12 +1737,6 @@ hr {
 
 
 /* Responsive adjustments */
-@media (max-width: 992px) {
-  .settings-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
 @media (max-width: 768px) {
 
   .main-tab {
@@ -1690,10 +1747,6 @@ hr {
 
   .main-tabs {
     gap: 1px;
-  }
-
-  .settings-grid {
-    grid-template-columns: 1fr;
   }
 
   body {
@@ -1811,8 +1864,8 @@ input:checked+.slider:before {
 
 .corner-status {
   position: fixed;
-  bottom: 10px;
-  right: 10px;
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  right: calc(10px + env(safe-area-inset-right));
   font-family: 'Courier New', monospace;
   font-size: 12px;
   letter-spacing: 0.5px;
@@ -1851,6 +1904,40 @@ input:checked+.slider:before {
   --card-light: #1e1e1e;
   --border: #444444;
   --reading: gray;
+}
+
+/* Elements with hardcoded white backgrounds that need dark mode overrides */
+.dark-mode .learning-table-container {
+  background: #1e1e1e;
+}
+.dark-mode .learning-table-container.rate-normal {
+  background: rgba(0, 161, 154, 0.08);
+}
+.dark-mode .learning-table-container.rate-low {
+  background: rgba(255, 152, 0, 0.08);
+}
+.dark-mode .learning-table th {
+  background: #2a2a2a;
+  color: #cccccc;
+}
+.dark-mode #settings-accel .orientation-option {
+  background: #1e1e1e;
+  border-color: #444;
+}
+
+/* uPlot dark mode — axis labels, tick text, axis lines, grid */
+.dark-mode .u-label {
+  color: #cccccc !important;
+}
+.dark-mode .u-axis text {
+  fill: #cccccc !important;
+}
+.dark-mode .u-axis path {
+  stroke: #555555 !important;
+}
+.dark-mode .u-grid line,
+.dark-mode .u-ticks line {
+  stroke: #404040 !important;
 }
 
 .dark-mode input[type="text"],
@@ -1941,7 +2028,7 @@ input:checked+.slider:before {
 #history-iframe {
   width: 100%;
   min-height: 800px;
-  height: calc(100vh - 250px);
+  height: calc(100dvh - 250px);
   border: none;
   display: none;
 }
@@ -1960,6 +2047,7 @@ input:checked+.slider:before {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .card-group-title {
@@ -1987,8 +2075,7 @@ input:checked+.slider:before {
 .metric-label {
   font-size: 12px;
   color: #666;
-  padding-right: 24px;
-  /* increase to 28–32px if still too close */
+  padding-right: 4px;
 }
 
 .metric-value {
@@ -2024,8 +2111,8 @@ input:checked+.slider:before {
 
 #reconnect-button {
   position: fixed;
-  bottom: 70px;
-  right: 20px;
+  bottom: calc(70px + env(safe-area-inset-bottom));
+  right: calc(20px + env(safe-area-inset-right));
   padding: 12px 24px;
   background: #00a19a;
   color: white;
@@ -2527,7 +2614,7 @@ input:checked+.slider:before {
     gap: 8px !important;
   }
 
-  #settings-weather .form-input form {
+  #settings-weather .form-input form:not(:has(.switch)) {
     flex-direction: column !important;
   }
 

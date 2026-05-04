@@ -579,10 +579,12 @@ void captureResetReason() {
 
   // Check if this was a scheduled restart
   bool wasScheduled = false;
-  String flagContent = readFile(LittleFS, "/ScheduledRestart.flag");
-  if (flagContent == "1") {
-    wasScheduled = true;
-    fsRemove("/ScheduledRestart.flag");  // Clean up flag
+  if (fsExists("/ScheduledRestart.flag")) {
+    String flagContent = readFile(LittleFS, "/ScheduledRestart.flag");
+    if (flagContent == "1") {
+      wasScheduled = true;
+    }
+    fsRemove("/ScheduledRestart.flag");
   }
 
   // Get current reason
@@ -2178,6 +2180,21 @@ void _ReadAnalogInputs_inner() {
                        queueConsoleMessage("ADS1115 I2C read error ch" + String(adsTriggeredChannel) + " endStatus=" + String(endStatus) + " bytes=" + String(bytesReceived));
                      }
 
+                     // Track consecutive I²C failures — 5 in a row = chip gone mid-run
+                     {
+                       static uint8_t adsConsecFails = 0;
+                       if (readOK) {
+                         adsConsecFails = 0;
+                       } else {
+                         adsConsecFails++;
+                         if (adsConsecFails >= 5) {
+                           ADS1115Disconnected = 1;
+                           queueConsoleMessage("ADS1115 declared disconnected after 5 consecutive I2C failures");
+                           adsConsecFails = 0;
+                         }
+                       }
+                     }
+
                      // CRITICAL: Use adsTriggeredChannel, NOT adsSequenceIndex!
                      // Only process and mark fresh on a confirmed good read
                      if (readOK) {
@@ -2518,6 +2535,15 @@ void _ReadAnalogInputs_inner() {
 void drainIMUFifo() {
   if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
   lastIMUPoll = millis();
+  // If accel display is disabled, drain the hardware FIFO so it doesn't back up, but don't queue anything
+  if (!accelEnabled) {
+    uint16_t n = 0;
+    if (imu.Get_FIFO_Num_Samples(&n) == LSM6DSOX_OK && n > 0) {
+      uint16_t drain = (n > MAX_FIFO_DRAIN_PER_POLL) ? MAX_FIFO_DRAIN_PER_POLL : n;
+      imu.Get_FIFO_Sample(fifoBuffer, drain);
+    }
+    return;
+  }
 
   TIMED_CALL(ft_rai_imu, ([&]() {
                uint16_t fifo_samples = 0;

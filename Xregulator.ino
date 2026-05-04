@@ -579,12 +579,12 @@ unsigned long wave_last_crossing_time = 0;
 float wave_period_ewma = -1.0;
 
 // IMU NVS cache variables (may belong with other prev_* variables, but...)
-static uint32_t prev_imu_capsize_count = 0;
-static uint32_t prev_imu_pitchpole_count = 0;
-static uint32_t prev_imu_slam_count_lifetime = 0;
-static float prev_imu_heel_max_lifetime = 0;
-static float prev_imu_pitch_max_lifetime = 0;
-static float prev_imu_slam_peak_lifetime = 0;
+uint32_t prev_imu_capsize_count = 0;
+uint32_t prev_imu_pitchpole_count = 0;
+uint32_t prev_imu_slam_count_lifetime = 0;
+float prev_imu_heel_max_lifetime = 0;
+float prev_imu_pitch_max_lifetime = 0;
+float prev_imu_slam_peak_lifetime = 0;
 static uint8_t prev_imuMountOrientation = 0;
 static float prev_CAPSIZE_THRESHOLD_DEG = 0;
 static float prev_PITCHPOLE_THRESHOLD_DEG = 0;
@@ -1862,7 +1862,7 @@ float pidError = 0.0f;   // PID error for display (A)
 int LearningMode = 0;    // 0=disabled, 1=enabled
 
 
-int accelEnabled = 0;  // Set to false to block accelerometer related calcs
+int accelEnabled = 1;  // Set to false to block accelerometer related calcs
 
 // =====================================================================================
 // === CV LOOP PARAMETERS — all tunable values consolidated here
@@ -1953,7 +1953,8 @@ enum FieldEventReason : uint8_t {
   REASON_MANUAL_MODE,
   REASON_INA_OVERVOLTAGE,
   REASON_HARD_OVERCURRENT,
-  REASON_RPM_TOO_LOW
+  REASON_RPM_TOO_LOW,
+  REASON_CURRENT_STALE
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -1992,6 +1993,8 @@ struct TickSnapshot {
   bool tempSourceIsAlt;
 
   bool inaOvervoltageLatched;
+
+  bool currentDataStale;
 
   bool inAbsorptionStage;
 };
@@ -2128,7 +2131,7 @@ float innerTermD = 0.0f;
 float outerTermP = 0.0f;
 float outerTermI = 0.0f;
 float outerTermD = 0.0f;          // probably always 0
-float outerTermDExternal = 0.0f;  //the more interesting one
+float thermalSlopeFPerSec = 0.0f;  // long-window slope estimate (°F/sec); replaces outerTermDExternal
 
 volatile bool tempPIDResetRequested = false;
 volatile bool innerPIDResetRequested = false;
@@ -2136,9 +2139,13 @@ volatile bool cvLoopResetRequested = false;
 
 float tempFiltered = NAN;
 float thermalPenaltyLastValid = 0.0f;
-float edgePrevRaw = NAN;    // raw DS18B20 value at the last edge-derivative sample
-uint32_t edgePrevMs = 0;    // timestamp of that sample
-uint32_t edgeLastReadMs = 0; // last tempLastSuccessMillis seen — detects new DS18B20 readings
+// Slope ring buffer: THERMAL_SLOPE_BUF readings × 5s = 60s window (12 intervals)
+#define THERMAL_SLOPE_BUF 13
+float thermalSlopeBuffer[THERMAL_SLOPE_BUF];
+uint8_t thermalSlopeBufIdx = 0;
+bool thermalSlopeBufFull = false;
+float projectedTempF = NAN;         // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
+uint32_t thermalSlopeLastPushMs = 0; // gates slope buffer push to TempPIDIntervalMs cadence
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -2177,24 +2184,19 @@ uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp 
 // Tuning — all web UI configurable
 float TempPIDKp = 3.0f;            // A/°F proportional gain
 float TempPIDKi = 0.025f;          // Integral gain
-float TempPIDKd = 0.0f;            // Derivative gain (provides predictive feel via dT/dt)
-float TempPIDKdExternal = 20.0f;    // external D gain (A per °F/s)
-float ThermalTimeConstantSec = 100.0f; // seconds from field change to first sensed temp delta
-float edgeDecayFactor = 0.9659f;     // precomputed: 0.5^(5/ThermalTimeConstantSec); update on change
+float ThermalLookaheadSec = 90.0f;  // prediction horizon: project this many seconds ahead; tune ~= thermal time constant
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
 float prevThermalPenalty = 0.0f;       // file-scope, tracks previous slew-limited value
 
-float TempPIDMarginF = 15;              //15.0f;           // °F below TemperatureLimitF — PID targets this, not the limit itself
 uint32_t TempPIDIntervalMs = 5000;      // Temperature loop update period (ms) — independent of output current loop and sensor rate
 float TempPIDFilterAlpha = 0.2f;        // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
-float ThermistorFilterAlpha = 0.02f;    // IIR smoothing for thermistor (0=frozen, 1=raw); heavy by default — raw signal is noisy at 16Hz
-float TempPIDAntiWindupMarginA = 5.0f;  // OBSOLETE REMOVE
+// ThermistorFilterAlpha removed — hardcoded 0.02f in tempPID_tick IIR filter, not user-configurable
 // Runtime state — expose via telemetry
-double tempPIDInput_d = 77.0;        // Filtered temp (°F), PID input
+double tempPIDInput_d = 77.0;        // Projected temp (°F) = filtered + slope × lookahead; PID process variable
 double tempCapAmps_d = 9999.0;       // OBSOLETE
-double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF - TempPIDMarginF
+double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
 float tempCapAmps = 9999.0f;         // OBSOLETE
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
@@ -2203,7 +2205,7 @@ float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted f
 double thermalPenaltyAmps_d = 0.0;  // double version for PID library
 
 //REVERSE because rising temperature should increase the penalty
-PID tempPID(&tempPIDInput_d, &thermalPenaltyAmps_d, &tempPIDSetpoint_d, TempPIDKp, TempPIDKi, TempPIDKd, REVERSE);
+PID tempPID(&tempPIDInput_d, &thermalPenaltyAmps_d, &tempPIDSetpoint_d, TempPIDKp, TempPIDKi, 0.0, REVERSE);
 
 
 
@@ -2257,8 +2259,8 @@ struct ThermalLogEntry {
   uint32_t ts;
 
   // tempRaw removed — filtered is sufficient for PID tuning
-  int16_t tempFiltered;
-  int16_t tempSetpoint;
+  int16_t tempFiltered;   // actual IIR-filtered sensor reading
+  int16_t tempProjected;  // projectedTempF = filtered + slope × lookahead (what PID sees)
   int16_t nominalTarget;
   int16_t rpmCap;
   int16_t voltCap;
@@ -2281,8 +2283,8 @@ struct ThermalLogEntry {
   int16_t outerTermI;
   int16_t outerTermD;
   int16_t impliedPenalty;
-  int16_t outerTermDExternal;
-  // gainKp/Ki/Kd/KdExternal removed — written once in CSV CONST row
+  int16_t thermalSlope;  // thermalSlopeFPerSec × 1000 (0.001 °F/sec per count)
+  // gainKp/Ki/Lookahead written once in pidlog CONST row
 };
 
 // At file scope, outside setupServer():
@@ -2514,6 +2516,19 @@ uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
 bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
+
+// Protection event counters — rising-edge, cleared by web UI reset buttons
+uint32_t g_iExcessCount = 0;
+uint32_t g_inaOVCount = 0;
+uint32_t g_hardOCCount = 0;
+uint32_t g_voltSpikeCount = 0;
+uint32_t g_voltDisagreeCritCount = 0;
+uint32_t g_voltDisagreeWarnCount = 0;
+uint32_t g_voltImplausibleCount = 0;
+uint32_t g_tempCritCount = 0;
+uint32_t g_tempSustainedCount = 0;
+uint32_t g_tempStaleCount = 0;
+uint32_t g_currentStaleCount = 0;
 
 // CV loop tunable parameters moved to the CV LOOP PARAMETERS block above (~line 1860)
 
@@ -2847,9 +2862,8 @@ void setup() {
 
   Serial.setTxBufferSize(4096);  // 4 KB TX in internal RAM
   Serial.setRxBufferSize(2048);  // optional, we don't currently Rx anyway...
-  delay(200);
+  delay(100);
   Serial.println("\n\n=== SYSTEM STARTUP ===");
-  delay(200);
   // Allocate buffers from PSRAM
   configPayloadBuffer = (char *)ps_malloc(CONFIG_PAYLOAD_SIZE);
   payloadBuffer = (char *)ps_malloc(PAYLOAD_BUFFER_SIZE);
@@ -2899,9 +2913,7 @@ void setup() {
   Serial.println();
   initializeDeviceId();    // Sets the UID (real or spoofed)
   checkDeviceUIDChange();  // Compares to last boot, COMMENT THIS OUT DUE TO AVOID NEED TO REREGISTER DURING TESTING.  NEEDS UNCOMMENTING WHEN DEVICE ID CHANGES!!
-  delay(200);
   loadAuthToken();  // Loads token (will be empty if just cleared)  // for supabase
-  delay(200);
   Serial.flush();  // Ensure it's sent before continuing
   int major = 0, minor = 0, patch = 0;
   // Parse FIRMWARE_VERSION directly (e.g. "0.1.65")
@@ -2957,7 +2969,7 @@ void setup() {
   } else {
     initSensorBuffer();
   }
-  delay(500);
+  delay(50);
   checkWebFilesExist();
   sessionStartTime = millis();
   // Reset all per-function timing structs and session loop metrics at boot
@@ -3127,10 +3139,10 @@ void setup() {
   loadLearningTableFromNVS();  // Load all table data at boot
   Serial.println();
   // Force initial sensor readings before main loop starts
-  delay(100);  // Brief settling time
+  delay(50);  // Brief settling time
   if (hardwarePresent == 1) {
     ReadAnalogInputs();
-    delay(100);          // Give it a moment to process
+    delay(50);           // Give it a moment to process
     ReadAnalogInputs();  // Second reading to be sure
   }
 

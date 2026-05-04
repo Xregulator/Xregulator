@@ -1522,17 +1522,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     TempPIDKp = readFile(LittleFS, "/TempPIDKp.txt").toFloat();
   }
-  if (!fsExists("/TempPIDKdExternal.txt")) {
-    writeFile(LittleFS, "/TempPIDKdExternal.txt", String(TempPIDKdExternal, 6).c_str());
+  if (!fsExists("/ThermalLookaheadSec.txt")) {
+    writeFile(LittleFS, "/ThermalLookaheadSec.txt", String(ThermalLookaheadSec, 1).c_str());
   } else {
-    TempPIDKdExternal = readFile(LittleFS, "/TempPIDKdExternal.txt").toFloat();
+    ThermalLookaheadSec = max(0.0f, readFile(LittleFS, "/ThermalLookaheadSec.txt").toFloat());
   }
-  if (!fsExists("/ThermalTimeConstantSec.txt")) {
-    writeFile(LittleFS, "/ThermalTimeConstantSec.txt", String(ThermalTimeConstantSec, 1).c_str());
-  } else {
-    ThermalTimeConstantSec = readFile(LittleFS, "/ThermalTimeConstantSec.txt").toFloat();
-  }
-  edgeDecayFactor = powf(0.5f, 5.0f / ThermalTimeConstantSec);
 
   if (!fsExists("/TempPIDKi.txt")) {
     writeFile(LittleFS, "/TempPIDKi.txt", String(TempPIDKi, 6).c_str());
@@ -1540,17 +1534,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     TempPIDKi = readFile(LittleFS, "/TempPIDKi.txt").toFloat();
   }
 
-  if (!fsExists("/TempPIDKd.txt")) {
-    writeFile(LittleFS, "/TempPIDKd.txt", String(TempPIDKd, 6).c_str());
-  } else {
-    TempPIDKd = readFile(LittleFS, "/TempPIDKd.txt").toFloat();
-  }
-
-  if (!fsExists("/TempPIDMarginF.txt")) {
-    writeFile(LittleFS, "/TempPIDMarginF.txt", String(TempPIDMarginF, 2).c_str());
-  } else {
-    TempPIDMarginF = readFile(LittleFS, "/TempPIDMarginF.txt").toFloat();
-  }
 
   if (!fsExists("/TempPIDIntervalMs.txt")) {
     writeFile(LittleFS, "/TempPIDIntervalMs.txt", String(TempPIDIntervalMs).c_str());
@@ -1564,17 +1547,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     TempPIDFilterAlpha = readFile(LittleFS, "/TempPIDFilterAlpha.txt").toFloat();
   }
 
-  if (!fsExists("/ThermistorFilterAlpha.txt")) {
-    writeFile(LittleFS, "/ThermistorFilterAlpha.txt", String(ThermistorFilterAlpha, 3).c_str());
-  } else {
-    ThermistorFilterAlpha = readFile(LittleFS, "/ThermistorFilterAlpha.txt").toFloat();
-  }
 
-  if (!fsExists("/TempPIDAntiWindupMarginA.txt")) {
-    writeFile(LittleFS, "/TempPIDAntiWindupMarginA.txt", String(TempPIDAntiWindupMarginA, 2).c_str());
-  } else {
-    TempPIDAntiWindupMarginA = readFile(LittleFS, "/TempPIDAntiWindupMarginA.txt").toFloat();
-  }
   if (!fsExists("/PidKi.txt")) {
     writeFile(LittleFS, "/PidKi.txt", String(PidKi, 3).c_str());
   } else {
@@ -2278,8 +2251,13 @@ void updateAccelMetrics() {
   }
 
   // Capsize/pitchpole detection
+  // _triggered arms the 1s timer; _reported latches true after the message fires
+  // and prevents re-firing while the angle stays above threshold. Both flags reset
+  // only when the angle drops back below threshold (one message per event).
   static bool capsize_triggered = false;
+  static bool capsize_reported = false;
   static bool pitchpole_triggered = false;
+  static bool pitchpole_reported = false;
   static unsigned long capsize_start = 0;
   static unsigned long pitchpole_start = 0;
 
@@ -2287,25 +2265,28 @@ void updateAccelMetrics() {
     if (!capsize_triggered) {
       capsize_triggered = true;
       capsize_start = now;
-    } else if (now - capsize_start > 1000) {  // >1s duration
+    } else if (!capsize_reported && (now - capsize_start > 1000)) {  // fires once per event
       imu_capsize_count++;
       queueConsoleMessageF("CAPSIZE EVENT: %.1f deg", cf_heel);
-      capsize_triggered = false;
+      capsize_reported = true;
     }
   } else {
     capsize_triggered = false;
+    capsize_reported = false;
   }
 
   if (abs(cf_pitch) > PITCHPOLE_THRESHOLD_DEG) {
     if (!pitchpole_triggered) {
       pitchpole_triggered = true;
       pitchpole_start = now;
-    } else if (now - pitchpole_start > 1000) {  // >1s duration — fires once; stays triggered until pitch clears
+    } else if (!pitchpole_reported && (now - pitchpole_start > 1000)) {  // fires once per event
       imu_pitchpole_count++;
       queueConsoleMessageF("PITCHPOLE EVENT: %.1f deg", cf_pitch);
+      pitchpole_reported = true;
     }
   } else {
     pitchpole_triggered = false;
+    pitchpole_reported = false;
   }
 
   // Update lifetime maximums

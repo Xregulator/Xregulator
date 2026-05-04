@@ -1488,7 +1488,7 @@
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="resetInnerPID()" class="btn-primary">Reset Output Current PID</button>
+                    <button onclick="resetInnerPID()" class="btn-secondary">Reset Output Current PID</button>
                   </div>
                 </div>
 
@@ -1887,13 +1887,12 @@
                       <span class="metric-label telemetry-label">Temperature D External
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">External 20-second derivative contribution to thermal penalty (A). =
-                            KdExternal × (tempFiltered − sample from 20s ago) / 20s. Positive when temperature is rising
-                            (pre-emptively increases penalty). Negative when temperature is falling (pre-emptively
-                            reduces penalty, boosting current). Clamped to the same cap/target headroom as the rest of
-                            the penalty. Zero when KdExternal = 0.</span>
+                            Temperature slope estimate over a 60-second window (°F/sec). Positive = rising temp.
+                            Used to project future temperature: projectedTemp = current + slope × lookahead.
+                            The PID controls against projectedTemp rather than current temp.</span>
                         </span>
                       </span>
-                      <span class="metric-value telemetry-value"><span id="outerTermDExternal_display">?</span> A</span>
+                      <span class="metric-value telemetry-value"><span id="thermalSlopeFPerSec_display">?</span> °F/s</span>
                     </div>
                   </div>
 
@@ -1916,7 +1915,7 @@
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="resetThermalPID()" class="btn-primary">Reset Thermal PID</button>
+                    <button onclick="resetThermalPID()" class="btn-secondary">Reset Thermal PID</button>
                   </div>
                 </div>
 
@@ -1958,66 +1957,16 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Kd (library) (<span id="TempPIDKd_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Library
-                        derivative gain computed over one 5-second compute interval — too short to capture real thermal
-                        momentum. Keep at 0. Use Kd External instead, which computes over a 20-second window. Default:
-                        0.0.</span></span>
+                    <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Prediction
+                        horizon in seconds. The PID controls against projectedTemp = currentTemp + slope × lookahead
+                        rather than current temperature. Set near the thermal time constant (~90–120s). Larger = earlier
+                        derating before the limit is reached; smaller = tighter control near the limit. Default: 90.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKd" type="number" step="0.1" min="0" max="500" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Kd External (A/°F/s) (<span id="TempPIDKdExternal_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">External derivative gain — applies to both DS18B20 and Thermistor sources, but the mechanism differs. DS18B20: fires on each new sensor reading (~5s when healthy), using raw temperature. Thermistor: fires on each PID computation tick (~5s), using the filtered signal. Increases thermal penalty when temperature is rising quickly before the setpoint is reached. Zero disables. Default: 200.0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKdExternal" type="number" step="0.1" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermal Time Constant (s) (<span id="ThermalTimeConstantSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">DS18B20 only. Controls how quickly the external derivative term decays toward zero between discrete sensor readings — longer values mean the D term holds its estimate longer before fading. Not relevant to the Thermistor path, which computes a fresh derivative on every PID tick and has no hold period to decay. Default: 100.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="ThermalTimeConstantSec" type="number" step="1" min="5" max="600" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Margin (°F) (<span id="TempPIDMarginF_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                        below TemperatureLimitF that the temperature PID targets. The PID works to hold temp at (Limit −
-                        Margin), giving it room to act before the hard safety threshold. Larger = earlier, gentler
-                        intervention. Default: 15°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDMarginF" type="number" step="0.01" min="0" max="9999" />
+                      <input name="ThermalLookaheadSec" type="number" step="1" min="0" max="300" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2055,20 +2004,6 @@
                   </div>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermistor Filter Alpha (<span id="ThermistorFilterAlpha_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Thermistor only. IIR smoothing coefficient applied to the raw thermistor reading before it reaches the PID and derivative calculation. Much heavier than the DS18B20 filter — the thermistor samples at ~16Hz and picks up significant electrical noise from the alternator environment. 0 = frozen, 1 = unfiltered. Lower values reject noise more aggressively but slow thermal reaction. Has no effect when DS18B20 source is selected. Default: 0.02 (~3s time constant at 16Hz).</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="ThermistorFilterAlpha" type="number" step="0.001" min="0.001" max="1.0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
 
 
               </details><!-- END Temperature Controller Parameters -->
@@ -2260,90 +2195,6 @@
                       <span class="metric-value telemetry-value"><span id="voltageCtrlActive_display">?</span></span>
                     </div>
 
-                    <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">FastOV Cap
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">fastOvCurrentCap — hard ceiling on commanded current (amps) imposed
-                            by the fast overvoltage supervisor this tick. Equals MaxTableValue when inactive. Drops when
-                            BatteryV approaches or exceeds ChargingVoltageTarget, before the CV loop has a chance to
-                            respond.</span>
-                        </span>
-                      </span>
-                      <span class="metric-value telemetry-value"><span id="fastOvCurrentCapID">?</span></span>
-                    </div>
-
-                    <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">FastOV Events
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">
-                            Total FastOV rising-edge event counter. Increments once each time the FastOV supervisor
-                            changes from inactive to active. This includes any FastOV intervention: soft predictive
-                            clamp, hard predictive clamp, or measured-voltage hysteresis clamp. Use this to catch brief
-                            interventions that may be too short to notice in the live cap display.<br><br>
-                            What is normal: this value will usually keep increasing over time because it is a
-                            lifetime-style event counter. Slow growth is expected, especially during small RPM changes,
-                            load changes, or minor voltage corrections.<br><br>
-                            What is suspicious: fast growth during truly steady operation, especially if hard events are
-                            also increasing or if the system shows visible current or voltage pulsing. A high event rate
-                            at steady state can mean the FastOV thresholds are too aggressive, prediction is too jumpy,
-                            or the voltage loop still needs more tuning.
-                          </span>
-                        </span>
-                      </span>
-                      <span class="metric-value telemetry-value"><span id="fastOvClampCountID">?</span></span>
-                    </div>
-
-                    <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">FastOV Soft Events
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">
-                            Rising-edge counter for soft FastOV events only. A soft event means the predictive voltage
-                            logic entered the soft zone and started trimming the allowed current cap before voltage rose
-                            too far. This is the normal early-warning action of the FastOV supervisor.<br><br>
-                            What is normal: some soft events during transients, and occasional isolated events near the
-                            voltage target.<br><br>
-                            What is suspicious: frequent soft events during stable running with no meaningful overshoot.
-                            That usually means V_SOFT is too low, the prediction horizon is too aggressive, dv/dt is too
-                            noisy, or the CV loop is still pushing too hard near target.
-                          </span>
-                        </span>
-                      </span>
-                      <span class="metric-value telemetry-value"><span id="fastOvSoftCountID">?</span></span>
-                    </div>
-
-                    <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">FastOV Hard Events
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">
-                            Rising-edge counter for hard FastOV events only. A hard event means the predictive hard zone
-                            or measured-voltage hysteresis clamp was triggered, causing a stronger current-cap reduction
-                            and instant downward setpoint action. Hard events should be uncommon in a well-tuned
-                            system.<br><br>
-                            What is normal: rare events during major (engine speed) transients or unusual operating
-                            conditions.<br><br>
-                            What is abnormal: repeated hard events, or any steady accumulation during normal settled
-                            charging. That usually means true overshoot is still occurring and the voltage loop is
-                            underdamped, too slow to pull down, or relying on FastOV as a primary control mechanism
-                            instead of a safety backstop.
-                          </span>
-                        </span>
-                      </span>
-                      <span class="metric-value telemetry-value"><span id="fastOvHardCountID">?</span></span>
-                    </div>
-
-                    <hr />
-                    <div class="form-row">
-                      <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                        <span>Reset FastOV Event Counters</span>
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Clears the soft, hard, and total FastOV event counters. Use after tuning changes to establish a fresh baseline for characterising false-fire rates.</span>
-                        </span>
-                      </div>
-                      <div class="form-input">
-                        <button onclick="resetFastOvCounters()" class="btn-secondary">Reset Counters</button>
-                      </div>
-                    </div>
-
                   </div>
                 </div>
 
@@ -2362,7 +2213,7 @@
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="resetVoltageLoop()" class="btn-primary">Reset CV Integrator</button>
+                    <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
                   </div>
                 </div>
 
@@ -2921,7 +2772,7 @@
                     </span>
                   </div>
                   <div class="form-input">
-                    <button onclick="openSystemIDModal()" class="btn-primary">Run Test...</button>
+                    <button onclick="openSystemIDModal()" class="btn-secondary">Run Test...</button>
                   </div>
                 </div>
 
@@ -2953,7 +2804,7 @@
 
                     <div style="display:flex; gap:10px; justify-content:flex-end;">
                       <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Cancel</button>
-                      <button id="sysid-start-btn" onclick="confirmSystemIDStart()" class="btn-primary" style="flex:1;" disabled>Start Test</button>
+                      <button id="sysid-start-btn" onclick="confirmSystemIDStart()" class="btn-secondary" style="flex:1;" disabled>Start Test</button>
                     </div>
                   </div>
 
@@ -2977,7 +2828,7 @@
                     </div>
                     <div id="sysid-elapsed" style="font-size:0.85em; color:#aaa; margin-bottom:20px;"></div>
                     <div style="display:flex; justify-content:flex-end;">
-                      <button onclick="abortSystemIDTest()" style="background:#8b0000; color:#fff; border:none; padding:8px 18px; border-radius:4px; cursor:pointer;">Abort</button>
+                      <button onclick="abortSystemIDTest()" class="btn-secondary">Abort</button>
                     </div>
                   </div>
 
@@ -2998,7 +2849,7 @@
                     <div id="sysid-results-warning" style="font-size:0.85em; color:#f0a500; margin-bottom:16px; display:none;"></div>
                     <div style="display:flex; gap:10px; justify-content:flex-end;">
                       <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Dismiss</button>
-                      <button id="sysid-apply-btn" onclick="applySystemIDResults()" class="btn-primary" style="flex:1;">Apply &amp; Save</button>
+                      <button id="sysid-apply-btn" onclick="applySystemIDResults()" class="btn-secondary" style="flex:1;">Apply &amp; Save</button>
                     </div>
                   </div>
 
@@ -3233,8 +3084,10 @@
                   In <em>absorption stage</em>, the voltage loop engages and holds the battery at the absorption
                   voltage. The battery itself now dictates how much current it accepts — current tapers naturally as the
                   battery fills. The system exits absorption when charge current has dropped to or below the configured
-                  tail current for the required hold period, confirming the battery is genuinely full. A safety timeout
-                  forces a transition to float if tail current is never reached.
+                  tail current for the required hold period, confirming the battery is genuinely full. If the system is
+                  thermally constrained and current is already near its limit, tail detection is suspended until thermal
+                  headroom recovers — preventing a premature exit before the battery is truly full. A safety timeout
+                  forces a transition to float (or idle, if Use Float is off) if tail current is never reached.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   In <em>float stage</em>, the voltage loop holds the battery at the lower float voltage. After the
@@ -4060,7 +3913,7 @@
             </div>
 
             <div style="display: flex; align-items: center; justify-content: flex-end; margin-bottom: 10px;">
-              <button onclick="triggerWeatherUpdate()">Update Weather Now</button>
+              <button onclick="triggerWeatherUpdate()" class="btn-secondary">Update Weather Now</button>
             </div>
 
             <div class="card-group">
@@ -4115,14 +3968,13 @@
               </div>
 
               <div class="form-row"
-                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border-light);">
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
                 <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
                   <span>Nominal Solar Array Power (W):</span>
                   <span
                     style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
                       id="SolarWatts_echo">?</span></span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
                     <span class="tooltip-box">System-rated solar capacity, e.g. 600 for two 300W panels</span>
                   </span>
                 </div>
@@ -4137,15 +3989,15 @@
                 </div>
               </div>
 
+              <hr />
               <div class="form-row"
-                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border-light);">
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
                 <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
                   <span>Solar Performance Ratio:</span>
                   <span
                     style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
                       id="performanceRatio_echo">?</span></span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
                     <span class="tooltip-box">Accounts for losses, 0.75 typical, adjust to fit your system</span>
                   </span>
                 </div>
@@ -4160,15 +4012,15 @@
                 </div>
               </div>
 
+              <hr />
               <div class="form-row"
-                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; padding: 12px 0;">
+                style="display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center;">
                 <div class="form-label" style="display: flex; align-items: center; gap: 8px;">
                   <span>High Solar Threshold (kWh):</span>
                   <span
                     style="font-family: 'Courier New', monospace; font-size: 13px; color: #666; margin-left: 5px;"><span
                       id="UVThresholdHigh_echo">?</span></span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
                     <span class="tooltip-box">If predicted solar output for at least 2 of next 3 days exceeds this
                       value,
                       pause alternator output</span>
@@ -4423,7 +4275,7 @@
                   <form action="/get" method="GET" target="hidden-form" onsubmit="return handleAlarmTest();">
                     <input type="hidden" name="password" class="password_field">
                     <input type="hidden" name="AlarmTest" value="1">
-                    <button type="submit" id="alarm-test-btn" class="btn-primary">Test Buzzer (2s)</button>
+                    <button type="submit" id="alarm-test-btn" class="btn-secondary">Test Buzzer (2s)</button>
                   </form>
                 </div>
               </div>
@@ -4435,7 +4287,7 @@
                   <form action="/get" method="GET" target="hidden-form" onsubmit="return handleResetLatch();">
                     <input type="hidden" name="password" class="password_field">
                     <input type="hidden" name="ResetAlarmLatch" value="1">
-                    <button type="submit" id="reset-latch-btn" class="btn-primary">Reset Latch</button>
+                    <button type="submit" id="reset-latch-btn" class="btn-secondary">Reset Latch</button>
                   </form>
                 </div>
               </div>
@@ -5026,7 +4878,7 @@
                   <span class="toggle-label">Off</span>
                   <label class="switch">
                     <input id="DarkMode_checkbox" type="checkbox"
-                      onchange="document.body.classList.toggle('dark-mode'); localStorage.setItem('darkMode', this.checked ? '1' : '0'); updateUplotTheme(currentTempPlot); updateUplotTheme(voltagePlot); updateUplotTheme(rpmPlot); updateUplotTheme(temperaturePlot);" />
+                      onchange="document.body.classList.toggle('dark-mode'); localStorage.setItem('darkMode', this.checked ? '1' : '0'); updateUplotTheme(currentTempPlot); updateUplotTheme(voltagePlot); updateUplotTheme(rpmPlot); updateUplotTheme(temperaturePlot); updateAllStalenessStyles();" />
                     <span class="slider round"></span>
                   </label>
                   <span class="toggle-label">On</span>
@@ -5041,7 +4893,7 @@
                 Security & Maintenance</summary>
 
               <div class="form-row">
-                <div class="form-label">Change Password:</div>
+                <div class="form-label"></div>
                 <div class="form-input">
                   <form action="/setPassword" method="POST" target="hidden-form" onsubmit="return setNewPassword();">
                     <input type="hidden" name="password" class="password_field" />
@@ -5065,7 +4917,7 @@
               <div class="form-row">
                 <div class="form-label">Lock Settings:</div>
                 <div class="form-input">
-                  <button type="button" onclick="lockSettingsManually()" class="btn-primary">Lock Settings</button>
+                  <button type="button" onclick="lockSettingsManually()" class="btn-secondary">Lock Settings</button>
                 </div>
               </div>
 
@@ -5073,8 +4925,7 @@
               <div class="form-row">
                 <div class="form-label">Erase All Memory:</div>
                 <div class="form-input">
-                  <button type="button" id="factory-reset-btn" onclick="factoryReset()"
-                    style="background-color: #dc3545; border-color: #dc3545;" class="btn-primary">
+                  <button type="button" id="factory-reset-btn" onclick="factoryReset()" class="btn-danger">
                     Restore Defaults
                   </button>
                 </div>
@@ -5098,6 +4949,7 @@
       <button class="sub-tab" onclick="showSubTab('livedata', 'gps', event)">GPS/Travel/Wind</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'accel', event)">Accel</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'protection', event)">Protection</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'other', event)">Other</button>
     </div>
     <div id="livedata-alternator" class="sub-tab-content">
@@ -5210,6 +5062,63 @@
         </span>
 
 
+      </div>
+
+      <!-- DS18B20 Sensor Health -->
+      <div class="settings-card" style="margin-top:16px;">
+        <p class="card-group-title">DS18B20 Temperature Sensor Health</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Lifetime counters from the temperature sensor task. Any nonzero failure count warrants investigation. CRC recovered is informational — occasional recoveries on a noisy bus are acceptable.</p>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Read Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">CRC Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempCrcFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">CRC Recovered (retry)</span>
+          <span class="metric-value telemetry-value"><span id="tempCrcRecoveredCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">All-0xFF Reads</span>
+          <span class="metric-value telemetry-value"><span id="tempAllFFCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Power-On 85°C Reads</span>
+          <span class="metric-value telemetry-value"><span id="tempPowerOn85CountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Out of Range Reads</span>
+          <span class="metric-value telemetry-value"><span id="tempOutOfRangeCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Request Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempRequestFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Connected Check Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempConnectedFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Resolution Auto-Fixes</span>
+          <span class="metric-value telemetry-value"><span id="tempResolutionFixCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Re-read Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempRereadFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Resolution Fix CRC Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempResolutionFixCrcFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Enumerate Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempEnumerateFailCountID">?</span></span>
+        </div>
+        <div style="margin-top:10px;">
+          <button onclick="resetTempTaskCounters()" class="btn-secondary">Reset Sensor Health Counters</button>
+        </div>
       </div>
 
     </div>
@@ -5833,6 +5742,10 @@
           </div>
 
         </div> <!-- closes .grid -->
+        <div style="margin-top: 16px; display: flex; gap: 10px;">
+          <button type="button" class="btn-secondary" onclick="handleResetAccelSession()">Reset Session Stats</button>
+          <button type="button" class="btn-danger" onclick="handleResetAccelLifetime()">Reset Lifetime Stats</button>
+        </div>
       </div> <!-- closes .settings-card -->
     </div> <!-- closes accel tab -->
 
@@ -6469,6 +6382,151 @@
       </div>
     </div>
 
+    <!-- Protection Events Live Data Sub-tab -->
+    <div id="livedata-protection" class="sub-tab-content">
+
+      <div class="settings-card">
+        <p style="font-size:13px;line-height:1.55;color:var(--text-muted);margin:0 0 16px 0;">
+          Counts of protection events since boot or last reset. All counters are rising-edge — each number represents how many times that protection mechanism activated, not how long it was active. Use the per-category reset buttons to establish a clean baseline after tuning changes or suspected transient conditions. FastOV events are normal during load transients; sustained accumulation at idle is not.
+        </p>
+
+        <!-- Voltage & Current Protection -->
+        <p class="card-group-title">Voltage &amp; Current Protection</p>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">FastOV Cap (live)
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Live per-tick ceiling on commanded current (A) from the fast overvoltage supervisor. Equals MaxTableValue when inactive.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="fastOvCurrentCapID">?</span> A</span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">FastOV Events (total)
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: any FastOV activation (soft predictive, hard predictive, or measured-voltage hysteresis). Slow growth during transients is normal. Fast growth at steady state suggests thresholds need tuning.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="fastOvClampCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">FastOV Soft Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: soft FastOV only (predictive soft zone). Normal early-warning action. Frequent events at stable RPM suggest V_SOFT is too tight or dv/dt is noisy.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="fastOvSoftCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">FastOV Hard Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: hard FastOV only (predictive hard zone or hysteresis clamp). Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="fastOvHardCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">iExcess Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: current excess supervisor trips. Fires when measured current exceeds setpoint + IExcessK for IExcessN consecutive ticks while in CV mode. Active in all charge stages, not just CV.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="iExcessCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">INA228 OV Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: INA228 hardware ALERT pin fired (bus voltage crossed VoltageHardwareLimit = BulkVoltage + 0.3V). Hardware cuts GPIO4 immediately before software runs. Should be zero under normal operation.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="inaOVCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Hard OC Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: hard overcurrent trip (MeasuredAmps exceeded HardOCTripAmps for HardOCDebounceMs). Field cut immediately. Should be zero.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="hardOCCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Voltage Spike Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: measured battery voltage exceeded BulkVoltage + spike margin. Field ramps down and cuts after settle. Occasional events during RPM transients are acceptable.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="voltSpikeCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Volt Disagree Critical Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: ADS1115 and INA228 voltage readings diverged beyond the critical threshold. Field cut. Indicates a sensor fault or wiring problem.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="voltDisagreeCritCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Volt Disagree Warning Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: ADS1115 and INA228 voltage readings diverged into the warning zone (less than critical). Field ramps down but may recover if disagreement clears.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="voltDisagreeWarnCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Volt Implausible Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: voltage sensor reading flagged as implausible (out of expected range). Indicates hardware or calibration fault.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="voltImplausibleCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Current Sensor Stale Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: alternator current sensor (ADS1115 CH1) stopped updating. Field cut after 10s without fresh data. Check clamp sensor wiring and ADS1115 connection.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="currentStaleCountID">?</span></span>
+        </div>
+        <div style="margin-top:10px;">
+          <button onclick="resetVoltageProtectionCounters()" class="btn-secondary">Reset Voltage &amp; Current Counters</button>
+        </div>
+
+        <hr style="margin:18px 0;" />
+
+        <!-- Thermal Protection -->
+        <p class="card-group-title">Thermal Protection Events</p>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Temp Critical Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: alternator temperature exceeded the critical threshold (TempLimit + critical excess). Field cut immediately. Should be rare.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="tempCritCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Temp Sustained Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: alternator temperature remained in the warning zone long enough to trigger a sustained overtemp shutdown. Less severe than critical but indicates prolonged thermal stress.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="tempSustainedCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Temp Stale Events
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Rising-edge count: temperature sensor data went stale (DS18B20 stopped updating). Field cut as a precaution. Investigate sensor wiring if this is nonzero.</span>
+            </span>
+          </span>
+          <span class="metric-value telemetry-value"><span id="tempStaleCountID">?</span></span>
+        </div>
+        <div style="margin-top:10px;">
+          <button onclick="resetThermalProtectionCounters()" class="btn-secondary">Reset Thermal Protection Counters</button>
+        </div>
+
+      </div>
+    </div>
+
     <!-- Other Live Data Sub-tab -->
     <div id="livedata-other" class="sub-tab-content">
       <div class="settings-card">
@@ -6531,8 +6589,8 @@
             </span>
           </div>
           <div class="form-input" style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button type="button" class="btn-primary" onclick="downloadLogs()">Download Logs</button>
-            <button type="button" class="btn-danger" onclick="resetLogs()">Reset Logs</button>
+            <button type="button" class="btn-secondary" onclick="downloadLogs()">Download Logs</button>
+            <button type="button" class="btn-secondary" onclick="resetLogs()">Reset Logs</button>
           </div>
         </div>
       </div>
@@ -6830,7 +6888,7 @@
             </span>
           </div>
           <div class="form-input">
-            <button onclick="handleDeleteAllData()" class="btn-primary">Delete All Data</button>
+            <button onclick="handleDeleteAllData()" class="btn-danger">Delete All Data</button>
           </div>
         </div>
       </div>
@@ -7497,7 +7555,7 @@
 
         <div class="form-row">
           <div class="form-input">
-            <button class="btn-primary" onclick="loadAvailableVersions()">
+            <button class="btn-secondary" onclick="loadAvailableVersions()">
               Refresh Available Versions
             </button>
           </div>

@@ -22,6 +22,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms);
 // Mode selection (pure functions)
 FieldControlMode selectFieldControlMode(const TickSnapshot &tick);
 FieldEventReason selectFieldEventReason(const TickSnapshot &tick);
+void updateProtectionCounters(FieldEventReason reason);
 // Sustained timer functions
 bool isTempSustainedWarning(uint32_t nowMs, float tempToUseF, float tempLimitF,
                             float tempWarnExcessF, bool ignoreTemperature);
@@ -616,6 +617,7 @@ void AdjustFieldLearnMode() {
   // ========== PRE-GATE IMMEDIATE CUT CHECK ==========
   // Runs before the CH1 gate so INA overvoltage always cuts regardless of sensor freshness.
   FieldEventReason preReason = selectFieldEventReason(tick);
+  updateProtectionCounters(preReason);
   if (shouldImmediatelyCutGPIO4(preReason) && !gpio4IsLow) {
     applyImmediateCut(tick, preReason);
     return;
@@ -1233,6 +1235,7 @@ void AdjustFieldLearnMode() {
                 preEventCvI = cv_I;         // rising edge — capture before any snap or bleed
                 cv_I_aw_cap = cv_I;         // cap the bumpless tracker ceiling to pre-event level — prevents current-limited rewind
                 postFastOvMismatch = true;  // iExcess collapses setpointLimited the same way fastOV does; block re-trigger during field TC wind-down
+                g_iExcessCount++;
               }
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
               fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
@@ -1973,6 +1976,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_INA_OVERVOLTAGE: return "INA228 hardware overvoltage";
     case REASON_HARD_OVERCURRENT: return "HARD_OVERCURRENT";
     case REASON_RPM_TOO_LOW: return "RPM_TOO_LOW";
+    case REASON_CURRENT_STALE: return "CURRENT_STALE";
 
     default: return "UNKNOWN";
   }
@@ -2064,6 +2068,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
 
   // Priority 4: Critical (auto mode only)
   if (tick.tempDataVeryStale && !tick.ignoreTemperature) return REASON_TEMP_STALE;
+  if (tick.currentDataStale) return REASON_CURRENT_STALE;
   if (!tick.voltagePlausible) return REASON_VOLTAGE_IMPLAUSIBLE;
   if (tick.voltageDisagreementCritical) return REASON_VOLTAGE_DISAGREE_CRITICAL;
   if (!tick.ignoreTemperature && tick.tempToUseF > (tick.tempLimitF + tick.tempCritExcessF)) {
@@ -2087,6 +2092,28 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   if (tick.inLockout) return REASON_LOCKOUT_ACTIVE;
 
   return REASON_NONE;
+}
+
+// Tracks rising edges on reasons that map to protection counters.
+// Called once per loop tick after selectFieldEventReason().
+void updateProtectionCounters(FieldEventReason reason) {
+  static FieldEventReason prevReason = REASON_NONE;
+  if (reason != prevReason) {
+    switch (reason) {
+      case REASON_INA_OVERVOLTAGE:           g_inaOVCount++;             break;
+      case REASON_HARD_OVERCURRENT:          g_hardOCCount++;            break;
+      case REASON_VOLTAGE_SPIKE:             g_voltSpikeCount++;         break;
+      case REASON_VOLTAGE_DISAGREE_CRITICAL: g_voltDisagreeCritCount++;  break;
+      case REASON_VOLTAGE_DISAGREE_WARNING:  g_voltDisagreeWarnCount++;  break;
+      case REASON_VOLTAGE_IMPLAUSIBLE:       g_voltImplausibleCount++;   break;
+      case REASON_TEMP_CRITICAL:             g_tempCritCount++;          break;
+      case REASON_TEMP_SUSTAINED:            g_tempSustainedCount++;     break;
+      case REASON_TEMP_STALE:                g_tempStaleCount++;         break;
+      case REASON_CURRENT_STALE:             g_currentStaleCount++;      break;
+      default: break;
+    }
+    prevReason = reason;
+  }
 }
 
 void reportFieldModeEvent(uint32_t nowMs, FieldControlMode mode, FieldEventReason reason,
@@ -2217,6 +2244,7 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
     case REASON_VOLTAGE_IMPLAUSIBLE:
     case REASON_VOLTAGE_DISAGREE_CRITICAL:
     case REASON_TEMP_STALE:
+    case REASON_CURRENT_STALE:
     case REASON_HARD_OVERCURRENT:
     case REASON_RPM_TOO_LOW:
       return true;
@@ -2334,6 +2362,17 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   }
 
   tick.tempDataVeryStale = tempDataVeryStale;
+
+  // Current sensor staleness — same freshness system as temperature
+  {
+    bool curStale = false;
+    if (dataTimestamps[IDX_MEASURED_AMPS] == 0) {
+      if (tick.nowMs > 30000) curStale = true;
+    } else {
+      curStale = (tick.nowMs - dataTimestamps[IDX_MEASURED_AMPS]) > 10000;
+    }
+    tick.currentDataStale = curStale;
+  }
 
   // Voltage validation
   tick.voltagePlausible = isVoltageSensorPlausible();
@@ -2819,8 +2858,8 @@ void tempPID_init() {
   // Don't enable AUTO yet — wait for first valid temp reading in tempPID_tick()
   tempPID.SetMode(MANUAL);
 
-  Serial.printf("TempPID: Init | Kp=%.2f Ki=%.3f Kd=%.2f Margin=%.1f°F Interval=%lums\n",
-                TempPIDKp, TempPIDKi, TempPIDKd, TempPIDMarginF, (unsigned long)TempPIDIntervalMs);
+  Serial.printf("TempPID: Init | Kp=%.2f Ki=%.3f Lookahead=%.1fs Interval=%lums\n",
+                TempPIDKp, TempPIDKi, ThermalLookaheadSec, (unsigned long)TempPIDIntervalMs);
 }
 void tempPID_tick(uint32_t nowMs, float actualDtSec) {
 
@@ -2833,10 +2872,12 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     tempPID.ResetIntegratorTo(0.0);
     tempPIDActive = false;
     tempFilterNeedsReseed = true;
-    edgePrevRaw = NAN;
-    edgePrevMs = 0;
-    edgeLastReadMs = 0;
-    outerTermDExternal = 0.0f;
+    memset(thermalSlopeBuffer, 0, sizeof(thermalSlopeBuffer));
+    thermalSlopeBufIdx = 0;
+    thermalSlopeBufFull = false;
+    thermalSlopeLastPushMs = 0;
+    thermalSlopeFPerSec = 0.0f;
+    projectedTempF = NAN;
     queueConsoleMessage("ThermalPID: manual reset requested - integrator and filter cleared");
     return;
   }
@@ -2873,7 +2914,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   const float penaltyMax = (float)MaxTableValue;
 
   const bool inPureBulk = (inBulkStage && !inAbsorptionStage);
-  const float penaltyMin = 0.0f;  //Cold boost is gone as a concept now. You're already commanding I_cap at thermal neutral — there's nowhere to boost to. Penalty only derates downward from there. The inPureBulk distinction for penaltyMin is now meaningless.
+  const float penaltyMin = 0.0f;  //Cold boost is gone as a concept now.
 
   // ---------------------------------------------------------------------------
   //  Temperature sanity guard — only stops PID on invalid value (NaN / out of range).
@@ -2899,8 +2940,45 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     tempFiltered = TempToUse;
     tempFilterNeedsReseed = false;
   } else {
-    float alpha = (TempSource == 0) ? TempPIDFilterAlpha : ThermistorFilterAlpha;
+    float alpha = (TempSource == 0) ? TempPIDFilterAlpha : 0.02f;  // thermistor alpha hardcoded — not user-configurable
     tempFiltered = alpha * TempToUse + (1.0f - alpha) * tempFiltered;
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Slope estimator: long-window backward difference.
+  //  Runs at TempPIDIntervalMs cadence (same as Compute). Buffer holds
+  //  THERMAL_SLOPE_BUF readings; window = (THERMAL_SLOPE_BUF - 1) × 5s = 60s.
+  //  Slope only valid once buffer is full. Hard clamp catches sensor garbage.
+  // ---------------------------------------------------------------------------
+  if ((uint32_t)(nowMs - thermalSlopeLastPushMs) >= TempPIDIntervalMs) {
+    thermalSlopeLastPushMs = nowMs;
+    float tempSample = (TempSource == 0) ? TempToUse : tempFiltered;
+    thermalSlopeBuffer[thermalSlopeBufIdx] = tempSample;
+    thermalSlopeBufIdx = (thermalSlopeBufIdx + 1) % THERMAL_SLOPE_BUF;
+    if (thermalSlopeBufIdx == 0) thermalSlopeBufFull = true;
+
+    if (thermalSlopeBufFull) {
+      float oldest = thermalSlopeBuffer[thermalSlopeBufIdx];
+      const float windowSec = (float)(THERMAL_SLOPE_BUF - 1) * (TempPIDIntervalMs / 1000.0f);
+      float rawSlope = (tempSample - oldest) / windowSec;
+      const float SLOPE_CLAMP = 0.5f;  // °F/sec — beyond this is sensor noise or fault
+      if (fabsf(rawSlope) > SLOPE_CLAMP) {
+        rawSlope = clamp_f(rawSlope, -SLOPE_CLAMP, SLOPE_CLAMP);
+        static uint32_t slopeClampLastLogMs = 0;
+        if ((uint32_t)(nowMs - slopeClampLastLogMs) >= 60000) {
+          slopeClampLastLogMs = nowMs;
+          queueConsoleMessageF("TempPID: slope clamped to %.3f °F/s — check sensor", rawSlope);
+        }
+      }
+      thermalSlopeFPerSec = rawSlope;
+    } else {
+      thermalSlopeFPerSec = 0.0f;  // buffer not yet full — no prediction yet
+    }
+  }
+  // Update projected temperature every call so PID input is always fresh.
+  {
+    float tempNow = (TempSource == 0) ? TempToUse : tempFiltered;
+    projectedTempF = isnan(tempNow) ? tempFiltered : (tempNow + thermalSlopeFPerSec * ThermalLookaheadSec);
   }
 
   // ---------------------------------------------------------------------------
@@ -2921,9 +2999,25 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // ---------------------------------------------------------------------------
   if (!tempPIDActive) {
     tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);
-    tempPID.SetTunings((double)TempPIDKp, (double)TempPIDKi, (double)TempPIDKd);
-    tempPIDInput_d = (double)tempFiltered;
-    tempPIDSetpoint_d = (double)(TemperatureLimitF - TempPIDMarginF);
+
+    // Clear slope buffer first — old trend data is stale after a gap, and a stale
+    // slope would inflate projectedTempF used for the bumpless seed below.
+    memset(thermalSlopeBuffer, 0, sizeof(thermalSlopeBuffer));
+    thermalSlopeBufIdx = 0;
+    thermalSlopeBufFull = false;
+    thermalSlopeLastPushMs = 0;
+    thermalSlopeFPerSec = 0.0f;
+    // Recompute projectedTempF without stale slope — this is what the seed actually sees.
+    {
+      float tempNow = (TempSource == 0) ? TempToUse : tempFiltered;
+      projectedTempF = isnan(tempNow) ? tempFiltered : tempNow;
+    }
+
+    // Warmup setpoint: buffer just cleared so slope = 0 for 60s. Apply fallback margin
+    // so the PID reacts before temp reaches the hard limit during the unprotected window.
+    const float reEnableSetpoint = TemperatureLimitF - 20.0f;
+
+    tempPIDInput_d = (double)projectedTempF;
     thermalPenaltyAmps_d = (double)thermalPenaltyLastValid;
     tempPID.SetMode(AUTOMATIC);
 
@@ -2932,7 +3026,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     // if temp was high then but has since recovered, seeding at the old value
     // overpunishes and takes many minutes to wind down via integrator alone.
     float stalePenalty = thermalPenaltyLastValid;
-    float e_resume = tempFiltered - (TemperatureLimitF - TempPIDMarginF);
+    float e_resume = projectedTempF - reEnableSetpoint;
     float resumePenalty = clamp_f(e_resume > 0.0f ? TempPIDKp * e_resume : 0.0f,
                                   penaltyMin, penaltyMax);
     tempPID.ResetIntegratorTo((double)resumePenalty);
@@ -2942,78 +3036,33 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalPenaltyLastValid = resumePenalty;
 
     tempPIDActive = true;
-    edgePrevRaw = (TempSource == 0) ? TempToUse : tempFiltered;
-    edgePrevMs = nowMs;
-    edgeLastReadMs = (TempSource == 0) ? (uint32_t)tempLastSuccessMillis : nowMs;
-    outerTermDExternal = 0.0f;
-    queueConsoleMessageF("TempPID: resumed | temp=%.1f°F setpoint=%.1f°F penalty=%.1fA (was %.1fA) stage=%s",
-                         tempFiltered, TemperatureLimitF - TempPIDMarginF, resumePenalty,
+    queueConsoleMessageF("TempPID: resumed | projTemp=%.1f°F setpoint=%.1f°F penalty=%.1fA (was %.1fA) stage=%s",
+                         projectedTempF, reEnableSetpoint, resumePenalty,
                          stalePenalty, inPureBulk ? "bulk" : "CV");
   }
 
   // ---------------------------------------------------------------------------
   //  Update setpoint and output limits every tick.
   //  Both use the same penaltyMin computed at function entry.
+  //  effectiveSetpoint applies a 20°F fallback margin during the 60s warmup
+  //  window (thermalSlopeBufFull == false) so the PID starts reacting before
+  //  projected temp reaches the hard limit. Once the buffer fills, margin = 0.
   // ---------------------------------------------------------------------------
-  tempPIDSetpoint_d = (double)(TemperatureLimitF - TempPIDMarginF);
-  tempPIDInput_d = (double)tempFiltered;
+  const float effectiveSetpoint = thermalSlopeBufFull ? TemperatureLimitF : (TemperatureLimitF - 20.0f);
+  tempPIDSetpoint_d = (double)effectiveSetpoint;
+  tempPIDInput_d = (double)projectedTempF;
 
-  tempPID.SetTunings((double)TempPIDKp, (double)TempPIDKi, (double)TempPIDKd);
+  tempPID.SetTunings((double)TempPIDKp, (double)TempPIDKi, 0.0);
   tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);
 
   bool pidComputed = tempPID.Compute();
 
   // ---------------------------------------------------------------------------
-  //  Post-compute: external D, slew limiter, final clamp.
+  //  Post-compute: slew limiter, final clamp.
   //  All use penaltyMin / penaltyMax — no re-derivation.
   // ---------------------------------------------------------------------------
   if (pidComputed) {
     thermalPenaltyAmps = (float)thermalPenaltyAmps_d;
-
-    // Decay outerTermDExternal every pidComputed tick unconditionally.
-    // For DS18B20: this means decay continues even when readings stop (sensor failure),
-    // preventing the D term from freezing at a stale high-penalty value.
-    // For thermistor: decay still fires each tick; the fresh delta computation below
-    // overwrites it immediately if there is a real step.
-    outerTermDExternal *= edgeDecayFactor;
-
-    if (TempSource == 0) {
-      // DS18B20: update D term only when a new reading arrives with a real step.
-      // No-change reads: decay above already handled, no explicit action needed.
-      uint32_t readMs = (uint32_t)tempLastSuccessMillis;
-      if (TempPIDKdExternal != 0.0f && readMs != 0 && readMs != edgeLastReadMs) {
-        float rawNow = TempToUse;
-        edgeLastReadMs = readMs;
-
-        if (!isnan(edgePrevRaw) && edgePrevMs != 0) {
-          float delta = rawNow - edgePrevRaw;
-          float dtSec = (readMs - edgePrevMs) / 1000.0f;
-          if (delta != 0.0f && dtSec > 0.1f) {
-            outerTermDExternal = TempPIDKdExternal * (delta / dtSec);
-          }
-          // No step: decay above already reduced outerTermDExternal this tick
-        }
-        edgePrevRaw = rawNow;
-        edgePrevMs = readMs;
-      }
-    } else {
-      // Thermistor: pidComputed-tick derivative, fires every PID interval (~5s).
-      // Operates on filtered signal to reject 16Hz electrical noise.
-      // Shares TempPIDKdExternal and edgeDecayFactor with DS18B20 path.
-      if (TempPIDKdExternal != 0.0f && !isnan(edgePrevRaw) && edgePrevMs != 0) {
-        float delta = tempFiltered - edgePrevRaw;
-        float dtSec = (nowMs - edgePrevMs) / 1000.0f;
-        if (delta != 0.0f && dtSec > 0.1f) {
-          outerTermDExternal = TempPIDKdExternal * (delta / dtSec);
-        }
-        // No step: decay above already reduced outerTermDExternal this tick
-      }
-      edgePrevRaw = tempFiltered;
-      edgePrevMs = nowMs;
-    }
-    // Apply outerTermDExternal
-    thermalPenaltyAmps += outerTermDExternal;
-    thermalPenaltyAmps = clamp_f(thermalPenaltyAmps, penaltyMin, penaltyMax);
 
     // Asymmetric slew limiter, then re-clamp with same bounds.
     thermalPenaltyAmps = slew_limit_f(prevThermalPenalty, thermalPenaltyAmps,
@@ -3247,8 +3296,8 @@ void thermalLog_tick(uint32_t nowMs) {
   ThermalLogEntry &e = thermalLog[thermalLogHead];
 
   e.ts = nowMs;
-  e.tempFiltered = thermalLogScale10((float)tempPIDInput_d);
-  e.tempSetpoint = thermalLogScale10((float)tempPIDSetpoint_d);
+  e.tempFiltered  = thermalLogScale10(tempFiltered);
+  e.tempProjected = thermalLogScale10(projectedTempF);
   e.nominalTarget = thermalLogScale10(getCapCurrentForRPM(RPM));
   e.rpmCap = thermalLogScale10(getCapCurrentForRPM(RPM));
   e.voltCap = thermalLogScale10(Icv);
@@ -3275,7 +3324,7 @@ void thermalLog_tick(uint32_t nowMs) {
   e.outerTermI = thermalLogScale10(outerTermI);
   e.outerTermD = thermalLogScale10(outerTermD);
   e.impliedPenalty = thermalLogScale10(outerImpliedPenalty);
-  e.outerTermDExternal = thermalLogScale10(outerTermDExternal);
+  e.thermalSlope = (int16_t)(thermalSlopeFPerSec * 1000.0f);
 
   thermalLogHead = (thermalLogHead + 1) % THERMAL_LOG_SIZE;
   if (thermalLogCount < THERMAL_LOG_SIZE) thermalLogCount++;

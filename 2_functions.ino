@@ -266,10 +266,8 @@ void TempTask(void *parameter) {
       if (sensors.getAddress(tempDeviceAddress, 0)) {
         sensors.setResolution(tempDeviceAddress, resolution);
         sensorEnumerated = true;
-        Serial.printf("TempTask: Sensor enumerated at %d-bit resolution\n", resolution);
       } else {
         tempEnumerateFailCount++;
-        Serial.printf("TempTask FAIL: sensor not found on bus  enumFail=%lu\n", (unsigned long)tempEnumerateFailCount);
         vTaskDelay(pdMS_TO_TICKS(5000));
         continue;
       }
@@ -298,7 +296,6 @@ void TempTask(void *parameter) {
 
     if (!sensors.isConnected(tempDeviceAddress)) {
       tempConnectedFailCount++;
-      Serial.printf("TempTask FAIL: isConnected false - will re-enumerate  connFail=%lu\n", (unsigned long)tempConnectedFailCount);
       lastValidTemp = -99;
       sensorEnumerated = false;
       goto cleanup;
@@ -306,7 +303,6 @@ void TempTask(void *parameter) {
 
     if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
       tempRequestFailCount++;
-      Serial.printf("TempTask FAIL: requestTemperatures NACK  reqFail=%lu\n", (unsigned long)tempRequestFailCount);
       goto cleanup;
     }
 
@@ -323,7 +319,6 @@ void TempTask(void *parameter) {
 
         if (millis() - convStart > convTimeout) {
           tempRequestFailCount++;
-          Serial.printf("TempTask FAIL: conversion timeout after %lums  reqFail=%lu\n", millis() - convStart, (unsigned long)tempRequestFailCount);
           goto cleanup;
         }
       }
@@ -335,26 +330,18 @@ void TempTask(void *parameter) {
       uint8_t crc = OneWire::crc8(scratchPad, 8);
       if (crc != scratchPad[8]) {
         tempCrcFailCount++;
-        Serial.printf("TempTask FAIL: CRC bad cfg=0x%02X crcFail=%lu  scratchpad=", (unsigned int)scratchPad[4], (unsigned long)tempCrcFailCount);
-        for (int i = 0; i < 9; i++) Serial.printf("%02X ", scratchPad[i]);
-        Serial.printf(" calc=%02X exp=%02X\n", crc, scratchPad[8]);
 
         // Immediate single retry
         vTaskDelay(pdMS_TO_TICKS(2));
         if (sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
           uint8_t crc2 = OneWire::crc8(scratchPad, 8);
           if (crc2 != scratchPad[8]) {
-            Serial.printf("TempTask FAIL: CRC bad on retry crcFail=%lu  scratchpad=", (unsigned long)tempCrcFailCount);
-            for (int i = 0; i < 9; i++) Serial.printf("%02X ", scratchPad[i]);
-            Serial.printf(" calc=%02X exp=%02X\n", crc2, scratchPad[8]);
             goto cleanup;
           } else {
             tempCrcRecoveredCount++;
-            Serial.printf("TempTask: CRC recovered on retry  crcRec=%lu\n", (unsigned long)tempCrcRecoveredCount);
           }
         } else {
           tempReadFailCount++;
-          Serial.printf("TempTask FAIL: readScratchPad failed on retry  readFail=%lu\n", (unsigned long)tempReadFailCount);
           goto cleanup;
         }
       }
@@ -369,7 +356,6 @@ void TempTask(void *parameter) {
       }
       if (allFF) {
         tempAllFFCount++;
-        Serial.printf("TempTask FAIL: all-0xFF - will re-enumerate  allFF=%lu\n", (unsigned long)tempAllFFCount);
         lastValidTemp = -99;
         sensorEnumerated = false;
         goto cleanup;
@@ -382,18 +368,15 @@ void TempTask(void *parameter) {
       // CHECK 3: Power-on signature (0x0550 = 85°C = 185°F)
       if (raw == 0x0550) {
         tempPowerOn85Count++;
-        Serial.printf("TempTask FAIL: power-on 85C value detected  85C=%lu\n", (unsigned long)tempPowerOn85Count);
         goto cleanup;
       }
 
       // CHECK 4: Verify resolution; auto-correct if EEPROM or reset changed it
       if (scratchPad[4] != DS18B20_CFG_BYTE) {
         tempResolutionFixCount++;
-        Serial.printf("TempTask: Resolution mismatch (cfg=0x%02X expected=0x%02X) forcing %d-bit  resFix=%lu\n", (unsigned int)scratchPad[4], DS18B20_CFG_BYTE, resolution, (unsigned long)tempResolutionFixCount);
         sensors.setResolution(tempDeviceAddress, resolution);
         if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
           tempRequestFailCount++;
-          Serial.printf("TempTask FAIL: re-request after resolution fix failed  reqFail=%lu\n", (unsigned long)tempRequestFailCount);
           goto cleanup;
         }
 
@@ -409,7 +392,6 @@ void TempTask(void *parameter) {
 
             if (millis() - convStart2 > convTimeout2) {
               tempRequestFailCount++;
-              Serial.printf("TempTask FAIL: conversion timeout after res fix %lums  reqFail=%lu\n", millis() - convStart2, (unsigned long)tempRequestFailCount);
               goto cleanup;
             }
           }
@@ -417,12 +399,10 @@ void TempTask(void *parameter) {
 
         if (!sensors.readScratchPad(tempDeviceAddress, scratchPad)) {
           tempRereadFailCount++;
-          Serial.printf("TempTask FAIL: re-read after resolution fix failed  rereadFail=%lu\n", (unsigned long)tempRereadFailCount);
           goto cleanup;
         }
         if (OneWire::crc8(scratchPad, 8) != scratchPad[8]) {
           tempResolutionFixCrcFailCount++;
-          Serial.printf("TempTask FAIL: CRC fail after resolution fix  resFixCrcFail=%lu\n", (unsigned long)tempResolutionFixCrcFailCount);
           goto cleanup;
         }
         // Recalculate from corrected scratchpad
@@ -454,11 +434,9 @@ void TempTask(void *parameter) {
         }
       } else {
         tempOutOfRangeCount++;
-        Serial.printf("TempTask FAIL: out of range %.1fF  oor=%lu\n", tempF, (unsigned long)tempOutOfRangeCount);
       }
     } else {
       tempReadFailCount++;
-      Serial.printf("TempTask FAIL: readScratchPad failed  readFail=%lu\n", (unsigned long)tempReadFailCount);
     }
 
 cleanup:
@@ -466,6 +444,22 @@ cleanup:
     core0Busy = false;
     lastTempRead = millis();
     lastTempTaskHeartbeat = millis();
+
+    // Alert on persistent sensor failure — 5 consecutive non-success reads
+    {
+      static uint8_t tempConsecFail = 0;
+      static unsigned long lastTempFailAlert = 0;
+      if (thisReadSucceeded) {
+        tempConsecFail = 0;
+      } else {
+        tempConsecFail++;
+        if (tempConsecFail >= 5 && (millis() - lastTempFailAlert > 60000)) {
+          queueConsoleMessage("DS18B20 WARNING: 5+ consecutive read failures — check sensor connection");
+          lastTempFailAlert = millis();
+          tempConsecFail = 0;
+        }
+      }
+    }
 
     if (writeMaxTemp) {
       MaxAlternatorTemperatureF = pendingMaxTemp;

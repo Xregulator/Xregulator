@@ -157,6 +157,17 @@ const CSV1_FIELDS = [
     "ch1_n_at",                   // 66
     "BatteryV_filtered",          // 67
     "MeasuredAmps_filtered",      // 68
+    "iExcessCount",               // 69
+    "inaOVCount",                 // 70
+    "hardOCCount",                // 71
+    "voltSpikeCount",             // 72
+    "voltDisagreeCritCount",      // 73
+    "voltDisagreeWarnCount",      // 74
+    "voltImplausibleCount",       // 75
+    "tempCritCount",              // 76
+    "tempSustainedCount",         // 77
+    "tempStaleCount",             // 78
+    "currentStaleCount",          // 79
 ];
 const CSV2_FIELDS = [
     "IBVMax",                           // 0
@@ -373,7 +384,7 @@ const CSV2_FIELDS = [
     "outerTermP",                       // 211
     "outerTermI",                       // 212
     "outerTermD",                       // 213
-    "outerTermDExternal",               // 214
+    "thermalSlopeFPerSec",              // 214
     "AbsorptionVoltage",                // 215
     "AbsorptionTimeoutMs",              // 216
     "bulkVoltageHoldMs",                // 217
@@ -408,6 +419,18 @@ const CSV2_FIELDS = [
     "fsWriteQueueDrops",                // 246
     "TempAlarmLow",                     // 247
     "cv_D",                             // 248
+    "tempReadFailCount",                // 249
+    "tempCrcFailCount",                 // 250
+    "tempCrcRecoveredCount",            // 251
+    "tempAllFFCount",                   // 252
+    "tempPowerOn85Count",               // 253
+    "tempOutOfRangeCount",              // 254
+    "tempRequestFailCount",             // 255
+    "tempConnectedFailCount",           // 256
+    "tempResolutionFixCount",           // 257
+    "tempRereadFailCount",              // 258
+    "tempResolutionFixCrcFailCount",    // 259
+    "tempEnumerateFailCount",           // 260
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -615,19 +638,19 @@ const CSV3_FIELDS = [
     "learningUpCount9",                // 202
     "TempPIDKp",                       // 203
     "TempPIDKi",                       // 204
-    "TempPIDKd",                       // 205
-    "TempPIDMarginF",                  // 206
+    "UNUSED_205",                      // 205 (was TempPIDKd, removed)
+    "ThermalLookaheadSec",             // 206
     "TempPIDIntervalMs",               // 207
     "TempPIDFilterAlpha",              // 208
     "_unused_209",                     // 209 (was TempPIDStaleMs, removed)
-    "TempPIDAntiWindupMarginA",        // 210
+    "_unused_210",                     // 210 (was TempPIDAntiWindupMarginA, removed)
     "FreeInternalRam",                 // 211
     "TotalInternalRam",                // 212
     "LargestInternalBlock",            // 213
     "FreePSRAM",                       // 214
     "TotalPSRAM",                      // 215
     "Heapfrag",                        // 216
-    "TempPIDKdExternal",               // 217
+    "UNUSED_217",                      // 217 (was TempPIDKdExternal, removed)
     "VoltageKi",                       // 218
     "rpmCapPowerTable0",               // 219
     "rpmCapPowerTable1",               // 220
@@ -670,7 +693,7 @@ const CSV3_FIELDS = [
     "IExcessKBleed",            // 257
     "IgnoreRPM",                // 258
     "MinRPMForField",           // 259
-    "ThermalTimeConstantSec",   // 260
+    "UNUSED_260",               // 260 (was ThermalTimeConstantSec, removed)
     "AwBleedRate",              // 261
     "AwRecoverRate",            // 262
     "KSoft",                    // 263
@@ -678,7 +701,7 @@ const CSV3_FIELDS = [
     "IExcessReseedFrac",        // 265
     "AwSeedProtectMs",          // 266
     "VoltageKd",                // 267
-    "ThermistorFilterAlpha",    // 268
+    "UNUSED_268",               // 268 (was ThermistorFilterAlpha, removed)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2586,13 +2609,9 @@ function updateAllEchosOptimized(data) {
         { key: 'SOC_AllowRebulk_percent', id: 'SOC_AllowRebulk_percent_echo', transform: v => v.toFixed(1) },
         { key: 'TempPIDKp', id: 'TempPIDKp_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKi', id: 'TempPIDKi_echo', transform: v => (v / 1000).toFixed(3) },
-        { key: 'TempPIDKd', id: 'TempPIDKd_echo', transform: v => (v / 1000).toFixed(3) },
-        { key: 'TempPIDMarginF', id: 'TempPIDMarginF_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'ThermalLookaheadSec', id: 'ThermalLookaheadSec_echo', transform: v => v },
         { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
-        { key: 'ThermistorFilterAlpha', id: 'ThermistorFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
-        { key: 'TempPIDKdExternal', id: 'TempPIDKdExternal_echo', transform: v => (v / 1000).toFixed(3) },
-        { key: 'ThermalTimeConstantSec', id: 'ThermalTimeConstantSec_echo', transform: v => v },
         { key: 'AwBleedRate',       id: 'AwBleedRate_echo',       transform: v => (v / 10).toFixed(1) },
         { key: 'AwRecoverRate',     id: 'AwRecoverRate_echo',     transform: v => (v / 10).toFixed(2) },
         { key: 'KSoft',             id: 'KSoft_echo',             transform: v => (v / 10).toFixed(1) },
@@ -3035,10 +3054,9 @@ function handleProfileUpdate(event) {
             }, 8000);
         })
         .then(response => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.json();
+            return response.json().then(data => ({ httpStatus: response.status, data }));
         })
-        .then(data => {
+        .then(({ httpStatus, data }) => {
             if (data.success) {
                 messageDiv.style.backgroundColor = '#e8f5e9';
                 messageDiv.style.color = '#2e7d32';
@@ -3047,7 +3065,7 @@ function handleProfileUpdate(event) {
             } else {
                 messageDiv.style.backgroundColor = '#ffebee';
                 messageDiv.style.color = '#c62828';
-                messageDiv.textContent = 'Error: ' + (data.error || 'Save failed');
+                messageDiv.textContent = 'Error: ' + (data.error || `HTTP ${httpStatus}`);
             }
         })
         .catch(err => {
@@ -3120,10 +3138,24 @@ function resetVoltageLoop() {
         .catch(err => console.warn('Reset error:', err));
 }
 
-function resetFastOvCounters() {
-    if (!confirm('Reset FastOV event counters? Soft, hard, and total counts will be cleared.')) return;
-    fetch('/resetFastOvCounters', { method: 'POST' })
-        .then(r => r.ok ? console.log('FastOV counters reset') : console.warn('Reset failed'))
+function resetVoltageProtectionCounters() {
+    if (!confirm('Reset all voltage & current protection counters? FastOV, iExcess, INA OV, hard OC, spike, and disagree counts will be cleared.')) return;
+    fetch('/resetVoltageProtectionCounters', { method: 'POST' })
+        .then(r => r.ok ? console.log('Voltage protection counters reset') : console.warn('Reset failed'))
+        .catch(err => console.warn('Reset error:', err));
+}
+
+function resetThermalProtectionCounters() {
+    if (!confirm('Reset thermal protection event counters? Temp critical, sustained, and stale counts will be cleared.')) return;
+    fetch('/resetThermalProtectionCounters', { method: 'POST' })
+        .then(r => r.ok ? console.log('Thermal protection counters reset') : console.warn('Reset failed'))
+        .catch(err => console.warn('Reset error:', err));
+}
+
+function resetTempTaskCounters() {
+    if (!confirm('Reset DS18B20 sensor health counters? All read/CRC/fail counts will be cleared.')) return;
+    fetch('/resetTempTaskCounters', { method: 'POST' })
+        .then(r => r.ok ? console.log('TempTask counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
@@ -3892,17 +3924,21 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
     }
 
     const isStale = ageMs > staleThreshold;
+    const isDark = document.body.classList.contains('dark-mode');
 
-    // Only update DOM if stale state changed
-    if (element._lastStaleState === isStale) {
+    // Cache key includes dark mode so toggling dark mode forces re-apply
+    const cacheKey = isStale ? (isDark ? 'stale-dark' : 'stale-light') : 'fresh';
+    if (element._lastStaleState === cacheKey) {
         return; // No change needed
     }
 
-    element._lastStaleState = isStale;
+    element._lastStaleState = cacheKey;
 
     if (isStale) {
+        // Light mode: fade toward light gray (harder to see on white bg)
+        // Dark mode: fade toward dark gray (harder to see on dark bg)
         element.style.opacity = "0.5";
-        element.style.color = "#999999";
+        element.style.color = isDark ? "#444444" : "#999999";
         element.style.fontStyle = "italic";
         element.title = `Data is ${Math.round(ageMs / 1000)} seconds old`;
     } else {
@@ -4749,7 +4785,9 @@ window.addEventListener("load", function () {
 
     // Add event listeners to source after initialization
     if (source) {
-        // Console event listener (in your source event listeners section)
+        // Console event listener
+        // Timestamp = time received by app (not time sent by regulator).
+        // Messages throttled by firmware: max 5 per 700ms (adjustable).
         source.addEventListener("console", function (event) {
             if (consolePaused) return; // Don't add messages while paused
 
@@ -4760,7 +4798,9 @@ window.addEventListener("load", function () {
             const line = document.createElement("div");
             line.textContent = `[${timestamp}] ${event.data}`;
             consoleDiv.appendChild(line);
-            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+
+            // Defer scroll to avoid forced synchronous reflow on every message
+            requestAnimationFrame(() => { consoleDiv.scrollTop = consoleDiv.scrollHeight; });
 
             while (consoleDiv.children.length > 100) {
                 consoleDiv.removeChild(consoleDiv.firstChild);
@@ -4980,6 +5020,17 @@ window.addEventListener("load", function () {
                 ["fastOvClampCountID", "fastOvClampCount"],
                 ["fastOvSoftCountID", "fastOvSoftCount"],
                 ["fastOvHardCountID", "fastOvHardCount"],
+                ["iExcessCountID", "iExcessCount"],
+                ["inaOVCountID", "inaOVCount"],
+                ["hardOCCountID", "hardOCCount"],
+                ["voltSpikeCountID", "voltSpikeCount"],
+                ["voltDisagreeCritCountID", "voltDisagreeCritCount"],
+                ["voltDisagreeWarnCountID", "voltDisagreeWarnCount"],
+                ["voltImplausibleCountID", "voltImplausibleCount"],
+                ["tempCritCountID", "tempCritCount"],
+                ["tempSustainedCountID", "tempSustainedCount"],
+                ["tempStaleCountID", "tempStaleCount"],
+                ["currentStaleCountID", "currentStaleCount"],
                 ["ch1_last_ms_ID", "ch1_last_ms"],
                 ["ch1_avg_10s_ID", "ch1_avg_10s"],
                 ["ch1_worst_10s_ID", "ch1_worst_10s"],
@@ -5210,8 +5261,11 @@ window.addEventListener("load", function () {
                         const seconds = Math.floor(totalSeconds % 60);
                         newTextContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
                     }
-                    else if (["innerTermP", "innerTermI", "innerTermD", "outerTermP", "outerTermI", "outerTermD", "outerTermDExternal"].includes(key)) {
+                    else if (["innerTermP", "innerTermI", "innerTermD", "outerTermP", "outerTermI", "outerTermD"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
+                    }
+                    else if (key === "thermalSlopeFPerSec") {
+                        newTextContent = (value / 1000).toFixed(3);
                     }
                     // Session duration in minutes
                     else if (["LastSessionDuration"].includes(key)) {
@@ -5483,6 +5537,18 @@ window.addEventListener("load", function () {
                 ["ft_rai_bmp_state_ses_ID", "ft_rai_bmp_state_ses"],
                 ["ft_rai_imu_win_ID", "ft_rai_imu_win"],
                 ["ft_rai_imu_ses_ID", "ft_rai_imu_ses"],
+                ["tempReadFailCountID", "tempReadFailCount"],
+                ["tempCrcFailCountID", "tempCrcFailCount"],
+                ["tempCrcRecoveredCountID", "tempCrcRecoveredCount"],
+                ["tempAllFFCountID", "tempAllFFCount"],
+                ["tempPowerOn85CountID", "tempPowerOn85Count"],
+                ["tempOutOfRangeCountID", "tempOutOfRangeCount"],
+                ["tempRequestFailCountID", "tempRequestFailCount"],
+                ["tempConnectedFailCountID", "tempConnectedFailCount"],
+                ["tempResolutionFixCountID", "tempResolutionFixCount"],
+                ["tempRereadFailCountID", "tempRereadFailCount"],
+                ["tempResolutionFixCrcFailCountID", "tempResolutionFixCrcFailCount"],
+                ["tempEnumerateFailCountID", "tempEnumerateFailCount"],
 
             ];
 
@@ -5495,11 +5561,13 @@ window.addEventListener("load", function () {
                 ["outerTermP_display", "outerTermP"],
                 ["outerTermI_display", "outerTermI"],
                 ["outerTermD_display", "outerTermD"],
-                ["outerTermDExternal_display", "outerTermDExternal"]
+                ["thermalSlopeFPerSec_display", "thermalSlopeFPerSec"]
             ]) {
                 const raw = data[key];
                 if (raw === undefined) continue;
-                const newText = (-raw / 100).toFixed(2);
+                const newText = key === "thermalSlopeFPerSec"
+                    ? (raw / 1000).toFixed(3)
+                    : (-raw / 100).toFixed(2);
                 const cacheKey = `${id}_${key}`;
                 if (lastValues.get(cacheKey) !== newText) {
                     lastValues.set(cacheKey, newText);
@@ -6158,6 +6226,38 @@ function handleResetPerfCounters() {
         .catch(err => diagError('Reset peaks failed:', err));
 }
 
+function handleResetAccelSession() {
+    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
+    const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelSession: '1' });
+    fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
+        .then(() => {
+            const ids = [
+                'imu_total_samples_accel_ID', 'imu_total_samples_gyro_ID',
+                'imu_accel_dropped_ID', 'imu_gyro_dropped_ID',
+                'imu_fifo_overrun_count_ID', 'imu_i2c_error_count_ID', 'imu_unknown_tag_count_ID',
+                'imu_slam_count_ID'
+            ];
+            ids.forEach(id => { const el = document.getElementById(id); if (el) el.textContent = '0'; });
+        })
+        .catch(err => diagError('Reset accel session failed:', err));
+}
+
+function handleResetAccelLifetime() {
+    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
+    if (!confirm("Reset ALL lifetime accel stats? This clears max heel/pitch, slam records, capsize and pitchpole counts from NVS. Cannot be undone.")) return;
+    const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelLifetime: '1' });
+    fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
+        .then(() => {
+            const ids = [
+                'imu_heel_max_lifetime_ID', 'imu_pitch_max_lifetime_ID',
+                'imu_slam_peak_lifetime_ID', 'imu_slam_count_lifetime_ID',
+                'imu_capsize_count_ID', 'imu_pitchpole_count_ID'
+            ];
+            ids.forEach(id => { const el = document.getElementById(id); if (el) el.textContent = '0'; });
+        })
+        .catch(err => diagError('Reset accel lifetime failed:', err));
+}
+
 function handleClearToken() {
     const confirmation = confirm(
         "🔴 CLEAR AUTH TOKEN 🔴\n\n" +
@@ -6744,11 +6844,27 @@ function drawGlyphs() {
     const svg = document.getElementById('glyphOverlay');
     if (!wrap || !svg) return;
 
+    // Read ALL rects before any DOM write to avoid repeated forced reflows.
+    // getBoundingClientRect after innerHTML='' forces a synchronous layout on
+    // every call because the DOM is dirty — reading first keeps it one reflow.
     const br = wrap.getBoundingClientRect();
+    const glyphTeal = getComputedStyle(document.documentElement).getPropertyValue('--glyph-teal');
+    const glyphBlack = getComputedStyle(document.documentElement).getPropertyValue('--glyph-black');
 
+    const buckets = [];
+    for (let i = 0; i < 9; i++) {
+        const aEl = document.getElementById('rpmTableRPMPoints' + i + '_input');
+        const bEl = document.getElementById('rpmTableRPMPoints' + (i + 1) + '_input');
+        const ohEl = document.getElementById('overheatCount' + i + '_display');
+        if (!aEl || !bEl) { buckets.push(null); continue; }
+        const ra = aEl.getBoundingClientRect();
+        const rb = bEl.getBoundingClientRect();
+        const roh = ohEl ? ohEl.getBoundingClientRect() : null;
+        buckets.push({ ra, rb, roh });
+    }
+
+    // DOM writes happen after all reads — single reflow above, zero below
     svg.setAttribute('viewBox', `0 0 ${br.width} ${br.height}`);
-
-    // Keep defs, clear everything else
     const defs = svg.querySelector('defs');
     svg.innerHTML = '';
     if (defs) svg.appendChild(defs);
@@ -6756,34 +6872,17 @@ function drawGlyphs() {
     const ypad = 8;
     const w = 14;
 
-    function rect(el) {
-        const r = el.getBoundingClientRect();
-        return {
-            l: r.left - br.left,
-            t: r.top - br.top,
-            b: r.bottom - br.top
-        };
-    }
-
-    // 10 RPM points => 9 buckets (0..8)
     for (let i = 0; i < 9; i++) {
-        const aEl = document.getElementById('rpmTableRPMPoints' + i + '_input');
-        const bEl = document.getElementById('rpmTableRPMPoints' + (i + 1) + '_input');
-        const ohEl = document.getElementById('overheatCount' + i + '_display');
-        if (!aEl || !bEl) continue;
+        const b = buckets[i];
+        if (!b) continue;
 
-        const A = rect(aEl), B = rect(bEl);
-        const y1 = A.t - ypad;
-        const y2 = B.b + ypad;
+        const y1 = (b.ra.top - br.top) - ypad;
+        const y2 = (b.rb.bottom - br.top) + ypad;
         const mid = (y1 + y2) / 2;
-
-        // Two x-tracks so glyphs never overlap
         const x = (i % 2 === 0) ? 0 : 12;
-
-        // Keep curvature stable; symmetric top/bottom
         const cy = Math.max(16, (y2 - y1) * 0.28);
+        const color = (i % 2 === 0) ? glyphTeal : glyphBlack;
 
-        // Draw the curved path
         const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
         const d = `M ${x + w} ${y1} Q ${x} ${y1 + cy} ${x + w} ${mid} Q ${x} ${y2 - cy} ${x + w} ${y2}`;
         p.setAttribute('d', d);
@@ -6791,27 +6890,20 @@ function drawGlyphs() {
         p.setAttribute('stroke-linecap', 'round');
         p.setAttribute('stroke-linejoin', 'round');
         p.setAttribute('stroke-width', '3.4');
-        p.setAttribute('stroke', (i % 2 === 0) ?
-            getComputedStyle(document.documentElement).getPropertyValue('--glyph-teal') :
-            getComputedStyle(document.documentElement).getPropertyValue('--glyph-black'));
+        p.setAttribute('stroke', color);
         svg.appendChild(p);
 
-        // Arrow from glyph centerpoint to start of Overheats number
-        if (ohEl) {
-            const ob = ohEl.getBoundingClientRect();
-            const tx = ob.left - br.left;
-            const ty = (ob.top + ob.bottom) / 2 - br.top;
+        if (b.roh) {
+            const tx = b.roh.left - br.left;
+            const ty = (b.roh.top + b.roh.bottom) / 2 - br.top;
 
             const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
             line.setAttribute('x1', x + w);
             line.setAttribute('y1', mid);
-            const endX = Math.max(tx - 10, (x + w) + 6);
-            line.setAttribute('x2', endX);
+            line.setAttribute('x2', Math.max(tx - 10, (x + w) + 6));
             line.setAttribute('y2', ty);
             line.setAttribute('stroke-width', '2.6');
-            line.setAttribute('stroke', (i % 2 === 0) ?
-                getComputedStyle(document.documentElement).getPropertyValue('--glyph-teal') :
-                getComputedStyle(document.documentElement).getPropertyValue('--glyph-black'));
+            line.setAttribute('stroke', color);
             line.setAttribute('marker-end', (i % 2 === 0) ? 'url(#arrowG)' : 'url(#arrowK)');
             svg.appendChild(line);
         }
@@ -8211,8 +8303,7 @@ function resetThermalZoom() {
 function drawThermalWatermark(u) {
     const lines = [
         `Kp: ${getEchoText('TempPIDKp_echo')}   Ki: ${getEchoText('TempPIDKi_echo')}`,
-        `Kd: ${getEchoText('TempPIDKd_echo')}   KdExt: ${getEchoText('TempPIDKdExternal_echo')}`,
-        `Margin: ${getEchoText('TempPIDMarginF_echo')}°F   Interval: ${getEchoText('TempPIDIntervalMs_echo')}ms`
+        `Lookahead: ${getEchoText('ThermalLookaheadSec_echo')}s   Interval: ${getEchoText('TempPIDIntervalMs_echo')}ms`
     ];
     const ctx = u.ctx;
     ctx.save();
@@ -8544,7 +8635,7 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
 
     if (thermalLogPlots[3]) {
         thermalLogPlots[3].setData(data);
-        thermalLogPlots[3].redraw();
+        // setData already triggers a full redraw; redundant redraw() removed
         return;
     }
 

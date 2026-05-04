@@ -147,11 +147,10 @@ with open(path) as f:
                     constants[k.strip()] = float(v.strip())
             break
 
-kp    = constants.get("kp",    float("nan"))
-ki    = constants.get("ki",    float("nan"))
-kd    = constants.get("kd",    float("nan"))
-kdext = constants.get("kdExt", float("nan"))
-const_label = f"Kp={kp}  Ki={ki}  Kd={kd}  KdExt={kdext}"
+kp       = constants.get("kp",       float("nan"))
+ki       = constants.get("ki",       float("nan"))
+lookahead = constants.get("lookahead", float("nan"))
+const_label = f"Kp={kp}  Ki={ki}  Lookahead={lookahead}s"
 print(f"Constants: {const_label}")
 
 # Load data rows
@@ -159,11 +158,11 @@ df = pd.read_csv(path, on_bad_lines="skip")
 df = df[df["ts_ms"] != "CONST"].copy()
 
 numeric_cols = [
-    "ts_ms", "tempFilt_F", "tempSP_F", "nominalTarget_A", "rpmCap_A",
+    "ts_ms", "tempFilt_F", "tempProj_F", "nominalTarget_A", "rpmCap_A",
     "voltCap_A", "uTarget_A", "spLimited_A", "pidErr_A", "pidOut_pct",
     "duty_pct", "RPM", "battV", "measAmps_A", "penaltyAmps_A", "flags",
     "chargeStageDisplay", "outerP", "outerI", "outerD", "impliedPenalty",
-    "antiWindupFired", "outerDExternal"
+    "antiWindupFired", "thermalSlope_F_sec"
 ]
 
 for col in numeric_cols:
@@ -307,8 +306,8 @@ ax1a = fig1.add_subplot(gs1[0])
 ax1b = ax1a.twinx()
 ax1s = fig1.add_subplot(gs1[1], sharex=ax1a)
 
-ax1a.plot(df["t_plot"], df["tempFilt_F"],    color="#c62828", lw=2.5, label="tempFilt_F")
-ax1a.plot(df["t_plot"], df["tempSP_F"],      color="#e91e63", lw=2.2, linestyle="--", label="tempSP_F")
+ax1a.plot(df["t_plot"], df["tempFilt_F"],  color="#c62828", lw=2.5, label="tempFilt_F (measured)")
+ax1a.plot(df["t_plot"], df["tempProj_F"], color="#e91e63", lw=2.2, linestyle="--", label="tempProj_F (PID input)")
 ax1b.plot(df["t_plot"], df["penaltyAmps_A"], color="#2e7d32", lw=2.2, label="penaltyAmps_A")
 
 ax1a.set_ylabel("Temperature (°F)", color="#c62828")
@@ -337,7 +336,7 @@ ax2.plot(df["t_plot"], df["outerP"],          color="#1565c0", lw=2.2, label="ou
 ax2.plot(df["t_plot"], df["outerI"],          color="#f9a825", lw=2.2, label="outerI")
 ax2.plot(df["t_plot"], df["outerD"],          color="#6a1b9a", lw=2.2, label="outerD")
 ax2.plot(df["t_plot"], df["impliedPenalty"],  color="#2e7d32", lw=2.5, label="impliedPenalty")
-ax2.plot(df["t_plot"], df["outerDExternal"],  color="#00838f", lw=2.0, linestyle=":", label="outerDExternal")
+ax2.plot(df["t_plot"], df["thermalSlope_F_sec"], color="#00838f", lw=2.0, linestyle=":", label="thermalSlope_F_sec")
 
 ax2.set_ylabel("PID Terms")
 ax2.grid(**GRID_KW)
