@@ -363,8 +363,9 @@ enum Csv2Index {
   CSV2_tempRereadFailCount,                // 258
   CSV2_tempResolutionFixCrcFailCount,      // 259
   CSV2_tempEnumerateFailCount,             // 260
+  CSV2_warmupCeiling,                      // 261
 
-  CSV2_FIELD_COUNT  // ← always last, = 261
+  CSV2_FIELD_COUNT  // ← always last, = 262
 };
 
 enum Csv3Index {
@@ -637,8 +638,10 @@ enum Csv3Index {
   CSV3_AwSeedProtectMs,               // 266
   CSV3_VoltageKd,                     // 267
   CSV3_UNUSED_268,                    // 268 (was ThermistorFilterAlpha, removed)
+  CSV3_displayTempUnit,               // 269
+  CSV3_WarmupRampRate,                // 270
 
-  CSV3_FIELD_COUNT  // = 269
+  CSV3_FIELD_COUNT  // = 271
 };
 
 
@@ -660,8 +663,19 @@ enum TsIndex {
   TS_DutyCycle,       // 14
   TS_FieldVolts,      // 15
   TS_FieldAmps,       // 16
+  TS_CogNMEA,         // 17
+  TS_SogNMEA,         // 18
+  TS_AppWindSpeed,    // 19
+  TS_AppWindAngle,    // 20
+  TS_TrueWindSpeed,   // 21
+  TS_TrueWindAngle,   // 22
+  TS_Leeway,          // 23
+  TS_VMG,             // 24
+  TS_BaroPressure,    // 25
+  TS_AmbientTemp,     // 26
+  TS_IMU,             // 27
 
-  TS_FIELD_COUNT  // = 17
+  TS_FIELD_COUNT  // = 28
 };
 
 
@@ -2634,6 +2648,12 @@ void setupServer() {
       writeFile(LittleFS, "/WindingTempOffset.txt", inputMessage.c_str());
       WindingTempOffset = inputMessage.toFloat();
     }
+    if (request->hasParam("displayTempUnit")) {
+      foundParameter = true;
+      inputMessage = request->getParam("displayTempUnit")->value();
+      writeFile(LittleFS, "/displayTempUnit.txt", inputMessage.c_str());
+      displayTempUnit = (uint8_t)inputMessage.toInt();
+    }
     if (request->hasParam("PulleyRatio")) {
       foundParameter = true;
       inputMessage = request->getParam("PulleyRatio")->value();
@@ -3254,6 +3274,13 @@ void setupServer() {
       writeFile(LittleFS, "/HardOCDebounceMs.txt", inputMessage.c_str());
       HardOCDebounceMs = (uint32_t)inputMessage.toInt();
       queueConsoleMessageF("Overcurrent trip debounce set to: %ums", HardOCDebounceMs);
+    }
+    if (request->hasParam("WarmupRampRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("WarmupRampRate")->value();
+      WarmupRampRate = max(0.0f, inputMessage.toFloat());
+      writeFile(LittleFS, "/WarmupRampRate.txt", String(WarmupRampRate, 2).c_str());
+      queueConsoleMessageF("Warmup ramp rate set to: %.2f A/s", WarmupRampRate);
     }
     if (request->hasParam("IExcessK")) {
       foundParameter = true;
@@ -4320,7 +4347,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4583,7 +4610,8 @@ void SendWifiData() {
                                SafeInt(tempResolutionFixCount),         // 257
                                SafeInt(tempRereadFailCount),            // 258
                                SafeInt(tempResolutionFixCrcFailCount),  // 259
-                               SafeInt(tempEnumerateFailCount)          // 260
+                               SafeInt(tempEnumerateFailCount),         // 260
+                               SafeInt(warmupCeiling)                   // 261
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -4615,7 +4643,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -4886,7 +4914,9 @@ void SendWifiData() {
                                SafeInt(IExcessReseedFrac, 100),                         // 265 — ×100, 2 decimal
                                (int)AwSeedProtectMs,                                    // 266
                                SafeInt(VoltageKd, 100),                                 // 267
-                               0                                                        // 268 (was ThermistorFilterAlpha, removed)
+                               0,                                                       // 268 (was ThermistorFilterAlpha, removed)
+                               SafeInt(displayTempUnit),                                // 269
+                               SafeInt(WarmupRampRate, 10)                              // 270 — ×10, 1 decimal
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
@@ -4912,25 +4942,36 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
                                        (unsigned long)TS_FIELD_COUNT,
-                                       (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),        // 0
-                                       (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),      // 1
-                                       (dataTimestamps[IDX_LONGITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LONGITUDE_NMEA]),    // 2
-                                       (dataTimestamps[IDX_SATELLITE_COUNT] == 0) ? 999999 : (now - dataTimestamps[IDX_SATELLITE_COUNT]),  // 3
-                                       (dataTimestamps[IDX_VICTRON_VOLTAGE] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_VOLTAGE]),  // 4
-                                       (dataTimestamps[IDX_VICTRON_CURRENT] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_CURRENT]),  // 5
-                                       (dataTimestamps[IDX_ALTERNATOR_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_ALTERNATOR_TEMP]),  // 6
-                                       (dataTimestamps[IDX_THERMISTOR_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_THERMISTOR_TEMP]),  // 7
-                                       (dataTimestamps[IDX_RPM] == 0) ? 999999 : (now - dataTimestamps[IDX_RPM]),                          // 8
-                                       (dataTimestamps[IDX_MEASURED_AMPS] == 0) ? 999999 : (now - dataTimestamps[IDX_MEASURED_AMPS]),      // 9
-                                       (dataTimestamps[IDX_BATTERY_V] == 0) ? 999999 : (now - dataTimestamps[IDX_BATTERY_V]),              // 10
-                                       (dataTimestamps[IDX_IBV] == 0) ? 999999 : (now - dataTimestamps[IDX_IBV]),                          // 11
-                                       (dataTimestamps[IDX_BCUR] == 0) ? 999999 : (now - dataTimestamps[IDX_BCUR]),                        // 12
-                                       (dataTimestamps[IDX_CHANNEL3V] == 0) ? 999999 : (now - dataTimestamps[IDX_CHANNEL3V]),              // 13
-                                       (dataTimestamps[IDX_DUTY_CYCLE] == 0) ? 999999 : (now - dataTimestamps[IDX_DUTY_CYCLE]),            // 14
-                                       (dataTimestamps[IDX_FIELD_VOLTS] == 0) ? 999999 : (now - dataTimestamps[IDX_FIELD_VOLTS]),          // 15
-                                       (dataTimestamps[IDX_FIELD_AMPS] == 0) ? 999999 : (now - dataTimestamps[IDX_FIELD_AMPS])             // 16
+                                       (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),              // 0
+                                       (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),            // 1
+                                       (dataTimestamps[IDX_LONGITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LONGITUDE_NMEA]),          // 2
+                                       (dataTimestamps[IDX_SATELLITE_COUNT] == 0) ? 999999 : (now - dataTimestamps[IDX_SATELLITE_COUNT]),        // 3
+                                       (dataTimestamps[IDX_VICTRON_VOLTAGE] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_VOLTAGE]),        // 4
+                                       (dataTimestamps[IDX_VICTRON_CURRENT] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_CURRENT]),        // 5
+                                       (dataTimestamps[IDX_ALTERNATOR_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_ALTERNATOR_TEMP]),        // 6
+                                       (dataTimestamps[IDX_THERMISTOR_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_THERMISTOR_TEMP]),        // 7
+                                       (dataTimestamps[IDX_RPM] == 0) ? 999999 : (now - dataTimestamps[IDX_RPM]),                               // 8
+                                       (dataTimestamps[IDX_MEASURED_AMPS] == 0) ? 999999 : (now - dataTimestamps[IDX_MEASURED_AMPS]),            // 9
+                                       (dataTimestamps[IDX_BATTERY_V] == 0) ? 999999 : (now - dataTimestamps[IDX_BATTERY_V]),                   // 10
+                                       (dataTimestamps[IDX_IBV] == 0) ? 999999 : (now - dataTimestamps[IDX_IBV]),                               // 11
+                                       (dataTimestamps[IDX_BCUR] == 0) ? 999999 : (now - dataTimestamps[IDX_BCUR]),                             // 12
+                                       (dataTimestamps[IDX_CHANNEL3V] == 0) ? 999999 : (now - dataTimestamps[IDX_CHANNEL3V]),                   // 13
+                                       (dataTimestamps[IDX_DUTY_CYCLE] == 0) ? 999999 : (now - dataTimestamps[IDX_DUTY_CYCLE]),                 // 14
+                                       (dataTimestamps[IDX_FIELD_VOLTS] == 0) ? 999999 : (now - dataTimestamps[IDX_FIELD_VOLTS]),               // 15
+                                       (dataTimestamps[IDX_FIELD_AMPS] == 0) ? 999999 : (now - dataTimestamps[IDX_FIELD_AMPS]),                 // 16
+                                       (dataTimestamps[IDX_COG_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_COG_NMEA]),                     // 17
+                                       (dataTimestamps[IDX_SOG_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_SOG_NMEA]),                     // 18
+                                       (dataTimestamps[IDX_APPARENT_WIND_SPEED] == 0) ? 999999 : (now - dataTimestamps[IDX_APPARENT_WIND_SPEED]), // 19
+                                       (dataTimestamps[IDX_APPARENT_WIND_ANGLE] == 0) ? 999999 : (now - dataTimestamps[IDX_APPARENT_WIND_ANGLE]), // 20
+                                       (dataTimestamps[IDX_TRUE_WIND_SPEED] == 0) ? 999999 : (now - dataTimestamps[IDX_TRUE_WIND_SPEED]),        // 21
+                                       (dataTimestamps[IDX_TRUE_WIND_ANGLE] == 0) ? 999999 : (now - dataTimestamps[IDX_TRUE_WIND_ANGLE]),        // 22
+                                       (dataTimestamps[IDX_LEEWAY] == 0) ? 999999 : (now - dataTimestamps[IDX_LEEWAY]),                         // 23
+                                       (dataTimestamps[IDX_VMG] == 0) ? 999999 : (now - dataTimestamps[IDX_VMG]),                               // 24
+                                       (dataTimestamps[IDX_BARO_PRESSURE] == 0) ? 999999 : (now - dataTimestamps[IDX_BARO_PRESSURE]),           // 25
+                                       (dataTimestamps[IDX_AMBIENT_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_AMBIENT_TEMP]),             // 26
+                                       (dataTimestamps[IDX_IMU] == 0) ? 999999 : (now - dataTimestamps[IDX_IMU])                               // 27
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

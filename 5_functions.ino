@@ -2393,7 +2393,7 @@ void _ReadAnalogInputs_inner() {
 
                          case 3:
                            Channel3V = Raw / 32768.0 * 6.144 * 833 * 2;
-                           temperatureThermistor = thermistorTempC(Channel3V);
+                           temperatureThermistor = (int)(thermistorTempC(Channel3V) * 1.8f + 32.0f);  // convert °C to °F
 
                            if (temperatureThermistor > 500) {
                              temperatureThermistor = -99;
@@ -2404,7 +2404,7 @@ void _ReadAnalogInputs_inner() {
                            if (Channel3V > 0 && Channel3V < 100) {  // Sanity check for Channel3V
                              MARK_FRESH(IDX_CHANNEL3V);
                            }
-                           if (temperatureThermistor > -50 && temperatureThermistor < 200) {  // Sanity check for temp
+                           if (temperatureThermistor > -58 && temperatureThermistor < 392) {  // Sanity check for temp (°F bounds)
                              MARK_FRESH(IDX_THERMISTOR_TEMP);
 
                              // Track max thermistor temperature (session)
@@ -2502,7 +2502,7 @@ void _ReadAnalogInputs_inner() {
                          }
 
                          if (isfinite(newTemp) && newTemp > -50.0f && newTemp < 150.0f) {
-                           ambientTemp = newTemp;
+                           ambientTemp = newTemp * 1.8f + 32.0f;  // convert sensor °C to °F for storage
                            MARK_FRESH(IDX_AMBIENT_TEMP);
                          }
                        }
@@ -2535,6 +2535,7 @@ void _ReadAnalogInputs_inner() {
 void drainIMUFifo() {
   if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
   lastIMUPoll = millis();
+  MARK_FRESH(IDX_IMU);
   // If accel display is disabled, drain the hardware FIFO so it doesn't back up, but don't queue anything
   if (!accelEnabled) {
     uint16_t n = 0;

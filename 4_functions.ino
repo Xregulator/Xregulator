@@ -1335,6 +1335,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     WindingTempOffset = readFile(LittleFS, "/WindingTempOffset.txt").toFloat();
   }
+  if (!fsExists("/displayTempUnit.txt")) {
+    writeFile(LittleFS, "/displayTempUnit.txt", String(displayTempUnit).c_str());
+  } else {
+    displayTempUnit = (uint8_t)readFile(LittleFS, "/displayTempUnit.txt").toInt();
+  }
   if (!fsExists("/PulleyRatio.txt")) {
     writeFile(LittleFS, "/PulleyRatio.txt", String(PulleyRatio, 2).c_str());
   } else {
@@ -1661,6 +1666,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/HardOCDebounceMs.txt", String(HardOCDebounceMs).c_str());
   } else {
     HardOCDebounceMs = (uint32_t)readFile(LittleFS, "/HardOCDebounceMs.txt").toInt();
+  }
+  if (!fsExists("/WarmupRampRate.txt")) {
+    writeFile(LittleFS, "/WarmupRampRate.txt", String(WarmupRampRate, 2).c_str());
+  } else {
+    WarmupRampRate = max(0.0f, readFile(LittleFS, "/WarmupRampRate.txt").toFloat());
   }
   if (!fsExists("/IExcessK.txt")) {
     writeFile(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());

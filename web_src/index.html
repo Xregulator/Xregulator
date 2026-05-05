@@ -54,63 +54,86 @@
 </head>
 
 <body><iframe name="hidden-form" style="display:none"></iframe>
-  <h2 id="main-header">X Engineering Alternator Regulator</h2>
 
   <div class="permanent-header">
-    <!-- Tier 1: Sensor readings that flow horizontally first, then wrap -->
-    <div class="sensor-readings-tier">
-      <div class="reading-pair">
-        <div class="reading-item">
-          <span class="reading-label">Battery</span>
-          <span class="reading-value"><span id="header-voltage">-</span>V</span>
-        </div>
-        <div class="reading-item">
-          <span class="reading-label">Charge</span>
-          <span class="reading-value"><span id="header-soc">-</span>%</span>
-        </div>
+
+    <!-- Brand row: wordmark left, field cluster right -->
+    <div class="header-brand-row">
+      <div class="header-wordmark">
+        <span class="wm-X">X</span><span class="wm-rest">Engineering</span>
       </div>
-
-      <div class="reading-pair">
-        <div class="reading-item">
-          <span class="reading-label">Alternator Current</span>
-          <span class="reading-value"><span id="header-alt-current">-</span>A</span>
+      <div class="reading-value header-field-cluster field-status-inactive">
+        <div class="field-status-row">
+          <span id="field-status">?</span>
+          <span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign" style="display:none;"></span>
         </div>
-        <div class="reading-item">
-          <span class="reading-label">Battery Current</span>
-          <span class="reading-value"><span id="header-batt-current">-</span>A</span>
-        </div>
-      </div>
-
-      <div class="reading-pair">
-        <div class="reading-item">
-          <span class="reading-label">Alt Temp</span>
-          <span class="reading-value"><span id="header-alt-temp">-</span>°F</span>
-        </div>
-
-        <div class="reading-item">
-          <span class="reading-label">Engine</span>
-          <span class="reading-value"><span id="header-rpm">-</span> RPM</span>
-        </div>
-      </div>
-
-      <div class="reading-pair">
-        <div class="reading-item">
-          <span class="reading-label">Ignition</span>
-          <span class="reading-value" id="ignition-status">?</span>
-        </div>
-        <div class="reading-item">
-          <span class="reading-label">Field</span>
-          <span class="reading-value field-status-inactive">
-            <span id="field-status">?</span><br>
-            <span id="dutyCycleID3" style="display:none;"></span><span id="dutyCyclePercentSign"
-              style="display:none;">%</span>
-            <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
-          </span>
-        </div>
+        <span id="charge-stage" class="charge-stage charge-stage-unknown">—</span>
       </div>
     </div>
 
-    <!-- Tier 2: Settings Access (full width underneath readings) -->
+    <!-- Sensor chips + Alternator Enable in one row (toggle moves right at wider screens) -->
+    <div class="sensor-control-row">
+
+      <div class="sensor-readings-tier">
+        <!-- Battery + SOC -->
+        <div class="reading-duo">
+          <span class="duo-lbl">Batt</span>
+          <span class="duo-num"><span id="header-voltage">-</span></span>
+          <span class="duo-unit">V</span>
+          <span class="duo-lbl">SOC</span>
+          <span class="duo-num"><span id="header-soc">-</span></span>
+          <span class="duo-unit">%</span>
+        </div>
+
+        <!-- Alt + Batt currents — 3-column grid keeps A's vertically aligned -->
+        <div class="reading-duo">
+          <span class="duo-lbl">Alt</span>
+          <span class="duo-num"><span id="header-alt-current">-</span></span>
+          <span class="duo-unit">A</span>
+          <span class="duo-lbl">Batt</span>
+          <span class="duo-num"><span id="header-batt-current">-</span></span>
+          <span class="duo-unit">A</span>
+        </div>
+
+        <!-- Alt Temp: label above value row to save horizontal space -->
+        <div class="reading-duo reading-duo-solo">
+          <span class="duo-lbl">Temp</span>
+          <div class="duo-value-row">
+            <span class="duo-num"><span id="header-alt-temp">-</span></span>
+            <span class="duo-unit"><span class="temp-unit-label">°F</span></span>
+          </div>
+        </div>
+
+        <!-- RPM + Ignition -->
+        <div class="reading-duo">
+          <span class="duo-lbl">RPM</span>
+          <span class="duo-num"><span id="header-rpm">-</span></span>
+          <span class="duo-unit"></span>
+          <span class="duo-lbl">IGN</span>
+          <span class="duo-num" id="ignition-status">?</span>
+          <span class="duo-unit"></span>
+        </div>
+      </div>
+
+      <!-- Alternator Enable — sits right of chips when screen is wide enough -->
+      <div class="alternator-control-tier">
+        <div class="alternator-control">
+          <span class="control-label">Alternator Enable</span>
+          <form action="/get" method="GET" target="hidden-form">
+            <input type="hidden" name="password" class="password_field">
+            <label class="switch">
+              <input id="header-alternator-enable" type="checkbox"
+                onchange="if(handleAlternatorToggle(this)) { this.form.submit(); submitMessage(); }" />
+              <span class="slider"></span>
+            </label>
+            <input id="OnOff" name="OnOff" type="number" value="" style="display:none;" />
+          </form>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Settings Access -->
     <div id="settings-access-section" class="settings-access-tier">
       <div id="lock-status">Settings are Locked</div>
       <div class="password-form-wrapper">
@@ -128,23 +151,6 @@
             </div>
           </div>
           <div id="admin_password_msg"></div>
-        </form>
-      </div>
-    </div>
-
-
-    <!-- Tier 3: Alternator control (always centered and visible) -->
-    <div class="alternator-control-tier">
-      <div class="alternator-control">
-        <span class="control-label">Alternator Enable</span>
-        <form action="/get" method="GET" target="hidden-form">
-          <input type="hidden" name="password" class="password_field">
-          <label class="switch">
-            <input id="header-alternator-enable" type="checkbox"
-              onchange="if(handleAlternatorToggle(this)) { this.form.submit(); submitMessage(); }" />
-            <span class="slider"></span>
-          </label>
-          <input id="OnOff" name="OnOff" type="number" value="" style="display:none;" />
         </form>
       </div>
     </div>
@@ -1098,6 +1104,24 @@
                   </div>
                 </div>
 
+                <!-- Warmup Ramp Rate -->
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Warmup Ramp Rate (A/s) (<span id="WarmupRampRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Rate at which the output current ceiling rises from 0A each time the alternator enables. Set to 0 to disable (immediate full output). Example: 2 A/s reaches 120A cap in 60 seconds.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="WarmupRampRate" type="number" step="0.1" min="0" max="999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
               </details><!-- END Output Control -->
 
               <!-- Temperature Settings (closed) -->
@@ -1107,10 +1131,10 @@
                 <!-- Alternator Temp Limit -->
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Alternator Temp Limit (°F) (<span id="TemperatureLimitF_echo">?</span>):</span>
+                    <span>Alternator Temp Limit (<span class="temp-unit-label">°F</span>) (<span id="TemperatureLimitF_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">
                       ℹ️
-                      <span class="tooltip-box">Maximum safe temperature (°F) at the sensor location. The temperature
+                      <span class="tooltip-box">Maximum safe temperature at the sensor location. The temperature
                         PID begins reducing current as temperature approaches this value — intervention starts
                         at (Limit − Temp PID Margin), defaulting to 15°F below. Hard warning and critical shutdowns
                         trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
@@ -1118,7 +1142,7 @@
                     </span>
                   </div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
                       <input type="hidden" name="password" class="password_field">
                       <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -1153,13 +1177,13 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Internal Temp Offset (°F) (<span id="WindingTempOffset_echo">?</span>):</span>
+                    <span>Internal Temp Offset (<span class="temp-unit-label">°F</span>) (<span id="WindingTempOffset_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">ONLY
                         used for alternator component life physics models. How much hotter windings, bearings, brushes
                         are than physically measured alternator case temperature. Typical: 40–60°F.</span></span>
                   </div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'WindingTempOffset',true)">
                       <input type="hidden" name="password" class="password_field">
                       <input name="WindingTempOffset" type="number" step="0.1" min="0" max="100" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -1819,7 +1843,7 @@
                             the PID actually sees.</span>
                         </span>
                       </span>
-                      <span class="metric-value telemetry-value"><span id="tempPIDInput_display">?</span> °F</span>
+                      <span class="metric-value telemetry-value"><span id="tempPIDInput_display">?</span> <span class="temp-unit-label">°F</span></span>
                     </div>
 
                     <div class="metric-row telemetry-row">
@@ -1828,7 +1852,7 @@
                           <span class="tooltip-box">Alternator's target right now!</span>
                         </span>
                       </span>
-                      <span class="metric-value telemetry-value"><span id="tempPIDSetpoint_display">?</span> °F</span>
+                      <span class="metric-value telemetry-value"><span id="tempPIDSetpoint_display">?</span> <span class="temp-unit-label">°F</span></span>
                     </div>
 
                     <div class="metric-row telemetry-row">
@@ -1892,7 +1916,7 @@
                             The PID controls against projectedTemp rather than current temp.</span>
                         </span>
                       </span>
-                      <span class="metric-value telemetry-value"><span id="thermalSlopeFPerSec_display">?</span> °F/s</span>
+                      <span class="metric-value telemetry-value"><span id="thermalSlopeFPerSec_display">?</span> <span class="temp-rate-label">°F/s</span></span>
                     </div>
                   </div>
 
@@ -2482,13 +2506,13 @@
               <hr />
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Temp Warning Excess (°F) (<span id="TempWarnExcess_echo">?</span>):</span>
+                  <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                      above TemperatureLimitF that triggers WARNING state. System ramps down duty cycle and begins
+                      above the temp limit that triggers WARNING state. System ramps down duty cycle and begins
                       lockout timer. Allows graceful response before critical shutdown. Typical: 10°F.</span></span>
                 </div>
                 <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
                     <input type="hidden" name="password" class="password_field">
                     <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -2499,13 +2523,13 @@
               <hr />
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Temp Critical Excess (°F) (<span id="TempCritExcess_echo">?</span>):</span>
+                  <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Degrees
-                      above TemperatureLimitF that triggers IMMEDIATE GPIO4 cut (skips gradual ramp). Emergency
+                      above the temp limit that triggers IMMEDIATE GPIO4 cut (skips gradual ramp). Emergency
                       protection. Typical: 30°F.</span></span>
                 </div>
                 <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
                     <input type="hidden" name="password" class="password_field">
                     <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -4160,9 +4184,9 @@
             <!-- Temperature Alarm -->
             <hr />
             <div class="form-row">
-              <div class="form-label">High Temp Alarm (F) (<span id="TempAlarm_echo">0</span>):</div>
+              <div class="form-label">High Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarm_echo">0</span>):</div>
               <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form">
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarm',false)">
                   <input type="hidden" name="password" class="password_field">
                   <input name="TempAlarm" type="number" step="1" min="0" max="350" />
                   <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -4171,9 +4195,9 @@
             </div>
 
             <div class="form-row">
-              <div class="form-label">Low Temp Alarm (F) (<span id="TempAlarmLow_echo">0</span>):</div>
+              <div class="form-label">Low Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarmLow_echo">0</span>):</div>
               <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form">
+                <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarmLow',false)">
                   <input type="hidden" name="password" class="password_field">
                   <input name="TempAlarmLow" type="number" step="1" min="0" max="350" />
                   <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -4639,6 +4663,32 @@
               </div>
             </details>
 
+            <!-- Display Preferences Section -->
+            <details open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Display Preferences</summary>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Temperature Units:</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">Choose Fahrenheit or Celsius for all temperature displays and form inputs. Setting is saved on the device.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <button type="button" id="tempUnitF_btn" class="btn-primary"
+                      onclick="setTempUnit(0)" style="margin-right:6px;">°F</button>
+                    <button type="button" id="tempUnitC_btn" class="btn-secondary"
+                      onclick="setTempUnit(1)">°C</button>
+                  </form>
+                </div>
+              </div>
+            </details>
+
             <hr />
             <div class="form-row">
               <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -4796,6 +4846,7 @@
                   </div>
                 </div>
 
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Ignore RPM (<span id="IgnoreRPM_echo">0</span>):</span>
@@ -4820,6 +4871,7 @@
                   </div>
                 </div>
 
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Min RPM For Field (RPM) (<span id="MinRPMForField_echo">?</span>):</span>
@@ -4955,16 +5007,24 @@
     <div id="livedata-alternator" class="sub-tab-content">
 
       <div class="settings-card">
-        <span id="alt-health-badge" class="alt-health-badge badge-neutral">ALT ◌</span>
 
         <!-- Health percentage and session trend sparkline -->
         <div id="eff-health-row"
-          style="display:flex;align-items:flex-start;gap:16px;margin-bottom:10px;flex-wrap:wrap;">
+          style="position:relative;display:flex;align-items:flex-start;gap:16px;margin-bottom:10px;flex-wrap:wrap;">
 
-          <!-- Live health number -->
-          <div style="min-width:90px;text-align:center;">
-            <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Live Health</div>
-            <div id="eff-health-pct" style="font-size:28px;font-weight:bold;color:#4CAF50;line-height:1;">
+          <!-- Red X overlay — shown in no-data demo state -->
+          <svg id="eff-demo-x" style="display:none;position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2;"
+               preserveAspectRatio="none" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <line x1="0" y1="0" x2="100" y2="100" stroke="#EF5350" stroke-width="3.5"
+                  vector-effect="non-scaling-stroke" opacity="0.22"/>
+            <line x1="100" y1="0" x2="0" y2="100" stroke="#EF5350" stroke-width="3.5"
+                  vector-effect="non-scaling-stroke" opacity="0.22"/>
+          </svg>
+
+          <!-- Health stat -->
+          <div style="min-width:76px;text-align:center;flex-shrink:0;">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">Health</div>
+            <div id="eff-health-pct" style="font-size:28px;font-weight:800;color:#888;line-height:1;font-variant-numeric:tabular-nums;">
               --
             </div>
             <div style="font-size:10px;color:var(--text-muted);">vs reference avg</div>
@@ -4972,14 +5032,23 @@
 
           <!-- Sparkline -->
           <div style="flex:1;min-width:180px;">
-            <div style="font-size:11px;color:var(--text-muted);margin-bottom:2px;">
-              Session History
-              <span style="font-size:10px;opacity:0.6;">(last 30 sessions)</span>
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:3px;">
+              Session History <span id="eff-history-subtitle" style="font-size:10px;opacity:0.6;">(no sessions yet)</span>
             </div>
             <div id="eff-sparkline-container" style="width:100%;"></div>
           </div>
 
         </div>
+
+        <!-- Demo data note — shown when no real sessions exist -->
+        <div id="eff-demo-note"
+          style="display:none;align-items:flex-start;gap:8px;margin-top:6px;padding:6px 10px;
+                 background:rgba(239,83,80,0.07);border-left:3px solid rgba(239,83,80,0.5);
+                 border-radius:0 4px 4px 0;font-size:12px;color:#b71c1c;line-height:1.5;">
+          <span style="font-weight:900;flex-shrink:0;color:#EF5350;">✕</span>
+          <span>This is demo data. Learning still in progress — check back after a few more sessions.</span>
+        </div>
+
       </div>
 
       <div class="settings-card">
@@ -4994,11 +5063,11 @@
             <p class="card-group-title">Temperature</p>
             <div class="metric-row">
               <span class="metric-label">Alternator</span>
-              <span class="metric-value" style="font-size: 24px;"><span id="AltTempID">0</span> °F</span>
+              <span class="metric-value" style="font-size: 24px;"><span id="AltTempID">0</span> <span class="temp-unit-label">°F</span></span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Thermistor</span>
-              <span class="metric-value"><span id="temperatureThermistorID">0</span> °C</span>
+              <span class="metric-value"><span id="temperatureThermistorID">0</span> <span class="temp-unit-label">°F</span></span>
             </div>
             <div class="metric-row">
               <span class="metric-label" style="display:flex;align-items:center;gap:4px;">
@@ -5067,7 +5136,7 @@
       <!-- DS18B20 Sensor Health -->
       <div class="settings-card" style="margin-top:16px;">
         <p class="card-group-title">DS18B20 Temperature Sensor Health</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Lifetime counters from the temperature sensor task. Any nonzero failure count warrants investigation. CRC recovered is informational — occasional recoveries on a noisy bus are acceptable.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">Read Failures</span>
           <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
@@ -5863,7 +5932,7 @@
                 </span>
               </span>
             </p>
-            <div style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 0;">
+            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
 
               <!-- HEADER -->
               <div
@@ -6192,7 +6261,7 @@
                 </span>
               </span>
             </p>
-            <div style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 0;">
+            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
                 <div style="padding: 6px 8px;"></div>
@@ -6259,7 +6328,7 @@
           <!-- SESSION INFO -->
           <div class="card-group">
             <p class="card-group-title">Session Info</p>
-            <div style="display: grid; grid-template-columns: auto 1fr 1fr; gap: 0;">
+            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
                 <div style="padding: 6px 8px;"></div>
@@ -6544,13 +6613,13 @@
               <span class="tooltip" onclick="this.classList.toggle('active')">
                 ℹ️
                 <span class="tooltip-box">
-                  Temperature measured in the regulator (°F), will often be 5-25 deg hotter than
+                  Temperature measured in the regulator, will often be 5-25 deg hotter than
                   ambient depending on location and electrical demands
                 </span>
               </span>
             </p>
             <p class="reading" id="ambientTemp-display">
-              <span id="ambientTempID">0</span> °F
+              <span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span>
             </p>
           </div>
 
@@ -6787,7 +6856,7 @@
         <button type="button" onclick="clearConsole()" style="font-size: 12px; margin-left: 5px;">Clear</button>
       </div>
       <div id="consoleOutput" class="responsive-console"></div>
-      <div style="font-size: 11px; color: #888; margin-top: 8px; font-style: italic;">
+      <div style="font-size: 11px; color: #888; margin-top: 8px; font-style: italic; text-align: center;">
         Timestamps show when messages were received by the app, not when sent by the regulator.
         Messages are throttled: max 5 every 700ms (adjustable in firmware).
       </div>
@@ -7112,12 +7181,12 @@
                   <div style="display:flex;align-items:center;gap:6px;">
                     <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
                     <span class="metric-value-compact" id="MaxAlternatorTemperatureF_AllTimeID">0</span><span
-                      style="font-size:11px;">°F</span>
+                      class="temp-unit-label" style="font-size:11px;">°F</span>
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;position:relative;">
                     <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
                     <span class="metric-value-compact" id="MaxAlternatorTemperatureF_ID">0</span><span
-                      style="font-size:11px;">°F</span>
+                      class="temp-unit-label" style="font-size:11px;">°F</span>
                     <form action="/get" method="GET" target="hidden-form"
                       style="position:absolute;left:100%;margin-left:8px;">
                       <input type="hidden" name="ResetTemp" id="ResetTemp" value="0" />
@@ -7135,12 +7204,12 @@
                   <div style="display:flex;align-items:center;gap:6px;">
                     <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
                     <span class="metric-value-compact" id="MaxTemperatureThermistor_AllTimeID">0</span><span
-                      style="font-size:11px;">°F</span>
+                      class="temp-unit-label" style="font-size:11px;">°F</span>
                   </div>
                   <div style="display:flex;align-items:center;gap:6px;position:relative;">
                     <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
                     <span class="metric-value-compact" id="MaxTemperatureThermistorID">0</span><span
-                      style="font-size:11px;">°F</span>
+                      class="temp-unit-label" style="font-size:11px;">°F</span>
                     <form action="/get" method="GET" target="hidden-form"
                       style="position:absolute;left:100%;margin-left:8px;">
                       <input type="hidden" name="ResetThermTemp" id="ResetThermTemp" value="0" />

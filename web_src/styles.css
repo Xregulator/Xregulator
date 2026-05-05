@@ -48,7 +48,7 @@
 
 body {
   margin: 0;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   padding: 0.5rem;
   background-color: var(--bg-light);
   color: var(--text-dark);
@@ -94,6 +94,19 @@ input[type="number"],
 textarea {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* Stable numeric layout — prevents width jitter as digits change and
+   stops units from wrapping to a new line mid-update */
+.reading-value,
+.metric-value,
+.metric-value-compact,
+.counter-value,
+.reading,
+.reading span {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
 }
 
 /* Prevent accidental zooming */
@@ -643,7 +656,8 @@ textarea {
   font-size: 14px;
   flex-shrink: 0;
   white-space: nowrap;
-  min-width: fit-content;
+  width: auto;
+  max-width: fit-content;
 }
 
 /* override the color for Set buttons */
@@ -678,6 +692,9 @@ input[type="submit"] {
   font-weight: 800;
   cursor: pointer;
   font-size: 14px;
+  white-space: nowrap;
+  width: auto;
+  max-width: fit-content;
 }
 
 .btn-secondary:active {
@@ -693,6 +710,9 @@ input[type="submit"] {
   font-weight: 800;
   cursor: pointer;
   font-size: 14px;
+  white-space: nowrap;
+  width: auto;
+  max-width: fit-content;
 }
 
 .btn-danger:active {
@@ -738,6 +758,10 @@ input[type="submit"] {
 }
 
 /* Fuel table row striping + shared table save feedback */
+
+.fuel-table {
+  margin: 0 auto;
+}
 
 .fuel-table-row {
   background-color: var(--bg-light);
@@ -862,7 +886,8 @@ input[type="submit"] {
   .btn-primary,
   .btn-secondary,
   .btn-danger {
-    width: 100%;
+    width: auto;
+    max-width: fit-content;
   }
 }
 
@@ -910,6 +935,54 @@ input[type="submit"] {
   gap: 12px;
 }
 
+/* Brand row */
+.header-brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(0, 161, 154, 0.15);
+}
+
+.header-wordmark {
+  display: flex;
+  align-items: baseline;
+  line-height: 1;
+}
+
+.wm-X {
+  font-size: 20px;
+  font-weight: 900;
+  color: var(--accent);
+  letter-spacing: -0.02em;
+}
+
+.wm-rest {
+  font-size: 20px;
+  font-weight: 300;
+  color: var(--text-dark);
+  letter-spacing: 0.01em;
+}
+
+/* Field cluster in brand row — overrides .reading-value defaults */
+.header-field-cluster {
+  display: flex !important;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 88px;
+  font-size: 13px !important;
+  text-align: right !important;
+  line-height: 1.2;
+}
+
+.field-status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  justify-content: flex-end;
+}
+
 /* Sticky header for tablets and desktops (not phones, and conditionally disabled via JS) */
 @media (min-width: 768px) {
   .permanent-header-sticky {
@@ -941,13 +1014,42 @@ input[type="submit"] {
 }
 
 
+/* Row wrapper — stacks vertically by default; goes side-by-side at wider screens */
+.sensor-control-row {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 8px;
+}
+
+@media (min-width: 560px) {
+  .sensor-control-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 0;
+  }
+
+  .sensor-control-row .sensor-readings-tier {
+    flex: 1;
+  }
+
+  .sensor-control-row .alternator-control-tier {
+    flex-shrink: 0;
+    width: auto;
+    justify-content: flex-end;
+    border-left: 1px solid rgba(0, 161, 154, 0.18);
+    padding-left: 14px;
+    margin-left: 10px;
+  }
+}
+
 .sensor-readings-tier {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  column-gap: 20px;
-  row-gap: 10px;
+  grid-template-columns: repeat(4, max-content);
+  justify-content: space-evenly;
+  align-items: stretch;
   width: 100%;
-  align-items: center;
+  row-gap: 8px;
 }
 
 .reading-pair {
@@ -955,6 +1057,69 @@ input[type="submit"] {
   flex-direction: row;
   gap: 15px;
   align-items: center;
+  flex: 0 0 auto;
+}
+
+/* Chip card — each reading pair is its own white card with a teal border */
+/* 3-column grid: label | number (right-aligned) | unit                  */
+/* Keeps unit letters vertically aligned regardless of sign character     */
+.reading-duo {
+  display: grid;
+  grid-template-columns: auto minmax(28px, auto) auto;
+  align-items: baseline;
+  align-content: center;
+  column-gap: 4px;
+  row-gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: white;
+  border: 1px solid rgba(0, 161, 154, 0.22);
+  box-shadow: 0 1px 4px rgba(0, 161, 154, 0.08);
+}
+
+.duo-lbl {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.duo-num {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-dark);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.duo-unit {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+
+/* Temp block: flex column so label sits above the value row.
+   Saves horizontal space; chip card stretches to match neighbor height. */
+.reading-duo-solo {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+}
+
+/* Number + unit sit side-by-side within the Temp block */
+.duo-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.reading-duo-solo .duo-num,
+.reading-duo-solo .duo-unit {
+  font-size: 20px;
+  font-weight: 800;
+  text-align: left;
 }
 
 
@@ -972,12 +1137,21 @@ input[type="submit"] {
   justify-content: center;
 }
 
-
 .alternator-control-tier {
   display: flex;
   justify-content: center;
   align-items: center;
   width: 100%;
+}
+
+/* Narrow screens: collapse to 2×2 — triggered only when 4 columns
+   would overflow (roughly below a small phone width) */
+@media (max-width: 420px) {
+  .sensor-readings-tier {
+    grid-template-columns: max-content max-content;
+    justify-content: space-evenly;
+    row-gap: 12px;
+  }
 }
 
 
@@ -1028,10 +1202,9 @@ input[type="submit"] {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 20px;
-  background: var(--bg-light);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
+  padding: 4px 0;
+  background: transparent;
+  border: none;
 }
 
 .control-label {
@@ -1162,6 +1335,10 @@ input[type="submit"] {
 
 .dark-mode .lock-status-unlocked {
   color: var(--accent) !important;
+}
+
+.dark-mode .wm-rest {
+  color: #cccccc;
 }
 
 .dark-mode .reading-label {
@@ -1337,7 +1514,7 @@ h2 {
 }
 
 .sub-tab {
-  padding: 8px 16px;
+  padding: 5px 11px;
   border: 1px solid var(--border);
   background: var(--bg-light);
   cursor: pointer;
@@ -1389,7 +1566,7 @@ h2 {
 }
 
 .alt-tab-btn {
-  padding: 8px 14px;
+  padding: 5px 11px;
   border: 1px solid var(--border);
   background: var(--bg-light);
   cursor: pointer;
@@ -1573,6 +1750,8 @@ hr {
   flex: 1;
   text-align: left;
   padding-right: 10px;
+  gap: 6px;
+  justify-content: flex-start !important;  /* override inline space-between; keeps ℹ️ next to label text */
 }
 
 .form-input {
@@ -1612,35 +1791,34 @@ hr {
   white-space: pre-wrap;
   border-radius: var(--radius);
   width: 100%;
-  height: 200px;
+  height: 400px;
   margin: 0 auto;
-  /* ADD THIS LINE */
 }
 
 /* Tablet and up */
 @media (min-width: 768px) {
   .responsive-console {
-    height: 300px;
+    height: 600px;
   }
 }
 
 @media (min-width: 1024px) {
   .responsive-console {
-    height: 400px;
+    height: 800px;
     max-width: 1200px;
   }
 }
 
 @media (min-width: 1440px) {
   .responsive-console {
-    height: 500px;
+    height: 1000px;
     max-width: 1400px;
   }
 }
 
 @media (min-width: 1920px) {
   .responsive-console {
-    height: 600px;
+    height: 1200px;
     max-width: 1600px;
   }
 }

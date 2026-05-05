@@ -932,6 +932,7 @@ void AdjustFieldLearnMode() {
           shutdownPhaseEntryMs = 0;
           shutdownPhase2EntryMs = 0;
           settledAtZeroDutyMs = 0;
+          warmupCeiling = 0.0f;
           queueConsoleMessage("Charging enabled (AUTO)");
           Serial.println("Charging enabled (AUTO)");
         }
@@ -1168,6 +1169,12 @@ void AdjustFieldLearnMode() {
         I_cmd = fmaxf(I_cmd, 0.0f);
 
         uTargetAmps = I_cmd;
+
+        // Warmup ramp: advance ceiling each tick, apply as cap on uTargetAmps
+        if (WarmupRampRate > 0.0f) {
+          warmupCeiling = fminf(warmupCeiling + WarmupRampRate * actualDtSec, (float)MaxTableValue);
+          uTargetAmps = fminf(uTargetAmps, warmupCeiling);
+        }
 
         // User overrides
         if (MaintainMode == 1) uTargetAmps = 0;
@@ -3048,7 +3055,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //  window (thermalSlopeBufFull == false) so the PID starts reacting before
   //  projected temp reaches the hard limit. Once the buffer fills, margin = 0.
   // ---------------------------------------------------------------------------
-  const float effectiveSetpoint = thermalSlopeBufFull ? TemperatureLimitF : (TemperatureLimitF - 20.0f);
+  const float effectiveSetpoint = thermalSlopeBufFull ? (TemperatureLimitF - 5.0f) : (TemperatureLimitF - 20.0f);
   tempPIDSetpoint_d = (double)effectiveSetpoint;
   tempPIDInput_d = (double)projectedTempF;
 

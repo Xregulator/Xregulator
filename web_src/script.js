@@ -63,6 +63,62 @@ let cachedYyMin = null;
 let cachedYyMax = null;
 let cachedXTime = null;
 
+// Temperature unit preference — 0=°F (default), 1=°C. Echoed from CSV3.
+let displayTempUnit = 0;
+
+function toDisplayTemp(val_f) {
+    return displayTempUnit === 1 ? (val_f - 32) * 5 / 9 : val_f;
+}
+function toDisplayTempDelta(delta_f) {
+    return displayTempUnit === 1 ? delta_f * 5 / 9 : delta_f;
+}
+function tempUnitLabel() {
+    return displayTempUnit === 1 ? '°C' : '°F';
+}
+function updateAllTempUnitLabels() {
+    const lbl = tempUnitLabel();
+    document.querySelectorAll('.temp-unit-label').forEach(el => { el.textContent = lbl; });
+    document.querySelectorAll('.temp-rate-label').forEach(el => { el.textContent = lbl + '/s'; });
+    // Update toggle button states
+    const fBtn = document.getElementById('tempUnitF_btn');
+    const cBtn = document.getElementById('tempUnitC_btn');
+    if (fBtn && cBtn) {
+        if (displayTempUnit === 1) {
+            fBtn.className = 'btn-secondary';
+            cBtn.className = 'btn-primary';
+        } else {
+            fBtn.className = 'btn-primary';
+            cBtn.className = 'btn-secondary';
+        }
+    }
+}
+
+function setTempUnit(unit) {
+    displayTempUnit = unit;
+    updateAllTempUnitLabels();
+    // Persist to device via GET
+    const pw = document.querySelector('.password_field');
+    const pwVal = pw ? pw.value : '';
+    const url = `/get?displayTempUnit=${unit}&password=${encodeURIComponent(pwVal)}`;
+    fetch(url).catch(() => {});
+}
+
+// Convert a form input value from display unit back to °F before GET submission.
+// Temporarily rewrites the input value, lets the form submit, then restores the display value.
+function convertTempFormIfNeeded(form, inputName, isDelta) {
+    if (displayTempUnit !== 1) return true;
+    const input = form.querySelector(`[name="${inputName}"]`);
+    if (!input) return true;
+    const displayVal = parseFloat(input.value);
+    if (isNaN(displayVal)) return true;
+    const nativeVal = isDelta
+        ? (displayVal * 9 / 5)           // delta: °C span → °F span
+        : (displayVal * 9 / 5 + 32);     // absolute: °C → °F
+    input.value = Math.round(nativeVal * 10) / 10;  // round to 1 decimal
+    const originalDisplay = String(displayVal);
+    setTimeout(() => { input.value = originalDisplay; }, 500);
+    return true;
+}
 
 //  UPDATE LATER
 let isDeviceRegistered = false; // Tracks if device is registered for Cloud Features
@@ -431,6 +487,7 @@ const CSV2_FIELDS = [
     "tempRereadFailCount",              // 258
     "tempResolutionFixCrcFailCount",    // 259
     "tempEnumerateFailCount",           // 260
+    "warmupCeiling",                    // 261
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -702,6 +759,8 @@ const CSV3_FIELDS = [
     "AwSeedProtectMs",          // 266
     "VoltageKd",                // 267
     "UNUSED_268",               // 268 (was ThermistorFilterAlpha, removed)
+    "displayTempUnit",          // 269
+    "WarmupRampRate",           // 270
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -721,6 +780,17 @@ const TS_FIELDS = [
     "ts_DutyCycle",        // 14
     "ts_FieldVolts",       // 15
     "ts_FieldAmps",        // 16
+    "ts_CogNMEA",          // 17
+    "ts_SogNMEA",          // 18
+    "ts_AppWindSpeed",     // 19
+    "ts_AppWindAngle",     // 20
+    "ts_TrueWindSpeed",    // 21
+    "ts_TrueWindAngle",    // 22
+    "ts_Leeway",           // 23
+    "ts_VMG",              // 24
+    "ts_BaroPressure",     // 25
+    "ts_AmbientTemp",      // 26
+    "ts_IMU",              // 27
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -731,16 +801,6 @@ const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : '';
 // const API_BASE_URL = IS_CAPACITOR ? 'http://192.168.4.1' : ''; // For AP mode
 // const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : ''; // For Client mode with mDNS
 
-
-// Hide the main header when running as a Capacitor app
-if (IS_CAPACITOR) {
-    document.addEventListener('DOMContentLoaded', function () {
-        const header = document.getElementById('main-header');
-        if (header) {
-            header.style.display = 'none';
-        }
-    });
-}
 
 
 if (typeof window.gpsManualOverride === 'undefined') {
@@ -1262,7 +1322,7 @@ Object.keys(headerElements).forEach(id => {
 const ignitionStatus = document.getElementById('ignition-status');
 if (ignitionStatus) {
     ignitionStatus.textContent = 'ON';
-    ignitionStatus.style.color = '#00a19a'; // Green
+    ignitionStatus.className = 'duo-num ignition-on';
 }
 
 
@@ -2471,7 +2531,7 @@ function updateAllEchosOptimized(data) {
     //THIS IS WHERE SCALING HAPPENS FOR THE ECHOS!!!
 
     const echoUpdates = [
-        { key: 'TemperatureLimitF', id: 'TemperatureLimitF_echo', transform: v => v },
+        { key: 'TemperatureLimitF', id: 'TemperatureLimitF_echo', transform: v => Math.round(toDisplayTemp(v)) },
         { key: 'BulkVoltage', id: 'BulkVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'wavePeriod', id: 'wavePeriod_echo', transform: v => v },
         { key: 'FloatVoltage', id: 'FloatVoltage_echo', transform: v => (v / 100).toFixed(2) },
@@ -2499,14 +2559,14 @@ function updateAllEchosOptimized(data) {
         { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v },
         { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v },
         { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v },
-        { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => v },
-        { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => v },
+        { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => Math.round(toDisplayTemp(v)) },
+        { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => Math.round(toDisplayTemp(v)) },
         { key: 'VoltageAlarmHigh', id: 'VoltageAlarmHigh_echo', transform: v => v },
         { key: 'VoltageAlarmLow', id: 'VoltageAlarmLow_echo', transform: v => v },
         { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
         { key: 'FourWay', id: 'FourWay_echo', transform: v => v },
         { key: 'RPMScalingFactor', id: 'RPMScalingFactor_echo', transform: v => v },
-        { key: 'ResetTemp', id: 'ResetTemp_echo', transform: v => v },
+        { key: 'ResetTemp', id: 'ResetTemp_echo', transform: v => Math.round(toDisplayTemp(v)) },
         { key: 'ResetVoltage', id: 'ResetVoltage_echo', transform: v => v },
         { key: 'ResetCurrent', id: 'ResetCurrent_echo', transform: v => v },
         { key: 'ResetEngineRunTime', id: 'ResetEngineRunTime_echo', transform: v => v },
@@ -2542,7 +2602,7 @@ function updateAllEchosOptimized(data) {
         { key: 'FLOAT_DURATION', id: 'FLOAT_DURATION_echo', transform: v => (v / 3600).toFixed(2) },
         { key: 'AutoShuntGainCorrection', id: 'AutoShuntGainCorrection_echo', transform: v => v },
         { key: 'AutoAltCurrentZero', id: 'AutoAltCurrentZero_echo', transform: v => v },
-        { key: 'WindingTempOffset', id: 'WindingTempOffset_echo', transform: v => v },
+        { key: 'WindingTempOffset', id: 'WindingTempOffset_echo', transform: v => Math.round(toDisplayTempDelta(v)) },
         { key: 'PulleyRatio', id: 'PulleyRatio_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'ManualLifePercentage', id: 'ManualLifePercentage_echo', transform: v => v },
         { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => v },
@@ -2577,8 +2637,8 @@ function updateAllEchosOptimized(data) {
         { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
         { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
-        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => (v / 100).toFixed(1) },
-        { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => (v / 100).toFixed(1) },
+        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
+        { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v) },
         { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
@@ -2631,6 +2691,7 @@ function updateAllEchosOptimized(data) {
         { key: 'InputFilterTC', id: 'InputFilterTC_echo', transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_ID', transform: v => v },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
+        { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
 
     ];
 
@@ -3951,34 +4012,114 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
 // Function to update all staleness styling
 function updateAllStalenessStyles() {
     if (!window.sensorAges) return;
+    const sa = window.sensorAges;
 
-    // Apply staleness using ages directly 
-    applyStaleStyleByAge("HeadingNMEAID", window.sensorAges.heading);                      // GPS heading
-    applyStaleStyleByAge("LatitudeNMEA_ID", window.sensorAges.latitude);            // GPS latitude
-    applyStaleStyleByAge("LongitudeNMEA_ID", window.sensorAges.longitude);          // GPS longitude
-    applyStaleStyleByAge("SatelliteCountNMEA_ID", window.sensorAges.satellites);    // GPS satellite count
-    applyStaleStyleByAge("VictronVoltageID", window.sensorAges.victronVoltage);     // Victron voltage
-    applyStaleStyleByAge("VictronCurrentID", window.sensorAges.victronCurrent);     // Victron current
-    applyStaleStyleByAge("AltTempID", window.sensorAges.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
-    applyStaleStyleByAge("temperatureThermistorID", window.sensorAges.thermistorTemp, STALE_THRESHOLD_TEMP_MS);
-    applyStaleStyleByAge("RPMID", window.sensorAges.rpm);                           // Engine RPM
-    applyStaleStyleByAge("MeasAmpsID", window.sensorAges.measuredAmps);             // Alternator current
-    applyStaleStyleByAge("BatteryVID", window.sensorAges.batteryV);                 // ADS battery voltage
-    applyStaleStyleByAge("IBVID", window.sensorAges.ibv);                           // INA battery voltage
-    applyStaleStyleByAge("BCurrID", window.sensorAges.bcur);                        // Battery current
-    applyStaleStyleByAge("ADS3ID", window.sensorAges.channel3V);                    // ADS Channel 3 voltage
-    applyStaleStyleByAge("dutyCycleID", window.sensorAges.dutyCycle);               // Field duty cycle
-    applyStaleStyleByAge("FieldVoltsID", window.sensorAges.fieldVolts);             // Field voltage (calculated)
-    applyStaleStyleByAge("FieldAmpsID", window.sensorAges.fieldAmps);               // Field current (calculated)
+    // --- Primary sensor readings ---
+    applyStaleStyleByAge("HeadingNMEAID", sa.heading);
+    applyStaleStyleByAge("LatitudeNMEA_ID", sa.latitude);
+    applyStaleStyleByAge("LongitudeNMEA_ID", sa.longitude);
+    applyStaleStyleByAge("SatelliteCountNMEA_ID", sa.satellites);
+    applyStaleStyleByAge("VictronVoltageID", sa.victronVoltage);
+    applyStaleStyleByAge("VictronCurrentID", sa.victronCurrent);
+    applyStaleStyleByAge("AltTempID", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("temperatureThermistorID", sa.thermistorTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("RPMID", sa.rpm);
+    applyStaleStyleByAge("MeasAmpsID", sa.measuredAmps);
+    applyStaleStyleByAge("BatteryVID", sa.batteryV);
+    applyStaleStyleByAge("IBVID", sa.ibv);
+    applyStaleStyleByAge("BCurrID", sa.bcur);
+    applyStaleStyleByAge("ADS3ID", sa.channel3V);
+    applyStaleStyleByAge("dutyCycleID", sa.dutyCycle);
+    applyStaleStyleByAge("FieldVoltsID", sa.fieldVolts);
+    applyStaleStyleByAge("FieldAmpsID", sa.fieldAmps);
 
-    //banner
-    applyStaleStyleByAge("header-voltage", window.sensorAges.ibv);
-    applyStaleStyleByAge("header-soc", window.sensorAges.soc);
-    applyStaleStyleByAge("header-alt-current", window.sensorAges.measuredAmps);
-    applyStaleStyleByAge("header-batt-current", window.sensorAges.bcur);
-    applyStaleStyleByAge("header-alt-temp", window.sensorAges.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
-    applyStaleStyleByAge("header-rpm", window.sensorAges.rpm);
-    applyStaleStyleByAge("dutyCycleID3", window.sensorAges.dutyCycle);               // Field duty cycle
+    // --- Header bar ---
+    applyStaleStyleByAge("header-voltage", sa.ibv);
+    applyStaleStyleByAge("header-soc", Math.max(sa.ibv, sa.bcur));      // fixed: was sensorAges.soc which was never populated
+    applyStaleStyleByAge("header-alt-current", sa.measuredAmps);
+    applyStaleStyleByAge("header-batt-current", sa.bcur);
+    applyStaleStyleByAge("header-alt-temp", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("header-rpm", sa.rpm);
+    applyStaleStyleByAge("dutyCycleID3", sa.dutyCycle);
+
+    // --- Battery / SoC — piggyback on ibv+bcur ---
+    const socAge = Math.max(sa.ibv, sa.bcur);
+    applyStaleStyleByAge("SOC_percentID", socAge);
+    applyStaleStyleByAge("timeToFullChargeMinID", socAge);
+    applyStaleStyleByAge("timeToFullDischargeMinID", socAge);
+
+    // --- PID debug panel — piggyback on primary sensor ages ---
+    applyStaleStyleByAge("pidInput_display", sa.measuredAmps);
+    applyStaleStyleByAge("dutyCycleID2", sa.dutyCycle);
+    applyStaleStyleByAge("FieldVoltsID2", sa.fieldVolts);
+    applyStaleStyleByAge("FieldAmpsID2", sa.fieldAmps);
+
+    // --- Thermal PID panel — piggyback on alternator temp ---
+    applyStaleStyleByAge("tempPIDInput_display", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
+    applyStaleStyleByAge("thermalPenaltyAmps_display", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
+
+    // --- NMEA nav — dedicated timestamps ---
+    applyStaleStyleByAge("COGNMEA_ID", sa.cogNMEA);
+    applyStaleStyleByAge("SOGNMEA_ID", sa.sogNMEA);
+    applyStaleStyleByAge("VMGNMEA_ID", sa.vmg);
+    applyStaleStyleByAge("LeewayNMEA_ID", sa.leeway);
+    applyStaleStyleByAge("ApparentWindSpeedNMEA_ID", sa.appWindSpeed);
+    applyStaleStyleByAge("ApparentWindAngleNMEA_ID", sa.appWindAngle);
+    applyStaleStyleByAge("TrueWindSpeedNMEA_ID", sa.trueWindSpeed);
+    applyStaleStyleByAge("TrueWindAngleNMEA_ID", sa.trueWindAngle);
+
+    // --- Baro / ambient — dedicated timestamps ---
+    applyStaleStyleByAge("baroPressureID", sa.baroPressure);
+    applyStaleStyleByAge("ambientTempID", sa.ambientTemp, STALE_THRESHOLD_TEMP_MS);
+
+    // --- IMU — all displays share one timestamp ---
+    applyStaleStyleByAge("imu_heel_deg_ID", sa.imu);
+    applyStaleStyleByAge("imu_pitch_deg_ID", sa.imu);
+    applyStaleStyleByAge("imu_vertical_accel_g_ID", sa.imu);
+    applyStaleStyleByAge("imu_total_accel_g_ID", sa.imu);
+    applyStaleStyleByAge("imu_yaw_rate_dps_ID", sa.imu);
+    applyStaleStyleByAge("imu_wave_period_sec_ID", sa.imu);
+    applyStaleStyleByAge("imu_hf_vibration_energy_ID", sa.imu);
+    applyStaleStyleByAge("imu_accel_x_raw_ID", sa.imu);
+    applyStaleStyleByAge("imu_accel_y_raw_ID", sa.imu);
+    applyStaleStyleByAge("imu_accel_z_raw_ID", sa.imu);
+    applyStaleStyleByAge("imu_gyro_x_raw_ID", sa.imu);
+    applyStaleStyleByAge("imu_gyro_y_raw_ID", sa.imu);
+    applyStaleStyleByAge("imu_gyro_z_raw_ID", sa.imu);
+    applyStaleStyleByAge("imu_heel_change_60s_ID", sa.imu);
+    applyStaleStyleByAge("imu_heel_deviation_60s_ID", sa.imu);
+    applyStaleStyleByAge("imu_pitch_change_60s_ID", sa.imu);
+    applyStaleStyleByAge("imu_pitch_deviation_60s_ID", sa.imu);
+    applyStaleStyleByAge("accel_x_min_ID", sa.imu);
+    applyStaleStyleByAge("accel_x_avg_ID", sa.imu);
+    applyStaleStyleByAge("accel_x_max_ID", sa.imu);
+    applyStaleStyleByAge("accel_y_min_ID", sa.imu);
+    applyStaleStyleByAge("accel_y_avg_ID", sa.imu);
+    applyStaleStyleByAge("accel_y_max_ID", sa.imu);
+    applyStaleStyleByAge("accel_z_min_ID", sa.imu);
+    applyStaleStyleByAge("accel_z_avg_ID", sa.imu);
+    applyStaleStyleByAge("accel_z_max_ID", sa.imu);
+    applyStaleStyleByAge("gyro_x_min_ID", sa.imu);
+    applyStaleStyleByAge("gyro_x_avg_ID", sa.imu);
+    applyStaleStyleByAge("gyro_x_max_ID", sa.imu);
+    applyStaleStyleByAge("gyro_y_min_ID", sa.imu);
+    applyStaleStyleByAge("gyro_y_avg_ID", sa.imu);
+    applyStaleStyleByAge("gyro_y_max_ID", sa.imu);
+    applyStaleStyleByAge("gyro_z_min_ID", sa.imu);
+    applyStaleStyleByAge("gyro_z_avg_ID", sa.imu);
+    applyStaleStyleByAge("gyro_z_max_ID", sa.imu);
+    applyStaleStyleByAge("heel_min_ID", sa.imu);
+    applyStaleStyleByAge("heel_avg_ID", sa.imu);
+    applyStaleStyleByAge("heel_max_ID", sa.imu);
+    applyStaleStyleByAge("pitch_min_ID", sa.imu);
+    applyStaleStyleByAge("pitch_avg_ID", sa.imu);
+    applyStaleStyleByAge("pitch_max_ID", sa.imu);
+    applyStaleStyleByAge("vertical_accel_min_ID", sa.imu);
+    applyStaleStyleByAge("vertical_accel_avg_ID", sa.imu);
+    applyStaleStyleByAge("vertical_accel_max_ID", sa.imu);
+    applyStaleStyleByAge("total_accel_min_ID", sa.imu);
+    applyStaleStyleByAge("total_accel_avg_ID", sa.imu);
+    applyStaleStyleByAge("total_accel_max_ID", sa.imu);
 
     updateWeatherAlerts();
 }
@@ -4522,7 +4663,18 @@ window.addEventListener("load", function () {
         channel3V: 999999,
         dutyCycle: 999999,
         fieldVolts: 999999,
-        fieldAmps: 999999
+        fieldAmps: 999999,
+        cogNMEA: 999999,
+        sogNMEA: 999999,
+        appWindSpeed: 999999,
+        appWindAngle: 999999,
+        trueWindSpeed: 999999,
+        trueWindAngle: 999999,
+        leeway: 999999,
+        vmg: 999999,
+        baroPressure: 999999,
+        ambientTemp: 999999,
+        imu: 999999
     };
 
     document.getElementById("AlarmLatchEnabled_checkbox").checked = (document.getElementById("AlarmLatchEnabled").value === "1");
@@ -4883,19 +5035,19 @@ window.addEventListener("load", function () {
             if (fieldIndicator) {
                 if (data.fieldActiveStatus === 1) {
                     fieldIndicator.textContent = 'ACTIVE';
-                    if (fieldWrapper) fieldWrapper.className = 'reading-value field-status-active';
+                    if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-active';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'inline';
                 } else if (data.fieldActiveStatus === 2) {
                     fieldIndicator.textContent = 'RAMP DOWN';
-                    if (fieldWrapper) fieldWrapper.className = 'reading-value field-status-rampdown';
+                    if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-rampdown';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'inline';
                 } else if (data.fieldActiveStatus === 3) {
                     fieldIndicator.textContent = 'MANUAL';
-                    if (fieldWrapper) fieldWrapper.className = 'reading-value field-status-manual';
+                    if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-manual';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'inline';
                 } else {
                     fieldIndicator.textContent = 'OFF';
-                    if (fieldWrapper) fieldWrapper.className = 'reading-value field-status-inactive';
+                    if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-inactive';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'none';
                 }
             }
@@ -4916,7 +5068,10 @@ window.addEventListener("load", function () {
                     else if (["imu_vertical_accel_g", "imu_total_accel_g", "imu_hf_vibration_energy"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(3);
                     }
-                    else if (["BatteryV", "uTargetAmps", "AlternatorTemperatureF", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "BatteryV_filtered", "MeasuredAmps_filtered"].includes(key)) {
+                    else if (key === "AlternatorTemperatureF") {
+                        newTextContent = toDisplayTemp(value / 100).toFixed(1);
+                    }
+                    else if (["BatteryV", "uTargetAmps", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "BatteryV_filtered", "MeasuredAmps_filtered"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -5190,8 +5345,17 @@ window.addEventListener("load", function () {
                         "imu_heel_max_lifetime", "imu_pitch_max_lifetime"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
+                    // Temperature fields (raw integer °F from firmware — convert to display unit)
+                    else if (["MaxAlternatorTemperatureF", "temperatureThermistor", "MaxTemperatureThermistor",
+                        "ambientTemp", "MaxAlternatorTemperatureF_AllTime", "MaxTemperatureThermistor_AllTime"].includes(key)) {
+                        newTextContent = Math.round(toDisplayTemp(value));
+                    }
+                    // Temperature PID input/setpoint scaled ×100 — convert to display unit
+                    else if (key === "tempPIDInput_d" || key === "tempPIDSetpoint_d") {
+                        newTextContent = toDisplayTemp(value / 100).toFixed(1);
+                    }
                     // Values scaled by 100 on server (existing)
-                    else if (["IBVMax", "ChargeCycles", "ChargeCycles_AllTime", "tempPIDInput_d", "tempPIDSetpoint_d", "thermalPenaltyAmps", "MeasuredAmpsMax", "SOC_percent", "VictronCurrent", "performanceRatio", "UVThresholdHigh",
+                    else if (["IBVMax", "ChargeCycles", "ChargeCycles_AllTime", "thermalPenaltyAmps", "MeasuredAmpsMax", "SOC_percent", "VictronCurrent", "performanceRatio", "UVThresholdHigh",
                         "PeakVoltage_AllTime", "MinVoltage", "MinVoltage_AllTime", "AvgSOC_AllTime", "AvgSpeed_AllTime", "InsulationLifePercent", "GreaseLifePercent",
                         "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
@@ -5265,7 +5429,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "thermalSlopeFPerSec") {
-                        newTextContent = (value / 1000).toFixed(3);
+                        newTextContent = toDisplayTempDelta(value / 1000).toFixed(3);
                     }
                     // Session duration in minutes
                     else if (["LastSessionDuration"].includes(key)) {
@@ -5307,11 +5471,11 @@ window.addEventListener("load", function () {
             if (ignitionStatus && ignitionValue) {
                 const ign = parseInt(ignitionValue.textContent);
                 if (ign === 1) {
-                    ignitionStatus.textContent = 'IGN ON';
-                    ignitionStatus.className = 'reading-value ignition-on';
+                    ignitionStatus.textContent = 'ON';
+                    ignitionStatus.className = 'duo-num ignition-on';
                 } else {
-                    ignitionStatus.textContent = 'IGN OFF';
-                    ignitionStatus.className = 'reading-value ignition-off';
+                    ignitionStatus.textContent = 'OFF';
+                    ignitionStatus.className = 'duo-num ignition-off';
                 }
             }
             // Update charging mode
@@ -5566,7 +5730,7 @@ window.addEventListener("load", function () {
                 const raw = data[key];
                 if (raw === undefined) continue;
                 const newText = key === "thermalSlopeFPerSec"
-                    ? (raw / 1000).toFixed(3)
+                    ? toDisplayTempDelta(raw / 1000).toFixed(3)
                     : (-raw / 100).toFixed(2);
                 const cacheKey = `${id}_${key}`;
                 if (lastValues.get(cacheKey) !== newText) {
@@ -5649,8 +5813,9 @@ window.addEventListener("load", function () {
                     chargeStageEl.textContent = 'FLOAT';
                     chargeStageEl.className = 'charge-stage charge-stage-float';
                 } else if (stage === 4) {
-                    chargeStageEl.textContent = 'MANUAL';
-                    chargeStageEl.className = 'charge-stage charge-stage-manual';
+                    // Field status word already shows MANUAL — suppress duplicate badge
+                    chargeStageEl.textContent = '';
+                    chargeStageEl.className = 'charge-stage charge-stage-hidden';
                 } else if (stage === 5) {
                     chargeStageEl.textContent = 'MAINTAIN';
                     chargeStageEl.className = 'charge-stage charge-stage-maintain';
@@ -5718,6 +5883,10 @@ window.addEventListener("load", function () {
                          └──────────────────────────────┘ */
             if (data.stateRevision !== undefined) {
                 lastSeenRev = data.stateRevision;
+            }
+            if (data.displayTempUnit !== undefined && data.displayTempUnit !== displayTempUnit) {
+                displayTempUnit = data.displayTempUnit;
+                updateAllTempUnitLabels();
             }
             // updateFields for CSVData3     the only time a user setting needs to be displayed via updateFields() is if its shown somewhere other than an Echo (like a status indicator, for example).  Echos are updated elsewhere (updateAllEchosOptimized).
             const updateFields = (fieldArray) => {
@@ -6075,7 +6244,18 @@ window.addEventListener("load", function () {
                 channel3V: data.ts_Channel3V,
                 dutyCycle: data.ts_DutyCycle,
                 fieldVolts: data.ts_FieldVolts,
-                fieldAmps: data.ts_FieldAmps
+                fieldAmps: data.ts_FieldAmps,
+                cogNMEA: data.ts_CogNMEA,
+                sogNMEA: data.ts_SogNMEA,
+                appWindSpeed: data.ts_AppWindSpeed,
+                appWindAngle: data.ts_AppWindAngle,
+                trueWindSpeed: data.ts_TrueWindSpeed,
+                trueWindAngle: data.ts_TrueWindAngle,
+                leeway: data.ts_Leeway,
+                vmg: data.ts_VMG,
+                baroPressure: data.ts_BaroPressure,
+                ambientTemp: data.ts_AmbientTemp,
+                imu: data.ts_IMU
             };
         }, false);
 
@@ -6401,7 +6581,6 @@ function showRegistrationRequiredModal(featureName) {
 }
 
 function showSubTab(parentTab, subTabName, evt = null) {
-    console.log('[DEBUG] showSubTab called:', parentTab, subTabName, 'vesselInfoComplete:', vesselInfoComplete);
 
     // Block all subtabs except Settings > Vessel Info until vessel info complete
     if (!vesselInfoComplete && !(parentTab === 'settings' && subTabName === 'vessel-info')) {
@@ -7985,46 +8164,26 @@ function queueEffPlotUpdate() {
 // Updates:
 //   #eff-anomaly-banner  — warning block on efficiency tab
 //   #eff-anomaly-message — detail text inside banner
-//   #alt-health-badge    — small colored badge on main dashboard
+//   #eff-health-pct      — large health % number in settings card
 
 function updateEffAnomalyDisplay() {
     const banner = document.getElementById('eff-anomaly-banner');
     const msgEl = document.getElementById('eff-anomaly-message');
-    const badgeEl = document.getElementById('alt-health-badge');
 
     const state = effMatrixState.state;
     const errCount = effMatrixState.sessionErrorCount;
 
-    // ── Dashboard health badge ──
-    if (badgeEl) {
-        const healthPct = getEffHealthPct();
-        if (!effRedDot.valid || effMatrixState.state === 0) {
-            badgeEl.textContent = 'ALT ◌';
-            badgeEl.className = 'alt-health-badge badge-neutral';
-        } else if (effMatrixState.state !== 2) {
-            badgeEl.textContent = 'ALT ?';
-            badgeEl.className = 'alt-health-badge badge-neutral';
-        } else if (healthPct === null) {
-            badgeEl.textContent = 'ALT --';
-            badgeEl.className = 'alt-health-badge badge-neutral';
-        } else if (errCount === 0 && healthPct >= 95) {
-            badgeEl.textContent = `ALT ${healthPct.toFixed(0)}%`;
-            badgeEl.className = 'alt-health-badge badge-green';
-        } else if (errCount < 3 && healthPct >= 85) {
-            badgeEl.textContent = `ALT ${healthPct.toFixed(0)}%`;
-            badgeEl.className = 'alt-health-badge badge-yellow';
-        } else {
-            badgeEl.textContent = `ALT ${healthPct !== null ? healthPct.toFixed(0) + '%' : '⚠'}`;
-            badgeEl.className = 'alt-health-badge badge-red';
-        }
-    }
-
-    // ── Always update health pct element and sparkline ──
-    // Done here so they update even when banner is hidden
+    // ── Health pct element ──
     const healthEl = document.getElementById('eff-health-pct');
     if (healthEl) {
         const pct = getEffHealthPct();
-        if (pct === null) {
+        const noData = effHistory.count === 0 && pct === null;
+        if (noData) {
+            // No history and no live reading — show demo value so the
+            // number isn't empty under the X overlay
+            healthEl.textContent = '92%';
+            healthEl.style.color = '#4CAF50';
+        } else if (pct === null) {
             healthEl.textContent = '--';
             healthEl.style.color = '#888';
         } else {
@@ -8157,103 +8316,138 @@ function renderEffSparkline() {
     if (!container) return;
 
     const W = container.clientWidth || 300;
-    const H = 70;
-    const PAD_L = 28, PAD_R = 8, PAD_T = 8, PAD_B = 18;
+    const H = 84;
+    const PAD_L = 30, PAD_R = 8, PAD_T = 8, PAD_B = 14;
     const plotW = W - PAD_L - PAD_R;
     const plotH = H - PAD_T - PAD_B;
+    const Y_MIN = 80, Y_MAX = 112;
+
+    // Demo data shown when no real sessions exist yet
+    const DEMO_PTS = [
+        103, 105, 102, 104, 101, 100, 102, 99, 98, 100,
+        97, 99, 96, 95, 97, 94, 93, 92, 94, 91,
+        93, 90, 92, 89, 88, 90, 87, 86, 88, 92
+    ];
 
     // Reconstruct chronological order from circular buffer
     const ordered = [];
     if (effHistory.count > 0) {
-        const oldest = effHistory.count < 30
-            ? 0
-            : effHistory.head;
+        const oldest = effHistory.count < 30 ? 0 : effHistory.head;
         for (let i = 0; i < effHistory.count; i++) {
             const idx = (oldest + i) % 30;
             const v = effHistory.values[idx];
-            if (v > 0.1) ordered.push(v * 100);  // Convert ratio to pct
+            if (v > 0.1) ordered.push(v * 100);
         }
     }
 
-    // Also append live current session if meaningful
     const livePct = getEffHealthPct();
-    // sessionHealthCount not directly available in JS — use effMatrixState as proxy
-    // Show live point if we're in a reference bin with a valid reading
     const showLive = (effMatrixState.state === 2 && effRedDot.valid && livePct !== null);
-
-    const Y_MIN = 70;
-    const Y_MAX = 120;
+    const realPoints = showLive ? [...ordered, livePct] : ordered;
+    const noData = realPoints.length === 0;
+    const pts = noData ? DEMO_PTS : realPoints;
+    const nPts = pts.length;
 
     function toPixelX(i, total) {
         return PAD_L + (i / Math.max(total - 1, 1)) * plotW;
     }
-    function toPixelY(pct) {
-        const clamped = Math.max(Y_MIN, Math.min(Y_MAX, pct));
-        return PAD_T + plotH - ((clamped - Y_MIN) / (Y_MAX - Y_MIN)) * plotH;
+    function toPixelY(v) {
+        const c = Math.max(Y_MIN, Math.min(Y_MAX, v));
+        return PAD_T + plotH - ((c - Y_MIN) / (Y_MAX - Y_MIN)) * plotH;
     }
-    function colorForPct(pct) {
-        if (pct >= 95) return '#4CAF50';
-        if (pct >= 85) return '#FFC107';
+    function colorFor(v) {
+        if (v >= 95) return '#4CAF50';
+        if (v >= 85) return '#FFC107';
         return '#F44336';
     }
 
-    const allPoints = showLive ? [...ordered, livePct] : ordered;
-    const nPts = allPoints.length;
-
-    let svgLines = '';
-    let svgDots = '';
-
-    if (nPts >= 2) {
-        // Draw colored line segments
-        for (let i = 0; i < nPts - 1; i++) {
-            const x1 = toPixelX(i, nPts);
-            const x2 = toPixelX(i + 1, nPts);
-            const y1 = toPixelY(allPoints[i]);
-            const y2 = toPixelY(allPoints[i + 1]);
-            const col = colorForPct((allPoints[i] + allPoints[i + 1]) / 2);
-            svgLines += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" `
-                + `x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" `
-                + `stroke="${col}" stroke-width="2" stroke-linecap="round"/>`;
+    // Catmull-Rom bezier path
+    function smoothPath(points, close) {
+        const tension = 0.35;
+        const px = points.map((v, i) => [toPixelX(i, points.length), toPixelY(v)]);
+        let d = `M${px[0][0].toFixed(1)},${px[0][1].toFixed(1)}`;
+        for (let i = 0; i < px.length - 1; i++) {
+            const p0 = px[Math.max(0, i - 1)];
+            const p1 = px[i];
+            const p2 = px[i + 1];
+            const p3 = px[Math.min(px.length - 1, i + 2)];
+            const cp1x = p1[0] + (p2[0] - p0[0]) * tension;
+            const cp1y = p1[1] + (p2[1] - p0[1]) * tension;
+            const cp2x = p2[0] - (p3[0] - p1[0]) * tension;
+            const cp2y = p2[1] - (p3[1] - p1[1]) * tension;
+            d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
         }
+        if (close) {
+            const last = px[px.length - 1];
+            const first = px[0];
+            const btm = (PAD_T + plotH).toFixed(1);
+            d += ` L${last[0].toFixed(1)},${btm} L${first[0].toFixed(1)},${btm} Z`;
+        }
+        return d;
     }
 
-    // Dots for each session point
-    for (let i = 0; i < nPts; i++) {
-        const x = toPixelX(i, nPts);
-        const y = toPixelY(allPoints[i]);
-        const col = colorForPct(allPoints[i]);
-        const isLiveDot = showLive && i === nPts - 1;
-        svgDots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" `
-            + `r="${isLiveDot ? 4 : 3}" fill="${col}" `
-            + `${isLiveDot ? 'opacity="0.7"' : ''}/>`;
-    }
+    const avg = pts.reduce((a, v) => a + v, 0) / pts.length;
+    const lineColor = colorFor(avg);
 
-    // Reference line at 100%
     const refY = toPixelY(100).toFixed(1);
-    const refLine = `<line x1="${PAD_L}" y1="${refY}" x2="${W - PAD_R}" y2="${refY}" `
-        + `stroke="#888" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>`;
+    const refLine = `<line x1="${PAD_L}" y1="${refY}" x2="${W - PAD_R}" y2="${refY}" stroke="#aaa" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>`;
 
-    // Y axis labels
-    const yLabels = [70, 85, 100, 115].map(v => {
+    const linePath = smoothPath(pts, false);
+    const areaPath = smoothPath(pts, true);
+
+    const yLabels = [85, 95, 100, 105].map(v => {
         const y = toPixelY(v).toFixed(1);
-        return `<text x="${PAD_L - 4}" y="${y}" text-anchor="end" `
-            + `dominant-baseline="middle" font-size="9" fill="#888">${v}</text>`;
+        const bold = v === 100;
+        return `<text x="${PAD_L - 4}" y="${y}" text-anchor="end" dominant-baseline="middle" font-size="9" fill="${bold ? '#999' : '#ccc'}" font-weight="${bold ? '600' : '400'}">${v}</text>`;
     }).join('');
 
-    // X axis label
-    const xLabel = `<text x="${PAD_L + plotW / 2}" y="${H - 3}" `
-        + `text-anchor="middle" font-size="9" fill="#888">Sessions (oldest → newest)</text>`;
+    // Pick up to 6 evenly-spaced x-axis tick indices, always including first and last
+    const maxTicks = 6;
+    const tickIndices = new Set([0, nPts - 1]);
+    if (nPts > 2) {
+        const step = Math.max(1, Math.round((nPts - 1) / (maxTicks - 1)));
+        for (let i = step; i < nPts - 1; i += step) tickIndices.add(i);
+    }
+    const xLabels = [...tickIndices].sort((a, b) => a - b).map(i => {
+        const x = toPixelX(i, nPts).toFixed(1);
+        const lbl = i === nPts - 1 ? 'now' : `S${i + 1}`;
+        return `<line x1="${x}" y1="${(PAD_T + plotH).toFixed(1)}" x2="${x}" y2="${(PAD_T + plotH + 3).toFixed(1)}" stroke="#ddd"/>` +
+               `<text x="${x}" y="${H - 1}" text-anchor="middle" font-size="9" fill="#bbb">${lbl}</text>`;
+    }).join('');
 
-    // No data message
-    const noData = nPts === 0
-        ? `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" `
-        + `dominant-baseline="middle" font-size="11" fill="#666">No session history yet</text>`
-        : '';
+    const dots = pts.map((v, i) => {
+        const x = toPixelX(i, nPts).toFixed(1);
+        const y = toPixelY(v).toFixed(1);
+        const col = colorFor(v);
+        const isLiveDot = !noData && showLive && i === nPts - 1;
+        if (isLiveDot) {
+            return `<circle cx="${x}" cy="${y}" r="5" fill="${col}" opacity="0.2"/>` +
+                   `<circle cx="${x}" cy="${y}" r="3.5" fill="${col}"/>`;
+        }
+        return `<circle cx="${x}" cy="${y}" r="2.5" fill="${col}" stroke="white" stroke-width="1"/>`;
+    }).join('');
+
+    const defs = `<defs><linearGradient id="effSparkGrad" x1="0" y1="0" x2="0" y2="1">` +
+        `<stop offset="0%" stop-color="${lineColor}" stop-opacity="0.18"/>` +
+        `<stop offset="100%" stop-color="${lineColor}" stop-opacity="0"/>` +
+        `</linearGradient></defs>`;
 
     container.innerHTML =
-        `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">`
-        + refLine + svgLines + svgDots + yLabels + xLabel + noData
-        + `</svg>`;
+        `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">` +
+        defs + refLine +
+        `<path d="${areaPath}" fill="url(#effSparkGrad)"/>` +
+        `<path d="${linePath}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>` +
+        dots + yLabels + xLabels +
+        `</svg>`;
+
+    // Show/hide demo overlay and update subtitle
+    const demoX    = document.getElementById('eff-demo-x');
+    const demoNote = document.getElementById('eff-demo-note');
+    const subtitle = document.getElementById('eff-history-subtitle');
+    if (demoX)    demoX.style.display    = noData ? 'block' : 'none';
+    if (demoNote) demoNote.style.display = noData ? 'flex'  : 'none';
+    if (subtitle) subtitle.textContent   = noData
+        ? '(no sessions yet · demo)'
+        : `(${effHistory.count} session${effHistory.count !== 1 ? 's' : ''})`;
 }
 
 // ==================== THERMAL LOG PLOTS ====================

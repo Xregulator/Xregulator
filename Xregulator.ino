@@ -1490,6 +1490,7 @@ unsigned long alternatorOnAccumulator = 0;  // Milliseconds accumulator for alte
 const unsigned long THERMAL_UPDATE_INTERVAL = 10000;  // 10 seconds   (this is just used for how often to update thermal stresses)
 
 float WindingTempOffset = 50.0;  // User configurable winding temp offset (°F)
+uint8_t displayTempUnit = 0;     // 0 = °F, 1 = °C — display preference, no firmware math changes
 float PulleyRatio = 2.0;         // User configurable pulley ratio
 int ManualLifePercentage = 100;  // Manual override for life remaining %
 
@@ -2013,8 +2014,8 @@ float SetpointRampRate = 0.0f;   // THIS IS OBSOLETE AND NEEDS DELETING SOMEDAY 
 uint32_t SettleTimeBeforeCut = 1000;  // ms - how long duty must be at 0% before GPIO4 goes LOW
 
 // --- Temperature Thresholds (°F above TemperatureLimitF) ---
-float TempWarnExcess = 10.0f;            // °F above limit triggers WARNING ramp, starts lockout
-float TempCritExcess = 30.0f;            // °F above limit triggers IMMEDIATE GPIO4 cut (skips Phase 1 ramp)
+float TempWarnExcess = 2.0f;             // °F above limit triggers WARNING ramp, starts lockout
+float TempCritExcess = 10.0f;            // °F above limit triggers IMMEDIATE GPIO4 cut (skips Phase 1 ramp)
 uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this long triggers GPIO4 cut (2 min default)
 
 // --- Voltage Thresholds ---
@@ -2154,7 +2155,7 @@ bool outerAntiWindupFired = false;
 float learningTargetFromRPM = -1.0;  // Table lookup result before corrections
 float ambientTempCorrection = 0.0;   // Calculated temp correction (A)
 float finalLearningTarget = 0.0;     // After all corrections applied
-float ambientTemp = NAN;             // Current ambient temperature (°C)
+float ambientTemp = NAN;             // Current ambient temperature (°F)
 float baroPressure = NAN;            // bmp380
 
 // ===== LEARNING DIAGNOSTICS =====
@@ -2188,6 +2189,9 @@ float ThermalLookaheadSec = 90.0f;  // prediction horizon: project this many sec
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
+
+float WarmupRampRate = 0.0f;           // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
+float warmupCeiling = 0.0f;            // runtime warmup ceiling (not persisted)
 float prevThermalPenalty = 0.0f;       // file-scope, tracks previous slew-limited value
 
 uint32_t TempPIDIntervalMs = 5000;      // Temperature loop update period (ms) — independent of output current loop and sensor rate
@@ -2590,8 +2594,9 @@ enum DataIndex {
   IDX_TIME_TO_FULL_CHARGE,       // 31
   IDX_TIME_TO_FULL_DISCHARGE,    // 32
   IDX_DYNAMIC_SHUNT_GAIN,        // 33
+  IDX_IMU,                       // 34 - IMU (accel/gyro/derived angles)
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 34
+  MAX_DATA_INDICES = 35
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
