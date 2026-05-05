@@ -1048,9 +1048,9 @@ void cvLog_tick(uint32_t nowMs) {
   CvLogEntry &e = cvLog[cvLogHead];
 
   e.ts = nowMs;
-  e.battV = (int16_t)(BatteryV * 100.0f);
+  e.battV = (int16_t)(IBV * 100.0f);
   e.targV = (int16_t)(ChargingVoltageTarget * 100.0f);
-  e.vErrorMv = (int16_t)((ChargingVoltageTarget - BatteryV) * 1000.0f);
+  e.vErrorMv = (int16_t)((ChargingVoltageTarget - IBV) * 1000.0f);
   e.dvdt_x1000 = (int16_t)clamp_f(g_fastOvDvdt * 1000.0f, -32767.0f, 32767.0f);
   e.vPred = (int16_t)(g_fastOvVpred * 100.0f);
   e.fastOvCap = (int16_t)(g_fastOvCurrentCap * 10.0f);
@@ -1070,7 +1070,7 @@ void cvLog_tick(uint32_t nowMs) {
 
   e.pad = 0;
   e.rpm = (int16_t)constrain((int)RPM, -32768, 32767);
-  e.battV_filt_x100 = (int16_t)clamp_f(BatteryV_filtered * 100.0f, -32767.0f, 32767.0f);
+  e.battV_filt_x100 = (int16_t)clamp_f(IBV_filtered * 100.0f, -32767.0f, 32767.0f);
   e.iMeas_filt_x10 = (int16_t)clamp_f(MeasuredAmps_filtered * 10.0f, -32767.0f, 32767.0f);
   e.pad2 = 0;
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;

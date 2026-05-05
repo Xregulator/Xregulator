@@ -1245,10 +1245,9 @@ float getBatteryCurrent() {
   }
 }
 float getBatteryVoltage() {
-  // Return battery voltage from appropriate source
-  // update- removed choice because the control loops need predictable and controllable daq rates
-  // Variables are populated by ReadAnalogInputs() or ReadAnalogInputs_Fake()
-  return BatteryV;
+  // INA228 bus voltage — more accurate (20-bit, no divider drift) and faster in field-on mode.
+  // BatteryV (ADS1115) is retained separately for the cross-sensor disagreement check only.
+  return IBV;
 }
 float getTargetAmps() {
   return MeasuredAmps;
@@ -1258,9 +1257,9 @@ float getFiltI() {
   return MeasuredAmps_filtered;
 }
 float getFiltV() {
-  // Filtered battery voltage for control loops only.
-  // Never use for safety checks — use BatteryV directly.
-  return BatteryV_filtered;
+  // Filtered INA228 bus voltage for control loops only.
+  // Never use for safety checks — use IBV directly.
+  return IBV_filtered;
 }
 
 int thermistorTempC(float V_thermistor) {
@@ -2044,7 +2043,27 @@ void _ReadAnalogInputs_inner() {
   // ── INA228 Battery Monitor ────────────────────────────────────────────────
   static unsigned long lastINARead_local = 0;
 
-  if (millis() - lastINARead_local >= AnalogInputReadInterval) {
+  // Speed mode switch — fast (4.3ms) when field gate is open, slow (1054ms) when off.
+  // Writes two I2C registers only on transition; no cost on steady state.
+  if (INADisconnected == 0) {
+    bool fieldGateOpen = !gpio4IsLow;
+    if (fieldGateOpen && !inaFastModeActive) {
+      INA.setAverage(1);                    // 4 samples (register 1)
+      INA.setBusVoltageConversionTime(4);   // 540µs
+      INA.setShuntVoltageConversionTime(4); // 540µs — total update: 4×1080µs ≈ 4.3ms
+      IBV_filtered = IBV;                   // reseed EMA so CV loop starts clean
+      inaReadInterval = INA_FAST_INTERVAL_MS;
+      inaFastModeActive = true;
+    } else if (!fieldGateOpen && inaFastModeActive) {
+      INA.setAverage(4);                    // 128 samples (register 4)
+      INA.setBusVoltageConversionTime(7);   // 4120µs
+      INA.setShuntVoltageConversionTime(7); // 4120µs — total update: 128×8240µs ≈ 1054ms
+      inaReadInterval = INA_SLOW_INTERVAL_MS;
+      inaFastModeActive = false;
+    }
+  }
+
+  if (millis() - lastINARead_local >= inaReadInterval) {
     if (INADisconnected == 0) {
       lastINARead_local = millis();
 
@@ -2070,6 +2089,36 @@ void _ReadAnalogInputs_inner() {
                        // Only mark fresh on successful, valid readings
                        MARK_FRESH(IDX_IBV);
                        MARK_FRESH(IDX_BCUR);
+
+                       // IBV EMA — used by getFiltV() and CV loop error terms
+                       // dBcur/dt — positive value = load dump (loads disconnected, OV risk)
+                       {
+                         uint32_t nowIna = millis();
+                         static bool ibv_ema_init = false;
+                         static uint32_t lastIbvEmaMs = 0;
+                         if (!ibv_ema_init) {
+                           IBV_filtered = IBV;
+                           ibv_ema_init = true;
+                         } else {
+                           float dt_f = fmaxf(1.0f, (float)(nowIna - lastIbvEmaMs));
+                           float alpha = dt_f / (InputFilterTC + dt_f);
+                           IBV_filtered = alpha * IBV + (1.0f - alpha) * IBV_filtered;
+                         }
+                         lastIbvEmaMs = nowIna;
+                         ibvFreshFlag = true;
+
+                         static float bcurPrev = 0.0f;
+                         static uint32_t bcurPrevMs = 0;
+                         if (bcurPrevMs > 0) {
+                           uint32_t dtBcur = nowIna - bcurPrevMs;
+                           if (dtBcur > 0 && dtBcur < 2000) {
+                             g_dBcur_dt = (Bcur - bcurPrev) / ((float)dtBcur * 0.001f);
+                           }
+                         }
+                         bcurPrev = Bcur;
+                         bcurPrevMs = nowIna;
+                       }
+
                        if (IBV > IBVMax) {
                          IBVMax = IBV;
                          static unsigned long lastWrite_IBVMax = 0;

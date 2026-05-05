@@ -1140,6 +1140,16 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     MaximumAllowedBatteryAmps = readFile(LittleFS, "/MaximumAllowedBatteryAmps.txt").toInt();
   }
+  if (!fsExists("/LoadDumpDtThresh.txt")) {
+    writeFile(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
+  } else {
+    LoadDumpDtThresh = readFile(LittleFS, "/LoadDumpDtThresh.txt").toFloat();
+  }
+  if (!fsExists("/LoadDumpCurrentDrop.txt")) {
+    writeFile(LittleFS, "/LoadDumpCurrentDrop.txt", String(LoadDumpCurrentDrop).c_str());
+  } else {
+    LoadDumpCurrentDrop = readFile(LittleFS, "/LoadDumpCurrentDrop.txt").toFloat();
+  }
   if (!fsExists("/ManualSOCPoint.txt")) {
     writeFile(LittleFS, "/ManualSOCPoint.txt", String(ManualSOCPoint).c_str());
   } else {
@@ -1964,6 +1974,17 @@ struct RollingWindow {
   uint16_t count = 0;  // How many valid samples (0-60)
 } rolling60s;
 
+// 120-second rolling window for anchor display (roll/pitch deviation + heading swing)
+// heading entries: actual degrees [0,360] when fresh, -1.0 when compass stale
+constexpr uint16_t ROLLING_WINDOW_120 = 120;
+struct RollingWindow120 {
+  float heel[ROLLING_WINDOW_120];
+  float pitch[ROLLING_WINDOW_120];
+  float heading[ROLLING_WINDOW_120];
+  uint16_t index = 0;
+  uint16_t count = 0;
+} rolling120s;
+
 // ============================================================================
 // IMU METRIC PROCESSING FUNCTIONS
 // ============================================================================
@@ -2057,6 +2078,7 @@ void updateAccelMetrics() {
   static unsigned long wave_last_decim_ms = 0;
   static bool wave_dc_initialized = false;
   static float msi_rms2_ewma = 0;    // 60s RMS² EWMA for MSI frequency-weighted vertical accel
+  static bool gps_was_moving = false; // hysteresis state: ON above 1.7 kt, OFF below 1.3 kt
 
   // Process accel ring buffer — cap per call as a safety net against edge cases
   uint16_t accel_cap = 0;
@@ -2168,10 +2190,27 @@ void updateAccelMetrics() {
   // EWMA update for HF vibration energy from this batch of accel samples
   if (hf_sample_count > 0) {
     float new_rms2 = hf_rms2_accum / hf_sample_count;
-    // alpha = exp(-dt/tau): dt≈10ms (FIFO drain rate), tau=3s → alpha≈0.9967
-    imu_hf_vibration_energy = 0.0033f * new_rms2 + 0.9967f * imu_hf_vibration_energy;
+    // alpha = exp(-dt/tau): dt≈10ms (FIFO drain rate), tau=1s → alpha≈0.99
+    imu_hf_vibration_energy = 0.01f * new_rms2 + 0.99f * imu_hf_vibration_energy;
     hf_rms2_accum = 0.0f;
     hf_sample_count = 0;
+  }
+
+  // GPS speed gate — ON above 1.7 kt, OFF below 1.3 kt (hysteresis prevents threshold chatter)
+  bool gps_is_moving = (SOGNMEA > 1.7f) || (gps_was_moving && SOGNMEA >= 1.3f);
+  if (gps_is_moving != gps_was_moving) {
+    // Both scores reset to zero on any mode switch — no cross-contamination between trips and anchorings
+    msi_rms2_ewma = 0.0f;
+    if (!gps_is_moving) {
+      // Underway → anchored: flush rolling window so passage motion doesn't skew comfort score
+      rolling60s.index = 0;
+      rolling60s.count = 0;
+      rolling120s.index = 0;
+      rolling120s.count = 0;
+      imu_heading_swing_120s = -1.0f;
+    }
+    // (Anchored → underway: msi_rms2_ewma already reset above; scores will read 0.0 until EWMA builds)
+    gps_was_moving = gps_is_moving;
   }
 
   // Wave period detection — emit one decimated sample every 100ms (10 Hz)
@@ -2202,13 +2241,18 @@ void updateAccelMetrics() {
         W_e = 0.5f;  // mid-range estimate when wave period is unknown
       }
       float a_w = detrended * W_e;
-      // 60s EWMA at 10 Hz: alpha = 1/(10 × 60) = 0.00167
-      msi_rms2_ewma = 0.9983f * msi_rms2_ewma + 0.0017f * (a_w * a_w);
-      float a_w_rms = sqrtf(msi_rms2_ewma);
-      // L&G 1987 calibration: 0.03g weighted RMS → ~10% vomiting in 2hrs
-      imu_msi_score = (a_w_rms / 0.03f) * 30.0f;
-      // Power-law approx of L&G empirical population curve — labeled as approximate
-      imu_vomit_pct = constrain(100.0f * powf(a_w_rms / 0.03f, 1.3f) * 0.10f, 0.0f, 100.0f);
+      if (gps_is_moving) {
+        // 60s EWMA at 10 Hz: alpha = 1/(10 × 60) = 0.00167
+        msi_rms2_ewma = 0.9983f * msi_rms2_ewma + 0.0017f * (a_w * a_w);
+      }
+      // Always publish scores so JS can display a grayed value at anchor; EWMA just doesn't accumulate there
+      {
+        float a_w_rms = sqrtf(msi_rms2_ewma);
+        // L&G 1987 calibration: 0.03g weighted RMS → ~10% vomiting in 2hrs
+        imu_msi_score = (a_w_rms / 0.03f) * 30.0f;
+        // Power-law approx of L&G empirical population curve — labeled as approximate
+        imu_vomit_pct = constrain(100.0f * powf(a_w_rms / 0.03f, 1.3f) * 0.10f, 0.0f, 100.0f);
+      }
     }
 
     // Zero-crossing with hysteresis — prevents noise-triggered false crossings
@@ -2373,6 +2417,61 @@ void updateAccelMetrics() {
       imu_pitch_change_60s = pitch_max_60s - pitch_min_60s;
       imu_pitch_deviation_60s = pitch_dev;
     }
+
+    // --- 120-second ring buffer (same 1s tick) ---
+    rolling120s.heel[rolling120s.index]    = cf_heel;
+    rolling120s.pitch[rolling120s.index]   = cf_pitch;
+    // Store compass heading if fresh; -1.0 sentinel means stale/unavailable
+    rolling120s.heading[rolling120s.index] = IS_STALE(IDX_HEADING_NMEA) ? -1.0f : HeadingNMEA;
+    rolling120s.index = (rolling120s.index + 1) % ROLLING_WINDOW_120;
+    if (rolling120s.count < ROLLING_WINDOW_120) rolling120s.count++;
+
+    if (rolling120s.count > 30) {
+      // Roll deviation — peak departure from 2-min mean
+      float h_min = 999.0f, h_max = -999.0f, h_sum = 0;
+      float p_min = 999.0f, p_max = -999.0f, p_sum = 0;
+      for (uint16_t i = 0; i < rolling120s.count; i++) {
+        if (rolling120s.heel[i]  < h_min) h_min = rolling120s.heel[i];
+        if (rolling120s.heel[i]  > h_max) h_max = rolling120s.heel[i];
+        h_sum += rolling120s.heel[i];
+        if (rolling120s.pitch[i] < p_min) p_min = rolling120s.pitch[i];
+        if (rolling120s.pitch[i] > p_max) p_max = rolling120s.pitch[i];
+        p_sum += rolling120s.pitch[i];
+      }
+      float h_mean = h_sum / rolling120s.count;
+      float p_mean = p_sum / rolling120s.count;
+      imu_heel_deviation_120s  = max(abs(h_max - h_mean), abs(h_min - h_mean));
+      imu_pitch_deviation_120s = max(abs(p_max - p_mean), abs(p_min - p_mean));
+
+      // Heading swing — wrap-aware using mean-vector approach (handles 0°/360° boundary)
+      float sin_sum = 0, cos_sum = 0;
+      int valid_hd = 0;
+      for (uint16_t i = 0; i < rolling120s.count; i++) {
+        float hd = rolling120s.heading[i];
+        if (hd >= 0) {  // -1 sentinel = stale
+          float hd_rad = hd * (float)(M_PI / 180.0);
+          sin_sum += sinf(hd_rad);
+          cos_sum += cosf(hd_rad);
+          valid_hd++;
+        }
+      }
+      if (valid_hd > 10) {
+        float mean_rad = atan2f(sin_sum, cos_sum);
+        float max_dev = 0;
+        for (uint16_t i = 0; i < rolling120s.count; i++) {
+          float hd = rolling120s.heading[i];
+          if (hd >= 0) {
+            float diff = hd * (float)(M_PI / 180.0) - mean_rad;
+            while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+            while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+            if (fabsf(diff) > max_dev) max_dev = fabsf(diff);
+          }
+        }
+        imu_heading_swing_120s = max_dev * (float)(180.0 / M_PI) * 2.0f;  // peak-to-peak
+      } else {
+        imu_heading_swing_120s = -1.0f;  // not enough compass data
+      }
+    }
   }
 
   // Capsize/pitchpole detection
@@ -2442,7 +2541,7 @@ void updateAccelMetrics() {
     }
   }
 
-  // Anchorage comfort heuristic — 0=terrible, 100=calm
+  // Anchorage comfort — always computed so JS can show a grayed value underway; contextually meaningful only at anchor
   // Roll and pitch only — at anchor there are no underway-style slams; rocking and hobby-horsing are the discomfort drivers
   {
     float roll_penalty  = min(imu_heel_deviation_60s  / 12.0f, 1.0f) * 65.0f;  // 12 deg heel dev -> full penalty

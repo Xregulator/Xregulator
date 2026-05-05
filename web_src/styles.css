@@ -2937,4 +2937,10 @@ input:checked+.slider:before {
 }
 
 
+/* Anchor motion color coding — applied to value spans via JS updateAnchorColorCoding().
+   Stale gray (inline style) overrides these color classes cleanly. */
+.anchor-good { color: #4caf50; }
+.anchor-warn { color: #ff9800; }
+.anchor-bad  { color: #f44336; }
+
 /* XREG_END */

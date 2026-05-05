@@ -4316,6 +4316,48 @@
                   </form>
                 </div>
               </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Load Dump Detection Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Rate of battery current increase (A/s) that triggers load dump feedforward. Only active in CV mode with INA228 in fast mode. Default 500 A/s.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="LoadDumpDtThresh" type="number" step="1" min="1" max="9999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Load Dump Current Cap Drop (A) (<span id="LoadDumpCurrentDrop_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">On load dump detection, the output current cap is set to (CV setpoint − this value). Reduces alternator output immediately to prevent overvoltage. Default 30 A.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="LoadDumpCurrentDrop" type="number" step="1" min="0" max="500" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <div class="form-label">Battery Current Rate of Change (A/s):</div>
+                <div class="form-input"><span id="dBcur_dt_ID">—</span></div>
+              </div>
+              <div class="form-row">
+                <div class="form-label">Load Dump Feedforward Active:</div>
+                <div class="form-input"><span id="loadDumpActive_ID">—</span></div>
+              </div>
             </details>
 
             <!-- Alarm Controls Section -->
@@ -5534,24 +5576,36 @@
               <span class="metric-value"><span id="imu_yaw_rate_dps_ID">0.0</span> °/s</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Wave Period</span>
+              <span class="metric-label">Wave Period <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dominant wave period in seconds, auto-detected from the vertical acceleration signal. Calculated via zero-crossings of the 10 Hz-decimated vertical accel after DC (gravity) removal. Shows "--" until enough crossings are detected.</span></span></span>
               <span class="metric-value"><span id="imu_wave_period_sec_ID">--</span> s</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">HF Vibration Energy</span>
+              <span class="metric-label">HF Vibration Energy <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">High-frequency (above 20 Hz) vibration energy from the accelerometer, displayed as RMS² in g². Reflects engine vibration, chop, and mechanical noise. Gravity and slow vessel motion are removed by a high-pass filter. ~1 second smoothing.</span></span></span>
               <span class="metric-value"><span id="imu_hf_vibration_energy_ID">0</span> RMS²</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Motion Sickness Index</span>
+              <span class="metric-label">Motion Sickness Index <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lawther &amp; Griffin (1987) motion sickness index. Frequency-weights vertical acceleration — peaks at 0.2 Hz (5-second waves), which causes the most sickness. Scale: 0–30 low, 30–70 moderate, 70+ severe. Not a percentage; higher is worse. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor. Resets to zero on departure and arrival — no cross-contamination between trips.</span></span></span>
               <span class="metric-value"><span id="imu_msi_score_ID">--</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Vomit Probability (2hr)</span>
+              <span class="metric-label">Vomit Probability (2hr) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Estimated percentage of an average population who would vomit during a 2-hour voyage at the current sustained motion level. Derived from the Motion Sickness Index using the Lawther &amp; Griffin power-law model. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor.</span></span></span>
               <span class="metric-value"><span id="imu_vomit_pct_ID">--</span> %</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Anchorage Comfort</span>
+              <span class="metric-label">Anchorage Comfort <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Comfort score at anchor on a 0–100 scale (100 = flat calm). Based on rolling (heel deviation, 65% weight) and hobby-horsing (pitch deviation, 35% weight) over the last 60 seconds. Full penalty at 12° heel deviation or 8° pitch deviation. Grayed out underway — contextually meaningful only at anchor. Motion history resets on departure so passage data never skews the score. Activates below 1.3 kt.</span></span></span>
               <span class="metric-value"><span id="imu_anchorage_comfort_ID">--</span> / 100</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Roll Deviation (2 min) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Peak-to-peak heel (roll) deviation over the last 2 minutes. Measures how much the boat rolls side to side at anchor. Color coded: green = comfortable, yellow = moderate, red = uncomfortable. Grayed out underway.</span></span></span>
+              <span class="metric-value"><span id="imu_heel_deviation_120s_ID">--</span> °</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Pitch Deviation (2 min) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Peak-to-peak pitch (fore-aft) deviation over the last 2 minutes. Measures how much the boat hobby-horses at anchor. Color coded: green = comfortable, yellow = moderate, red = uncomfortable. Grayed out underway.</span></span></span>
+              <span class="metric-value"><span id="imu_pitch_deviation_120s_ID">--</span> °</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Yaw Swing (2 min) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Peak-to-peak heading swing over the last 2 minutes from the NMEA2000 compass. Shows how much the boat swings on its anchor rode. "--" if no compass data. Color coded: green = steady, yellow = moderate swing, red = wide swing. Grayed out underway.</span></span></span>
+              <span class="metric-value"><span id="imu_heading_swing_120s_ID">--</span> °</span>
             </div>
           </div>
 
@@ -5559,11 +5613,11 @@
           <div class="card-group">
             <p class="card-group-title">Events (Current Window)</p>
             <div class="metric-row">
-              <span class="metric-label">Slam Count</span>
+              <span class="metric-label">Slam Count <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of slams in the current window. A slam is counted when vertical (upward) acceleration exceeds the configurable Slam Threshold, with a 300 ms refractory period to avoid counting one physical event multiple times.</span></span></span>
               <span class="metric-value"><span id="imu_slam_count_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Slam Peak (Max)</span>
+              <span class="metric-label">Slam Peak (Max) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Highest single vertical acceleration reading recorded during a slam event in the current window, in g's. Resets each window.</span></span></span>
               <span class="metric-value"><span id="imu_slam_peak_max_ID">0.0</span> g</span>
             </div>
           </div>
@@ -5572,15 +5626,15 @@
           <div class="card-group">
             <p class="card-group-title">Events (Lifetime)</p>
             <div class="metric-row">
-              <span class="metric-label">Total Slams</span>
+              <span class="metric-label">Total Slams <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative slam count since the device was last reset. Persists across power cycles via non-volatile storage.</span></span></span>
               <span class="metric-value"><span id="imu_slam_count_lifetime_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Capsize Events</span>
+              <span class="metric-label">Capsize Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times heel angle has exceeded the configurable Capsize Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
               <span class="metric-value"><span id="imu_capsize_count_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Pitchpole Events</span>
+              <span class="metric-label">Pitchpole Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times pitch angle has exceeded the configurable Pitchpole Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
               <span class="metric-value"><span id="imu_pitchpole_count_ID">0</span></span>
             </div>
           </div>
@@ -5589,19 +5643,19 @@
           <div class="card-group">
             <p class="card-group-title">60-Second Rolling Metrics</p>
             <div class="metric-row">
-              <span class="metric-label">Heel Change (60s)</span>
+              <span class="metric-label">Heel Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in heel angle over the last 60 seconds (latest minus oldest sample). Captures slow, persistent roll shifts — e.g. a jibe or load transfer.</span></span></span>
               <span class="metric-value"><span id="imu_heel_change_60s_ID">0.0</span>°</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Heel Deviation (60s)</span>
+              <span class="metric-label">Heel Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean heel angle. Measures how much the boat is rocking side-to-side regardless of its steady list. High deviation = active rolling. Used in the Anchorage Comfort score.</span></span></span>
               <span class="metric-value"><span id="imu_heel_deviation_60s_ID">0.0</span>°</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Pitch Change (60s)</span>
+              <span class="metric-label">Pitch Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in pitch angle over the last 60 seconds (latest minus oldest). Captures slow fore-aft trim shifts.</span></span></span>
               <span class="metric-value"><span id="imu_pitch_change_60s_ID">0.0</span>°</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Pitch Deviation (60s)</span>
+              <span class="metric-label">Pitch Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean pitch angle. Measures fore-aft hobby-horsing. High deviation = active pitching. Used in the Anchorage Comfort score.</span></span></span>
               <span class="metric-value"><span id="imu_pitch_deviation_60s_ID">0.0</span>°</span>
             </div>
           </div>
@@ -5659,7 +5713,7 @@
 
           <!-- Sea State Hours -->
           <div class="card-group">
-            <p class="card-group-title">Sea State Hours (Lifetime)</p>
+            <p class="card-group-title">Sea State Hours (Lifetime) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative hours bucketed by Motion Sickness Index and speed (moving = SOG ≥ 1.5 kt). Buckets: Gentle (MSI &lt; 10), Moderate (10–30), Rough (30–70), Extreme (MSI ≥ 70). Logged once per minute.</span></span></p>
             <div class="metric-row">
               <span class="metric-label">Moving — Gentle</span>
               <span class="metric-value"><span id="imu_min_moving_gentle_ID">0.0</span> hr</span>
@@ -7822,6 +7876,8 @@
     <span id="ResetRPMMax_echo" style="display:none;">0</span>
     <span id="FuelUsedID" style="display:none;">0</span>
     <span id="MaximumAllowedBatteryAmps_echo" style="display:none;">0</span>
+    <span id="LoadDumpDtThresh_echo" style="display:none;">0</span>
+    <span id="LoadDumpCurrentDrop_echo" style="display:none;">0</span>
     <span id="ManualSOCPoint_echo" style="display:none;">0</span>
     <span id="BatteryVoltageSource_echo" style="display:none;">0</span>
     <span id="ShuntResistanceMicroOhm_echo" style="display:none;">0</span>

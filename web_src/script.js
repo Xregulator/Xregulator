@@ -499,6 +499,13 @@ const CSV2_FIELDS = [
     "imu_min_stat_moderate",            // 267
     "imu_min_stat_rough",               // 268
     "imu_min_stat_extreme",             // 269
+    "imu_heel_deviation_120s",          // 270
+    "imu_pitch_deviation_120s",         // 271
+    "imu_heading_swing_120s",           // 272
+    "LoadDumpDtThresh",                 // 273
+    "LoadDumpCurrentDrop",              // 274
+    "dBcur_dt",                         // 275
+    "loadDumpActive",                   // 276
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -2584,6 +2591,8 @@ function updateAllEchosOptimized(data) {
         { key: 'ResetAlternatorOnTime', id: 'ResetAlternatorOnTime_echo', transform: v => v },
         { key: 'ResetEnergy', id: 'ResetEnergy_echo', transform: v => v },
         { key: 'MaximumAllowedBatteryAmps', id: 'MaximumAllowedBatteryAmps_echo', transform: v => v },
+        { key: 'LoadDumpDtThresh',    id: 'LoadDumpDtThresh_echo',    transform: v => v },
+        { key: 'LoadDumpCurrentDrop', id: 'LoadDumpCurrentDrop_echo', transform: v => v },
         { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
         { key: 'BatteryVoltageSource', id: 'BatteryVoltageSource_echo', transform: v => v },
         { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
@@ -4084,6 +4093,94 @@ function initTemperaturePlot() {
 }
 
 //Staleness stuff
+// Dims an entire metric-row when the metric doesn't apply in the current GPS mode (anchored vs underway).
+// Targets the closest .metric-row ancestor so label and value both gray together.
+// Distinct from stale styling: stale = data is old; mode-inactive = data isn't contextually relevant.
+function applyModeStyle(valueElementId, isApplicable, inactiveTitle) {
+    const el = document.getElementById(valueElementId);
+    if (!el) return;
+    const row = el.closest('.metric-row') || el;
+    const isDark = document.body.classList.contains('dark-mode');
+    const cacheKey = isApplicable ? 'mode-active' : (isDark ? 'mode-inactive-dark' : 'mode-inactive-light');
+    if (row._modeState === cacheKey) return;
+    row._modeState = cacheKey;
+    if (!isApplicable) {
+        row.style.opacity = '0.35';
+        row.style.fontStyle = 'italic';
+        row.title = inactiveTitle || 'Not active in current mode';
+    } else {
+        row.style.opacity = '1.0';
+        row.style.fontStyle = 'normal';
+        row.title = '';
+    }
+}
+
+// window.imuMovingState: null = GPS unknown (show all), true = underway, false = anchored.
+// Mirrors firmware hysteresis: ON above 1.7 kt, OFF below 1.3 kt.
+window.imuMovingState = null;
+function updateIMUMovingState(sogRaw) {
+    const sog = sogRaw / 100;
+    if (window.imuMovingState === null) {
+        window.imuMovingState = sog > 1.5;
+    } else if (window.imuMovingState && sog < 1.3) {
+        window.imuMovingState = false;
+    } else if (!window.imuMovingState && sog > 1.7) {
+        window.imuMovingState = true;
+    }
+}
+
+// Placeholder thresholds — adjust once real-world data is available
+// Roll (heel deviation 2min): warn=5°, bad=12°
+// Pitch (pitch deviation 2min): warn=3°, bad=8°
+// Yaw (heading swing 2min): warn=20°, bad=45°
+function updateAnchorColorCoding(data) {
+    function applyAnchorColor(elementId, rawValue, scale, warnThresh, badThresh) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+        el.classList.remove('anchor-good', 'anchor-warn', 'anchor-bad');
+        const value = rawValue / scale;
+        if (value < 0) return;  // sentinel — no data, leave unstyled
+        if (value >= badThresh) {
+            el.classList.add('anchor-bad');
+        } else if (value >= warnThresh) {
+            el.classList.add('anchor-warn');
+        } else {
+            el.classList.add('anchor-good');
+        }
+    }
+
+    if (data.imu_heel_deviation_120s !== undefined)
+        applyAnchorColor('imu_heel_deviation_120s_ID',  data.imu_heel_deviation_120s,  100, 5,  12);  // TODO: tune thresholds
+    if (data.imu_pitch_deviation_120s !== undefined)
+        applyAnchorColor('imu_pitch_deviation_120s_ID', data.imu_pitch_deviation_120s, 100, 3,  8);   // TODO: tune thresholds
+    if (data.imu_heading_swing_120s !== undefined)
+        applyAnchorColor('imu_heading_swing_120s_ID',   data.imu_heading_swing_120s,   10,  20, 45);  // TODO: tune thresholds
+}
+
+function updateIMUModeStyles() {
+    if (window.imuMovingState === null) return;  // no GPS yet — leave everything at full opacity
+    const moving = window.imuMovingState;
+
+    // These metrics are only meaningful underway — gray them when anchored
+    [
+        'imu_msi_score_ID',
+        'imu_vomit_pct_ID',
+        'imu_wave_period_sec_ID',
+        'imu_heel_deviation_60s_ID',
+        'imu_heel_change_60s_ID',
+        'imu_pitch_deviation_60s_ID',
+        'imu_pitch_change_60s_ID',
+    ].forEach(id => applyModeStyle(id, moving, 'Active underway only (SOG > 1.7 kt)'));
+
+    // These metrics are only meaningful at anchor — gray them when underway
+    [
+        'imu_anchorage_comfort_ID',
+        'imu_heel_deviation_120s_ID',
+        'imu_pitch_deviation_120s_ID',
+        'imu_heading_swing_120s_ID',
+    ].forEach(id => applyModeStyle(id, !moving, 'Active at anchor only (SOG < 1.3 kt)'));
+}
+
 function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD_DEFAULT_MS) {
     const element = document.getElementById(elementId);
     if (!element) {
@@ -4190,6 +4287,9 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("imu_msi_score_ID", sa.imu);
     applyStaleStyleByAge("imu_vomit_pct_ID", sa.imu);
     applyStaleStyleByAge("imu_anchorage_comfort_ID", sa.imu);
+    applyStaleStyleByAge("imu_heel_deviation_120s_ID", sa.imu);
+    applyStaleStyleByAge("imu_pitch_deviation_120s_ID", sa.imu);
+    applyStaleStyleByAge("imu_heading_swing_120s_ID", sa.imu);
     applyStaleStyleByAge("imu_min_moving_gentle_ID", sa.imu);
     applyStaleStyleByAge("imu_min_moving_moderate_ID", sa.imu);
     applyStaleStyleByAge("imu_min_moving_rough_ID", sa.imu);
@@ -4245,7 +4345,7 @@ function updateAllStalenessStyles() {
 // Start the staleness detection system - call this from window.load
 function startStalenessDetection() {
     // Update staleness styling every 2 seconds
-    setTrackedInterval(updateAllStalenessStyles, 2000);
+    setTrackedInterval(() => { updateAllStalenessStyles(); updateIMUModeStyles(); }, 2000);
 }
 
 
@@ -4669,8 +4769,8 @@ function handleChargeRateModeToggle(mode) {
 }
 
 function getLiveBatteryV() {
-    // BatteryV in CSVData1 is scaled ×100; fall back to 12V if not yet received
-    return ((window._debugData?.BatteryV) || 1200) / 100;
+    // IBV (INA228) is the primary voltage source; fall back to BatteryV (ADS1115), then 12V
+    return ((window._debugData?.IBV) || (window._debugData?.BatteryV) || 1200) / 100;
 }
 
 function ampsToKW(amps) {
@@ -5277,7 +5377,10 @@ window.addEventListener("load", function () {
                 ["imu_hf_vibration_energy_ID", "imu_hf_vibration_energy"],
                 ["imu_msi_score_ID", "imu_msi_score"],
                 ["imu_vomit_pct_ID", "imu_vomit_pct"],
-                ["imu_anchorage_comfort_ID", "imu_anchorage_comfort"]
+                ["imu_anchorage_comfort_ID", "imu_anchorage_comfort"],
+                ["imu_heel_deviation_120s_ID", "imu_heel_deviation_120s"],
+                ["imu_pitch_deviation_120s_ID", "imu_pitch_deviation_120s"],
+                ["imu_heading_swing_120s_ID", "imu_heading_swing_120s"]
             ];
 
             // Update alarm status, this is GPIO21 buzzer/alarm
@@ -5306,6 +5409,8 @@ window.addEventListener("load", function () {
                 ["fastOvSoftCountID", "fastOvSoftCount"],
                 ["fastOvHardCountID", "fastOvHardCount"],
                 ["iExcessCountID", "iExcessCount"],
+                ["dBcur_dt_ID", "dBcur_dt"],
+                ["loadDumpActive_ID", "loadDumpActive"],
                 ["inaOVCountID", "inaOVCount"],
                 ["hardOCCountID", "hardOCCount"],
                 ["voltSpikeCountID", "voltSpikeCount"],
@@ -5414,7 +5519,15 @@ window.addEventListener("load", function () {
 
             handleForcedUpdate(data);
 
-            //  updateFields for CSVData2     
+            // Update GPS moving state for IMU mode graying (SOGNMEA is scaled ×100)
+            if (data.SOGNMEA !== undefined) {
+                updateIMUMovingState(data.SOGNMEA);
+                updateIMUModeStyles();
+            }
+
+            updateAnchorColorCoding(data);
+
+            //  updateFields for CSVData2
             const updateFields = (fieldArray) => {
                 for (const [elementId, key] of fieldArray) {
                     const value = data[key];
@@ -5450,6 +5563,14 @@ window.addEventListener("load", function () {
                             newTextContent = (value / 1000).toFixed(2);
                         }
                     }
+                    // Heading swing: sentinel -10 means no compass data
+                    else if (key === "imu_heading_swing_120s") {
+                        if (value < 0) {
+                            newTextContent = "--";
+                        } else {
+                            newTextContent = (value / 10).toFixed(1);
+                        }
+                    }
                     // Time values that need conversion from minutes to days/hours/minutes
                     else if (["timeToFullChargeMin", "timeToFullDischargeMin"].includes(key)) {
                         newTextContent = formatMinutesToDHM(value);
@@ -5472,7 +5593,8 @@ window.addEventListener("load", function () {
                         "pitch_min", "pitch_max", "pitch_avg",
                         "imu_heel_change_60s", "imu_heel_deviation_60s",
                         "imu_pitch_change_60s", "imu_pitch_deviation_60s",
-                        "imu_heel_max_lifetime", "imu_pitch_max_lifetime"].includes(key)) {
+                        "imu_heel_max_lifetime", "imu_pitch_max_lifetime",
+                        "imu_heel_deviation_120s", "imu_pitch_deviation_120s"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     // Temperature fields (raw integer °F from firmware — convert to display unit)
@@ -5525,8 +5647,11 @@ window.addEventListener("load", function () {
                     else if (["Icv", "cv_I", "cv_D"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);    // *100 int -> amps
                     }
-                    else if (key === "voltageControlActive") {
+                    else if (key === "voltageControlActive" || key === "loadDumpActive") {
                         newTextContent = value === 1 ? "YES" : "NO";
+                    }
+                    else if (key === "dBcur_dt") {
+                        newTextContent = (value / 10).toFixed(1);  // ×10 -> A/s, 1dp
                     }
                     // FLOAT_DURATION: stored/sent as seconds -> display hours
                     else if (["FLOAT_DURATION"].includes(key)) {
@@ -9721,7 +9846,7 @@ function sysidUpdatePreflight() {
     const rpm     = parseFloat(getField("RPMID") ?? 0);
     const minRpm  = parseFloat(getField("MinRPMForField_echo") ?? 500);
     const amps    = parseFloat(getField("MeasAmpsID") ?? 0);
-    const battV   = parseFloat(getField("BatteryVID") ?? 0);
+    const battV   = parseFloat(getField("IBVID") ?? getField("BatteryVID") ?? 0);
     const bulkV   = parseFloat(getField("BulkVoltage_echo") ?? 14.8);
 
     const rpmOK   = rpm >= minRpm;

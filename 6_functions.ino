@@ -540,7 +540,7 @@ void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEvent
 //   current rise supervisor for CV-mode transient protection.
 //   Still active as a last-resort voltage backstop (sensor glitch,
 //   non-CV modes, cases where iExcess detection misses).
-//   battVFreshFlag fires at ~15ms cadence (CH0 gets 1 of 6 ADS slots; CH1 interval ~5ms).
+//   ibvFreshFlag fires at ~5ms cadence (field on, INA228 fast mode) or ~1100ms (field off).
 //   dvdt EMA alpha=0.08 → effective time constant ~190ms.
 //
 // ── TEMPERATURE LOOP PID ─────────────────────────────────────
@@ -740,18 +740,18 @@ void AdjustFieldLearnMode() {
 
     g_fastOvSoftActive = false;
     g_fastOvHardActive = false;
-    g_fastOvVpred = BatteryV;
+    g_fastOvVpred = IBV;
 
-    if (battVFreshFlag) {
-      battVFreshFlag = false;
+    if (ibvFreshFlag) {
+      ibvFreshFlag = false;
       if (vPrevMs > 0) {
         float dtV = (currentMillis - vPrevMs) / 1000.0f;
         if (dtV > 0.001f && dtV < 0.1f) {
-          float raw = (BatteryV - vPrev) / dtV;
+          float raw = (IBV - vPrev) / dtV;
           dvdt = 0.08 * raw + 0.92 * dvdt;
         }
       }
-      vPrev = BatteryV;
+      vPrev = IBV;
       vPrevMs = currentMillis;
     }
     g_fastOvDvdt = dvdt;
@@ -762,14 +762,14 @@ void AdjustFieldLearnMode() {
       const float V_HARD = ChargingVoltageTarget + 0.15f;
       const float PRED_GUARD = 0.06f;
 
-      float Vpred = BatteryV + TD_PRED * fmaxf(0.0f, dvdt);
+      float Vpred = IBV + TD_PRED * fmaxf(0.0f, dvdt);
       g_fastOvVpred = Vpred;
 
       if (!ovActive) {
         preEventIcv = Icv;
       }
 
-      if (BatteryV > ChargingVoltageTarget - PRED_GUARD) {
+      if (IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (Vpred > V_SOFT) {
           // H1: baseline anchored to setpointLimited (actual operating point) not fastOvBaseCap
           // (theoretical ceiling). Cap is now binding and proportional to overshoot magnitude.
@@ -788,8 +788,8 @@ void AdjustFieldLearnMode() {
       }
 
       const float HARD_CLAMP_HYST = 0.08f;
-      if (BatteryV > ChargingVoltageTarget + HARD_CLAMP_HYST) {
-        float ovExcess = BatteryV - (ChargingVoltageTarget + HARD_CLAMP_HYST);
+      if (IBV > ChargingVoltageTarget + HARD_CLAMP_HYST) {
+        float ovExcess = IBV - (ChargingVoltageTarget + HARD_CLAMP_HYST);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
         fastOvClampActive = true;
@@ -799,10 +799,10 @@ void AdjustFieldLearnMode() {
 
       // Recovery seed: fires once when clamp de-asserts.
       if (ovActive
-          && (BatteryV <= ChargingVoltageTarget)
+          && (IBV <= ChargingVoltageTarget)
           && (Vpred <= V_SOFT)) {
 
-        float e = ChargingVoltageTarget - BatteryV;
+        float e = ChargingVoltageTarget - IBV;
         float icvHi = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
 
         // cv_I = clamp_f(preEventIcv - VoltageKp * e, 0.0f, icvHi);  // likely to remove permanently
@@ -982,7 +982,7 @@ void AdjustFieldLearnMode() {
     if (voltageControlActive) {
       if (fastOvClampActive) {
         cvGovBypassLatch = true;
-      } else if (BatteryV < ChargingVoltageTarget + 0.02f) {
+      } else if (IBV < ChargingVoltageTarget + 0.02f) {
         cvGovBypassLatch = false;
       }
       if (cvGovBypassLatch) {
@@ -1346,7 +1346,7 @@ void AdjustFieldLearnMode() {
           static int iExcessPersistCount = 0;
           static float preEventCvI = 0.0f;  // cv_I captured just before snap, used to seed recovery
 
-          if (voltageControlActive && (BatteryV > ChargingVoltageTarget - IEXCESS_GATE)) {
+          if (voltageControlActive && (IBV > ChargingVoltageTarget - IEXCESS_GATE)) {
             float excess = g_iMA2 - setpointLimited - IExcessK;  // setpointLimited = previous tick — acceptable
             bool aboveThreshold = (excess > 0.0f);
             bool belowHysteresis = (g_iMA2 < setpointLimited + IExcessK - IEXCESS_HYST);
@@ -1428,9 +1428,27 @@ void AdjustFieldLearnMode() {
           g_iExcessDutyCap = 100.0f;  // retired
         }
 
-        // ── Apply fastOvCurrentCap to uTargetAmps (fastOV + iExcess combined) ──
+        // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
+        // Positive g_dBcur_dt means battery is suddenly absorbing more current (loads dropped).
+        // Voltage will rise; act before it crosses the fastOV threshold.
+        // Gate: CV mode only, fast INA228 reads active (5ms cadence).
+        // No risk of false trigger on commanded reductions — those cause dBcur_dt ≤ 0.
+        if (voltageControlActive && inaFastModeActive) {
+          static bool ldWasActive = false;
+          bool ldNow = (g_dBcur_dt > LoadDumpDtThresh);
+          if (ldNow) {
+            float ldCap = fmaxf(0.0f, setpointLimited - LoadDumpCurrentDrop);
+            fastOvCurrentCap = fminf(fastOvCurrentCap, ldCap);
+            if (!ldWasActive) g_loadDumpCount++;
+          }
+          g_loadDumpActive = ldNow;
+          ldWasActive = ldNow;
+        } else {
+          g_loadDumpActive = false;
+        }
+
+        // ── Apply fastOvCurrentCap to uTargetAmps (fastOV + iExcess + load dump) ──
         uTargetAmps = fminf((float)uTargetAmps, fastOvCurrentCap);
-        // This line was missing — fastOvCurrentCap was computed but never applied.
 
         // TargetVoltageMode: run CV at a user-specified voltage target.
         // Forces float-equivalent stage flags so voltageControlActive goes true
@@ -3372,7 +3390,7 @@ void pidLog_tick(uint32_t nowMs) {
   e.pad0 = 0;
 
   // ── Voltage loop ─────────────────────────────────────────────────────────
-  e.battV = BatteryV;
+  e.battV = IBV;
   e.ChargingVoltageTarget = ChargingVoltageTarget;
   e.vError = pidLog_vError;
   e.Icv = Icv;
@@ -3408,7 +3426,7 @@ void pidLog_tick(uint32_t nowMs) {
   e.gainKi = (float)PidKi;
   e.gainKd = (float)PidKd;
 
-  e.battV_filt = BatteryV_filtered;
+  e.battV_filt = IBV_filtered;
   e.iMeas_filt = MeasuredAmps_filtered;
 
   pidLogHead = (pidLogHead + 1) % PID_LOG_SIZE;
@@ -3475,7 +3493,7 @@ void thermalLog_tick(uint32_t nowMs) {
   e.pidOut = thermalLogScale10((float)pidOutput);
   e.duty = thermalLogScale10(dutyCycle);
   e.rpm = thermalLogScaleRPM(RPM);
-  e.battV = thermalLogScale10(BatteryV);
+  e.battV = thermalLogScale10(IBV);
   e.measAmps = thermalLogScale10(MeasuredAmps);
   e.penaltyAmps = thermalLogScale10(thermalPenaltyAmps);
 

@@ -475,6 +475,9 @@ float imu_hf_vibration_energy = 0;  // High-freq vibration energy (RMS²)
 float imu_msi_score = 0;            // Motion Sickness Index (L&G 1987, freq-weighted vertical accel RMS; 100 = severe)
 float imu_vomit_pct = 0;            // Estimated % of population vomiting after 2hrs (L&G 1987, power-law approx)
 float imu_anchorage_comfort = 0;    // Heuristic comfort score 0-100 (100=calm); roll+MSI+slam weighted
+float imu_heel_deviation_120s = 0;  // Peak roll deviation from 2-min mean (°)
+float imu_pitch_deviation_120s = 0; // Peak pitch deviation from 2-min mean (°)
+float imu_heading_swing_120s = -1;  // Peak-to-peak heading swing over 2 min (°); -1 = no compass data
 
 // --- RAW SIGNAL STATISTICS (Reset every reporting period) ---
 // Accel X
@@ -842,6 +845,7 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
 float InputFilterTC = 100.0f;  // ms — web-configurable, LittleFS-backed
 float BatteryV_filtered = 0.0f;
+float IBV_filtered = 0.0f;       // EMA of INA228 bus voltage — used by getFiltV() and CV loop
 float MeasuredAmps_filtered = 0.0f;
 float RPM_filtered = 0.0f;
 
@@ -1070,6 +1074,7 @@ float MeasuredAmpsMax;              // used to track maximum alternator output
 float RPMMax;                       // used to track maximum RPM
 int ADS1115Disconnected = 0;
 volatile bool battVFreshFlag = false;
+bool ibvFreshFlag = false;          // set each INA228 read; cleared by fastOV dvdt block
 
 // === Cloud Features Variables (and some others later added to LiveData) ===
 // Energy (Wh)
@@ -1531,7 +1536,10 @@ int LifeIndicatorColor = 0;           // 0=green, 1=yellow, 2=red
 
 // Timing
 unsigned long lastThermalUpdateTime = 0;  // Last thermal calculation time
-const int AnalogInputReadInterval = 1100;  // INA228 poll interval — must exceed register update time (1054ms at AVG=128)
+const uint32_t INA_SLOW_INTERVAL_MS = 1100;  // field off: AVG=128, CT=4120µs → 1054ms update
+const uint32_t INA_FAST_INTERVAL_MS = 5;     // field on:  AVG=4,   CT=540µs  → 4.3ms update
+uint32_t inaReadInterval = INA_SLOW_INTERVAL_MS;
+bool inaFastModeActive = false;
 
 // Physical Constants
 const float EA_INSULATION = 1.0f;     // eV, activation energy
@@ -2439,7 +2447,7 @@ struct PidLogEntry {
   float gainKi;
   float gainKd;
   // ── Filtered signals ─────────────────────────────────────────────
-  float battV_filt;  // BatteryV_filtered
+  float battV_filt;  // IBV_filtered
   float iMeas_filt;  // MeasuredAmps_filtered
 };                   // 104 bytes — naturally aligned, no implicit holes
 
@@ -2531,7 +2539,7 @@ struct CvLogEntry {
   uint8_t flags;
   uint8_t pad;
   int16_t rpm;
-  int16_t battV_filt_x100;  // BatteryV_filtered × 100    (V)
+  int16_t battV_filt_x100;  // IBV_filtered × 100    (V)
   int16_t iMeas_filt_x10;   // MeasuredAmps_filtered × 10 (A)
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
   int16_t pad2;             // explicit alignment pad — keeps sizeof == 40
@@ -2571,7 +2579,8 @@ static bool cvLogPaused = false;
 static uint32_t cvLogPausedAtMs = 0;
 
 
-float g_fastOvDvdt = 0.0f;        // filtered dV/dt (V/s), updated every battV fresh tick
+float g_fastOvDvdt = 0.0f;        // filtered dV/dt (V/s), updated every IBV fresh tick
+float g_dBcur_dt = 0.0f;         // dBcur/dt (A/s), updated every INA228 read; positive = load dump
 float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageControlActive
 bool g_fastOvSoftActive = false;  // K_SOFT correction fired this tick
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
@@ -2597,6 +2606,12 @@ uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
 bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
+
+// Load dump detection via dBcur/dt
+float LoadDumpDtThresh    = 500.0f;  // A/s — threshold to declare a load dump event
+float LoadDumpCurrentDrop = 30.0f;   // A   — how much to reduce fastOvCurrentCap on event
+bool  g_loadDumpActive    = false;
+uint32_t g_loadDumpCount  = 0;
 
 // Protection event counters — rising-edge, cleared by web UI reset buttons
 uint32_t g_iExcessCount = 0;

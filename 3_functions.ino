@@ -375,8 +375,16 @@ enum Csv2Index {
   CSV2_imu_min_stat_moderate,              // 267
   CSV2_imu_min_stat_rough,                 // 268
   CSV2_imu_min_stat_extreme,               // 269
+  CSV2_imu_heel_deviation_120s,            // 270
+  CSV2_imu_pitch_deviation_120s,           // 271
+  CSV2_imu_heading_swing_120s,             // 272
 
-  CSV2_FIELD_COUNT  // ← always last, = 270
+  CSV2_loadDumpDtThresh,                   // 273
+  CSV2_loadDumpCurrentDrop,                // 274
+  CSV2_dBcur_dt,                           // 275
+  CSV2_loadDumpActive,                     // 276
+
+  CSV2_FIELD_COUNT  // ← always last, = 277
 };
 
 enum Csv3Index {
@@ -2545,6 +2553,18 @@ void setupServer() {
       writeFile(LittleFS, "/MaximumAllowedBatteryAmps.txt", inputMessage.c_str());
       MaximumAllowedBatteryAmps = inputMessage.toInt();
     }
+    if (request->hasParam("LoadDumpDtThresh")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpDtThresh")->value();
+      LoadDumpDtThresh = inputMessage.toFloat();
+      writeFile(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
+    }
+    if (request->hasParam("LoadDumpCurrentDrop")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpCurrentDrop")->value();
+      LoadDumpCurrentDrop = inputMessage.toFloat();
+      writeFile(LittleFS, "/LoadDumpCurrentDrop.txt", String(LoadDumpCurrentDrop).c_str());
+    }
     if (request->hasParam("ManualSOCPoint")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualSOCPoint")->value();
@@ -4441,7 +4461,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4713,7 +4734,14 @@ void SendWifiData() {
                                SafeInt(imu_min_stat_gentle),            // 266
                                SafeInt(imu_min_stat_moderate),          // 267
                                SafeInt(imu_min_stat_rough),             // 268
-                               SafeInt(imu_min_stat_extreme)            // 269
+                               SafeInt(imu_min_stat_extreme),           // 269
+                               SafeInt(imu_heel_deviation_120s, 100),   // 270 — ×100, 2dp degrees
+                               SafeInt(imu_pitch_deviation_120s, 100),  // 271 — ×100, 2dp degrees
+                               SafeInt(imu_heading_swing_120s, 10),     // 272 — ×10, 1dp degrees; -10 = no compass data
+                               SafeInt(LoadDumpDtThresh),               // 273 — A/s threshold for load dump detection
+                               SafeInt(LoadDumpCurrentDrop),            // 274 — A current drop cap on load dump
+                               SafeInt(g_dBcur_dt, 10),                 // 275 — ×10, 1dp A/s battery current rate of change
+                               (int)g_loadDumpActive                    // 276 — 1 if load dump feedforward is active
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
