@@ -2168,7 +2168,8 @@ void updateAccelMetrics() {
   // EWMA update for HF vibration energy from this batch of accel samples
   if (hf_sample_count > 0) {
     float new_rms2 = hf_rms2_accum / hf_sample_count;
-    imu_hf_vibration_energy = 0.15f * new_rms2 + 0.85f * imu_hf_vibration_energy;
+    // alpha = exp(-dt/tau): dt≈10ms (FIFO drain rate), tau=3s → alpha≈0.9967
+    imu_hf_vibration_energy = 0.0033f * new_rms2 + 0.9967f * imu_hf_vibration_energy;
     hf_rms2_accum = 0.0f;
     hf_sample_count = 0;
   }

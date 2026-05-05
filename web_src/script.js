@@ -3210,6 +3210,102 @@ function resetVoltageLoop() {
         .catch(err => console.warn('Reset error:', err));
 }
 
+// ============================================================================
+// PID TUNING SCORE LOG
+// ============================================================================
+
+let _tuningLogPollTimer = null;
+
+function fetchTuningLog() {
+    fetch('/tuninglog')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) renderTuningLog(data); })
+        .catch(() => {});
+}
+
+function renderTuningLog(data) {
+    // Update live score displays
+    const liveLabels = ['1m', '10m', '100m', '1000m'];
+    (data.live || []).forEach((v, i) => {
+        const el = document.getElementById('liveScore' + i);
+        if (el) el.textContent = v > 0 ? liveLabels[i] + ': ' + v.toFixed(2) : liveLabels[i] + ': —';
+    });
+
+    // Active test score
+    const testRow = document.getElementById('testScoreRow');
+    if (testRow) {
+        if (data.ta) {
+            testRow.style.display = '';
+            const tsel = document.getElementById('currentTestScore');
+            const ttgl = document.getElementById('testToggleCount');
+            if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
+            if (ttgl) ttgl.textContent = data.tt;
+        } else {
+            testRow.style.display = 'none';
+        }
+    }
+
+    // Current settings for row highlighting
+    const curKp  = parseFloat(document.getElementById('PidKp_echo')?.textContent);
+    const curKi  = parseFloat(document.getElementById('PidKi_echo')?.textContent);
+    const curKd  = parseFloat(document.getElementById('PidKd_echo')?.textContent);
+    const curAmp = parseInt(document.getElementById('waveAmplitude_echo')?.textContent);
+    const curPer = parseInt(document.getElementById('wavePeriod_echo')?.textContent);
+
+    const records = (data.rec || []).slice();  // already sorted best-first by firmware
+    const tbody = document.getElementById('tuningLogBody');
+    if (!tbody) return;
+
+    tbody.innerHTML = records.map(r => {
+        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 20 ? '#eab308' : '#ef4444';
+        const isMatch = !isNaN(curKp) &&
+            Math.abs(r.kp - curKp) < 0.0001 &&
+            Math.abs(r.ki - curKi) < 0.0001 &&
+            Math.abs(r.kd - curKd) < 0.00001 &&
+            r.wa === curAmp && r.wp === curPer;
+        const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
+
+        return `<tr style="${rowStyle}">
+            <td style="padding:2px 5px;">${r.n}</td>
+            <td style="padding:2px 5px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
+            <td style="padding:2px 5px;">${r.kp.toFixed(3)}</td>
+            <td style="padding:2px 5px;">${r.ki.toFixed(3)}</td>
+            <td style="padding:2px 5px;">${r.kd.toFixed(4)}</td>
+            <td style="padding:2px 5px;">${r.sd}</td>
+            <td style="padding:2px 5px;">${r.tg.toFixed(2)}</td>
+            <td style="padding:2px 5px;">${r.dr.toFixed(1)}</td>
+            <td style="padding:2px 5px;">${r.wa}</td>
+            <td style="padding:2px 5px;">${r.wp}</td>
+            <td style="padding:2px 5px;">${r.rpm.toFixed(0)}</td>
+            <td style="padding:2px 5px;">${r.temp.toFixed(1)}</td>
+            <td style="padding:2px 5px;">${r.worst.toFixed(1)}</td>
+            <td style="padding:2px 5px;">${r.t.toFixed(0)}</td>
+        </tr>`;
+    }).join('');
+}
+
+function resetTuningLog() {
+    if (!confirm('Reset all tuning scores and live windows?')) return;
+    fetch('/resettuninglog', { method: 'POST' })
+        .then(() => fetchTuningLog())
+        .catch(() => {});
+}
+
+// Poll while the tuning score section is open
+document.addEventListener('DOMContentLoaded', () => {
+    const section = document.getElementById('tuningScoreSection');
+    if (!section) return;
+    section.addEventListener('toggle', e => {
+        if (e.target.open) {
+            fetchTuningLog();
+            _tuningLogPollTimer = setInterval(fetchTuningLog, 4000);
+        } else {
+            clearInterval(_tuningLogPollTimer);
+            _tuningLogPollTimer = null;
+        }
+    });
+});
+
 function resetVoltageProtectionCounters() {
     if (!confirm('Reset all voltage & current protection counters? FastOV, iExcess, INA OV, hard OC, spike, and disagree counts will be cleared.')) return;
     fetch('/resetVoltageProtectionCounters', { method: 'POST' })

@@ -444,8 +444,8 @@ uint8_t fifoBuffer[MAX_FIFO_DRAIN_PER_POLL * 7];  // 7 bytes per FIFO entry
 // Error/diagnostic counters
 uint32_t imu_fifo_overrun_count = 0;
 uint32_t imu_i2c_error_count = 0;
-uint32_t imu_total_samples_accel = 0;
-uint32_t imu_total_samples_gyro = 0;
+uint64_t imu_total_samples_accel = 0;
+uint64_t imu_total_samples_gyro = 0;
 uint32_t imu_unknown_tag_count = 0;
 
 // Collision avoidance threshold
@@ -1878,6 +1878,61 @@ int LearningTempHysteresis = 10;
 int wavePeriod = 10;     //For PID tuning
 int waveAmplitude = 10;  //For PID tuning
 int TuningMode = 0;      //
+
+// === PID Tuning Score System ===
+struct TuningRecord {
+    uint16_t runNumber;
+    float    score;
+    float    activeTimeSec;
+    float    kp, ki, kd;
+    uint8_t  sampleDivisor;
+    float    trackingGain;
+    float    dutyRampRate;
+    int16_t  waveAmplitude;
+    int16_t  wavePeriod;
+    float    avgRPM;
+    float    avgAltTempF;
+    float    worstErrorA;
+};
+
+struct ScoreBucket {
+    float errorAccum;
+    float activeTimeSec;
+};
+
+struct TuningScoreState {
+    uint8_t  toggleCount;         // half-period toggles seen since test start
+    uint8_t  scoredToggleCount;   // toggles that occurred in scoring phase (post ring-in)
+    bool     ringInDone;          // true after 4 toggles (2 full cycles discarded)
+    bool     inScoringWindow;     // within 5s of last scored toggle
+    float    errorAccum;          // ISE accumulator (e² × dt)
+    float    activeTimeSec;       // total time spent inside scoring windows
+    uint32_t lastToggleMs;        // millis() of most recent toggle (for 5s window timer)
+    float    rpmSum;              // for computing avg RPM over test
+    float    tempSum;             // for computing avg alt temp over test
+    uint16_t avgSampleCount;
+    float    worstErrorA;         // largest single |error| seen during test
+    float    score;               // current normalized score = errorAccum / activeTimeSec
+};
+
+const uint32_t LIVE_BUCKET_MS[4] = {1000UL, 10000UL, 100000UL, 1000000UL};  // bucket widths: 1s, 10s, 100s, 1000s
+const uint8_t  LIVE_BUCKET_N     = 60;  // buckets per window (60 × bucket_width = window size)
+
+TuningRecord*    tuningLog           = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
+uint8_t          tuningLogCount      = 0;        // records currently in ring buffer (0–50)
+uint8_t          tuningLogHead       = 0;        // next write index
+uint16_t         tuningRunCounter    = 0;        // increments each commit, persists via loadTuningLog
+TuningScoreState tuningScore         = {};       // active test accumulator
+bool             tuningParamChanged  = false;    // set by server handlers when a tuning param is updated
+
+ScoreBucket*  liveScoreBuckets[4]   = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
+uint8_t       liveScoreHead[4]      = {};
+uint32_t      liveBucketStartMs[4]  = {};
+float         liveScoreVal[4]       = {};  // cached computed scores, updated each accumulation tick
+float         liveScore_lastSP      = 0.0f;
+uint32_t      liveScore_lastStepMs  = 0;
+bool          liveScore_inWindow    = false;
+
 float xTime = 60.0;      // seconds    PID Chart
 int yyMax = 105;         // PID Chart     Amps
 int yyMin = -25;         //  PID Chart Amps
@@ -2723,7 +2778,7 @@ int WiFiWakeButton = 0;                           // Current button state (1=pre
 unsigned long wifiWakeButtonPressTime = 0;        // Timestamp when button pressed
 const unsigned long WIFI_WAKE_DURATION = 300000;  // 5 minutes
 bool wifiWakeActive = false;                      // Tracking wake mode state
-unsigned long wifiWakeTimeout = 0;                // When WiFi should turn off (0 = inactive)
+unsigned long wifiWakeStart = 0;                  // millis() when wake was triggered; 0 = inactive. Never store millis()+constant — use elapsed-time comparisons to survive 49.7-day wraparound.
 
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
 AsyncEventSource events("/events");         // Create an Event Source on /events
@@ -2923,6 +2978,16 @@ void setup() {
   imuRingBuffer = (ImuRingBuffer *)ps_malloc(sizeof(ImuRingBuffer));
   if (!imuRingBuffer) Serial.println("FATAL: imuRingBuffer ps_malloc failed");
   else memset(imuRingBuffer, 0, sizeof(ImuRingBuffer));
+  // Tuning score log — 50 records × ~48 bytes = ~2.4 KB PSRAM
+  tuningLog = (TuningRecord *)ps_malloc(50 * sizeof(TuningRecord));
+  if (!tuningLog) Serial.println("FATAL: tuningLog ps_malloc failed");
+  else memset(tuningLog, 0, 50 * sizeof(TuningRecord));
+  // Live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
+  for (int i = 0; i < 4; i++) {
+    liveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
+    if (!liveScoreBuckets[i]) Serial.printf("FATAL: liveScoreBuckets[%d] ps_malloc failed\n", i);
+    else memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+  }
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3
 
@@ -3062,13 +3127,14 @@ void setup() {
 
   InitSystemSettings();       // load all settings from LittleFS.  If no files exist, create them.
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
+  loadTuningLog();            // restore last session's tuning records from LittleFS
   loadPasswordHash();
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;
   if (nvs_open("update_req", NVS_READONLY, &wake_handle) == ESP_OK) {
     uint8_t wakeFlag = 0;
     if (nvs_get_u8(wake_handle, "wake_flag", &wakeFlag) == ESP_OK && wakeFlag == 1) {
-      wifiWakeTimeout = millis() + WIFI_WAKE_DURATION;
+      wifiWakeStart = millis();
       queueConsoleMessage("UPDATE: WiFi wake enabled for pending update (5 min)");
 
       // Clear the wake flag immediately
@@ -3186,6 +3252,7 @@ void setup() {
   thermalLog_init();
   pidLog_init();
   cvLog_init();
+  tuningScore_init();
   Serial.println("=== SETUP COMPLETE ===");
 }
 
@@ -3205,7 +3272,7 @@ void loop() {
 
   // Button press extends/starts timeout
   if (WiFiWakeButton == 1) {
-    wifiWakeTimeout = millis() + WIFI_WAKE_DURATION;  // Reset to 5min from now
+    wifiWakeStart = millis();  // Reset 5-min window from now
   }
 
   // === OTA UPDATE CHECK - USER INITIATED UPDATE FROM NVS ===
@@ -3292,7 +3359,7 @@ void loop() {
 
     if (Ignition == 0) {
       // ===== IGNITION OFF =====
-      wifiWakeActive = (millis() < wifiWakeTimeout);
+      wifiWakeActive = (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION);
       // Detect state change for WiFi wake mode
       if (wifiWakeActive != lastWifiWakeActive) {
         if (wifiWakeActive) {
@@ -3310,7 +3377,7 @@ void loop() {
           setupWiFi();
         }
         // Warn user before timeout expires
-        if ((wifiWakeTimeout - millis()) < 20000 && !wakeExpiryWarningShown) {
+        if ((WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) < 20000 && !wakeExpiryWarningShown) {
           queueConsoleMessage("WiFi wake mode expiring in 20 seconds - press button to extend");
           wakeExpiryWarningShown = true;
         }
@@ -3336,7 +3403,7 @@ void loop() {
         Serial.println("Ignition ON - Normal operation mode");
         lastIgnitionState = 1;
       }
-      wifiWakeTimeout = 0;             // Clear wake mode
+      wifiWakeStart = 0;               // Clear wake mode
       lastWifiWakeActive = false;      // Reset wake mode tracking
       wakeExpiryWarningShown = false;  // Reset warning
       setCpuFrequencyMhz(240);         // Ensure full speed
@@ -3494,7 +3561,7 @@ void loop() {
 
       // Client-specific connection monitoring
       // if (currentMode == MODE_CLIENT) {  // moved the gating check into the checkwificonnection function WAS NOT SUFFICIENT FOR WHATEVER REASON
-      if (currentMode == MODE_CLIENT && (Ignition == 1 || millis() < wifiWakeTimeout)) {
+      if (currentMode == MODE_CLIENT && (Ignition == 1 || (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION))) {
         // if (currentMode == MODE_CLIENT && (Ignition == 1 || wifiWakeActive)) { // can't try to do anything wifi related unless ignition is on and clock speed is fast enough to not crash
         TIMED_CALL(ft_checkWiFiConnection, checkWiFiConnection());
 

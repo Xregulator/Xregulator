@@ -2054,6 +2054,7 @@ void setupServer() {
       inputMessage = request->getParam("wavePeriod")->value();
       writeFile(LittleFS, "/wavePeriod.txt", inputMessage.c_str());
       wavePeriod = inputMessage.toInt();
+      if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("SwitchingFrequency")) {
       foundParameter = true;
@@ -2198,6 +2199,7 @@ void setupServer() {
       inputMessage = request->getParam("waveAmplitude")->value();
       writeFile(LittleFS, "/waveAmplitude.txt", inputMessage.c_str());
       waveAmplitude = inputMessage.toInt();
+      if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("CurrentThreshold")) {
       foundParameter = true;
@@ -3021,12 +3023,14 @@ void setupServer() {
       inputMessage = request->getParam("SetpointRiseRate")->value();
       writeFile(LittleFS, "/SetpointRiseRate.txt", inputMessage.c_str());
       SetpointRiseRate = inputMessage.toFloat();
+      if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("SetpointFallRate")) {
       foundParameter = true;
       inputMessage = request->getParam("SetpointFallRate")->value();
       writeFile(LittleFS, "/SetpointFallRate.txt", inputMessage.c_str());
       SetpointFallRate = inputMessage.toFloat();
+      if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("PIDTrackingGain")) {
       foundParameter = true;
@@ -3034,6 +3038,7 @@ void setupServer() {
       float temp = inputMessage.toFloat();
       writeFile(LittleFS, "/PIDTrackingGain.txt", String(temp).c_str());
       PIDTrackingGain = temp;
+      if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("SafeOperationThreshold")) {
       foundParameter = true;
@@ -3050,6 +3055,7 @@ void setupServer() {
       if (pidInitialized) {
         currentPID.SetTunings(PidKp, PidKi, PidKd);
       }
+      if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("PID Kp updated to: %.6f", PidKp);
     }
     if (request->hasParam("AbsorptionVoltage")) {
@@ -3136,6 +3142,7 @@ void setupServer() {
       if (pidInitialized) {
         currentPID.SetTunings(PidKp, PidKi, PidKd);
       }
+      if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("PID Ki updated to: %.6f", PidKi);
     }
     if (request->hasParam("PidKd")) {
@@ -3146,6 +3153,7 @@ void setupServer() {
       if (pidInitialized) {
         currentPID.SetTunings(PidKp, PidKi, PidKd);
       }
+      if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("PID Kd updated to: %.6f", PidKd);
     }
     if (request->hasParam("PidSampleDivisor")) {
@@ -3153,6 +3161,7 @@ void setupServer() {
       inputMessage = request->getParam("PidSampleDivisor")->value();
       writeFile(LittleFS, "/PidSampleDivisor.txt", inputMessage.c_str());
       PidSampleDivisor = inputMessage.toInt();
+      if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("LearningSettlingPeriod")) {
       foundParameter = true;
@@ -3226,6 +3235,7 @@ void setupServer() {
       inputMessage = request->getParam("DutyRampRate")->value();
       writeFile(LittleFS, "/DutyRampRate.txt", inputMessage.c_str());
       DutyRampRate = inputMessage.toFloat();
+      if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("Duty ramp rate set to: %.1f %%/sec", DutyRampRate);
     }
     if (request->hasParam("DutySlowRampRate")) {
@@ -3946,6 +3956,74 @@ void setupServer() {
     request->send(200, "text/plain", "OK");
   });
 
+  server.on("/tuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char *buf = (char *)ps_malloc(10240);
+    if (!buf) { request->send(500, "text/plain", "OOM"); return; }
+
+    // Build sorted index (insertion sort — 50 entries max)
+    uint8_t sortIdx[50];
+    for (int i = 0; i < tuningLogCount; i++) sortIdx[i] = i;
+    for (int i = 1; i < tuningLogCount; i++) {
+      uint8_t key = sortIdx[i];
+      float keyScore = tuningLog[key].score;
+      int j = i - 1;
+      while (j >= 0 && tuningLog[sortIdx[j]].score > keyScore) {
+        sortIdx[j + 1] = sortIdx[j];
+        j--;
+      }
+      sortIdx[j + 1] = key;
+    }
+
+    int pos = 0;
+    pos += snprintf(buf + pos, 10240 - pos, "{\"rec\":[");
+    for (int i = 0; i < tuningLogCount && pos < 9800; i++) {
+      TuningRecord &r = tuningLog[sortIdx[i]];
+      pos += snprintf(buf + pos, 10240 - pos,
+        "%s{\"n\":%d,\"s\":%.2f,\"t\":%.1f,"
+        "\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.5f,"
+        "\"sd\":%d,\"tg\":%.2f,\"dr\":%.1f,"
+        "\"wa\":%d,\"wp\":%d,"
+        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f}",
+        i > 0 ? "," : "",
+        r.runNumber, r.score, r.activeTimeSec,
+        r.kp, r.ki, r.kd,
+        r.sampleDivisor, r.trackingGain, r.dutyRampRate,
+        (int)r.waveAmplitude, (int)r.wavePeriod,
+        r.avgRPM, r.avgAltTempF, r.worstErrorA);
+    }
+    bool testActive = (TuningMode && tuningScore.toggleCount > 0);
+    float ts = (tuningScore.activeTimeSec > 0.0f)
+                 ? (tuningScore.errorAccum / tuningScore.activeTimeSec) : 0.0f;
+    pos += snprintf(buf + pos, 10240 - pos,
+      "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
+      "\"ts\":%.2f,\"tt\":%d,\"ta\":%d}",
+      liveScoreVal[0], liveScoreVal[1], liveScoreVal[2], liveScoreVal[3],
+      ts, (int)tuningScore.toggleCount, testActive ? 1 : 0);
+
+    request->send(200, "application/json", String(buf));
+    free(buf);
+  });
+
+  server.on("/resettuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
+    tuningLogCount    = 0;
+    tuningLogHead     = 0;
+    tuningRunCounter  = 0;
+    tuningScore       = {};
+    tuningParamChanged = false;
+    if (tuningLog) memset(tuningLog, 0, 50 * sizeof(TuningRecord));
+    for (int i = 0; i < 4; i++) {
+      if (liveScoreBuckets[i]) memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+      liveScoreHead[i]     = 0;
+      liveBucketStartMs[i] = 0;
+      liveScoreVal[i]      = 0.0f;
+    }
+    liveScore_lastSP     = 0.0f;
+    liveScore_lastStepMs = 0;
+    liveScore_inWindow   = false;
+    saveTuningLog();
+    request->send(200, "text/plain", "OK");
+  });
+
   server.on("/resetVoltageLoop", HTTP_POST, [](AsyncWebServerRequest *request) {
     cvLoopResetRequested = true;
     request->send(200, "text/plain", "OK");
@@ -4485,7 +4563,7 @@ void SendWifiData() {
                                SafeInt(RPMMax_AllTime),                                                                                                                                  //116
                                SafeInt(Ignition),                                                                                                                                        //117
                                SafeInt(inBulkStage ? 1 : 0),                                                                                                                             //118
-                               SafeInt((wifiWakeTimeout > millis()) ? (wifiWakeTimeout - millis()) / 1000 : 0),                                                                          //119
+                               SafeInt((wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION) ? (WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) / 1000 : 0),         //119
                                SafeInt(bufferedRecordCount),                                                                                                                             //120
                                SafeInt((bufferedRecordCount * 100) / MAX_BUFFERED_RECORDS),                                                                                              //121
                                SafeInt(MAX_BUFFERED_RECORDS),                                                                                                                            //122

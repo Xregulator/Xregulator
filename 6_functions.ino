@@ -565,6 +565,106 @@ void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEvent
 //   PidSampleDivisor=1 (default) → output current PID runs every CH1 hit.
 //   ADS_TIMEOUT_MS = 50          → conversion timeout before retry.
 
+// ============================================================================
+// PID TUNING SCORE — helpers called from AdjustFieldLearnMode
+// ============================================================================
+
+// Called from setup() after PSRAM allocations and loadTuningLog() are done.
+// Prints sizing info; allocation and load happen in setup() proper.
+void tuningScore_init() {
+  Serial.printf("TuningScore: %d record slots × %u bytes = %u bytes in PSRAM\n",
+                50, (unsigned)sizeof(TuningRecord),
+                (unsigned)(50 * sizeof(TuningRecord)));
+  Serial.printf("TuningScore: live buckets = 4 windows × %d × %u bytes = %u bytes in PSRAM\n",
+                (int)LIVE_BUCKET_N, (unsigned)sizeof(ScoreBucket),
+                (unsigned)(4 * LIVE_BUCKET_N * sizeof(ScoreBucket)));
+}
+
+void saveTuningLog() {
+  if (!tuningLog) return;
+  File f = LittleFS.open("/tuninglog.bin", "w");
+  if (!f) return;
+  f.write((uint8_t *)&tuningLogCount,   sizeof(tuningLogCount));
+  f.write((uint8_t *)&tuningLogHead,    sizeof(tuningLogHead));
+  f.write((uint8_t *)&tuningRunCounter, sizeof(tuningRunCounter));
+  f.write((uint8_t *)tuningLog, 50 * sizeof(TuningRecord));
+  f.close();
+}
+
+void loadTuningLog() {
+  if (!tuningLog) return;
+  File f = LittleFS.open("/tuninglog.bin", "r");
+  if (!f) return;
+  f.read((uint8_t *)&tuningLogCount,   sizeof(tuningLogCount));
+  f.read((uint8_t *)&tuningLogHead,    sizeof(tuningLogHead));
+  f.read((uint8_t *)&tuningRunCounter, sizeof(tuningRunCounter));
+  f.read((uint8_t *)tuningLog, 50 * sizeof(TuningRecord));
+  f.close();
+  Serial.printf("TuningLog: loaded %d records, counter=%d\n", tuningLogCount, tuningRunCounter);
+}
+
+void commitTuningRecord() {
+  if (!tuningLog) return;
+  if (tuningScore.activeTimeSec < 0.5f) {
+    tuningScore = {};
+    return;
+  }
+  TuningRecord rec = {};
+  rec.runNumber    = ++tuningRunCounter;
+  rec.score        = tuningScore.errorAccum / tuningScore.activeTimeSec;
+  rec.activeTimeSec = tuningScore.activeTimeSec;
+  rec.kp           = PidKp;
+  rec.ki           = PidKi;
+  rec.kd           = PidKd;
+  rec.sampleDivisor = PidSampleDivisor;
+  rec.trackingGain  = PIDTrackingGain;
+  rec.dutyRampRate  = DutyRampRate;
+  rec.waveAmplitude = (int16_t)waveAmplitude;
+  rec.wavePeriod    = (int16_t)wavePeriod;
+  rec.avgRPM        = (tuningScore.avgSampleCount > 0)
+                        ? (tuningScore.rpmSum / tuningScore.avgSampleCount) : 0.0f;
+  rec.avgAltTempF   = (tuningScore.avgSampleCount > 0)
+                        ? (tuningScore.tempSum / tuningScore.avgSampleCount) : 0.0f;
+  rec.worstErrorA   = tuningScore.worstErrorA;
+
+  tuningLog[tuningLogHead] = rec;
+  tuningLogHead = (tuningLogHead + 1) % 50;
+  if (tuningLogCount < 50) tuningLogCount++;
+
+  saveTuningLog();
+  queueConsoleMessageF("TuningScore: run#%d score=%.2f kp=%.3f ki=%.3f kd=%.4f t=%.1fs",
+    rec.runNumber, rec.score, rec.kp, rec.ki, rec.kd, rec.activeTimeSec);
+
+  tuningScore = {};  // reset for next test
+}
+
+static float computeLiveScore(int w) {
+  float e = 0.0f, t = 0.0f;
+  if (!liveScoreBuckets[w]) return 0.0f;
+  for (int i = 0; i < LIVE_BUCKET_N; i++) {
+    e += liveScoreBuckets[w][i].errorAccum;
+    t += liveScoreBuckets[w][i].activeTimeSec;
+  }
+  return (t > 0.1f) ? (e / t) : 0.0f;
+}
+
+static void accumulateLiveScore(float e, float dtSec, uint32_t nowMs) {
+  float contribution = e * e * dtSec;
+  for (int w = 0; w < 4; w++) {
+    if (!liveScoreBuckets[w]) continue;
+    // Rotate bucket if the current one has expired
+    if (liveBucketStartMs[w] == 0) liveBucketStartMs[w] = nowMs;
+    if ((nowMs - liveBucketStartMs[w]) >= LIVE_BUCKET_MS[w]) {
+      liveScoreHead[w] = (liveScoreHead[w] + 1) % LIVE_BUCKET_N;
+      liveBucketStartMs[w] = nowMs;
+      liveScoreBuckets[w][liveScoreHead[w]] = {0.0f, 0.0f};
+    }
+    liveScoreBuckets[w][liveScoreHead[w]].errorAccum    += contribution;
+    liveScoreBuckets[w][liveScoreHead[w]].activeTimeSec += dtSec;
+    liveScoreVal[w] = computeLiveScore(w);
+  }
+}
+
 void AdjustFieldLearnMode() {
 
   // ========== TIMING ==========
@@ -1094,10 +1194,35 @@ void AdjustFieldLearnMode() {
         static bool tuningWaveHigh = false;
         static uint32_t lastTuningWaveToggle = 0;
 
+        // Commit on parameter change if enough scored cycles have accumulated
+        if (tuningParamChanged) {
+          if (tuningScore.scoredToggleCount >= 4 && tuningScore.activeTimeSec > 0.5f) {
+            commitTuningRecord();  // resets tuningScore internally
+          } else {
+            tuningScore = {};  // discard partial data, re-ring-in with new params
+          }
+          tuningParamChanged = false;
+        }
+
         uint32_t halfPeriodMs = ((uint32_t)wavePeriod * 1000) / 2;
         if (tick.nowMs - lastTuningWaveToggle >= halfPeriodMs) {
           tuningWaveHigh = !tuningWaveHigh;
           lastTuningWaveToggle = tick.nowMs;
+
+          tuningScore.toggleCount++;
+          if (tuningScore.toggleCount > 4) {
+            tuningScore.ringInDone = true;  // 2 full ring-in cycles (4 half-periods) complete
+          }
+          if (tuningScore.ringInDone) {
+            tuningScore.inScoringWindow = true;
+            tuningScore.lastToggleMs    = tick.nowMs;
+            tuningScore.scoredToggleCount++;
+          }
+        }
+
+        // Close scoring window after 5s of no new toggle
+        if (tuningScore.inScoringWindow && (tick.nowMs - tuningScore.lastToggleMs > 5000)) {
+          tuningScore.inScoringWindow = false;
         }
 
         uTargetAmps = tuningWaveHigh ? (5 + waveAmplitude) : 5;
@@ -1113,6 +1238,22 @@ void AdjustFieldLearnMode() {
         pidSetpoint = (double)setpointLimited;
         pidError = setpointLimited - targetCurrent;
         currentPID.Compute();
+
+        // Accumulate test score while inside a scoring window
+        if (tuningScore.inScoringWindow) {
+          float e = pidError;
+          tuningScore.errorAccum    += e * e * actualDtSec;
+          tuningScore.activeTimeSec += actualDtSec;
+          if (fabsf(e) > tuningScore.worstErrorA) tuningScore.worstErrorA = fabsf(e);
+          tuningScore.rpmSum  += RPM_filtered;
+          float tempSample = isnan(AlternatorTemperatureF) ? TempToUse : AlternatorTemperatureF;
+          if (!isnan(tempSample)) tuningScore.tempSum += tempSample;
+          tuningScore.avgSampleCount++;
+          if (tuningScore.activeTimeSec > 0.0f) {
+            tuningScore.score = tuningScore.errorAccum / tuningScore.activeTimeSec;
+          }
+        }
+
         // TrackAppliedOutput() is NOT needed here — falls through to the shared
         // call at the end of the normal-mode section.
 
@@ -1125,6 +1266,12 @@ void AdjustFieldLearnMode() {
         if (lastTuningMode) {
           tempPIDActive = false;
           tempFilterNeedsReseed = true;
+          // Commit tuning score if enough cycles were scored (≥2 cycles = ≥4 scored toggles)
+          if (tuningScore.scoredToggleCount >= 4 && tuningScore.activeTimeSec > 0.5f) {
+            commitTuningRecord();
+          } else {
+            tuningScore = {};  // discard partial — not enough data
+          }
         }
         lastTuningMode = false;
 
@@ -1530,6 +1677,20 @@ void AdjustFieldLearnMode() {
     innerTermP = (float)currentPID.GetPterm();
     innerTermI = (float)currentPID.GetIterm();
     innerTermD = (float)currentPID.GetDterm();
+
+    // Live score accumulation — open a 5s window whenever setpoint steps ≥5A
+    float spDelta = fabsf(setpointLimited - liveScore_lastSP);
+    if (spDelta >= 5.0f) {
+      liveScore_lastStepMs = tick.nowMs;
+      liveScore_inWindow   = true;
+    }
+    liveScore_lastSP = setpointLimited;
+    if (liveScore_inWindow && (tick.nowMs - liveScore_lastStepMs > 5000)) {
+      liveScore_inWindow = false;
+    }
+    if (liveScore_inWindow) {
+      accumulateLiveScore(pidError, actualDtSec, tick.nowMs);
+    }
   } else {
     innerTermP = innerTermI = innerTermD = 0.0f;
   }

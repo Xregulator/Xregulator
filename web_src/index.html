@@ -1812,6 +1812,56 @@
                 <div class="plot-container" id="pid-tuning-plot"></div>
               </details>
 
+              <!-- PID Tuning Score Log -->
+              <details id="tuningScoreSection" class="alt-nested-section">
+                <summary class="alt-summary-nested">Tuning Score Log</summary>
+
+                <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
+                  <span style="color:var(--text-muted);">Live score (1/10/100/1000 min):</span>
+                  <span id="liveScore0" style="font-weight:bold;">—</span>
+                  <span id="liveScore1" style="font-weight:bold;">—</span>
+                  <span id="liveScore2" style="font-weight:bold;">—</span>
+                  <span id="liveScore3" style="font-weight:bold;">—</span>
+                  <button onclick="resetTuningLog()" class="btn-secondary" style="margin-left:auto; padding:3px 10px; font-size:0.85em;">Reset All</button>
+                </div>
+
+                <div id="testScoreRow" style="margin-bottom:8px; font-size:0.85em; display:none;">
+                  Active test — score: <strong id="currentTestScore">—</strong> &nbsp; toggles: <span id="testToggleCount">—</span>
+                </div>
+
+                <div style="overflow-x:auto;">
+                  <table id="tuningLogTable" style="width:100%; font-size:0.76em; border-collapse:collapse;">
+                    <thead>
+                      <tr style="background:var(--card-dark); text-align:left;">
+                        <th style="padding:3px 5px;">#</th>
+                        <th style="padding:3px 5px;">Score ↑</th>
+                        <th style="padding:3px 5px;">Kp</th>
+                        <th style="padding:3px 5px;">Ki</th>
+                        <th style="padding:3px 5px;">Kd</th>
+                        <th style="padding:3px 5px;">SDiv</th>
+                        <th style="padding:3px 5px;">Track</th>
+                        <th style="padding:3px 5px;">DRamp</th>
+                        <th style="padding:3px 5px;">Amp</th>
+                        <th style="padding:3px 5px;">Per</th>
+                        <th style="padding:3px 5px;">RPM</th>
+                        <th style="padding:3px 5px;">Temp°F</th>
+                        <th style="padding:3px 5px;">Worst</th>
+                        <th style="padding:3px 5px;">t(s)</th>
+                      </tr>
+                    </thead>
+                    <tbody id="tuningLogBody"></tbody>
+                  </table>
+                </div>
+
+                <p style="font-size:0.74em; color:var(--text-muted); margin-top:6px;">
+                  Score = ISE/s (lower is better). Scored within 5s of each setpoint step, after 2 ring-in cycles.
+                  <span style="color:#22c55e;">&#9632;</span> &lt;5 &nbsp;
+                  <span style="color:#eab308;">&#9632;</span> &lt;20 &nbsp;
+                  <span style="color:#ef4444;">&#9632;</span> &ge;20 &nbsp;&mdash; thresholds are initial guesses; calibrate after first runs.
+                  Highlighted rows match current PID + wave settings.
+                </p>
+              </details>
+
             </div>
 
             <div id="alt-panel-outer-loop" class="alt-panel alt-panel-primary">
