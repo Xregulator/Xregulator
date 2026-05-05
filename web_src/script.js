@@ -506,6 +506,11 @@ const CSV2_FIELDS = [
     "LoadDumpCurrentDrop",              // 274
     "dBcur_dt",                         // 275
     "loadDumpActive",                   // 276
+    "CVTuningMode",                     // 277
+    "cvWaveAmplitudeV",                 // 278 — ×100
+    "cvWavePeriodSec",                  // 279
+    "cvKOvershoot",                     // 280 — ×10
+    "cvConsecutiveReads",               // 281
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -2712,6 +2717,11 @@ function updateAllEchosOptimized(data) {
         { key: 'InputFilterTC', id: 'InputFilterTC_ID', transform: v => v },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v },
+        { key: 'cvWaveAmplitudeV',  id: 'cvWaveAmplitudeV_echo',  transform: v => (v / 100).toFixed(2) },
+        { key: 'cvWavePeriodSec',   id: 'cvWavePeriodSec_echo',   transform: v => v },
+        { key: 'cvKOvershoot',      id: 'cvKOvershoot_echo',      transform: v => (v / 10).toFixed(1) },
+        { key: 'cvConsecutiveReads', id: 'cvConsecutiveReads_echo', transform: v => v },
 
     ];
 
@@ -3311,6 +3321,116 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             clearInterval(_tuningLogPollTimer);
             _tuningLogPollTimer = null;
+        }
+    });
+});
+
+// ── CV Tuning Log ──────────────────────────────────────────────────────────
+let _cvTuningLogPollTimer = null;
+
+function fetchCVTuningLog() {
+    fetch('/cvtuninglog')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) renderCVTuningLog(data); })
+        .catch(() => {});
+}
+
+function renderCVTuningLog(data) {
+    // Active test score banner
+    const testRow = document.getElementById('cvTestScoreRow');
+    if (testRow) {
+        if (data.ta) {
+            testRow.style.display = '';
+            const tsel = document.getElementById('cvCurrentTestScore');
+            const ttgl = document.getElementById('cvTestCycleCount');
+            if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
+            if (ttgl) ttgl.textContent = data.tc;
+        } else {
+            testRow.style.display = 'none';
+        }
+    }
+
+    // Current settings for row highlighting — read from echo spans
+    const curVkp = parseFloat(document.getElementById('VoltageKp_echo')?.textContent);
+    const curVki = parseFloat(document.getElementById('VoltageKi_echo')?.textContent);
+    const curVkd = parseFloat(document.getElementById('VoltageKd_echo')?.textContent);
+    const curWa  = parseFloat(document.getElementById('cvWaveAmplitudeV_echo')?.textContent);
+    const curWp  = parseInt(document.getElementById('cvWavePeriodSec_echo')?.textContent);
+    const curKo  = parseFloat(document.getElementById('cvKOvershoot_echo')?.textContent);
+    const curCr  = parseInt(document.getElementById('cvConsecutiveReads_echo')?.textContent);
+
+    const records = (data.rec || []).slice();
+    const tbody = document.getElementById('cvTuningLogBody');
+    if (!tbody) return;
+
+    tbody.innerHTML = records.map(r => {
+        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 20 ? '#eab308' : '#ef4444';
+        const isMatch = !isNaN(curVkp) &&
+            Math.abs(r.vkp - curVkp) < 0.001 &&
+            Math.abs(r.vki - curVki) < 0.001 &&
+            Math.abs(r.vkd - curVkd) < 0.01  &&
+            Math.abs(r.wa  - curWa)  < 0.005 &&
+            r.wp === curWp && Math.abs(r.ko - curKo) < 0.05 && r.cr === curCr;
+        const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
+
+        return `<tr style="${rowStyle}">
+            <td style="padding:2px 4px;">${r.n}</td>
+            <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.st.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.wo.toFixed(3)}</td>
+            <td style="padding:2px 4px;">${r.io.toFixed(4)}</td>
+            <td style="padding:2px 4px;">${r.vkp.toFixed(3)}</td>
+            <td style="padding:2px 4px;">${r.vki.toFixed(3)}</td>
+            <td style="padding:2px 4px;">${r.vkd.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.srr.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.sfr.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.abl.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.arl.toFixed(3)}</td>
+            <td style="padding:2px 4px;">${r.asp}</td>
+            <td style="padding:2px 4px;">${r.irf.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.ks.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.kh.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.iek.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.ien}</td>
+            <td style="padding:2px 4px;">${r.iekb.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.lddt.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.ldcd.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.tc.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.wa.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.wp}</td>
+            <td style="padding:2px 4px;">${r.ko.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.cr}</td>
+            <td style="padding:2px 4px;">${r.fov}</td>
+            <td style="padding:2px 4px;">${r.iex}</td>
+            <td style="padding:2px 4px;">${r.ld}</td>
+            <td style="padding:2px 4px;">${r.hoc}</td>
+            <td style="padding:2px 4px;">${r.rpm.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.tmp.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.bv.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.soc.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.cvt.toFixed(2)}</td>
+        </tr>`;
+    }).join('');
+}
+
+function resetCVTuningLog() {
+    if (!confirm('Reset all CV tuning records?')) return;
+    fetch('/resetcvtuninglog', { method: 'POST' })
+        .then(() => fetchCVTuningLog())
+        .catch(() => {});
+}
+
+// Poll while the CV tuning section is open
+document.addEventListener('DOMContentLoaded', () => {
+    const section = document.getElementById('cvTuningScoreSection');
+    if (!section) return;
+    section.addEventListener('toggle', e => {
+        if (e.target.open) {
+            fetchCVTuningLog();
+            _cvTuningLogPollTimer = setInterval(fetchCVTuningLog, 4000);
+        } else {
+            clearInterval(_cvTuningLogPollTimer);
+            _cvTuningLogPollTimer = null;
         }
     });
 });

@@ -3108,6 +3108,175 @@
                 </div>
 
               </details><!-- END How Anomaly Detection Works -->
+
+              <!-- CV Loop Tuning Score -->
+              <details id="cvTuningScoreSection" class="alt-nested-section">
+                <summary class="alt-summary-nested">CV Loop Tuning Score</summary>
+
+                <!-- Enable/Disable Test Mode -->
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>CV Tuning Mode (<span id="CVTuningMode_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Enables the square-wave voltage dithering test. The regulator briefly lowers the target by the wave amplitude for half a period, then returns to the real target and scores settling time and overshoot. At least 2 scored high-phase cycles are required before a log entry is committed. Disable to commit the current run.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="CVTuningMode_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('CVTuningMode_checkbox', 'CVTuningMode', 'CVTuningMode')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="CVTuningMode" name="CVTuningMode" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+
+                <!-- Wave Amplitude -->
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Wave Amplitude (V) (<span id="cvWaveAmplitudeV_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">How far below the real target the low phase drops. Larger = bigger step disturbance = more aggressive test. Recommend 0.20–0.50V. The high phase always returns to the real charging target.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvWaveAmplitudeV" type="number" step="0.05" min="0.05" max="2.0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Wave Period -->
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Wave Period (sec) (<span id="cvWavePeriodSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Total period of one low+high cycle in seconds. Each half-period is this value ÷ 2. Use longer periods (60–120s) at higher time constants; shorter (20–30s) for faster loops. Must be long enough for the voltage to fully settle in the high phase.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvWavePeriodSec" type="number" step="5" min="10" max="600" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- K Overshoot -->
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Overshoot Penalty (K) (<span id="cvKOvershoot_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Penalty weight applied to integrated overshoot in the score formula: Score = AvgSettleTime + K × AvgIntegratedOvershoot. Higher K penalises overshoot more aggressively relative to settling speed. Start at 10 and increase until you're happy with the tradeoff — overshoot is the dominant constraint in battery CV charging.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvKOvershoot" type="number" step="0.5" min="0" max="500" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Consecutive Reads -->
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Settling Consecutive Reads (<span id="cvConsecutiveReads_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">How many consecutive control ticks the filtered voltage must stay within ±0.10V of the target before settling is declared. Higher = stricter settling criterion. 3–5 is a reasonable starting point.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvConsecutiveReads" type="number" step="1" min="1" max="30" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+
+                <!-- Active test score banner -->
+                <div id="cvTestScoreRow" style="display:none; background:rgba(99,102,241,0.12); border:1px solid #6366f1; border-radius:6px; padding:8px 12px; margin:8px 0; font-size:0.88em;">
+                  <strong>Test active</strong> &mdash;
+                  Current score: <strong id="cvCurrentTestScore">—</strong> &nbsp;|&nbsp;
+                  Scored high cycles: <strong id="cvTestCycleCount">0</strong>
+                  <span style="color:var(--text-muted);font-size:0.85em;"> (commit requires ≥2)</span>
+                </div>
+
+                <!-- Log table -->
+                <div style="overflow-x:auto; margin-top:8px;">
+                  <table style="border-collapse:collapse; font-size:0.72em; width:100%; min-width:900px;">
+                    <thead>
+                      <tr style="background:var(--card-light); text-align:left;">
+                        <th style="padding:3px 4px;">#</th>
+                        <th style="padding:3px 4px;">Score</th>
+                        <th style="padding:3px 4px;">Settle(s)</th>
+                        <th style="padding:3px 4px;">OvV</th>
+                        <th style="padding:3px 4px;">IntOv</th>
+                        <th style="padding:3px 4px;">VKp</th>
+                        <th style="padding:3px 4px;">VKi</th>
+                        <th style="padding:3px 4px;">VKd</th>
+                        <th style="padding:3px 4px;">SRR</th>
+                        <th style="padding:3px 4px;">SFR</th>
+                        <th style="padding:3px 4px;">AwBl</th>
+                        <th style="padding:3px 4px;">AwRec</th>
+                        <th style="padding:3px 4px;">AwSP</th>
+                        <th style="padding:3px 4px;">IRF</th>
+                        <th style="padding:3px 4px;">KS</th>
+                        <th style="padding:3px 4px;">KH</th>
+                        <th style="padding:3px 4px;">IExK</th>
+                        <th style="padding:3px 4px;">IExN</th>
+                        <th style="padding:3px 4px;">IKB</th>
+                        <th style="padding:3px 4px;">LDDt</th>
+                        <th style="padding:3px 4px;">LDCd</th>
+                        <th style="padding:3px 4px;">TC</th>
+                        <th style="padding:3px 4px;">WA</th>
+                        <th style="padding:3px 4px;">WP</th>
+                        <th style="padding:3px 4px;">KO</th>
+                        <th style="padding:3px 4px;">CR</th>
+                        <th style="padding:3px 4px;">OVf</th>
+                        <th style="padding:3px 4px;">IEf</th>
+                        <th style="padding:3px 4px;">LDf</th>
+                        <th style="padding:3px 4px;">HOCf</th>
+                        <th style="padding:3px 4px;">RPM</th>
+                        <th style="padding:3px 4px;">Temp</th>
+                        <th style="padding:3px 4px;">BattV</th>
+                        <th style="padding:3px 4px;">SOC%</th>
+                        <th style="padding:3px 4px;">CVT</th>
+                      </tr>
+                    </thead>
+                    <tbody id="cvTuningLogBody">
+                      <tr><td colspan="35" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <p style="font-size:0.74em; color:var(--text-muted); margin-top:6px;">
+                  Score = AvgSettle(s) + K × AvgIntegratedOvershoot(V·s). Lower is better.
+                  <span style="color:#22c55e;">&#9632;</span> &lt;5 &nbsp;
+                  <span style="color:#eab308;">&#9632;</span> &lt;20 &nbsp;
+                  <span style="color:#ef4444;">&#9632;</span> &ge;20.
+                  Highlighted rows match current VKp/VKi/VKd + wave settings.
+                  OVf/IEf/LDf/HOCf = protection fire counts during scored phases.
+                </p>
+
+                <button onclick="resetCVTuningLog()" class="btn-danger" style="margin-top:6px;">Reset CV Tuning Log</button>
+
+              </details><!-- END CV Loop Tuning Score -->
+
             </div>
 
             <div id="alt-panel-about" class="alt-panel alt-panel-primary">
@@ -7878,6 +8047,11 @@
     <span id="MaximumAllowedBatteryAmps_echo" style="display:none;">0</span>
     <span id="LoadDumpDtThresh_echo" style="display:none;">0</span>
     <span id="LoadDumpCurrentDrop_echo" style="display:none;">0</span>
+    <span id="CVTuningMode_echo" style="display:none;">0</span>
+    <span id="cvWaveAmplitudeV_echo" style="display:none;">0</span>
+    <span id="cvWavePeriodSec_echo" style="display:none;">0</span>
+    <span id="cvKOvershoot_echo" style="display:none;">0</span>
+    <span id="cvConsecutiveReads_echo" style="display:none;">0</span>
     <span id="ManualSOCPoint_echo" style="display:none;">0</span>
     <span id="BatteryVoltageSource_echo" style="display:none;">0</span>
     <span id="ShuntResistanceMicroOhm_echo" style="display:none;">0</span>

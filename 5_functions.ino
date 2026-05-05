@@ -1790,7 +1790,7 @@ void handleAltZeroReset() {
 void calculateChargeTimes() {
   static unsigned long lastCalcTime = 0;
   unsigned long now = millis();
-  if (now - lastCalcTime < AnalogInputReadInterval) return;  // Only run every X seconds
+  if (now - lastCalcTime < INA_SLOW_INTERVAL_MS) return;  // Only run every X seconds
   lastCalcTime = now;
 
   // Get the current amperage from INA228 battery shunt
@@ -2696,7 +2696,7 @@ void drainIMUFifo() {
 void ReadAnalogInputs_Fake() {
   static unsigned long lastINARead_local2 = 0;
 
-  if (millis() - lastINARead_local2 >= AnalogInputReadInterval) {  // could go down to 600 here, but this logic belongs in Loop anyway
+  if (millis() - lastINARead_local2 >= INA_SLOW_INTERVAL_MS) {  // could go down to 600 here, but this logic belongs in Loop anyway
     lastINARead_local2 = millis();                                 // ← ADD THIS LINE!
 
     static unsigned long lastFakeUpdate = 0;

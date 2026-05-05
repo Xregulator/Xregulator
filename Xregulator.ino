@@ -1941,6 +1941,87 @@ float         liveScore_lastSP      = 0.0f;
 uint32_t      liveScore_lastStepMs  = 0;
 bool          liveScore_inWindow    = false;
 
+// === CV Loop Tuning Score System ===
+float   cvWaveAmplitudeV    = 0.30f;  // V — target dips by this during LOW phase
+int     cvWavePeriodSec     = 60;     // s — half-period of CV test wave
+float   cvKOvershoot        = 10.0f;  // penalty weight on integrated overshoot (user-exposed)
+uint8_t cvConsecutiveReads  = 3;      // consecutive filtered reads within ±0.1V to declare settled
+int     CVTuningMode        = 0;      // 0=off, 1=on
+float   cvBaseTarget        = 0.0f;   // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
+
+const float CV_SETTLE_V_THRESH = 0.10f;  // V — settling threshold
+
+struct CVTuningRecord {
+    uint16_t runNumber;
+    // Results
+    float    score;
+    float    avgSettlingTimeSec;
+    float    worstOvershootV;
+    float    avgIntegratedOvershootVs;
+    float    activeTimeSec;
+    uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
+    // CV PID
+    float    voltageKp, voltageKi, voltageKd;
+    // Setpoint shaping
+    float    setpointRiseRate, setpointFallRate;
+    // Integrator management
+    float    awBleedRate, awRecoverRate;
+    uint16_t awSeedProtectMs;
+    float    iExcessReseedFrac;
+    // FastOV supervisor
+    float    kSoft, kHard;
+    // iExcess
+    float    iExcessK;
+    int      iExcessN;
+    float    iExcessKBleed;
+    // Load dump
+    float    loadDumpDtThresh, loadDumpCurrentDrop;
+    // Filter
+    float    inputFilterTC;
+    // Test setup
+    float    waveAmplitudeV;
+    uint16_t wavePeriodSec;
+    float    kOvershoot;
+    uint8_t  consecutiveReads;
+    // Operating conditions
+    float    avgRPM, avgAltTempF;
+    float    battVAtStart, socAtStart;
+    float    chargingVoltageTarget;
+};
+
+struct CVTuningScoreState {
+    bool     waveHigh;
+    uint32_t lastToggleMs;
+    uint8_t  halfPeriodCount;
+    bool     ringInDone;
+    // Per-HIGH-phase state (reset each toggle-to-high)
+    uint32_t phaseStartMs;
+    bool     phaseSettled;
+    uint8_t  consecutiveInBand;
+    // Accumulators across scored HIGH phases
+    uint8_t  scoredHighCount;
+    float    totalSettlingTimeSec;
+    float    worstOvershootV;
+    float    totalIntegratedOvershootVs;
+    float    activeTimeSec;
+    // Protection deltas (snapshotted at start of each HIGH phase)
+    uint32_t fastOvSnap, iExcessSnap, loadDumpSnap, hardOcSnap;
+    uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
+    // Operating conditions
+    float    battVAtStart, socAtStart;
+    bool     testStarted;
+    // Averages
+    float    rpmSum, tempSum;
+    uint16_t avgSampleCount;
+};
+
+CVTuningRecord*    cvTuningLog          = nullptr;  // ps_malloc(50 × sizeof(CVTuningRecord))
+uint8_t            cvTuningLogCount     = 0;
+uint8_t            cvTuningLogHead      = 0;
+uint16_t           cvTuningRunCounter   = 0;
+CVTuningScoreState cvTuningScore        = {};
+bool               cvTuningParamChanged = false;
+
 float xTime = 60.0;      // seconds    PID Chart
 int yyMax = 105;         // PID Chart     Amps
 int yyMin = -25;         //  PID Chart Amps
@@ -3003,6 +3084,10 @@ void setup() {
     if (!liveScoreBuckets[i]) Serial.printf("FATAL: liveScoreBuckets[%d] ps_malloc failed\n", i);
     else memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
   }
+  // CV tuning score log — 50 records × ~120 bytes = ~6 KB PSRAM
+  cvTuningLog = (CVTuningRecord *)ps_malloc(50 * sizeof(CVTuningRecord));
+  if (!cvTuningLog) Serial.println("FATAL: cvTuningLog ps_malloc failed");
+  else memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3
 
@@ -3143,6 +3228,7 @@ void setup() {
   InitSystemSettings();       // load all settings from LittleFS.  If no files exist, create them.
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS
+  loadCVTuningLog();          // restore CV tuning records from LittleFS
   loadPasswordHash();
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;

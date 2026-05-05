@@ -638,6 +638,83 @@ void commitTuningRecord() {
   tuningScore = {};  // reset for next test
 }
 
+void saveCVTuningLog() {
+  if (!cvTuningLog) return;
+  File f = LittleFS.open("/cvtuninglog.bin", "w");
+  if (!f) return;
+  f.write((uint8_t *)&cvTuningLogCount,   sizeof(cvTuningLogCount));
+  f.write((uint8_t *)&cvTuningLogHead,    sizeof(cvTuningLogHead));
+  f.write((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
+  f.write((uint8_t *)cvTuningLog, 50 * sizeof(CVTuningRecord));
+  f.close();
+}
+
+void loadCVTuningLog() {
+  if (!cvTuningLog) return;
+  File f = LittleFS.open("/cvtuninglog.bin", "r");
+  if (!f) return;
+  f.read((uint8_t *)&cvTuningLogCount,   sizeof(cvTuningLogCount));
+  f.read((uint8_t *)&cvTuningLogHead,    sizeof(cvTuningLogHead));
+  f.read((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
+  f.read((uint8_t *)cvTuningLog, 50 * sizeof(CVTuningRecord));
+  f.close();
+  Serial.printf("CVTuningLog: loaded %d records, counter=%d\n", cvTuningLogCount, cvTuningRunCounter);
+}
+
+void commitCVTuningRecord() {
+  if (!cvTuningLog || cvTuningScore.scoredHighCount < 2) {
+    cvTuningScore = {};
+    return;
+  }
+  CVTuningRecord rec = {};
+  float n                        = (float)cvTuningScore.scoredHighCount;
+  rec.runNumber                  = ++cvTuningRunCounter;
+  rec.avgSettlingTimeSec         = cvTuningScore.totalSettlingTimeSec / n;
+  rec.avgIntegratedOvershootVs   = cvTuningScore.totalIntegratedOvershootVs / n;
+  rec.worstOvershootV            = cvTuningScore.worstOvershootV;
+  rec.activeTimeSec              = cvTuningScore.activeTimeSec;
+  rec.score                      = rec.avgSettlingTimeSec + cvKOvershoot * rec.avgIntegratedOvershootVs;
+  rec.fastOvFires                = cvTuningScore.fastOvFires;
+  rec.iExcessFires               = cvTuningScore.iExcessFires;
+  rec.loadDumpFires              = cvTuningScore.loadDumpFires;
+  rec.hardOcFires                = cvTuningScore.hardOcFires;
+  rec.voltageKp                  = VoltageKp;
+  rec.voltageKi                  = VoltageKi;
+  rec.voltageKd                  = VoltageKd;
+  rec.setpointRiseRate           = SetpointRiseRate;
+  rec.setpointFallRate           = SetpointFallRate;
+  rec.awBleedRate                = AwBleedRate;
+  rec.awRecoverRate              = AwRecoverRate;
+  rec.awSeedProtectMs            = AwSeedProtectMs;
+  rec.iExcessReseedFrac          = IExcessReseedFrac;
+  rec.kSoft                      = KSoft;
+  rec.kHard                      = KHard;
+  rec.iExcessK                   = IExcessK;
+  rec.iExcessN                   = IExcessN;
+  rec.iExcessKBleed              = IExcessKBleed;
+  rec.loadDumpDtThresh           = LoadDumpDtThresh;
+  rec.loadDumpCurrentDrop        = LoadDumpCurrentDrop;
+  rec.inputFilterTC              = InputFilterTC;
+  rec.waveAmplitudeV             = cvWaveAmplitudeV;
+  rec.wavePeriodSec              = (uint16_t)cvWavePeriodSec;
+  rec.kOvershoot                 = cvKOvershoot;
+  rec.consecutiveReads           = cvConsecutiveReads;
+  rec.avgRPM                     = (cvTuningScore.avgSampleCount > 0) ? (cvTuningScore.rpmSum  / cvTuningScore.avgSampleCount) : 0.0f;
+  rec.avgAltTempF                = (cvTuningScore.avgSampleCount > 0) ? (cvTuningScore.tempSum / cvTuningScore.avgSampleCount) : 0.0f;
+  rec.battVAtStart               = cvTuningScore.battVAtStart;
+  rec.socAtStart                 = cvTuningScore.socAtStart;
+  rec.chargingVoltageTarget      = cvBaseTarget;
+
+  cvTuningLog[cvTuningLogHead] = rec;
+  cvTuningLogHead = (cvTuningLogHead + 1) % 50;
+  if (cvTuningLogCount < 50) cvTuningLogCount++;
+
+  saveCVTuningLog();
+  queueConsoleMessageF("CVTuningScore: run#%d score=%.2f settle=%.1fs overshoot=%.3fV n=%d",
+    rec.runNumber, rec.score, rec.avgSettlingTimeSec, rec.worstOvershootV, (int)n);
+  cvTuningScore = {};
+}
+
 static float computeLiveScore(int w) {
   float e = 0.0f, t = 0.0f;
   if (!liveScoreBuckets[w]) return 0.0f;
@@ -1482,6 +1559,78 @@ void AdjustFieldLearnMode() {
         bool enteringCV = (!lastVoltageControlActive && voltageControlActive);
         lastVoltageControlActive = voltageControlActive;
 
+        // ===== CV TUNING MODE: voltage square-wave generator =====
+        // Dithers ChargingVoltageTarget between base (HIGH) and base−amp (LOW) so the
+        // CV loop step response (settling time, overshoot) can be measured and scored.
+        // Only runs in the NORMAL AUTO path — incompatible with inner-loop TuningMode.
+        {
+          static bool lastCVTuningMode = false;
+
+          // Commit on CVTuningMode turn-off
+          if (lastCVTuningMode && !CVTuningMode) {
+            if (cvTuningScore.scoredHighCount >= 2) commitCVTuningRecord();
+            else cvTuningScore = {};
+          }
+          lastCVTuningMode = (CVTuningMode != 0);
+
+          if (CVTuningMode && voltageControlActive) {
+            // Capture base target and initial conditions once per test
+            if (!cvTuningScore.testStarted) {
+              cvBaseTarget                = ChargingVoltageTarget;
+              cvTuningScore.battVAtStart  = IBV;
+              cvTuningScore.socAtStart    = (float)SOC_percent / 100.0f;
+              cvTuningScore.lastToggleMs  = currentMillis;
+              cvTuningScore.waveHigh      = true;   // start in HIGH phase (at target)
+              cvTuningScore.phaseStartMs  = currentMillis;
+              cvTuningScore.testStarted   = true;
+            }
+
+            // Commit on parameter change if enough cycles have scored
+            if (cvTuningParamChanged) {
+              if (cvTuningScore.scoredHighCount >= 2) commitCVTuningRecord();
+              else cvTuningScore = {};
+              cvTuningParamChanged = false;
+            }
+
+            // Half-period toggle
+            uint32_t halfPeriodMs = (uint32_t)cvWavePeriodSec * 1000UL;
+            if (currentMillis - cvTuningScore.lastToggleMs >= halfPeriodMs) {
+              bool goingHigh = !cvTuningScore.waveHigh;
+              cvTuningScore.waveHigh     = goingHigh;
+              cvTuningScore.lastToggleMs = currentMillis;
+              cvTuningScore.halfPeriodCount++;
+              if (cvTuningScore.halfPeriodCount >= 4) cvTuningScore.ringInDone = true;
+
+              if (goingHigh && cvTuningScore.ringInDone) {
+                // Start of a new scored HIGH phase
+                cvBaseTarget                    = ChargingVoltageTarget;  // refresh real target
+                cvTuningScore.phaseStartMs      = currentMillis;
+                cvTuningScore.phaseSettled      = false;
+                cvTuningScore.consecutiveInBand = 0;
+                cvTuningScore.fastOvSnap        = g_fastOvClampCount;
+                cvTuningScore.iExcessSnap       = g_iExcessCount;
+                cvTuningScore.loadDumpSnap      = g_loadDumpCount;
+                cvTuningScore.hardOcSnap        = g_hardOCCount;
+              }
+              if (!goingHigh && cvTuningScore.ringInDone) {
+                // End of a scored HIGH phase — finalize settling time
+                if (!cvTuningScore.phaseSettled) {
+                  cvTuningScore.totalSettlingTimeSec += (float)cvWavePeriodSec;  // full penalty
+                }
+                cvTuningScore.scoredHighCount++;
+                cvTuningScore.fastOvFires   += (uint16_t)(g_fastOvClampCount - cvTuningScore.fastOvSnap);
+                cvTuningScore.iExcessFires  += (uint16_t)(g_iExcessCount     - cvTuningScore.iExcessSnap);
+                cvTuningScore.loadDumpFires += (uint16_t)(g_loadDumpCount    - cvTuningScore.loadDumpSnap);
+                cvTuningScore.hardOcFires   += (uint16_t)(g_hardOCCount      - cvTuningScore.hardOcSnap);
+              }
+            }
+
+            // Override ChargingVoltageTarget for this tick
+            ChargingVoltageTarget = cvTuningScore.waveHigh ? cvBaseTarget
+                                                           : (cvBaseTarget - cvWaveAmplitudeV);
+          }
+        }
+
         // Voltage target rise governor.
         // Now only active in the final CV_ENGAGE_MARGIN window before target (vGap <= 0.15V).
         // During bulk approach, current-limited state commands uTargetAmps directly and this governor
@@ -1636,6 +1785,33 @@ void AdjustFieldLearnMode() {
           if (!enteringCV) {
             Icv = clamp_f(VoltageKp * e_now + cv_I - VoltageKd * g_fastOvDvdt, 0.0f, icvHi_tick);
           }
+        }
+
+        // ===== CV TUNING SCORE ACCUMULATION =====
+        // Scores settling time and overshoot during each HIGH phase after ring-in.
+        if (CVTuningMode && voltageControlActive && cvTuningScore.waveHigh && cvTuningScore.ringInDone) {
+          float overshoot = fmaxf(0.0f, IBV - cvBaseTarget);
+          cvTuningScore.totalIntegratedOvershootVs += overshoot * actualDtSec;
+          if (overshoot > cvTuningScore.worstOvershootV) cvTuningScore.worstOvershootV = overshoot;
+
+          if (!cvTuningScore.phaseSettled) {
+            float vErr = fabsf(getFiltV() - cvBaseTarget);
+            if (vErr <= CV_SETTLE_V_THRESH) {
+              if (++cvTuningScore.consecutiveInBand >= cvConsecutiveReads) {
+                cvTuningScore.phaseSettled = true;
+                cvTuningScore.totalSettlingTimeSec +=
+                  (float)(currentMillis - cvTuningScore.phaseStartMs) / 1000.0f;
+              }
+            } else {
+              cvTuningScore.consecutiveInBand = 0;
+            }
+          }
+
+          cvTuningScore.activeTimeSec += actualDtSec;
+          cvTuningScore.rpmSum        += RPM_filtered;
+          float tempSample = isnan(AlternatorTemperatureF) ? TempToUse : AlternatorTemperatureF;
+          if (!isnan(tempSample)) cvTuningScore.tempSum += tempSample;
+          cvTuningScore.avgSampleCount++;
         }
 
         setpointCommand = voltageControlActive ? Icv : (float)uTargetAmps;

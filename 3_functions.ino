@@ -383,8 +383,13 @@ enum Csv2Index {
   CSV2_loadDumpCurrentDrop,                // 274
   CSV2_dBcur_dt,                           // 275
   CSV2_loadDumpActive,                     // 276
+  CSV2_CVTuningMode,                       // 277
+  CSV2_cvWaveAmplitudeV,                   // 278 — ×100
+  CSV2_cvWavePeriodSec,                    // 279
+  CSV2_cvKOvershoot,                       // 280 — ×10
+  CSV2_cvConsecutiveReads,                 // 281
 
-  CSV2_FIELD_COUNT  // ← always last, = 277
+  CSV2_FIELD_COUNT  // ← always last, = 282
 };
 
 enum Csv3Index {
@@ -1921,6 +1926,7 @@ void setupServer() {
       inputMessage = request->getParam("InputFilterTC")->value();
       writeFile(LittleFS, "/InputFilterTC.txt", inputMessage.c_str());
       InputFilterTC = inputMessage.toFloat();
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
 
     else if (request->hasParam("SystemIDStepAmplitude")) {
@@ -2595,6 +2601,7 @@ void setupServer() {
       inputMessage = request->getParam("VoltageKp")->value();
       writeFile(LittleFS, "/VoltageKp.txt", inputMessage.c_str());
       VoltageKp = inputMessage.toFloat();
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
 
     if (request->hasParam("maxPoints")) {
@@ -3044,6 +3051,7 @@ void setupServer() {
       writeFile(LittleFS, "/SetpointRiseRate.txt", inputMessage.c_str());
       SetpointRiseRate = inputMessage.toFloat();
       if (TuningMode) tuningParamChanged = true;
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("SetpointFallRate")) {
       foundParameter = true;
@@ -3051,6 +3059,7 @@ void setupServer() {
       writeFile(LittleFS, "/SetpointFallRate.txt", inputMessage.c_str());
       SetpointFallRate = inputMessage.toFloat();
       if (TuningMode) tuningParamChanged = true;
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("PIDTrackingGain")) {
       foundParameter = true;
@@ -3110,12 +3119,14 @@ void setupServer() {
       inputMessage = request->getParam("VoltageKi")->value();
       VoltageKi = inputMessage.toFloat();
       writeFile(LittleFS, "/VoltageKi.txt", String(VoltageKi).c_str());
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("VoltageKd")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageKd")->value();
       VoltageKd = inputMessage.toFloat();
       writeFile(LittleFS, "/VoltageKd.txt", String(VoltageKd).c_str());
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
@@ -3329,6 +3340,7 @@ void setupServer() {
       IExcessK = inputMessage.toFloat();
       writeFile(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());
       queueConsoleMessageF("IExcess threshold set to: %.1fA above setpoint", IExcessK);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("IExcessN")) {
       foundParameter = true;
@@ -3336,6 +3348,7 @@ void setupServer() {
       IExcessN = (int)inputMessage.toInt();
       writeFile(LittleFS, "/IExcessN.txt", String(IExcessN).c_str());
       queueConsoleMessageF("IExcess persistence set to: %d ticks", IExcessN);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("IExcessKBleed")) {
       foundParameter = true;
@@ -3343,6 +3356,7 @@ void setupServer() {
       IExcessKBleed = inputMessage.toFloat();
       writeFile(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
       queueConsoleMessageF("K_bleed set to: %.2f A/s per A", IExcessKBleed);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("AwBleedRate")) {
       foundParameter = true;
@@ -3350,6 +3364,7 @@ void setupServer() {
       AwBleedRate = inputMessage.toFloat();
       writeFile(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 1).c_str());
       queueConsoleMessageF("AW bleed rate set to: %.1f A/s", AwBleedRate);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("AwRecoverRate")) {
       foundParameter = true;
@@ -3357,6 +3372,7 @@ void setupServer() {
       AwRecoverRate = inputMessage.toFloat();
       writeFile(LittleFS, "/AwRecoverRate.txt", String(AwRecoverRate, 1).c_str());
       queueConsoleMessageF("AW recovery rate set to: %.1f A/s", AwRecoverRate);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("AwSeedProtectMs")) {
       foundParameter = true;
@@ -3364,6 +3380,7 @@ void setupServer() {
       AwSeedProtectMs = (uint16_t)constrain(inputMessage.toInt(), 0, 2000);
       writeFile(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
       queueConsoleMessageF("AW seed protect window set to: %u ms", (unsigned)AwSeedProtectMs);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("KSoft")) {
       foundParameter = true;
@@ -3371,6 +3388,7 @@ void setupServer() {
       KSoft = inputMessage.toFloat();
       writeFile(LittleFS, "/KSoft.txt", String(KSoft, 1).c_str());
       queueConsoleMessageF("KSoft set to: %.1f A/V", KSoft);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("KHard")) {
       foundParameter = true;
@@ -3378,6 +3396,7 @@ void setupServer() {
       KHard = inputMessage.toFloat();
       writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
       queueConsoleMessageF("KHard set to: %.1f A/V", KHard);
+      if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("IExcessReseedFrac")) {
       foundParameter = true;
@@ -3385,6 +3404,39 @@ void setupServer() {
       IExcessReseedFrac = inputMessage.toFloat();
       writeFile(LittleFS, "/IExcessReseedFrac.txt", String(IExcessReseedFrac, 2).c_str());
       queueConsoleMessageF("IExcess reseed fraction set to: %.2f", IExcessReseedFrac);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("CVTuningMode")) {
+      foundParameter = true;
+      inputMessage = request->getParam("CVTuningMode")->value();
+      writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
+      CVTuningMode = inputMessage.toInt();
+    }
+    if (request->hasParam("cvWaveAmplitudeV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("cvWaveAmplitudeV")->value();
+      cvWaveAmplitudeV = inputMessage.toFloat();
+      writeFile(LittleFS, "/cvWaveAmplitudeV.txt", String(cvWaveAmplitudeV, 2).c_str());
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("cvWavePeriodSec")) {
+      foundParameter = true;
+      inputMessage = request->getParam("cvWavePeriodSec")->value();
+      cvWavePeriodSec = inputMessage.toInt();
+      writeFile(LittleFS, "/cvWavePeriodSec.txt", String(cvWavePeriodSec).c_str());
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("cvKOvershoot")) {
+      foundParameter = true;
+      inputMessage = request->getParam("cvKOvershoot")->value();
+      cvKOvershoot = inputMessage.toFloat();
+      writeFile(LittleFS, "/cvKOvershoot.txt", String(cvKOvershoot, 1).c_str());
+    }
+    if (request->hasParam("cvConsecutiveReads")) {
+      foundParameter = true;
+      inputMessage = request->getParam("cvConsecutiveReads")->value();
+      cvConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
+      writeFile(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
     }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
@@ -4024,6 +4076,79 @@ void setupServer() {
     free(buf);
   });
 
+  server.on("/cvtuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char *buf = (char *)ps_malloc(16384);
+    if (!buf) { request->send(500, "text/plain", "OOM"); return; }
+
+    // Build sorted index (insertion sort, best score first)
+    uint8_t sortIdx[50];
+    for (int i = 0; i < cvTuningLogCount; i++) sortIdx[i] = i;
+    for (int i = 1; i < cvTuningLogCount; i++) {
+      uint8_t key = sortIdx[i];
+      float keyScore = cvTuningLog[key].score;
+      int j = i - 1;
+      while (j >= 0 && cvTuningLog[sortIdx[j]].score > keyScore) {
+        sortIdx[j + 1] = sortIdx[j];
+        j--;
+      }
+      sortIdx[j + 1] = key;
+    }
+
+    int pos = 0;
+    pos += snprintf(buf + pos, 16384 - pos, "{\"rec\":[");
+    for (int i = 0; i < cvTuningLogCount && pos < 15800; i++) {
+      CVTuningRecord &r = cvTuningLog[sortIdx[i]];
+      pos += snprintf(buf + pos, 16384 - pos,
+        "%s{\"n\":%d,\"s\":%.2f,\"st\":%.1f,\"wo\":%.3f,\"io\":%.4f,\"t\":%.1f,"
+        "\"fov\":%d,\"iex\":%d,\"ld\":%d,\"hoc\":%d,"
+        "\"vkp\":%.3f,\"vki\":%.3f,\"vkd\":%.2f,"
+        "\"srr\":%.1f,\"sfr\":%.1f,"
+        "\"abl\":%.2f,\"arl\":%.3f,\"asp\":%d,\"irf\":%.2f,"
+        "\"ks\":%.1f,\"kh\":%.1f,"
+        "\"iek\":%.1f,\"ien\":%d,\"iekb\":%.2f,"
+        "\"lddt\":%.0f,\"ldcd\":%.0f,"
+        "\"tc\":%.0f,\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
+        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f}",
+        i > 0 ? "," : "",
+        r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
+        r.avgIntegratedOvershootVs, r.activeTimeSec,
+        (int)r.fastOvFires, (int)r.iExcessFires, (int)r.loadDumpFires, (int)r.hardOcFires,
+        r.voltageKp, r.voltageKi, r.voltageKd,
+        r.setpointRiseRate, r.setpointFallRate,
+        r.awBleedRate, r.awRecoverRate, (int)r.awSeedProtectMs, r.iExcessReseedFrac,
+        r.kSoft, r.kHard,
+        r.iExcessK, (int)r.iExcessN, r.iExcessKBleed,
+        r.loadDumpDtThresh, r.loadDumpCurrentDrop,
+        r.inputFilterTC, r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
+        r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget);
+    }
+    // Active test state
+    bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
+    float cvts = 0.0f;
+    if (cvTestActive && cvTuningScore.scoredHighCount > 0) {
+      float n = (float)cvTuningScore.scoredHighCount;
+      cvts = (cvTuningScore.totalSettlingTimeSec / n)
+           + cvKOvershoot * (cvTuningScore.totalIntegratedOvershootVs / n);
+    }
+    pos += snprintf(buf + pos, 16384 - pos,
+      "],\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
+      cvts, (int)cvTuningScore.scoredHighCount, cvTestActive ? 1 : 0);
+
+    request->send(200, "application/json", String(buf));
+    free(buf);
+  });
+
+  server.on("/resetcvtuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
+    cvTuningLogCount     = 0;
+    cvTuningLogHead      = 0;
+    cvTuningRunCounter   = 0;
+    cvTuningScore        = {};
+    cvTuningParamChanged = false;
+    if (cvTuningLog) memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
+    saveCVTuningLog();
+    request->send(200, "text/plain", "OK");
+  });
+
   server.on("/resettuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
     tuningLogCount    = 0;
     tuningLogHead     = 0;
@@ -4462,7 +4587,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4741,7 +4866,12 @@ void SendWifiData() {
                                SafeInt(LoadDumpDtThresh),               // 273 — A/s threshold for load dump detection
                                SafeInt(LoadDumpCurrentDrop),            // 274 — A current drop cap on load dump
                                SafeInt(g_dBcur_dt, 10),                 // 275 — ×10, 1dp A/s battery current rate of change
-                               (int)g_loadDumpActive                    // 276 — 1 if load dump feedforward is active
+                               (int)g_loadDumpActive,                   // 276 — 1 if load dump feedforward is active
+                               (int)CVTuningMode,                       // 277
+                               SafeInt(cvWaveAmplitudeV, 100),          // 278 — ×100, 2dp V
+                               (int)cvWavePeriodSec,                    // 279
+                               SafeInt(cvKOvershoot, 10),               // 280 — ×10, 1dp
+                               (int)cvConsecutiveReads                  // 281
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);

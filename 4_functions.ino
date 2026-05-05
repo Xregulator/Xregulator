@@ -1150,6 +1150,31 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     LoadDumpCurrentDrop = readFile(LittleFS, "/LoadDumpCurrentDrop.txt").toFloat();
   }
+  if (!fsExists("/CVTuningMode.txt")) {
+    writeFile(LittleFS, "/CVTuningMode.txt", String(CVTuningMode).c_str());
+  } else {
+    CVTuningMode = readFile(LittleFS, "/CVTuningMode.txt").toInt();
+  }
+  if (!fsExists("/cvWaveAmplitudeV.txt")) {
+    writeFile(LittleFS, "/cvWaveAmplitudeV.txt", String(cvWaveAmplitudeV).c_str());
+  } else {
+    cvWaveAmplitudeV = readFile(LittleFS, "/cvWaveAmplitudeV.txt").toFloat();
+  }
+  if (!fsExists("/cvWavePeriodSec.txt")) {
+    writeFile(LittleFS, "/cvWavePeriodSec.txt", String(cvWavePeriodSec).c_str());
+  } else {
+    cvWavePeriodSec = readFile(LittleFS, "/cvWavePeriodSec.txt").toInt();
+  }
+  if (!fsExists("/cvKOvershoot.txt")) {
+    writeFile(LittleFS, "/cvKOvershoot.txt", String(cvKOvershoot).c_str());
+  } else {
+    cvKOvershoot = readFile(LittleFS, "/cvKOvershoot.txt").toFloat();
+  }
+  if (!fsExists("/cvConsecutiveReads.txt")) {
+    writeFile(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
+  } else {
+    cvConsecutiveReads = (uint8_t)readFile(LittleFS, "/cvConsecutiveReads.txt").toInt();
+  }
   if (!fsExists("/ManualSOCPoint.txt")) {
     writeFile(LittleFS, "/ManualSOCPoint.txt", String(ManualSOCPoint).c_str());
   } else {
