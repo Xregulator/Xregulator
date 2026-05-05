@@ -472,6 +472,9 @@ float imu_yaw_rate_dps = 0;         // Current yaw rate (direct from gyro_z)
 float imu_vertical_accel_g = 0;     // Vertical acceleration
 float imu_total_accel_g = 0;        // Total acceleration magnitude
 float imu_hf_vibration_energy = 0;  // High-freq vibration energy (RMS²)
+float imu_msi_score = 0;            // Motion Sickness Index (L&G 1987, freq-weighted vertical accel RMS; 100 = severe)
+float imu_vomit_pct = 0;            // Estimated % of population vomiting after 2hrs (L&G 1987, power-law approx)
+float imu_anchorage_comfort = 0;    // Heuristic comfort score 0-100 (100=calm); roll+MSI+slam weighted
 
 // --- RAW SIGNAL STATISTICS (Reset every reporting period) ---
 // Accel X
@@ -554,6 +557,17 @@ uint32_t imu_slam_count = 0;           // Reset every reporting period
 uint32_t imu_slam_count_lifetime = 0;  // Lifetime, persistent to NVS
 float imu_slam_peak_max = 0;           // Reset every reporting period
 
+// --- SEA STATE HOURS (stored as minutes, NVS-persisted) ---
+// Moving = SOGNMEA >= 1.5 kts; buckets by MSI: gentle<10, moderate<30, rough<70, extreme>=70
+uint32_t imu_min_moving_gentle = 0;
+uint32_t imu_min_moving_moderate = 0;
+uint32_t imu_min_moving_rough = 0;
+uint32_t imu_min_moving_extreme = 0;
+uint32_t imu_min_stat_gentle = 0;
+uint32_t imu_min_stat_moderate = 0;
+uint32_t imu_min_stat_rough = 0;
+uint32_t imu_min_stat_extreme = 0;
+
 // --- WAVE PERIOD ---
 float imu_wave_period_sec = -1.0;  // -1 = no valid detection
 
@@ -585,6 +599,14 @@ uint32_t prev_imu_slam_count_lifetime = 0;
 float prev_imu_heel_max_lifetime = 0;
 float prev_imu_pitch_max_lifetime = 0;
 float prev_imu_slam_peak_lifetime = 0;
+uint32_t prev_imu_min_moving_gentle = 0;
+uint32_t prev_imu_min_moving_moderate = 0;
+uint32_t prev_imu_min_moving_rough = 0;
+uint32_t prev_imu_min_moving_extreme = 0;
+uint32_t prev_imu_min_stat_gentle = 0;
+uint32_t prev_imu_min_stat_moderate = 0;
+uint32_t prev_imu_min_stat_rough = 0;
+uint32_t prev_imu_min_stat_extreme = 0;
 static uint8_t prev_imuMountOrientation = 0;
 static float prev_CAPSIZE_THRESHOLD_DEG = 0;
 static float prev_PITCHPOLE_THRESHOLD_DEG = 0;
@@ -2096,8 +2118,8 @@ uint8_t capLimitMode = 0;  // 0 = use amp cap (rpmCapCurrentTable), 1 = use kW c
 // Minimum PWM duty cycle (%) applied to the field at each RPM breakpoint.
 // Prevents the RPM signal from dropping out due to rapid stator signal changes. Higher values at low RPM because the alternator needs more field
 // excitation to produce useful output when spinning slowly.
-float rpmMinDutyTable[RPM_TABLE_SIZE]    = { 18.0, 18.0, 18.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0 };
-float defaultMinDutyValues[RPM_TABLE_SIZE] = { 18.0, 18.0, 18.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0, 5.0 };
+float rpmMinDutyTable[RPM_TABLE_SIZE]    = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
+float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
 
 unsigned long lastOverheatTime[RPM_TABLE_SIZE] = { 0 };          // Timestamp of last overheat per RPM
 int overheatCount[RPM_TABLE_SIZE] = { 0 };                       // Total overheat events per RPM

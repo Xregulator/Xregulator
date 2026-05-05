@@ -96,8 +96,11 @@ enum Csv1Index {
   CSV1_g_tempSustainedCount,     // 77
   CSV1_g_tempStaleCount,         // 78
   CSV1_g_currentStaleCount,      // 79
+  CSV1_imu_msi_score,            // 80
+  CSV1_imu_vomit_pct,            // 81
+  CSV1_imu_anchorage_comfort,    // 82
 
-  CSV1_FIELD_COUNT  // = 80
+  CSV1_FIELD_COUNT  // = 83
 
 };
 
@@ -364,8 +367,16 @@ enum Csv2Index {
   CSV2_tempResolutionFixCrcFailCount,      // 259
   CSV2_tempEnumerateFailCount,             // 260
   CSV2_warmupCeiling,                      // 261
+  CSV2_imu_min_moving_gentle,              // 262
+  CSV2_imu_min_moving_moderate,            // 263
+  CSV2_imu_min_moving_rough,               // 264
+  CSV2_imu_min_moving_extreme,             // 265
+  CSV2_imu_min_stat_gentle,                // 266
+  CSV2_imu_min_stat_moderate,              // 267
+  CSV2_imu_min_stat_rough,                 // 268
+  CSV2_imu_min_stat_extreme,               // 269
 
-  CSV2_FIELD_COUNT  // ← always last, = 262
+  CSV2_FIELD_COUNT  // ← always last, = 270
 };
 
 enum Csv3Index {
@@ -4212,7 +4223,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),    // 0
@@ -4295,7 +4307,10 @@ void SendWifiData() {
                                SafeInt(g_tempCritCount),            // 76
                                SafeInt(g_tempSustainedCount),       // 77
                                SafeInt(g_tempStaleCount),           // 78
-                               SafeInt(g_currentStaleCount)         // 79
+                               SafeInt(g_currentStaleCount),        // 79
+                               SafeInt(imu_msi_score, 100),         // 80
+                               SafeInt(imu_vomit_pct, 100),         // 81
+                               SafeInt(imu_anchorage_comfort, 100)  // 82
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -4347,7 +4362,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4611,7 +4627,15 @@ void SendWifiData() {
                                SafeInt(tempRereadFailCount),            // 258
                                SafeInt(tempResolutionFixCrcFailCount),  // 259
                                SafeInt(tempEnumerateFailCount),         // 260
-                               SafeInt(warmupCeiling)                   // 261
+                               SafeInt(warmupCeiling),                  // 261
+                               SafeInt(imu_min_moving_gentle),          // 262
+                               SafeInt(imu_min_moving_moderate),        // 263
+                               SafeInt(imu_min_moving_rough),           // 264
+                               SafeInt(imu_min_moving_extreme),         // 265
+                               SafeInt(imu_min_stat_gentle),            // 266
+                               SafeInt(imu_min_stat_moderate),          // 267
+                               SafeInt(imu_min_stat_rough),             // 268
+                               SafeInt(imu_min_stat_extreme)            // 269
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);

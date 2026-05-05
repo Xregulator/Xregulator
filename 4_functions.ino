@@ -2045,6 +2045,19 @@ void updateAccelMetrics() {
   uint32_t samples_processed = 0;
   unsigned long now = millis();
 
+  // HP filter state for HF vibration energy (1st-order IIR, fc = 20 Hz)
+  static float hp_ax = 0, hp_ay = 0, hp_az = 0;
+  static float hp_prev_ax = 0, hp_prev_ay = 0, hp_prev_az = 0;
+  static float hf_rms2_accum = 0;
+  static uint32_t hf_sample_count = 0;
+
+  // Wave period decimation state (10 Hz output, real-time gated)
+  static float wave_decim_sum = 0;
+  static uint16_t wave_decim_count = 0;
+  static unsigned long wave_last_decim_ms = 0;
+  static bool wave_dc_initialized = false;
+  static float msi_rms2_ewma = 0;    // 60s RMS² EWMA for MSI frequency-weighted vertical accel
+
   // Process accel ring buffer — cap per call as a safety net against edge cases
   uint16_t accel_cap = 0;
   while (imuRingBuffer->accel_tail != imuRingBuffer->accel_head && accel_cap < 50) {
@@ -2105,18 +2118,23 @@ void updateAccelMetrics() {
       imuWindow->vertical_accel_area_v_us += (int64_t)vert_accel_scaled * dt_us;
       imuWindow->vertical_accel_valid_us += dt_us;
 
-      // Slam detection (positive vertical accel spike)
+      // Slam detection — refractory period prevents multi-counting a single physical event
+      static uint32_t lastSlamMs = 0;
       if (vert_accel > SLAM_THRESHOLD_G) {
-        imuWindow->slam_count++;
-        imu_slam_count_lifetime++;
-        if (vert_accel_scaled > imuWindow->slam_peak_max) {
-          imuWindow->slam_peak_max = vert_accel_scaled;
+        if ((uint32_t)now - lastSlamMs >= 300) {
+          lastSlamMs = (uint32_t)now;
+          imuWindow->slam_count++;
+          imu_slam_count_lifetime++;
         }
-        if (vert_accel > imu_slam_peak_lifetime) {
-          imu_slam_peak_lifetime = vert_accel;
-        }
+        // Always update peak — capture the worst reading within the event
+        if (vert_accel_scaled > imuWindow->slam_peak_max) imuWindow->slam_peak_max = vert_accel_scaled;
+        if (vert_accel > imu_slam_peak_lifetime) imu_slam_peak_lifetime = vert_accel;
       }
     }
+
+    // Accumulate az for wave period decimation (emitted every 100ms after the loop)
+    wave_decim_sum += az;
+    wave_decim_count++;
 
     // Store current raw values (last sample processed, for display)
     imu_accel_x_raw = ax;
@@ -2126,11 +2144,107 @@ void updateAccelMetrics() {
     imu_total_accel_g = sqrt(ax * ax + ay * ay + az * az);
 
     // TODO: Wave period decimation and processing
-    // TODO: High-frequency vibration energy
+
+    // 1st-order IIR HP filter at 20 Hz — strips gravity + slow motion, leaves vibration
+    if (dt_us > 0 && dt_us < 50000) {
+      const float RC_HP = 0.007958f;  // 1 / (2π × 20 Hz)
+      float dt_s = dt_us / 1000000.0f;
+      float alpha = RC_HP / (RC_HP + dt_s);
+      hp_ax = alpha * (hp_ax + ax - hp_prev_ax);
+      hp_ay = alpha * (hp_ay + ay - hp_prev_ay);
+      hp_az = alpha * (hp_az + az - hp_prev_az);
+      hf_rms2_accum += hp_ax * hp_ax + hp_ay * hp_ay + hp_az * hp_az;
+      hf_sample_count++;
+    }
+    hp_prev_ax = ax;
+    hp_prev_ay = ay;
+    hp_prev_az = az;
 
     imuWindow->lastUpdateTime_us = now_us;
     imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
     samples_processed++;
+  }
+
+  // EWMA update for HF vibration energy from this batch of accel samples
+  if (hf_sample_count > 0) {
+    float new_rms2 = hf_rms2_accum / hf_sample_count;
+    imu_hf_vibration_energy = 0.15f * new_rms2 + 0.85f * imu_hf_vibration_energy;
+    hf_rms2_accum = 0.0f;
+    hf_sample_count = 0;
+  }
+
+  // Wave period detection — emit one decimated sample every 100ms (10 Hz)
+  if (wave_decim_count > 0 && (now - wave_last_decim_ms) >= 100) {
+    float az_dec = wave_decim_sum / wave_decim_count;
+    wave_last_decim_ms = now;
+    wave_decim_sum = 0;
+    wave_decim_count = 0;
+
+    // DC removal: slow EWMA with ~30s time constant at 10 Hz (alpha = 1 - 1/300 samples)
+    if (!wave_dc_initialized) {
+      wave_last_dc_mean = az_dec;
+      wave_dc_initialized = true;
+    } else {
+      wave_last_dc_mean = 0.9967f * wave_last_dc_mean + 0.0033f * az_dec;
+    }
+    float detrended = az_dec - wave_last_dc_mean;
+
+    // Motion Sickness Index — L&G 1987 frequency-weighted vertical accel RMS
+    // Weighting function peaks at 0.2 Hz (5s wave period); falls off as a Gaussian in log-freq space
+    {
+      float W_e;
+      if (imu_wave_period_sec > 0) {
+        float f = 1.0f / imu_wave_period_sec;
+        float log_ratio = logf(f / 0.2f);  // log(f/0.2); 0 at 5s, ±1.5 at ~1s/15s
+        W_e = 1.0f / (1.0f + log_ratio * log_ratio * 4.43f);
+      } else {
+        W_e = 0.5f;  // mid-range estimate when wave period is unknown
+      }
+      float a_w = detrended * W_e;
+      // 60s EWMA at 10 Hz: alpha = 1/(10 × 60) = 0.00167
+      msi_rms2_ewma = 0.9983f * msi_rms2_ewma + 0.0017f * (a_w * a_w);
+      float a_w_rms = sqrtf(msi_rms2_ewma);
+      // L&G 1987 calibration: 0.03g weighted RMS → ~10% vomiting in 2hrs
+      imu_msi_score = (a_w_rms / 0.03f) * 30.0f;
+      // Power-law approx of L&G empirical population curve — labeled as approximate
+      imu_vomit_pct = constrain(100.0f * powf(a_w_rms / 0.03f, 1.3f) * 0.10f, 0.0f, 100.0f);
+    }
+
+    // Zero-crossing with hysteresis — prevents noise-triggered false crossings
+    // wave_last_crossing_positive: true = currently in positive zone (last crossed up through +HYST)
+    const float WAVE_HYST = 0.02f;  // ±20 mg band
+    bool crossing = false;
+    if (!wave_last_crossing_positive && detrended > WAVE_HYST) {
+      wave_last_crossing_positive = true;
+      crossing = true;
+    } else if (wave_last_crossing_positive && detrended < -WAVE_HYST) {
+      wave_last_crossing_positive = false;
+      crossing = true;
+    }
+
+    if (crossing) {
+      if (wave_last_crossing_time > 0) {
+        // Each crossing is a half-period; full period = 2 × half-period
+        float half_period_s = (now - wave_last_crossing_time) / 1000.0f;
+        float period_s = half_period_s * 2.0f;
+        if (period_s >= 2.0f && period_s <= 20.0f) {
+          if (wave_period_ewma < 0) {
+            wave_period_ewma = period_s;
+          } else {
+            wave_period_ewma = 0.8f * wave_period_ewma + 0.2f * period_s;
+          }
+          imu_wave_period_sec = wave_period_ewma;
+        }
+      }
+      wave_last_crossing_time = now;
+    }
+
+    // Invalidate if no crossing detected for >30s (boat stopped, no waves, or signal lost)
+    if (wave_last_crossing_time > 0 && (now - wave_last_crossing_time) > 30000) {
+      imu_wave_period_sec = -1.0f;
+      wave_period_ewma = -1.0f;
+      wave_last_crossing_time = 0;
+    }
   }
 
   // Process gyro ring buffer — cap per call as a safety net
@@ -2278,6 +2392,7 @@ void updateAccelMetrics() {
     } else if (!capsize_reported && (now - capsize_start > 1000)) {  // fires once per event
       imu_capsize_count++;
       queueConsoleMessageF("CAPSIZE EVENT: %.1f deg", cf_heel);
+      lastNVSSaveTime = 0;  // Force immediate NVS write — boat may lose power
       capsize_reported = true;
     }
   } else {
@@ -2292,6 +2407,7 @@ void updateAccelMetrics() {
     } else if (!pitchpole_reported && (now - pitchpole_start > 1000)) {  // fires once per event
       imu_pitchpole_count++;
       queueConsoleMessageF("PITCHPOLE EVENT: %.1f deg", cf_pitch);
+      lastNVSSaveTime = 0;  // Force immediate NVS write — boat may lose power
       pitchpole_reported = true;
     }
   } else {
@@ -2306,19 +2422,41 @@ void updateAccelMetrics() {
   if (abs(cf_pitch) > imu_pitch_max_lifetime) {
     imu_pitch_max_lifetime = abs(cf_pitch);
   }
+
+  // Sea state minute bucketing — tick every 60s
+  // Bucket by MSI score: gentle<10, moderate<30, rough<70, extreme>=70
+  // Moving vs stationary by SOGNMEA (knots): moving if >= 1.5 kts
+  static unsigned long seaStateTick_ms = 0;
+  if (now - seaStateTick_ms >= 60000) {
+    seaStateTick_ms = now;
+    bool moving = (SOGNMEA >= 1.5f);
+    if (imu_msi_score < 10.0f) {
+      if (moving) imu_min_moving_gentle++;  else imu_min_stat_gentle++;
+    } else if (imu_msi_score < 30.0f) {
+      if (moving) imu_min_moving_moderate++; else imu_min_stat_moderate++;
+    } else if (imu_msi_score < 70.0f) {
+      if (moving) imu_min_moving_rough++;   else imu_min_stat_rough++;
+    } else {
+      if (moving) imu_min_moving_extreme++; else imu_min_stat_extreme++;
+    }
+  }
+
+  // Anchorage comfort heuristic — 0=terrible, 100=calm
+  // Roll and pitch only — at anchor there are no underway-style slams; rocking and hobby-horsing are the discomfort drivers
+  {
+    float roll_penalty  = min(imu_heel_deviation_60s  / 12.0f, 1.0f) * 65.0f;  // 12 deg heel dev -> full penalty
+    float pitch_penalty = min(imu_pitch_deviation_60s /  8.0f, 1.0f) * 35.0f;  //  8 deg pitch dev -> full penalty
+    imu_anchorage_comfort = constrain(100.0f - roll_penalty - pitch_penalty, 0.0f, 100.0f);
+  }
 }
 // ============================================================================
 // STUB FUNCTIONS - IMPLEMENT LATER
 // ============================================================================
 void updateWavePeriod() {
-  // TODO: Implement decimation + zero-crossing detection
-  // See plan: decimate 417Hz → 10Hz, DC removal, zero-crossing with hysteresis
-  imu_wave_period_sec = -1.0;  // Placeholder
+  // Implemented inline in updateAccelMetrics() — 10 Hz decimation, DC EWMA, zero-crossing with hysteresis
 }
 void updateVibrationEnergy() {
-  // TODO: Implement 1st-order IIR HP @20Hz → RMS² → EWMA
-  // See plan Appendix E for compute-light implementation
-  imu_hf_vibration_energy = 0;  // Placeholder
+  // Implemented inline in updateAccelMetrics() — HP filter + RMS² + EWMA per accel sample batch
 }
 
 

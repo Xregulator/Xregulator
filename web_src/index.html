@@ -5318,17 +5318,17 @@
                   </span>
                 </span>
               </span>
-              <div style="display: flex; align-items: center; gap: 8px;">
+              <div style="display: flex; align-items: center;">
                 <form action="/get" method="GET" target="hidden-form"
-                  style="display: flex; align-items: center; gap: 8px; margin: 0;">
+                  style="display: flex; align-items: center; gap: 0; margin: 0;">
                   <input type="hidden" name="password" class="password_field">
-                  <span class="toggle-label">Manual</span>
+                  <span class="toggle-label" style="margin: 0 4px;">Manual</span>
                   <label class="switch">
                     <input id="VMGUseTrueWind_checkbox" type="checkbox"
                       onchange="if(handleUserToggle('VMGUseTrueWind_checkbox', 'VMGUseTrueWind', 'VMGUseTrueWind')) { this.form.submit(); submitMessage(); }" />
                     <span class="slider round"></span>
                   </label>
-                  <span class="toggle-label">True Wind</span>
+                  <span class="toggle-label" style="margin: 0 4px;">True Wind</span>
                   <input id="VMGUseTrueWind" name="VMGUseTrueWind" type="number" value="" style="display:none;" />
                 </form>
               </div>
@@ -5491,6 +5491,18 @@
               <span class="metric-label">HF Vibration Energy</span>
               <span class="metric-value"><span id="imu_hf_vibration_energy_ID">0</span> RMS²</span>
             </div>
+            <div class="metric-row">
+              <span class="metric-label">Motion Sickness Index</span>
+              <span class="metric-value"><span id="imu_msi_score_ID">--</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Vomit Probability (2hr)</span>
+              <span class="metric-value"><span id="imu_vomit_pct_ID">--</span> %</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Anchorage Comfort</span>
+              <span class="metric-value"><span id="imu_anchorage_comfort_ID">--</span> / 100</span>
+            </div>
           </div>
 
           <!-- Event Counters - Current Window -->
@@ -5592,6 +5604,43 @@
             <div class="metric-row">
               <span class="metric-label">Worst Slam</span>
               <span class="metric-value"><span id="imu_slam_peak_lifetime_ID">0.0</span> g</span>
+            </div>
+          </div>
+
+          <!-- Sea State Hours -->
+          <div class="card-group">
+            <p class="card-group-title">Sea State Hours (Lifetime)</p>
+            <div class="metric-row">
+              <span class="metric-label">Moving — Gentle</span>
+              <span class="metric-value"><span id="imu_min_moving_gentle_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Moving — Moderate</span>
+              <span class="metric-value"><span id="imu_min_moving_moderate_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Moving — Rough</span>
+              <span class="metric-value"><span id="imu_min_moving_rough_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Moving — Extreme</span>
+              <span class="metric-value"><span id="imu_min_moving_extreme_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Stationary — Gentle</span>
+              <span class="metric-value"><span id="imu_min_stat_gentle_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Stationary — Moderate</span>
+              <span class="metric-value"><span id="imu_min_stat_moderate_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Stationary — Rough</span>
+              <span class="metric-value"><span id="imu_min_stat_rough_ID">0.0</span> hr</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Stationary — Extreme</span>
+              <span class="metric-value"><span id="imu_min_stat_extreme_ID">0.0</span> hr</span>
             </div>
           </div>
 

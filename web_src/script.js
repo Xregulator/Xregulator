@@ -224,6 +224,9 @@ const CSV1_FIELDS = [
     "tempSustainedCount",         // 77
     "tempStaleCount",             // 78
     "currentStaleCount",          // 79
+    "imu_msi_score",              // 80
+    "imu_vomit_pct",              // 81
+    "imu_anchorage_comfort",      // 82
 ];
 const CSV2_FIELDS = [
     "IBVMax",                           // 0
@@ -488,6 +491,14 @@ const CSV2_FIELDS = [
     "tempResolutionFixCrcFailCount",    // 259
     "tempEnumerateFailCount",           // 260
     "warmupCeiling",                    // 261
+    "imu_min_moving_gentle",            // 262
+    "imu_min_moving_moderate",          // 263
+    "imu_min_moving_rough",             // 264
+    "imu_min_moving_extreme",           // 265
+    "imu_min_stat_gentle",              // 266
+    "imu_min_stat_moderate",            // 267
+    "imu_min_stat_rough",               // 268
+    "imu_min_stat_extreme",             // 269
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -4080,6 +4091,17 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("imu_yaw_rate_dps_ID", sa.imu);
     applyStaleStyleByAge("imu_wave_period_sec_ID", sa.imu);
     applyStaleStyleByAge("imu_hf_vibration_energy_ID", sa.imu);
+    applyStaleStyleByAge("imu_msi_score_ID", sa.imu);
+    applyStaleStyleByAge("imu_vomit_pct_ID", sa.imu);
+    applyStaleStyleByAge("imu_anchorage_comfort_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_moving_gentle_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_moving_moderate_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_moving_rough_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_moving_extreme_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_stat_gentle_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_stat_moderate_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_stat_rough_ID", sa.imu);
+    applyStaleStyleByAge("imu_min_stat_extreme_ID", sa.imu);
     applyStaleStyleByAge("imu_accel_x_raw_ID", sa.imu);
     applyStaleStyleByAge("imu_accel_y_raw_ID", sa.imu);
     applyStaleStyleByAge("imu_accel_z_raw_ID", sa.imu);
@@ -4318,8 +4340,8 @@ function triggerWeatherUpdate() {
 }
 
 function updateGPSDisplay(lat, lon) {
-    document.getElementById('LatitudeNMEA_display').textContent = lat.toFixed(6);
-    document.getElementById('LongitudeNMEA_display').textContent = lon.toFixed(6);
+    document.getElementById('LatitudeNMEA_display').textContent = lat.toFixed(5);
+    document.getElementById('LongitudeNMEA_display').textContent = lon.toFixed(5);
 
     const source = document.getElementById('gps-source');
     if (lat === 0.0 && lon === 0.0) {
@@ -5068,6 +5090,15 @@ window.addEventListener("load", function () {
                     else if (["imu_vertical_accel_g", "imu_total_accel_g", "imu_hf_vibration_energy"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(3);
                     }
+                    // Values scaled by 100 on server
+                    else if (["imu_msi_score", "imu_vomit_pct", "imu_anchorage_comfort"].includes(key)) {
+                        newTextContent = (value / 100).toFixed(1);
+                    }
+                    // Sea state minutes — display as hours (raw minutes, no server scaling)
+                    else if (["imu_min_moving_gentle", "imu_min_moving_moderate", "imu_min_moving_rough", "imu_min_moving_extreme",
+                              "imu_min_stat_gentle", "imu_min_stat_moderate", "imu_min_stat_rough", "imu_min_stat_extreme"].includes(key)) {
+                        newTextContent = (value / 60).toFixed(1);
+                    }
                     else if (key === "AlternatorTemperatureF") {
                         newTextContent = toDisplayTemp(value / 100).toFixed(1);
                     }
@@ -5075,7 +5106,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
-                        newTextContent = (value / 100).toFixed(2) + "%";
+                        newTextContent = (value / 100).toFixed(2);
                     }
 
                     // Values scaled by 100 on server
@@ -5147,7 +5178,10 @@ window.addEventListener("load", function () {
                 ["imu_vertical_accel_g_ID", "imu_vertical_accel_g"],
                 ["imu_yaw_rate_dps_ID", "imu_yaw_rate_dps"],
                 ["imu_total_accel_g_ID", "imu_total_accel_g"],
-                ["imu_hf_vibration_energy_ID", "imu_hf_vibration_energy"]
+                ["imu_hf_vibration_energy_ID", "imu_hf_vibration_energy"],
+                ["imu_msi_score_ID", "imu_msi_score"],
+                ["imu_vomit_pct_ID", "imu_vomit_pct"],
+                ["imu_anchorage_comfort_ID", "imu_anchorage_comfort"]
             ];
 
             // Update alarm status, this is GPIO21 buzzer/alarm
@@ -5658,6 +5692,16 @@ window.addEventListener("load", function () {
                 ["imu_heel_max_lifetime_ID", "imu_heel_max_lifetime"],
                 ["imu_pitch_max_lifetime_ID", "imu_pitch_max_lifetime"],
                 ["imu_slam_peak_lifetime_ID", "imu_slam_peak_lifetime"],
+
+                // Sea state lifetime hours (stored as minutes, displayed as hours)
+                ["imu_min_moving_gentle_ID",   "imu_min_moving_gentle"],
+                ["imu_min_moving_moderate_ID", "imu_min_moving_moderate"],
+                ["imu_min_moving_rough_ID",    "imu_min_moving_rough"],
+                ["imu_min_moving_extreme_ID",  "imu_min_moving_extreme"],
+                ["imu_min_stat_gentle_ID",     "imu_min_stat_gentle"],
+                ["imu_min_stat_moderate_ID",   "imu_min_stat_moderate"],
+                ["imu_min_stat_rough_ID",      "imu_min_stat_rough"],
+                ["imu_min_stat_extreme_ID",    "imu_min_stat_extreme"],
 
                 // IMU Diagnostics
                 ["imuEnabled_ID", "imuEnabled"],

@@ -2945,25 +2945,30 @@ void ReadAnalogInputs_Fake() {
     if (lastIMUFake == 0) dt = 0.1f;  // First call
     lastIMUFake = now;
 
-    // Simulate yacht rolling motion (slow sinusoidal, ~6-8 second period)
+    // Advance motion phases every call so heel/pitch track real time even when pushes are throttled
     static float rollPhase = 0;
-    rollPhase += dt * 0.5f;                                             // ~0.5 rad/s = ~12s period
+    rollPhase += dt * 0.5f;                                              // ~0.5 rad/s = ~12s period
     fakeHeelAngle = 8.0f * sin(rollPhase) + (random(-30, 30) / 10.0f);  // ±8° ±3° noise
     fakeHeelRate = 8.0f * 0.5f * cos(rollPhase);                        // Derivative
 
-    // Simulate pitching motion (slower, smaller amplitude)
     static float pitchPhase = 0;
-    pitchPhase += dt * 0.3f;                                              // ~0.3 rad/s = ~20s period
+    pitchPhase += dt * 0.3f;                                               // ~0.3 rad/s = ~20s period
     fakePitchAngle = 4.0f * sin(pitchPhase) + (random(-20, 20) / 10.0f);  // ±4° ±2° noise
     fakePitchRate = 4.0f * 0.3f * cos(pitchPhase);                        // Derivative
 
-    // Occasional slam event (5% chance per call)
+    // Rate-limit sample push to ~10 Hz — avoids flooding ring buffer at fast main loop rates
+    static unsigned long lastIMUPush = 0;
+    if (now - lastIMUPush < 100) return;
+    lastIMUPush = now;
+
+    // Slam event (~2% per push call at 10 Hz = ~1 per 5 seconds, rough conditions)
+    // Amplitude kept within ±2g sensor range to avoid int16_t overflow
     static float slamDecay = 0;
-    if (random(0, 100) < 5 && slamDecay == 0) {
-      slamDecay = 3.0f + (random(0, 200) / 100.0f);  // 3-5g spike
+    if (random(0, 100) < 2 && slamDecay == 0) {
+      slamDecay = 0.6f + (random(0, 30) / 100.0f);  // 0.6–0.9g spike
     }
     if (slamDecay > 0) {
-      slamDecay -= dt * 8.0f;  // Decay over ~0.5s
+      slamDecay -= dt * 8.0f;
       if (slamDecay < 0) slamDecay = 0;
     }
 
@@ -2980,16 +2985,16 @@ void ReadAnalogInputs_Fake() {
     // Add vertical slam spike
     az_g += slamDecay;
 
-    // Add wave-induced vertical motion (0.2g RMS, ~8s period)
+    // Add wave-induced vertical motion (~0.3g peak, ~8s period)
     static float wavePhase = 0;
     wavePhase += dt * 0.8f;
     az_g += 0.3f * sin(wavePhase) + (random(-20, 20) / 100.0f);
 
-    // Convert to raw sensor counts (±2g range, 16-bit)
-    // ACCEL_SCALE = 0.000061 g/LSB → 1g = 16393 LSB
-    int16_t raw_ax = (int16_t)(ax_g / ACCEL_SCALE);
-    int16_t raw_ay = (int16_t)(ay_g / ACCEL_SCALE);
-    int16_t raw_az = (int16_t)(az_g / ACCEL_SCALE);
+    // Convert to raw sensor counts — constrain prevents int16_t overflow on spikes
+    // ACCEL_SCALE = 0.000061 g/LSB → 1g = 16393 LSB, full range ±32767 = ±2.0g
+    int16_t raw_ax = (int16_t)constrain((int32_t)(ax_g / ACCEL_SCALE), -32767, 32767);
+    int16_t raw_ay = (int16_t)constrain((int32_t)(ay_g / ACCEL_SCALE), -32767, 32767);
+    int16_t raw_az = (int16_t)constrain((int32_t)(az_g / ACCEL_SCALE), -32767, 32767);
 
     // Gyro rates (already in dps)
     // GYRO_SCALE = 0.070 dps/LSB → 1 dps = 14.3 LSB
@@ -3001,23 +3006,24 @@ void ReadAnalogInputs_Fake() {
     int16_t raw_gy = (int16_t)(gy_dps / GYRO_SCALE);
     int16_t raw_gz = (int16_t)(gz_dps / GYRO_SCALE);
 
-    // Push samples to ring buffers
-    // Simulate batch of samples accumulated since last call
-    // At 417 Hz over ~100ms interval = ~42 samples, but just push a few representative ones
+    // Engine + sea-state vibration noise scaled with RPM
+    // At 1500 RPM: ±2500 LSB ≈ ±150 mg per axis (≈90 mg RMS) → HF energy ≈ 0.02 g²
+    // At idle/stopped: minimum 200 LSB keeps background sea-state noise present
+    int engineNoise = (int)constrain(RPM / 0.6f, 200.0f, 6000.0f);
+
+    // Push samples to ring buffers — simulates a batch from the real 417 Hz FIFO
     uint32_t timestamp_us = micros();
 
-    // Push accel samples (5 samples at 417 Hz = ~2.4ms spacing)
+    // 5 accel samples at ~2.4ms spacing = 417Hz claimed rate
     for (int i = 0; i < 5; i++) {
-      // Add small jitter to each sample
-      int16_t jitter_ax = raw_ax + random(-100, 100);
-      int16_t jitter_ay = raw_ay + random(-100, 100);
-      int16_t jitter_az = raw_az + random(-100, 100);
-      pushAccelSample(jitter_ax, jitter_ay, jitter_az, timestamp_us + i * 2400);  // ~2.4ms spacing = 417Hz
+      int16_t jitter_ax = (int16_t)constrain((int32_t)raw_ax + random(-engineNoise, engineNoise), -32767, 32767);
+      int16_t jitter_ay = (int16_t)constrain((int32_t)raw_ay + random(-engineNoise, engineNoise), -32767, 32767);
+      int16_t jitter_az = (int16_t)constrain((int32_t)raw_az + random(-engineNoise, engineNoise), -32767, 32767);
+      pushAccelSample(jitter_ax, jitter_ay, jitter_az, timestamp_us + i * 2400);
     }
 
     // Gyro at 52 Hz (one sample per ~20ms)
-    // Give it a timestamp 19ms AFTER the base timestamp
-    pushGyroSample(raw_gx, raw_gy, raw_gz, timestamp_us + 19000);  // ← CHANGED from timestamp_us
+    pushGyroSample(raw_gx, raw_gy, raw_gz, timestamp_us + 19000);
   }
 }
 
@@ -3985,6 +3991,18 @@ void saveNVSData() {
     anyChanges = true;
   }
 
+  // TODO: sea state minute counter NVS saves deferred — implement once non-blocking NVS strategy is resolved
+  // Keys ready: IMU_MinMvGnt/Mod/Rgh/Ext, IMU_MinStGnt/Mod/Rgh/Ext
+  // Uncomment when NVS write latency is addressed:
+  // if (prev_imu_min_moving_gentle   != imu_min_moving_gentle)   { nvs_set_u32(nvs_handle, "IMU_MinMvGnt",  imu_min_moving_gentle);   prev_imu_min_moving_gentle   = imu_min_moving_gentle;   anyChanges = true; }
+  // if (prev_imu_min_moving_moderate != imu_min_moving_moderate) { nvs_set_u32(nvs_handle, "IMU_MinMvMod",  imu_min_moving_moderate); prev_imu_min_moving_moderate = imu_min_moving_moderate; anyChanges = true; }
+  // if (prev_imu_min_moving_rough    != imu_min_moving_rough)    { nvs_set_u32(nvs_handle, "IMU_MinMvRgh",  imu_min_moving_rough);    prev_imu_min_moving_rough    = imu_min_moving_rough;    anyChanges = true; }
+  // if (prev_imu_min_moving_extreme  != imu_min_moving_extreme)  { nvs_set_u32(nvs_handle, "IMU_MinMvExt",  imu_min_moving_extreme);  prev_imu_min_moving_extreme  = imu_min_moving_extreme;  anyChanges = true; }
+  // if (prev_imu_min_stat_gentle     != imu_min_stat_gentle)     { nvs_set_u32(nvs_handle, "IMU_MinStGnt",  imu_min_stat_gentle);     prev_imu_min_stat_gentle     = imu_min_stat_gentle;     anyChanges = true; }
+  // if (prev_imu_min_stat_moderate   != imu_min_stat_moderate)   { nvs_set_u32(nvs_handle, "IMU_MinStMod",  imu_min_stat_moderate);   prev_imu_min_stat_moderate   = imu_min_stat_moderate;   anyChanges = true; }
+  // if (prev_imu_min_stat_rough      != imu_min_stat_rough)      { nvs_set_u32(nvs_handle, "IMU_MinStRgh",  imu_min_stat_rough);      prev_imu_min_stat_rough      = imu_min_stat_rough;      anyChanges = true; }
+  // if (prev_imu_min_stat_extreme    != imu_min_stat_extreme)    { nvs_set_u32(nvs_handle, "IMU_MinStExt",  imu_min_stat_extreme);    prev_imu_min_stat_extreme    = imu_min_stat_extreme;    anyChanges = true; }
+
   // IMU Settings
   if (prev_imuMountOrientation != imuMountOrientation) {
     nvs_set_u8(nvs_handle, "IMU_Orient", imuMountOrientation);
@@ -4157,6 +4175,16 @@ void loadNVSData() {
   if (nvs_get_u32(nvs_handle, "IMU_Pitchpol", &temp_uint32) == ESP_OK) imu_pitchpole_count = temp_uint32;
   if (nvs_get_u32(nvs_handle, "IMU_SlamLife", &temp_uint32) == ESP_OK) imu_slam_count_lifetime = temp_uint32;
 
+  // TODO: sea state minute counter NVS loads deferred — uncomment when saves are re-enabled
+  // if (nvs_get_u32(nvs_handle, "IMU_MinMvGnt",  &temp_uint32) == ESP_OK) imu_min_moving_gentle   = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinMvMod",  &temp_uint32) == ESP_OK) imu_min_moving_moderate = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinMvRgh",  &temp_uint32) == ESP_OK) imu_min_moving_rough    = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinMvExt",  &temp_uint32) == ESP_OK) imu_min_moving_extreme  = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinStGnt",  &temp_uint32) == ESP_OK) imu_min_stat_gentle     = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinStMod",  &temp_uint32) == ESP_OK) imu_min_stat_moderate   = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinStRgh",  &temp_uint32) == ESP_OK) imu_min_stat_rough      = temp_uint32;
+  // if (nvs_get_u32(nvs_handle, "IMU_MinStExt",  &temp_uint32) == ESP_OK) imu_min_stat_extreme    = temp_uint32;
+
   // IMU Lifetime Maximums
   required_size = sizeof(float);
   nvs_get_blob(nvs_handle, "IMU_HeelMax", &imu_heel_max_lifetime, &required_size);
@@ -4239,6 +4267,15 @@ void initNVSCache() {
   prev_imu_heel_max_lifetime = imu_heel_max_lifetime;
   prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;
   prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;
+  // TODO: sea state prev_ sync deferred — uncomment when saves are re-enabled
+  // prev_imu_min_moving_gentle   = imu_min_moving_gentle;
+  // prev_imu_min_moving_moderate = imu_min_moving_moderate;
+  // prev_imu_min_moving_rough    = imu_min_moving_rough;
+  // prev_imu_min_moving_extreme  = imu_min_moving_extreme;
+  // prev_imu_min_stat_gentle     = imu_min_stat_gentle;
+  // prev_imu_min_stat_moderate   = imu_min_stat_moderate;
+  // prev_imu_min_stat_rough      = imu_min_stat_rough;
+  // prev_imu_min_stat_extreme    = imu_min_stat_extreme;
   prev_imuMountOrientation = imuMountOrientation;
   prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;
   prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;
