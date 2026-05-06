@@ -38,9 +38,14 @@ static bool queueFSWrite(const char *path, const char *data) {
   return true;
 }
 
-// Call once per loop() - drains one entry per call
+// Call once per loop() - drains one entry per call, rate-limited to prevent burst blocking
+// when many writes queue at once (e.g. all fake-mode maxima updating simultaneously)
 void FlushFileWriteQueue() {
   if (fsWriteHead == fsWriteTail) return;  // queue empty
+  static unsigned long lastFlush = 0;
+  unsigned long now = millis();
+  if (now - lastFlush < 25) return;  // spread writes — each LittleFS write blocks ~40-50ms; prevents 700ms stall
+  lastFlush = now;
   writeFile(LittleFS, fsWriteQueue[fsWriteHead].path,
             fsWriteQueue[fsWriteHead].data);
   fsWriteHead = (fsWriteHead + 1) % FS_WRITE_QUEUE_DEPTH;
@@ -3658,9 +3663,6 @@ void queueConsoleMessage(const char *msg) {
   }
   if (!consoleQueue || !msg) return;
 
-  Serial.print("QUEUE DEBUG: ");  // Debug output
-  Serial.println(msg);
-
   portENTER_CRITICAL(&consoleMux);
   if (consoleCount >= CONSOLE_QUEUE_SIZE) {
     consoleTail = (consoleTail + 1) % CONSOLE_QUEUE_SIZE;
@@ -3742,344 +3744,210 @@ void initializeNVS() {
   Serial.println("NVS initialized successfully");
   queueConsoleMessage("NVS initialized successfully");
 }
-void saveNVSData() {
-  // Throttle: only save every X (currently 2) minutes
-  unsigned long currentTime = millis();
-  if (currentTime - lastNVSSaveTime < NVS_SAVE_INTERVAL) {
-    return;
-  }
-
-  nvs_handle_t nvs_handle;
-  esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+// Synchronous full write — for setup() and emergency use only.
+// Not safe to call from loop() — blocks for up to 200ms.
+void saveNVSDataFull() {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open("storage", NVS_READWRITE, &h);
   if (err != ESP_OK) {
     queueConsoleMessage("ERROR: Failed to open NVS");
     Serial.println("ERROR: Failed to open NVS");
     return;
   }
+  bool chg = false;
 
-  bool anyChanges = false;
+  // Session Energy
+  if (prev_ChargedEnergy != (uint32_t)ChargedEnergy)                        { nvs_set_u32(h, "ChargedEnergy",  (uint32_t)ChargedEnergy);                        prev_ChargedEnergy = (uint32_t)ChargedEnergy;                        chg = true; }
+  if (prev_DischrgdEnergy != (uint32_t)DischargedEnergy)                    { nvs_set_u32(h, "DischrgdEnergy", (uint32_t)DischargedEnergy);                    prev_DischrgdEnergy = (uint32_t)DischargedEnergy;                    chg = true; }
+  if (prev_AltChrgdEnergy != (uint32_t)AlternatorChargedEnergy)             { nvs_set_u32(h, "AltChrgdEnergy", (uint32_t)AlternatorChargedEnergy);             prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;             chg = true; }
+  if (prev_SolarEnergy != (uint32_t)SolarChargedEnergy)                     { nvs_set_u32(h, "SolarEnergy",    (uint32_t)SolarChargedEnergy);                  prev_SolarEnergy = (uint32_t)SolarChargedEnergy;                     chg = true; }
+  if (prev_AltFuelUsed != (int32_t)(AlternatorFuelUsed * 10))               { nvs_set_i32(h, "AltFuelUsed",    (int32_t)(AlternatorFuelUsed * 10));             prev_AltFuelUsed = (int32_t)(AlternatorFuelUsed * 10);               chg = true; }
+  if (prev_EngineFuel != (int32_t)(EngineFuelUsed * 10))                    { nvs_set_i32(h, "EngineFuel",     (int32_t)(EngineFuelUsed * 10));                 prev_EngineFuel = (int32_t)(EngineFuelUsed * 10);                    chg = true; }
+  // Lifetime Energy
+  if (prev_ChargedEnergy_AllTime != (uint32_t)ChargedEnergy_AllTime)        { nvs_set_u32(h, "ChrgdEng_AT",    (uint32_t)ChargedEnergy_AllTime);               prev_ChargedEnergy_AllTime = (uint32_t)ChargedEnergy_AllTime;        chg = true; }
+  if (prev_DischrgdEnergy_AllTime != (uint32_t)DischargedEnergy_AllTime)    { nvs_set_u32(h, "DschrgEng_AT",   (uint32_t)DischargedEnergy_AllTime);            prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;    chg = true; }
+  if (prev_AltChrgdEnergy_AllTime != (uint32_t)AlternatorChargedEnergy_AllTime) { nvs_set_u32(h, "AltChrgEng_AT", (uint32_t)AlternatorChargedEnergy_AllTime); prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime; chg = true; }
+  if (prev_SolarEnergy_AllTime != (uint32_t)SolarChargedEnergy_AllTime)     { nvs_set_u32(h, "SolarEng_AT",    (uint32_t)SolarChargedEnergy_AllTime);          prev_SolarEnergy_AllTime = (uint32_t)SolarChargedEnergy_AllTime;     chg = true; }
+  if (prev_AltFuelUsed_AllTime != (int32_t)(AlternatorFuelUsed_AllTime * 10)) { nvs_set_i32(h, "AltFuel_AT",  (int32_t)(AlternatorFuelUsed_AllTime * 10));    prev_AltFuelUsed_AllTime = (int32_t)(AlternatorFuelUsed_AllTime * 10); chg = true; }
+  if (prev_EngineFuel_AllTime != (int32_t)(EngineFuelUsed_AllTime * 10))    { nvs_set_i32(h, "EngFuel_AT",     (int32_t)(EngineFuelUsed_AllTime * 10));        prev_EngineFuel_AllTime = (int32_t)(EngineFuelUsed_AllTime * 10);    chg = true; }
+  // Runtime + Cycles
+  if (prev_EngineRunTime != (int32_t)EngineRunTime)                         { nvs_set_i32(h, "EngineRunTime",  (int32_t)EngineRunTime);                        prev_EngineRunTime = (int32_t)EngineRunTime;                         chg = true; }
+  if (prev_EngineCycles != (int32_t)EngineCycles)                           { nvs_set_i32(h, "EngineCycles",   (int32_t)EngineCycles);                         prev_EngineCycles = (int32_t)EngineCycles;                           chg = true; }
+  if (prev_AltOnTime != (int32_t)AlternatorOnTime)                          { nvs_set_i32(h, "AltOnTime",      (int32_t)AlternatorOnTime);                     prev_AltOnTime = (int32_t)AlternatorOnTime;                          chg = true; }
+  if (prev_EngineRunTime_AllTime != (int32_t)EngineRunTime_AllTime)         { nvs_set_i32(h, "EngRunTime_AT",  (int32_t)EngineRunTime_AllTime);                prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime;         chg = true; }
+  if (prev_EngineCycles_AllTime != (int32_t)EngineCycles_AllTime)           { nvs_set_i32(h, "EngCycles_AT",   (int32_t)EngineCycles_AllTime);                 prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;           chg = true; }
+  if (prev_AltOnTime_AllTime != (int32_t)AlternatorOnTime_AllTime)          { nvs_set_i32(h, "AltOnTime_AT",   (int32_t)AlternatorOnTime_AllTime);             prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;          chg = true; }
+  if (prev_ChargeCycles != (int32_t)ChargeCycles)                           { nvs_set_i32(h, "ChrgCycles",     (int32_t)ChargeCycles);                         prev_ChargeCycles = (int32_t)ChargeCycles;                           chg = true; }
+  if (prev_ChargeCycles_AllTime != (int32_t)ChargeCycles_AllTime)           { nvs_set_i32(h, "ChrgCyc_AT",     (int32_t)ChargeCycles_AllTime);                 prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;           chg = true; }
+  // Travel + SOC session
+  if (prev_TotalDist != (int32_t)TotalDistance)                             { nvs_set_i32(h, "TotalDist",      (int32_t)TotalDistance);                        prev_TotalDist = (int32_t)TotalDistance;                             chg = true; }
+  if (prev_AvgSpeed != (int32_t)(AvgSpeed * 100))                           { nvs_set_i32(h, "AvgSpeed",       (int32_t)(AvgSpeed * 100));                     prev_AvgSpeed = (int32_t)(AvgSpeed * 100);                           chg = true; }
+  if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)             { nvs_set_i32(h, "TotDist_AT",     (int32_t)TotalDistance_AllTime);                prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;             chg = true; }
+  if (prev_AvgSpeed_AllTime != (int32_t)(AvgSpeed_AllTime * 100))           { nvs_set_i32(h, "AvgSpd_AT",      (int32_t)(AvgSpeed_AllTime * 100));             prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);           chg = true; }
+  if (prev_AvgSOC != (int32_t)(AvgSOC * 100))                               { nvs_set_i32(h, "AvgSOC",         (int32_t)(AvgSOC * 100));                       prev_AvgSOC = (int32_t)(AvgSOC * 100);                               chg = true; }
+  // SOC alltime + battery state
+  { uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
+    if (prev_socAccum_AllTime != sc)                                         { nvs_set_u64(h, "SocAccum_AT", sc);                                               prev_socAccum_AllTime = sc;                                          chg = true; } }
+  if (prev_socTime_AllTime != (uint32_t)totalSocSampleTime_AllTime)         { nvs_set_u32(h, "SocTime_AT",     (uint32_t)totalSocSampleTime_AllTime);          prev_socTime_AllTime = (uint32_t)totalSocSampleTime_AllTime;         chg = true; }
+  if (prev_SOC_percent != (int32_t)SOC_percent)                             { nvs_set_i32(h, "SOC_percent",    (int32_t)SOC_percent);                          prev_SOC_percent = (int32_t)SOC_percent;                             chg = true; }
+  if (prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled)                 { nvs_set_i32(h, "CoulombCount",   (int32_t)CoulombCount_Ah_scaled);               prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;                 chg = true; }
+  // Health + Thermal + Learning
+  if (prev_SessionDur != (uint32_t)CurrentSessionDuration)                  { nvs_set_u32(h, "SessionDur",     (uint32_t)CurrentSessionDuration);              prev_SessionDur = (uint32_t)CurrentSessionDuration;                  chg = true; }
+  if (prev_MaxLoop != (int32_t)MaxLoopTime)                                  { nvs_set_i32(h, "MaxLoop",        (int32_t)MaxLoopTime);                          prev_MaxLoop = (int32_t)MaxLoopTime;                                 chg = true; }
+  if (prev_MinHeap != (int32_t)MinFreeHeap)                                  { nvs_set_i32(h, "MinHeap",        (int32_t)MinFreeHeap);                          prev_MinHeap = (int32_t)MinFreeHeap;                                 chg = true; }
+  if (prev_PowerCycles != (int32_t)totalPowerCycles)                        { nvs_set_i32(h, "PowerCycles",    (int32_t)totalPowerCycles);                     prev_PowerCycles = (int32_t)totalPowerCycles;                        chg = true; }
+  if (prev_InsulDamage != CumulativeInsulationDamage)                       { nvs_set_blob(h, "InsulDamage",   &CumulativeInsulationDamage, sizeof(float));     prev_InsulDamage = CumulativeInsulationDamage;                       chg = true; }
+  if (prev_GreaseDamage != CumulativeGreaseDamage)                          { nvs_set_blob(h, "GreaseDamage",  &CumulativeGreaseDamage,     sizeof(float));     prev_GreaseDamage = CumulativeGreaseDamage;                          chg = true; }
+  if (prev_BrushDamage != CumulativeBrushDamage)                            { nvs_set_blob(h, "BrushDamage",   &CumulativeBrushDamage,      sizeof(float));     prev_BrushDamage = CumulativeBrushDamage;                            chg = true; }
+  if (prev_ShuntGain != DynamicShuntGainFactor)                             { nvs_set_blob(h, "ShuntGain",     &DynamicShuntGainFactor,     sizeof(float));     prev_ShuntGain = DynamicShuntGainFactor;                             chg = true; }
+  if (prev_AltZero != DynamicAltCurrentZero)                                { nvs_set_blob(h, "AltZero",       &DynamicAltCurrentZero,      sizeof(float));     prev_AltZero = DynamicAltCurrentZero;                                chg = true; }
+  if (prev_LastGainTime != (uint32_t)lastGainCorrectionTime)                { nvs_set_u32(h, "LastGainTime",   (uint32_t)lastGainCorrectionTime);              prev_LastGainTime = (uint32_t)lastGainCorrectionTime;                chg = true; }
+  if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime)                      { nvs_set_u32(h, "LastZeroTime",   (uint32_t)lastAutoZeroTime);                    prev_LastZeroTime = (uint32_t)lastAutoZeroTime;                      chg = true; }
+  if (prev_LastZeroTemp != lastAutoZeroTemp)                                 { nvs_set_blob(h, "LastZeroTemp",  &lastAutoZeroTemp,           sizeof(float));     prev_LastZeroTemp = lastAutoZeroTemp;                                chg = true; }
+  if (prev_sailing_days_alltime != sailing_days_alltime)                    { nvs_set_blob(h, "SailDays_AT",   &sailing_days_alltime,       sizeof(float));     prev_sailing_days_alltime = sailing_days_alltime;                    chg = true; }
+  // IMU
+  if (prev_imu_capsize_count != imu_capsize_count)                          { nvs_set_u32(h,  "IMU_Capsize",   imu_capsize_count);                              prev_imu_capsize_count = imu_capsize_count;                          chg = true; }
+  if (prev_imu_pitchpole_count != imu_pitchpole_count)                      { nvs_set_u32(h,  "IMU_Pitchpol",  imu_pitchpole_count);                           prev_imu_pitchpole_count = imu_pitchpole_count;                      chg = true; }
+  if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime)              { nvs_set_u32(h,  "IMU_SlamLife",  imu_slam_count_lifetime);                        prev_imu_slam_count_lifetime = imu_slam_count_lifetime;              chg = true; }
+  if (prev_imu_heel_max_lifetime != imu_heel_max_lifetime)                  { nvs_set_blob(h, "IMU_HeelMax",   &imu_heel_max_lifetime,      sizeof(float));     prev_imu_heel_max_lifetime = imu_heel_max_lifetime;                  chg = true; }
+  if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime)                { nvs_set_blob(h, "IMU_PitchMax",  &imu_pitch_max_lifetime,     sizeof(float));     prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;                chg = true; }
+  if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)                { nvs_set_blob(h, "IMU_SlamMax",   &imu_slam_peak_lifetime,     sizeof(float));     prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;                chg = true; }
+  if (prev_imuMountOrientation != imuMountOrientation)                      { nvs_set_u8(h,   "IMU_Orient",    imuMountOrientation);                            prev_imuMountOrientation = imuMountOrientation;                      chg = true; }
+  if (prev_CAPSIZE_THRESHOLD_DEG != CAPSIZE_THRESHOLD_DEG)                  { nvs_set_blob(h, "IMU_CapThres",  &CAPSIZE_THRESHOLD_DEG,      sizeof(float));     prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;                  chg = true; }
+  if (prev_PITCHPOLE_THRESHOLD_DEG != PITCHPOLE_THRESHOLD_DEG)              { nvs_set_blob(h, "IMU_PitThres",  &PITCHPOLE_THRESHOLD_DEG,    sizeof(float));     prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;              chg = true; }
+  if (prev_SLAM_THRESHOLD_G != SLAM_THRESHOLD_G)                            { nvs_set_blob(h, "IMU_SlamThrs",  &SLAM_THRESHOLD_G,           sizeof(float));     prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;                            chg = true; }
 
-  // Session Energy Tracking
-  if (prev_ChargedEnergy != (uint32_t)ChargedEnergy) {
-    nvs_set_u32(nvs_handle, "ChargedEnergy", (uint32_t)ChargedEnergy);
-    prev_ChargedEnergy = (uint32_t)ChargedEnergy;
-    anyChanges = true;
-  }
-  if (prev_DischrgdEnergy != (uint32_t)DischargedEnergy) {
-    nvs_set_u32(nvs_handle, "DischrgdEnergy", (uint32_t)DischargedEnergy);
-    prev_DischrgdEnergy = (uint32_t)DischargedEnergy;
-    anyChanges = true;
-  }
-  if (prev_AltChrgdEnergy != (uint32_t)AlternatorChargedEnergy) {
-    nvs_set_u32(nvs_handle, "AltChrgdEnergy", (uint32_t)AlternatorChargedEnergy);
-    prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;
-    anyChanges = true;
-  }
-  if (prev_SolarEnergy != (uint32_t)SolarChargedEnergy) {
-    nvs_set_u32(nvs_handle, "SolarEnergy", (uint32_t)SolarChargedEnergy);
-    prev_SolarEnergy = (uint32_t)SolarChargedEnergy;
-    anyChanges = true;
-  }
-  if (prev_AltFuelUsed != (int32_t)(AlternatorFuelUsed * 10)) {
-    nvs_set_i32(nvs_handle, "AltFuelUsed", (int32_t)(AlternatorFuelUsed * 10));
-    prev_AltFuelUsed = (int32_t)(AlternatorFuelUsed * 10);
-    anyChanges = true;
-  }
-  if (prev_EngineFuel != (int32_t)(EngineFuelUsed * 10)) {
-    nvs_set_i32(nvs_handle, "EngineFuel", (int32_t)(EngineFuelUsed * 10));
-    prev_EngineFuel = (int32_t)(EngineFuelUsed * 10);
-    anyChanges = true;
-  }
+  if (chg) nvs_commit(h);
+  nvs_close(h);
+  lastNVSSaveTime = millis();
+}
 
-  // Lifetime Energy Tracking (_AllTime)
-  if (prev_ChargedEnergy_AllTime != (uint32_t)ChargedEnergy_AllTime) {
-    nvs_set_u32(nvs_handle, "ChrgdEng_AT", (uint32_t)ChargedEnergy_AllTime);
-    prev_ChargedEnergy_AllTime = (uint32_t)ChargedEnergy_AllTime;
-    anyChanges = true;
-  }
-  if (prev_DischrgdEnergy_AllTime != (uint32_t)DischargedEnergy_AllTime) {
-    nvs_set_u32(nvs_handle, "DschrgEng_AT", (uint32_t)DischargedEnergy_AllTime);
-    prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;
-    anyChanges = true;
-  }
-  if (prev_AltChrgdEnergy_AllTime != (uint32_t)AlternatorChargedEnergy_AllTime) {
-    nvs_set_u32(nvs_handle, "AltChrgEng_AT", (uint32_t)AlternatorChargedEnergy_AllTime);
-    prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime;
-    anyChanges = true;
-  }
-  if (prev_SolarEnergy_AllTime != (uint32_t)SolarChargedEnergy_AllTime) {
-    nvs_set_u32(nvs_handle, "SolarEng_AT", (uint32_t)SolarChargedEnergy_AllTime);
-    prev_SolarEnergy_AllTime = (uint32_t)SolarChargedEnergy_AllTime;
-    anyChanges = true;
-  }
-  if (prev_AltFuelUsed_AllTime != (int32_t)(AlternatorFuelUsed_AllTime * 10)) {
-    nvs_set_i32(nvs_handle, "AltFuel_AT", (int32_t)(AlternatorFuelUsed_AllTime * 10));
-    prev_AltFuelUsed_AllTime = (int32_t)(AlternatorFuelUsed_AllTime * 10);
-    anyChanges = true;
-  }
-  if (prev_EngineFuel_AllTime != (int32_t)(EngineFuelUsed_AllTime * 10)) {
-    nvs_set_i32(nvs_handle, "EngFuel_AT", (int32_t)(EngineFuelUsed_AllTime * 10));
-    prev_EngineFuel_AllTime = (int32_t)(EngineFuelUsed_AllTime * 10);
-    anyChanges = true;
-  }
+// Phased NVS write — called every loop() tick.
+// Phase 0: idle, waiting for 2-minute gate.
+// Phases 1-8: one logical write group per active call, with NVS_TICK_SPACING
+//             fast ticks between each group so the loop() stall is ~2-10ms
+//             instead of 50-200ms all at once.
+// Phase 9: commit + close.  nvsCycleMs records how long the full drain took.
+void saveNVSData() {
+  static uint16_t      nvsTick      = 0;
+  static nvs_handle_t  nvsH         = 0;
+  static bool          nvsChg       = false;
+  static uint32_t      nvsCycleStart = 0;
 
-  // Session Runtime Tracking
-  if (prev_EngineRunTime != (int32_t)EngineRunTime) {
-    nvs_set_i32(nvs_handle, "EngineRunTime", (int32_t)EngineRunTime);
-    prev_EngineRunTime = (int32_t)EngineRunTime;
-    anyChanges = true;
-  }
-  if (prev_EngineCycles != (int32_t)EngineCycles) {
-    nvs_set_i32(nvs_handle, "EngineCycles", (int32_t)EngineCycles);
-    prev_EngineCycles = (int32_t)EngineCycles;
-    anyChanges = true;
-  }
-  if (prev_AltOnTime != (int32_t)AlternatorOnTime) {
-    nvs_set_i32(nvs_handle, "AltOnTime", (int32_t)AlternatorOnTime);
-    prev_AltOnTime = (int32_t)AlternatorOnTime;
-    anyChanges = true;
-  }
-
-  // Lifetime Runtime Tracking (_AllTime)
-  if (prev_EngineRunTime_AllTime != (int32_t)EngineRunTime_AllTime) {
-    nvs_set_i32(nvs_handle, "EngRunTime_AT", (int32_t)EngineRunTime_AllTime);
-    prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime;
-    anyChanges = true;
-  }
-  if (prev_EngineCycles_AllTime != (int32_t)EngineCycles_AllTime) {
-    nvs_set_i32(nvs_handle, "EngCycles_AT", (int32_t)EngineCycles_AllTime);
-    prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;
-    anyChanges = true;
-  }
-  if (prev_AltOnTime_AllTime != (int32_t)AlternatorOnTime_AllTime) {
-    nvs_set_i32(nvs_handle, "AltOnTime_AT", (int32_t)AlternatorOnTime_AllTime);
-    prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;
-    anyChanges = true;
+  if (nvsPhase == 0) {
+    if (millis() - lastNVSSaveTime < NVS_SAVE_INTERVAL) return;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvsH);
+    if (err != ESP_OK) {
+      queueConsoleMessage("ERROR: Failed to open NVS");
+      Serial.println("ERROR: Failed to open NVS");
+      lastNVSSaveTime = millis();  // back off; don't hammer on failure
+      return;
+    }
+    nvsChg = false;
+    nvsTick = NVS_TICK_SPACING;  // fire phase 1 on the very next active call
+    nvsCycleStart = millis();
+    nvsPhase = 1;
+    return;
   }
 
-  // Session Charge Cycles
-  if (prev_ChargeCycles != (int32_t)ChargeCycles) {
-    nvs_set_i32(nvs_handle, "ChrgCycles", (int32_t)ChargeCycles);
-    prev_ChargeCycles = (int32_t)ChargeCycles;
-    anyChanges = true;
-  }
+  if (nvsTick < NVS_TICK_SPACING) { nvsTick++; return; }
+  nvsTick = 0;
 
-  // Lifetime Charge Cycles (_AllTime)
-  if (prev_ChargeCycles_AllTime != (int32_t)ChargeCycles_AllTime) {
-    nvs_set_i32(nvs_handle, "ChrgCyc_AT", (int32_t)ChargeCycles_AllTime);
-    prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;
-    anyChanges = true;
-  }
+  switch (nvsPhase) {
 
-  // Session Travel Statistics
-  if (prev_TotalDist != (int32_t)TotalDistance) {
-    nvs_set_i32(nvs_handle, "TotalDist", (int32_t)TotalDistance);
-    prev_TotalDist = (int32_t)TotalDistance;
-    anyChanges = true;
-  }
-  if (prev_AvgSpeed != (int32_t)(AvgSpeed * 100)) {
-    nvs_set_i32(nvs_handle, "AvgSpeed", (int32_t)(AvgSpeed * 100));
-    prev_AvgSpeed = (int32_t)(AvgSpeed * 100);
-    anyChanges = true;
-  }
+    case 1:  // Session Energy
+      if (prev_ChargedEnergy  != (uint32_t)ChargedEnergy)             { nvs_set_u32(nvsH, "ChargedEnergy",  (uint32_t)ChargedEnergy);             prev_ChargedEnergy  = (uint32_t)ChargedEnergy;             nvsChg = true; }
+      if (prev_DischrgdEnergy != (uint32_t)DischargedEnergy)          { nvs_set_u32(nvsH, "DischrgdEnergy", (uint32_t)DischargedEnergy);          prev_DischrgdEnergy = (uint32_t)DischargedEnergy;          nvsChg = true; }
+      if (prev_AltChrgdEnergy != (uint32_t)AlternatorChargedEnergy)   { nvs_set_u32(nvsH, "AltChrgdEnergy", (uint32_t)AlternatorChargedEnergy);   prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;   nvsChg = true; }
+      if (prev_SolarEnergy    != (uint32_t)SolarChargedEnergy)        { nvs_set_u32(nvsH, "SolarEnergy",    (uint32_t)SolarChargedEnergy);        prev_SolarEnergy    = (uint32_t)SolarChargedEnergy;        nvsChg = true; }
+      if (prev_AltFuelUsed    != (int32_t)(AlternatorFuelUsed * 10))  { nvs_set_i32(nvsH, "AltFuelUsed",    (int32_t)(AlternatorFuelUsed * 10));  prev_AltFuelUsed    = (int32_t)(AlternatorFuelUsed * 10);  nvsChg = true; }
+      if (prev_EngineFuel     != (int32_t)(EngineFuelUsed * 10))      { nvs_set_i32(nvsH, "EngineFuel",     (int32_t)(EngineFuelUsed * 10));      prev_EngineFuel     = (int32_t)(EngineFuelUsed * 10);      nvsChg = true; }
+      nvsPhase = 2; break;
 
-  // Lifetime Travel Statistics (_AllTime)
-  if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime) {
-    nvs_set_i32(nvs_handle, "TotDist_AT", (int32_t)TotalDistance_AllTime);
-    prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;
-    anyChanges = true;
-  }
-  if (prev_AvgSpeed_AllTime != (int32_t)(AvgSpeed_AllTime * 100)) {
-    nvs_set_i32(nvs_handle, "AvgSpd_AT", (int32_t)(AvgSpeed_AllTime * 100));
-    prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);
-    anyChanges = true;
-  }
+    case 2:  // Lifetime Energy
+      if (prev_ChargedEnergy_AllTime  != (uint32_t)ChargedEnergy_AllTime)           { nvs_set_u32(nvsH, "ChrgdEng_AT",   (uint32_t)ChargedEnergy_AllTime);           prev_ChargedEnergy_AllTime  = (uint32_t)ChargedEnergy_AllTime;           nvsChg = true; }
+      if (prev_DischrgdEnergy_AllTime != (uint32_t)DischargedEnergy_AllTime)        { nvs_set_u32(nvsH, "DschrgEng_AT",  (uint32_t)DischargedEnergy_AllTime);        prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;        nvsChg = true; }
+      if (prev_AltChrgdEnergy_AllTime != (uint32_t)AlternatorChargedEnergy_AllTime) { nvs_set_u32(nvsH, "AltChrgEng_AT", (uint32_t)AlternatorChargedEnergy_AllTime); prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime; nvsChg = true; }
+      if (prev_SolarEnergy_AllTime    != (uint32_t)SolarChargedEnergy_AllTime)      { nvs_set_u32(nvsH, "SolarEng_AT",   (uint32_t)SolarChargedEnergy_AllTime);      prev_SolarEnergy_AllTime    = (uint32_t)SolarChargedEnergy_AllTime;      nvsChg = true; }
+      if (prev_AltFuelUsed_AllTime    != (int32_t)(AlternatorFuelUsed_AllTime * 10)) { nvs_set_i32(nvsH, "AltFuel_AT",  (int32_t)(AlternatorFuelUsed_AllTime * 10)); prev_AltFuelUsed_AllTime    = (int32_t)(AlternatorFuelUsed_AllTime * 10); nvsChg = true; }
+      if (prev_EngineFuel_AllTime     != (int32_t)(EngineFuelUsed_AllTime * 10))    { nvs_set_i32(nvsH, "EngFuel_AT",    (int32_t)(EngineFuelUsed_AllTime * 10));    prev_EngineFuel_AllTime     = (int32_t)(EngineFuelUsed_AllTime * 10);    nvsChg = true; }
+      nvsPhase = 3; break;
 
-  // Average SOC (Session only - save the average directly)
-  if (prev_AvgSOC != (int32_t)(AvgSOC * 100)) {
-    nvs_set_i32(nvs_handle, "AvgSOC", (int32_t)(AvgSOC * 100));
-    prev_AvgSOC = (int32_t)(AvgSOC * 100);
-    anyChanges = true;
-  }
+    case 3:  // Runtime + Charge Cycles (session + alltime)
+      if (prev_EngineRunTime       != (int32_t)EngineRunTime)        { nvs_set_i32(nvsH, "EngineRunTime", (int32_t)EngineRunTime);        prev_EngineRunTime       = (int32_t)EngineRunTime;        nvsChg = true; }
+      if (prev_EngineCycles        != (int32_t)EngineCycles)         { nvs_set_i32(nvsH, "EngineCycles",  (int32_t)EngineCycles);         prev_EngineCycles        = (int32_t)EngineCycles;         nvsChg = true; }
+      if (prev_AltOnTime           != (int32_t)AlternatorOnTime)     { nvs_set_i32(nvsH, "AltOnTime",     (int32_t)AlternatorOnTime);     prev_AltOnTime           = (int32_t)AlternatorOnTime;     nvsChg = true; }
+      if (prev_EngineRunTime_AllTime != (int32_t)EngineRunTime_AllTime) { nvs_set_i32(nvsH, "EngRunTime_AT", (int32_t)EngineRunTime_AllTime); prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime; nvsChg = true; }
+      if (prev_EngineCycles_AllTime  != (int32_t)EngineCycles_AllTime)  { nvs_set_i32(nvsH, "EngCycles_AT",  (int32_t)EngineCycles_AllTime);  prev_EngineCycles_AllTime  = (int32_t)EngineCycles_AllTime;  nvsChg = true; }
+      if (prev_AltOnTime_AllTime     != (int32_t)AlternatorOnTime_AllTime) { nvs_set_i32(nvsH, "AltOnTime_AT", (int32_t)AlternatorOnTime_AllTime); prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime; nvsChg = true; }
+      if (prev_ChargeCycles          != (int32_t)ChargeCycles)        { nvs_set_i32(nvsH, "ChrgCycles",    (int32_t)ChargeCycles);         prev_ChargeCycles          = (int32_t)ChargeCycles;        nvsChg = true; }
+      if (prev_ChargeCycles_AllTime  != (int32_t)ChargeCycles_AllTime) { nvs_set_i32(nvsH, "ChrgCyc_AT",  (int32_t)ChargeCycles_AllTime); prev_ChargeCycles_AllTime  = (int32_t)ChargeCycles_AllTime; nvsChg = true; }
+      nvsPhase = 4; break;
 
-  // Average SOC (AllTime - save the ACCUMULATORS, not the average)
-  static uint64_t prev_socAccum_AllTime = 0;
-  static uint32_t prev_socTime_AllTime = 0;
+    case 4:  // Travel + session average SOC
+      if (prev_TotalDist       != (int32_t)TotalDistance)             { nvs_set_i32(nvsH, "TotalDist",  (int32_t)TotalDistance);              prev_TotalDist       = (int32_t)TotalDistance;             nvsChg = true; }
+      if (prev_AvgSpeed        != (int32_t)(AvgSpeed * 100))          { nvs_set_i32(nvsH, "AvgSpeed",   (int32_t)(AvgSpeed * 100));           prev_AvgSpeed        = (int32_t)(AvgSpeed * 100);          nvsChg = true; }
+      if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)   { nvs_set_i32(nvsH, "TotDist_AT", (int32_t)TotalDistance_AllTime);      prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;   nvsChg = true; }
+      if (prev_AvgSpeed_AllTime  != (int32_t)(AvgSpeed_AllTime * 100)) { nvs_set_i32(nvsH, "AvgSpd_AT", (int32_t)(AvgSpeed_AllTime * 100));   prev_AvgSpeed_AllTime  = (int32_t)(AvgSpeed_AllTime * 100); nvsChg = true; }
+      if (prev_AvgSOC          != (int32_t)(AvgSOC * 100))            { nvs_set_i32(nvsH, "AvgSOC",     (int32_t)(AvgSOC * 100));             prev_AvgSOC          = (int32_t)(AvgSOC * 100);            nvsChg = true; }
+      nvsPhase = 5; break;
 
-  // Scale accumulator: multiply by 100 to preserve 2 decimal places
-  uint64_t socAccum_scaled = (uint64_t)(socAccumulator_AllTime * 100.0f);
-  if (prev_socAccum_AllTime != socAccum_scaled) {
-    nvs_set_u64(nvs_handle, "SocAccum_AT", socAccum_scaled);
-    prev_socAccum_AllTime = socAccum_scaled;
-    anyChanges = true;
-  }
+    case 5: {  // SOC alltime accumulators + battery state
+      uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
+      if (prev_socAccum_AllTime != sc)                                       { nvs_set_u64(nvsH, "SocAccum_AT",  sc);                                    prev_socAccum_AllTime = sc;                                    nvsChg = true; }
+      if (prev_socTime_AllTime  != (uint32_t)totalSocSampleTime_AllTime)    { nvs_set_u32(nvsH, "SocTime_AT",   (uint32_t)totalSocSampleTime_AllTime);  prev_socTime_AllTime  = (uint32_t)totalSocSampleTime_AllTime;  nvsChg = true; }
+      if (prev_SOC_percent      != (int32_t)SOC_percent)                    { nvs_set_i32(nvsH, "SOC_percent",  (int32_t)SOC_percent);                  prev_SOC_percent      = (int32_t)SOC_percent;                  nvsChg = true; }
+      if (prev_CoulombCount     != (int32_t)CoulombCount_Ah_scaled)         { nvs_set_i32(nvsH, "CoulombCount", (int32_t)CoulombCount_Ah_scaled);       prev_CoulombCount     = (int32_t)CoulombCount_Ah_scaled;       nvsChg = true; }
+      nvsPhase = 6; break;
+    }
 
-  if (prev_socTime_AllTime != (uint32_t)totalSocSampleTime_AllTime) {
-    nvs_set_u32(nvs_handle, "SocTime_AT", (uint32_t)totalSocSampleTime_AllTime);
-    prev_socTime_AllTime = (uint32_t)totalSocSampleTime_AllTime;
-    anyChanges = true;
-  }
+    case 6:  // Session + system health
+      if (prev_SessionDur  != (uint32_t)CurrentSessionDuration) { nvs_set_u32(nvsH, "SessionDur",  (uint32_t)CurrentSessionDuration); prev_SessionDur  = (uint32_t)CurrentSessionDuration; nvsChg = true; }
+      if (prev_MaxLoop     != (int32_t)MaxLoopTime)              { nvs_set_i32(nvsH, "MaxLoop",     (int32_t)MaxLoopTime);             prev_MaxLoop     = (int32_t)MaxLoopTime;             nvsChg = true; }
+      if (prev_MinHeap     != (int32_t)MinFreeHeap)              { nvs_set_i32(nvsH, "MinHeap",     (int32_t)MinFreeHeap);             prev_MinHeap     = (int32_t)MinFreeHeap;             nvsChg = true; }
+      if (prev_PowerCycles != (int32_t)totalPowerCycles)         { nvs_set_i32(nvsH, "PowerCycles", (int32_t)totalPowerCycles);        prev_PowerCycles = (int32_t)totalPowerCycles;        nvsChg = true; }
+      nvsPhase = 7; break;
 
-  // Battery State
-  if (prev_SOC_percent != (int32_t)SOC_percent) {
-    nvs_set_i32(nvs_handle, "SOC_percent", (int32_t)SOC_percent);
-    prev_SOC_percent = (int32_t)SOC_percent;
-    anyChanges = true;
-  }
-  if (prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled) {
-    nvs_set_i32(nvs_handle, "CoulombCount", (int32_t)CoulombCount_Ah_scaled);
-    prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;
-    anyChanges = true;
-  }
+    case 7:  // Thermal stress + dynamic learning calibration
+      if (prev_InsulDamage != CumulativeInsulationDamage)   { nvs_set_blob(nvsH, "InsulDamage",  &CumulativeInsulationDamage, sizeof(float)); prev_InsulDamage  = CumulativeInsulationDamage;   nvsChg = true; }
+      if (prev_GreaseDamage != CumulativeGreaseDamage)       { nvs_set_blob(nvsH, "GreaseDamage", &CumulativeGreaseDamage,     sizeof(float)); prev_GreaseDamage = CumulativeGreaseDamage;       nvsChg = true; }
+      if (prev_BrushDamage  != CumulativeBrushDamage)        { nvs_set_blob(nvsH, "BrushDamage",  &CumulativeBrushDamage,      sizeof(float)); prev_BrushDamage  = CumulativeBrushDamage;        nvsChg = true; }
+      if (prev_ShuntGain    != DynamicShuntGainFactor)        { nvs_set_blob(nvsH, "ShuntGain",    &DynamicShuntGainFactor,     sizeof(float)); prev_ShuntGain    = DynamicShuntGainFactor;        nvsChg = true; }
+      if (prev_AltZero      != DynamicAltCurrentZero)         { nvs_set_blob(nvsH, "AltZero",      &DynamicAltCurrentZero,      sizeof(float)); prev_AltZero      = DynamicAltCurrentZero;         nvsChg = true; }
+      if (prev_LastGainTime != (uint32_t)lastGainCorrectionTime) { nvs_set_u32(nvsH, "LastGainTime", (uint32_t)lastGainCorrectionTime); prev_LastGainTime = (uint32_t)lastGainCorrectionTime; nvsChg = true; }
+      if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime)    { nvs_set_u32(nvsH, "LastZeroTime",  (uint32_t)lastAutoZeroTime);         prev_LastZeroTime = (uint32_t)lastAutoZeroTime;    nvsChg = true; }
+      if (prev_LastZeroTemp != lastAutoZeroTemp)               { nvs_set_blob(nvsH, "LastZeroTemp", &lastAutoZeroTemp,           sizeof(float)); prev_LastZeroTemp = lastAutoZeroTemp;             nvsChg = true; }
+      if (prev_sailing_days_alltime != sailing_days_alltime)  { nvs_set_blob(nvsH, "SailDays_AT",  &sailing_days_alltime,       sizeof(float)); prev_sailing_days_alltime = sailing_days_alltime; nvsChg = true; }
+      nvsPhase = 8; break;
 
-  // Session Health Stats
-  if (prev_SessionDur != (uint32_t)CurrentSessionDuration) {
-    nvs_set_u32(nvs_handle, "SessionDur", (uint32_t)CurrentSessionDuration);
-    prev_SessionDur = (uint32_t)CurrentSessionDuration;
-    anyChanges = true;
-  }
-  if (prev_MaxLoop != (int32_t)MaxLoopTime) {
-    nvs_set_i32(nvs_handle, "MaxLoop", (int32_t)MaxLoopTime);
-    prev_MaxLoop = (int32_t)MaxLoopTime;
-    anyChanges = true;
-  }
-  if (prev_MinHeap != (int32_t)MinFreeHeap) {
-    nvs_set_i32(nvs_handle, "MinHeap", (int32_t)MinFreeHeap);
-    prev_MinHeap = (int32_t)MinFreeHeap;
-    anyChanges = true;
-  }
+    case 8:  // IMU lifetime counters, maxima, and settings
+      if (prev_imu_capsize_count      != imu_capsize_count)          { nvs_set_u32(nvsH,  "IMU_Capsize",  imu_capsize_count);                             prev_imu_capsize_count      = imu_capsize_count;          nvsChg = true; }
+      if (prev_imu_pitchpole_count    != imu_pitchpole_count)        { nvs_set_u32(nvsH,  "IMU_Pitchpol", imu_pitchpole_count);                           prev_imu_pitchpole_count    = imu_pitchpole_count;        nvsChg = true; }
+      if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime)   { nvs_set_u32(nvsH,  "IMU_SlamLife", imu_slam_count_lifetime);                       prev_imu_slam_count_lifetime = imu_slam_count_lifetime;  nvsChg = true; }
+      if (prev_imu_heel_max_lifetime  != imu_heel_max_lifetime)      { nvs_set_blob(nvsH, "IMU_HeelMax",  &imu_heel_max_lifetime,  sizeof(float));        prev_imu_heel_max_lifetime  = imu_heel_max_lifetime;      nvsChg = true; }
+      if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime)     { nvs_set_blob(nvsH, "IMU_PitchMax", &imu_pitch_max_lifetime, sizeof(float));        prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;     nvsChg = true; }
+      if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)     { nvs_set_blob(nvsH, "IMU_SlamMax",  &imu_slam_peak_lifetime, sizeof(float));        prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;     nvsChg = true; }
+      if (prev_imuMountOrientation    != imuMountOrientation)        { nvs_set_u8(nvsH,   "IMU_Orient",   imuMountOrientation);                           prev_imuMountOrientation    = imuMountOrientation;        nvsChg = true; }
+      if (prev_CAPSIZE_THRESHOLD_DEG  != CAPSIZE_THRESHOLD_DEG)      { nvs_set_blob(nvsH, "IMU_CapThres", &CAPSIZE_THRESHOLD_DEG,  sizeof(float));        prev_CAPSIZE_THRESHOLD_DEG  = CAPSIZE_THRESHOLD_DEG;      nvsChg = true; }
+      if (prev_PITCHPOLE_THRESHOLD_DEG != PITCHPOLE_THRESHOLD_DEG)   { nvs_set_blob(nvsH, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, sizeof(float));       prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;  nvsChg = true; }
+      if (prev_SLAM_THRESHOLD_G       != SLAM_THRESHOLD_G)           { nvs_set_blob(nvsH, "IMU_SlamThrs", &SLAM_THRESHOLD_G,        sizeof(float));        prev_SLAM_THRESHOLD_G       = SLAM_THRESHOLD_G;           nvsChg = true; }
+      // TODO: sea state minute counters (IMU_MinMvGnt/Mod/Rgh/Ext, IMU_MinStGnt/Mod/Rgh/Ext) — add here when ready
+      nvsPhase = 9; break;
 
-  // System Health Counters
-  if (prev_PowerCycles != (int32_t)totalPowerCycles) {
-    nvs_set_i32(nvs_handle, "PowerCycles", (int32_t)totalPowerCycles);
-    prev_PowerCycles = (int32_t)totalPowerCycles;
-    anyChanges = true;
-  }
+    case 9:  // Commit + close
+      if (nvsChg) nvs_commit(nvsH);
+      nvs_close(nvsH);
+      nvsH = 0;
+      nvsCycleMs = millis() - nvsCycleStart;
+      lastNVSSaveTime = millis();
+      nvsPhase = 0;
+      break;
 
-  // Thermal Stress
-  if (prev_InsulDamage != CumulativeInsulationDamage) {
-    nvs_set_blob(nvs_handle, "InsulDamage", &CumulativeInsulationDamage, sizeof(float));
-    prev_InsulDamage = CumulativeInsulationDamage;
-    anyChanges = true;
+    default:
+      if (nvsH != 0) { nvs_close(nvsH); nvsH = 0; }
+      nvsPhase = 0;
+      break;
   }
-  if (prev_GreaseDamage != CumulativeGreaseDamage) {
-    nvs_set_blob(nvs_handle, "GreaseDamage", &CumulativeGreaseDamage, sizeof(float));
-    prev_GreaseDamage = CumulativeGreaseDamage;
-    anyChanges = true;
-  }
-  if (prev_BrushDamage != CumulativeBrushDamage) {
-    nvs_set_blob(nvs_handle, "BrushDamage", &CumulativeBrushDamage, sizeof(float));
-    prev_BrushDamage = CumulativeBrushDamage;
-    anyChanges = true;
-  }
-
-  // Dynamic Learning
-  if (prev_ShuntGain != DynamicShuntGainFactor) {
-    nvs_set_blob(nvs_handle, "ShuntGain", &DynamicShuntGainFactor, sizeof(float));
-    prev_ShuntGain = DynamicShuntGainFactor;
-    anyChanges = true;
-  }
-  if (prev_AltZero != DynamicAltCurrentZero) {
-    nvs_set_blob(nvs_handle, "AltZero", &DynamicAltCurrentZero, sizeof(float));
-    prev_AltZero = DynamicAltCurrentZero;
-    anyChanges = true;
-  }
-  if (prev_LastGainTime != (uint32_t)lastGainCorrectionTime) {
-    nvs_set_u32(nvs_handle, "LastGainTime", (uint32_t)lastGainCorrectionTime);
-    prev_LastGainTime = (uint32_t)lastGainCorrectionTime;
-    anyChanges = true;
-  }
-  if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime) {
-    nvs_set_u32(nvs_handle, "LastZeroTime", (uint32_t)lastAutoZeroTime);
-    prev_LastZeroTime = (uint32_t)lastAutoZeroTime;
-    anyChanges = true;
-  }
-  if (prev_LastZeroTemp != lastAutoZeroTemp) {
-    nvs_set_blob(nvs_handle, "LastZeroTemp", &lastAutoZeroTemp, sizeof(float));
-    prev_LastZeroTemp = lastAutoZeroTemp;
-    anyChanges = true;
-  }
-
-  if (prev_sailing_days_alltime != sailing_days_alltime) {
-    nvs_set_blob(nvs_handle, "SailDays_AT", &sailing_days_alltime, sizeof(float));
-    prev_sailing_days_alltime = sailing_days_alltime;
-    anyChanges = true;
-  }
-
-  // IMU Lifetime Counters
-  if (prev_imu_capsize_count != imu_capsize_count) {
-    nvs_set_u32(nvs_handle, "IMU_Capsize", imu_capsize_count);
-    prev_imu_capsize_count = imu_capsize_count;
-    anyChanges = true;
-  }
-  if (prev_imu_pitchpole_count != imu_pitchpole_count) {
-    nvs_set_u32(nvs_handle, "IMU_Pitchpol", imu_pitchpole_count);
-    prev_imu_pitchpole_count = imu_pitchpole_count;
-    anyChanges = true;
-  }
-  if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime) {
-    nvs_set_u32(nvs_handle, "IMU_SlamLife", imu_slam_count_lifetime);
-    prev_imu_slam_count_lifetime = imu_slam_count_lifetime;
-    anyChanges = true;
-  }
-
-  // IMU Lifetime Maximums
-  if (prev_imu_heel_max_lifetime != imu_heel_max_lifetime) {
-    nvs_set_blob(nvs_handle, "IMU_HeelMax", &imu_heel_max_lifetime, sizeof(float));
-    prev_imu_heel_max_lifetime = imu_heel_max_lifetime;
-    anyChanges = true;
-  }
-  if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime) {
-    nvs_set_blob(nvs_handle, "IMU_PitchMax", &imu_pitch_max_lifetime, sizeof(float));
-    prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;
-    anyChanges = true;
-  }
-  if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime) {
-    nvs_set_blob(nvs_handle, "IMU_SlamMax", &imu_slam_peak_lifetime, sizeof(float));
-    prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;
-    anyChanges = true;
-  }
-
-  // TODO: sea state minute counter NVS saves deferred — implement once non-blocking NVS strategy is resolved
-  // Keys ready: IMU_MinMvGnt/Mod/Rgh/Ext, IMU_MinStGnt/Mod/Rgh/Ext
-  // Uncomment when NVS write latency is addressed:
-  // if (prev_imu_min_moving_gentle   != imu_min_moving_gentle)   { nvs_set_u32(nvs_handle, "IMU_MinMvGnt",  imu_min_moving_gentle);   prev_imu_min_moving_gentle   = imu_min_moving_gentle;   anyChanges = true; }
-  // if (prev_imu_min_moving_moderate != imu_min_moving_moderate) { nvs_set_u32(nvs_handle, "IMU_MinMvMod",  imu_min_moving_moderate); prev_imu_min_moving_moderate = imu_min_moving_moderate; anyChanges = true; }
-  // if (prev_imu_min_moving_rough    != imu_min_moving_rough)    { nvs_set_u32(nvs_handle, "IMU_MinMvRgh",  imu_min_moving_rough);    prev_imu_min_moving_rough    = imu_min_moving_rough;    anyChanges = true; }
-  // if (prev_imu_min_moving_extreme  != imu_min_moving_extreme)  { nvs_set_u32(nvs_handle, "IMU_MinMvExt",  imu_min_moving_extreme);  prev_imu_min_moving_extreme  = imu_min_moving_extreme;  anyChanges = true; }
-  // if (prev_imu_min_stat_gentle     != imu_min_stat_gentle)     { nvs_set_u32(nvs_handle, "IMU_MinStGnt",  imu_min_stat_gentle);     prev_imu_min_stat_gentle     = imu_min_stat_gentle;     anyChanges = true; }
-  // if (prev_imu_min_stat_moderate   != imu_min_stat_moderate)   { nvs_set_u32(nvs_handle, "IMU_MinStMod",  imu_min_stat_moderate);   prev_imu_min_stat_moderate   = imu_min_stat_moderate;   anyChanges = true; }
-  // if (prev_imu_min_stat_rough      != imu_min_stat_rough)      { nvs_set_u32(nvs_handle, "IMU_MinStRgh",  imu_min_stat_rough);      prev_imu_min_stat_rough      = imu_min_stat_rough;      anyChanges = true; }
-  // if (prev_imu_min_stat_extreme    != imu_min_stat_extreme)    { nvs_set_u32(nvs_handle, "IMU_MinStExt",  imu_min_stat_extreme);    prev_imu_min_stat_extreme    = imu_min_stat_extreme;    anyChanges = true; }
-
-  // IMU Settings
-  if (prev_imuMountOrientation != imuMountOrientation) {
-    nvs_set_u8(nvs_handle, "IMU_Orient", imuMountOrientation);
-    prev_imuMountOrientation = imuMountOrientation;
-    anyChanges = true;
-  }
-  if (prev_CAPSIZE_THRESHOLD_DEG != CAPSIZE_THRESHOLD_DEG) {
-    nvs_set_blob(nvs_handle, "IMU_CapThres", &CAPSIZE_THRESHOLD_DEG, sizeof(float));
-    prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;
-    anyChanges = true;
-  }
-  if (prev_PITCHPOLE_THRESHOLD_DEG != PITCHPOLE_THRESHOLD_DEG) {
-    nvs_set_blob(nvs_handle, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, sizeof(float));
-    prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;
-    anyChanges = true;
-  }
-  if (prev_SLAM_THRESHOLD_G != SLAM_THRESHOLD_G) {
-    nvs_set_blob(nvs_handle, "IMU_SlamThrs", &SLAM_THRESHOLD_G, sizeof(float));
-    prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;
-    anyChanges = true;
-  }
-
-  if (anyChanges) {
-    nvs_commit(nvs_handle);
-  }
-  nvs_close(nvs_handle);
-
-  lastNVSSaveTime = currentTime;
 }
 void loadNVSData() {
   nvs_handle_t nvs_handle;

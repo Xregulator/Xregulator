@@ -389,7 +389,21 @@ enum Csv2Index {
   CSV2_cvKOvershoot,                       // 280 — ×10
   CSV2_cvConsecutiveReads,                 // 281
 
-  CSV2_FIELD_COUNT  // ← always last, = 282
+  CSV2_ThermalTuningMode,                  // 282
+  CSV2_thermalWaveLowF,                    // 283 — ×10
+  CSV2_thermalWaveHighF,                   // 284 — ×10
+  CSV2_thermalWaveHalfPeriodMin,           // 285 — ×10
+  CSV2_thermalKOvershoot,                  // 286 — ×100
+  CSV2_thermalKUndershoot,                 // 287 — ×100
+  CSV2_thermalSettleThreshF,               // 288 — ×10
+  CSV2_thermalConsecutiveReads,            // 289
+  CSV2_thermalLiveScore0,                  // 290 — ×10000, 10-min window
+  CSV2_thermalLiveScore1,                  // 291 — ×10000, 1-hr window
+  CSV2_thermalLiveScore2,                  // 292 — ×10000, 10-hr window
+  CSV2_thermalLiveScore3,                  // 293 — ×10000, 100-hr window
+  CSV2_thermalTuningTestPhase,             // 294 — 0=off/ring-in 1=scored active
+
+  CSV2_FIELD_COUNT  // ← always last, = 295
 };
 
 enum Csv3Index {
@@ -634,8 +648,8 @@ enum Csv3Index {
   CSV3_ft_buildConfigPayload_win,     // 238
   CSV3_ft_buildConfigPayload_ses,     // 239
   CSV3_VeTime2,                       // 240
-  CSV3_systemIDActive,                // 241
-  CSV3_systemIDResultsReady,          // 242
+  CSV3_systemIDActive,                // 241 OBSOLETE — HTML removed, firmware sends 0
+  CSV3_systemIDResultsReady,          // 242 OBSOLETE — HTML removed, firmware sends 0
   CSV3_systemIDRiseDelay_0,           // 243
   CSV3_systemIDRiseDelay_1,           // 244
   CSV3_systemIDRiseDelay_2,           // 245
@@ -664,8 +678,14 @@ enum Csv3Index {
   CSV3_UNUSED_268,                    // 268 (was ThermistorFilterAlpha, removed)
   CSV3_displayTempUnit,               // 269
   CSV3_WarmupRampRate,                // 270
+  CSV3_nvsPhase,                      // 271 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
+  CSV3_ft_saveNVSData_win,               // 272 — saveNVSData worst 5s window (µs)
+  CSV3_ft_saveNVSData_ses,               // 273 — saveNVSData worst session (µs)
+  CSV3_nvsCycleMs,                       // 274 — last full NVS drain duration (ms)
+  CSV3_ft_FlushFileWriteQueue_win,       // 275 — FlushFileWriteQueue worst 5s window (µs)
+  CSV3_ft_FlushFileWriteQueue_ses,       // 276 — FlushFileWriteQueue worst session (µs)
 
-  CSV3_FIELD_COUNT  // = 271
+  CSV3_FIELD_COUNT  // = 277
 };
 
 
@@ -3134,6 +3154,7 @@ void setupServer() {
       writeFile(LittleFS, "/TempPIDKp.txt", inputMessage.c_str());
       TempPIDKp = inputMessage.toFloat();
       tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("Temp PID Kp updated to: %.6f", TempPIDKp);
     }
     if (request->hasParam("TempPIDKi")) {
@@ -3142,6 +3163,7 @@ void setupServer() {
       writeFile(LittleFS, "/TempPIDKi.txt", inputMessage.c_str());
       TempPIDKi = inputMessage.toFloat();
       tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("Temp PID Ki updated to: %.6f", TempPIDKi);
     }
     if (request->hasParam("ThermalLookaheadSec")) {
@@ -3149,6 +3171,7 @@ void setupServer() {
       inputMessage = request->getParam("ThermalLookaheadSec")->value();
       ThermalLookaheadSec = clamp_f(inputMessage.toFloat(), 0.0f, 300.0f);
       writeFile(LittleFS, "/ThermalLookaheadSec.txt", String(ThermalLookaheadSec, 1).c_str());
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("ThermalLookaheadSec set to: %.1f s", ThermalLookaheadSec);
     }
     if (request->hasParam("TempPIDIntervalMs")) {
@@ -3156,6 +3179,7 @@ void setupServer() {
       inputMessage = request->getParam("TempPIDIntervalMs")->value();
       writeFile(LittleFS, "/TempPIDIntervalMs.txt", inputMessage.c_str());
       TempPIDIntervalMs = inputMessage.toInt();
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("Temp PID interval updated to: %d ms", TempPIDIntervalMs);
     }
     if (request->hasParam("TempPIDFilterAlpha")) {
@@ -3163,6 +3187,7 @@ void setupServer() {
       inputMessage = request->getParam("TempPIDFilterAlpha")->value();
       writeFile(LittleFS, "/TempPIDFilterAlpha.txt", inputMessage.c_str());
       TempPIDFilterAlpha = inputMessage.toFloat();
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("Temp PID filter alpha updated to: %.3f", TempPIDFilterAlpha);
     }
     if (request->hasParam("PidKi")) {
@@ -3438,6 +3463,57 @@ void setupServer() {
       cvConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
       writeFile(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
     }
+    if (request->hasParam("ThermalTuningMode")) {
+      foundParameter = true;
+      inputMessage = request->getParam("ThermalTuningMode")->value();
+      writeFile(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
+      ThermalTuningMode = inputMessage.toInt();
+    }
+    if (request->hasParam("thermalWaveLowF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalWaveLowF")->value();
+      thermalWaveLowF = inputMessage.toFloat();
+      writeFile(LittleFS, "/thermalWaveLowF.txt", String(thermalWaveLowF, 1).c_str());
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
+    }
+    if (request->hasParam("thermalWaveHighF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalWaveHighF")->value();
+      thermalWaveHighF = inputMessage.toFloat();
+      writeFile(LittleFS, "/thermalWaveHighF.txt", String(thermalWaveHighF, 1).c_str());
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
+    }
+    if (request->hasParam("thermalWaveHalfPeriodMin")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalWaveHalfPeriodMin")->value();
+      thermalWaveHalfPeriodMin = inputMessage.toFloat();
+      writeFile(LittleFS, "/thermalWaveHalfPeriodMin.txt", String(thermalWaveHalfPeriodMin, 1).c_str());
+      if (ThermalTuningMode) thermalTuningParamChanged = true;
+    }
+    if (request->hasParam("thermalKOvershoot")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalKOvershoot")->value();
+      thermalKOvershoot = inputMessage.toFloat();
+      writeFile(LittleFS, "/thermalKOvershoot.txt", String(thermalKOvershoot, 1).c_str());
+    }
+    if (request->hasParam("thermalKUndershoot")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalKUndershoot")->value();
+      thermalKUndershoot = inputMessage.toFloat();
+      writeFile(LittleFS, "/thermalKUndershoot.txt", String(thermalKUndershoot, 1).c_str());
+    }
+    if (request->hasParam("thermalSettleThreshF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalSettleThreshF")->value();
+      thermalSettleThreshF = inputMessage.toFloat();
+      writeFile(LittleFS, "/thermalSettleThreshF.txt", String(thermalSettleThreshF, 1).c_str());
+    }
+    if (request->hasParam("thermalConsecutiveReads")) {
+      foundParameter = true;
+      inputMessage = request->getParam("thermalConsecutiveReads")->value();
+      thermalConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
+      writeFile(LittleFS, "/thermalConsecutiveReads.txt", String(thermalConsecutiveReads).c_str());
+    }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeThreshold")->value();
@@ -3510,6 +3586,8 @@ void setupServer() {
       ft_uploadBufferedRecords.worstSession = 0;
       ft_buildConfigPayload.worstSession = 0;
       ft_ReadVEData.worstSession = 0;
+      ft_saveNVSData.worstSession = 0;
+      ft_FlushFileWriteQueue.worstSession = 0;
       VeTime2 = 0;
       // CPU load maxes
       cpuLoadCore0Max = 0;
@@ -4100,6 +4178,7 @@ void setupServer() {
       CVTuningRecord &r = cvTuningLog[sortIdx[i]];
       pos += snprintf(buf + pos, 16384 - pos,
         "%s{\"n\":%d,\"s\":%.2f,\"st\":%.1f,\"wo\":%.3f,\"io\":%.4f,\"t\":%.1f,"
+        "\"ls\":%.2f,\"lst\":%.1f,\"lwo\":%.3f,\"lio\":%.4f,"
         "\"fov\":%d,\"iex\":%d,\"ld\":%d,\"hoc\":%d,"
         "\"vkp\":%.3f,\"vki\":%.3f,\"vkd\":%.2f,"
         "\"srr\":%.1f,\"sfr\":%.1f,"
@@ -4112,6 +4191,7 @@ void setupServer() {
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
         r.avgIntegratedOvershootVs, r.activeTimeSec,
+        r.lowScore, r.avgLowSettlingTimeSec, r.worstLowOvV, r.avgLowIntOvVs,
         (int)r.fastOvFires, (int)r.iExcessFires, (int)r.loadDumpFires, (int)r.hardOcFires,
         r.voltageKp, r.voltageKi, r.voltageKd,
         r.setpointRiseRate, r.setpointFallRate,
@@ -4131,7 +4211,9 @@ void setupServer() {
            + cvKOvershoot * (cvTuningScore.totalIntegratedOvershootVs / n);
     }
     pos += snprintf(buf + pos, 16384 - pos,
-      "],\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
+      "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
+      "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
+      cvLiveScoreVal[0], cvLiveScoreVal[1], cvLiveScoreVal[2], cvLiveScoreVal[3],
       cvts, (int)cvTuningScore.scoredHighCount, cvTestActive ? 1 : 0);
 
     request->send(200, "application/json", String(buf));
@@ -4145,7 +4227,92 @@ void setupServer() {
     cvTuningScore        = {};
     cvTuningParamChanged = false;
     if (cvTuningLog) memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
+    for (int i = 0; i < 4; i++) {
+      if (cvLiveScoreBuckets[i]) memset(cvLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+      cvLiveScoreHead[i]      = 0;
+      cvLiveBucketStartMs[i]  = 0;
+      cvLiveScoreVal[i]       = 0.0f;
+    }
+    cvLiveScore_lastDtMs = 0;
+    cvLiveScore_inWindow = false;
     saveCVTuningLog();
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/thermaltuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    char *buf = (char *)ps_malloc(8192);
+    if (!buf) { request->send(500, "text/plain", "OOM"); return; }
+
+    // Sort by score ascending (best first)
+    uint8_t sortIdx[50];
+    for (int i = 0; i < thermalTuningLogCount; i++) sortIdx[i] = i;
+    for (int i = 1; i < thermalTuningLogCount; i++) {
+      uint8_t key = sortIdx[i];
+      float keyScore = thermalTuningLog[key].score;
+      int j = i - 1;
+      while (j >= 0 && thermalTuningLog[sortIdx[j]].score > keyScore) {
+        sortIdx[j + 1] = sortIdx[j];
+        j--;
+      }
+      sortIdx[j + 1] = key;
+    }
+
+    int pos = 0;
+    pos += snprintf(buf + pos, 8192 - pos, "{\"rec\":[");
+    for (int i = 0; i < thermalTuningLogCount && pos < 7800; i++) {
+      ThermalTuningRecord &r = thermalTuningLog[sortIdx[i]];
+      pos += snprintf(buf + pos, 8192 - pos,
+        "%s{\"n\":%d,\"s\":%.2f,\"st\":%.0f,\"wo\":%.1f,\"io\":%.2f,\"iu\":%.2f,"
+        "\"ns\":%d,\"t\":%.0f,"
+        "\"kp\":%.4f,\"ki\":%.5f,\"la\":%.0f,\"fa\":%.3f,\"im\":%d,"
+        "\"wl\":%.0f,\"wh\":%.0f,\"wp\":%.1f,"
+        "\"rr\":%.1f,\"fr\":%.1f,"
+        "\"rpm\":%.0f,\"amb\":%.1f}",
+        i > 0 ? "," : "",
+        r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootF,
+        r.avgIntOverFs, r.avgIntUnderFs,
+        (int)r.scoredStepCount, r.activeTimeSec,
+        r.kp, r.ki, r.lookaheadSec, r.filterAlpha, (int)r.intervalMs,
+        r.waveLowF, r.waveHighF, r.waveHalfPeriodMin,
+        r.riseRate, r.fallRate,
+        r.avgRPM, r.avgAmbientF);
+    }
+    // Active test state
+    bool testActive = (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.ringInDone);
+    float ts = 0.0f;
+    if (testActive && thermalTuningScore.scoredStepCount > 0) {
+      float n = (float)thermalTuningScore.scoredStepCount;
+      float avgSettle = thermalTuningScore.totalSettlingTimeSec / n;
+      float avgOver   = thermalTuningScore.totalIntOverFs / n;
+      float avgUnder  = thermalTuningScore.totalIntUnderFs / n;
+      ts = avgSettle + thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;
+    }
+    pos += snprintf(buf + pos, 8192 - pos,
+      "],\"live\":[%.4f,%.4f,%.4f,%.4f],"
+      "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
+      thermalLiveScoreVal[0], thermalLiveScoreVal[1],
+      thermalLiveScoreVal[2], thermalLiveScoreVal[3],
+      ts, (int)thermalTuningScore.scoredStepCount, testActive ? 1 : 0);
+
+    request->send(200, "application/json", String(buf));
+    free(buf);
+  });
+
+  server.on("/resetthermaltuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
+    thermalTuningLogCount     = 0;
+    thermalTuningLogHead      = 0;
+    thermalTuningRunCounter   = 0;
+    thermalTuningScore        = {};
+    thermalTuningParamChanged = false;
+    thermalWaveCurrentSetpointF = 0.0f;
+    if (thermalTuningLog) memset(thermalTuningLog, 0, 50 * sizeof(ThermalTuningRecord));
+    for (int i = 0; i < 4; i++) {
+      if (thermalLiveScoreBuckets[i]) memset(thermalLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+      thermalLiveScoreHead[i]       = 0;
+      thermalLiveBucketStartMs[i]   = 0;
+      thermalLiveScoreVal[i]        = 0.0f;
+    }
+    saveThermalTuningLog();
     request->send(200, "text/plain", "OK");
   });
 
@@ -4162,7 +4329,8 @@ void setupServer() {
       liveBucketStartMs[i] = 0;
       liveScoreVal[i]      = 0.0f;
     }
-    liveScore_lastSP     = 0.0f;
+    liveScore_lastCmd    = 0.0f;
+    liveScore_thisCmd    = 0.0f;
     liveScore_lastStepMs = 0;
     liveScore_inWindow   = false;
     saveTuningLog();
@@ -4587,7 +4755,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4871,7 +5040,20 @@ void SendWifiData() {
                                SafeInt(cvWaveAmplitudeV, 100),          // 278 — ×100, 2dp V
                                (int)cvWavePeriodSec,                    // 279
                                SafeInt(cvKOvershoot, 10),               // 280 — ×10, 1dp
-                               (int)cvConsecutiveReads                  // 281
+                               (int)cvConsecutiveReads,                 // 281
+                               (int)ThermalTuningMode,                  // 282
+                               SafeInt(thermalWaveLowF, 10),            // 283 — ×10, 1dp °F
+                               SafeInt(thermalWaveHighF, 10),           // 284 — ×10, 1dp °F
+                               SafeInt(thermalWaveHalfPeriodMin, 10),   // 285 — ×10, 1dp min
+                               SafeInt(thermalKOvershoot, 100),         // 286 — ×100, 2dp
+                               SafeInt(thermalKUndershoot, 100),        // 287 — ×100, 2dp
+                               SafeInt(thermalSettleThreshF, 10),       // 288 — ×10, 1dp °F
+                               (int)thermalConsecutiveReads,            // 289
+                               SafeInt(thermalLiveScoreVal[0], 10000),  // 290 — ×10000
+                               SafeInt(thermalLiveScoreVal[1], 10000),  // 291 — ×10000
+                               SafeInt(thermalLiveScoreVal[2], 10000),  // 292 — ×10000
+                               SafeInt(thermalLiveScoreVal[3], 10000),  // 293 — ×10000
+                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.ringInDone) ? 1 : 0  // 294
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -4903,7 +5085,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -5147,8 +5330,8 @@ void SendWifiData() {
                                SafeInt(ft_buildConfigPayload.worstWindow),      // 238 — Build Config Payload worst 5s window (µs)
                                SafeInt(ft_buildConfigPayload.worstSession),     // 239 — Build Config Payload worst session (µs)
                                SafeInt(VeTime2),                                       //240
-                               (int)systemIDActive,                                    // 241
-                               (int)systemIDResultsReady,                              // 242
+                               0,                                                      // 241 OBSOLETE systemIDActive
+                               0,                                                      // 242 OBSOLETE systemIDResultsReady
                                (int)systemIDRiseDelay_ms[0],                           // 243
                                (int)systemIDRiseDelay_ms[1],                           // 244
                                (int)systemIDRiseDelay_ms[2],                           // 245
@@ -5176,7 +5359,13 @@ void SendWifiData() {
                                SafeInt(VoltageKd, 100),                                 // 267
                                0,                                                       // 268 (was ThermistorFilterAlpha, removed)
                                SafeInt(displayTempUnit),                                // 269
-                               SafeInt(WarmupRampRate, 10)                              // 270 — ×10, 1 decimal
+                               SafeInt(WarmupRampRate, 10),                             // 270 — ×10, 1 decimal
+                               (int)nvsPhase,                                           // 271 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
+                               SafeInt(ft_saveNVSData.worstWindow),                     // 272 — saveNVSData worst 5s window (µs)
+                               SafeInt(ft_saveNVSData.worstSession),                    // 273 — saveNVSData worst session (µs)
+                               SafeInt(nvsCycleMs),                                     // 274 — last full NVS drain duration (ms)
+                               SafeInt(ft_FlushFileWriteQueue.worstWindow),             // 275 — FlushFileWriteQueue worst 5s window (µs)
+                               SafeInt(ft_FlushFileWriteQueue.worstSession)             // 276 — FlushFileWriteQueue worst session (µs)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

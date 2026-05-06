@@ -100,7 +100,7 @@ void updateCpuLoad() {
   lastTotal = total;
 }
 
-void printSystemHealth() {
+void updateSystemHealthStats() {
   if (otaInProgress) return;
 
   static unsigned long lastCpuSample = 0;
@@ -1174,6 +1174,46 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
   } else {
     cvConsecutiveReads = (uint8_t)readFile(LittleFS, "/cvConsecutiveReads.txt").toInt();
+  }
+  if (!fsExists("/ThermalTuningMode.txt")) {
+    writeFile(LittleFS, "/ThermalTuningMode.txt", String(ThermalTuningMode).c_str());
+  } else {
+    ThermalTuningMode = readFile(LittleFS, "/ThermalTuningMode.txt").toInt();
+  }
+  if (!fsExists("/thermalWaveLowF.txt")) {
+    writeFile(LittleFS, "/thermalWaveLowF.txt", String(thermalWaveLowF, 1).c_str());
+  } else {
+    thermalWaveLowF = readFile(LittleFS, "/thermalWaveLowF.txt").toFloat();
+  }
+  if (!fsExists("/thermalWaveHighF.txt")) {
+    writeFile(LittleFS, "/thermalWaveHighF.txt", String(thermalWaveHighF, 1).c_str());
+  } else {
+    thermalWaveHighF = readFile(LittleFS, "/thermalWaveHighF.txt").toFloat();
+  }
+  if (!fsExists("/thermalWaveHalfPeriodMin.txt")) {
+    writeFile(LittleFS, "/thermalWaveHalfPeriodMin.txt", String(thermalWaveHalfPeriodMin, 1).c_str());
+  } else {
+    thermalWaveHalfPeriodMin = readFile(LittleFS, "/thermalWaveHalfPeriodMin.txt").toFloat();
+  }
+  if (!fsExists("/thermalKOvershoot.txt")) {
+    writeFile(LittleFS, "/thermalKOvershoot.txt", String(thermalKOvershoot, 1).c_str());
+  } else {
+    thermalKOvershoot = readFile(LittleFS, "/thermalKOvershoot.txt").toFloat();
+  }
+  if (!fsExists("/thermalKUndershoot.txt")) {
+    writeFile(LittleFS, "/thermalKUndershoot.txt", String(thermalKUndershoot, 1).c_str());
+  } else {
+    thermalKUndershoot = readFile(LittleFS, "/thermalKUndershoot.txt").toFloat();
+  }
+  if (!fsExists("/thermalSettleThreshF.txt")) {
+    writeFile(LittleFS, "/thermalSettleThreshF.txt", String(thermalSettleThreshF, 1).c_str());
+  } else {
+    thermalSettleThreshF = readFile(LittleFS, "/thermalSettleThreshF.txt").toFloat();
+  }
+  if (!fsExists("/thermalConsecutiveReads.txt")) {
+    writeFile(LittleFS, "/thermalConsecutiveReads.txt", String(thermalConsecutiveReads).c_str());
+  } else {
+    thermalConsecutiveReads = (uint8_t)readFile(LittleFS, "/thermalConsecutiveReads.txt").toInt();
   }
   if (!fsExists("/ManualSOCPoint.txt")) {
     writeFile(LittleFS, "/ManualSOCPoint.txt", String(ManualSOCPoint).c_str());

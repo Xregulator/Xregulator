@@ -1424,6 +1424,9 @@ int SOCUpdateInterval = 2000;             // Update SOC every 2 seconds.   Don't
 //NVS Stuff
 unsigned long lastNVSSaveTime = 0;
 const unsigned long NVS_SAVE_INTERVAL = 120000;  // 2 minutes
+const uint16_t NVS_TICK_SPACING = 100;           // fast ticks between NVS write phases
+uint8_t  nvsPhase   = 0;    // 0=idle, 1-8=write phases, 9=commit; exported to CSV
+uint32_t nvsCycleMs = 0;    // ms elapsed for last complete NVS drain cycle
 
 /*
 NVS lifetime analysis (ESP32-S3-WROOM-1U-N16R8, 16 MB flash)
@@ -1507,6 +1510,8 @@ int32_t prev_AvgSpeed_AllTime = 0;
 int32_t prev_AvgSOC = 0;
 int32_t prev_AvgSOC_AllTime = 0;
 static float prev_sailing_days_alltime = -1.0f;
+uint64_t prev_socAccum_AllTime = 0;  // moved from saveNVSData() static — needed across phases
+uint32_t prev_socTime_AllTime  = 0;
 
 // Accumulators for runtime tracking
 unsigned long engineRunAccumulator = 0;     // Milliseconds accumulator for engine runtime
@@ -1759,7 +1764,7 @@ FuncTiming ft_ReadAnalogInputs;
 FuncTiming ft_saveNVSData;
 FuncTiming ft_AdjustFieldLearnMode;
 FuncTiming ft_logDashboardValues;
-FuncTiming ft_printSystemHealth;
+FuncTiming ft_updateSystemHealthStats;
 FuncTiming ft_checkWiFiConnection;
 FuncTiming ft_SendWifiData;
 FuncTiming ft_CheckAlarms;
@@ -1925,6 +1930,7 @@ struct TuningScoreState {
 
 const uint32_t LIVE_BUCKET_MS[4] = {1000UL, 10000UL, 100000UL, 1000000UL};  // bucket widths: 1s, 10s, 100s, 1000s
 const uint8_t  LIVE_BUCKET_N     = 60;  // buckets per window (60 × bucket_width = window size)
+const float    CV_LIVE_GATE_APS  = 5.0f;  // A/s battery current rate-of-change to open CV scoring window
 
 TuningRecord*    tuningLog           = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
 uint8_t          tuningLogCount      = 0;        // records currently in ring buffer (0–50)
@@ -1937,9 +1943,18 @@ ScoreBucket*  liveScoreBuckets[4]   = {};  // ps_malloc'd — 4 windows × 60 bu
 uint8_t       liveScoreHead[4]      = {};
 uint32_t      liveBucketStartMs[4]  = {};
 float         liveScoreVal[4]       = {};  // cached computed scores, updated each accumulation tick
-float         liveScore_lastSP      = 0.0f;
+float         liveScore_lastCmd     = 0.0f;  // setpointCommand from previous tick (pre-slew)
+float         liveScore_thisCmd     = 0.0f;  // setpointCommand from current tick (pre-slew)
 uint32_t      liveScore_lastStepMs  = 0;
 bool          liveScore_inWindow    = false;
+
+// CV loop always-running live score — same bucket structure as inner loop
+ScoreBucket*  cvLiveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
+uint8_t       cvLiveScoreHead[4]    = {};
+uint32_t      cvLiveBucketStartMs[4] = {};
+float         cvLiveScoreVal[4]     = {};
+uint32_t      cvLiveScore_lastDtMs  = 0;   // last time |g_dBcur_dt| crossed the gate threshold
+bool          cvLiveScore_inWindow  = false;
 
 // === CV Loop Tuning Score System ===
 float   cvWaveAmplitudeV    = 0.30f;  // V — target dips by this during LOW phase
@@ -1987,6 +2002,11 @@ struct CVTuningRecord {
     float    avgRPM, avgAltTempF;
     float    battVAtStart, socAtStart;
     float    chargingVoltageTarget;
+    // Low phase results (step-down response)
+    float    lowScore;
+    float    avgLowSettlingTimeSec;
+    float    avgLowIntOvVs;     // avg integrated overvoltage above lowTarget (V·s)
+    float    worstLowOvV;       // peak above lowTarget during any scored LOW phase
 };
 
 struct CVTuningScoreState {
@@ -2007,6 +2027,17 @@ struct CVTuningScoreState {
     // Protection deltas (snapshotted at start of each HIGH phase)
     uint32_t fastOvSnap, iExcessSnap, loadDumpSnap, hardOcSnap;
     uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
+    // Per-LOW-phase state (reset each toggle-to-low after ring-in)
+    uint32_t lowPhaseStartMs;
+    bool     lowPhaseSettled;
+    uint8_t  lowConsecInBand;
+    // Accumulators across scored LOW phases
+    uint8_t  scoredLowCount;
+    float    totalLowSettlingTimeSec;
+    float    totalLowIntOvVs;   // integral of max(0, filtV - lowTarget) × dt
+    float    worstLowOvV;       // peak above lowTarget during any scored LOW phase
+    // Protection snaps for LOW phases
+    uint32_t lowFastOvSnap, lowIExSnap, lowLdSnap, lowHocSnap;
     // Operating conditions
     float    battVAtStart, socAtStart;
     bool     testStarted;
@@ -2021,6 +2052,87 @@ uint8_t            cvTuningLogHead      = 0;
 uint16_t           cvTuningRunCounter   = 0;
 CVTuningScoreState cvTuningScore        = {};
 bool               cvTuningParamChanged = false;
+
+// ===== THERMAL STEP TEST TUNING =====
+
+struct ThermalTuningRecord {
+    uint16_t runNumber;
+    float    score;               // avgSettlingTimeSec + Ko×avgIntOverFs + Ku×avgIntUnderFs
+    float    avgSettlingTimeSec;
+    float    worstOvershootF;     // peak above HIGH setpoint across all scored steps
+    float    avgIntOverFs;        // avg integral of temp above HIGH setpoint per step (°F·s)
+    float    avgIntUnderFs;       // avg integral of temp below HIGH setpoint after settle per step
+    uint16_t scoredStepCount;
+    float    activeTimeSec;
+    // Tuning parameters at test time
+    float    kp, ki;
+    float    lookaheadSec;
+    float    filterAlpha;
+    uint16_t intervalMs;
+    float    waveLowF;
+    float    waveHighF;
+    float    waveHalfPeriodMin;
+    // Slew rates at test time
+    float    riseRate;            // ThermalPenaltyRiseRate (A/s)
+    float    fallRate;            // ThermalPenaltyFallRate (A/s)
+    // Operating conditions
+    float    avgRPM;
+    float    avgAmbientF;
+};
+
+struct ThermalTuningScoreState {
+    bool     testStarted;
+    uint8_t  halfPeriodCount;     // total half-period toggles so far
+    bool     ringInDone;          // true after 4 half-periods (2 full cycles)
+    bool     waveHigh;            // true = currently in HIGH phase
+    uint32_t lastToggleMs;
+    // Per-HIGH-phase state (reset on each toggle-to-HIGH after ring-in)
+    uint32_t phaseStartMs;
+    bool     phaseSettled;        // temperature entered settle band this phase
+    uint32_t phaseSettledMs;      // ms when first settled
+    bool     phaseFirstSettled;   // settled at least once (gates undershoot accumulation)
+    uint8_t  consecutiveInBand;
+    float    intOverFs;           // integral of max(0, temp - HIGH) × dt this phase
+    float    intUnderFs;          // integral of max(0, HIGH - temp) × dt after first settle
+    float    worstOvershootF;     // peak above HIGH setpoint this phase
+    // Accumulators across scored HIGH phases
+    float    totalSettlingTimeSec;
+    float    totalIntOverFs;
+    float    totalIntUnderFs;
+    float    worstOvAll;
+    uint16_t scoredStepCount;
+    float    activeTimeSec;
+    // Conditions snapshot
+    float    rpmSum;
+    float    ambientSum;
+    uint16_t avgSampleCount;
+};
+
+// Thermal tuning mode settings (persisted to LittleFS)
+int     ThermalTuningMode          = 0;       // 0=off, 1=on
+float   thermalWaveLowF            = 120.0f;  // LOW phase setpoint (°F)
+float   thermalWaveHighF           = 150.0f;  // HIGH phase setpoint (°F)
+float   thermalWaveHalfPeriodMin   = 10.0f;   // minutes per half-period
+float   thermalKOvershoot          = 4.0f;    // ISE penalty weight for above-setpoint
+float   thermalKUndershoot         = 1.0f;    // ISE penalty weight for below-setpoint (after settle)
+float   thermalSettleThreshF       = 2.0f;    // ±°F band for settled check
+uint8_t thermalConsecutiveReads    = 3;       // consecutive in-band reads to declare settled
+bool    thermalTuningParamChanged  = false;
+
+float thermalWaveCurrentSetpointF  = 0.0f;   // active wave setpoint; 0 = not started
+
+ThermalTuningRecord*    thermalTuningLog        = nullptr;  // ps_malloc(50 × sizeof(ThermalTuningRecord))
+uint8_t                 thermalTuningLogCount   = 0;
+uint8_t                 thermalTuningLogHead    = 0;
+uint16_t                thermalTuningRunCounter = 0;
+ThermalTuningScoreState thermalTuningScore      = {};
+
+// Thermal always-on live score buckets (long windows: 10min, 1hr, 10hr, 100hr)
+const uint32_t THERMAL_LIVE_BUCKET_MS[4] = {10000UL, 60000UL, 600000UL, 6000000UL};
+ScoreBucket*   thermalLiveScoreBuckets[4] = {};   // ps_malloc'd
+uint8_t        thermalLiveScoreHead[4]    = {};
+uint32_t       thermalLiveBucketStartMs[4] = {};
+float          thermalLiveScoreVal[4]     = {};
 
 float xTime = 60.0;      // seconds    PID Chart
 int yyMax = 105;         // PID Chart     Amps
@@ -3084,10 +3196,26 @@ void setup() {
     if (!liveScoreBuckets[i]) Serial.printf("FATAL: liveScoreBuckets[%d] ps_malloc failed\n", i);
     else memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
   }
+  // CV live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
+  for (int i = 0; i < 4; i++) {
+    cvLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
+    if (!cvLiveScoreBuckets[i]) Serial.printf("FATAL: cvLiveScoreBuckets[%d] ps_malloc failed\n", i);
+    else memset(cvLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+  }
   // CV tuning score log — 50 records × ~120 bytes = ~6 KB PSRAM
   cvTuningLog = (CVTuningRecord *)ps_malloc(50 * sizeof(CVTuningRecord));
   if (!cvTuningLog) Serial.println("FATAL: cvTuningLog ps_malloc failed");
   else memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
+  // Thermal tuning score log — 50 records × ~80 bytes = ~4 KB PSRAM
+  thermalTuningLog = (ThermalTuningRecord *)ps_malloc(50 * sizeof(ThermalTuningRecord));
+  if (!thermalTuningLog) Serial.println("FATAL: thermalTuningLog ps_malloc failed");
+  else memset(thermalTuningLog, 0, 50 * sizeof(ThermalTuningRecord));
+  // Thermal live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
+  for (int i = 0; i < 4; i++) {
+    thermalLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
+    if (!thermalLiveScoreBuckets[i]) Serial.printf("FATAL: thermalLiveScoreBuckets[%d] ps_malloc failed\n", i);
+    else memset(thermalLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+  }
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3
 
@@ -3171,7 +3299,7 @@ void setup() {
   memset(&ft_saveNVSData, 0, sizeof(FuncTiming));
   memset(&ft_AdjustFieldLearnMode, 0, sizeof(FuncTiming));
   memset(&ft_logDashboardValues, 0, sizeof(FuncTiming));
-  memset(&ft_printSystemHealth, 0, sizeof(FuncTiming));
+  memset(&ft_updateSystemHealthStats, 0, sizeof(FuncTiming));
   memset(&ft_checkWiFiConnection, 0, sizeof(FuncTiming));
   memset(&ft_SendWifiData, 0, sizeof(FuncTiming));
   memset(&ft_CheckAlarms, 0, sizeof(FuncTiming));
@@ -3206,7 +3334,7 @@ void setup() {
   prevSessionMaxLoopTime = MaxLoopTime;  // snapshot last session's worst before zeroing
   MaxLoopTime = 0;                       // reset for this session (persists to NVS on next save)
   totalPowerCycles++;
-  saveNVSData();  // Save immediately to persist the adjustments done above in setup so far
+  saveNVSDataFull();  // Synchronous write — persists boot-time adjustments before loop() starts
   initEfficiencyTracker();
   setCpuFrequencyMhz(240);
   pinMode(4, OUTPUT);     // This pin is used to provide a high signal to Field Enable pin
@@ -3229,6 +3357,7 @@ void setup() {
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS
   loadCVTuningLog();          // restore CV tuning records from LittleFS
+  loadThermalTuningLog();     // restore thermal step test records from LittleFS
   loadPasswordHash();
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;
@@ -3354,6 +3483,7 @@ void setup() {
   pidLog_init();
   cvLog_init();
   tuningScore_init();
+  thermalScore_init();
   Serial.println("=== SETUP COMPLETE ===");
 }
 
@@ -3446,8 +3576,7 @@ void loop() {
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
-  TIMED_CALL(ft_saveNVSData, saveNVSData());                    // Only save current operational data, not session stats
-  TIMED_CALL(ft_saveNVSData, saveNVSData());
+  TIMED_CALL(ft_saveNVSData, saveNVSData());  // phased: one group per NVS_TICK_SPACING ticks
   TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
@@ -3545,6 +3674,7 @@ void loop() {
       } else {
         imuEnabled = true;        //hack but it works for now
         ReadAnalogInputs_Fake();  // Fake sensor readings for development
+        delay(1);                 // yield to asyncTCP callbacks — I2C wait states do this naturally in real mode
         // Notify user every 60 seconds that we're in fake mode
         static unsigned long lastFakeWarning = 0;
         if (millis() - lastFakeWarning > 60000) {
@@ -3579,7 +3709,7 @@ void loop() {
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       efficiencyTracker_tick();
-      drainIMUFifo();  // Isolated after control path — Wire stall only delays telemetry, not control
+      if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
 
       // Sync legacy display variables
       totalSafeHours = (float)totalSafeMs / 3600000.0f;  // Fractional hours for UI
@@ -3596,7 +3726,7 @@ void loop() {
         overheatingPenaltyTimer = 0;
       }
       TIMED_CALL(ft_logDashboardValues, logDashboardValues());  //  nice to have some history in the Console
-      TIMED_CALL(ft_printSystemHealth, printSystemHealth());
+      TIMED_CALL(ft_updateSystemHealthStats, updateSystemHealthStats());  // samples CPU load + heap stats into globals for CSVData2
       TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());  // Update sensor aggregation (after sensor reads)
       {
         static int lastAccelEnabled = 0;
@@ -3695,7 +3825,7 @@ void loop() {
     ft_saveNVSData.worstWindow = 0;
     ft_AdjustFieldLearnMode.worstWindow = 0;
     ft_logDashboardValues.worstWindow = 0;
-    ft_printSystemHealth.worstWindow = 0;
+    ft_updateSystemHealthStats.worstWindow = 0;
     ft_checkWiFiConnection.worstWindow = 0;
     ft_SendWifiData.worstWindow = 0;
     ft_CheckAlarms.worstWindow = 0;
@@ -3788,8 +3918,8 @@ void loop() {
                   ft_calculateDerivedMetrics.worstWindow / 1000, ft_calculateDerivedMetrics.worstSession / 1000);
     Serial.printf("  logDashboardValues:     %4lu / %4lu\n",
                   ft_logDashboardValues.worstWindow / 1000, ft_logDashboardValues.worstSession / 1000);
-    Serial.printf("  printSystemHealth:      %4lu / %4lu\n",
-                  ft_printSystemHealth.worstWindow / 1000, ft_printSystemHealth.worstSession / 1000);
+    Serial.printf("  updateSystemHealthStats:%4lu / %4lu\n",
+                  ft_updateSystemHealthStats.worstWindow / 1000, ft_updateSystemHealthStats.worstSession / 1000);
     Serial.printf("  checkWiFiConnection:    %4lu / %4lu\n",
                   ft_checkWiFiConnection.worstWindow / 1000, ft_checkWiFiConnection.worstSession / 1000);
     Serial.printf("  SendWifiData:           %4lu / %4lu\n",

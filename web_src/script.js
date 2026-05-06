@@ -511,6 +511,19 @@ const CSV2_FIELDS = [
     "cvWavePeriodSec",                  // 279
     "cvKOvershoot",                     // 280 — ×10
     "cvConsecutiveReads",               // 281
+    "ThermalTuningMode",                // 282
+    "thermalWaveLowF",                  // 283 — ×10
+    "thermalWaveHighF",                 // 284 — ×10
+    "thermalWaveHalfPeriodMin",         // 285 — ×10
+    "thermalKOvershoot",                // 286 — ×100
+    "thermalKUndershoot",               // 287 — ×100
+    "thermalSettleThreshF",             // 288 — ×10
+    "thermalConsecutiveReads",          // 289
+    "thermalLiveScore0",                // 290 — ×10000
+    "thermalLiveScore1",                // 291 — ×10000
+    "thermalLiveScore2",                // 292 — ×10000
+    "thermalLiveScore3",                // 293 — ×10000
+    "thermalTuningTestPhase",           // 294
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -784,6 +797,12 @@ const CSV3_FIELDS = [
     "UNUSED_268",               // 268 (was ThermistorFilterAlpha, removed)
     "displayTempUnit",          // 269
     "WarmupRampRate",           // 270
+    "nvsPhase",                 // 271 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
+    "ft_saveNVSData_win",               // 272 — saveNVSData worst 5s window (µs)
+    "ft_saveNVSData_ses",               // 273 — saveNVSData worst session (µs)
+    "nvsCycleMs",                       // 274 — last full NVS drain duration (ms)
+    "ft_FlushFileWriteQueue_win",       // 275 — FlushFileWriteQueue worst 5s window (µs)
+    "ft_FlushFileWriteQueue_ses",       // 276 — FlushFileWriteQueue worst session (µs)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -956,7 +975,7 @@ function devLog(...args) {
 // ============================================================================
 // TOGGLE DIAGNOSTIC MODE HERE - SET TO false FOR APP STORE SUBMISSION
 // ============================================================================
-setDiagnosticMode(false); // ← CHANGE THIS LINE: true=ON, false=OFF
+setDiagnosticMode(true); // ← CHANGE THIS LINE: true=ON, false=OFF
 //What gets hidden when false:
 //diagLog() - YES, hidden when false
 //diagWarn() - YES, hidden when false
@@ -2339,6 +2358,26 @@ function processCSVDataOptimized(data) {
             }
         }
 
+        // CV voltage tuning plot data
+        if (cvTuningData) {
+            const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
+            const filtV      = 'BatteryV_filtered' in data ? parseFloat(data.BatteryV_filtered) / 100 : null;
+            const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
+            const icv        = 'Icv' in data ? parseFloat(data.Icv) / 100 : null;
+            for (let i = 1; i < cvTuningData[1].length; i++) {
+                cvTuningData[1][i - 1] = cvTuningData[1][i];
+                cvTuningData[2][i - 1] = cvTuningData[2][i];
+                cvTuningData[3][i - 1] = cvTuningData[3][i];
+                cvTuningData[4][i - 1] = cvTuningData[4][i];
+            }
+            const last = cvTuningData[1].length - 1;
+            cvTuningData[1][last] = voltTarget;
+            cvTuningData[2][last] = filtV;
+            cvTuningData[3][last] = ibvRaw;
+            cvTuningData[4][last] = icv;
+            if (cvTuningPlot) queueCVTuningPlotUpdate();
+        }
+
         // Queue all plot updates at once (only for existing plots)
         plotUpdates.forEach(plotName => queuePlotUpdate(plotName));
 
@@ -2722,6 +2761,14 @@ function updateAllEchosOptimized(data) {
         { key: 'cvWavePeriodSec',   id: 'cvWavePeriodSec_echo',   transform: v => v },
         { key: 'cvKOvershoot',      id: 'cvKOvershoot_echo',      transform: v => (v / 10).toFixed(1) },
         { key: 'cvConsecutiveReads', id: 'cvConsecutiveReads_echo', transform: v => v },
+        { key: 'ThermalTuningMode',         id: 'ThermalTuningMode_echo',         transform: v => v },
+        { key: 'thermalWaveLowF',           id: 'thermalWaveLowF_echo',           transform: v => (v / 10).toFixed(1) },
+        { key: 'thermalWaveHighF',          id: 'thermalWaveHighF_echo',          transform: v => (v / 10).toFixed(1) },
+        { key: 'thermalWaveHalfPeriodMin',  id: 'thermalWaveHalfPeriodMin_echo',  transform: v => (v / 10).toFixed(1) },
+        { key: 'thermalKOvershoot',         id: 'thermalKOvershoot_echo',         transform: v => (v / 100).toFixed(2) },
+        { key: 'thermalKUndershoot',        id: 'thermalKUndershoot_echo',        transform: v => (v / 100).toFixed(2) },
+        { key: 'thermalSettleThreshF',      id: 'thermalSettleThreshF_echo',      transform: v => (v / 10).toFixed(1) },
+        { key: 'thermalConsecutiveReads',   id: 'thermalConsecutiveReads_echo',   transform: v => v },
 
     ];
 
@@ -3243,11 +3290,14 @@ function fetchTuningLog() {
 }
 
 function renderTuningLog(data) {
-    // Update live score displays
+    // Update live score displays (Settings panel + Live Data → Alternator mirror)
     const liveLabels = ['1m', '10m', '100m', '1000m'];
     (data.live || []).forEach((v, i) => {
+        const txt = v > 0 ? liveLabels[i] + ': ' + v.toFixed(2) : liveLabels[i] + ': —';
         const el = document.getElementById('liveScore' + i);
-        if (el) el.textContent = v > 0 ? liveLabels[i] + ': ' + v.toFixed(2) : liveLabels[i] + ': —';
+        if (el) el.textContent = txt;
+        const elAlt = document.getElementById('liveScoreAlt' + i);
+        if (elAlt) elAlt.textContent = txt;
     });
 
     // Active test score
@@ -3336,6 +3386,16 @@ function fetchCVTuningLog() {
 }
 
 function renderCVTuningLog(data) {
+    // Update CV live score displays (Score Log + Live Data mirror)
+    const cvLiveLabels = ['1m', '10m', '100m', '1000m'];
+    (data.live || []).forEach((v, i) => {
+        const txt = v > 0 ? cvLiveLabels[i] + ': ' + v.toFixed(2) : cvLiveLabels[i] + ': —';
+        const el = document.getElementById('cvLiveScore' + i);
+        if (el) el.textContent = txt;
+        const elAlt = document.getElementById('cvLiveScoreAlt' + i);
+        if (elAlt) elAlt.textContent = txt;
+    });
+
     // Active test score banner
     const testRow = document.getElementById('cvTestScoreRow');
     if (testRow) {
@@ -3373,12 +3433,17 @@ function renderCVTuningLog(data) {
             r.wp === curWp && Math.abs(r.ko - curKo) < 0.05 && r.cr === curCr;
         const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
 
+        const lowScoreColor = (r.ls || 0) < 5 ? '#22c55e' : (r.ls || 0) < 20 ? '#eab308' : '#ef4444';
         return `<tr style="${rowStyle}">
             <td style="padding:2px 4px;">${r.n}</td>
             <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.st.toFixed(1)}</td>
             <td style="padding:2px 4px;">${r.wo.toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.io.toFixed(4)}</td>
+            <td style="padding:2px 4px;color:${lowScoreColor};font-weight:bold;">${(r.ls || 0).toFixed(2)}</td>
+            <td style="padding:2px 4px;">${(r.lst || 0).toFixed(1)}</td>
+            <td style="padding:2px 4px;">${(r.lwo || 0).toFixed(3)}</td>
+            <td style="padding:2px 4px;">${(r.lio || 0).toFixed(4)}</td>
             <td style="padding:2px 4px;">${r.vkp.toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vki.toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vkd.toFixed(2)}</td>
@@ -3434,6 +3499,256 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 });
+
+// ── Thermal Step Test Tuning Log ──────────────────────────────────────────
+let _thermalTuningLogPollTimer = null;
+
+function fetchThermalTuningLog() {
+    fetch('/thermaltuninglog')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) renderThermalTuningLog(data); })
+        .catch(() => {});
+}
+
+function renderThermalTuningLog(data) {
+    // Update thermal live score displays (4 windows: 10m, 1h, 10h, 100h)
+    const labels = ['10m', '1h', '10h', '100h'];
+    (data.live || []).forEach((v, i) => {
+        const txt = v > 0 ? labels[i] + ': ' + v.toFixed(4) : labels[i] + ': —';
+        const el = document.getElementById('thermalLiveScore' + i);
+        if (el) el.textContent = txt;
+    });
+
+    // Active test score banner
+    const testRow = document.getElementById('thermalTestScoreRow');
+    if (testRow) {
+        if (data.ta) {
+            testRow.style.display = '';
+            const tsel = document.getElementById('thermalCurrentTestScore');
+            const ttgl = document.getElementById('thermalTestStepCount');
+            if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
+            if (ttgl) ttgl.textContent = data.tc;
+        } else {
+            testRow.style.display = 'none';
+        }
+    }
+
+    // Current settings for row highlighting
+    const curKp  = parseFloat(document.getElementById('TempPIDKp_echo')?.textContent);
+    const curKi  = parseFloat(document.getElementById('TempPIDKi_echo')?.textContent);
+    const curLa  = parseFloat(document.getElementById('ThermalLookaheadSec_echo')?.textContent);
+    const curWl  = parseFloat(document.getElementById('thermalWaveLowF_echo')?.textContent);
+    const curWh  = parseFloat(document.getElementById('thermalWaveHighF_echo')?.textContent);
+    const curWp  = parseFloat(document.getElementById('thermalWaveHalfPeriodMin_echo')?.textContent);
+
+    const records = (data.rec || []).slice();
+    const tbody = document.getElementById('thermalTuningLogBody');
+    if (!tbody) return;
+
+    tbody.innerHTML = records.map(r => {
+        const scoreColor = r.s < 200 ? '#22c55e' : r.s < 600 ? '#eab308' : '#ef4444';
+        const isMatch = !isNaN(curKp) &&
+            Math.abs(r.kp - curKp) < 0.0001 &&
+            Math.abs(r.ki - curKi) < 0.00001 &&
+            Math.abs(r.la - curLa) < 1 &&
+            Math.abs(r.wl - curWl) < 0.5 &&
+            Math.abs(r.wh - curWh) < 0.5 &&
+            Math.abs(r.wp - curWp) < 0.2;
+        const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
+        return `<tr style="${rowStyle}">
+            <td style="padding:2px 4px;">${r.n}</td>
+            <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.st.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.wo.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.io.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.iu.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${r.ns}</td>
+            <td style="padding:2px 4px;">${r.kp.toFixed(4)}</td>
+            <td style="padding:2px 4px;">${r.ki.toFixed(5)}</td>
+            <td style="padding:2px 4px;">${r.la.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.fa.toFixed(3)}</td>
+            <td style="padding:2px 4px;">${r.im}</td>
+            <td style="padding:2px 4px;">${r.wl.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.wh.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.wp.toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.rpm.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${(r.amb || 0).toFixed(1)}</td>
+            <td style="padding:2px 4px;">${(r.rr || 0).toFixed(1)}</td>
+            <td style="padding:2px 4px;">${(r.fr || 0).toFixed(1)}</td>
+        </tr>`;
+    }).join('');
+}
+
+function resetThermalTuningLog() {
+    if (!confirm('Reset all thermal tuning records and live scores?')) return;
+    fetch('/resetthermaltuninglog', { method: 'POST' })
+        .then(() => fetchThermalTuningLog())
+        .catch(() => {});
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const section = document.getElementById('thermalTuningScoreSection');
+    if (!section) return;
+    section.addEventListener('toggle', e => {
+        if (e.target.open) {
+            fetchThermalTuningLog();
+            _thermalTuningLogPollTimer = setInterval(fetchThermalTuningLog, 8000);
+        } else {
+            clearInterval(_thermalTuningLogPollTimer);
+            _thermalTuningLogPollTimer = null;
+        }
+    });
+});
+
+// ── CV Voltage Loop Tuning Plot ────────────────────────────────────────────
+let cvTuningPlot = null;
+let cvTuningData = null;
+let cvTuningPlotResizeObserver = null;
+
+let cvTuningSeriesVisible = {
+    voltTarget: true,
+    filtV:      true,
+    ibv:        true,
+    icv:        true,
+};
+
+function initCVTuningDataStructures() {
+    const intervalMs = window._lastKnownInterval || 200;
+    const timeWindowSec = (xTime && xTime > 0 && !isNaN(xTime)) ? xTime : 30;
+    const maxPoints = Math.ceil(timeWindowSec * 1000 / intervalMs);
+    const intervalSec = intervalMs / 1000;
+    const xAxisData = [];
+    for (let i = 0; i < maxPoints; i++) xAxisData[i] = -(maxPoints - 1 - i) * intervalSec;
+
+    cvTuningData = [
+        [...xAxisData],
+        new Array(maxPoints).fill(null),   // [1] voltageTarget (V)
+        new Array(maxPoints).fill(null),   // [2] BatteryV_filtered / filtV (V)
+        new Array(maxPoints).fill(null),   // [3] IBV raw (V)
+        new Array(maxPoints).fill(null),   // [4] Icv (A) — right axis
+    ];
+}
+
+function initCVTuningPlot() {
+    const plotEl = document.getElementById('cv-tuning-plot');
+    if (!plotEl) return;
+
+    if (!cvTuningData) initCVTuningDataStructures();
+
+    const opts = {
+        width:  Math.min(plotEl.clientWidth, 800),
+        height: 350,
+        series: [
+            {},
+            {
+                label:  'Voltage Target',
+                stroke: cvTuningSeriesVisible.voltTarget ? '#FF6B6B' : 'transparent',
+                width:  2,
+                scale:  'volts',
+                dash:   [6, 3],
+            },
+            {
+                label:  'Filtered Voltage',
+                stroke: cvTuningSeriesVisible.filtV ? '#4CAF50' : 'transparent',
+                width:  2,
+                scale:  'volts',
+            },
+            {
+                label:  'IBV (raw)',
+                stroke: cvTuningSeriesVisible.ibv ? '#B0BEC5' : 'transparent',
+                width:  1,
+                scale:  'volts',
+                dash:   [2, 2],
+            },
+            {
+                label:  'Icv (A)',
+                stroke: cvTuningSeriesVisible.icv ? '#FFA726' : 'transparent',
+                width:  2,
+                scale:  'amps',
+            },
+        ],
+        axes: [
+            {},
+            {
+                scale: 'volts',
+                label: 'Voltage (V)',
+                side:  3,
+                grid:  { show: true },
+            },
+            {
+                scale: 'amps',
+                label: 'Current (A)',
+                side:  1,
+                grid:  { show: false },
+            },
+        ],
+        scales: {
+            x:     { time: false },
+            volts: {},
+            amps:  {},
+        },
+    };
+
+    if (cvTuningPlot) cvTuningPlot.destroy();
+    cvTuningPlot = new uPlot(opts, cvTuningData, plotEl);
+    if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvTuningPlot);
+    createCVTuningLegend();
+
+    if (cvTuningPlotResizeObserver) cvTuningPlotResizeObserver.disconnect();
+    cvTuningPlotResizeObserver = new ResizeObserver(() => {
+        if (cvTuningPlot) cvTuningPlot.setSize({ width: plotEl.clientWidth, height: 350 });
+    });
+    cvTuningPlotResizeObserver.observe(plotEl);
+}
+
+function createCVTuningLegend() {
+    const plotEl = document.getElementById('cv-tuning-plot');
+    if (!plotEl) return;
+    const existing = plotEl.querySelector('.cv-custom-legend');
+    if (existing) existing.remove();
+
+    const legendDiv = document.createElement('div');
+    legendDiv.className = 'cv-custom-legend';
+    legendDiv.style.cssText = 'display:flex;justify-content:center;gap:15px;margin-top:8px;flex-wrap:wrap;';
+
+    const items = [
+        { key: 'voltTarget', label: 'Voltage Target', color: '#FF6B6B', idx: 1 },
+        { key: 'filtV',      label: 'Filtered Voltage', color: '#4CAF50', idx: 2 },
+        { key: 'ibv',        label: 'IBV (raw)',         color: '#B0BEC5', idx: 3 },
+        { key: 'icv',        label: 'Icv (A)',           color: '#FFA726', idx: 4 },
+    ];
+
+    items.forEach(item => {
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;user-select:none;';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = cvTuningSeriesVisible[item.key];
+        cb.style.cssText = 'cursor:pointer;margin:0;';
+        cb.addEventListener('change', () => {
+            cvTuningSeriesVisible[item.key] = cb.checked;
+            if (cvTuningPlot) cvTuningPlot.setSeries(item.idx, { show: cb.checked });
+        });
+        const box = document.createElement('div');
+        box.style.cssText = `width:16px;height:3px;background:${item.color};border-radius:1px;`;
+        const span = document.createElement('span');
+        span.textContent = item.label;
+        span.style.cssText = 'color:var(--text-dark);';
+        lbl.appendChild(cb); lbl.appendChild(box); lbl.appendChild(span);
+        legendDiv.appendChild(lbl);
+    });
+    plotEl.appendChild(legendDiv);
+}
+
+let cvTuningPlotUpdateScheduled = false;
+function queueCVTuningPlotUpdate() {
+    if (cvTuningPlotUpdateScheduled) return;
+    cvTuningPlotUpdateScheduled = true;
+    requestAnimationFrame(() => {
+        if (cvTuningPlot && cvTuningData) cvTuningPlot.setData(cvTuningData);
+        cvTuningPlotUpdateScheduled = false;
+    });
+}
 
 function resetVoltageProtectionCounters() {
     if (!confirm('Reset all voltage & current protection counters? FastOV, iExcess, INA OV, hard OC, spike, and disagree counts will be cleared.')) return;
@@ -4791,6 +5106,8 @@ function updateTogglesFromData(data) {
         updateCheckbox("TargetVoltageMode_checkbox", data.TargetVoltageMode, "TargetVoltageMode");
         updateCheckbox("AutoShuntGainCorrection_checkbox", data.AutoShuntGainCorrection, "AutoShuntGainCorrection");
         updateCheckbox("AutoAltCurrentZero_checkbox", data.AutoAltCurrentZero, "AutoAltCurrentZero");
+        updateCheckbox("CVTuningMode_checkbox", data.CVTuningMode, "CVTuningMode");
+        updateCheckbox("ThermalTuningMode_checkbox", data.ThermalTuningMode, "ThermalTuningMode");
         updateCheckbox("timeAxisModeChanging_checkbox", data.timeAxisModeChanging, "timeAxisModeChanging");
         updateCheckbox("weatherModeEnabled_checkbox", data.weatherModeEnabled, "weatherModeEnabled");
         updateCheckbox("accelEnabled_checkbox", data.accelEnabled, "accelEnabled");
@@ -5020,6 +5337,8 @@ window.addEventListener("load", function () {
     document.getElementById("TargetVoltageMode_checkbox").checked = (document.getElementById("TargetVoltageMode").value === "1");
     document.getElementById("HardwarePresent_checkbox").checked = (document.getElementById("hardwarePresent").value === "1");
     document.getElementById("UseFloat_checkbox").checked = (document.getElementById("UseFloat").value === "1");
+    document.getElementById("CVTuningMode_checkbox").checked = (document.getElementById("CVTuningMode").value === "1");
+    document.getElementById("ThermalTuningMode_checkbox").checked = (document.getElementById("ThermalTuningMode").value === "1");
 
 
     //gray out Settings on a reload
@@ -5058,6 +5377,8 @@ window.addEventListener("load", function () {
     initTemperaturePlot();
     initPidTuningDataStructures();
     initPidTuningPlot();
+    initCVTuningDataStructures();
+    initCVTuningPlot();
     initEffPlot();
     //initEffPlotAxisListeners();
 
@@ -5311,6 +5632,14 @@ window.addEventListener("load", function () {
 
             // Update timestamp when data is received
             lastEventTime = Date.now();
+
+            // Diagnostic: track inter-event gap to distinguish firmware/WiFi delays from client-side issues
+            if (window._lastCSV1Arrival) {
+                const delta = lastEventTime - window._lastCSV1Arrival;
+                const expected = window._lastKnownInterval || 200;
+                if (delta > expected * 1.75) diagWarn(`[SSE GAP] CSVData gap: ${delta}ms (expected ~${expected}ms)`);
+            }
+            window._lastCSV1Arrival = lastEventTime;
 
             // Immediately mark as connected when data arrives
             updateInlineStatus(true);
@@ -5605,6 +5934,10 @@ window.addEventListener("load", function () {
             } else {
                 updateInlineStatus(true);
             }
+
+            // Diagnostic: flag if this handler itself took too long (client-side bottleneck)
+            const handlerDuration = Date.now() - lastEventTime;
+            if (handlerDuration > 30) diagWarn(`[PERF] handleCSVData slow: ${handlerDuration}ms`);
         };
         window._csvDataHandler = handleCSVData; // Store for demo mode
         source.addEventListener('CSVData', handleCSVData, false);
@@ -6368,9 +6701,12 @@ window.addEventListener("load", function () {
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
                 ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
+                ["ft_saveNVSData_win_ID", "ft_saveNVSData_win"],
+                ["ft_saveNVSData_ses_ID", "ft_saveNVSData_ses"],
+                ["ft_FlushFileWriteQueue_win_ID", "ft_FlushFileWriteQueue_win"],
+                ["ft_FlushFileWriteQueue_ses_ID", "ft_FlushFileWriteQueue_ses"],
                 ["VeTime2_ID", "VeTime2"],
-                ["systemIDActive_ID", "systemIDActive"],
-                ["systemIDResultsReady_ID", "systemIDResultsReady"],
+                // systemIDActive (241) and systemIDResultsReady (242) OBSOLETE — firmware sends 0
                 ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
                 ["systemIDRiseDelay_1_ID", "systemIDRiseDelay_1"],
                 ["systemIDRiseDelay_2_ID", "systemIDRiseDelay_2"],
@@ -6777,6 +7113,7 @@ function handleResetPerfCounters() {
                 'ft_rai_ads_state_ses_ID', 'ft_rai_bmp_state_ses_ID', 'ft_rai_imu_ses_ID',
                 'VeTime2_ID', 'ft_AdjustFieldLearnMode_ses_ID', 'ft_uploadSensorHistory_ses_ID',
                 'ft_uploadBufferedRecords_ses_ID', 'ft_buildConfigPayload_ses_ID',
+                'ft_saveNVSData_ses_ID', 'ft_FlushFileWriteQueue_ses_ID',
                 'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
                 'MaximumLoopTimeID',
                 'ch1_worst_10s_ID', 'ch1_over2x_10s_ID', 'ch1_avg_10s_ID', 'ch1_n_10s_ID',
