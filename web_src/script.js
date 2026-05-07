@@ -1735,12 +1735,12 @@ function lerp(a, b, t) {
 }
 
 const plotInterp = {
-    current:     { prevY: [0, 0, 0],                  nextY: [0, 0, 0],                  arrivalTime: 0 },
-    voltage:     { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0 },
-    rpm:         { prevY: [0],                        nextY: [0],                        arrivalTime: 0 },
-    temperature: { prevY: [0],                        nextY: [0],                        arrivalTime: 0 },
-    pid:         { prevY: [0, 0, 0, 0, 0, 0, 0],      nextY: [0, 0, 0, 0, 0, 0, 0],      arrivalTime: 0 },
-    cv:          { prevY: [null, null, null, null],    nextY: [null, null, null, null],    arrivalTime: 0 },
+    current:     { prevY: [0, 0, 0],                  nextY: [0, 0, 0],                  arrivalTime: 0, lerpDuration: 200 },
+    voltage:     { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0, lerpDuration: 200 },
+    rpm:         { prevY: [0],                        nextY: [0],                        arrivalTime: 0, lerpDuration: 200 },
+    temperature: { prevY: [0],                        nextY: [0],                        arrivalTime: 0, lerpDuration: 200 },
+    pid:         { prevY: [0, 0, 0, 0, 0, 0, 0],      nextY: [0, 0, 0, 0, 0, 0, 0],      arrivalTime: 0, lerpDuration: 200 },
+    cv:          { prevY: [null, null, null, null],    nextY: [null, null, null, null],    arrivalTime: 0, lerpDuration: 200 },
 };
 
 let interpLoopRunning = false;
@@ -1751,7 +1751,7 @@ function startInterpLoop() {
 
     function applyInterp(state, dataArray, seriesCount) {
         if (state.arrivalTime === 0) return false;
-        const t = Math.min(1, (performance.now() - state.arrivalTime) / (window._lastKnownInterval || 200));
+        const t = Math.min(1, (performance.now() - state.arrivalTime) / state.lerpDuration);
         const last = dataArray[1].length - 1;
         for (let s = 0; s < seriesCount; s++) {
             dataArray[s + 1][last] = lerp(state.prevY[s], state.nextY[s], t);
@@ -1759,44 +1759,59 @@ function startInterpLoop() {
         return true;
     }
 
+    // True when the main plots tab is the active visible tab
+    function plotsTabVisible() {
+        const el = document.getElementById('plots');
+        return el && el.classList.contains('active');
+    }
+    // True when the tuning tab is the active visible tab
+    function tuningTabVisible() {
+        const el = document.getElementById('tuning');
+        return el && el.classList.contains('active');
+    }
+
     function frame() {
-        if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 3)) {
-            const s = performance.now();
-            currentTempPlot.setData(currentTempData);
-            const d = performance.now() - s;
-            plotRenderTracker.plots.current.count++;
-            plotRenderTracker.plots.current.totalTime += d;
-            plotRenderTracker.plots.current.maxTime = Math.max(plotRenderTracker.plots.current.maxTime, d);
+        if (plotsTabVisible()) {
+            if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 3)) {
+                const s = performance.now();
+                currentTempPlot.setData(currentTempData);
+                const d = performance.now() - s;
+                plotRenderTracker.plots.current.count++;
+                plotRenderTracker.plots.current.totalTime += d;
+                plotRenderTracker.plots.current.maxTime = Math.max(plotRenderTracker.plots.current.maxTime, d);
+            }
+            if (voltagePlot && applyInterp(plotInterp.voltage, voltageData, 2)) {
+                const s = performance.now();
+                voltagePlot.setData(voltageData);
+                const d = performance.now() - s;
+                plotRenderTracker.plots.voltage.count++;
+                plotRenderTracker.plots.voltage.totalTime += d;
+                plotRenderTracker.plots.voltage.maxTime = Math.max(plotRenderTracker.plots.voltage.maxTime, d);
+            }
+            if (rpmPlot && applyInterp(plotInterp.rpm, rpmData, 1)) {
+                const s = performance.now();
+                rpmPlot.setData(rpmData);
+                const d = performance.now() - s;
+                plotRenderTracker.plots.rpm.count++;
+                plotRenderTracker.plots.rpm.totalTime += d;
+                plotRenderTracker.plots.rpm.maxTime = Math.max(plotRenderTracker.plots.rpm.maxTime, d);
+            }
+            if (temperaturePlot && applyInterp(plotInterp.temperature, temperatureData, 1)) {
+                const s = performance.now();
+                temperaturePlot.setData(temperatureData);
+                const d = performance.now() - s;
+                plotRenderTracker.plots.temperature.count++;
+                plotRenderTracker.plots.temperature.totalTime += d;
+                plotRenderTracker.plots.temperature.maxTime = Math.max(plotRenderTracker.plots.temperature.maxTime, d);
+            }
         }
-        if (voltagePlot && applyInterp(plotInterp.voltage, voltageData, 2)) {
-            const s = performance.now();
-            voltagePlot.setData(voltageData);
-            const d = performance.now() - s;
-            plotRenderTracker.plots.voltage.count++;
-            plotRenderTracker.plots.voltage.totalTime += d;
-            plotRenderTracker.plots.voltage.maxTime = Math.max(plotRenderTracker.plots.voltage.maxTime, d);
-        }
-        if (rpmPlot && applyInterp(plotInterp.rpm, rpmData, 1)) {
-            const s = performance.now();
-            rpmPlot.setData(rpmData);
-            const d = performance.now() - s;
-            plotRenderTracker.plots.rpm.count++;
-            plotRenderTracker.plots.rpm.totalTime += d;
-            plotRenderTracker.plots.rpm.maxTime = Math.max(plotRenderTracker.plots.rpm.maxTime, d);
-        }
-        if (temperaturePlot && applyInterp(plotInterp.temperature, temperatureData, 1)) {
-            const s = performance.now();
-            temperaturePlot.setData(temperatureData);
-            const d = performance.now() - s;
-            plotRenderTracker.plots.temperature.count++;
-            plotRenderTracker.plots.temperature.totalTime += d;
-            plotRenderTracker.plots.temperature.maxTime = Math.max(plotRenderTracker.plots.temperature.maxTime, d);
-        }
-        if (pidTuningPlot && pidTuningData && applyInterp(plotInterp.pid, pidTuningData, 7)) {
-            pidTuningPlot.setData(pidTuningData);
-        }
-        if (cvTuningPlot && cvTuningData && applyInterp(plotInterp.cv, cvTuningData, 4)) {
-            cvTuningPlot.setData(cvTuningData);
+        if (tuningTabVisible()) {
+            if (pidTuningPlot && pidTuningData && applyInterp(plotInterp.pid, pidTuningData, 7)) {
+                pidTuningPlot.setData(pidTuningData);
+            }
+            if (cvTuningPlot && cvTuningData && applyInterp(plotInterp.cv, cvTuningData, 4)) {
+                cvTuningPlot.setData(cvTuningData);
+            }
         }
         requestAnimationFrame(frame);
     }
@@ -2363,6 +2378,21 @@ function processCSVDataOptimized(data) {
         plotRenderTracker.dataPointsProcessed++;
 
         const now = useTimestamps ? Math.floor(Date.now() / 1000) : null;
+
+        // Measure actual inter-arrival time and update lerpDuration for all plots.
+        // Clamp to [100, 1000]ms to avoid wild values at startup or after long gaps.
+        const _arrivalNow = performance.now();
+        if (processCSVDataOptimized._lastArrival > 0) {
+            const measured = _arrivalNow - processCSVDataOptimized._lastArrival;
+            const clamped = Math.max(100, Math.min(1000, measured));
+            plotInterp.current.lerpDuration     = clamped;
+            plotInterp.voltage.lerpDuration     = clamped;
+            plotInterp.rpm.lerpDuration         = clamped;
+            plotInterp.temperature.lerpDuration = clamped;
+            plotInterp.pid.lerpDuration         = clamped;
+            plotInterp.cv.lerpDuration          = clamped;
+        }
+        processCSVDataOptimized._lastArrival = _arrivalNow;
 
         // ALWAYS UPDATE DATA STRUCTURES - Current/Temperature plot data
         const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
