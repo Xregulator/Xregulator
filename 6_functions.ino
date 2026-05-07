@@ -969,9 +969,17 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
   }
 
   // ===== Always-on thermal live score =====
-  // Gate: loop is actively engaged (penalty above threshold) and PID is active.
-  // Error measured against the 5°F operating margin (same reference the PID controls to).
-  if (tempPIDActive && thermalPenaltyAmps > 2.0f && !isnan(tempFiltered)) {
+  // Fair gate: only score when thermal is the binding constraint.
+  // Track last time voltage control was active; blank for 3 min after it clears
+  // so external limiting (CV mode) can't unfairly inflate the thermal score.
+  // Also require slope buffer full (reliable projectedTemp) and no active step test.
+  if (voltageControlActive) thermalScoreLastExternalMs = nowMs;
+  bool liveScoreActive = tempPIDActive &&
+                         thermalSlopeBufFull &&
+                         !isnan(tempFiltered) &&
+                         !ThermalTuningMode &&
+                         (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
+  if (liveScoreActive) {
     float liveErr = tempFiltered - (TemperatureLimitF - 5.0f);
     accumulateThermalLiveScore(liveErr, dtSec, nowMs);
   }
@@ -3319,7 +3327,6 @@ void updateRPMBucketHistory(uint32_t nowMs) {
   if (bucket < 0 || bucket >= RPM_TABLE_SIZE) return;
 
   static bool inOverheat = false;
-  static uint32_t lastNVSSaveMs = 0;
 
   if (!inOverheat) {
     if (TempToUse >= TemperatureLimitF) {
@@ -3327,17 +3334,13 @@ void updateRPMBucketHistory(uint32_t nowMs) {
       overheatCount[bucket]++;
       totalOverheats++;
       timeSinceLastOverheat = 0;
-      saveHistoricalDataImmediate();
+      saveHistoricalDataImmediate();  // save immediately on overheat entry
     } else {
       cumulativeNoOverheatTime[bucket] += dtMs;
       totalSafeMs += (uint64_t)dtMs;
       totalSafeHours = (float)(totalSafeMs / 3600000ULL);
       timeSinceLastOverheat += dtMs;
-
-      if (AutoSaveLearningTable && (nowMs - lastNVSSaveMs >= 300000UL)) {
-        lastNVSSaveMs = nowMs;
-        saveHistoricalDataImmediate();
-      }
+      // periodic 5-min save removed — was OBSOLETE, caused 65-70ms nvs_commit stall in AdjustFieldLearnMode every 5 min
     }
   } else {
     if (TempToUse < (TemperatureLimitF - 2.0f)) {
@@ -3924,7 +3927,13 @@ void thermalLog_tick(uint32_t nowMs) {
   e.ts = nowMs;
   e.tempFiltered  = thermalLogScale10(tempFiltered);
   e.tempProjected = thermalLogScale10(projectedTempF);
-  e.nominalTarget = thermalLogScale10(getCapCurrentForRPM(RPM));
+  // effective setpoint: mirrors the logic in tempPID_tick (slopeBufFull = 5°F margin, else 20°F warmup margin)
+  {
+    float logLimit = (ThermalTuningMode && thermalTuningScore.testStarted)
+                     ? thermalWaveCurrentSetpointF : TemperatureLimitF;
+    float logSetpoint = thermalSlopeBufFull ? (logLimit - 5.0f) : (logLimit - 20.0f);
+    e.nominalTarget = thermalLogScale10(logSetpoint);
+  }
   e.rpmCap = thermalLogScale10(getCapCurrentForRPM(RPM));
   e.voltCap = thermalLogScale10(Icv);
   e.uTarget = thermalLogScale10((float)uTargetAmps);

@@ -1,4 +1,6 @@
 /* XREG_START */
+// Prevent browser from restoring previous scroll position on reload/reflash
+if ('scrollRestoration' in history) { history.scrollRestoration = 'manual'; }
 
 
 /*  * AI_SUMMARY: Alternator Regulator Project - This file is the majority of the JS served by the ESP32
@@ -227,6 +229,16 @@ const CSV1_FIELDS = [
     "imu_msi_score",              // 80
     "imu_vomit_pct",              // 81
     "imu_anchorage_comfort",      // 82
+    "ina_last_ms",                // 83
+    "ina_avg_10s",                // 84
+    "ina_worst_10s",              // 85
+    "ina_over2x_10s",             // 86
+    "ina_avg_2m",                 // 87
+    "ina_worst_2m",               // 88
+    "ina_over2x_2m",              // 89
+    "ina_avg_at",                 // 90
+    "ina_worst_at",               // 91
+    "ina_over2x_at",              // 92
 ];
 const CSV2_FIELDS = [
     "IBVMax",                           // 0
@@ -803,6 +815,8 @@ const CSV3_FIELDS = [
     "nvsCycleMs",                       // 274 — last full NVS drain duration (ms)
     "ft_FlushFileWriteQueue_win",       // 275 — FlushFileWriteQueue worst 5s window (µs)
     "ft_FlushFileWriteQueue_ses",       // 276 — FlushFileWriteQueue worst session (µs)
+    "ft_efficiencyTracker_win",         // 277 — efficiencyTracker_tick() worst 5s window (µs)
+    "ft_efficiencyTracker_ses",         // 278 — efficiencyTracker_tick() worst session (µs)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -3511,12 +3525,15 @@ function fetchThermalTuningLog() {
 }
 
 function renderThermalTuningLog(data) {
-    // Update thermal live score displays (4 windows: 10m, 1h, 10h, 100h)
-    const labels = ['10m', '1h', '10h', '100h'];
+    // Update thermal live score displays (4 windows: 30m, 3h, 24h, 7d)
+    const labels = ['30m', '3h', '24h', '7d'];
     (data.live || []).forEach((v, i) => {
         const txt = v > 0 ? labels[i] + ': ' + v.toFixed(4) : labels[i] + ': —';
         const el = document.getElementById('thermalLiveScore' + i);
         if (el) el.textContent = txt;
+        // Also update the always-on Alternator Live Data tab spans
+        const altEl = document.getElementById('thermalLiveScoreAlt' + i);
+        if (altEl) altEl.textContent = txt;
     });
 
     // Active test score banner
@@ -5269,6 +5286,7 @@ function setCapMode(mode) {
 
 // this is known as the window.load event in AI speak, all this stuff executes on page load
 window.addEventListener("load", function () {
+    window.scrollTo(0, 0);  // always start at top — browser scroll restoration disabled above
     // DEBUG CODE
     const originalGetElementById = document.getElementById;
     let warnedElements = new Set();
@@ -5747,7 +5765,7 @@ window.addEventListener("load", function () {
                     else if (key === "AlternatorTemperatureF") {
                         newTextContent = toDisplayTemp(value / 100).toFixed(1);
                     }
-                    else if (["BatteryV", "uTargetAmps", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "BatteryV_filtered", "MeasuredAmps_filtered"].includes(key)) {
+                    else if (["BatteryV", "uTargetAmps", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "BatteryV_filtered", "MeasuredAmps_filtered"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -5874,15 +5892,22 @@ window.addEventListener("load", function () {
                 ["ch1_avg_10s_ID", "ch1_avg_10s"],
                 ["ch1_worst_10s_ID", "ch1_worst_10s"],
                 ["ch1_over2x_10s_ID", "ch1_over2x_10s"],
-                ["ch1_n_10s_ID", "ch1_n_10s"],
                 ["ch1_avg_2m_ID", "ch1_avg_2m"],
                 ["ch1_worst_2m_ID", "ch1_worst_2m"],
                 ["ch1_over2x_2m_ID", "ch1_over2x_2m"],
-                ["ch1_n_2m_ID", "ch1_n_2m"],
                 ["ch1_avg_at_ID", "ch1_avg_at"],
                 ["ch1_worst_at_ID", "ch1_worst_at"],
                 ["ch1_over2x_at_ID", "ch1_over2x_at"],
-                ["ch1_n_at_ID", "ch1_n_at"],
+                ["ina_last_ms_ID", "ina_last_ms"],
+                ["ina_avg_10s_ID", "ina_avg_10s"],
+                ["ina_worst_10s_ID", "ina_worst_10s"],
+                ["ina_over2x_10s_ID", "ina_over2x_10s"],
+                ["ina_avg_2m_ID", "ina_avg_2m"],
+                ["ina_worst_2m_ID", "ina_worst_2m"],
+                ["ina_over2x_2m_ID", "ina_over2x_2m"],
+                ["ina_avg_at_ID", "ina_avg_at"],
+                ["ina_worst_at_ID", "ina_worst_at"],
+                ["ina_over2x_at_ID", "ina_over2x_at"],
                 ["BatteryV_filtered_ID", "BatteryV_filtered"],
                 ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"]
             ];
@@ -6193,14 +6218,16 @@ window.addEventListener("load", function () {
                 const bulkStage = parseInt(bulkStageValue.textContent);
                 chargingMode.textContent = bulkStage === 1 ? 'BULK' : 'FLOAT';
             }
-            // Update WiFi wake notification
+            // Update WiFi countdown banner — shown during WiFi wake mode OR shutdown drain window
             const wifiWakeStatus = document.getElementById('wifi-wake-status');
             const wifiWakeSeconds = document.getElementById('wifi-wake-seconds');
             const wifiWakeValue = document.getElementById('WifiWakeSecondsRemainingID');
             if (wifiWakeStatus && wifiWakeSeconds && wifiWakeValue) {
                 const seconds = parseInt(wifiWakeValue.textContent);
                 if (seconds > 0) {
-                    wifiWakeSeconds.textContent = seconds;
+                    const m = Math.floor(seconds / 60);
+                    const s = seconds % 60;
+                    wifiWakeSeconds.textContent = m + ':' + String(s).padStart(2, '0');
                     wifiWakeStatus.style.display = 'block';
                 } else {
                     wifiWakeStatus.style.display = 'none';
@@ -6457,6 +6484,24 @@ window.addEventListener("load", function () {
                 }
             }
 
+            // Update thermal live score spans in Alternator Live Data tab (always-on)
+            // thermalLiveScore0-3 are ×10000 in CSV2; display with window labels
+            {
+                const thermalAltLabels = ['30m', '3h', '24h', '7d'];
+                for (let i = 0; i < 4; i++) {
+                    const raw = data['thermalLiveScore' + i];
+                    if (raw === undefined) continue;
+                    const v = raw / 10000;
+                    const txt = v > 0 ? thermalAltLabels[i] + ': ' + v.toFixed(4) : thermalAltLabels[i] + ': —';
+                    const cacheKey = 'thermalLiveScoreAlt_' + i;
+                    if (lastValues.get(cacheKey) !== txt) {
+                        lastValues.set(cacheKey, txt);
+                        const el = document.getElementById('thermalLiveScoreAlt' + i);
+                        if (el) el.textContent = txt;
+                    }
+                }
+            }
+
             // Update GPS display and manual entry form visibility
             if (data.LatitudeNMEA !== undefined && data.LongitudeNMEA !== undefined) {
                 const latDegrees = data.LatitudeNMEA / 1000000;
@@ -6705,6 +6750,8 @@ window.addEventListener("load", function () {
                 ["ft_saveNVSData_ses_ID", "ft_saveNVSData_ses"],
                 ["ft_FlushFileWriteQueue_win_ID", "ft_FlushFileWriteQueue_win"],
                 ["ft_FlushFileWriteQueue_ses_ID", "ft_FlushFileWriteQueue_ses"],
+                ["ft_efficiencyTracker_win_ID", "ft_efficiencyTracker_win"],
+                ["ft_efficiencyTracker_ses_ID", "ft_efficiencyTracker_ses"],
                 ["VeTime2_ID", "VeTime2"],
                 // systemIDActive (241) and systemIDResultsReady (242) OBSOLETE — firmware sends 0
                 ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
@@ -7116,9 +7163,12 @@ function handleResetPerfCounters() {
                 'ft_saveNVSData_ses_ID', 'ft_FlushFileWriteQueue_ses_ID',
                 'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
                 'MaximumLoopTimeID',
-                'ch1_worst_10s_ID', 'ch1_over2x_10s_ID', 'ch1_avg_10s_ID', 'ch1_n_10s_ID',
-                'ch1_worst_2m_ID', 'ch1_over2x_2m_ID', 'ch1_avg_2m_ID', 'ch1_n_2m_ID',
-                'ch1_worst_at_ID', 'ch1_over2x_at_ID', 'ch1_avg_at_ID', 'ch1_n_at_ID'
+                'ch1_worst_10s_ID', 'ch1_over2x_10s_ID', 'ch1_avg_10s_ID',
+                'ch1_worst_2m_ID', 'ch1_over2x_2m_ID', 'ch1_avg_2m_ID',
+                'ch1_worst_at_ID', 'ch1_over2x_at_ID', 'ch1_avg_at_ID',
+                'ina_last_ms_ID', 'ina_avg_10s_ID', 'ina_worst_10s_ID', 'ina_over2x_10s_ID',
+                'ina_avg_2m_ID', 'ina_worst_2m_ID', 'ina_over2x_2m_ID',
+                'ina_avg_at_ID', 'ina_worst_at_ID', 'ina_over2x_at_ID'
             ];
             ids.forEach(id => {
                 const el = document.getElementById(id);
@@ -9183,7 +9233,7 @@ let thermalWindowMin = 30;
 
 // Default visibility — hide the four requested series
 let thermalSeriesVisible = {
-    tempFilt: true, tempSP: true, penaltyAmps: false,
+    tempFilt: true, tempProjected: true, tempSetpoint: true, penaltyAmps: false,
     outerP: true, outerI: false, outerD: false,
     impliedPenalty: true, outerDExternal: true,
     measAmps: false, uTarget: true
@@ -9292,7 +9342,8 @@ function parseThermalBin(buf) {
 
     const t = new Array(count);
     const tempFilt = new Array(count);
-    const tempSP = new Array(count);
+    const tempProjected = new Array(count);
+    const tempSetpoint = new Array(count);
     const penalty = new Array(count);
     const outerP = new Array(count);
     const outerI = new Array(count);
@@ -9311,8 +9362,9 @@ function parseThermalBin(buf) {
         t[i] = -(count - 1 - i) * intervalMin;
         const b = HEADER_SIZE + i * ENTRY_SIZE;
 
-        tempFilt[i] = view.getInt16(b + 4, true) / 10.0;
-        tempSP[i] = view.getInt16(b + 6, true) / 10.0;
+        tempFilt[i]      = view.getInt16(b + 4, true) / 10.0;
+        tempProjected[i] = view.getInt16(b + 6, true) / 10.0;
+        tempSetpoint[i]  = view.getInt16(b + 8, true) / 10.0;
         voltCap[i] = view.getInt16(b + 12, true) / 10.0;
         uTarget[i] = view.getInt16(b + 14, true) / 10.0;
         spLimited[i] = view.getInt16(b + 16, true) / 10.0;
@@ -9330,7 +9382,7 @@ function parseThermalBin(buf) {
         outerDExt[i] = view.getInt16(b + 44, true) / 10.0;
     }
 
-    renderThermalPlot1([t, tempFilt, tempSP, penalty, measAmps, uTarget], t[0]);
+    renderThermalPlot1([t, tempFilt, tempProjected, tempSetpoint, penalty, measAmps, uTarget], t[0]);
     renderThermalPlotState([t, new Array(count).fill(null)], t[0], flagsArr, antiWindup, stageArr, t);
     renderThermalPlot2([t, outerP, outerI, outerD, implied, outerDExt], t[0]);
 }
@@ -9424,9 +9476,14 @@ function renderThermalPlot1(data, tMin) {
                 show: thermalSeriesVisible.tempFilt !== false
             },
             {
-                label: 'Temp Setpoint (°F)', stroke: '#f39c12', width: 1.5,
-                scale: 'temp', dash: [5, 5],
-                show: thermalSeriesVisible.tempSP !== false
+                label: 'Temp Projected (°F)', stroke: '#e67e22', width: 1.5,
+                scale: 'temp', dash: [4, 3],
+                show: thermalSeriesVisible.tempProjected !== false
+            },
+            {
+                label: 'Setpoint (°F)', stroke: '#f39c12', width: 1.5,
+                scale: 'temp', dash: [8, 4],
+                show: thermalSeriesVisible.tempSetpoint !== false
             },
             {
                 label: 'Penalty Amps (A)', stroke: '#2ecc71', width: 1.5,
@@ -9468,11 +9525,12 @@ function renderThermalPlot1(data, tMin) {
     thermalLogPlots[0] = new uPlot(opts, data, el);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[0]);
     _createThermalLegend(el, 0, [
-        { key: 'tempFilt', label: 'Temp Filtered', color: '#e74c3c', idx: 1 },
-        { key: 'tempSP', label: 'Temp Setpoint', color: '#f39c12', idx: 2 },
-        { key: 'penaltyAmps', label: 'Penalty Amps', color: '#2ecc71', idx: 3 },
-        { key: 'measAmps', label: 'Measured Amps', color: '#3498db', idx: 4 },
-        { key: 'uTarget', label: 'U Target', color: '#9b59b6', idx: 5 }
+        { key: 'tempFilt',      label: 'Temp Filtered',   color: '#e74c3c', idx: 1 },
+        { key: 'tempProjected', label: 'Temp Projected',  color: '#e67e22', idx: 2 },
+        { key: 'tempSetpoint',  label: 'Setpoint',        color: '#f39c12', idx: 3 },
+        { key: 'penaltyAmps',   label: 'Penalty Amps',    color: '#2ecc71', idx: 4 },
+        { key: 'measAmps',      label: 'Measured Amps',   color: '#3498db', idx: 5 },
+        { key: 'uTarget',       label: 'U Target',        color: '#9b59b6', idx: 6 }
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[0] && el.clientWidth > 0)

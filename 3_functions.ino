@@ -99,8 +99,19 @@ enum Csv1Index {
   CSV1_imu_msi_score,            // 80
   CSV1_imu_vomit_pct,            // 81
   CSV1_imu_anchorage_comfort,    // 82
+  // INA228 fast-mode interval stats (gated: only updated when field active)
+  CSV1_ina_last_ms,              // 83
+  CSV1_ina_avg_10s,              // 84
+  CSV1_ina_worst_10s,            // 85
+  CSV1_ina_over2x_10s,           // 86
+  CSV1_ina_avg_2m,               // 87
+  CSV1_ina_worst_2m,             // 88
+  CSV1_ina_over2x_2m,            // 89
+  CSV1_ina_avg_at,               // 90
+  CSV1_ina_worst_at,             // 91
+  CSV1_ina_over2x_at,            // 92
 
-  CSV1_FIELD_COUNT  // = 83
+  CSV1_FIELD_COUNT  // = 93
 
 };
 
@@ -684,8 +695,10 @@ enum Csv3Index {
   CSV3_nvsCycleMs,                       // 274 — last full NVS drain duration (ms)
   CSV3_ft_FlushFileWriteQueue_win,       // 275 — FlushFileWriteQueue worst 5s window (µs)
   CSV3_ft_FlushFileWriteQueue_ses,       // 276 — FlushFileWriteQueue worst session (µs)
+  CSV3_ft_efficiencyTracker_win,         // 277 — efficiencyTracker_tick() worst 5s window (µs)
+  CSV3_ft_efficiencyTracker_ses,         // 278 — efficiencyTracker_tick() worst session (µs)
 
-  CSV3_FIELD_COUNT  // = 277
+  CSV3_FIELD_COUNT  // = 279
 };
 
 
@@ -1739,17 +1752,9 @@ void setupServer() {
     IMU_DIST_BOW_FT = doc["imu_dist_bow_ft"];
     IMU_DIST_CL_FT = doc["imu_dist_cl_ft"];
     IMU_HEIGHT_WL_FT = doc["imu_height_wl_ft"];
-    // Write to LittleFS
-    File file = LittleFS.open("/vessel_info.json", "w");
-    if (file) {
-      serializeJson(doc, file);
-      file.close();
-      Serial.println("Vessel info saved successfully");
-      request->send(200, "application/json", "{\"success\":true}");
-    } else {
-      Serial.println("Failed to write vessel_info.json");
-      request->send(500, "application/json", "{\"success\":false,\"error\":\"File write failed\"}");
-    }
+    // Defer file write to Core 1 — LittleFS open/write on Core 0 stalls SSE delivery
+    pendingSaveVesselInfo = true;
+    request->send(200, "application/json", "{\"success\":true}");
   });
   server.on("/clearVesselInfo", HTTP_POST, [](AsyncWebServerRequest *request) {
     // Password check
@@ -1782,12 +1787,8 @@ void setupServer() {
     IMU_DIST_CL_FT = 0;
     IMU_HEIGHT_WL_FT = 0;
 
-    // Delete the file (or write defaults)
-    if (LittleFS.exists("/vessel_info.json")) {
-      LittleFS.remove("/vessel_info.json");
-    }
-
-    Serial.println("Vessel info cleared");
+    // Defer file delete to Core 1 — LittleFS.remove on Core 0 stalls SSE delivery
+    pendingClearVesselInfo = true;
     request->send(200, "application/json", "{\"success\":true}");
   });
   // ============================================================
@@ -1987,13 +1988,7 @@ void setupServer() {
       authToken = "";
       isRegistered = false;
 
-      nvs_handle_t nvs_handle;
-      if (nvs_open("auth", NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        nvs_erase_key(nvs_handle, "token");
-        nvs_erase_key(nvs_handle, "registered");
-        nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-      }
+      pendingClearToken = true;  // nvs_commit deferred to Core 1 to avoid SSE gap
 
       queueConsoleMessage("Auth token cleared - device requires re-registration");
       inputMessage = "1";
@@ -2023,7 +2018,7 @@ void setupServer() {
       writeFile(LittleFS, "/anomalyAlarmEnable.txt", String((int)anomalyAlarmEnable).c_str());
     } else if (request->hasParam("ResetEfficiencyMatrix")) {
       foundParameter = true;
-      resetEfficiencyMatrix();
+      pendingResetEfficiencyMatrix = true;  // deferred to Core 1 to avoid SSE gap
     }
 
     if (request->hasParam("ManualDutyTarget")) {
@@ -2820,7 +2815,7 @@ void setupServer() {
     }
     if (request->hasParam("ClearOverheatHistory")) {
       foundParameter = true;
-      clearOverheatHistoryAction();
+      pendingClearOverheatHistory = true;  // deferred to Core 1 to avoid SSE gap
       inputMessage = "1";
     }
     if (request->hasParam("LearningMode")) {
@@ -2992,7 +2987,7 @@ void setupServer() {
         }
       }
 
-      saveUserTableEdits();
+      pendingSaveUserTableEdits = true;  // deferred to Core 1 to avoid SSE gap
       queueConsoleMessage("Learning: Table saved to NVS");
     }
 
@@ -3588,6 +3583,7 @@ void setupServer() {
       ft_ReadVEData.worstSession = 0;
       ft_saveNVSData.worstSession = 0;
       ft_FlushFileWriteQueue.worstSession = 0;
+      ft_efficiencyTracker.worstSession = 0;
       VeTime2 = 0;
       // CPU load maxes
       cpuLoadCore0Max = 0;
@@ -4235,7 +4231,7 @@ void setupServer() {
     }
     cvLiveScore_lastDtMs = 0;
     cvLiveScore_inWindow = false;
-    saveCVTuningLog();
+    pendingSaveCVTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
@@ -4312,7 +4308,7 @@ void setupServer() {
       thermalLiveBucketStartMs[i]   = 0;
       thermalLiveScoreVal[i]        = 0.0f;
     }
-    saveThermalTuningLog();
+    pendingSaveThermalTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
@@ -4333,7 +4329,7 @@ void setupServer() {
     liveScore_thisCmd    = 0.0f;
     liveScore_lastStepMs = 0;
     liveScore_inWindow   = false;
-    saveTuningLog();
+    pendingSaveTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
@@ -4600,7 +4596,7 @@ void SendWifiData() {
     ch1_compute_stats();  // ← add this line immediately before the snprintf
 
     static char *payload1 = nullptr;
-    static const size_t PAYLOAD1_SIZE = 700;
+    static const size_t PAYLOAD1_SIZE = 900;
     if (!payload1) {
       payload1 = (char *)ps_malloc(PAYLOAD1_SIZE);  // bumped from 500, allocated to PSRAM
       if (!payload1) {
@@ -4615,7 +4611,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),    // 0
@@ -4701,7 +4697,17 @@ void SendWifiData() {
                                SafeInt(g_currentStaleCount),        // 79
                                SafeInt(imu_msi_score, 100),         // 80
                                SafeInt(imu_vomit_pct, 100),         // 81
-                               SafeInt(imu_anchorage_comfort, 100)  // 82
+                               SafeInt(imu_anchorage_comfort, 100), // 82
+                               SafeInt(ina_last_ms),                // 83
+                               SafeInt(ina_avg_10s, 100),           // 84  — 2 decimal places
+                               SafeInt(ina_worst_10s),              // 85
+                               SafeInt(ina_over2x_10s),             // 86
+                               SafeInt(ina_avg_2m, 100),            // 87  — 2 decimal places
+                               SafeInt(ina_worst_2m),               // 88
+                               SafeInt(ina_over2x_2m),              // 89
+                               SafeInt(ina_avg_at, 100),            // 90  — 2 decimal places
+                               SafeInt(ina_worst_at),               // 91
+                               SafeInt(ina_over2x_at)               // 92
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -4878,7 +4884,13 @@ void SendWifiData() {
                                SafeInt(RPMMax_AllTime),                                                                                                                                  //116
                                SafeInt(Ignition),                                                                                                                                        //117
                                SafeInt(inBulkStage ? 1 : 0),                                                                                                                             //118
-                               SafeInt((wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION) ? (WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) / 1000 : 0),         //119
+                               // 119: seconds of WiFi remaining — WiFi wake OR shutdown drain window (shown as countdown banner)
+                               SafeInt(
+                                 (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION)
+                                   ? (WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) / 1000
+                                   : (pendingShutdownFlush && shutdownCloudDeadlineMs > millis())
+                                       ? (shutdownCloudDeadlineMs - millis()) / 1000
+                                       : 0),                                                                                                                                                 //119
                                SafeInt(bufferedRecordCount),                                                                                                                             //120
                                SafeInt((bufferedRecordCount * 100) / MAX_BUFFERED_RECORDS),                                                                                              //121
                                SafeInt(MAX_BUFFERED_RECORDS),                                                                                                                            //122
@@ -5086,7 +5098,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -5365,7 +5377,9 @@ void SendWifiData() {
                                SafeInt(ft_saveNVSData.worstSession),                    // 273 — saveNVSData worst session (µs)
                                SafeInt(nvsCycleMs),                                     // 274 — last full NVS drain duration (ms)
                                SafeInt(ft_FlushFileWriteQueue.worstWindow),             // 275 — FlushFileWriteQueue worst 5s window (µs)
-                               SafeInt(ft_FlushFileWriteQueue.worstSession)             // 276 — FlushFileWriteQueue worst session (µs)
+                               SafeInt(ft_FlushFileWriteQueue.worstSession),            // 276 — FlushFileWriteQueue worst session (µs)
+                               SafeInt(ft_efficiencyTracker.worstWindow),               // 277 — efficiencyTracker_tick() worst 5s window (µs)
+                               SafeInt(ft_efficiencyTracker.worstSession)               // 278 — efficiencyTracker_tick() worst session (µs)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
@@ -5558,6 +5572,49 @@ void updateVesselInfoField(const char *fieldName, int value) {
   if (file) {
     serializeJson(doc, file);
     file.close();
+  }
+  xSemaphoreGive(fsMutex);
+}
+
+// Called from Core 1 main loop via pendingSaveVesselInfo flag — not safe to call on Core 0
+void saveVesselInfoToFile() {
+  if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    Serial.println("saveVesselInfoToFile: mutex timeout");
+    return;
+  }
+  DynamicJsonDocument doc(1024);
+  doc["boat_length_ft"]         = BOAT_LENGTH_FT;
+  doc["boat_type"]              = BOAT_TYPE;
+  doc["boat_make_model"]        = BOAT_MAKE_MODEL;
+  doc["boat_year"]              = BOAT_YEAR;
+  doc["home_port"]              = HOME_PORT;
+  doc["engine_make"]            = ENGINE_MAKE;
+  doc["engine_hp"]              = ENGINE_HP;
+  doc["battery_voltage"]        = BATTERY_VOLTAGE;
+  doc["battery_capacity_ah"]    = BatteryCapacity_Ah;
+  doc["battery_type"]           = BATTERY_TYPE;
+  doc["alternator_brand_model"] = ALTERNATOR_BRAND_MODEL;
+  doc["solar_watts"]            = SolarWatts;
+  doc["imu_mount_orientation"]  = imuMountOrientation;
+  doc["imu_dist_bow_ft"]        = IMU_DIST_BOW_FT;
+  doc["imu_dist_cl_ft"]         = IMU_DIST_CL_FT;
+  doc["imu_height_wl_ft"]       = IMU_HEIGHT_WL_FT;
+  File file = LittleFS.open("/vessel_info.json", "w");
+  if (file) {
+    serializeJson(doc, file);
+    file.close();
+  }
+  xSemaphoreGive(fsMutex);
+}
+
+// Called from Core 1 main loop via pendingClearVesselInfo flag — not safe to call on Core 0
+void executeClearVesselInfo() {
+  if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    Serial.println("executeClearVesselInfo: mutex timeout");
+    return;
+  }
+  if (LittleFS.exists("/vessel_info.json")) {
+    LittleFS.remove("/vessel_info.json");
   }
   xSemaphoreGive(fsMutex);
 }

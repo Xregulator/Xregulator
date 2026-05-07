@@ -1507,6 +1507,10 @@ int32_t prev_AltOnTime_AllTime = 0;
 float prev_ChargeCycles_AllTime = 0;
 int32_t prev_TotalDist_AllTime = 0;
 int32_t prev_AvgSpeed_AllTime = 0;
+float   prev_spdAccum_AllTime = -1.0f;
+uint32_t prev_spdTime_AllTime = 0;
+float   prev_vltAccum_AllTime = -1.0f;
+uint32_t prev_vltTime_AllTime = 0;
 int32_t prev_AvgSOC = 0;
 int32_t prev_AvgSOC_AllTime = 0;
 static float prev_sailing_days_alltime = -1.0f;
@@ -1545,6 +1549,18 @@ const uint32_t INA_SLOW_INTERVAL_MS = 1100;  // field off: AVG=128, CT=4120µs �
 const uint32_t INA_FAST_INTERVAL_MS = 5;     // field on:  AVG=4,   CT=540µs  → 4.3ms update
 uint32_t inaReadInterval = INA_SLOW_INTERVAL_MS;
 bool inaFastModeActive = false;
+
+// INA228 fast-mode interval stats — updated only when inaFastModeActive, frozen when field off
+uint16_t ina_last_ms    = 0;
+float    ina_avg_10s    = 0.0f;
+uint16_t ina_worst_10s  = 0;
+uint16_t ina_over2x_10s = 0;
+float    ina_avg_2m     = 0.0f;
+uint16_t ina_worst_2m   = 0;
+uint16_t ina_over2x_2m  = 0;
+float    ina_avg_at     = 0.0f;
+uint16_t ina_worst_at   = 0;
+uint32_t ina_over2x_at  = 0;
 
 // Physical Constants
 const float EA_INSULATION = 1.0f;     // eV, activation energy
@@ -1793,6 +1809,7 @@ FuncTiming ft_rai_bmp_state;  // BMP388 state machine — cost per state step
 FuncTiming ft_rai_imu;        // IMU FIFO drain block
 FuncTiming ft_ReadVEData;
 FuncTiming ft_FlushFileWriteQueue;
+FuncTiming ft_efficiencyTracker;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -2127,8 +2144,8 @@ uint8_t                 thermalTuningLogHead    = 0;
 uint16_t                thermalTuningRunCounter = 0;
 ThermalTuningScoreState thermalTuningScore      = {};
 
-// Thermal always-on live score buckets (long windows: 10min, 1hr, 10hr, 100hr)
-const uint32_t THERMAL_LIVE_BUCKET_MS[4] = {10000UL, 60000UL, 600000UL, 6000000UL};
+// Thermal always-on live score buckets (30m, 3h, 24h, 7d — thermal system has long time constants)
+const uint32_t THERMAL_LIVE_BUCKET_MS[4] = {1800000UL, 10800000UL, 86400000UL, 604800000UL};
 ScoreBucket*   thermalLiveScoreBuckets[4] = {};   // ps_malloc'd
 uint8_t        thermalLiveScoreHead[4]    = {};
 uint32_t       thermalLiveBucketStartMs[4] = {};
@@ -2177,6 +2194,7 @@ uint32_t lastVoltageLoopMs = 0;      // timestamp of last voltage loop update
 float Icv = 0.0f;                    // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                   // CV integrator state (A)
 bool voltageControlActive = false;   // true when voltage PID is active (non-idle stages)
+uint32_t thermalScoreLastExternalMs = 0;  // last ms when voltageControlActive was true; gates 3-min blanking
 // =====================================================================================
 // Table Bounds & Safety
 float MaxTableValue = 150.0;               // Maximum table entry (A)
@@ -2200,8 +2218,20 @@ int CloudFeatures = 1;
 int LearningDryRunMode = 0;  // Calculate but don't apply changes
 
 // Data Management
-int AutoSaveLearningTable = 1;                     // OBSOLETE REMOVE LATER — kept = 1 so 6_functions autosave gate always passes
-unsigned long LearningTableSaveInterval = 300000;  // OBSOLETE REMOVE LATER
+// Deferred saves — set by Core 0 (AsyncWebServer handlers), executed on Core 1 in main loop
+// to avoid blocking SSE delivery on Core 0
+volatile bool pendingSaveCVTuningLog      = false;
+volatile bool pendingSaveTuningLog        = false;
+volatile bool pendingSaveThermalTuningLog = false;
+volatile bool pendingResetEfficiencyMatrix  = false;
+volatile bool pendingClearOverheatHistory   = false;
+volatile bool pendingSaveUserTableEdits     = false;
+volatile bool pendingClearToken             = false;
+volatile bool pendingSaveVesselInfo         = false;
+volatile bool pendingClearVesselInfo        = false;
+bool pendingShutdownFlush = false;       // set on ignition-off edge; cleared after full flush
+bool shutdownNVSFlushDone = false;       // true once NVS+sensor window saved this shutdown
+uint32_t shutdownCloudDeadlineMs = 0;   // millis() deadline for cloud drain window
 
 // Momentary Actions (Reset to 0 after execution)
 int ResetLearningTable = 0;    // OBSOLETE LEGACY EXTRA
@@ -3323,6 +3353,7 @@ void setup() {
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
   memset(&ft_FlushFileWriteQueue, 0, sizeof(FuncTiming));
+  memset(&ft_efficiencyTracker, 0, sizeof(FuncTiming));
 
 
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
@@ -3492,8 +3523,11 @@ void loop() {
   esp_task_wdt_reset();
   Ignition = !digitalRead(1);  // ! is for optocoupler
   if (IgnitionOverride == 1) {
-    Ignition = 1;
+    Ignition = 1;       // force ON  (bench testing, normal default)
+  } else if (IgnitionOverride == 0) {
+    Ignition = 0;       // force OFF (test shutdown sequence — change from 1 to 0 to trigger)
   }
+  // IgnitionOverride negative: real GPIO passthrough (no override)
   // static DeviceMode lastMode = MODE_CONFIG;  //DEBUG REMOVE LATER
   // if (currentMode != lastMode) {
   //   Serial.printf("MODE CHANGED (0=CONFIG, 1= AP, 2 = CLIENT): %d -> %d\n", lastMode, currentMode);
@@ -3578,6 +3612,21 @@ void loop() {
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   TIMED_CALL(ft_saveNVSData, saveNVSData());  // phased: one group per NVS_TICK_SPACING ticks
   TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
+  // Deferred saves from Core 0 button handlers — executed here on Core 1 so Core 0 SSE is not blocked.
+  // Gated: wait 5 consecutive seconds out of critical zone before firing, to avoid bursting I/O
+  // the moment voltage drops. All flags in this block execute in the same tick — no re-entry possible.
+  // Shutdown flush (below) bypasses this gate and drains remaining flags unconditionally.
+  if (safeToFlushIO()) {
+    if (pendingSaveCVTuningLog)        { pendingSaveCVTuningLog        = false; saveCVTuningLog();          }
+    if (pendingSaveTuningLog)          { pendingSaveTuningLog          = false; saveTuningLog();            }
+    if (pendingSaveThermalTuningLog)   { pendingSaveThermalTuningLog   = false; saveThermalTuningLog();     }
+    if (pendingResetEfficiencyMatrix)  { pendingResetEfficiencyMatrix  = false; resetEfficiencyMatrix();    }
+    if (pendingClearOverheatHistory)   { pendingClearOverheatHistory   = false; clearOverheatHistoryAction(); }
+    if (pendingSaveUserTableEdits)     { pendingSaveUserTableEdits      = false; saveUserTableEdits();       }
+    if (pendingClearToken)             { pendingClearToken              = false; executeClearToken();        }
+    if (pendingSaveVesselInfo)         { pendingSaveVesselInfo          = false; saveVesselInfoToFile();     }
+    if (pendingClearVesselInfo)        { pendingClearVesselInfo         = false; executeClearVesselInfo();   }
+  }
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
   // Power management affects AP and CLIENT modes, but NOT CONFIG mode (CONFIG mode exits early below)
@@ -3589,6 +3638,12 @@ void loop() {
 
     if (Ignition == 0) {
       // ===== IGNITION OFF =====
+      // Edge detection FIRST — must set pendingShutdownFlush before the state machine checks it
+      if (lastIgnitionState == 1) {
+        pendingShutdownFlush = true;
+        Serial.println("Ignition OFF");
+        lastIgnitionState = 0;
+      }
       wifiWakeActive = (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION);
       // Detect state change for WiFi wake mode
       if (wifiWakeActive != lastWifiWakeActive) {
@@ -3612,24 +3667,55 @@ void loop() {
           wakeExpiryWarningShown = true;
         }
       } else {
-        // Low power mode - save battery
-        WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
-        if (tempTaskHandle != NULL) {
-          vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
+        if (pendingShutdownFlush) {
+          if (!gpio4IsLow) {
+            // Phase 1: field still ramping — hold 240MHz and WiFi until it cuts
+            setCpuFrequencyMhz(240);
+          } else if (!shutdownNVSFlushDone) {
+            // Phase 2: field just cut — flush NVS and save partial sensor window immediately
+            setCpuFrequencyMhz(240);
+            saveNVSDataFull();                // absolute latest values, no critical-zone gate
+            saveEfficiencyMatrix();
+            saveCurrentSessionHealth();
+            uploadSensorHistory();            // save whatever is in the current window to local buffer
+            if (pendingSaveCVTuningLog)        { pendingSaveCVTuningLog        = false; saveCVTuningLog();            }
+            if (pendingSaveTuningLog)          { pendingSaveTuningLog          = false; saveTuningLog();              }
+            if (pendingSaveThermalTuningLog)   { pendingSaveThermalTuningLog   = false; saveThermalTuningLog();       }
+            if (pendingResetEfficiencyMatrix)  { pendingResetEfficiencyMatrix  = false; resetEfficiencyMatrix();      }
+            if (pendingClearOverheatHistory)   { pendingClearOverheatHistory   = false; clearOverheatHistoryAction(); }
+            if (pendingSaveUserTableEdits)     { pendingSaveUserTableEdits      = false; saveUserTableEdits();         }
+            if (pendingClearToken)             { pendingClearToken              = false; executeClearToken();          }
+            if (pendingSaveVesselInfo)         { pendingSaveVesselInfo          = false; saveVesselInfoToFile();       }
+            if (pendingClearVesselInfo)        { pendingClearVesselInfo         = false; executeClearVesselInfo();     }
+            shutdownNVSFlushDone = true;
+            shutdownCloudDeadlineMs = millis() + 120000;  // 2-min window: keeps WiFi up to confirm drain completed
+          } else if (millis() < shutdownCloudDeadlineMs) {
+            // Phase 3: hold 240MHz and WiFi for the full 2-min window unconditionally.
+            // Lets the CloudFeatures block continue uploading, and keeps WiFi open to verify the drain.
+            setCpuFrequencyMhz(240);
+          } else {
+            // Phase 4: done (buffer empty or timed out) — clear flags; low power on next tick
+            pendingShutdownFlush = false;
+            shutdownNVSFlushDone = false;
+            shutdownCloudDeadlineMs = 0;
+          }
+        } else {
+          // Low power mode - save battery
+          WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
+          if (tempTaskHandle != NULL) {
+            vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
+          }
+          setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
         }
-        setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
-      }
-
-      // Detect ignition turning OFF
-      if (lastIgnitionState == 1) {
-        Serial.println("Ignition OFF");
-        lastIgnitionState = 0;
       }
 
     } else {
       // ===== IGNITION ON - Normal operation =====
       // Detect ignition state change to ON
       if (lastIgnitionState != 1) {
+        pendingShutdownFlush = false;       // ignition back on — cancel any pending flush
+        shutdownNVSFlushDone = false;
+        shutdownCloudDeadlineMs = 0;
         Serial.println("Ignition ON - Normal operation mode");
         lastIgnitionState = 1;
       }
@@ -3708,7 +3794,7 @@ void loop() {
         TIMED_CALL(ft_updateWeatherMode, updateWeatherMode());
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
-      efficiencyTracker_tick();
+      TIMED_CALL(ft_efficiencyTracker, efficiencyTracker_tick());
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
 
       // Sync legacy display variables
@@ -3746,10 +3832,11 @@ void loop() {
           return;  // Skip during OTA
         }
         unsigned long currentMillisz = millis();
-        // Check time sync every 12 hours
-        TIMED_CALL(ft_checkTimeSync, checkTimeSync());
+        // Check time sync every 12 hours — skipped in critical zone (would fire nvs_commit)
+        if (!inCriticalZone()) TIMED_CALL(ft_checkTimeSync, checkTimeSync());
         // Save current sensor window to buffer every SENSOR_UPLOAD_INTERVAL. All data goes to buffer first
-        if (currentMillisz - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
+        // Skipped in critical zone (high voltage + field on) — window keeps accumulating, saved when zone clears
+        if (!inCriticalZone() && currentMillisz - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
           esp_task_wdt_reset();
           TIMED_CALL(ft_UpdateSailingMetrics, UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL));
           lastSensorUploadTime = currentMillisz;
@@ -3759,7 +3846,8 @@ void loop() {
         }
 
         // Upload buffered records every BUFFER_UPLOAD_INTERVAL minutes.  Reads file, uploads it, deletes on success
-        if (currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7) {  // added 7 to give a tiny offset, not sure if useful or not
+        // Skipped in critical zone — no LittleFS reads or queue activity during high-voltage regulation
+        if (!inCriticalZone() && currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7) {  // added 7 to give a tiny offset, not sure if useful or not
           lastBufferUploadAttempt = currentMillisz;
           if (bufferedRecordCount > 0) {
             esp_task_wdt_reset();                                           // Feed before upload
@@ -3770,7 +3858,7 @@ void loop() {
         //delay(3);  // removed 4/18/26, don't think it was ever necessary
 
         // Configuration Snapshot
-        if (millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
+        if (!inCriticalZone() && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
           lastConfigSnapshotTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
             if (WiFi.RSSI() >= -76) {
@@ -3854,6 +3942,7 @@ void loop() {
     ft_rai_imu.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
     ft_FlushFileWriteQueue.worstWindow = 0;
+    ft_efficiencyTracker.worstWindow = 0;
 
 
 

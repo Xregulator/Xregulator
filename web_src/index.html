@@ -5018,8 +5018,9 @@
               </div> <!-- END Temperature Controller Parameters -->
 
               <!-- Live Plot View -->
-              <div id="thermallog-details" class="tuning-section">
-                <p class="tuning-section-title">Live Plot View</p>
+              <details id="thermallog-details" class="tuning-section" style="padding:0;">
+                <summary style="padding:12px 16px;cursor:pointer;font-weight:600;font-size:14px;color:var(--text-dark);">Live Plot View</summary>
+                <div style="padding:0 16px 16px 16px;">
 
                 <div style="display:flex; justify-content:space-between; align-items:center;
               margin: 8px 0 12px 0;">
@@ -5089,7 +5090,8 @@
                 </div>
                 <div class="plot-container" id="thermallog-plot2" style="min-height:300px;"></div>
 
-              </div>
+                </div>
+              </details>
 
               <!-- Step Test Parameters -->
               <div class="tuning-section">
@@ -5648,6 +5650,16 @@
             <span id="cvLiveScoreAlt1" style="font-weight:bold;">—</span>
             <span id="cvLiveScoreAlt2" style="font-weight:bold;">—</span>
             <span id="cvLiveScoreAlt3" style="font-weight:bold;">—</span>
+          </span>
+        </div>
+
+        <div class="metric-row" style="margin-top:8px;">
+          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">Thermal Loop — 30m / 3h / 24h / 7d:</span>
+          <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
+            <span id="thermalLiveScoreAlt0" style="font-weight:bold;">—</span>
+            <span id="thermalLiveScoreAlt1" style="font-weight:bold;">—</span>
+            <span id="thermalLiveScoreAlt2" style="font-weight:bold;">—</span>
+            <span id="thermalLiveScoreAlt3" style="font-weight:bold;">—</span>
           </span>
         </div>
       </div>
@@ -6444,7 +6456,7 @@
           </div>
 
           <!-- FUNCTION TIMING — WORST CASE -->
-          <div class="card-group">
+          <div class="card-group" style="grid-column: 1 / -1;">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
               <span>Function Timing — Worst Case (ms)</span>
               <span class="tooltip" onclick="this.classList.toggle('active')">
@@ -6643,7 +6655,7 @@
               </div>
 
               <!-- Build Config Payload -->
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Build Config Payload
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">Builds the configuration snapshot JSON for cloud upload. Fires
@@ -6659,7 +6671,7 @@
               </div>
 
               <!-- Save NVS Data -->
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Save NVS Data
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">Phased NVS flash write — one group of variables per call, commit on final phase. The commit phase writes dirty pages to flash and can take 50–150ms. Primary suspect for loop stalls.</span>
@@ -6674,7 +6686,7 @@
               </div>
 
               <!-- Flush File Write Queue -->
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Flush File Write Queue
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">Drains one LittleFS write from the queue per loop. Secondary suspect for loop stalls — LittleFS writes can take 10–50ms when a flash page must be erased.</span>
@@ -6685,6 +6697,21 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_FlushFileWriteQueue_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Efficiency Tracker -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Efficiency Tracker
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">efficiencyTracker_tick() — includes NVS matrix and session health commits every 2 minutes. Spikes to 200–500ms every 2 min are expected in real mode; in fake mode these writes are suppressed.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_efficiencyTracker_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_efficiencyTracker_ses_ID">0</span>
                 </div>
               </div>
 
@@ -6728,14 +6755,6 @@
               <span class="metric-value"><span id="ch1_over2x_10s_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">N 10s
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Number of CH1 samples in last 10 seconds</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ch1_n_10s_ID">0</span></span>
-            </div>
-            <div class="metric-row">
               <span class="metric-label">Avg 2m
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean CH1 interval over last 2 minutes (closed 10s buckets only)</span>
@@ -6758,14 +6777,6 @@
                 </span>
               </span>
               <span class="metric-value"><span id="ch1_over2x_2m_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">N 2m
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Number of CH1 samples in last 2 minutes</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ch1_n_2m_ID">0</span></span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Avg All-Time
@@ -6791,13 +6802,96 @@
               </span>
               <span class="metric-value"><span id="ch1_over2x_at_ID">0</span></span>
             </div>
+          </div>
+
+          <!-- INA228 READ INTERVAL -->
+          <div class="card-group">
+            <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
+              <span>INA228 Read Interval (ms)</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">Inter-sample timing for INA228 voltage/current reads. Only updated when the field is active (fast mode, ~5ms target). Values freeze when field is off.</span>
+              </span>
+            </p>
             <div class="metric-row">
-              <span class="metric-label">N All-Time
+              <span class="metric-label">Last Interval
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Total CH1 samples since power-on</span>
+                  <span class="tooltip-box">Most recent time between INA228 reads, ms</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="ch1_n_at_ID">0</span></span>
+              <span class="metric-value"><span id="ina_last_ms_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Avg 10s
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Mean INA228 read interval over last 10 seconds of field-active time</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_avg_10s_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Worst 10s
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Maximum INA228 read interval in last 10 seconds of field-active time, ms</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_worst_10s_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Over 2× 10s
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Count of INA228 intervals exceeding 2× average in last 10 seconds</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_over2x_10s_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Avg 2m
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Mean INA228 read interval over last 2 minutes of field-active time</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_avg_2m_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Worst 2m
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Maximum INA228 read interval in last 2 minutes of field-active time, ms</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_worst_2m_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Over 2× 2m
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Count of INA228 intervals exceeding 2× average in last 2 minutes</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_over2x_2m_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Avg All-Time
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Mean INA228 read interval since last field-on event</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_avg_at_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Worst All-Time
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Maximum INA228 read interval since last field-on event, ms</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_worst_at_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Over 2× All-Time
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Count of INA228 intervals exceeding 2× running mean since last field-on event</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ina_over2x_at_ID">—</span></span>
             </div>
           </div>
 
@@ -8215,8 +8309,8 @@
 
 
   <div id="corner-status" class="corner-status corner-status-connected">CONNECTED</div>
-  <div id="wifi-wake-status" class="corner-status corner-status-warning" style="display:none;">WIFI WAKE: <span
-      id="wifi-wake-seconds">0</span>s</div>
+  <div id="wifi-wake-status" class="corner-status corner-status-warning" style="display:none;">WiFi off in <span
+      id="wifi-wake-seconds">0:00</span></div>
 
   <!-- span id's are for display values that JavaScript updates dynamically
  Read-only .  Basically sensor readings, calculated values, button and setting echos -->
@@ -8446,10 +8540,6 @@
     <input id="R_fixed" style="display:none;" value="0" />
     <input id="Beta" style="display:none;" value="0" />
     <input id="T0_C" style="display:none;" value="0" />
-    <input id="TempSource" name="TempSource" type="number" value style="display:none;" />
-    <input id="IgnitionOverride" name="IgnitionOverride" type="number" value style="display:none;" />
-    <input id="AlarmLatchEnabled" name="AlarmLatchEnabled" type="number" value style="display:none;" />
-    <input id="accelEnabled" name="accelEnabled" type="number" value style="display:none;" />
     <input id="AlarmTest" style="display:none;" value="0" />
     <input id="ResetAlarmLatch" style="display:none;" value="0" />
     <input id="MaintainMode" name="MaintainMode" type="number" value style="display:none;" />

@@ -42,6 +42,7 @@ static bool queueFSWrite(const char *path, const char *data) {
 // when many writes queue at once (e.g. all fake-mode maxima updating simultaneously)
 void FlushFileWriteQueue() {
   if (fsWriteHead == fsWriteTail) return;  // queue empty
+  if (!safeToFlushIO()) return;            // hold writes until 5s stable out of critical zone
   static unsigned long lastFlush = 0;
   unsigned long now = millis();
   if (now - lastFlush < 25) return;  // spread writes — each LittleFS write blocks ~40-50ms; prevents 700ms stall
@@ -2071,6 +2072,13 @@ void _ReadAnalogInputs_inner() {
   if (millis() - lastINARead_local >= inaReadInterval) {
     if (INADisconnected == 0) {
       lastINARead_local = millis();
+      // Track intervals only when field is actually driven — fieldActiveStatus > 0
+      // Reset windowed stats on each field-on rising edge
+      static bool lastFieldActive = false;
+      bool nowFieldActive = (fieldActiveStatus > 0);
+      if (nowFieldActive && !lastFieldActive) resetINA228IntervalWindows();
+      lastFieldActive = nowFieldActive;
+      if (nowFieldActive) recordINA228Interval(lastINARead_local);
 
       // ft_rai_ina228 / AnalogReadTime aliases: worstWindow + lastCall updated by macro
       TIMED_CALL(ft_rai_ina228, ([&]() {
@@ -3784,11 +3792,15 @@ void saveNVSDataFull() {
   if (prev_AvgSpeed != (int32_t)(AvgSpeed * 100))                           { nvs_set_i32(h, "AvgSpeed",       (int32_t)(AvgSpeed * 100));                     prev_AvgSpeed = (int32_t)(AvgSpeed * 100);                           chg = true; }
   if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)             { nvs_set_i32(h, "TotDist_AT",     (int32_t)TotalDistance_AllTime);                prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;             chg = true; }
   if (prev_AvgSpeed_AllTime != (int32_t)(AvgSpeed_AllTime * 100))           { nvs_set_i32(h, "AvgSpd_AT",      (int32_t)(AvgSpeed_AllTime * 100));             prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);           chg = true; }
+  if (prev_spdAccum_AllTime  != speedAccumulator_AllTime)                   { nvs_set_blob(h, "SpdAccum_AT",   &speedAccumulator_AllTime,   sizeof(float));    prev_spdAccum_AllTime  = speedAccumulator_AllTime;                   chg = true; }
+  if (prev_spdTime_AllTime   != (uint32_t)totalSpeedSampleTime_AllTime)     { nvs_set_u32(h, "SpdTime_AT",     (uint32_t)totalSpeedSampleTime_AllTime);        prev_spdTime_AllTime   = (uint32_t)totalSpeedSampleTime_AllTime;     chg = true; }
   if (prev_AvgSOC != (int32_t)(AvgSOC * 100))                               { nvs_set_i32(h, "AvgSOC",         (int32_t)(AvgSOC * 100));                       prev_AvgSOC = (int32_t)(AvgSOC * 100);                               chg = true; }
-  // SOC alltime + battery state
+  // SOC alltime + voltage AllTime accumulators + battery state
   { uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
     if (prev_socAccum_AllTime != sc)                                         { nvs_set_u64(h, "SocAccum_AT", sc);                                               prev_socAccum_AllTime = sc;                                          chg = true; } }
   if (prev_socTime_AllTime != (uint32_t)totalSocSampleTime_AllTime)         { nvs_set_u32(h, "SocTime_AT",     (uint32_t)totalSocSampleTime_AllTime);          prev_socTime_AllTime = (uint32_t)totalSocSampleTime_AllTime;         chg = true; }
+  if (prev_vltAccum_AllTime  != voltageAccumulator_AllTime)                  { nvs_set_blob(h, "VltAccum_AT",   &voltageAccumulator_AllTime, sizeof(float));    prev_vltAccum_AllTime  = voltageAccumulator_AllTime;                  chg = true; }
+  if (prev_vltTime_AllTime   != (uint32_t)totalVoltageSampleTime_AllTime)    { nvs_set_u32(h, "VltTime_AT",     (uint32_t)totalVoltageSampleTime_AllTime);      prev_vltTime_AllTime   = (uint32_t)totalVoltageSampleTime_AllTime;    chg = true; }
   if (prev_SOC_percent != (int32_t)SOC_percent)                             { nvs_set_i32(h, "SOC_percent",    (int32_t)SOC_percent);                          prev_SOC_percent = (int32_t)SOC_percent;                             chg = true; }
   if (prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled)                 { nvs_set_i32(h, "CoulombCount",   (int32_t)CoulombCount_Ah_scaled);               prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;                 chg = true; }
   // Health + Thermal + Learning
@@ -3822,12 +3834,34 @@ void saveNVSDataFull() {
   lastNVSSaveTime = millis();
 }
 
+// Returns true when battery is high AND field is on — the window where a 50ms stall
+// could mask a load-dump voltage spike. No NVS commits happen in this window.
+bool inCriticalZone() {
+  return (BatteryV > (BulkVoltage - 0.5f) && fieldActiveStatus > 0);
+}
+
+// Returns true once we've been continuously out of critical zone for 5 seconds.
+// Resets timer if critical zone re-enters. Prevents bursting deferred I/O the instant
+// voltage drops — voltage may still be oscillating near the threshold.
+bool safeToFlushIO() {
+  static unsigned long critZoneClearAt = 0;
+  if (inCriticalZone()) {
+    critZoneClearAt = 0;
+    return false;
+  }
+  if (critZoneClearAt == 0) {
+    critZoneClearAt = millis();
+  }
+  return (millis() - critZoneClearAt >= 5000);
+}
+
 // Phased NVS write — called every loop() tick.
 // Phase 0: idle, waiting for 2-minute gate.
 // Phases 1-8: one logical write group per active call, with NVS_TICK_SPACING
 //             fast ticks between each group so the loop() stall is ~2-10ms
 //             instead of 50-200ms all at once.
 // Phase 9: commit + close.  nvsCycleMs records how long the full drain took.
+//          Skipped if inCriticalZone() — handle closed without commit, cycle restarts.
 void saveNVSData() {
   static uint16_t      nvsTick      = 0;
   static nvs_handle_t  nvsH         = 0;
@@ -3836,6 +3870,7 @@ void saveNVSData() {
 
   if (nvsPhase == 0) {
     if (millis() - lastNVSSaveTime < NVS_SAVE_INTERVAL) return;
+    if (inCriticalZone()) return;  // don't start a cycle while voltage is high and field is on
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvsH);
     if (err != ESP_OK) {
       queueConsoleMessage("ERROR: Failed to open NVS");
@@ -3884,18 +3919,22 @@ void saveNVSData() {
       if (prev_ChargeCycles_AllTime  != (int32_t)ChargeCycles_AllTime) { nvs_set_i32(nvsH, "ChrgCyc_AT",  (int32_t)ChargeCycles_AllTime); prev_ChargeCycles_AllTime  = (int32_t)ChargeCycles_AllTime; nvsChg = true; }
       nvsPhase = 4; break;
 
-    case 4:  // Travel + session average SOC
+    case 4:  // Travel + session average SOC + speed AllTime accumulators
       if (prev_TotalDist       != (int32_t)TotalDistance)             { nvs_set_i32(nvsH, "TotalDist",  (int32_t)TotalDistance);              prev_TotalDist       = (int32_t)TotalDistance;             nvsChg = true; }
       if (prev_AvgSpeed        != (int32_t)(AvgSpeed * 100))          { nvs_set_i32(nvsH, "AvgSpeed",   (int32_t)(AvgSpeed * 100));           prev_AvgSpeed        = (int32_t)(AvgSpeed * 100);          nvsChg = true; }
       if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)   { nvs_set_i32(nvsH, "TotDist_AT", (int32_t)TotalDistance_AllTime);      prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;   nvsChg = true; }
       if (prev_AvgSpeed_AllTime  != (int32_t)(AvgSpeed_AllTime * 100)) { nvs_set_i32(nvsH, "AvgSpd_AT", (int32_t)(AvgSpeed_AllTime * 100));   prev_AvgSpeed_AllTime  = (int32_t)(AvgSpeed_AllTime * 100); nvsChg = true; }
+      if (prev_spdAccum_AllTime  != speedAccumulator_AllTime)          { nvs_set_blob(nvsH, "SpdAccum_AT", &speedAccumulator_AllTime, sizeof(float));    prev_spdAccum_AllTime  = speedAccumulator_AllTime;          nvsChg = true; }
+      if (prev_spdTime_AllTime   != (uint32_t)totalSpeedSampleTime_AllTime) { nvs_set_u32(nvsH, "SpdTime_AT", (uint32_t)totalSpeedSampleTime_AllTime); prev_spdTime_AllTime = (uint32_t)totalSpeedSampleTime_AllTime; nvsChg = true; }
       if (prev_AvgSOC          != (int32_t)(AvgSOC * 100))            { nvs_set_i32(nvsH, "AvgSOC",     (int32_t)(AvgSOC * 100));             prev_AvgSOC          = (int32_t)(AvgSOC * 100);            nvsChg = true; }
       nvsPhase = 5; break;
 
-    case 5: {  // SOC alltime accumulators + battery state
+    case 5: {  // SOC alltime accumulators + voltage AllTime accumulators + battery state
       uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
       if (prev_socAccum_AllTime != sc)                                       { nvs_set_u64(nvsH, "SocAccum_AT",  sc);                                    prev_socAccum_AllTime = sc;                                    nvsChg = true; }
       if (prev_socTime_AllTime  != (uint32_t)totalSocSampleTime_AllTime)    { nvs_set_u32(nvsH, "SocTime_AT",   (uint32_t)totalSocSampleTime_AllTime);  prev_socTime_AllTime  = (uint32_t)totalSocSampleTime_AllTime;  nvsChg = true; }
+      if (prev_vltAccum_AllTime  != voltageAccumulator_AllTime)              { nvs_set_blob(nvsH, "VltAccum_AT", &voltageAccumulator_AllTime, sizeof(float));    prev_vltAccum_AllTime  = voltageAccumulator_AllTime;          nvsChg = true; }
+      if (prev_vltTime_AllTime   != (uint32_t)totalVoltageSampleTime_AllTime) { nvs_set_u32(nvsH, "VltTime_AT", (uint32_t)totalVoltageSampleTime_AllTime); prev_vltTime_AllTime = (uint32_t)totalVoltageSampleTime_AllTime; nvsChg = true; }
       if (prev_SOC_percent      != (int32_t)SOC_percent)                    { nvs_set_i32(nvsH, "SOC_percent",  (int32_t)SOC_percent);                  prev_SOC_percent      = (int32_t)SOC_percent;                  nvsChg = true; }
       if (prev_CoulombCount     != (int32_t)CoulombCount_Ah_scaled)         { nvs_set_i32(nvsH, "CoulombCount", (int32_t)CoulombCount_Ah_scaled);       prev_CoulombCount     = (int32_t)CoulombCount_Ah_scaled;       nvsChg = true; }
       nvsPhase = 6; break;
@@ -3934,7 +3973,14 @@ void saveNVSData() {
       // TODO: sea state minute counters (IMU_MinMvGnt/Mod/Rgh/Ext, IMU_MinStGnt/Mod/Rgh/Ext) — add here when ready
       nvsPhase = 9; break;
 
-    case 9:  // Commit + close
+    case 9:  // Commit + close — skip commit if in critical zone, restart cycle immediately
+      if (inCriticalZone()) {
+        nvs_close(nvsH);   // discard staged values
+        nvsH = 0;
+        lastNVSSaveTime = 0;  // restart cycle as soon as zone clears (no 2-min wait)
+        nvsPhase = 0;
+        break;
+      }
       if (nvsChg) nvs_commit(nvsH);
       nvs_close(nvsH);
       nvsH = 0;
@@ -4002,6 +4048,13 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "TotDist_AT", &temp_int32) == ESP_OK) TotalDistance_AllTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "AvgSpd_AT", &temp_int32) == ESP_OK) AvgSpeed_AllTime = temp_int32 / 100.0f;
 
+  // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "SpdAccum_AT", &speedAccumulator_AllTime, &required_size);
+  if (nvs_get_u32(nvs_handle, "SpdTime_AT", &temp_uint32) == ESP_OK) totalSpeedSampleTime_AllTime = temp_uint32;
+  if (totalSpeedSampleTime_AllTime > 0)
+    AvgSpeed_AllTime = speedAccumulator_AllTime / (float)totalSpeedSampleTime_AllTime;
+
   // NEW: Sailing metrics (add after other _AllTime loads)
   required_size = sizeof(float);  // ✅ Just assign, don't declare
   nvs_get_blob(nvs_handle, "SailDays_AT", &sailing_days_alltime, &required_size);
@@ -4022,6 +4075,13 @@ void loadNVSData() {
     Serial.printf("NVS LOAD: totalSocSampleTime_AllTime = %lu sec (%.1f hours)\n",
                   temp_uint32, temp_uint32 / 3600.0f);
   }
+
+  // Voltage AllTime accumulators (restore so AvgVoltage_AllTime continues correctly after reboot)
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "VltAccum_AT", &voltageAccumulator_AllTime, &required_size);
+  if (nvs_get_u32(nvs_handle, "VltTime_AT", &temp_uint32) == ESP_OK) totalVoltageSampleTime_AllTime = temp_uint32;
+  if (totalVoltageSampleTime_AllTime > 0)
+    AvgVoltage_AllTime = voltageAccumulator_AllTime / totalVoltageSampleTime_AllTime;
 
   // Calculate AvgSOC_AllTime from loaded accumulators
   if (totalSocSampleTime_AllTime > 0) {
@@ -4148,6 +4208,10 @@ void initNVSCache() {
   prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;
   prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;
   prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);
+  prev_spdAccum_AllTime = speedAccumulator_AllTime;
+  prev_spdTime_AllTime  = (uint32_t)totalSpeedSampleTime_AllTime;
+  prev_vltAccum_AllTime = voltageAccumulator_AllTime;
+  prev_vltTime_AllTime  = (uint32_t)totalVoltageSampleTime_AllTime;
   prev_AvgSOC_AllTime = (int32_t)(AvgSOC_AllTime * 100);
 
   // Battery state

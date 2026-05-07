@@ -155,7 +155,7 @@ static bool checkPointValid(float amps, float battV, float &fieldVolts,
 // ============================================================
 
 static void saveEfficiencyMatrix() {
-  if (!effMatrix) return;
+  if (!effMatrix || hardwarePresent != 1 || inCriticalZone()) return;
 
   nvs_handle_t handle;
   if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) {
@@ -906,10 +906,8 @@ static void saveEffHistory() {
 }
 
 static void saveCurrentSessionHealth() {
-  if (sessionHealthCount == 0) return;
+  if (sessionHealthCount == 0 || hardwarePresent != 1 || inCriticalZone()) return;
   float ratio = sessionHealthSum / (float)sessionHealthCount;
-  Serial.printf("[EffSession] saving health ratio=%.3f (count=%lu) — commits to sparkline on next boot\n",
-    ratio, (unsigned long)sessionHealthCount);
 
   nvs_handle_t handle;
   if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) return;
@@ -1203,6 +1201,136 @@ void ch1_compute_stats() {
   ch1_avg_at = ch1AtCount > 0 ? (float)((double)ch1AtSum / ch1AtCount) : 0.0f;
   ch1_over2x_at = ch1AtOver2x;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INA228 fast-mode interval tracking
+// Mirrors CH1 interval stats. Only updated when inaFastModeActive.
+// resetINA228IntervalWindows() clears 10s/2m windows; all-time persists.
+// ─────────────────────────────────────────────────────────────────────────────
+struct InaMiniB  { uint32_t sum; uint32_t count; uint16_t worst; };
+struct InaBucket { uint32_t sum; uint32_t count; uint16_t worst; uint16_t over2x; };
+
+#define INA_1S_BUCKETS 11
+#define INA_BUCKETS    12
+
+static InaMiniB  ina1sB[INA_1S_BUCKETS];
+static uint8_t   ina1sHead  = 0;
+static uint8_t   ina1sCount = 0;
+static InaMiniB  ina1sCur   = {0, 0, 0};
+static uint32_t  ina1sStart = 0;
+
+static InaBucket ina2mB[INA_BUCKETS];
+static uint8_t   ina2mHead  = 0;
+static uint8_t   ina2mCount = 0;
+static uint32_t  ina2mStart = 0;
+
+static uint64_t  inaAtSum   = 0;
+static uint32_t  inaAtCount = 0;
+static uint16_t  inaAtWorst = 0;
+static uint32_t  inaAtOver2x = 0;
+static uint32_t  inaPrevRead = 0;
+
+void resetINA228IntervalWindows() {
+  memset(ina1sB, 0, sizeof(ina1sB));
+  ina1sHead = 0; ina1sCount = 0;
+  ina1sCur  = {0, 0, 0};
+  ina1sStart = millis();
+  memset(ina2mB, 0, sizeof(ina2mB));
+  ina2mHead = 0; ina2mCount = 0;
+  ina2mStart = millis();
+  inaPrevRead = 0;
+  ina_last_ms = 0;
+  ina_avg_10s = 0.0f; ina_worst_10s = 0; ina_over2x_10s = 0;
+  ina_avg_2m  = 0.0f; ina_worst_2m  = 0; ina_over2x_2m  = 0;
+}
+
+void recordINA228Interval(uint32_t now) {
+  if (inaPrevRead == 0) { inaPrevRead = now; return; }
+
+  uint32_t diff = now - inaPrevRead;
+  inaPrevRead = now;
+  uint16_t iv = (diff > 65535u) ? 65535u : (uint16_t)diff;
+  ina_last_ms = iv;
+
+  // All-time accumulators
+  inaAtCount++;
+  inaAtSum += iv;
+  if (iv > inaAtWorst) inaAtWorst = iv;
+  if (inaAtCount > 1) {
+    float runMean = (float)((double)inaAtSum / inaAtCount);
+    if ((float)iv > runMean * 2.0f) inaAtOver2x++;
+  }
+
+  // 1s mini-bucket
+  ina1sCur.sum += iv;
+  ina1sCur.count++;
+  if (iv > ina1sCur.worst) ina1sCur.worst = iv;
+
+  if (now - ina1sStart >= 1000UL) {
+    ina1sB[ina1sHead] = ina1sCur;
+    ina1sHead = (ina1sHead + 1) % INA_1S_BUCKETS;
+    if (ina1sCount < INA_1S_BUCKETS) ina1sCount++;
+    ina1sCur  = {0, 0, 0};
+    ina1sStart = now;
+  }
+
+  // 10s→2m bucket rollover
+  if (now - ina2mStart >= 10000UL) {
+    InaBucket bkt = {0, 0, 0, 0};
+    for (uint8_t i = 0; i < ina1sCount; i++) {
+      uint8_t idx = (ina1sHead + INA_1S_BUCKETS - 1 - i) % INA_1S_BUCKETS;
+      bkt.sum   += ina1sB[idx].sum;
+      bkt.count += ina1sB[idx].count;
+      if (ina1sB[idx].worst > bkt.worst) bkt.worst = ina1sB[idx].worst;
+    }
+    bkt.sum   += ina1sCur.sum;
+    bkt.count += ina1sCur.count;
+    if (ina1sCur.worst > bkt.worst) bkt.worst = ina1sCur.worst;
+    if (bkt.count > 0) {
+      float thresh = ((float)bkt.sum / (float)bkt.count) * 2.0f;
+      for (uint8_t i = 0; i < ina1sCount; i++) {
+        uint8_t idx = (ina1sHead + INA_1S_BUCKETS - 1 - i) % INA_1S_BUCKETS;
+        if ((float)ina1sB[idx].worst > thresh) bkt.over2x++;
+      }
+    }
+    ina2mB[ina2mHead] = bkt;
+    ina2mHead = (ina2mHead + 1) % INA_BUCKETS;
+    if (ina2mCount < INA_BUCKETS) ina2mCount++;
+    ina2mStart = now;
+  }
+
+  // Publish 10s stats
+  uint32_t sum10 = ina1sCur.sum, n10 = ina1sCur.count;
+  ina_worst_10s = ina1sCur.worst;
+  for (uint8_t i = 0; i < ina1sCount; i++) {
+    uint8_t idx = (ina1sHead + INA_1S_BUCKETS - 1 - i) % INA_1S_BUCKETS;
+    sum10 += ina1sB[idx].sum;
+    n10   += ina1sB[idx].count;
+    if (ina1sB[idx].worst > ina_worst_10s) ina_worst_10s = ina1sB[idx].worst;
+  }
+  ina_avg_10s    = (n10 > 0) ? (float)sum10 / (float)n10 : 0.0f;
+  ina_over2x_10s = 0;  // not tracked at 1s granularity
+
+  // Publish 2m stats
+  uint32_t n2m = 0;
+  uint64_t sum2m = 0;
+  ina_worst_2m   = 0;
+  ina_over2x_2m  = 0;
+  for (uint8_t i = 0; i < ina2mCount; i++) {
+    uint8_t idx = (ina2mHead + INA_BUCKETS - 1 - i) % INA_BUCKETS;
+    n2m          += ina2mB[idx].count;
+    sum2m        += ina2mB[idx].sum;
+    ina_over2x_2m += ina2mB[idx].over2x;
+    if (ina2mB[idx].worst > ina_worst_2m) ina_worst_2m = ina2mB[idx].worst;
+  }
+  ina_avg_2m = (n2m > 0) ? (float)sum2m / (float)n2m : 0.0f;
+
+  // Publish all-time stats
+  ina_avg_at    = (inaAtCount > 0) ? (float)((double)inaAtSum / inaAtCount) : 0.0f;
+  ina_worst_at  = inaAtWorst;
+  ina_over2x_at = inaAtOver2x;
+}
+
 void cacheGzFiles() {
   cachedIndex = loadFileToRAM("/index.html.gz");
   cachedCss = loadFileToRAM("/styles.css.gz");
