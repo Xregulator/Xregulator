@@ -1728,6 +1728,82 @@ function queuePlotUpdate(plotName) {
     }
 }
 
+// ── 60-fps interpolation ──────────────────────────────────────────────────
+function lerp(a, b, t) {
+    if (a === null || b === null) return b;
+    return a + (b - a) * t;
+}
+
+const plotInterp = {
+    current:     { prevY: [0, 0, 0],                  nextY: [0, 0, 0],                  arrivalTime: 0 },
+    voltage:     { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0 },
+    rpm:         { prevY: [0],                        nextY: [0],                        arrivalTime: 0 },
+    temperature: { prevY: [0],                        nextY: [0],                        arrivalTime: 0 },
+    pid:         { prevY: [0, 0, 0, 0, 0, 0, 0],      nextY: [0, 0, 0, 0, 0, 0, 0],      arrivalTime: 0 },
+    cv:          { prevY: [null, null, null, null],    nextY: [null, null, null, null],    arrivalTime: 0 },
+};
+
+let interpLoopRunning = false;
+
+function startInterpLoop() {
+    if (interpLoopRunning) return;
+    interpLoopRunning = true;
+
+    function applyInterp(state, dataArray, seriesCount) {
+        if (state.arrivalTime === 0) return false;
+        const t = Math.min(1, (performance.now() - state.arrivalTime) / (window._lastKnownInterval || 200));
+        const last = dataArray[1].length - 1;
+        for (let s = 0; s < seriesCount; s++) {
+            dataArray[s + 1][last] = lerp(state.prevY[s], state.nextY[s], t);
+        }
+        return true;
+    }
+
+    function frame() {
+        if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 3)) {
+            const s = performance.now();
+            currentTempPlot.setData(currentTempData);
+            const d = performance.now() - s;
+            plotRenderTracker.plots.current.count++;
+            plotRenderTracker.plots.current.totalTime += d;
+            plotRenderTracker.plots.current.maxTime = Math.max(plotRenderTracker.plots.current.maxTime, d);
+        }
+        if (voltagePlot && applyInterp(plotInterp.voltage, voltageData, 2)) {
+            const s = performance.now();
+            voltagePlot.setData(voltageData);
+            const d = performance.now() - s;
+            plotRenderTracker.plots.voltage.count++;
+            plotRenderTracker.plots.voltage.totalTime += d;
+            plotRenderTracker.plots.voltage.maxTime = Math.max(plotRenderTracker.plots.voltage.maxTime, d);
+        }
+        if (rpmPlot && applyInterp(plotInterp.rpm, rpmData, 1)) {
+            const s = performance.now();
+            rpmPlot.setData(rpmData);
+            const d = performance.now() - s;
+            plotRenderTracker.plots.rpm.count++;
+            plotRenderTracker.plots.rpm.totalTime += d;
+            plotRenderTracker.plots.rpm.maxTime = Math.max(plotRenderTracker.plots.rpm.maxTime, d);
+        }
+        if (temperaturePlot && applyInterp(plotInterp.temperature, temperatureData, 1)) {
+            const s = performance.now();
+            temperaturePlot.setData(temperatureData);
+            const d = performance.now() - s;
+            plotRenderTracker.plots.temperature.count++;
+            plotRenderTracker.plots.temperature.totalTime += d;
+            plotRenderTracker.plots.temperature.maxTime = Math.max(plotRenderTracker.plots.temperature.maxTime, d);
+        }
+        if (pidTuningPlot && pidTuningData && applyInterp(plotInterp.pid, pidTuningData, 7)) {
+            pidTuningPlot.setData(pidTuningData);
+        }
+        if (cvTuningPlot && cvTuningData && applyInterp(plotInterp.cv, cvTuningData, 4)) {
+            cvTuningPlot.setData(cvTuningData);
+        }
+        requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+}
+
 //ota update stuff
 
 // Software Update functionality
@@ -2286,8 +2362,6 @@ function processCSVDataOptimized(data) {
         // Increment data points counter
         plotRenderTracker.dataPointsProcessed++;
 
-        // Batch all plot updates
-        const plotUpdates = [];
         const now = useTimestamps ? Math.floor(Date.now() / 1000) : null;
 
         // ALWAYS UPDATE DATA STRUCTURES - Current/Temperature plot data
@@ -2296,6 +2370,11 @@ function processCSVDataOptimized(data) {
         const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
 
         // Shift all current data left and add new data at the end
+        const prevY_current = [
+            currentTempData[1][currentTempData[1].length - 1],
+            currentTempData[2][currentTempData[2].length - 1],
+            currentTempData[3][currentTempData[3].length - 1],
+        ];
         for (let i = 1; i < currentTempData[1].length; i++) {
             if (useTimestamps) {
                 currentTempData[0][i - 1] = currentTempData[0][i];
@@ -2311,15 +2390,18 @@ function processCSVDataOptimized(data) {
         currentTempData[1][lastCurrentIndex] = battCurrent;
         currentTempData[2][lastCurrentIndex] = altCurrent;
         currentTempData[3][lastCurrentIndex] = fieldCurrent;
-
-        if (typeof currentTempPlot !== 'undefined') {
-            plotUpdates.push('current');
-        }
+        plotInterp.current.prevY = prevY_current;
+        plotInterp.current.nextY = [battCurrent, altCurrent, fieldCurrent];
+        plotInterp.current.arrivalTime = performance.now();
 
         // ALWAYS UPDATE DATA STRUCTURES - Voltage plot data
         const adsBattV = 'BatteryV' in data ? parseFloat(data.BatteryV) / 100 : 0;
         const inaBattV = 'IBV' in data ? parseFloat(data.IBV) / 100 : 0;
 
+        const prevY_voltage = [
+            voltageData[1][voltageData[1].length - 1],
+            voltageData[2][voltageData[2].length - 1],
+        ];
         for (let i = 1; i < voltageData[1].length; i++) {
             if (useTimestamps) {
                 voltageData[0][i - 1] = voltageData[0][i];
@@ -2333,14 +2415,14 @@ function processCSVDataOptimized(data) {
         }
         voltageData[1][lastVoltageIndex] = adsBattV;
         voltageData[2][lastVoltageIndex] = inaBattV;
-
-        if (typeof voltagePlot !== 'undefined') {
-            plotUpdates.push('voltage');
-        }
+        plotInterp.voltage.prevY = prevY_voltage;
+        plotInterp.voltage.nextY = [adsBattV, inaBattV];
+        plotInterp.voltage.arrivalTime = performance.now();
 
         // ALWAYS UPDATE DATA STRUCTURES - RPM plot data
         const rpmValue = 'RPM' in data ? parseFloat(data.RPM) : 0;
 
+        const prevY_rpm = [rpmData[1][rpmData[1].length - 1]];
         for (let i = 1; i < rpmData[1].length; i++) {
             if (useTimestamps) {
                 rpmData[0][i - 1] = rpmData[0][i];
@@ -2352,14 +2434,14 @@ function processCSVDataOptimized(data) {
             rpmData[0][lastRPMIndex] = now;
         }
         rpmData[1][lastRPMIndex] = rpmValue;
-
-        if (typeof rpmPlot !== 'undefined') {
-            plotUpdates.push('rpm');
-        }
+        plotInterp.rpm.prevY = prevY_rpm;
+        plotInterp.rpm.nextY = [rpmValue];
+        plotInterp.rpm.arrivalTime = performance.now();
 
         // ALWAYS UPDATE DATA STRUCTURES - Temperature plot data
         const altTemp = 'AlternatorTemperatureF' in data ? parseFloat(data.AlternatorTemperatureF) / 100 : 0;
 
+        const prevY_temp = [temperatureData[1][temperatureData[1].length - 1]];
         for (let i = 1; i < temperatureData[1].length; i++) {
             if (useTimestamps) {
                 temperatureData[0][i - 1] = temperatureData[0][i];
@@ -2371,10 +2453,9 @@ function processCSVDataOptimized(data) {
             temperatureData[0][lastTempIndex] = now;
         }
         temperatureData[1][lastTempIndex] = altTemp;
-
-        if (typeof temperaturePlot !== 'undefined') {
-            plotUpdates.push('temperature');
-        }
+        plotInterp.temperature.prevY = prevY_temp;
+        plotInterp.temperature.nextY = [altTemp];
+        plotInterp.temperature.arrivalTime = performance.now();
 
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
@@ -2390,6 +2471,13 @@ function processCSVDataOptimized(data) {
             // Keep latest real RPM for watermark
             window._lastKnownRPM = rpmValue;
 
+            const last_pid = pidTuningData[1].length - 1;
+            const prevY_pid = [
+                pidTuningData[1][last_pid], pidTuningData[2][last_pid],
+                pidTuningData[3][last_pid], pidTuningData[4][last_pid],
+                pidTuningData[5][last_pid], pidTuningData[6][last_pid],
+                pidTuningData[7][last_pid],
+            ];
             for (let i = 1; i < pidTuningData[1].length; i++) {
                 pidTuningData[1][i - 1] = pidTuningData[1][i]; // setpointLimited
                 pidTuningData[2][i - 1] = pidTuningData[2][i]; // pidInput (raw)
@@ -2408,10 +2496,9 @@ function processCSVDataOptimized(data) {
             pidTuningData[5][lastPidIndex] = dutyCycle;
             pidTuningData[6][lastPidIndex] = pidOutput;
             pidTuningData[7][lastPidIndex] = rpmScaled;
-
-            if (typeof pidTuningPlot !== 'undefined') {
-                queuePidTuningPlotUpdate();
-            }
+            plotInterp.pid.prevY = prevY_pid;
+            plotInterp.pid.nextY = [setpointLimited, pidInput, iMeasFilt, uTargetAmps, dutyCycle, pidOutput, rpmScaled];
+            plotInterp.pid.arrivalTime = performance.now();
         }
 
         // CV voltage tuning plot data
@@ -2420,6 +2507,11 @@ function processCSVDataOptimized(data) {
             const filtV      = 'BatteryV_filtered' in data ? parseFloat(data.BatteryV_filtered) / 100 : null;
             const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
             const icv        = 'Icv' in data ? parseFloat(data.Icv) / 100 : null;
+            const last_cv = cvTuningData[1].length - 1;
+            const prevY_cv = [
+                cvTuningData[1][last_cv], cvTuningData[2][last_cv],
+                cvTuningData[3][last_cv], cvTuningData[4][last_cv],
+            ];
             for (let i = 1; i < cvTuningData[1].length; i++) {
                 cvTuningData[1][i - 1] = cvTuningData[1][i];
                 cvTuningData[2][i - 1] = cvTuningData[2][i];
@@ -2431,13 +2523,12 @@ function processCSVDataOptimized(data) {
             cvTuningData[2][last] = filtV;
             cvTuningData[3][last] = ibvRaw;
             cvTuningData[4][last] = icv;
-            if (cvTuningPlot) queueCVTuningPlotUpdate();
+            plotInterp.cv.prevY = prevY_cv;
+            plotInterp.cv.nextY = [voltTarget, filtV, ibvRaw, icv];
+            plotInterp.cv.arrivalTime = performance.now();
         }
 
-        // Queue all plot updates at once (only for existing plots)
-        plotUpdates.forEach(plotName => queuePlotUpdate(plotName));
-
-        return plotUpdates.length;
+        return 1;
     });
 }
 
@@ -2579,6 +2670,12 @@ function reinitializePlotsWithNewTiming(data) {
     voltageIndex = 0;
     rpmIndex = 0;
     temperatureIndex = 0;
+
+    // Reset interp states so rAF loop doesn't apply stale prev/next to new arrays
+    plotInterp.current.arrivalTime = 0;
+    plotInterp.voltage.arrivalTime = 0;
+    plotInterp.rpm.arrivalTime = 0;
+    plotInterp.temperature.arrivalTime = 0;
 
     // Update plots - they'll auto-scale with time: true
     if (currentTempPlot) {
@@ -3686,6 +3783,7 @@ function initCVTuningDataStructures() {
         new Array(maxPoints).fill(null),   // [3] IBV raw (V)
         new Array(maxPoints).fill(null),   // [4] Icv (A) — right axis
     ];
+    plotInterp.cv.arrivalTime = 0;
 }
 
 function initCVTuningPlot() {
@@ -5440,6 +5538,7 @@ window.addEventListener("load", function () {
     initCVTuningDataStructures();
     initCVTuningPlot();
     initEffPlot();
+    startInterpLoop();
     //initEffPlotAxisListeners();
 
     // Add change listener for manual CloudFeatures toggle
@@ -8221,6 +8320,7 @@ function initPidTuningDataStructures() {
     ];
 
     pidTuningIndex = 0;
+    plotInterp.pid.arrivalTime = 0;
 }
 // Initialize PID tuning plot
 function initPidTuningPlot() {
