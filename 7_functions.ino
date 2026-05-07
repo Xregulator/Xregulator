@@ -429,11 +429,11 @@ static void mergeWindowIntoMatrix() {
     if (win.max_amps > cell.max_amps)
       cell.max_amps = win.max_amps;
 
-    Serial.printf("[EffMerge] bin[%d,%d,%d] +%lus => total=%lus avg=%.1fA min=%.1f max=%.1f (need %ds for eligible)\n",
-      (int)win.r, (int)win.t, (int)win.f,
-      (unsigned long)win.ss_seconds, (unsigned long)newSS,
-      cell.avg_amps, cell.min_amps, cell.max_amps,
-      REF_MIN_SS_SECONDS);
+    //Serial.printf("[EffMerge] bin[%d,%d,%d] +%lus => total=%lus avg=%.1fA min=%.1f max=%.1f (need %ds for eligible)\n",
+    //  (int)win.r, (int)win.t, (int)win.f,
+    //  (unsigned long)win.ss_seconds, (unsigned long)newSS,
+    //  cell.avg_amps, cell.min_amps, cell.max_amps,
+    //  REF_MIN_SS_SECONDS);
 
     saveEfficiencyMatrix();
     selectReferenceBins();
@@ -801,17 +801,17 @@ static void printEffDiagnostics() {
                    eff_reject_battNaN + eff_reject_battLow +
                    eff_reject_rpmDelta + eff_reject_bucket;
   float fv = dutyCycle * getBatteryVoltage() / 100.0f;
-  Serial.printf("[EffDiag] checkPoint: %lu pass / %lu total | duty<5%%=%lu amps<2A=%lu battNaN=%lu battLow=%lu rpmD>200=%lu bucket=-1=%lu\n",
-    (unsigned long)eff_pass, (unsigned long)total,
-    (unsigned long)eff_reject_duty, (unsigned long)eff_reject_amps,
-    (unsigned long)eff_reject_battNaN, (unsigned long)eff_reject_battLow,
-    (unsigned long)eff_reject_rpmDelta, (unsigned long)eff_reject_bucket);
-  Serial.printf("[EffDiag]   live: RPM=%.0f duty=%.1f%% amps=%.1fA battV=%.2fV tempF=%.1f fieldV=%.2fV\n",
-    RPM, dutyCycle, isnan(MeasuredAmps) ? 0.0f : MeasuredAmps,
-    getBatteryVoltage(), TempToUse, fv);
-  Serial.printf("[EffDiag]   buckets: r=%d t=%d f=%d | refFinalized=%d sessionHealthCnt=%lu\n",
-    activeRPMBucket, activeTempBucket, activeFieldBucket,
-    (int)referenceFinalized, (unsigned long)sessionHealthCount);
+  //Serial.printf("[EffDiag] checkPoint: %lu pass / %lu total | duty<5%%=%lu amps<2A=%lu battNaN=%lu battLow=%lu rpmD>200=%lu bucket=-1=%lu\n",
+  //  (unsigned long)eff_pass, (unsigned long)total,
+  //  (unsigned long)eff_reject_duty, (unsigned long)eff_reject_amps,
+  //  (unsigned long)eff_reject_battNaN, (unsigned long)eff_reject_battLow,
+  //  (unsigned long)eff_reject_rpmDelta, (unsigned long)eff_reject_bucket);
+  //Serial.printf("[EffDiag]   live: RPM=%.0f duty=%.1f%% amps=%.1fA battV=%.2fV tempF=%.1f fieldV=%.2fV\n",
+  //  RPM, dutyCycle, isnan(MeasuredAmps) ? 0.0f : MeasuredAmps,
+  //  getBatteryVoltage(), TempToUse, fv);
+  //Serial.printf("[EffDiag]   buckets: r=%d t=%d f=%d | refFinalized=%d sessionHealthCnt=%lu\n",
+  //  activeRPMBucket, activeTempBucket, activeFieldBucket,
+  //  (int)referenceFinalized, (unsigned long)sessionHealthCount);
   eff_pass = 0; eff_reject_duty = 0; eff_reject_amps = 0;
   eff_reject_battNaN = 0; eff_reject_battLow = 0;
   eff_reject_rpmDelta = 0; eff_reject_bucket = 0;
@@ -821,11 +821,11 @@ static void printEffDiagnostics() {
   for (int i = 0; i < MAX_ACTIVE_BINS_PER_WINDOW; i++) {
     if (!effWindow || !effWindow[i].active) continue;
     activeSlots++;
-    Serial.printf("[EffDiag]   window[%d]: bin[%d,%d,%d] ss=%lus avg=%.1fA\n",
-      i, (int)effWindow[i].r, (int)effWindow[i].t, (int)effWindow[i].f,
-      (unsigned long)effWindow[i].ss_seconds, effWindow[i].wt_avg_amps);
+    //Serial.printf("[EffDiag]   window[%d]: bin[%d,%d,%d] ss=%lus avg=%.1fA\n",
+    //  i, (int)effWindow[i].r, (int)effWindow[i].t, (int)effWindow[i].f,
+    //  (unsigned long)effWindow[i].ss_seconds, effWindow[i].wt_avg_amps);
   }
-  if (activeSlots == 0) Serial.println("[EffDiag]   window: no active slots");
+  //if (activeSlots == 0) Serial.println("[EffDiag]   window: no active slots");
 
   // Matrix summary
   if (effMatrix) {
@@ -837,20 +837,20 @@ static void printEffDiagnostics() {
       if (effMatrix[i].is_reference_bin) refBins++;
       totalSS += effMatrix[i].ss_seconds;
     }
-    Serial.printf("[EffDiag] matrix: %d/%d bins populated | %d eligible(>=%ds) | %d ref bins | totalSS=%lus\n",
-      populated, NUM_MATRIX_CELLS, eligible, REF_MIN_SS_SECONDS,
-      refBins, (unsigned long)totalSS);
-    Serial.printf("[EffDiag]   need %d ref bins to finalize (have %d eligible) | finalized=%d\n",
-      NUM_REFERENCE_BINS, eligible, (int)referenceFinalized);
+    //Serial.printf("[EffDiag] matrix: %d/%d bins populated | %d eligible(>=%ds) | %d ref bins | totalSS=%lus\n",
+    //  populated, NUM_MATRIX_CELLS, eligible, REF_MIN_SS_SECONDS,
+    //  refBins, (unsigned long)totalSS);
+    //Serial.printf("[EffDiag]   need %d ref bins to finalize (have %d eligible) | finalized=%d\n",
+    //  NUM_REFERENCE_BINS, eligible, (int)referenceFinalized);
   }
 
   // Sparkline / session health
-  Serial.printf("[EffDiag] sparkline: history=%d sessions stored | this session: healthCnt=%lu",
-    (int)effHistory.count, (unsigned long)sessionHealthCount);
-  if (sessionHealthCount > 0)
-    Serial.printf(" ratio=%.3f (commits on next boot)\n", sessionHealthSum / (float)sessionHealthCount);
-  else
-    Serial.println(" — no health yet (needs refFinalized + is_reference_bin)");
+  //Serial.printf("[EffDiag] sparkline: history=%d sessions stored | this session: healthCnt=%lu",
+  //  (int)effHistory.count, (unsigned long)sessionHealthCount);
+  //if (sessionHealthCount > 0)
+  //  Serial.printf(" ratio=%.3f (commits on next boot)\n", sessionHealthSum / (float)sessionHealthCount);
+  //else
+  //  Serial.println(" — no health yet (needs refFinalized + is_reference_bin)");
 }
 
 void efficiencyTracker_tick() {
@@ -930,8 +930,8 @@ static void loadEffHistory() {
   esp_err_t err = nvs_get_blob(handle, "eff_cs", &prevSessionRatio, &fsz);
   nvs_close(handle);
 
-  Serial.printf("[EffHistory] boot load: count=%d head=%d | eff_cs err=%d ratio=%.3f\n",
-    effHistory.count, effHistory.head, (int)err, prevSessionRatio);
+  //Serial.printf("[EffHistory] boot load: count=%d head=%d | eff_cs err=%d ratio=%.3f\n",
+  //  effHistory.count, effHistory.head, (int)err, prevSessionRatio);
 
   if (err == ESP_OK && prevSessionRatio > 0.1f && prevSessionRatio < 3.0f) {
     // Valid previous session — commit it to history
@@ -952,13 +952,13 @@ static void loadEffHistory() {
     queueConsoleMessageF(
       "EffHistory: committed previous session health=%.2f (%d sessions stored)",
       prevSessionRatio, effHistory.count);
-    Serial.printf("[EffHistory] committed ratio=%.3f -> history now %d sessions\n",
-      prevSessionRatio, effHistory.count);
+    //Serial.printf("[EffHistory] committed ratio=%.3f -> history now %d sessions\n",
+    //  prevSessionRatio, effHistory.count);
 
     effHistoryDirty = true;
   } else {
-    Serial.printf("[EffHistory] no previous session committed (ratio=%.3f out of [0.1,3.0] or err=%d)\n",
-      prevSessionRatio, (int)err);
+    //Serial.printf("[EffHistory] no previous session committed (ratio=%.3f out of [0.1,3.0] or err=%d)\n",
+    //  prevSessionRatio, (int)err);
   }
 }
 

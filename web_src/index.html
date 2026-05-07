@@ -6433,28 +6433,6 @@
             </div>
           </div>
 
-          <!-- PERFORMANCE TIMING -->
-          <div class="card-group">
-            <p class="card-group-title">Performance Timing (μs)</p>
-            <div class="metric-row">
-              <span class="metric-label">Loop Time
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">The very last reading</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="LoopTimeID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">WiFi Send
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">&lt;2,000μs typical; measures the frequent payload (data for plots, sensor
-                    readings, etc.)</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="SendWifiTimeID">0</span></span>
-            </div>
-          </div>
-
           <!-- FUNCTION TIMING — WORST CASE -->
           <div class="card-group" style="grid-column: 1 / -1;">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
@@ -6479,6 +6457,40 @@
                 <div
                   style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
                   Session Worst</div>
+              </div>
+
+              <!-- Loop Time -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Loop Time
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Total loop() duration. 5s window worst resets every 5s — shows active
+                      spike. Session worst is the all-time maximum since boot.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_loop_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_loop_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- WiFi Send -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">WiFi Send
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">SendWifiData() — builds and streams all SSE payloads to connected clients.
+                      Runs every loop tick. Spikes here indicate slow TCP send or large payload backlog.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_SendWifiData_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_SendWifiData_ses_ID">0</span>
+                </div>
               </div>
 
               <!-- Read Analog Inputs -->
@@ -6620,6 +6632,102 @@
                 </div>
               </div>
 
+              <!-- Check Alarms -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Check Alarms
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">CheckAlarms() — alarm state machine, INA228 hardware OV latch management.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_CheckAlarms_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_CheckAlarms_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Calc Derived Metrics -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Calc Derived Metrics
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">calculateDerivedMetrics() — computes filtered voltages, currents, and power figures from raw sensor data.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_calculateDerivedMetrics_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_calculateDerivedMetrics_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Log Dashboard Values -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Log Dashboard Values
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">logDashboardValues() — records periodic min/max/history samples to ring buffers and flash.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_logDashboardValues_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_logDashboardValues_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update System Health Stats -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update System Health Stats
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">updateSystemHealthStats() — polls FreeRTOS heap stats, CPU load, fragmentation. Involves system calls that can occasionally stall.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_updateSystemHealthStats_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_updateSystemHealthStats_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Check WiFi Connection -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Check WiFi Connection
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">checkWiFiConnection() — reconnect logic and RSSI polling. Only runs when ignition is on.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_checkWiFiConnection_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_checkWiFiConnection_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- CH1 Compute Stats -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">CH1 Compute Stats
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">ch1_compute_stats() — scans mini-bucket rings to publish 10s/2m/all-time CH1 interval stats.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_ch1_compute_stats_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_ch1_compute_stats_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- Upload Sensor History -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
@@ -6701,7 +6809,7 @@
               </div>
 
               <!-- Efficiency Tracker -->
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Efficiency Tracker
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">efficiencyTracker_tick() — includes NVS matrix and session health commits every 2 minutes. Spikes to 200–500ms every 2 min are expected in real mode; in fake mode these writes are suppressed.</span>
@@ -6712,6 +6820,176 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_efficiencyTracker_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- SOC / Update Block sub-header -->
+              <div
+                style="grid-column: 1 / -1; background: rgba(0,0,0,0.03); padding: 4px 8px; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); border-top: 1px solid var(--border);">
+                SOC / Update Block
+              </div>
+
+              <!-- Update Engine Runtime -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Engine Runtime</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateEngineRuntime_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateEngineRuntime_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Engine Fuel -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Engine Fuel</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateEngineFuel_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateEngineFuel_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Battery SOC -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Battery SOC</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateBatterySOC_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateBatterySOC_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Travel Statistics -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Travel Statistics</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateTravelStatistics_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateTravelStatistics_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Distance This Interval -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Distance Interval</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateDistanceThisInterval_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateDistanceThisInterval_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Board Temp / Pressure -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Board Temp / Pressure</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateBoardTempPressureMaximums_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateBoardTempPressureMaximums_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Handle SOC Gain Reset -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Handle SOC Gain Reset</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_handleSocGainReset_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_handleSocGainReset_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Handle Alt Zero Reset -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Handle Alt Zero Reset</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_handleAltZeroReset_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_handleAltZeroReset_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Calculate Charge Times -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Calculate Charge Times</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_calculateChargeTimes_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_calculateChargeTimes_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Sailing Metrics -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Sailing Metrics</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_UpdateSailingMetrics_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_UpdateSailingMetrics_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Weather Mode -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Weather Mode</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_updateWeatherMode_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_updateWeatherMode_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Update Sensor Window -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Sensor Window
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">updateSensorWindow() — computes rolling min/max window used for efficiency tracking and thermal analysis. Can spike when the window fills or flushes.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_updateSensorWindow_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_updateSensorWindow_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Check Time Sync -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Check Time Sync
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">checkTimeSync() — NTP sync check. Gated: skipped while in critical zone.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_checkTimeSync_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_checkTimeSync_ses_ID">0</span>
                 </div>
               </div>
 

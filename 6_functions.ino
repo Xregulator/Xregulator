@@ -637,7 +637,7 @@ void loadCVTuningLog() {
 }
 
 void commitCVTuningRecord() {
-  if (!cvTuningLog || cvTuningScore.scoredHighCount < 2) {
+  if (!cvTuningLog || cvTuningScore.scoredHighCount < 1) {
     cvTuningScore = {};
     return;
   }
@@ -798,7 +798,7 @@ void commitThermalTuningRecord() {
   rec.worstOvershootF    = thermalTuningScore.worstOvAll;
   rec.scoredStepCount    = thermalTuningScore.scoredStepCount;
   rec.activeTimeSec      = thermalTuningScore.activeTimeSec;
-  rec.score              = avgSettle + thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;
+  rec.score              = thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;  // settling time is informational only
   rec.kp                 = TempPIDKp;
   rec.ki                 = TempPIDKi;
   rec.lookaheadSec       = ThermalLookaheadSec;
@@ -867,101 +867,104 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
   if (ThermalTuningMode) {
     // Initialize test on first tick
     if (!thermalTuningScore.testStarted) {
-      thermalWaveCurrentSetpointF = thermalWaveLowF;
-      thermalTuningScore.lastToggleMs = nowMs;
-      thermalTuningScore.waveHigh     = false;
-      thermalTuningScore.testStarted  = true;
-      queueConsoleMessageF("ThermalTuning: started — low=%.0f°F high=%.0f°F halfPeriod=%.1fmin",
+      thermalWaveCurrentSetpointF        = thermalWaveLowF;
+      thermalTuningScore.waveHigh        = false;
+      thermalTuningScore.lowPhaseStable  = false;
+      thermalTuningScore.lowConsecInBand = 0;
+      thermalTuningScore.testStarted     = true;
+      queueConsoleMessageF("ThermalTuning: started — low=%.0f°F high=%.0f°F halfPeriod=%.1fmin — waiting for LOW stability",
                            thermalWaveLowF, thermalWaveHighF, thermalWaveHalfPeriodMin);
     }
 
-    // Commit on parameter change
+    // Commit on parameter change — reset to LOW phase and wait for stability again
     if (thermalTuningParamChanged) {
       if (thermalTuningScore.scoredStepCount >= 1) commitThermalTuningRecord();
       else thermalTuningScore = {};
-      thermalTuningParamChanged = false;
-      thermalWaveCurrentSetpointF = thermalWaveLowF;
+      thermalTuningParamChanged          = false;
+      thermalWaveCurrentSetpointF        = thermalWaveLowF;
+      thermalTuningScore.waveHigh        = false;
+      thermalTuningScore.lowPhaseStable  = false;
+      thermalTuningScore.lowConsecInBand = 0;
     }
 
-    // Half-period toggle check
     uint32_t halfPeriodMs = (uint32_t)(thermalWaveHalfPeriodMin * 60000.0f);
-    if ((uint32_t)(nowMs - thermalTuningScore.lastToggleMs) >= halfPeriodMs) {
-      bool goingHigh = !thermalTuningScore.waveHigh;
-      thermalTuningScore.waveHigh     = goingHigh;
-      thermalTuningScore.lastToggleMs = nowMs;
-      thermalTuningScore.halfPeriodCount++;
-      if (thermalTuningScore.halfPeriodCount >= 4) thermalTuningScore.ringInDone = true;
 
-      if (goingHigh) {
-        // Transition to HIGH phase
-        thermalWaveCurrentSetpointF = thermalWaveHighF;
-        if (thermalTuningScore.ringInDone) {
-          // Start a new scored HIGH phase
+    if (!thermalTuningScore.waveHigh) {
+      // LOW phase: wait for temp to stabilize at thermalWaveLowF before scoring a step
+      if (!isnan(tempFiltered) && fabsf(tempFiltered - thermalWaveLowF) <= thermalSettleThreshF) {
+        if (++thermalTuningScore.lowConsecInBand >= thermalConsecutiveReads && !thermalTuningScore.lowPhaseStable) {
+          thermalTuningScore.lowPhaseStable = true;
+          queueConsoleMessageF("ThermalTuning: LOW stable at %.1f°F — stepping up to %.0f°F now",
+                               tempFiltered, thermalWaveHighF);
+          // Step up immediately once stable — scored HIGH phase starts now
+          thermalTuningScore.waveHigh          = true;
+          thermalTuningScore.lastToggleMs       = nowMs;
+          thermalWaveCurrentSetpointF           = thermalWaveHighF;  // controller targets this - 5°F internally
           thermalTuningScore.phaseStartMs       = nowMs;
           thermalTuningScore.phaseSettled       = false;
-          thermalTuningScore.phaseFirstSettled  = false;
+          thermalTuningScore.phaseSettledMs     = 0;
           thermalTuningScore.consecutiveInBand  = 0;
           thermalTuningScore.intOverFs          = 0.0f;
           thermalTuningScore.intUnderFs         = 0.0f;
           thermalTuningScore.worstOvershootF    = 0.0f;
-          queueConsoleMessageF("ThermalTuning: step UP to %.0f°F (ring-in done, scoring)",
-                               thermalWaveHighF);
-        } else {
-          queueConsoleMessageF("ThermalTuning: step UP to %.0f°F (ring-in %d/4)",
-                               thermalWaveHighF, (int)thermalTuningScore.halfPeriodCount);
         }
       } else {
-        // Transition to LOW phase
-        thermalWaveCurrentSetpointF = thermalWaveLowF;
-        // Finalize scored HIGH phase if ring-in was done and a phase was running
-        if (thermalTuningScore.ringInDone && thermalTuningScore.phaseStartMs > 0) {
-          float settleTime = thermalTuningScore.phaseSettled
-                             ? ((float)(thermalTuningScore.phaseSettledMs - thermalTuningScore.phaseStartMs) / 1000.0f)
-                             : ((float)halfPeriodMs / 1000.0f);  // never settled — full-period penalty
-          thermalTuningScore.totalSettlingTimeSec += settleTime;
-          thermalTuningScore.totalIntOverFs       += thermalTuningScore.intOverFs;
-          thermalTuningScore.totalIntUnderFs      += thermalTuningScore.intUnderFs;
-          thermalTuningScore.worstOvAll = fmaxf(thermalTuningScore.worstOvAll, thermalTuningScore.worstOvershootF);
-          thermalTuningScore.scoredStepCount++;
-          thermalTuningScore.activeTimeSec += (float)halfPeriodMs / 1000.0f;
-          queueConsoleMessageF("ThermalTuning: step DOWN — scored step #%d settle=%.0fs over=%.2f°F·s",
-                               (int)thermalTuningScore.scoredStepCount, settleTime, thermalTuningScore.intOverFs);
-        } else {
-          queueConsoleMessageF("ThermalTuning: step DOWN to %.0f°F (ring-in %d/4)",
-                               thermalWaveLowF, (int)thermalTuningScore.halfPeriodCount);
-        }
+        thermalTuningScore.lowConsecInBand = 0;
+      }
+    } else {
+      // HIGH phase: run for halfPeriodMs then step down
+      if ((uint32_t)(nowMs - thermalTuningScore.lastToggleMs) >= halfPeriodMs) {
+        // Finalize scored HIGH phase
+        float settleTime = thermalTuningScore.phaseSettled
+                           ? ((float)(thermalTuningScore.phaseSettledMs - thermalTuningScore.phaseStartMs) / 1000.0f)
+                           : ((float)halfPeriodMs / 1000.0f);  // informational — not in score formula
+        thermalTuningScore.totalSettlingTimeSec += settleTime;
+        thermalTuningScore.totalIntOverFs       += thermalTuningScore.intOverFs;
+        thermalTuningScore.totalIntUnderFs      += thermalTuningScore.intUnderFs;
+        thermalTuningScore.worstOvAll = fmaxf(thermalTuningScore.worstOvAll, thermalTuningScore.worstOvershootF);
+        thermalTuningScore.scoredStepCount++;
+        thermalTuningScore.activeTimeSec += (float)halfPeriodMs / 1000.0f;
+        queueConsoleMessageF("ThermalTuning: step DOWN — scored step #%d over=%.2f°F·s under=%.2f°F·s settle=%.0fs",
+                             (int)thermalTuningScore.scoredStepCount,
+                             thermalTuningScore.intOverFs, thermalTuningScore.intUnderFs, settleTime);
+        // Step down and wait for LOW stability before next step
+        thermalTuningScore.waveHigh        = false;
+        thermalTuningScore.lastToggleMs    = nowMs;
+        thermalTuningScore.lowPhaseStable  = false;
+        thermalTuningScore.lowConsecInBand = 0;
+        thermalWaveCurrentSetpointF        = thermalWaveLowF;
       }
     }
 
-    // Per-tick scoring accumulation during scored HIGH phase
-    if (thermalTuningScore.waveHigh && thermalTuningScore.ringInDone && thermalTuningScore.phaseStartMs > 0) {
+    // Per-tick scoring accumulation during HIGH phase
+    // Error measured against thermalWaveHighF (user's declared limit, not the -5°F internal target).
+    // Undershoot accumulates from the moment of step-up — no waiting for settle.
+    if (thermalTuningScore.waveHigh && thermalTuningScore.phaseStartMs > 0) {
       float tempNow = isnan(tempFiltered) ? 0.0f : tempFiltered;
       float e = tempNow - thermalWaveHighF;
 
       if (e > 0.0f) {
         thermalTuningScore.intOverFs += e * dtSec;
         thermalTuningScore.worstOvershootF = fmaxf(thermalTuningScore.worstOvershootF, e);
-      } else if (thermalTuningScore.phaseFirstSettled) {
-        // Only count undershoot penalty after first settle (avoids penalising the whole rise)
+      } else {
+        // Full undershoot from step-up — rewards fast approach and no overshoot
         thermalTuningScore.intUnderFs += (-e) * dtSec;
       }
 
-      // Settling check
+      // Settling check (informational only — does not gate scoring)
       if (fabsf(e) <= thermalSettleThreshF) {
         thermalTuningScore.consecutiveInBand++;
         if (thermalTuningScore.consecutiveInBand >= thermalConsecutiveReads && !thermalTuningScore.phaseSettled) {
-          thermalTuningScore.phaseSettled      = true;
-          thermalTuningScore.phaseSettledMs    = nowMs;
-          thermalTuningScore.phaseFirstSettled = true;
-          queueConsoleMessageF("ThermalTuning: SETTLED at %.1f°F (target %.0f°F) in %.0fs",
-                               tempNow, thermalWaveHighF,
-                               (float)(nowMs - thermalTuningScore.phaseStartMs) / 1000.0f);
+          thermalTuningScore.phaseSettled   = true;
+          thermalTuningScore.phaseSettledMs = nowMs;
+          queueConsoleMessageF("ThermalTuning: SETTLED at %.1f°F in %.0fs",
+                               tempNow, (float)(nowMs - thermalTuningScore.phaseStartMs) / 1000.0f);
         }
       } else {
         thermalTuningScore.consecutiveInBand = 0;
       }
 
-      // Conditions snapshot (sample every PID compute interval to match conditions logging elsewhere)
+      // Conditions snapshot
       thermalTuningScore.rpmSum     += RPM;
       thermalTuningScore.ambientSum += isnan(ambientTemp) ? 0.0f : ambientTemp;
       thermalTuningScore.avgSampleCount++;
@@ -969,18 +972,26 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
   }
 
   // ===== Always-on thermal live score =====
-  // Fair gate: only score when thermal is the binding constraint.
-  // Track last time voltage control was active; blank for 3 min after it clears
-  // so external limiting (CV mode) can't unfairly inflate the thermal score.
-  // Also require slope buffer full (reliable projectedTemp) and no active step test.
+  // Fair gate: only score when thermal is the binding constraint with no other limiter active.
+  //   voltageControlActive  — CV/absorption mode; 3-min blanking after it clears (sustained bias)
+  //   g_fastOvClampActive   — OV supervisor cutting current for voltage, not thermal
+  //   MaintainMode          — output forced to zero; thermal loop does nothing
+  //   thermalPenaltyAmps    — must be > 2A; if near zero, RPM table or cool conditions are
+  //                           the real ceiling, not thermal management
+  //   g_I_cap               — RPM table ceiling must be > 10A; below that we're at near-idle
+  //                           RPM and thermal management is irrelevant
   if (voltageControlActive) thermalScoreLastExternalMs = nowMs;
   bool liveScoreActive = tempPIDActive &&
                          thermalSlopeBufFull &&
                          !isnan(tempFiltered) &&
                          !ThermalTuningMode &&
+                         !g_fastOvClampActive &&
+                         (MaintainMode == 0) &&
+                         thermalPenaltyAmps > 2.0f &&
+                         g_I_cap > 10.0f &&
                          (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
   if (liveScoreActive) {
-    float liveErr = tempFiltered - (TemperatureLimitF - 5.0f);
+    float liveErr = tempFiltered - TemperatureLimitF;
     accumulateThermalLiveScore(liveErr, dtSec, nowMs);
   }
 }
@@ -1225,25 +1236,34 @@ void AdjustFieldLearnMode() {
     return;
   }
 
-  // ========== OVERRIDE MODE ENTRY DETECTION ==========
-  // Rising-edge detection so one-shot actions (log messages, integrator seeds)
-  // fire exactly once on activation, not every tick.
+  // ========== OVERRIDE MODE ENTRY/EXIT DETECTION ==========
+  // Edge detection so one-shot actions fire exactly once on each transition.
   static bool lastMaintainMode = false;
   static bool lastTargetVoltageMode = false;
-  bool enteringMaintainMode = (MaintainMode == 1) && !lastMaintainMode;
+  bool enteringMaintainMode      = (MaintainMode == 1)      && !lastMaintainMode;
+  bool exitingMaintainMode       = (MaintainMode == 0)      &&  lastMaintainMode;
   bool enteringTargetVoltageMode = (TargetVoltageMode == 1) && !lastTargetVoltageMode;
+  bool exitingTargetVoltageMode  = (TargetVoltageMode == 0) &&  lastTargetVoltageMode;
   lastMaintainMode = (MaintainMode == 1);
   lastTargetVoltageMode = (TargetVoltageMode == 1);
 
   // ========== CHARGING STAGE (bulk/absorption/float) ==========
   // Suppressed while either override is active — letting it run would fire
-  // spurious re-bulk transitions and absorption timeouts. On override exit,
-  // enter_sys_auto() re-evaluates stage from current voltage.
+  // spurious re-bulk transitions and absorption timeouts.
   // Stage tracking only meaningful in AUTO. In MANUAL, voltageControlActive=false
-  // and no CV loop runs, so stage state is meaningless and stage transitions are
-  // misleading. Also prevents stale stage state from contaminating the next AUTO entry.
+  // and no CV loop runs, so stage state is meaningless.
   if (MaintainMode != 1 && TargetVoltageMode != 1 && !tick.manualMode) {
     updateChargingStage();
+  }
+
+  // On override exit: call enter_sys_auto() to reset stage to BULK rather than
+  // resuming pre-override stage state that may be stale. updateChargingStage()
+  // will fast-forward to the correct stage on the first resumed tick if the
+  // battery is already charged.
+  if ((exitingMaintainMode || exitingTargetVoltageMode) && sysMode == SYS_MODE_AUTO) {
+    enter_sys_auto();
+    if (exitingMaintainMode)       queueConsoleMessage("MaintainMode exit: resuming charge from bulk");
+    if (exitingTargetVoltageMode)  queueConsoleMessage("TargetVoltageMode exit: resuming charge from bulk");
   }
 
   // Report mode changes
@@ -1352,6 +1372,8 @@ void AdjustFieldLearnMode() {
         break;
       case SYS_MODE_AUTO:
         enter_sys_auto();
+        tuningScore        = {};   // discard partial data — cannot score across a non-AUTO gap
+        tuningParamChanged = false;
         pidInitialized = true;
         if (enteringNormal) {
           shutdownPhase = SHUTDOWN_PHASE_NONE;
@@ -1540,13 +1562,13 @@ void AdjustFieldLearnMode() {
             tuningScore.ringInDone = true;  // 2 full ring-in cycles (4 half-periods) complete
           }
           if (tuningScore.ringInDone) {
-            tuningScore.inScoringWindow = true;
-            tuningScore.lastToggleMs    = tick.nowMs;
+            tuningScore.pendingWindowOpen = true;  // open window once slew settles, not at toggle time
+            tuningScore.inScoringWindow   = false;
             tuningScore.scoredToggleCount++;
           }
         }
 
-        // Close scoring window after 5s of no new toggle
+        // Close scoring window 5s after it opened (lastToggleMs is set when window opens, not at toggle)
         if (tuningScore.inScoringWindow && (tick.nowMs - tuningScore.lastToggleMs > 5000)) {
           tuningScore.inScoringWindow = false;
         }
@@ -1557,6 +1579,24 @@ void AdjustFieldLearnMode() {
 
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        SetpointRiseRate, SetpointFallRate, actualDtSec);
+
+        // Open scoring window once slew has settled (rate < 1 A/s) — fair regardless of SetpointRiseRate.
+        // lastToggleMs is set here so the 5s timeout starts from when scoring actually begins.
+        {
+          static float tuning_prevSlewed = 0.0f;
+          static bool  tuning_slewInit   = false;
+          float tuning_slewRate = 0.0f;
+          if (tuning_slewInit) {
+            tuning_slewRate = fabsf(setpointLimited - tuning_prevSlewed) / actualDtSec;
+          }
+          tuning_prevSlewed = setpointLimited;
+          tuning_slewInit   = true;
+          if (tuningScore.pendingWindowOpen && tuning_slewRate < 1.0f) {
+            tuningScore.inScoringWindow   = true;
+            tuningScore.pendingWindowOpen = false;
+            tuningScore.lastToggleMs      = tick.nowMs;
+          }
+        }
 
         voltageControlActive = false;
 
@@ -1638,6 +1678,7 @@ void AdjustFieldLearnMode() {
           I_cap = getCapCurrentForRPM(RPM);
         }
 
+        g_I_cap = I_cap;  // expose RPM table ceiling globally for thermal scoring gate
         float I_cmd = I_cap - thermalPenaltyAmps;
         I_cmd = fminf(I_cmd, (float)MaxTableValue);
         I_cmd = fmaxf(I_cmd, 0.0f);
@@ -1798,6 +1839,7 @@ void AdjustFieldLearnMode() {
         // voltageControlActive: true in absorption, float, and TargetVoltageMode.
         // False in idle and MaintainMode. PID runs continuously while true.
         voltageControlActive = !inIdleStage;
+        if (TargetVoltageMode == 1) voltageControlActive = true;  // force CV active even from idle
         if (MaintainMode == 1) {
           voltageControlActive = false;
           if (enteringMaintainMode) {
@@ -1818,7 +1860,7 @@ void AdjustFieldLearnMode() {
 
           // Commit on CVTuningMode turn-off
           if (lastCVTuningMode && !CVTuningMode) {
-            if (cvTuningScore.scoredHighCount >= 2) commitCVTuningRecord();
+            if (cvTuningScore.scoredHighCount >= 1) commitCVTuningRecord();
             else cvTuningScore = {};
           }
           lastCVTuningMode = (CVTuningMode != 0);
@@ -1837,7 +1879,7 @@ void AdjustFieldLearnMode() {
 
             // Commit on parameter change if enough cycles have scored
             if (cvTuningParamChanged) {
-              if (cvTuningScore.scoredHighCount >= 2) commitCVTuningRecord();
+              if (cvTuningScore.scoredHighCount >= 1) commitCVTuningRecord();
               else cvTuningScore = {};
               cvTuningParamChanged = false;
             }
@@ -1849,16 +1891,21 @@ void AdjustFieldLearnMode() {
               cvTuningScore.waveHigh     = goingHigh;
               cvTuningScore.lastToggleMs = currentMillis;
               cvTuningScore.halfPeriodCount++;
-              if (cvTuningScore.halfPeriodCount >= 4) cvTuningScore.ringInDone = true;
+              // 1 half-period ring-in: initial HIGH is the only unscored phase.
+              // ringInDone becomes true after the first toggle (end of initial HIGH).
+              // Guard on phaseStartMs > 0 ensures the initial HIGH→LOW transition
+              // doesn't spuriously finalize a never-started scored HIGH phase.
+              if (cvTuningScore.halfPeriodCount >= 1) cvTuningScore.ringInDone = true;
 
-              if (goingHigh && cvTuningScore.ringInDone) {
+              if (goingHigh && cvTuningScore.ringInDone && cvTuningScore.phaseStartMs > 0) {
                 // Finalize scored LOW phase (step-down response)
                 if (!cvTuningScore.lowPhaseSettled) {
                   cvTuningScore.totalLowSettlingTimeSec += (float)cvWavePeriodSec / 2.0f;
                 }
                 cvTuningScore.scoredLowCount++;
                 // (totalLowIntOvVs accumulated tick-by-tick in LOW phase block below)
-
+              }
+              if (goingHigh && cvTuningScore.ringInDone) {
                 // Start of a new scored HIGH phase
                 cvBaseTarget                    = ChargingVoltageTarget;  // refresh real target
                 cvTuningScore.phaseStartMs      = currentMillis;
@@ -1869,7 +1916,7 @@ void AdjustFieldLearnMode() {
                 cvTuningScore.loadDumpSnap      = g_loadDumpCount;
                 cvTuningScore.hardOcSnap        = g_hardOCCount;
               }
-              if (!goingHigh && cvTuningScore.ringInDone) {
+              if (!goingHigh && cvTuningScore.ringInDone && cvTuningScore.phaseStartMs > 0) {
                 // End of a scored HIGH phase — finalize settling time
                 if (!cvTuningScore.phaseSettled) {
                   cvTuningScore.totalSettlingTimeSec += (float)cvWavePeriodSec / 2.0f;  // half-period penalty
@@ -2147,19 +2194,29 @@ void AdjustFieldLearnMode() {
     innerTermI = (float)currentPID.GetIterm();
     innerTermD = (float)currentPID.GetDterm();
 
-    // Live score accumulation — gate on pre-slew command jump (not slewed setpoint)
-    // so slow SetpointRiseRate doesn't prevent large steps from triggering the window
-    float spDelta = fabsf(liveScore_thisCmd - liveScore_lastCmd);
-    if (spDelta >= 5.0f) {
-      liveScore_lastStepMs = tick.nowMs;
-      liveScore_inWindow   = true;
-    }
-    liveScore_lastCmd = liveScore_thisCmd;
-    if (liveScore_inWindow && (tick.nowMs - liveScore_lastStepMs > 5000)) {
-      liveScore_inWindow = false;
-    }
-    if (liveScore_inWindow) {
-      accumulateLiveScore(pidError, actualDtSec, tick.nowMs);
+    // Live score accumulation — gate on slewed setpoint rate of change.
+    // Using the slewed signal is fair regardless of SetpointRiseRate: slow slew = slow
+    // rate = window opens slowly but isn't falsely penalized for the slew itself.
+    // Window extends 3s beyond last tick where slewed rate >= 5 A/s.
+    {
+      static float liveScore_prevSlewed = 0.0f;
+      static bool  liveScore_slewInit   = false;
+      float slewedRate = 0.0f;
+      if (liveScore_slewInit) {
+        slewedRate = fabsf(setpointLimited - liveScore_prevSlewed) / actualDtSec;
+      }
+      liveScore_prevSlewed = setpointLimited;
+      liveScore_slewInit   = true;
+      if (slewedRate >= 5.0f) {
+        liveScore_lastStepMs = tick.nowMs;
+        liveScore_inWindow   = true;
+      }
+      if (liveScore_inWindow && (tick.nowMs - liveScore_lastStepMs > 3000)) {
+        liveScore_inWindow = false;
+      }
+      if (liveScore_inWindow) {
+        accumulateLiveScore(pidError, actualDtSec, tick.nowMs);
+      }
     }
 
     // CV live score — gate on battery current rate-of-change; 12s scoring window
@@ -2927,7 +2984,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Control state
   tick.manualMode = (ManualFieldToggle == 1);
   tick.autoZeroActive = (autoZeroStartTime > 0);
-  tick.ignoreTemperature = (IgnoreTemperature != 0);
+  tick.ignoreTemperature = (IgnoreTemperature != 0) || (ThermalTuningMode != 0);
   tick.ignoreRPM = (IgnoreRPM != 0);
   tick.rpmBelowMinimum = (!tick.ignoreRPM && RPM < (float)MinRPMForField);
 
@@ -3320,6 +3377,7 @@ void updateRPMBucketHistory(uint32_t nowMs) {
   if (dtMs > 500) dtMs = 500;
   lastHistoryMs = nowMs;
 
+  if (ThermalTuningMode) return;  // don't record overheat history during step tests
   if (isnan(TempToUse) || TempToUse < -50.0f || TempToUse > 400.0f) return;
   if (dtMs == 0) return;
 

@@ -110,8 +110,53 @@ enum Csv1Index {
   CSV1_ina_avg_at,               // 90
   CSV1_ina_worst_at,             // 91
   CSV1_ina_over2x_at,            // 92
+  // Loop + WiFi send timing for Function Timing table (ms, already /1000)
+  CSV1_loopTime5sWindow_ms,      // 93
+  CSV1_MaximumLoopTime_ms,       // 94
+  CSV1_ft_SendWifiData_win,      // 95
+  CSV1_ft_SendWifiData_ses,      // 96
+  // Remaining main-loop functions
+  CSV1_ft_CheckAlarms_win,                      // 97
+  CSV1_ft_CheckAlarms_ses,                      // 98
+  CSV1_ft_calculateDerivedMetrics_win,          // 99
+  CSV1_ft_calculateDerivedMetrics_ses,          // 100
+  CSV1_ft_logDashboardValues_win,               // 101
+  CSV1_ft_logDashboardValues_ses,               // 102
+  CSV1_ft_updateSystemHealthStats_win,          // 103
+  CSV1_ft_updateSystemHealthStats_ses,          // 104
+  CSV1_ft_checkWiFiConnection_win,              // 105
+  CSV1_ft_checkWiFiConnection_ses,              // 106
+  CSV1_ft_ch1_compute_stats_win,               // 107
+  CSV1_ft_ch1_compute_stats_ses,               // 108
+  // SOC / update block
+  CSV1_ft_UpdateEngineRuntime_win,              // 109
+  CSV1_ft_UpdateEngineRuntime_ses,              // 110
+  CSV1_ft_UpdateEngineFuel_win,                 // 111
+  CSV1_ft_UpdateEngineFuel_ses,                 // 112
+  CSV1_ft_UpdateBatterySOC_win,                 // 113
+  CSV1_ft_UpdateBatterySOC_ses,                 // 114
+  CSV1_ft_UpdateTravelStatistics_win,           // 115
+  CSV1_ft_UpdateTravelStatistics_ses,           // 116
+  CSV1_ft_UpdateDistanceThisInterval_win,       // 117
+  CSV1_ft_UpdateDistanceThisInterval_ses,       // 118
+  CSV1_ft_UpdateBoardTempPressureMaximums_win,  // 119
+  CSV1_ft_UpdateBoardTempPressureMaximums_ses,  // 120
+  CSV1_ft_handleSocGainReset_win,               // 121
+  CSV1_ft_handleSocGainReset_ses,               // 122
+  CSV1_ft_handleAltZeroReset_win,               // 123
+  CSV1_ft_handleAltZeroReset_ses,               // 124
+  CSV1_ft_calculateChargeTimes_win,             // 125
+  CSV1_ft_calculateChargeTimes_ses,             // 126
+  CSV1_ft_UpdateSailingMetrics_win,             // 127
+  CSV1_ft_UpdateSailingMetrics_ses,             // 128
+  CSV1_ft_updateWeatherMode_win,                // 129
+  CSV1_ft_updateWeatherMode_ses,                // 130
+  CSV1_ft_updateSensorWindow_win,               // 131
+  CSV1_ft_updateSensorWindow_ses,               // 132
+  CSV1_ft_checkTimeSync_win,                    // 133
+  CSV1_ft_checkTimeSync_ses,                    // 134
 
-  CSV1_FIELD_COUNT  // = 93
+  CSV1_FIELD_COUNT  // = 135
 
 };
 
@@ -2114,10 +2159,8 @@ void setupServer() {
     if (request->hasParam("ManualFieldToggle")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualFieldToggle")->value();
-      Serial.printf("[MFT] ESP32 received ManualFieldToggle=%s\n", inputMessage.c_str());
       writeFile(LittleFS, "/ManualFieldToggle.txt", inputMessage.c_str());
       ManualFieldToggle = inputMessage.toInt();
-      Serial.printf("[MFT] ManualFieldToggle now=%d\n", ManualFieldToggle);
     }
     if (request->hasParam("capLimitMode")) {
       foundParameter = true;
@@ -3000,9 +3043,7 @@ void setupServer() {
       if (request->hasParam(paramName)) {
         foundParameter = true;
         float value = request->getParam(paramName)->value().toFloat();
-        Serial.printf("DEBUG: Received %s = %.2f\n", paramName, value);
         fuelTableRPM[i] = value;
-        Serial.printf("DEBUG: fuelTableRPM[%d] now = %.2f\n", i, fuelTableRPM[i]);
         fuelTableUpdated = true;
       }
 
@@ -3010,9 +3051,7 @@ void setupServer() {
       if (request->hasParam(paramName)) {
         foundParameter = true;
         float value = request->getParam(paramName)->value().toFloat();
-        Serial.printf("DEBUG: Received %s = %.2f\n", paramName, value);
         fuelTableGPH[i] = value;
-        Serial.printf("DEBUG: fuelTableGPH[%d] now = %.2f\n", i, fuelTableGPH[i]);
         fuelTableUpdated = true;
       }
     }
@@ -4274,7 +4313,7 @@ void setupServer() {
         r.avgRPM, r.avgAmbientF);
     }
     // Active test state
-    bool testActive = (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.ringInDone);
+    bool testActive = (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh);
     float ts = 0.0f;
     if (testActive && thermalTuningScore.scoredStepCount > 0) {
       float n = (float)thermalTuningScore.scoredStepCount;
@@ -4596,7 +4635,7 @@ void SendWifiData() {
     ch1_compute_stats();  // ← add this line immediately before the snprintf
 
     static char *payload1 = nullptr;
-    static const size_t PAYLOAD1_SIZE = 900;
+    static const size_t PAYLOAD1_SIZE = 1400;
     if (!payload1) {
       payload1 = (char *)ps_malloc(PAYLOAD1_SIZE);  // bumped from 500, allocated to PSRAM
       if (!payload1) {
@@ -4611,7 +4650,9 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),    // 0
@@ -4707,7 +4748,49 @@ void SendWifiData() {
                                SafeInt(ina_over2x_2m),              // 89
                                SafeInt(ina_avg_at, 100),            // 90  — 2 decimal places
                                SafeInt(ina_worst_at),               // 91
-                               SafeInt(ina_over2x_at)               // 92
+                               SafeInt(ina_over2x_at),              // 92
+                               SafeInt(loopTime5sWindow / 1000),    // 93
+                               SafeInt(MaximumLoopTime / 1000),     // 94
+                               SafeInt(ft_SendWifiData.worstWindow / 1000),  // 95
+                               SafeInt(ft_SendWifiData.worstSession / 1000),  // 96
+                               SafeInt(ft_CheckAlarms.worstWindow / 1000),                     // 97
+                               SafeInt(ft_CheckAlarms.worstSession / 1000),                    // 98
+                               SafeInt(ft_calculateDerivedMetrics.worstWindow / 1000),         // 99
+                               SafeInt(ft_calculateDerivedMetrics.worstSession / 1000),        // 100
+                               SafeInt(ft_logDashboardValues.worstWindow / 1000),              // 101
+                               SafeInt(ft_logDashboardValues.worstSession / 1000),             // 102
+                               SafeInt(ft_updateSystemHealthStats.worstWindow / 1000),         // 103
+                               SafeInt(ft_updateSystemHealthStats.worstSession / 1000),        // 104
+                               SafeInt(ft_checkWiFiConnection.worstWindow / 1000),             // 105
+                               SafeInt(ft_checkWiFiConnection.worstSession / 1000),            // 106
+                               SafeInt(ft_ch1_compute_stats.worstWindow / 1000),              // 107
+                               SafeInt(ft_ch1_compute_stats.worstSession / 1000),             // 108
+                               SafeInt(ft_UpdateEngineRuntime.worstWindow / 1000),             // 109
+                               SafeInt(ft_UpdateEngineRuntime.worstSession / 1000),            // 110
+                               SafeInt(ft_UpdateEngineFuel.worstWindow / 1000),                // 111
+                               SafeInt(ft_UpdateEngineFuel.worstSession / 1000),               // 112
+                               SafeInt(ft_UpdateBatterySOC.worstWindow / 1000),                // 113
+                               SafeInt(ft_UpdateBatterySOC.worstSession / 1000),               // 114
+                               SafeInt(ft_UpdateTravelStatistics.worstWindow / 1000),          // 115
+                               SafeInt(ft_UpdateTravelStatistics.worstSession / 1000),         // 116
+                               SafeInt(ft_UpdateDistanceThisInterval.worstWindow / 1000),      // 117
+                               SafeInt(ft_UpdateDistanceThisInterval.worstSession / 1000),     // 118
+                               SafeInt(ft_UpdateBoardTempPressureMaximums.worstWindow / 1000), // 119
+                               SafeInt(ft_UpdateBoardTempPressureMaximums.worstSession / 1000),// 120
+                               SafeInt(ft_handleSocGainReset.worstWindow / 1000),              // 121
+                               SafeInt(ft_handleSocGainReset.worstSession / 1000),             // 122
+                               SafeInt(ft_handleAltZeroReset.worstWindow / 1000),              // 123
+                               SafeInt(ft_handleAltZeroReset.worstSession / 1000),             // 124
+                               SafeInt(ft_calculateChargeTimes.worstWindow / 1000),            // 125
+                               SafeInt(ft_calculateChargeTimes.worstSession / 1000),           // 126
+                               SafeInt(ft_UpdateSailingMetrics.worstWindow / 1000),            // 127
+                               SafeInt(ft_UpdateSailingMetrics.worstSession / 1000),           // 128
+                               SafeInt(ft_updateWeatherMode.worstWindow / 1000),               // 129
+                               SafeInt(ft_updateWeatherMode.worstSession / 1000),              // 130
+                               SafeInt(ft_updateSensorWindow.worstWindow / 1000),              // 131
+                               SafeInt(ft_updateSensorWindow.worstSession / 1000),             // 132
+                               SafeInt(ft_checkTimeSync.worstWindow / 1000),                   // 133
+                               SafeInt(ft_checkTimeSync.worstSession / 1000)                   // 134
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -5065,7 +5148,7 @@ void SendWifiData() {
                                SafeInt(thermalLiveScoreVal[1], 10000),  // 291 — ×10000
                                SafeInt(thermalLiveScoreVal[2], 10000),  // 292 — ×10000
                                SafeInt(thermalLiveScoreVal[3], 10000),  // 293 — ×10000
-                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.ringInDone) ? 1 : 0  // 294
+                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0  // 294
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);

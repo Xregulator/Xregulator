@@ -239,6 +239,48 @@ const CSV1_FIELDS = [
     "ina_avg_at",                 // 90
     "ina_worst_at",               // 91
     "ina_over2x_at",              // 92
+    "loopTime5sWindow_ms",        // 93
+    "MaximumLoopTime_ms",         // 94
+    "ft_SendWifiData_win",        // 95
+    "ft_SendWifiData_ses",        // 96
+    "ft_CheckAlarms_win",                      // 97
+    "ft_CheckAlarms_ses",                      // 98
+    "ft_calculateDerivedMetrics_win",          // 99
+    "ft_calculateDerivedMetrics_ses",          // 100
+    "ft_logDashboardValues_win",               // 101
+    "ft_logDashboardValues_ses",               // 102
+    "ft_updateSystemHealthStats_win",          // 103
+    "ft_updateSystemHealthStats_ses",          // 104
+    "ft_checkWiFiConnection_win",              // 105
+    "ft_checkWiFiConnection_ses",              // 106
+    "ft_ch1_compute_stats_win",               // 107
+    "ft_ch1_compute_stats_ses",               // 108
+    "ft_UpdateEngineRuntime_win",              // 109
+    "ft_UpdateEngineRuntime_ses",              // 110
+    "ft_UpdateEngineFuel_win",                 // 111
+    "ft_UpdateEngineFuel_ses",                 // 112
+    "ft_UpdateBatterySOC_win",                 // 113
+    "ft_UpdateBatterySOC_ses",                 // 114
+    "ft_UpdateTravelStatistics_win",           // 115
+    "ft_UpdateTravelStatistics_ses",           // 116
+    "ft_UpdateDistanceThisInterval_win",       // 117
+    "ft_UpdateDistanceThisInterval_ses",       // 118
+    "ft_UpdateBoardTempPressureMaximums_win",  // 119
+    "ft_UpdateBoardTempPressureMaximums_ses",  // 120
+    "ft_handleSocGainReset_win",               // 121
+    "ft_handleSocGainReset_ses",               // 122
+    "ft_handleAltZeroReset_win",               // 123
+    "ft_handleAltZeroReset_ses",               // 124
+    "ft_calculateChargeTimes_win",             // 125
+    "ft_calculateChargeTimes_ses",             // 126
+    "ft_UpdateSailingMetrics_win",             // 127
+    "ft_UpdateSailingMetrics_ses",             // 128
+    "ft_updateWeatherMode_win",                // 129
+    "ft_updateWeatherMode_ses",                // 130
+    "ft_updateSensorWindow_win",               // 131
+    "ft_updateSensorWindow_ses",               // 132
+    "ft_checkTimeSync_win",                    // 133
+    "ft_checkTimeSync_ses",                    // 134
 ];
 const CSV2_FIELDS = [
     "IBVMax",                           // 0
@@ -5820,8 +5862,7 @@ window.addEventListener("load", function () {
                 ["IBVID", "IBV"],                        // INA Battery Voltage 
                 ["BCurrID", "Bcur"],                     // Battery Current 
                 ["RPMID", "RPM"],                        // Engine Speed 
-                ["LoopTimeID", "LoopTime"],              // Loop Time 
-                ["WifiHeartBeatID", "WifiHeartBeat"],     // WifiHeartbeat 
+                ["WifiHeartBeatID", "WifiHeartBeat"],     // WifiHeartbeat
                 ["ADS3ID", "Channel3V"],
                 ["FieldVoltsID", "vvout"],
                 ["FieldVoltsID2", "vvout"], // have to use 2 because it appears in two HTML displays (Dumb rule)
@@ -5857,9 +5898,50 @@ window.addEventListener("load", function () {
             const otherFields = [
                 ["AltTempID", "AlternatorTemperatureF"],
                 ["VictronVoltageID", "VictronVoltage"],
-                ["SendWifiTimeID", "SendWifiTime"],
                 ["VeTimeID", "VeTime"],
                 ["MaximumLoopTimeID", "MaximumLoopTime"],
+                ["ft_loop_win_ID", "loopTime5sWindow_ms"],
+                ["ft_loop_ses_ID", "MaximumLoopTime_ms"],
+                ["ft_SendWifiData_win_ID", "ft_SendWifiData_win"],
+                ["ft_SendWifiData_ses_ID", "ft_SendWifiData_ses"],
+                ["ft_CheckAlarms_win_ID", "ft_CheckAlarms_win"],
+                ["ft_CheckAlarms_ses_ID", "ft_CheckAlarms_ses"],
+                ["ft_calculateDerivedMetrics_win_ID", "ft_calculateDerivedMetrics_win"],
+                ["ft_calculateDerivedMetrics_ses_ID", "ft_calculateDerivedMetrics_ses"],
+                ["ft_logDashboardValues_win_ID", "ft_logDashboardValues_win"],
+                ["ft_logDashboardValues_ses_ID", "ft_logDashboardValues_ses"],
+                ["ft_updateSystemHealthStats_win_ID", "ft_updateSystemHealthStats_win"],
+                ["ft_updateSystemHealthStats_ses_ID", "ft_updateSystemHealthStats_ses"],
+                ["ft_checkWiFiConnection_win_ID", "ft_checkWiFiConnection_win"],
+                ["ft_checkWiFiConnection_ses_ID", "ft_checkWiFiConnection_ses"],
+                ["ft_ch1_compute_stats_win_ID", "ft_ch1_compute_stats_win"],
+                ["ft_ch1_compute_stats_ses_ID", "ft_ch1_compute_stats_ses"],
+                ["ft_UpdateEngineRuntime_win_ID", "ft_UpdateEngineRuntime_win"],
+                ["ft_UpdateEngineRuntime_ses_ID", "ft_UpdateEngineRuntime_ses"],
+                ["ft_UpdateEngineFuel_win_ID", "ft_UpdateEngineFuel_win"],
+                ["ft_UpdateEngineFuel_ses_ID", "ft_UpdateEngineFuel_ses"],
+                ["ft_UpdateBatterySOC_win_ID", "ft_UpdateBatterySOC_win"],
+                ["ft_UpdateBatterySOC_ses_ID", "ft_UpdateBatterySOC_ses"],
+                ["ft_UpdateTravelStatistics_win_ID", "ft_UpdateTravelStatistics_win"],
+                ["ft_UpdateTravelStatistics_ses_ID", "ft_UpdateTravelStatistics_ses"],
+                ["ft_UpdateDistanceThisInterval_win_ID", "ft_UpdateDistanceThisInterval_win"],
+                ["ft_UpdateDistanceThisInterval_ses_ID", "ft_UpdateDistanceThisInterval_ses"],
+                ["ft_UpdateBoardTempPressureMaximums_win_ID", "ft_UpdateBoardTempPressureMaximums_win"],
+                ["ft_UpdateBoardTempPressureMaximums_ses_ID", "ft_UpdateBoardTempPressureMaximums_ses"],
+                ["ft_handleSocGainReset_win_ID", "ft_handleSocGainReset_win"],
+                ["ft_handleSocGainReset_ses_ID", "ft_handleSocGainReset_ses"],
+                ["ft_handleAltZeroReset_win_ID", "ft_handleAltZeroReset_win"],
+                ["ft_handleAltZeroReset_ses_ID", "ft_handleAltZeroReset_ses"],
+                ["ft_calculateChargeTimes_win_ID", "ft_calculateChargeTimes_win"],
+                ["ft_calculateChargeTimes_ses_ID", "ft_calculateChargeTimes_ses"],
+                ["ft_UpdateSailingMetrics_win_ID", "ft_UpdateSailingMetrics_win"],
+                ["ft_UpdateSailingMetrics_ses_ID", "ft_UpdateSailingMetrics_ses"],
+                ["ft_updateWeatherMode_win_ID", "ft_updateWeatherMode_win"],
+                ["ft_updateWeatherMode_ses_ID", "ft_updateWeatherMode_ses"],
+                ["ft_updateSensorWindow_win_ID", "ft_updateSensorWindow_win"],
+                ["ft_updateSensorWindow_ses_ID", "ft_updateSensorWindow_ses"],
+                ["ft_checkTimeSync_win_ID", "ft_checkTimeSync_win"],
+                ["ft_checkTimeSync_ses_ID", "ft_checkTimeSync_ses"],
                 ["HeadingNMEAID", "HeadingNMEA"],
                 ["EngineCyclesID", "EngineCycles"],
                 ["header-voltage", "IBV"],
@@ -7163,6 +7245,8 @@ function handleResetPerfCounters() {
                 'ft_saveNVSData_ses_ID', 'ft_FlushFileWriteQueue_ses_ID',
                 'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
                 'MaximumLoopTimeID',
+                'ft_loop_win_ID', 'ft_loop_ses_ID',
+                'ft_SendWifiData_win_ID', 'ft_SendWifiData_ses_ID',
                 'ch1_worst_10s_ID', 'ch1_over2x_10s_ID', 'ch1_avg_10s_ID',
                 'ch1_worst_2m_ID', 'ch1_over2x_2m_ID', 'ch1_avg_2m_ID',
                 'ch1_worst_at_ID', 'ch1_over2x_at_ID', 'ch1_avg_at_ID',

@@ -1934,10 +1934,11 @@ struct TuningScoreState {
     uint8_t  toggleCount;         // half-period toggles seen since test start
     uint8_t  scoredToggleCount;   // toggles that occurred in scoring phase (post ring-in)
     bool     ringInDone;          // true after 4 toggles (2 full cycles discarded)
-    bool     inScoringWindow;     // within 5s of last scored toggle
+    bool     inScoringWindow;     // true while scoring is active (after slew settles, times out 5s after opening)
+    bool     pendingWindowOpen;   // toggle seen post ring-in; waiting for slew to settle before opening window
     float    errorAccum;          // ISE accumulator (e² × dt)
     float    activeTimeSec;       // total time spent inside scoring windows
-    uint32_t lastToggleMs;        // millis() of most recent toggle (for 5s window timer)
+    uint32_t lastToggleMs;        // millis() when scoring window last opened (for 5s timeout timer)
     float    rpmSum;              // for computing avg RPM over test
     float    tempSum;             // for computing avg alt temp over test
     uint16_t avgSampleCount;
@@ -1947,7 +1948,7 @@ struct TuningScoreState {
 
 const uint32_t LIVE_BUCKET_MS[4] = {1000UL, 10000UL, 100000UL, 1000000UL};  // bucket widths: 1s, 10s, 100s, 1000s
 const uint8_t  LIVE_BUCKET_N     = 60;  // buckets per window (60 × bucket_width = window size)
-const float    CV_LIVE_GATE_APS  = 5.0f;  // A/s battery current rate-of-change to open CV scoring window
+const float    CV_LIVE_GATE_APS  = 15.0f;  // A/s battery current rate-of-change to open CV scoring window
 
 TuningRecord*    tuningLog           = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
 uint8_t          tuningLogCount      = 0;        // records currently in ring buffer (0–50)
@@ -1977,7 +1978,7 @@ bool          cvLiveScore_inWindow  = false;
 float   cvWaveAmplitudeV    = 0.30f;  // V — target dips by this during LOW phase
 int     cvWavePeriodSec     = 60;     // s — half-period of CV test wave
 float   cvKOvershoot        = 10.0f;  // penalty weight on integrated overshoot (user-exposed)
-uint8_t cvConsecutiveReads  = 3;      // consecutive filtered reads within ±0.1V to declare settled
+uint8_t cvConsecutiveReads  = 10;     // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
 int     CVTuningMode        = 0;      // 0=off, 1=on
 float   cvBaseTarget        = 0.0f;   // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
 
@@ -2099,21 +2100,21 @@ struct ThermalTuningRecord {
 
 struct ThermalTuningScoreState {
     bool     testStarted;
-    uint8_t  halfPeriodCount;     // total half-period toggles so far
-    bool     ringInDone;          // true after 4 half-periods (2 full cycles)
     bool     waveHigh;            // true = currently in HIGH phase
-    uint32_t lastToggleMs;
-    // Per-HIGH-phase state (reset on each toggle-to-HIGH after ring-in)
+    uint32_t lastToggleMs;        // ms when HIGH phase started (for half-period timer)
+    // LOW phase stability tracking (must stabilize at thermalWaveLowF before stepping up)
+    bool     lowPhaseStable;      // true once temp has been within ±thermalSettleThreshF for thermalConsecutiveReads
+    uint8_t  lowConsecInBand;     // consecutive in-band reads while in LOW phase
+    // Per-HIGH-phase state (reset on each step-up)
     uint32_t phaseStartMs;
-    bool     phaseSettled;        // temperature entered settle band this phase
-    uint32_t phaseSettledMs;      // ms when first settled
-    bool     phaseFirstSettled;   // settled at least once (gates undershoot accumulation)
+    bool     phaseSettled;        // temperature entered settle band this phase (informational only)
+    uint32_t phaseSettledMs;      // ms when first settled (informational only)
     uint8_t  consecutiveInBand;
-    float    intOverFs;           // integral of max(0, temp - HIGH) × dt this phase
-    float    intUnderFs;          // integral of max(0, HIGH - temp) × dt after first settle
-    float    worstOvershootF;     // peak above HIGH setpoint this phase
+    float    intOverFs;           // integral of max(0, temp - thermalWaveHighF) × dt this phase
+    float    intUnderFs;          // integral of max(0, thermalWaveHighF - temp) × dt from step-up (entire phase)
+    float    worstOvershootF;     // peak above thermalWaveHighF this phase
     // Accumulators across scored HIGH phases
-    float    totalSettlingTimeSec;
+    float    totalSettlingTimeSec; // informational — not included in score formula
     float    totalIntOverFs;
     float    totalIntUnderFs;
     float    worstOvAll;
@@ -2130,8 +2131,8 @@ int     ThermalTuningMode          = 0;       // 0=off, 1=on
 float   thermalWaveLowF            = 120.0f;  // LOW phase setpoint (°F)
 float   thermalWaveHighF           = 150.0f;  // HIGH phase setpoint (°F)
 float   thermalWaveHalfPeriodMin   = 10.0f;   // minutes per half-period
-float   thermalKOvershoot          = 4.0f;    // ISE penalty weight for above-setpoint
-float   thermalKUndershoot         = 1.0f;    // ISE penalty weight for below-setpoint (after settle)
+float   thermalKOvershoot          = 10.0f;   // ISE penalty weight for above-setpoint (10× harder than undershoot)
+float   thermalKUndershoot         = 1.0f;    // ISE penalty weight for below-setpoint
 float   thermalSettleThreshF       = 2.0f;    // ±°F band for settled check
 uint8_t thermalConsecutiveReads    = 3;       // consecutive in-band reads to declare settled
 bool    thermalTuningParamChanged  = false;
@@ -2362,6 +2363,8 @@ bool lockoutWasActive = false;
 float g_fastOvCurrentCap = 0.0f;   // live cap ceiling this tick (amps)
 bool g_fastOvClampActive = false;  // true if cap is below MaxTableValue this tick
 uint32_t g_fastOvClampCount = 0;   // rising-edge counter — watch for increments
+
+float g_I_cap = 0.0f;              // RPM table current ceiling this tick (A); set each AUTO tick
 
 
 
@@ -3978,81 +3981,6 @@ void loop() {
     lastTempDebugPrint = millis();
     printTempDebugStatus();
   }
-  // === FUNCTION TIMING DIGEST — Serial only, key spike candidates ===
-  static unsigned long lastTimingPrint = 0;
-  if (millis() - lastTimingPrint >= 300000) {  //5 minutes
-    lastTimingPrint = millis();
-    Serial.println("--- Function Timing Worst-Case (ms) | 5s-win / session ---");
-    Serial.printf("  Loop overall:           %4lu / %4lu\n",
-                  (uint32_t)(loopTime5sWindow / 1000), (uint32_t)(MaximumLoopTime / 1000));
-    Serial.printf("  ReadAnalogInputs:       %4lu / %4lu\n",
-                  ft_ReadAnalogInputs.worstWindow / 1000, ft_ReadAnalogInputs.worstSession / 1000);
-    Serial.printf("  RAI total:              %4lu / %4lu\n",
-                  ft_rai_total.worstWindow / 1000, ft_rai_total.worstSession / 1000);
-    Serial.printf("  RAI INA228:             %4lu / %4lu\n",
-                  ft_rai_ina228.worstWindow / 1000, ft_rai_ina228.worstSession / 1000);
-    Serial.printf("  RAI ADS state:          %4lu / %4lu\n",
-                  ft_rai_ads_state.worstWindow / 1000, ft_rai_ads_state.worstSession / 1000);
-    Serial.printf("  RAI BMP state:          %4lu / %4lu\n",
-                  ft_rai_bmp_state.worstWindow / 1000, ft_rai_bmp_state.worstSession / 1000);
-    Serial.printf("  RAI IMU:                %4lu / %4lu\n",
-                  ft_rai_imu.worstWindow / 1000, ft_rai_imu.worstSession / 1000);
-    Serial.printf("  saveNVSData:            %4lu / %4lu\n",
-                  ft_saveNVSData.worstWindow / 1000, ft_saveNVSData.worstSession / 1000);
-    Serial.printf("  Alternator Control:     %4lu / %4lu\n",
-                  ft_AdjustFieldLearnMode.worstWindow / 1000, ft_AdjustFieldLearnMode.worstSession / 1000);
-    Serial.printf("  CheckAlarms:            %4lu / %4lu\n",
-                  ft_CheckAlarms.worstWindow / 1000, ft_CheckAlarms.worstSession / 1000);
-    Serial.printf("  calcDerivedMetrics:     %4lu / %4lu\n",
-                  ft_calculateDerivedMetrics.worstWindow / 1000, ft_calculateDerivedMetrics.worstSession / 1000);
-    Serial.printf("  logDashboardValues:     %4lu / %4lu\n",
-                  ft_logDashboardValues.worstWindow / 1000, ft_logDashboardValues.worstSession / 1000);
-    Serial.printf("  updateSystemHealthStats:%4lu / %4lu\n",
-                  ft_updateSystemHealthStats.worstWindow / 1000, ft_updateSystemHealthStats.worstSession / 1000);
-    Serial.printf("  checkWiFiConnection:    %4lu / %4lu\n",
-                  ft_checkWiFiConnection.worstWindow / 1000, ft_checkWiFiConnection.worstSession / 1000);
-    Serial.printf("  SendWifiData:           %4lu / %4lu\n",
-                  ft_SendWifiData.worstWindow / 1000, ft_SendWifiData.worstSession / 1000);
-    Serial.printf("  ch1_compute_stats:      %4lu / %4lu\n",
-                  ft_ch1_compute_stats.worstWindow / 1000, ft_ch1_compute_stats.worstSession / 1000);
-    Serial.printf("  uploadSensorHistory:    %4lu / %4lu\n",
-                  ft_uploadSensorHistory.worstWindow / 1000, ft_uploadSensorHistory.worstSession / 1000);
-    Serial.printf("  uploadBufferedRecords:  %4lu / %4lu\n",
-                  ft_uploadBufferedRecords.worstWindow / 1000, ft_uploadBufferedRecords.worstSession / 1000);
-    Serial.printf("  buildConfigPayload:     %4lu / %4lu\n",
-                  ft_buildConfigPayload.worstWindow / 1000, ft_buildConfigPayload.worstSession / 1000);
-    Serial.println("--- SOC / update block ---");
-    Serial.printf("  UpdateEngineRuntime:    %4lu / %4lu\n",
-                  ft_UpdateEngineRuntime.worstWindow / 1000, ft_UpdateEngineRuntime.worstSession / 1000);
-    Serial.printf("  UpdateEngineFuel:       %4lu / %4lu\n",
-                  ft_UpdateEngineFuel.worstWindow / 1000, ft_UpdateEngineFuel.worstSession / 1000);
-    Serial.printf("  UpdateBatterySOC:       %4lu / %4lu\n",
-                  ft_UpdateBatterySOC.worstWindow / 1000, ft_UpdateBatterySOC.worstSession / 1000);
-    Serial.printf("  UpdateTravelStats:      %4lu / %4lu\n",
-                  ft_UpdateTravelStatistics.worstWindow / 1000, ft_UpdateTravelStatistics.worstSession / 1000);
-    Serial.printf("  UpdateDistanceInterval: %4lu / %4lu\n",
-                  ft_UpdateDistanceThisInterval.worstWindow / 1000, ft_UpdateDistanceThisInterval.worstSession / 1000);
-    Serial.printf("  UpdateBoardTempPress:   %4lu / %4lu\n",
-                  ft_UpdateBoardTempPressureMaximums.worstWindow / 1000, ft_UpdateBoardTempPressureMaximums.worstSession / 1000);
-    Serial.printf("  handleSocGainReset:     %4lu / %4lu\n",
-                  ft_handleSocGainReset.worstWindow / 1000, ft_handleSocGainReset.worstSession / 1000);
-    Serial.printf("  handleAltZeroReset:     %4lu / %4lu\n",
-                  ft_handleAltZeroReset.worstWindow / 1000, ft_handleAltZeroReset.worstSession / 1000);
-    Serial.printf("  calculateChargeTimes:   %4lu / %4lu\n",
-                  ft_calculateChargeTimes.worstWindow / 1000, ft_calculateChargeTimes.worstSession / 1000);
-    Serial.printf("  UpdateSailingMetrics:   %4lu / %4lu\n",
-                  ft_UpdateSailingMetrics.worstWindow / 1000, ft_UpdateSailingMetrics.worstSession / 1000);
-    Serial.printf("  updateWeatherMode:      %4lu / %4lu\n",
-                  ft_updateWeatherMode.worstWindow / 1000, ft_updateWeatherMode.worstSession / 1000);
-    Serial.printf("  updateSensorWindow:     %4lu / %4lu\n",
-                  ft_updateSensorWindow.worstWindow / 1000, ft_updateSensorWindow.worstSession / 1000);
-    Serial.printf("  checkTimeSync:          %4lu / %4lu\n",
-                  ft_checkTimeSync.worstWindow / 1000, ft_checkTimeSync.worstSession / 1000);
-    Serial.println("---");
-    Serial.printf("  FlushFileWriteQueue:    %4lu / %4lu\n",
-                  ft_FlushFileWriteQueue.worstWindow / 1000, ft_FlushFileWriteQueue.worstSession / 1000);
-  }
-  // === END FUNCTION TIMING DIGEST ===
 
   // === LED FIELD INDICATOR: 10-second cycle, ON-time proportional to duty MOVE THIS OUT OF LOOP SOMEDAY ===
   {
