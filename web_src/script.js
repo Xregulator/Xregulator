@@ -335,12 +335,12 @@ const CSV2_FIELDS = [
     "AlarmLatchState",                  // 49
     "ResetAlarmLatch",                  // 50
     "MaintainMode",                     // 51
-    "ResetTemp",                        // 52
-    "ResetVoltage",                     // 53
-    "ResetCurrent",                     // 54
-    "ResetEngineRunTime",               // 55
-    "ResetAlternatorOnTime",            // 56
-    "ResetEnergy",                      // 57
+    "_unused52",                        // 52 — ResetTemp flag removed (always 0; button uses hasParam, not this var)
+    "_unused53",                        // 53 — ResetVoltage flag removed
+    "_unused54",                        // 54 — ResetCurrent flag removed
+    "_unused55",                        // 55 — ResetEngineRunTime flag removed
+    "_unused56",                        // 56 — ResetAlternatorOnTime flag removed
+    "_unused57",                        // 57 — ResetEnergy flag removed
     "ManualSOCPoint",                   // 58
     "LearningMode",                     // 59
     "LearningPaused",                   // 60
@@ -578,6 +578,8 @@ const CSV2_FIELDS = [
     "thermalLiveScore2",                // 292 — ×10000
     "thermalLiveScore3",                // 293 — ×10000
     "thermalTuningTestPhase",           // 294
+    "ft_updateAccelMetrics_win",        // 295 — µs
+    "ft_updateAccelMetrics_ses",        // 296 — µs
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -1575,54 +1577,7 @@ let plotRenderTracker = {
     queueCalls: 0
 };
 
-function reportPlotRenderingStats() {
-    const now = performance.now();
-    const intervalMs = now - plotRenderTracker.lastReportTime;
-    const intervalSec = intervalMs / 1000;
-
-    // Calculate stats for each plot
-    const plotStats = {};
-    let totalUpdates = 0;
-
-    Object.entries(plotRenderTracker.plots).forEach(([name, plot]) => {
-        const avgTime = plot.count > 0 ? (plot.totalTime / plot.count) : 0;
-        plotStats[name] = {
-            count: plot.count,
-            avgTime: avgTime,
-            maxTime: plot.maxTime,
-            frequency: plot.count / intervalSec
-        };
-        totalUpdates += plot.count;
-    });
-
-    // Calculate overall metrics
-    const totalRenderPercent = (plotRenderTracker.totalRenderTime / intervalMs) * 100;
-    const avgDataRate = plotRenderTracker.dataPointsProcessed / intervalSec;
-    const queueEfficiency = totalUpdates > 0 ? (totalUpdates / plotRenderTracker.queueCalls * 100) : 0;
-
-    // Format the report
-    const statsText = Object.entries(plotStats)
-        .map(([name, stats]) =>
-            `${name.charAt(0).toUpperCase()}=${stats.count} (${stats.avgTime.toFixed(1)}ms avg, ${stats.frequency.toFixed(1)}/s)`
-        ).join(', ');
-
-    diagLog(`[PLOT RENDER REPORT] ${intervalSec.toFixed(1)}s: ${statsText} | Total: ${totalRenderPercent.toFixed(1)}% render time | Peak: ${plotRenderTracker.peakRenderTime.toFixed(1)}ms | Data: ${avgDataRate.toFixed(1)}/s | Queue eff: ${queueEfficiency.toFixed(0)}%`);
-
-    // Reset counters for next interval
-    Object.values(plotRenderTracker.plots).forEach(plot => {
-        plot.count = 0;
-        plot.totalTime = 0;
-        plot.maxTime = 0;
-    });
-
-    plotRenderTracker.totalRenderTime = 0;
-    plotRenderTracker.peakRenderTime = 0;
-    plotRenderTracker.dataPointsProcessed = 0;
-    plotRenderTracker.queueCalls = 0;
-    plotRenderTracker.lastReportTime = now;
-}
-
-// Plot Y-axis limits 
+// Plot Y-axis limits
 let Ymin1 = -20, Ymax1 = 20; // Current plot
 let Ymin2 = -20, Ymax2 = 20; // Voltage plot  
 let Ymin3 = -20, Ymax3 = 20; // RPM plot
@@ -2336,14 +2291,6 @@ function updateEchoIfChanged(elementId, newValue) {
     return false;
 }
 
-function startFrameTimeMonitoring() {
-    function frame() {
-        trackFrameTime();
-        requestAnimationFrame(frame);
-    }
-    requestAnimationFrame(frame);
-}
-
 //DOM Updates
 // Track what we last wrote to each element to avoid redundant updates
 let lastWrittenValues = new Map();
@@ -2868,12 +2815,6 @@ function updateAllEchosOptimized(data) {
         { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
         { key: 'FourWay', id: 'FourWay_echo', transform: v => v },
         { key: 'RPMScalingFactor', id: 'RPMScalingFactor_echo', transform: v => v },
-        { key: 'ResetTemp', id: 'ResetTemp_echo', transform: v => Math.round(toDisplayTemp(v)) },
-        { key: 'ResetVoltage', id: 'ResetVoltage_echo', transform: v => v },
-        { key: 'ResetCurrent', id: 'ResetCurrent_echo', transform: v => v },
-        { key: 'ResetEngineRunTime', id: 'ResetEngineRunTime_echo', transform: v => v },
-        { key: 'ResetAlternatorOnTime', id: 'ResetAlternatorOnTime_echo', transform: v => v },
-        { key: 'ResetEnergy', id: 'ResetEnergy_echo', transform: v => v },
         { key: 'MaximumAllowedBatteryAmps', id: 'MaximumAllowedBatteryAmps_echo', transform: v => v },
         { key: 'LoadDumpDtThresh',    id: 'LoadDumpDtThresh_echo',    transform: v => v },
         { key: 'LoadDumpCurrentDrop', id: 'LoadDumpCurrentDrop_echo', transform: v => v },
@@ -6742,6 +6683,8 @@ window.addEventListener("load", function () {
                 ["ft_rai_bmp_state_ses_ID", "ft_rai_bmp_state_ses"],
                 ["ft_rai_imu_win_ID", "ft_rai_imu_win"],
                 ["ft_rai_imu_ses_ID", "ft_rai_imu_ses"],
+                ["ft_updateAccelMetrics_win_ID", "ft_updateAccelMetrics_win"],
+                ["ft_updateAccelMetrics_ses_ID", "ft_updateAccelMetrics_ses"],
                 ["tempReadFailCountID", "tempReadFailCount"],
                 ["tempCrcFailCountID", "tempCrcFailCount"],
                 ["tempCrcRecoveredCountID", "tempCrcRecoveredCount"],
@@ -7453,7 +7396,7 @@ function handleResetPerfCounters() {
         .then(() => {
             const ids = [
                 'ft_ReadAnalogInputs_ses_ID', 'ft_rai_total_ses_ID', 'ft_rai_ina228_ses_ID',
-                'ft_rai_ads_state_ses_ID', 'ft_rai_bmp_state_ses_ID', 'ft_rai_imu_ses_ID',
+                'ft_rai_ads_state_ses_ID', 'ft_rai_bmp_state_ses_ID', 'ft_rai_imu_ses_ID', 'ft_updateAccelMetrics_ses_ID',
                 'VeTime2_ID', 'ft_AdjustFieldLearnMode_ses_ID', 'ft_uploadSensorHistory_ses_ID',
                 'ft_uploadBufferedRecords_ses_ID', 'ft_buildConfigPayload_ses_ID',
                 'ft_saveNVSData_ses_ID', 'ft_FlushFileWriteQueue_ses_ID',

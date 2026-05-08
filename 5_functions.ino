@@ -2572,8 +2572,8 @@ void _ReadAnalogInputs_inner() {
                  switch (bmpState) {
 
                    case BMP_IDLE:
-                     // Change this interval to whatever you want. This is only the trigger cadence.
-                     if (millis() - bmpLastCycleMs >= 10000) {
+                     // 8s cycle keeps ambient/baro fresh well inside the 10s DATA_TIMEOUT window
+                     if (millis() - bmpLastCycleMs >= 8000) {
                        bmp388.startForcedConversion();  // returns immediately if sensor is in sleep
                        bmpTriggerMs = millis();
                        bmpState = BMP_WAIT_READY;
@@ -2585,7 +2585,7 @@ void _ReadAnalogInputs_inner() {
                      if (bmp388.getMeasurements(temperature, pressure, altitude)) {
 
                        float newPressure = pressure;  // already hPa / mbar in this library
-                       float newTemp = temperature * 9.0f / 5.0f + 32.0f;
+                       float newTemp = temperature;  // keep in °C; conversion to °F happens at assignment below
 
                        if (!bmpFirstReadDone) {
                          bmpFirstReadDone = true;  // optional discard of first sample
@@ -2595,8 +2595,8 @@ void _ReadAnalogInputs_inner() {
                            MARK_FRESH(IDX_BARO_PRESSURE);
                          }
 
-                         if (isfinite(newTemp) && newTemp > -50.0f && newTemp < 150.0f) {
-                           ambientTemp = newTemp * 1.8f + 32.0f;  // convert sensor °C to °F for storage
+                         if (isfinite(newTemp) && newTemp > -40.0f && newTemp < 85.0f) {  // BMP388 rated range in °C
+                           ambientTemp = newTemp * 1.8f + 32.0f;  // convert °C to °F for storage
                            MARK_FRESH(IDX_AMBIENT_TEMP);
                          }
                        }
@@ -2626,13 +2626,31 @@ void _ReadAnalogInputs_inner() {
 // Called from loop() AFTER AdjustFieldLearnMode() so a Wire stall on the IMU
 // cannot delay control-critical voltage/current reads or the field control decision.
 // No collision-avoidance needed here — a slow drain only delays telemetry, not control.
+// Increment the shared I2C error counter and auto-disable the IMU if errors
+// exceed 10 within any 60-second window.  Called from both error paths inside
+// drainIMUFifo() so the threshold is shared across Get_FIFO_Num_Samples and
+// Get_FIFO_Sample failures.
+static void imuRecordI2CError() {
+  static uint32_t windowErrors = 0;
+  static unsigned long windowStart = 0;
+  imu_i2c_error_count++;
+  unsigned long now = millis();
+  if (windowStart == 0 || now - windowStart >= 60000) {
+    windowStart = now;
+    windowErrors = 0;
+  }
+  windowErrors++;
+  if (windowErrors >= 10 && imuEnabled) {
+    imuEnabled = false;
+    queueConsoleMessageF("IMU disabled: %u I2C errors in 60s (total %u). Check IMU wiring.", windowErrors, imu_i2c_error_count);
+  }
+}
+
 void drainIMUFifo() {
-  unsigned long pollInterval = accelEnabled ? IMU_POLL_INTERVAL : IMU_POLL_INTERVAL_DISABLED;
-  if (!imuEnabled || (millis() - lastIMUPoll < pollInterval)) return;
+  if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
   lastIMUPoll = millis();
-  // When accelEnabled is off, ODR is lowered to 12.5Hz (see transition block in loop()).
-  // FIFO fills at ~25 samples/sec. Drain without processing to keep FIFO clear and
-  // maintain natural I2C pacing in the loop. I2C traffic is ~10× less than when enabled.
+  MARK_FRESH(IDX_IMU);
+  // If accel display is disabled, drain the hardware FIFO so it doesn't back up, but don't queue anything
   if (!accelEnabled) {
     uint16_t n = 0;
     if (imu.Get_FIFO_Num_Samples(&n) == LSM6DSOX_OK && n > 0) {
@@ -2641,19 +2659,13 @@ void drainIMUFifo() {
     }
     return;
   }
-  MARK_FRESH(IDX_IMU);
 
   TIMED_CALL(ft_rai_imu, ([&]() {
                uint16_t fifo_samples = 0;
 
                // Read FIFO status (quick operation, ~50 µs)
                if (imu.Get_FIFO_Num_Samples(&fifo_samples) != LSM6DSOX_OK) {
-                 imu_i2c_error_count++;
-                 static unsigned long last_i2c_error = 0;
-                 if (millis() - last_i2c_error > 60000) {
-                   queueConsoleMessageF("IMU I2C error count: %u", imu_i2c_error_count);
-                   last_i2c_error = millis();
-                 }
+                 imuRecordI2CError();
                  return;
                }
 
@@ -2680,7 +2692,7 @@ void drainIMUFifo() {
                                             : fifo_samples;
 
                if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
-                 imu_i2c_error_count++;
+                 imuRecordI2CError();
                  return;
                }
 
@@ -3461,13 +3473,6 @@ void loadFuelTableFromNVS() {
     Serial.println("DEBUG: Failed to load fuelGPH from NVS");
   }
   nvs_close(nvs_handle);
-}
-void resetFuelTableToDefaults() {
-  for (int i = 0; i < FUEL_TABLE_SIZE; i++) {
-    fuelTableRPM[i] = defaultFuelRPMValues[i];
-    fuelTableGPH[i] = defaultFuelGPHValues[i];
-  }
-  saveFuelTableToNVS();
 }
 
 bool ensureLittleFS() {
@@ -4346,8 +4351,4 @@ void checkExpectedPartition(const char *name, esp_partition_type_t type, esp_par
   } else {
     Serial.printf("  ❌ %s: NOT FOUND!\n", name);
   }
-}
-void StuffToDoAtSomePoint() {
-  //every reset button has a pointless flag and an echo.  I did not delete them for fear of breaking the payload and they hardly cost anything to keep
-  //Battery Voltage Source drop down menu- make this text update on page re-load instead of just an echo number
 }

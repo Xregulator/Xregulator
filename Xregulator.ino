@@ -146,8 +146,8 @@ static PendingFSWrite fsWriteQueue[FS_WRITE_QUEUE_DEPTH];
 static volatile uint8_t fsWriteHead = 0;  // consumer (FlushFileWriteQueue)
 static volatile uint8_t fsWriteTail = 0;  // producer (writeFileThrottled)
 uint32_t fsWriteQueueDrops = 0;           // wire into telemetry
-uint32_t fsFlushDeferred   = 0;           // times FlushFileWriteQueue skipped because NVS committed same tick
-bool     heavyIOThisTick   = false;       // set by NVS commit or FS write; prevents co-fire in same tick
+uint32_t fsFlushDeferred = 0;             // times FlushFileWriteQueue skipped because NVS committed same tick
+bool heavyIOThisTick = false;             // set by NVS commit or FS write; prevents co-fire in same tick
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
@@ -260,12 +260,12 @@ static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
 // DEV: ALL thresholds relaxed to near-zero for sparkline testing. PRODUCTION: restore all values below.
 // PRODUCTION values: NUM_REFERENCE_BINS=10, REF_MIN_SS_SECONDS=30, REF_FREEZE_TOTAL_SS=6000,
 //                    REF_SPREAD_TEMP_DEG=50.0f, REF_SPREAD_FIELD_VOLTS=3.75f, REF_SPREAD_RPM=1000.0f
-#define NUM_REFERENCE_BINS 1          // DEV ONLY — production value: 10
-#define REF_MIN_SS_SECONDS 5          // DEV ONLY — production value: 30
-#define REF_FREEZE_TOTAL_SS 10        // DEV ONLY — production value: 6000
-#define REF_SPREAD_TEMP_DEG 1.0f      // DEV ONLY — production value: 50.0f
-#define REF_SPREAD_FIELD_VOLTS 0.1f   // DEV ONLY — production value: 3.75f
-#define REF_SPREAD_RPM 1.0f           // DEV ONLY — production value: 1000.0f
+#define NUM_REFERENCE_BINS 1         // DEV ONLY — production value: 10
+#define REF_MIN_SS_SECONDS 5         // DEV ONLY — production value: 30
+#define REF_FREEZE_TOTAL_SS 10       // DEV ONLY — production value: 6000
+#define REF_SPREAD_TEMP_DEG 1.0f     // DEV ONLY — production value: 50.0f
+#define REF_SPREAD_FIELD_VOLTS 0.1f  // DEV ONLY — production value: 3.75f
+#define REF_SPREAD_RPM 1.0f          // DEV ONLY — production value: 1000.0f
 
 // --- Anomaly detection — runtime, user-configurable via LittleFS ---
 float anomalyMarginAmps = 5.0f;   // Extra amps of tolerance beyond ref min/max (default: none)
@@ -442,8 +442,7 @@ static ImuRingBuffer *imuRingBuffer = nullptr;
 // IMU polling state
 bool imuEnabled = false;
 unsigned long lastIMUPoll = 0;
-constexpr unsigned long IMU_POLL_INTERVAL          = 10;   // ms — when accelEnabled
-constexpr unsigned long IMU_POLL_INTERVAL_DISABLED = 100;  // ms — when !accelEnabled; ODR also dropped to 12.5Hz so FIFO fills ~25 samples/sec, well within 6-sample drain at this rate
+constexpr unsigned long IMU_POLL_INTERVAL = 10;  // ms
 
 // FIFO drain budget
 constexpr uint16_t MAX_FIFO_DRAIN_PER_POLL = 6;   // Conservative start, tune up if needed
@@ -474,18 +473,18 @@ float imu_gyro_y_raw = 0;   // dps
 float imu_gyro_z_raw = 0;   // dps
 
 // --- CALCULATED METRICS (Real-time) ---
-float imu_heel_deg = 0;             // Current heel angle
-float imu_pitch_deg = 0;            // Current pitch angle
-float imu_yaw_rate_dps = 0;         // Current yaw rate (direct from gyro_z)
-float imu_vertical_accel_g = 0;     // Vertical acceleration
-float imu_total_accel_g = 0;        // Total acceleration magnitude
-float imu_hf_vibration_energy = 0;  // High-freq vibration energy (RMS²)
-float imu_msi_score = 0;            // Motion Sickness Index (L&G 1987, freq-weighted vertical accel RMS; 100 = severe)
-float imu_vomit_pct = 0;            // Estimated % of population vomiting after 2hrs (L&G 1987, power-law approx)
-float imu_anchorage_comfort = 0;    // Heuristic comfort score 0-100 (100=calm); roll+MSI+slam weighted
-float imu_heel_deviation_120s = 0;  // Peak roll deviation from 2-min mean (°)
-float imu_pitch_deviation_120s = 0; // Peak pitch deviation from 2-min mean (°)
-float imu_heading_swing_120s = -1;  // Peak-to-peak heading swing over 2 min (°); -1 = no compass data
+float imu_heel_deg = 0;              // Current heel angle
+float imu_pitch_deg = 0;             // Current pitch angle
+float imu_yaw_rate_dps = 0;          // Current yaw rate (direct from gyro_z)
+float imu_vertical_accel_g = 0;      // Vertical acceleration
+float imu_total_accel_g = 0;         // Total acceleration magnitude
+float imu_hf_vibration_energy = 0;   // High-freq vibration energy (RMS²)
+float imu_msi_score = 0;             // Motion Sickness Index (L&G 1987, freq-weighted vertical accel RMS; 100 = severe)
+float imu_vomit_pct = 0;             // Estimated % of population vomiting after 2hrs (L&G 1987, power-law approx)
+float imu_anchorage_comfort = 0;     // Heuristic comfort score 0-100 (100=calm); roll+MSI+slam weighted
+float imu_heel_deviation_120s = 0;   // Peak roll deviation from 2-min mean (°)
+float imu_pitch_deviation_120s = 0;  // Peak pitch deviation from 2-min mean (°)
+float imu_heading_swing_120s = -1;   // Peak-to-peak heading swing over 2 min (°); -1 = no compass data
 
 // --- RAW SIGNAL STATISTICS (Reset every reporting period) ---
 // Accel X
@@ -777,7 +776,7 @@ int totalPowerCycles = 0;    // Total number of power cycles (persistent)
 // These are health variables for the TempTask (digital temperature measurement)
 unsigned long lastTempTaskHeartbeat = 0;
 bool tempTaskHealthy = true;
-bool tempTaskAlarm = false;   // Set by checkTempTaskHealth() — triggers buzzer regardless of AlarmActivate
+bool tempTaskAlarm = false;                     // Set by checkTempTaskHealth() — triggers buzzer regardless of AlarmActivate
 const unsigned long TEMP_TASK_TIMEOUT = 20000;  // 20 seconds
 
 //Cloud Upload Stuff
@@ -853,7 +852,7 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
 float InputFilterTC = 100.0f;  // ms — web-configurable, LittleFS-backed
 float BatteryV_filtered = 0.0f;
-float IBV_filtered = 0.0f;       // EMA of INA228 bus voltage — used by getFiltV() and CV loop
+float IBV_filtered = 0.0f;  // EMA of INA228 bus voltage — used by getFiltV() and CV loop
 float MeasuredAmps_filtered = 0.0f;
 float RPM_filtered = 0.0f;
 
@@ -870,9 +869,9 @@ uint8_t systemIDActive = 0;                    // 0=idle, 1-9=current phase (sen
 bool systemIDResultsReady = false;             // set true when post-processing is complete
 
 // ── Stabilize-phase constants ────────────────────────────────────────────────
-#define SYSID_STABILIZE_AMPS       10.0f   // target alternator output before baseline begins
-#define SYSID_STABILIZE_SETTLE_MS  5000    // must hold within ±2A for this long before proceeding
-#define SYSID_STABILIZE_TIMEOUT_MS 30000   // abort if can't stabilize within this window
+#define SYSID_STABILIZE_AMPS 10.0f        // target alternator output before baseline begins
+#define SYSID_STABILIZE_SETTLE_MS 5000    // must hold within ±2A for this long before proceeding
+#define SYSID_STABILIZE_TIMEOUT_MS 30000  // abort if can't stabilize within this window
 
 float systemIDRiseDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // rising-step delays, ms
 float systemIDFallDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // falling-step delays, ms
@@ -894,7 +893,7 @@ int sysIDSampleCount = 0;
 // whatever mode they were in (AUTO, MANUAL, CV, bulk, etc.) without a jump.
 struct SystemIDResumeState {
   bool valid = false;
-int sysMode = 0;
+  int sysMode = 0;
   float setpointLimited_snap = 0.0f;
   float lastAppliedDuty_snap = 0.0f;  // informational only; NOT replayed as a command
   float cv_I_snap = 0.0f;
@@ -1005,8 +1004,8 @@ int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
 int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
-float HardOCTripAmps = 160.0f;       // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
-uint32_t HardOCDebounceMs = 20;      // user-adjustable, persisted in LittleFS
+float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
+uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in LittleFS
 uint32_t hardOCStartMs = 0;
 //Field PWM stuff
 const int pwmPin = 14;  // field PWM pin # (was 32)
@@ -1082,7 +1081,7 @@ float MeasuredAmpsMax;              // used to track maximum alternator output
 float RPMMax;                       // used to track maximum RPM
 int ADS1115Disconnected = 0;
 volatile bool battVFreshFlag = false;
-bool ibvFreshFlag = false;          // set each INA228 read; cleared by fastOV dvdt block
+bool ibvFreshFlag = false;  // set each INA228 read; cleared by fastOV dvdt block
 
 // === Cloud Features Variables (and some others later added to LiveData) ===
 // Energy (Wh)
@@ -1433,8 +1432,8 @@ int SOCUpdateInterval = 2000;             // Update SOC every 2 seconds.   Don't
 unsigned long lastNVSSaveTime = 0;
 const unsigned long NVS_SAVE_INTERVAL = 120000;  // 2 minutes
 const uint16_t NVS_TICK_SPACING = 100;           // fast ticks between NVS write phases
-uint8_t  nvsPhase   = 0;    // 0=idle, 1-8=write phases, 9=commit; exported to CSV
-uint32_t nvsCycleMs = 0;    // ms elapsed for last complete NVS drain cycle
+uint8_t nvsPhase = 0;                            // 0=idle, 1-8=write phases, 9=commit; exported to CSV
+uint32_t nvsCycleMs = 0;                         // ms elapsed for last complete NVS drain cycle
 
 /*
 NVS lifetime analysis (ESP32-S3-WROOM-1U-N16R8, 16 MB flash)
@@ -1515,15 +1514,15 @@ int32_t prev_AltOnTime_AllTime = 0;
 float prev_ChargeCycles_AllTime = 0;
 int32_t prev_TotalDist_AllTime = 0;
 int32_t prev_AvgSpeed_AllTime = 0;
-float   prev_spdAccum_AllTime = -1.0f;
+float prev_spdAccum_AllTime = -1.0f;
 uint32_t prev_spdTime_AllTime = 0;
-float   prev_vltAccum_AllTime = -1.0f;
+float prev_vltAccum_AllTime = -1.0f;
 uint32_t prev_vltTime_AllTime = 0;
 int32_t prev_AvgSOC = 0;
 int32_t prev_AvgSOC_AllTime = 0;
 static float prev_sailing_days_alltime = -1.0f;
 uint64_t prev_socAccum_AllTime = 0;  // moved from saveNVSData() static — needed across phases
-uint32_t prev_socTime_AllTime  = 0;
+uint32_t prev_socTime_AllTime = 0;
 
 // Accumulators for runtime tracking
 unsigned long engineRunAccumulator = 0;     // Milliseconds accumulator for engine runtime
@@ -1552,23 +1551,23 @@ int LifeIndicatorColor = 0;           // 0=green, 1=yellow, 2=red
 
 
 // Timing
-unsigned long lastThermalUpdateTime = 0;  // Last thermal calculation time
+unsigned long lastThermalUpdateTime = 0;     // Last thermal calculation time
 const uint32_t INA_SLOW_INTERVAL_MS = 1100;  // field off: AVG=128, CT=4120µs → 1054ms update
 const uint32_t INA_FAST_INTERVAL_MS = 5;     // field on:  AVG=4,   CT=540µs  → 4.3ms update
 uint32_t inaReadInterval = INA_SLOW_INTERVAL_MS;
 bool inaFastModeActive = false;
 
 // INA228 fast-mode interval stats — updated only when inaFastModeActive, frozen when field off
-uint16_t ina_last_ms    = 0;
-float    ina_avg_10s    = 0.0f;
-uint16_t ina_worst_10s  = 0;
+uint16_t ina_last_ms = 0;
+float ina_avg_10s = 0.0f;
+uint16_t ina_worst_10s = 0;
 uint16_t ina_over2x_10s = 0;
-float    ina_avg_2m     = 0.0f;
-uint16_t ina_worst_2m   = 0;
-uint16_t ina_over2x_2m  = 0;
-float    ina_avg_at     = 0.0f;
-uint16_t ina_worst_at   = 0;
-uint32_t ina_over2x_at  = 0;
+float ina_avg_2m = 0.0f;
+uint16_t ina_worst_2m = 0;
+uint16_t ina_over2x_2m = 0;
+float ina_avg_at = 0.0f;
+uint16_t ina_worst_at = 0;
+uint32_t ina_over2x_at = 0;
 
 // Physical Constants
 const float EA_INSULATION = 1.0f;     // eV, activation energy
@@ -1611,11 +1610,11 @@ int autoZeroSampleCount = 0;
 //Momentary Buttons and alarm logic
 int FactorySettings = 0;  // Reset Button
 // Add these alarm variables with your other globals
-bool alarmLatch = false;    // Current latched alarm state
-int AlarmLatchEnabled = 0;  // Whether latching is enabled (0/1 for consistency)
-int AlarmTest = 0;          // Momentary alarm test (1 = test active)
+bool alarmLatch = false;        // Current latched alarm state
+int AlarmLatchEnabled = 0;      // Whether latching is enabled (0/1 for consistency)
+int AlarmTest = 0;              // Momentary alarm test (1 = test active)
 bool alarmOutputState = false;  // Single source of truth for GPIO 21 state — mirrors every digitalWrite(21,...)
-int ResetAlarmLatch = 0;    // Momentary reset command
+int ResetAlarmLatch = 0;        // Momentary reset command
 unsigned long alarmTestStartTime = 0;
 const unsigned long ALARM_TEST_DURATION = 2000;  // 2 seconds test duration
 int Alarm_Status;                                // for alarm mirror light on Client
@@ -1638,7 +1637,7 @@ bool chargingEnabled;                 // defined from other variables
 bool bmsSignalActive;                 // Read from GPIO34
 int AlarmActivate = 0;                // set to 1 to enable alarm conditions
 int TempAlarm = 190;                  // above this value, sound alarm
-int TempAlarmLow = 32;               // below this value, sound alarm (0 = disabled)
+int TempAlarmLow = 32;                // below this value, sound alarm (0 = disabled)
 int VoltageAlarmHigh = 15;            // above this value, sound alarm
 int VoltageAlarmLow = 11;             // below this value, sound alarm
 int CurrentAlarmHigh = 100;           // above this value, sound alarm
@@ -1651,12 +1650,7 @@ int timeToFullChargeMin = NAN;        // self explained
 int timeToFullDischargeMin = NAN;     // self explained
 
 
-int ResetTemp;              // reset the maximum alternator temperature tracker
-int ResetVoltage;           // reset the maximum battery voltage measured
-int ResetCurrent;           // reset the maximmum alternator output current
-int ResetEngineRunTime;     // reset engine run time tracker
-int ResetAlternatorOnTime;  //reset AlternatorOnTime
-int ResetEnergy;            // ???
+// fields 52-57 in CSVData2 are reserved zeros (Reset* flags were always 0; buttons use hasParam, not these vars)
 int ResetDischargedEnergy;  // total discharged from battery
 int ResetFuelUsed;          // fuel used by alternator
 int ResetAlternatorChargedEnergy;
@@ -1810,11 +1804,12 @@ FuncTiming ft_UpdateSailingMetrics;
 FuncTiming ft_updateWeatherMode;
 FuncTiming ft_updateSensorWindow;
 FuncTiming ft_checkTimeSync;
-FuncTiming ft_rai_total;      // ReadAnalogInputs() — full function including flash writes
-FuncTiming ft_rai_ina228;     // INA228 read block only
-FuncTiming ft_rai_ads_state;  // ADS1115 state machine — cost per state step
-FuncTiming ft_rai_bmp_state;  // BMP388 state machine — cost per state step
-FuncTiming ft_rai_imu;        // IMU FIFO drain block
+FuncTiming ft_rai_total;           // ReadAnalogInputs() — full function including flash writes
+FuncTiming ft_rai_ina228;          // INA228 read block only
+FuncTiming ft_rai_ads_state;       // ADS1115 state machine — cost per state step
+FuncTiming ft_rai_bmp_state;       // BMP388 state machine — cost per state step
+FuncTiming ft_rai_imu;             // IMU FIFO drain block
+FuncTiming ft_updateAccelMetrics;  // accel ring-buffer processing (updateAccelMetrics)
 FuncTiming ft_ReadVEData;
 FuncTiming ft_FlushFileWriteQueue;
 FuncTiming ft_efficiencyTracker;
@@ -1919,252 +1914,252 @@ int TuningMode = 0;      //
 
 // === PID Tuning Score System ===
 struct TuningRecord {
-    uint16_t runNumber;
-    float    score;
-    float    activeTimeSec;
-    float    kp, ki, kd;
-    uint8_t  sampleDivisor;
-    float    trackingGain;
-    float    dutyRampRate;
-    int16_t  waveAmplitude;
-    int16_t  wavePeriod;
-    float    avgRPM;
-    float    avgAltTempF;
-    float    worstErrorA;
+  uint16_t runNumber;
+  float score;
+  float activeTimeSec;
+  float kp, ki, kd;
+  uint8_t sampleDivisor;
+  float trackingGain;
+  float dutyRampRate;
+  int16_t waveAmplitude;
+  int16_t wavePeriod;
+  float avgRPM;
+  float avgAltTempF;
+  float worstErrorA;
 };
 
 struct ScoreBucket {
-    float errorAccum;
-    float activeTimeSec;
+  float errorAccum;
+  float activeTimeSec;
 };
 
 struct TuningScoreState {
-    uint8_t  toggleCount;         // half-period toggles seen since test start
-    uint8_t  scoredToggleCount;   // toggles that occurred in scoring phase (post ring-in)
-    bool     ringInDone;          // true after 4 toggles (2 full cycles discarded)
-    bool     inScoringWindow;     // true while scoring is active (after slew settles, times out 5s after opening)
-    bool     pendingWindowOpen;   // toggle seen post ring-in; waiting for slew to settle before opening window
-    float    errorAccum;          // ISE accumulator (e² × dt)
-    float    activeTimeSec;       // total time spent inside scoring windows
-    uint32_t lastToggleMs;        // millis() when scoring window last opened (for 5s timeout timer)
-    float    rpmSum;              // for computing avg RPM over test
-    float    tempSum;             // for computing avg alt temp over test
-    uint16_t avgSampleCount;
-    float    worstErrorA;         // largest single |error| seen during test
-    float    score;               // current normalized score = errorAccum / activeTimeSec
+  uint8_t toggleCount;        // half-period toggles seen since test start
+  uint8_t scoredToggleCount;  // toggles that occurred in scoring phase (post ring-in)
+  bool ringInDone;            // true after 4 toggles (2 full cycles discarded)
+  bool inScoringWindow;       // true while scoring is active (after slew settles, times out 5s after opening)
+  bool pendingWindowOpen;     // toggle seen post ring-in; waiting for slew to settle before opening window
+  float errorAccum;           // ISE accumulator (e² × dt)
+  float activeTimeSec;        // total time spent inside scoring windows
+  uint32_t lastToggleMs;      // millis() when scoring window last opened (for 5s timeout timer)
+  float rpmSum;               // for computing avg RPM over test
+  float tempSum;              // for computing avg alt temp over test
+  uint16_t avgSampleCount;
+  float worstErrorA;  // largest single |error| seen during test
+  float score;        // current normalized score = errorAccum / activeTimeSec
 };
 
-const uint32_t LIVE_BUCKET_MS[4] = {1000UL, 10000UL, 100000UL, 1000000UL};  // bucket widths: 1s, 10s, 100s, 1000s
-const uint8_t  LIVE_BUCKET_N     = 60;  // buckets per window (60 × bucket_width = window size)
-const float    CV_LIVE_GATE_APS  = 15.0f;  // A/s battery current rate-of-change to open CV scoring window
+const uint32_t LIVE_BUCKET_MS[4] = { 1000UL, 10000UL, 100000UL, 1000000UL };  // bucket widths: 1s, 10s, 100s, 1000s
+const uint8_t LIVE_BUCKET_N = 60;                                             // buckets per window (60 × bucket_width = window size)
+const float CV_LIVE_GATE_APS = 15.0f;                                         // A/s battery current rate-of-change to open CV scoring window
 
-TuningRecord*    tuningLog           = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
-uint8_t          tuningLogCount      = 0;        // records currently in ring buffer (0–50)
-uint8_t          tuningLogHead       = 0;        // next write index
-uint16_t         tuningRunCounter    = 0;        // increments each commit, persists via loadTuningLog
-TuningScoreState tuningScore         = {};       // active test accumulator
-bool             tuningParamChanged  = false;    // set by server handlers when a tuning param is updated
+TuningRecord *tuningLog = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
+uint8_t tuningLogCount = 0;         // records currently in ring buffer (0–50)
+uint8_t tuningLogHead = 0;          // next write index
+uint16_t tuningRunCounter = 0;      // increments each commit, persists via loadTuningLog
+TuningScoreState tuningScore = {};  // active test accumulator
+bool tuningParamChanged = false;    // set by server handlers when a tuning param is updated
 
-ScoreBucket*  liveScoreBuckets[4]   = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
-uint8_t       liveScoreHead[4]      = {};
-uint32_t      liveBucketStartMs[4]  = {};
-float         liveScoreVal[4]       = {};  // cached computed scores, updated each accumulation tick
-float         liveScore_lastCmd     = 0.0f;  // setpointCommand from previous tick (pre-slew)
-float         liveScore_thisCmd     = 0.0f;  // setpointCommand from current tick (pre-slew)
-uint32_t      liveScore_lastStepMs  = 0;
-bool          liveScore_inWindow    = false;
+ScoreBucket *liveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
+uint8_t liveScoreHead[4] = {};
+uint32_t liveBucketStartMs[4] = {};
+float liveScoreVal[4] = {};      // cached computed scores, updated each accumulation tick
+float liveScore_lastCmd = 0.0f;  // setpointCommand from previous tick (pre-slew)
+float liveScore_thisCmd = 0.0f;  // setpointCommand from current tick (pre-slew)
+uint32_t liveScore_lastStepMs = 0;
+bool liveScore_inWindow = false;
 
 // CV loop always-running live score — same bucket structure as inner loop
-ScoreBucket*  cvLiveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
-uint8_t       cvLiveScoreHead[4]    = {};
-uint32_t      cvLiveBucketStartMs[4] = {};
-float         cvLiveScoreVal[4]     = {};
-uint32_t      cvLiveScore_lastDtMs  = 0;   // last time |g_dBcur_dt| crossed the gate threshold
-bool          cvLiveScore_inWindow  = false;
+ScoreBucket *cvLiveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
+uint8_t cvLiveScoreHead[4] = {};
+uint32_t cvLiveBucketStartMs[4] = {};
+float cvLiveScoreVal[4] = {};
+uint32_t cvLiveScore_lastDtMs = 0;  // last time |g_dBcur_dt| crossed the gate threshold
+bool cvLiveScore_inWindow = false;
 
 // === CV Loop Tuning Score System ===
-float   cvWaveAmplitudeV    = 0.30f;  // V — target dips by this during LOW phase
-int     cvWavePeriodSec     = 60;     // s — half-period of CV test wave
-float   cvKOvershoot        = 10.0f;  // penalty weight on integrated overshoot (user-exposed)
-uint8_t cvConsecutiveReads  = 10;     // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
-int     CVTuningMode        = 0;      // 0=off, 1=on
-float   cvBaseTarget        = 0.0f;   // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
+float cvWaveAmplitudeV = 0.30f;   // V — target dips by this during LOW phase
+int cvWavePeriodSec = 60;         // s — half-period of CV test wave
+float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
+uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
+int CVTuningMode = 0;             // 0=off, 1=on
+float cvBaseTarget = 0.0f;        // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
 
 const float CV_SETTLE_V_THRESH = 0.10f;  // V — settling threshold
 
 struct CVTuningRecord {
-    uint16_t runNumber;
-    // Results
-    float    score;
-    float    avgSettlingTimeSec;
-    float    worstOvershootV;
-    float    avgIntegratedOvershootVs;
-    float    activeTimeSec;
-    uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
-    // CV PID
-    float    voltageKp, voltageKi, voltageKd;
-    // Setpoint shaping
-    float    setpointRiseRate, setpointFallRate;
-    // Integrator management
-    float    awBleedRate, awRecoverRate;
-    uint16_t awSeedProtectMs;
-    float    iExcessReseedFrac;
-    // FastOV supervisor
-    float    kSoft, kHard;
-    // iExcess
-    float    iExcessK;
-    int      iExcessN;
-    float    iExcessKBleed;
-    // Load dump
-    float    loadDumpDtThresh, loadDumpCurrentDrop;
-    // Filter
-    float    inputFilterTC;
-    // Test setup
-    float    waveAmplitudeV;
-    uint16_t wavePeriodSec;
-    float    kOvershoot;
-    uint8_t  consecutiveReads;
-    // Operating conditions
-    float    avgRPM, avgAltTempF;
-    float    battVAtStart, socAtStart;
-    float    chargingVoltageTarget;
-    // Low phase results (step-down response)
-    float    lowScore;
-    float    avgLowSettlingTimeSec;
-    float    avgLowIntOvVs;     // avg integrated overvoltage above lowTarget (V·s)
-    float    worstLowOvV;       // peak above lowTarget during any scored LOW phase
+  uint16_t runNumber;
+  // Results
+  float score;
+  float avgSettlingTimeSec;
+  float worstOvershootV;
+  float avgIntegratedOvershootVs;
+  float activeTimeSec;
+  uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
+  // CV PID
+  float voltageKp, voltageKi, voltageKd;
+  // Setpoint shaping
+  float setpointRiseRate, setpointFallRate;
+  // Integrator management
+  float awBleedRate, awRecoverRate;
+  uint16_t awSeedProtectMs;
+  float iExcessReseedFrac;
+  // FastOV supervisor
+  float kSoft, kHard;
+  // iExcess
+  float iExcessK;
+  int iExcessN;
+  float iExcessKBleed;
+  // Load dump
+  float loadDumpDtThresh, loadDumpCurrentDrop;
+  // Filter
+  float inputFilterTC;
+  // Test setup
+  float waveAmplitudeV;
+  uint16_t wavePeriodSec;
+  float kOvershoot;
+  uint8_t consecutiveReads;
+  // Operating conditions
+  float avgRPM, avgAltTempF;
+  float battVAtStart, socAtStart;
+  float chargingVoltageTarget;
+  // Low phase results (step-down response)
+  float lowScore;
+  float avgLowSettlingTimeSec;
+  float avgLowIntOvVs;  // avg integrated overvoltage above lowTarget (V·s)
+  float worstLowOvV;    // peak above lowTarget during any scored LOW phase
 };
 
 struct CVTuningScoreState {
-    bool     waveHigh;
-    uint32_t lastToggleMs;
-    uint8_t  halfPeriodCount;
-    bool     ringInDone;
-    // Per-HIGH-phase state (reset each toggle-to-high)
-    uint32_t phaseStartMs;
-    bool     phaseSettled;
-    uint8_t  consecutiveInBand;
-    // Accumulators across scored HIGH phases
-    uint8_t  scoredHighCount;
-    float    totalSettlingTimeSec;
-    float    worstOvershootV;
-    float    totalIntegratedOvershootVs;
-    float    activeTimeSec;
-    // Protection deltas (snapshotted at start of each HIGH phase)
-    uint32_t fastOvSnap, iExcessSnap, loadDumpSnap, hardOcSnap;
-    uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
-    // Per-LOW-phase state (reset each toggle-to-low after ring-in)
-    uint32_t lowPhaseStartMs;
-    bool     lowPhaseSettled;
-    uint8_t  lowConsecInBand;
-    // Accumulators across scored LOW phases
-    uint8_t  scoredLowCount;
-    float    totalLowSettlingTimeSec;
-    float    totalLowIntOvVs;   // integral of max(0, filtV - lowTarget) × dt
-    float    worstLowOvV;       // peak above lowTarget during any scored LOW phase
-    // Protection snaps for LOW phases
-    uint32_t lowFastOvSnap, lowIExSnap, lowLdSnap, lowHocSnap;
-    // Operating conditions
-    float    battVAtStart, socAtStart;
-    bool     testStarted;
-    // Averages
-    float    rpmSum, tempSum;
-    uint16_t avgSampleCount;
+  bool waveHigh;
+  uint32_t lastToggleMs;
+  uint8_t halfPeriodCount;
+  bool ringInDone;
+  // Per-HIGH-phase state (reset each toggle-to-high)
+  uint32_t phaseStartMs;
+  bool phaseSettled;
+  uint8_t consecutiveInBand;
+  // Accumulators across scored HIGH phases
+  uint8_t scoredHighCount;
+  float totalSettlingTimeSec;
+  float worstOvershootV;
+  float totalIntegratedOvershootVs;
+  float activeTimeSec;
+  // Protection deltas (snapshotted at start of each HIGH phase)
+  uint32_t fastOvSnap, iExcessSnap, loadDumpSnap, hardOcSnap;
+  uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
+  // Per-LOW-phase state (reset each toggle-to-low after ring-in)
+  uint32_t lowPhaseStartMs;
+  bool lowPhaseSettled;
+  uint8_t lowConsecInBand;
+  // Accumulators across scored LOW phases
+  uint8_t scoredLowCount;
+  float totalLowSettlingTimeSec;
+  float totalLowIntOvVs;  // integral of max(0, filtV - lowTarget) × dt
+  float worstLowOvV;      // peak above lowTarget during any scored LOW phase
+  // Protection snaps for LOW phases
+  uint32_t lowFastOvSnap, lowIExSnap, lowLdSnap, lowHocSnap;
+  // Operating conditions
+  float battVAtStart, socAtStart;
+  bool testStarted;
+  // Averages
+  float rpmSum, tempSum;
+  uint16_t avgSampleCount;
 };
 
-CVTuningRecord*    cvTuningLog          = nullptr;  // ps_malloc(50 × sizeof(CVTuningRecord))
-uint8_t            cvTuningLogCount     = 0;
-uint8_t            cvTuningLogHead      = 0;
-uint16_t           cvTuningRunCounter   = 0;
-CVTuningScoreState cvTuningScore        = {};
-bool               cvTuningParamChanged = false;
+CVTuningRecord *cvTuningLog = nullptr;  // ps_malloc(50 × sizeof(CVTuningRecord))
+uint8_t cvTuningLogCount = 0;
+uint8_t cvTuningLogHead = 0;
+uint16_t cvTuningRunCounter = 0;
+CVTuningScoreState cvTuningScore = {};
+bool cvTuningParamChanged = false;
 
 // ===== THERMAL STEP TEST TUNING =====
 
 struct ThermalTuningRecord {
-    uint16_t runNumber;
-    float    score;               // avgSettlingTimeSec + Ko×avgIntOverFs + Ku×avgIntUnderFs
-    float    avgSettlingTimeSec;
-    float    worstOvershootF;     // peak above HIGH setpoint across all scored steps
-    float    avgIntOverFs;        // avg integral of temp above HIGH setpoint per step (°F·s)
-    float    avgIntUnderFs;       // avg integral of temp below HIGH setpoint after settle per step
-    uint16_t scoredStepCount;
-    float    activeTimeSec;
-    // Tuning parameters at test time
-    float    kp, ki;
-    float    lookaheadSec;
-    float    filterAlpha;
-    uint16_t intervalMs;
-    float    waveLowF;
-    float    waveHighF;
-    float    waveHalfPeriodMin;
-    // Slew rates at test time
-    float    riseRate;            // ThermalPenaltyRiseRate (A/s)
-    float    fallRate;            // ThermalPenaltyFallRate (A/s)
-    // Operating conditions
-    float    avgRPM;
-    float    avgAmbientF;
+  uint16_t runNumber;
+  float score;  // avgSettlingTimeSec + Ko×avgIntOverFs + Ku×avgIntUnderFs
+  float avgSettlingTimeSec;
+  float worstOvershootF;  // peak above HIGH setpoint across all scored steps
+  float avgIntOverFs;     // avg integral of temp above HIGH setpoint per step (°F·s)
+  float avgIntUnderFs;    // avg integral of temp below HIGH setpoint after settle per step
+  uint16_t scoredStepCount;
+  float activeTimeSec;
+  // Tuning parameters at test time
+  float kp, ki;
+  float lookaheadSec;
+  float filterAlpha;
+  uint16_t intervalMs;
+  float waveLowF;
+  float waveHighF;
+  float waveHalfPeriodMin;
+  // Slew rates at test time
+  float riseRate;  // ThermalPenaltyRiseRate (A/s)
+  float fallRate;  // ThermalPenaltyFallRate (A/s)
+  // Operating conditions
+  float avgRPM;
+  float avgAmbientF;
 };
 
 struct ThermalTuningScoreState {
-    bool     testStarted;
-    bool     waveHigh;            // true = currently in HIGH phase
-    uint32_t lastToggleMs;        // ms when HIGH phase started (for half-period timer)
-    // LOW phase stability tracking (must stabilize at thermalWaveLowF before stepping up)
-    bool     lowPhaseStable;      // true once temp has been within ±thermalSettleThreshF for thermalConsecutiveReads
-    uint8_t  lowConsecInBand;     // consecutive in-band reads while in LOW phase
-    // Per-HIGH-phase state (reset on each step-up)
-    uint32_t phaseStartMs;
-    bool     phaseSettled;        // temperature entered settle band this phase (informational only)
-    uint32_t phaseSettledMs;      // ms when first settled (informational only)
-    uint8_t  consecutiveInBand;
-    float    intOverFs;           // integral of max(0, temp - thermalWaveHighF) × dt this phase
-    float    intUnderFs;          // integral of max(0, thermalWaveHighF - temp) × dt from step-up (entire phase)
-    float    worstOvershootF;     // peak above thermalWaveHighF this phase
-    // Accumulators across scored HIGH phases
-    float    totalSettlingTimeSec; // informational — not included in score formula
-    float    totalIntOverFs;
-    float    totalIntUnderFs;
-    float    worstOvAll;
-    uint16_t scoredStepCount;
-    float    activeTimeSec;
-    // Conditions snapshot
-    float    rpmSum;
-    float    ambientSum;
-    uint16_t avgSampleCount;
+  bool testStarted;
+  bool waveHigh;          // true = currently in HIGH phase
+  uint32_t lastToggleMs;  // ms when HIGH phase started (for half-period timer)
+  // LOW phase stability tracking (must stabilize at thermalWaveLowF before stepping up)
+  bool lowPhaseStable;      // true once temp has been within ±thermalSettleThreshF for thermalConsecutiveReads
+  uint8_t lowConsecInBand;  // consecutive in-band reads while in LOW phase
+  // Per-HIGH-phase state (reset on each step-up)
+  uint32_t phaseStartMs;
+  bool phaseSettled;        // temperature entered settle band this phase (informational only)
+  uint32_t phaseSettledMs;  // ms when first settled (informational only)
+  uint8_t consecutiveInBand;
+  float intOverFs;        // integral of max(0, temp - thermalWaveHighF) × dt this phase
+  float intUnderFs;       // integral of max(0, thermalWaveHighF - temp) × dt from step-up (entire phase)
+  float worstOvershootF;  // peak above thermalWaveHighF this phase
+  // Accumulators across scored HIGH phases
+  float totalSettlingTimeSec;  // informational — not included in score formula
+  float totalIntOverFs;
+  float totalIntUnderFs;
+  float worstOvAll;
+  uint16_t scoredStepCount;
+  float activeTimeSec;
+  // Conditions snapshot
+  float rpmSum;
+  float ambientSum;
+  uint16_t avgSampleCount;
 };
 
 // Thermal tuning mode settings (persisted to LittleFS)
-int     ThermalTuningMode          = 0;       // 0=off, 1=on
-float   thermalWaveLowF            = 120.0f;  // LOW phase setpoint (°F)
-float   thermalWaveHighF           = 150.0f;  // HIGH phase setpoint (°F)
-float   thermalWaveHalfPeriodMin   = 10.0f;   // minutes per half-period
-float   thermalKOvershoot          = 10.0f;   // ISE penalty weight for above-setpoint (10× harder than undershoot)
-float   thermalKUndershoot         = 1.0f;    // ISE penalty weight for below-setpoint
-float   thermalSettleThreshF       = 2.0f;    // ±°F band for settled check
-uint8_t thermalConsecutiveReads    = 3;       // consecutive in-band reads to declare settled
-bool    thermalTuningParamChanged  = false;
+int ThermalTuningMode = 0;               // 0=off, 1=on
+float thermalWaveLowF = 120.0f;          // LOW phase setpoint (°F)
+float thermalWaveHighF = 150.0f;         // HIGH phase setpoint (°F)
+float thermalWaveHalfPeriodMin = 10.0f;  // minutes per half-period
+float thermalKOvershoot = 10.0f;         // ISE penalty weight for above-setpoint (10× harder than undershoot)
+float thermalKUndershoot = 1.0f;         // ISE penalty weight for below-setpoint
+float thermalSettleThreshF = 2.0f;       // ±°F band for settled check
+uint8_t thermalConsecutiveReads = 3;     // consecutive in-band reads to declare settled
+bool thermalTuningParamChanged = false;
 
-float thermalWaveCurrentSetpointF  = 0.0f;   // active wave setpoint; 0 = not started
+float thermalWaveCurrentSetpointF = 0.0f;  // active wave setpoint; 0 = not started
 
-ThermalTuningRecord*    thermalTuningLog        = nullptr;  // ps_malloc(50 × sizeof(ThermalTuningRecord))
-uint8_t                 thermalTuningLogCount   = 0;
-uint8_t                 thermalTuningLogHead    = 0;
-uint16_t                thermalTuningRunCounter = 0;
-ThermalTuningScoreState thermalTuningScore      = {};
+ThermalTuningRecord *thermalTuningLog = nullptr;  // ps_malloc(50 × sizeof(ThermalTuningRecord))
+uint8_t thermalTuningLogCount = 0;
+uint8_t thermalTuningLogHead = 0;
+uint16_t thermalTuningRunCounter = 0;
+ThermalTuningScoreState thermalTuningScore = {};
 
 // Thermal always-on live score buckets (30m, 3h, 24h, 7d — thermal system has long time constants)
-const uint32_t THERMAL_LIVE_BUCKET_MS[4] = {1800000UL, 10800000UL, 86400000UL, 604800000UL};
-ScoreBucket*   thermalLiveScoreBuckets[4] = {};   // ps_malloc'd
-uint8_t        thermalLiveScoreHead[4]    = {};
-uint32_t       thermalLiveBucketStartMs[4] = {};
-float          thermalLiveScoreVal[4]     = {};
+const uint32_t THERMAL_LIVE_BUCKET_MS[4] = { 1800000UL, 10800000UL, 86400000UL, 604800000UL };
+ScoreBucket *thermalLiveScoreBuckets[4] = {};  // ps_malloc'd
+uint8_t thermalLiveScoreHead[4] = {};
+uint32_t thermalLiveBucketStartMs[4] = {};
+float thermalLiveScoreVal[4] = {};
 
-float xTime = 60.0;      // seconds    PID Chart
-int yyMax = 105;         // PID Chart     Amps
-int yyMin = -25;         //  PID Chart Amps
-float pidError = 0.0f;   // PID error for display (A)
-int LearningMode = 0;    // 0=disabled, 1=enabled
+float xTime = 60.0;     // seconds    PID Chart
+int yyMax = 105;        // PID Chart     Amps
+int yyMin = -25;        //  PID Chart Amps
+float pidError = 0.0f;  // PID error for display (A)
+int LearningMode = 0;   // 0=disabled, 1=enabled
 
 
 int accelEnabled = 1;  // Set to false to block accelerometer related calcs
@@ -2186,23 +2181,23 @@ float VoltageKd = 40.0f;             // A/(V/s) — derivative gain; at dvdt=0.5
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
-float KSoft = 12.0f;            // A/V — soft OV cap slope (fires when Vpred > target+0.08V)
-float KHard = 35.0f;            // A/V — hard OV cap slope (fires when Vpred > target+0.15V)
+float KSoft = 12.0f;  // A/V — soft OV cap slope (fires when Vpred > target+0.08V)
+float KHard = 35.0f;  // A/V — hard OV cap slope (fires when Vpred > target+0.15V)
 // --- iExcess current supervisor ---
-float IExcessK = 5.0f;          // A above setpoint to arm supervisor
-int   IExcessN = 3;             // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
-float IExcessKBleed = 0.0f;     // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
-float IExcessReseedFrac = 0.5f; // fraction of pre-event cv_I to seed on iExcess recovery
+float IExcessK = 5.0f;           // A above setpoint to arm supervisor
+int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
+float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
+float IExcessReseedFrac = 0.5f;  // fraction of pre-event cv_I to seed on iExcess recovery
 // --- Anti-windup ---
-float AwBleedRate    = 2.0f;    // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
-float AwRecoverRate  = 0.1f;    // fraction of MaxTableValue/s — cv_I_aw_cap recovery after fastOV clears
-uint16_t AwSeedProtectMs = 150; // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
+float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
+float AwRecoverRate = 0.1f;      // fraction of MaxTableValue/s — cv_I_aw_cap recovery after fastOV clears
+uint16_t AwSeedProtectMs = 150;  // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
 // --- CV loop runtime state ---
-float VoltageTrimLimit = 5.0f;       // OBSOLETE DELETE LATER
-uint32_t lastVoltageLoopMs = 0;      // timestamp of last voltage loop update
-float Icv = 0.0f;                    // CV PID output — direct current setpoint (A)
-float cv_I = 0.0f;                   // CV integrator state (A)
-bool voltageControlActive = false;   // true when voltage PID is active (non-idle stages)
+float VoltageTrimLimit = 5.0f;            // OBSOLETE DELETE LATER
+uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
+float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
+float cv_I = 0.0f;                        // CV integrator state (A)
+bool voltageControlActive = false;        // true when voltage PID is active (non-idle stages)
 uint32_t thermalScoreLastExternalMs = 0;  // last ms when voltageControlActive was true; gates 3-min blanking
 // =====================================================================================
 // Table Bounds & Safety
@@ -2229,18 +2224,18 @@ int LearningDryRunMode = 0;  // Calculate but don't apply changes
 // Data Management
 // Deferred saves — set by Core 0 (AsyncWebServer handlers), executed on Core 1 in main loop
 // to avoid blocking SSE delivery on Core 0
-volatile bool pendingSaveCVTuningLog      = false;
-volatile bool pendingSaveTuningLog        = false;
+volatile bool pendingSaveCVTuningLog = false;
+volatile bool pendingSaveTuningLog = false;
 volatile bool pendingSaveThermalTuningLog = false;
-volatile bool pendingResetEfficiencyMatrix  = false;
-volatile bool pendingClearOverheatHistory   = false;
-volatile bool pendingSaveUserTableEdits     = false;
-volatile bool pendingClearToken             = false;
-volatile bool pendingSaveVesselInfo         = false;
-volatile bool pendingClearVesselInfo        = false;
-bool pendingShutdownFlush = false;       // set on ignition-off edge; cleared after full flush
-bool shutdownNVSFlushDone = false;       // true once NVS+sensor window saved this shutdown
-uint32_t shutdownCloudDeadlineMs = 0;   // millis() deadline for cloud drain window
+volatile bool pendingResetEfficiencyMatrix = false;
+volatile bool pendingClearOverheatHistory = false;
+volatile bool pendingSaveUserTableEdits = false;
+volatile bool pendingClearToken = false;
+volatile bool pendingSaveVesselInfo = false;
+volatile bool pendingClearVesselInfo = false;
+bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared after full flush
+bool shutdownNVSFlushDone = false;     // true once NVS+sensor window saved this shutdown
+uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain window
 
 // Momentary Actions (Reset to 0 after execution)
 int ResetLearningTable = 0;    // OBSOLETE LEGACY EXTRA
@@ -2372,7 +2367,7 @@ float g_fastOvCurrentCap = 0.0f;   // live cap ceiling this tick (amps)
 bool g_fastOvClampActive = false;  // true if cap is below MaxTableValue this tick
 uint32_t g_fastOvClampCount = 0;   // rising-edge counter — watch for increments
 
-float g_I_cap = 0.0f;              // RPM table current ceiling this tick (A); set each AUTO tick
+float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO tick
 
 
 
@@ -2381,9 +2376,9 @@ float g_I_cap = 0.0f;              // RPM table current ceiling this tick (A); s
 // Linear interpolation is used between points. Values at or below the first
 // breakpoint (100 RPM) use the first entry directly — no extrapolation below it.
 #define RPM_TABLE_SIZE 10
-int rpmTableRPMPoints[RPM_TABLE_SIZE]  = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
+int rpmTableRPMPoints[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
 // Factory defaults for RPM breakpoints
-int defaultRPMValues[RPM_TABLE_SIZE]   = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
+int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
 
 // ===== TARGET CURRENT TABLE =====
 // Maximum amps the regulator will command at each RPM breakpoint in Normal mode (HiLow=1).
@@ -2392,22 +2387,22 @@ int defaultRPMValues[RPM_TABLE_SIZE]   = { 100, 600, 1100, 1600, 2100, 2600, 310
 // The first entry (≤100 RPM = effectively stopped) is 0 to guarantee no field
 // current when the alternator is not spinning. The factory reset button restores
 // defaultCurrentValues below.
-float rpmCurrentTable[RPM_TABLE_SIZE]     = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
-float defaultCurrentValues[RPM_TABLE_SIZE] = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float rpmCurrentTable[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float defaultCurrentValues[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
 
 // ===== CAP CURRENT TABLE =====
 // Hard ceiling on commanded current at each RPM, always enforced regardless of
 // mode or PID output. Exists to protect the belt, shaft, and mounting hardware
 // from mechanical overload at any RPM. The target table above cannot push current
 // above this ceiling. Factory reset restores defaultCapCurrentValues.
-float rpmCapCurrentTable[RPM_TABLE_SIZE]      = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
-float defaultCapCurrentValues[RPM_TABLE_SIZE] = {  0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
 
 // ===== CAP POWER TABLE =====
 // Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
 // The firmware converts to an equivalent amp limit using live battery voltage.
 // All zeros = disabled (no power cap). capLimitMode selects which cap is active.
-float rpmCapPowerTable[RPM_TABLE_SIZE]      = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+float rpmCapPowerTable[RPM_TABLE_SIZE] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 float defaultCapPowerValues[RPM_TABLE_SIZE] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 uint8_t capLimitMode = 0;  // 0 = use amp cap (rpmCapCurrentTable), 1 = use kW cap (rpmCapPowerTable)
 
@@ -2415,7 +2410,7 @@ uint8_t capLimitMode = 0;  // 0 = use amp cap (rpmCapCurrentTable), 1 = use kW c
 // Minimum PWM duty cycle (%) applied to the field at each RPM breakpoint.
 // Prevents the RPM signal from dropping out due to rapid stator signal changes. Higher values at low RPM because the alternator needs more field
 // excitation to produce useful output when spinning slowly.
-float rpmMinDutyTable[RPM_TABLE_SIZE]    = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
+float rpmMinDutyTable[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
 float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
 
 unsigned long lastOverheatTime[RPM_TABLE_SIZE] = { 0 };          // Timestamp of last overheat per RPM
@@ -2450,7 +2445,7 @@ float innerTermD = 0.0f;
 // Values hold between computes, which is correct — the integrator state is stable.
 float outerTermP = 0.0f;
 float outerTermI = 0.0f;
-float outerTermD = 0.0f;          // probably always 0
+float outerTermD = 0.0f;           // probably always 0
 float thermalSlopeFPerSec = 0.0f;  // long-window slope estimate (°F/sec); replaces outerTermDExternal
 
 volatile bool tempPIDResetRequested = false;
@@ -2464,8 +2459,8 @@ float thermalPenaltyLastValid = 0.0f;
 float thermalSlopeBuffer[THERMAL_SLOPE_BUF];
 uint8_t thermalSlopeBufIdx = 0;
 bool thermalSlopeBufFull = false;
-float projectedTempF = NAN;         // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
-uint32_t thermalSlopeLastPushMs = 0; // gates slope buffer push to TempPIDIntervalMs cadence
+float projectedTempF = NAN;           // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
+uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDIntervalMs cadence
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -2502,19 +2497,19 @@ uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp 
 
 // ===== TEMPERATURE LOOP PID (replaces thermal model) =====
 // Tuning — all web UI configurable
-float TempPIDKp = 3.0f;            // A/°F proportional gain
-float TempPIDKi = 0.025f;          // Integral gain
+float TempPIDKp = 3.0f;             // A/°F proportional gain
+float TempPIDKi = 0.025f;           // Integral gain
 float ThermalLookaheadSec = 90.0f;  // prediction horizon: project this many seconds ahead; tune ~= thermal time constant
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
 
-float WarmupRampRate = 0.0f;           // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
-float warmupCeiling = 0.0f;            // runtime warmup ceiling (not persisted)
-float prevThermalPenalty = 0.0f;       // file-scope, tracks previous slew-limited value
+float WarmupRampRate = 0.0f;      // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
+float warmupCeiling = 0.0f;       // runtime warmup ceiling (not persisted)
+float prevThermalPenalty = 0.0f;  // file-scope, tracks previous slew-limited value
 
-uint32_t TempPIDIntervalMs = 5000;      // Temperature loop update period (ms) — independent of output current loop and sensor rate
-float TempPIDFilterAlpha = 0.2f;        // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
+uint32_t TempPIDIntervalMs = 5000;  // Temperature loop update period (ms) — independent of output current loop and sensor rate
+float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
 // ThermistorFilterAlpha removed — hardcoded 0.02f in tempPID_tick IIR filter, not user-configurable
 // Runtime state — expose via telemetry
 double tempPIDInput_d = 77.0;        // Projected temp (°F) = filtered + slope × lookahead; PID process variable
@@ -2814,7 +2809,7 @@ static uint32_t cvLogPausedAtMs = 0;
 
 
 float g_fastOvDvdt = 0.0f;        // filtered dV/dt (V/s), updated every IBV fresh tick
-float g_dBcur_dt = 0.0f;         // dBcur/dt (A/s), updated every INA228 read; positive = load dump
+float g_dBcur_dt = 0.0f;          // dBcur/dt (A/s), updated every INA228 read; positive = load dump
 float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageControlActive
 bool g_fastOvSoftActive = false;  // K_SOFT correction fired this tick
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
@@ -2842,10 +2837,10 @@ bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
 
 // Load dump detection via dBcur/dt
-float LoadDumpDtThresh    = 500.0f;  // A/s — threshold to declare a load dump event
-float LoadDumpCurrentDrop = 30.0f;   // A   — how much to reduce fastOvCurrentCap on event
-bool  g_loadDumpActive    = false;
-uint32_t g_loadDumpCount  = 0;
+float LoadDumpDtThresh = 500.0f;    // A/s — threshold to declare a load dump event
+float LoadDumpCurrentDrop = 30.0f;  // A   — how much to reduce fastOvCurrentCap on event
+bool g_loadDumpActive = false;
+uint32_t g_loadDumpCount = 0;
 
 // Protection event counters — rising-edge, cleared by web UI reset buttons
 uint32_t g_iExcessCount = 0;
@@ -3082,10 +3077,10 @@ tNMEA2000Handler NMEA2000Handlers[] = {
 Stream *OutputStream = &Serial;  // safe, correct
 
 //ADS1115 more pre-setup crap
-uint32_t adsI2CErrorCount  = 0;
-uint32_t adsSlowReadCount  = 0;   // times ADS_READ_RESULT took >5ms (I2C stall events)
-uint32_t adsLastSlowEndTxUs  = 0; // endTransmission duration on most recent slow read (µs)
-uint32_t adsLastSlowReqFromUs = 0; // requestFrom duration on most recent slow read (µs)
+uint32_t adsI2CErrorCount = 0;
+uint32_t adsSlowReadCount = 0;      // times ADS_READ_RESULT took >5ms (I2C stall events)
+uint32_t adsLastSlowEndTxUs = 0;    // endTransmission duration on most recent slow read (µs)
+uint32_t adsLastSlowReqFromUs = 0;  // requestFrom duration on most recent slow read (µs)
 
 enum ADS1115_State {
   ADS_IDLE,
@@ -3097,8 +3092,8 @@ ADS1115_State adsState = ADS_IDLE;
 uint8_t adsCurrentChannel = 0;  // Driven by adsSeq[] = {1,0,1,2,1,3}; CH1 fires 3× per cycle (~213 Hz / ~4.7ms)
 int adsTriggeredChannel = 0;
 unsigned long adsStateEntered = 0;
-const unsigned long ADS_CONVERSION_MS = 3;   // 1.16ms at 860SPS + millis() granularity margin
-const unsigned long ADS_TIMEOUT_MS    = 10;  // hardware fault catcher
+const unsigned long ADS_CONVERSION_MS = 3;  // 1.16ms at 860SPS + millis() granularity margin
+const unsigned long ADS_TIMEOUT_MS = 10;    // hardware fault catcher
 
 volatile bool ch1FreshFlag = false;  // Set when CH1 result is ready, consumed by AdjustFieldLearnMode()
 
@@ -3277,8 +3272,8 @@ void setup() {
   Serial.println();
   initializeDeviceId();    // Sets the UID (real or spoofed)
   checkDeviceUIDChange();  // Compares to last boot, COMMENT THIS OUT DUE TO AVOID NEED TO REREGISTER DURING TESTING.  NEEDS UNCOMMENTING WHEN DEVICE ID CHANGES!!
-  loadAuthToken();  // Loads token (will be empty if just cleared)  // for supabase
-  Serial.flush();  // Ensure it's sent before continuing
+  loadAuthToken();         // Loads token (will be empty if just cleared)  // for supabase
+  Serial.flush();          // Ensure it's sent before continuing
   int major = 0, minor = 0, patch = 0;
   // Parse FIRMWARE_VERSION directly (e.g. "0.1.65")
   const char *version = FIRMWARE_VERSION;
@@ -3365,6 +3360,7 @@ void setup() {
   memset(&ft_updateWeatherMode, 0, sizeof(FuncTiming));
   memset(&ft_updateSensorWindow, 0, sizeof(FuncTiming));
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
+  memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
   memset(&ft_FlushFileWriteQueue, 0, sizeof(FuncTiming));
   memset(&ft_efficiencyTracker, 0, sizeof(FuncTiming));
@@ -3390,7 +3386,7 @@ void setup() {
   pinMode(21, OUTPUT);    // Alarm/Buzzer output (was 33)
   digitalWrite(21, LOW);  // Start with alarm off
   alarmOutputState = false;
-  pinMode(42, INPUT);     // bmsLogic
+  pinMode(42, INPUT);  // bmsLogic
   // PWM setup (needed for basic operation)
   //ledcAttach(pwmPin, SwitchingFrequency, pwmResolution);
 
@@ -3537,9 +3533,9 @@ void loop() {
   esp_task_wdt_reset();
   Ignition = !digitalRead(1);  // ! is for optocoupler
   if (IgnitionOverride == 1) {
-    Ignition = 1;       // force ON  (bench testing, normal default)
+    Ignition = 1;  // force ON  (bench testing, normal default)
   } else if (IgnitionOverride == 0) {
-    Ignition = 0;       // force OFF (test shutdown sequence — change from 1 to 0 to trigger)
+    Ignition = 0;  // force OFF (test shutdown sequence — change from 1 to 0 to trigger)
   }
   // IgnitionOverride negative: real GPIO passthrough (no override)
   // static DeviceMode lastMode = MODE_CONFIG;  //DEBUG REMOVE LATER
@@ -3625,22 +3621,49 @@ void loop() {
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
-  TIMED_CALL(ft_saveNVSData, saveNVSData());  // phased: one group per NVS_TICK_SPACING ticks
+  TIMED_CALL(ft_saveNVSData, saveNVSData());                    // phased: one group per NVS_TICK_SPACING ticks
   TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   // Deferred saves from Core 0 button handlers — executed here on Core 1 so Core 0 SSE is not blocked.
   // Gated: wait 5 consecutive seconds out of critical zone before firing, to avoid bursting I/O
   // the moment voltage drops. All flags in this block execute in the same tick — no re-entry possible.
   // Shutdown flush (below) bypasses this gate and drains remaining flags unconditionally.
   if (safeToFlushIO()) {
-    if (pendingSaveCVTuningLog)        { pendingSaveCVTuningLog        = false; saveCVTuningLog();          }
-    if (pendingSaveTuningLog)          { pendingSaveTuningLog          = false; saveTuningLog();            }
-    if (pendingSaveThermalTuningLog)   { pendingSaveThermalTuningLog   = false; saveThermalTuningLog();     }
-    if (pendingResetEfficiencyMatrix)  { pendingResetEfficiencyMatrix  = false; resetEfficiencyMatrix();    }
-    if (pendingClearOverheatHistory)   { pendingClearOverheatHistory   = false; clearOverheatHistoryAction(); }
-    if (pendingSaveUserTableEdits)     { pendingSaveUserTableEdits      = false; saveUserTableEdits();       }
-    if (pendingClearToken)             { pendingClearToken              = false; executeClearToken();        }
-    if (pendingSaveVesselInfo)         { pendingSaveVesselInfo          = false; saveVesselInfoToFile();     }
-    if (pendingClearVesselInfo)        { pendingClearVesselInfo         = false; executeClearVesselInfo();   }
+    if (pendingSaveCVTuningLog) {
+      pendingSaveCVTuningLog = false;
+      saveCVTuningLog();
+    }
+    if (pendingSaveTuningLog) {
+      pendingSaveTuningLog = false;
+      saveTuningLog();
+    }
+    if (pendingSaveThermalTuningLog) {
+      pendingSaveThermalTuningLog = false;
+      saveThermalTuningLog();
+    }
+    if (pendingResetEfficiencyMatrix) {
+      pendingResetEfficiencyMatrix = false;
+      resetEfficiencyMatrix();
+    }
+    if (pendingClearOverheatHistory) {
+      pendingClearOverheatHistory = false;
+      clearOverheatHistoryAction();
+    }
+    if (pendingSaveUserTableEdits) {
+      pendingSaveUserTableEdits = false;
+      saveUserTableEdits();
+    }
+    if (pendingClearToken) {
+      pendingClearToken = false;
+      executeClearToken();
+    }
+    if (pendingSaveVesselInfo) {
+      pendingSaveVesselInfo = false;
+      saveVesselInfoToFile();
+    }
+    if (pendingClearVesselInfo) {
+      pendingClearVesselInfo = false;
+      executeClearVesselInfo();
+    }
   }
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
@@ -3689,19 +3712,46 @@ void loop() {
           } else if (!shutdownNVSFlushDone) {
             // Phase 2: field just cut — flush NVS and save partial sensor window immediately
             setCpuFrequencyMhz(240);
-            saveNVSDataFull();                // absolute latest values, no critical-zone gate
+            saveNVSDataFull();  // absolute latest values, no critical-zone gate
             saveEfficiencyMatrix();
             saveCurrentSessionHealth();
-            uploadSensorHistory();            // save whatever is in the current window to local buffer
-            if (pendingSaveCVTuningLog)        { pendingSaveCVTuningLog        = false; saveCVTuningLog();            }
-            if (pendingSaveTuningLog)          { pendingSaveTuningLog          = false; saveTuningLog();              }
-            if (pendingSaveThermalTuningLog)   { pendingSaveThermalTuningLog   = false; saveThermalTuningLog();       }
-            if (pendingResetEfficiencyMatrix)  { pendingResetEfficiencyMatrix  = false; resetEfficiencyMatrix();      }
-            if (pendingClearOverheatHistory)   { pendingClearOverheatHistory   = false; clearOverheatHistoryAction(); }
-            if (pendingSaveUserTableEdits)     { pendingSaveUserTableEdits      = false; saveUserTableEdits();         }
-            if (pendingClearToken)             { pendingClearToken              = false; executeClearToken();          }
-            if (pendingSaveVesselInfo)         { pendingSaveVesselInfo          = false; saveVesselInfoToFile();       }
-            if (pendingClearVesselInfo)        { pendingClearVesselInfo         = false; executeClearVesselInfo();     }
+            uploadSensorHistory();  // save whatever is in the current window to local buffer
+            if (pendingSaveCVTuningLog) {
+              pendingSaveCVTuningLog = false;
+              saveCVTuningLog();
+            }
+            if (pendingSaveTuningLog) {
+              pendingSaveTuningLog = false;
+              saveTuningLog();
+            }
+            if (pendingSaveThermalTuningLog) {
+              pendingSaveThermalTuningLog = false;
+              saveThermalTuningLog();
+            }
+            if (pendingResetEfficiencyMatrix) {
+              pendingResetEfficiencyMatrix = false;
+              resetEfficiencyMatrix();
+            }
+            if (pendingClearOverheatHistory) {
+              pendingClearOverheatHistory = false;
+              clearOverheatHistoryAction();
+            }
+            if (pendingSaveUserTableEdits) {
+              pendingSaveUserTableEdits = false;
+              saveUserTableEdits();
+            }
+            if (pendingClearToken) {
+              pendingClearToken = false;
+              executeClearToken();
+            }
+            if (pendingSaveVesselInfo) {
+              pendingSaveVesselInfo = false;
+              saveVesselInfoToFile();
+            }
+            if (pendingClearVesselInfo) {
+              pendingClearVesselInfo = false;
+              executeClearVesselInfo();
+            }
             shutdownNVSFlushDone = true;
             shutdownCloudDeadlineMs = millis() + 1800000;  // 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain
           } else if (millis() < shutdownCloudDeadlineMs) {
@@ -3728,7 +3778,7 @@ void loop() {
       // ===== IGNITION ON - Normal operation =====
       // Detect ignition state change to ON
       if (lastIgnitionState != 1) {
-        pendingShutdownFlush = false;       // ignition back on — cancel any pending flush
+        pendingShutdownFlush = false;  // ignition back on — cancel any pending flush
         shutdownNVSFlushDone = false;
         shutdownCloudDeadlineMs = 0;
         Serial.println("Ignition ON - Normal operation mode");
@@ -3828,37 +3878,18 @@ void loop() {
       } else {
         overheatingPenaltyTimer = 0;
       }
-      TIMED_CALL(ft_logDashboardValues, logDashboardValues());  //  nice to have some history in the Console
+      TIMED_CALL(ft_logDashboardValues, logDashboardValues());            //  nice to have some history in the Console
       TIMED_CALL(ft_updateSystemHealthStats, updateSystemHealthStats());  // samples CPU load + heap stats into globals for CSVData2
-      TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());  // Update sensor aggregation (after sensor reads)
+      TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());            // Update sensor aggregation (after sensor reads)
       {
         static int lastAccelEnabled = 0;
         if (accelEnabled == 1) {
-          if (lastAccelEnabled == 0) {
-            // Restore full ODR after low-power disabled state
-            if (imuEnabled) {
-              imu.Set_X_ODR(417.0f);
-              imu.Set_G_ODR(52.0f);
-              imu.Set_FIFO_X_BDR(417.0f);
-              imu.Set_FIFO_G_BDR(52.0f);
-            }
-            // Flush ring buffers so re-enable starts clean
+          if (lastAccelEnabled == 0 && imuRingBuffer) {
+            // Flush stale samples accumulated while disabled — avoids draining 2000 samples in one shot
             imuRingBuffer->accel_tail = imuRingBuffer->accel_head;
-            imuRingBuffer->gyro_tail  = imuRingBuffer->gyro_head;
+            imuRingBuffer->gyro_tail = imuRingBuffer->gyro_head;
           }
-          updateAccelMetrics();
-        } else {
-          if (lastAccelEnabled == 1) {
-            // Drop to minimum ODR — FIFO fills ~25 samples/sec instead of ~469.
-            // drainIMUFifo() polls at IMU_POLL_INTERVAL_DISABLED and drains without processing.
-            // I2C traffic drops ~10×. Loop pacing is preserved (avoids CPU% rising from tight spin).
-            if (imuEnabled) {
-              imu.Set_X_ODR(12.5f);
-              imu.Set_G_ODR(12.5f);
-              imu.Set_FIFO_X_BDR(12.5f);
-              imu.Set_FIFO_G_BDR(12.5f);
-            }
-          }
+          TIMED_CALL(ft_updateAccelMetrics, updateAccelMetrics());
         }
         lastAccelEnabled = accelEnabled;
       }
@@ -3890,8 +3921,7 @@ void loop() {
             esp_task_wdt_reset();                                           // Feed after upload completes
           }
         }
-        //delay(3);  // removed 4/18/26, don't think it was ever necessary
-
+        
         // Configuration Snapshot — requires field off for 70s
         if (fieldOffSettled(10000) && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
           lastConfigSnapshotTime = millis();
@@ -3975,11 +4005,10 @@ void loop() {
     ft_rai_ads_state.worstWindow = 0;
     ft_rai_bmp_state.worstWindow = 0;
     ft_rai_imu.worstWindow = 0;
+    ft_updateAccelMetrics.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
     ft_FlushFileWriteQueue.worstWindow = 0;
     ft_efficiencyTracker.worstWindow = 0;
-
-
 
     prev_millis7888 = millis();
   }
@@ -4029,7 +4058,8 @@ void loop() {
   }
   checkAndRestart();     // scheduled maintenance restart
   esp_task_wdt_reset();  // Always reset watchdog at end of loop
-                         // delay(1);              // Removed 4/18/2026
+
+  taskYIELD();  //consider removing
 }
 
 //This has to stay here, something about lambda functions (?)

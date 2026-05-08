@@ -458,8 +458,10 @@ enum Csv2Index {
   CSV2_thermalLiveScore2,                  // 292 — ×10000, 10-hr window
   CSV2_thermalLiveScore3,                  // 293 — ×10000, 100-hr window
   CSV2_thermalTuningTestPhase,             // 294 — 0=off/ring-in 1=scored active
+  CSV2_ft_updateAccelMetrics_win,          // 295 — µs, 5s worst
+  CSV2_ft_updateAccelMetrics_ses,          // 296 — µs, session worst
 
-  CSV2_FIELD_COUNT  // ← always last, = 295
+  CSV2_FIELD_COUNT  // ← always last, = 297
 };
 
 enum Csv3Index {
@@ -4858,7 +4860,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
@@ -4913,12 +4916,12 @@ void SendWifiData() {
                                SafeInt(alarmLatch ? 1 : 0),                                                                                                                              //49
                                SafeInt(ResetAlarmLatch),                                                                                                                                 //50
                                SafeInt(MaintainMode),                                                                                                                                    //51
-                               SafeInt(ResetTemp),                                                                                                                                       //52
-                               SafeInt(ResetVoltage),                                                                                                                                    //53
-                               SafeInt(ResetCurrent),                                                                                                                                    //54
-                               SafeInt(ResetEngineRunTime),                                                                                                                              //55
-                               SafeInt(ResetAlternatorOnTime),                                                                                                                           //56
-                               SafeInt(ResetEnergy),                                                                                                                                     //57
+                               0,                                                                                                                                                        //52 reserved
+                               0,                                                                                                                                                         //53 reserved
+                               0,                                                                                                                                                         //54 reserved
+                               0,                                                                                                                                                         //55 reserved
+                               0,                                                                                                                                                         //56 reserved
+                               0,                                                                                                                                                         //57 reserved
                                SafeInt(ManualSOCPoint),                                                                                                                                  //58
                                SafeInt(LearningMode),                                                                                                                                    //59
                                SafeInt(LearningPaused),                                                                                                                                  //60
@@ -5161,7 +5164,9 @@ void SendWifiData() {
                                SafeInt(thermalLiveScoreVal[1], 10000),  // 291 — ×10000
                                SafeInt(thermalLiveScoreVal[2], 10000),  // 292 — ×10000
                                SafeInt(thermalLiveScoreVal[3], 10000),  // 293 — ×10000
-                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0  // 294
+                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0,  // 294
+                               SafeInt(ft_updateAccelMetrics.worstWindow / 1000),   // 295
+                               SafeInt(ft_updateAccelMetrics.worstSession / 1000)   // 296
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);

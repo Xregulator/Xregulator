@@ -1963,58 +1963,6 @@ inline void pushGyroSample(int16_t x, int16_t y, int16_t z, uint32_t timestamp_u
   imu_total_samples_gyro++;
 }
 
-void printIMUStatus() {
-  Serial.println("=== IMU Status ===");
-  Serial.print("Enabled: ");
-  Serial.println(imuEnabled ? "YES" : "NO");
-  Serial.print("Accel samples: ");
-  Serial.print(imu_total_samples_accel);
-  Serial.print(" (dropped: ");
-  Serial.print(imuRingBuffer->accel_dropped);
-  Serial.println(")");
-  Serial.print("Gyro samples: ");
-  Serial.print(imu_total_samples_gyro);
-  Serial.print(" (dropped: ");
-  Serial.print(imuRingBuffer->gyro_dropped);
-  Serial.println(")");
-  Serial.print("FIFO overruns: ");
-  Serial.println(imu_fifo_overrun_count);
-  Serial.print("I2C errors: ");
-  Serial.println(imu_i2c_error_count);
-  Serial.print("Unknown tags: ");
-  Serial.println(imu_unknown_tag_count);
-  Serial.print("IMU read time: ");
-  Serial.print(IMUReadTime2);
-  Serial.print(" us (max: ");
-  Serial.print(IMUReadTime);
-  Serial.println(" us)");
-
-  // Ring buffer fill levels
-  uint16_t accel_used = (imuRingBuffer->accel_head >= imuRingBuffer->accel_tail)
-                          ? (imuRingBuffer->accel_head - imuRingBuffer->accel_tail)
-                          : (ACCEL_RING_SIZE - imuRingBuffer->accel_tail + imuRingBuffer->accel_head);
-  uint16_t gyro_used = (imuRingBuffer->gyro_head >= imuRingBuffer->gyro_tail)
-                         ? (imuRingBuffer->gyro_head - imuRingBuffer->gyro_tail)
-                         : (GYRO_RING_SIZE - imuRingBuffer->gyro_tail + imuRingBuffer->gyro_head);
-
-  Serial.print("Ring buffer usage: Accel ");
-  Serial.print(accel_used);
-  Serial.print("/");
-  Serial.print(ACCEL_RING_SIZE);
-  Serial.print(", Gyro ");
-  Serial.print(gyro_used);
-  Serial.print("/");
-  Serial.println(GYRO_RING_SIZE);
-
-  // Performance tuning suggestions
-  if (imu_fifo_overrun_count > 10) {
-    Serial.println("*** TUNING: Increase MAX_FIFO_DRAIN_PER_POLL or reduce IMU_POLL_INTERVAL");
-  }
-  if (IMUReadTime > 1500) {
-    Serial.println("*** TUNING: Reduce MAX_FIFO_DRAIN_PER_POLL (IMU taking too long)");
-  }
-}
-
 // ============================================================================
 // IMU CONVERSION CONSTANTS
 // ============================================================================
@@ -2147,6 +2095,7 @@ void updateAccelMetrics() {
   // Called from main loop at ~1Hz
 
   if (!imuEnabled) return;
+  if (!imuRingBuffer || !imuWindow) { imuEnabled = false; return; }
 
   uint32_t samples_processed = 0;
   unsigned long now = millis();

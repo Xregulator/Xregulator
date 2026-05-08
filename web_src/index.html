@@ -3524,7 +3524,12 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label">Erase All Memory:</div>
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Erase All Memory:</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Scorched-earth reset. Erases all settings, WiFi credentials, calibration data, auth tokens, and buffered logs. Device will restart into WiFi config mode. You will need to re-enter your WiFi network name and password before the regulator will operate again.</span>
+                  </span>
+                </div>
                 <div class="form-input">
                   <button type="button" id="factory-reset-btn" onclick="factoryReset()" class="btn-danger">
                     Restore Defaults
@@ -6603,6 +6608,24 @@
                 </div>
               </div>
 
+              <!-- ↳ Accel Metrics Processing -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ Accel Metrics
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">updateAccelMetrics() cost per call — ring-buffer processing, complementary
+                      filter, wave period detection, and HF vibration energy. Only runs when Accelerometer Data is
+                      enabled. Reported in µs.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="ft_updateAccelMetrics_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_updateAccelMetrics_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- VE Direct Read -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
@@ -8639,12 +8662,6 @@
     <span id="CurrentAlarmHigh_echo" style="display:none;">0</span>
     <span id="FourWay_echo" style="display:none;">0</span>
     <span id="RPMScalingFactor_echo" style="display:none;">0</span>
-    <span id="ResetTemp_echo" style="display:none;">0</span>
-    <span id="ResetVoltage_echo" style="display:none;">0</span>
-    <span id="ResetCurrent_echo" style="display:none;">0</span>
-    <span id="ResetEngineRunTime_echo" style="display:none;">0</span>
-    <span id="ResetAlternatorOnTime_echo" style="display:none;">0</span>
-    <span id="ResetEnergy_echo" style="display:none;">0</span>
     <span id="ResetAlternatorChargedEnergy_echo" style="display:none;">0</span>
     <span id="ResetDischargedEnergy_echo" style="display:none;">0</span>
     <span id="ResetFuelUsed_echo" style="display:none;">0</span>
