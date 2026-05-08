@@ -1146,6 +1146,10 @@ void AdjustFieldLearnMode() {
         float icvHi = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
 
         // cv_I = clamp_f(preEventIcv - VoltageKp * e, 0.0f, icvHi);  // likely to remove permanently
+        // cv_I here is already bled down by AwBleed during the fastOV period.
+        // That makes this seed conservative (below pre-event level), which is intentional —
+        // current rebuilds via the bumpless tracker rather than jumping straight back.
+        // If recovery looks sluggish, tune AwRecoverRate rather than changing this seed.
         Icv = clamp_f(VoltageKp * e + cv_I, 0.0f, icvHi);
         setpointLimited = Icv;
 
@@ -1420,6 +1424,10 @@ void AdjustFieldLearnMode() {
     applyImmediateCut(tick, reason);
     return;
   }
+  // Hold field off while Core 0 internet operation or NTP sync is in progress.
+  // Field was off for ≥60s before any internet activity fires, so this only
+  // prevents the field from turning back on mid-transaction.
+  if (core0Busy) return;
   digitalWrite(4, HIGH);
   gpio4IsLow = false;
   // GPIO38 driven solely by CheckAlarms — do not write here

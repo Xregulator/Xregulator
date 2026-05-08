@@ -81,6 +81,8 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 struct UpdateInfo;
 struct StreamingExtractor;
 struct HttpsRequest;
+// Auto-prototype generator fails on default-argument functions defined in later .ino files.
+bool fieldOffSettled(uint32_t extraMs = 0);
 
 SET_LOOP_TASK_STACK_SIZE(20 * 1024);  // Increase stack from 8KB to 20KB, necessary for SSL/TLS operations, backtraced at 12 on 4/18/26
 int hardwarePresent = 1;              // usage varies
@@ -127,8 +129,11 @@ CachedGzFile loadFileToRAM(const char *path) {
 // ── Async LittleFS write queue ────────────────────────────────
 // Decouples writeFileThrottled() from the actual flash write.
 // FlushFileWriteQueue() drains one entry per loop() call.
-// If queue fills (drops > 0), increase FS_WRITE_QUEUE_DEPTH.
-#define FS_WRITE_QUEUE_DEPTH 16
+// queueFSWrite() deduplicates by path — repeated writes to the same file
+// (e.g. board_temp_max firing every loop while rising) update in-place and
+// consume only one slot, so the depth only needs to equal the number of
+// unique paths ever pending simultaneously, not the write rate.
+#define FS_WRITE_QUEUE_DEPTH 64
 #define FS_WRITE_PATH_MAX 48
 #define FS_WRITE_DATA_MAX 48  // bump if any setting value exceeds 47 chars
 
@@ -141,6 +146,8 @@ static PendingFSWrite fsWriteQueue[FS_WRITE_QUEUE_DEPTH];
 static volatile uint8_t fsWriteHead = 0;  // consumer (FlushFileWriteQueue)
 static volatile uint8_t fsWriteTail = 0;  // producer (writeFileThrottled)
 uint32_t fsWriteQueueDrops = 0;           // wire into telemetry
+uint32_t fsFlushDeferred   = 0;           // times FlushFileWriteQueue skipped because NVS committed same tick
+bool     heavyIOThisTick   = false;       // set by NVS commit or FS write; prevents co-fire in same tick
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
@@ -435,7 +442,8 @@ static ImuRingBuffer *imuRingBuffer = nullptr;
 // IMU polling state
 bool imuEnabled = false;
 unsigned long lastIMUPoll = 0;
-constexpr unsigned long IMU_POLL_INTERVAL = 10;  // ms
+constexpr unsigned long IMU_POLL_INTERVAL          = 10;   // ms — when accelEnabled
+constexpr unsigned long IMU_POLL_INTERVAL_DISABLED = 100;  // ms — when !accelEnabled; ODR also dropped to 12.5Hz so FIFO fills ~25 samples/sec, well within 6-sample drain at this rate
 
 // FIFO drain budget
 constexpr uint16_t MAX_FIFO_DRAIN_PER_POLL = 6;   // Conservative start, tune up if needed
@@ -3074,7 +3082,10 @@ tNMEA2000Handler NMEA2000Handlers[] = {
 Stream *OutputStream = &Serial;  // safe, correct
 
 //ADS1115 more pre-setup crap
-uint32_t adsI2CErrorCount = 0;
+uint32_t adsI2CErrorCount  = 0;
+uint32_t adsSlowReadCount  = 0;   // times ADS_READ_RESULT took >5ms (I2C stall events)
+uint32_t adsLastSlowEndTxUs  = 0; // endTransmission duration on most recent slow read (µs)
+uint32_t adsLastSlowReqFromUs = 0; // requestFrom duration on most recent slow read (µs)
 
 enum ADS1115_State {
   ADS_IDLE,
@@ -3596,6 +3607,7 @@ void loop() {
   // // === END OTA UPDATE ===
   esp_task_wdt_reset();              // Feed the watchdog to prevent timeout
   starttime = esp_timer_get_time();  // Record start time for Loop
+  heavyIOThisTick = false;           // reset co-fire guard each tick
   currentTime = millis();
 
   // SOC and runtime update every 2 seconds (runs regardless of hardwarePresent)
@@ -3691,9 +3703,9 @@ void loop() {
             if (pendingSaveVesselInfo)         { pendingSaveVesselInfo          = false; saveVesselInfoToFile();       }
             if (pendingClearVesselInfo)        { pendingClearVesselInfo         = false; executeClearVesselInfo();     }
             shutdownNVSFlushDone = true;
-            shutdownCloudDeadlineMs = millis() + 120000;  // 2-min window: keeps WiFi up to confirm drain completed
+            shutdownCloudDeadlineMs = millis() + 1800000;  // 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain
           } else if (millis() < shutdownCloudDeadlineMs) {
-            // Phase 3: hold 240MHz and WiFi for the full 2-min window unconditionally.
+            // Phase 3: hold 240MHz and WiFi for the full 30-min window unconditionally.
             // Lets the CloudFeatures block continue uploading, and keeps WiFi open to verify the drain.
             setCpuFrequencyMhz(240);
           } else {
@@ -3760,6 +3772,8 @@ void loop() {
         checkTempTaskHealth();  // digital temperature measurement monitor (only with real hardware)
 
         TIMED_CALL(ft_ReadAnalogInputs, ReadAnalogInputs());
+        // If the ADS1115 step stalled (I2C hang), block NVS commit from also firing this tick
+        if (ft_rai_ads_state.lastCall > 5000) heavyIOThisTick = true;
       } else {
         imuEnabled = true;        //hack but it works for now
         ReadAnalogInputs_Fake();  // Fake sensor readings for development
@@ -3821,11 +3835,30 @@ void loop() {
         static int lastAccelEnabled = 0;
         if (accelEnabled == 1) {
           if (lastAccelEnabled == 0) {
-            // Flush stale samples accumulated while disabled — avoids draining 2000 samples in one shot
+            // Restore full ODR after low-power disabled state
+            if (imuEnabled) {
+              imu.Set_X_ODR(417.0f);
+              imu.Set_G_ODR(52.0f);
+              imu.Set_FIFO_X_BDR(417.0f);
+              imu.Set_FIFO_G_BDR(52.0f);
+            }
+            // Flush ring buffers so re-enable starts clean
             imuRingBuffer->accel_tail = imuRingBuffer->accel_head;
             imuRingBuffer->gyro_tail  = imuRingBuffer->gyro_head;
           }
           updateAccelMetrics();
+        } else {
+          if (lastAccelEnabled == 1) {
+            // Drop to minimum ODR — FIFO fills ~25 samples/sec instead of ~469.
+            // drainIMUFifo() polls at IMU_POLL_INTERVAL_DISABLED and drains without processing.
+            // I2C traffic drops ~10×. Loop pacing is preserved (avoids CPU% rising from tight spin).
+            if (imuEnabled) {
+              imu.Set_X_ODR(12.5f);
+              imu.Set_G_ODR(12.5f);
+              imu.Set_FIFO_X_BDR(12.5f);
+              imu.Set_FIFO_G_BDR(12.5f);
+            }
+          }
         }
         lastAccelEnabled = accelEnabled;
       }
@@ -3835,11 +3868,11 @@ void loop() {
           return;  // Skip during OTA
         }
         unsigned long currentMillisz = millis();
-        // Check time sync every 12 hours — skipped in critical zone (would fire nvs_commit)
-        if (!inCriticalZone()) TIMED_CALL(ft_checkTimeSync, checkTimeSync());
-        // Save current sensor window to buffer every SENSOR_UPLOAD_INTERVAL. All data goes to buffer first
-        // Skipped in critical zone (high voltage + field on) — window keeps accumulating, saved when zone clears
-        if (!inCriticalZone() && currentMillisz - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
+        // Check time sync every 12 hours — requires field off for 60s (fieldOffSettled)
+        if (fieldOffSettled(0)) TIMED_CALL(ft_checkTimeSync, checkTimeSync());
+        // Save current sensor window to local buffer every SENSOR_UPLOAD_INTERVAL.
+        // No internet involved — window accumulates while field is on, saved any time.
+        if (currentMillisz - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
           esp_task_wdt_reset();
           TIMED_CALL(ft_UpdateSailingMetrics, UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL));
           lastSensorUploadTime = currentMillisz;
@@ -3848,9 +3881,8 @@ void loop() {
           esp_task_wdt_reset();
         }
 
-        // Upload buffered records every BUFFER_UPLOAD_INTERVAL minutes.  Reads file, uploads it, deletes on success
-        // Skipped in critical zone — no LittleFS reads or queue activity during high-voltage regulation
-        if (!inCriticalZone() && currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7) {  // added 7 to give a tiny offset, not sure if useful or not
+        // Upload buffered records every BUFFER_UPLOAD_INTERVAL — requires field off for 65s
+        if (fieldOffSettled(5000) && currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7) {
           lastBufferUploadAttempt = currentMillisz;
           if (bufferedRecordCount > 0) {
             esp_task_wdt_reset();                                           // Feed before upload
@@ -3860,8 +3892,8 @@ void loop() {
         }
         //delay(3);  // removed 4/18/26, don't think it was ever necessary
 
-        // Configuration Snapshot
-        if (!inCriticalZone() && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
+        // Configuration Snapshot — requires field off for 70s
+        if (fieldOffSettled(10000) && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
           lastConfigSnapshotTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
             if (WiFi.RSSI() >= -76) {

@@ -1746,10 +1746,9 @@ void uploadSensorHistory() {
   //Serial.println("=== uploadSensorHistory() ===");
   // Serial.printf("Samples: %u, buffered: %d\n", currentWindow->sampleCount, bufferedRecordCount);  // OLD - commented out
 
-  // Sync time if needed
-  if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && currentTimeSource != TIME_GPS && !timeIsSynced) {
-    syncTimeFromNTP();
-  }
+  // NTP sync removed from this path — checkTimeSync() handles it on its own
+  // interval and is now gated by fieldOffSettled(). computeCollectionTime()
+  // falls back to millis-based timestamps if time is not yet synced.
   time_t collectionTime = computeCollectionTime();
   saveToLocalBuffer(collectionTime);  // This eventually will include IMU data in JSON
   // CHANGED - Updated debug to show time-weighted stats
@@ -2226,40 +2225,37 @@ void syncTimeFromNTP() {
   if (currentMode != MODE_CLIENT || WiFi.status() != WL_CONNECTED) return;  // MODE_CLIENT = 1
 
   Serial.println("Starting NTP sync...");
+  // Hold core0Busy so RunAlternator will not enable the field while we block
+  // on getLocalTime(). Cleared on all exit paths below.
+  core0Busy = true;
   esp_task_wdt_reset();
 
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
+  // Single-shot — no retry loop, no delay(). checkTimeSync() retries on its
+  // normal TIME_SYNC_INTERVAL cadence. A retry loop with delay(500) would
+  // block Core 1 for up to 10.5s (3×3000ms timeout + 3×500ms) if NTP is down.
   struct tm timeinfo;
-  int retries = 0;
-  const int MAX_NTP_RETRIES = 3;
-  const int NTP_TIMEOUT_MS = 3000;
+  esp_task_wdt_reset();
 
-  while (retries < MAX_NTP_RETRIES) {
-    esp_task_wdt_reset();  // Feed watchdog each attempt
+  if (getLocalTime(&timeinfo, 3000)) {
+    timeBase = time(nullptr);
+    timeBaseMillis = millis();
+    timeIsSynced = true;
+    currentTimeSource = TIME_NTP;
+    lastTimeSyncAttempt = millis();
 
-    if (getLocalTime(&timeinfo, NTP_TIMEOUT_MS)) {
-      timeBase = time(nullptr);
-      timeBaseMillis = millis();
-      timeIsSynced = true;
-      currentTimeSource = TIME_NTP;
-      lastTimeSyncAttempt = millis();
+    saveTimeSyncState();  // Persist immediately
 
-      saveTimeSyncState();  // Persist immediately
-
-      queueConsoleMessage("Time synced from NTP");
-      Serial.printf("NTP synced: epoch=%ld\n", timeBase);
-      return;
-    }
-
-    retries++;
-    Serial.printf("NTP attempt %d/%d failed\n", retries, MAX_NTP_RETRIES);
-    esp_task_wdt_reset();
-    delay(500);
+    queueConsoleMessage("Time synced from NTP");
+    Serial.printf("NTP synced: epoch=%ld\n", timeBase);
+    core0Busy = false;
+    return;
   }
 
-  Serial.println("NTP sync failed after all attempts");
+  Serial.println("NTP sync attempt failed");
   lastTimeSyncAttempt = millis();
+  core0Busy = false;
 }
 
 bool canUploadNow() {

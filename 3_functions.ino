@@ -2177,15 +2177,25 @@ void setupServer() {
     if (request->hasParam("MaintainMode")) {
       foundParameter = true;
       inputMessage = request->getParam("MaintainMode")->value();
-      writeFile(LittleFS, "/MaintainMode.txt", inputMessage.c_str());
       MaintainMode = inputMessage.toInt();
+      writeFile(LittleFS, "/MaintainMode.txt", inputMessage.c_str());
+      if (MaintainMode) {
+        // MaintainMode and TargetVoltageMode are mutually exclusive — clear the other.
+        TargetVoltageMode = 0;
+        writeFile(LittleFS, "/TargetVoltageMode.txt", "0");
+      }
       queueConsoleMessageF("MaintainMode mode %s", MaintainMode ? "enabled" : "disabled");
     }
     if (request->hasParam("TargetVoltageMode")) {
       foundParameter = true;
       inputMessage = request->getParam("TargetVoltageMode")->value();
-      writeFile(LittleFS, "/TargetVoltageMode.txt", inputMessage.c_str());
       TargetVoltageMode = inputMessage.toInt();
+      writeFile(LittleFS, "/TargetVoltageMode.txt", inputMessage.c_str());
+      if (TargetVoltageMode) {
+        // MaintainMode and TargetVoltageMode are mutually exclusive — clear the other.
+        MaintainMode = 0;
+        writeFile(LittleFS, "/MaintainMode.txt", "0");
+      }
       queueConsoleMessageF("TargetVoltageMode %s", TargetVoltageMode ? "enabled" : "disabled");
     }
     if (request->hasParam("OnOff")) {
@@ -2844,8 +2854,11 @@ void setupServer() {
     }
     if (request->hasParam("TriggerWeatherUpdate")) {
       foundParameter = true;
-      queueConsoleMessage("Weather: Manual update triggered");
-      if (WiFi.RSSI() >= -76 && LatitudeNMEA != 0.0 && LongitudeNMEA != 0.0) {
+      if (fieldActiveStatus > 0) {
+        queueConsoleMessage("Weather update refused: disable the field first");
+        inputMessage = "field_on";
+      } else if (WiFi.RSSI() >= -76 && LatitudeNMEA != 0.0 && LongitudeNMEA != 0.0) {
+        queueConsoleMessage("Weather: Manual update triggered");
         HttpsRequest req = { .type = HTTPS_FETCH_WEATHER };
         xQueueSend(httpsQueue, &req, 0);
       }

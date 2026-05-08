@@ -26,10 +26,25 @@ bool writeFileThrottled(fs::FS &fs, const char *path, const char *value,
   return false;
 }
 static bool queueFSWrite(const char *path, const char *data) {
+  // Deduplication: if this path is already queued, update its data in-place.
+  // This means 100 consecutive writes to the same file (e.g. board_temp_max
+  // firing every loop while temp rises) consume only one queue slot and always
+  // hold the latest value.
+  uint8_t i = fsWriteHead;
+  while (i != fsWriteTail) {
+    if (strcmp(fsWriteQueue[i].path, path) == 0) {
+      strlcpy(fsWriteQueue[i].data, data, FS_WRITE_DATA_MAX);
+      return true;
+    }
+    i = (i + 1) % FS_WRITE_QUEUE_DEPTH;
+  }
+  // Not already queued — add new entry
   uint8_t nextTail = (fsWriteTail + 1) % FS_WRITE_QUEUE_DEPTH;
   if (nextTail == fsWriteHead) {
-    // Queue full - drop this write
+    // Queue full — too many DIFFERENT paths pending simultaneously
     fsWriteQueueDrops++;
+    Serial.printf("FS queue full (%d unique paths), dropping write to %s\n",
+                  FS_WRITE_QUEUE_DEPTH - 1, path);
     return false;
   }
   strlcpy(fsWriteQueue[fsWriteTail].path, path, FS_WRITE_PATH_MAX);
@@ -43,6 +58,7 @@ static bool queueFSWrite(const char *path, const char *data) {
 void FlushFileWriteQueue() {
   if (fsWriteHead == fsWriteTail) return;  // queue empty
   if (!safeToFlushIO()) return;            // hold writes until 5s stable out of critical zone
+  if (heavyIOThisTick) { fsFlushDeferred++; return; }  // NVS committed this tick — defer FS write to prevent co-fire
   static unsigned long lastFlush = 0;
   unsigned long now = millis();
   if (now - lastFlush < 25) return;  // spread writes — each LittleFS write blocks ~40-50ms; prevents 700ms stall
@@ -50,6 +66,7 @@ void FlushFileWriteQueue() {
   writeFile(LittleFS, fsWriteQueue[fsWriteHead].path,
             fsWriteQueue[fsWriteHead].data);
   fsWriteHead = (fsWriteHead + 1) % FS_WRITE_QUEUE_DEPTH;
+  heavyIOThisTick = true;  // signal that a flash write happened this tick
 }
 
 void SystemTime(const tN2kMsg &N2kMsg) {
@@ -2228,8 +2245,23 @@ void _ReadAnalogInputs_inner() {
                      // so we bypass adc.getConversion() which would busy-wait/block the loop unnecessarily
                      Wire.beginTransmission(0x48);
                      Wire.write(ADS1115_REG_POINTER_CONVERT);
+                     uint32_t _ads_t0 = (uint32_t)esp_timer_get_time();
                      uint8_t endStatus = Wire.endTransmission(false);
+                     uint32_t _ads_t1 = (uint32_t)esp_timer_get_time();
                      uint8_t bytesReceived = Wire.requestFrom((uint8_t)0x48, (uint8_t)2);
+                     uint32_t _ads_t2 = (uint32_t)esp_timer_get_time();
+
+                     // Diagnostic: log when either I2C call stalls >5ms total
+                     if (_ads_t2 - _ads_t0 > 5000) {
+                       adsSlowReadCount++;
+                       adsLastSlowEndTxUs   = _ads_t1 - _ads_t0;
+                       adsLastSlowReqFromUs = _ads_t2 - _ads_t1;
+                       Serial.printf("ADS slow read #%lu ch%d: endTx=%luus reqFrom=%luus total=%luus\n",
+                                     (unsigned long)adsSlowReadCount, adsTriggeredChannel,
+                                     (unsigned long)adsLastSlowEndTxUs,
+                                     (unsigned long)adsLastSlowReqFromUs,
+                                     (unsigned long)(_ads_t2 - _ads_t0));
+                     }
 
                      bool readOK = (endStatus == 0) && (bytesReceived == 2) && (Wire.available() >= 2);
 
@@ -2595,10 +2627,12 @@ void _ReadAnalogInputs_inner() {
 // cannot delay control-critical voltage/current reads or the field control decision.
 // No collision-avoidance needed here — a slow drain only delays telemetry, not control.
 void drainIMUFifo() {
-  if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
+  unsigned long pollInterval = accelEnabled ? IMU_POLL_INTERVAL : IMU_POLL_INTERVAL_DISABLED;
+  if (!imuEnabled || (millis() - lastIMUPoll < pollInterval)) return;
   lastIMUPoll = millis();
-  MARK_FRESH(IDX_IMU);
-  // If accel display is disabled, drain the hardware FIFO so it doesn't back up, but don't queue anything
+  // When accelEnabled is off, ODR is lowered to 12.5Hz (see transition block in loop()).
+  // FIFO fills at ~25 samples/sec. Drain without processing to keep FIFO clear and
+  // maintain natural I2C pacing in the loop. I2C traffic is ~10× less than when enabled.
   if (!accelEnabled) {
     uint16_t n = 0;
     if (imu.Get_FIFO_Num_Samples(&n) == LSM6DSOX_OK && n > 0) {
@@ -2607,6 +2641,7 @@ void drainIMUFifo() {
     }
     return;
   }
+  MARK_FRESH(IDX_IMU);
 
   TIMED_CALL(ft_rai_imu, ([&]() {
                uint16_t fifo_samples = 0;
@@ -3855,6 +3890,22 @@ bool safeToFlushIO() {
   return (millis() - critZoneClearAt >= 5000);
 }
 
+// Returns true once fieldActiveStatus has been 0 continuously for 60s + extraMs.
+// Resets the moment the field turns on. Use extraMs to stagger callers so they
+// don't all fire at once after a long charging session.
+bool fieldOffSettled(uint32_t extraMs) {
+  static unsigned long fieldOffAt = 0;
+  if (fieldActiveStatus > 0) {
+    fieldOffAt = 0;
+    return false;
+  }
+  if (fieldOffAt == 0) {
+    fieldOffAt = millis();
+    return false;
+  }
+  return (millis() - fieldOffAt >= 60000UL + extraMs);
+}
+
 // Phased NVS write — called every loop() tick.
 // Phase 0: idle, waiting for 2-minute gate.
 // Phases 1-8: one logical write group per active call, with NVS_TICK_SPACING
@@ -3974,6 +4025,7 @@ void saveNVSData() {
       nvsPhase = 9; break;
 
     case 9:  // Commit + close — skip commit if in critical zone, restart cycle immediately
+      if (heavyIOThisTick) { nvsTick = NVS_TICK_SPACING; return; }  // ADS or FS stall this tick — retry next tick
       if (inCriticalZone()) {
         nvs_close(nvsH);   // discard staged values
         nvsH = 0;
@@ -3981,7 +4033,7 @@ void saveNVSData() {
         nvsPhase = 0;
         break;
       }
-      if (nvsChg) nvs_commit(nvsH);
+      if (nvsChg) { nvs_commit(nvsH); heavyIOThisTick = true; }  // flag so FlushFileWriteQueue defers this tick
       nvs_close(nvsH);
       nvsH = 0;
       nvsCycleMs = millis() - nvsCycleStart;

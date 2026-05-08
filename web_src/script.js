@@ -1749,60 +1749,91 @@ function startInterpLoop() {
     if (interpLoopRunning) return;
     interpLoopRunning = true;
 
+    // ── Smoothness diagnostics ────────────────────────────────────────────
+    const diag = {
+        frameCount: 0,
+        worstFrameGapMs: 0,   // largest gap between rAF calls — visible as a glitch when >33ms
+        glitchFrames: 0,      // frames where gap >33ms (below 30fps)
+        totalRenderMs: 0,     // cumulative setData time this period
+        worstRenderMs: 0,     // single worst setData batch
+        lerpDurationSum: 0,   // for computing average adaptive interval
+        lastFrameTime: performance.now(),
+        nextReportTime: performance.now() + 10000,
+    };
+
     function applyInterp(state, dataArray, seriesCount) {
         if (state.arrivalTime === 0) return false;
-        const t = Math.min(1, (performance.now() - state.arrivalTime) / state.lerpDuration);
+        const elapsedMs = performance.now() - state.arrivalTime;
+        const tLinear = Math.min(1, elapsedMs / state.lerpDuration);
+        // Smoothstep easing: slow-start → fast-middle → slow-end.
+        // Looks more organic than linear; also softens the "square step" on slow-updating sensors.
+        const t = tLinear * tLinear * (3 - 2 * tLinear);
         const last = dataArray[1].length - 1;
+        const elapsedSec = elapsedMs / 1000;
+
+        // Smooth x-axis scrolling — eliminates discrete jump when y-data shifts at packet arrival.
+        // Relative (seconds-ago) mode: reconstruct entire x-array each frame, offsetting left by elapsed.
+        // Absolute (epoch) mode: pin both x[0] and x[last] so range width stays constant — prevents
+        //   left-edge jump when the shift-buffer drops the oldest sample at each SSE arrival.
+        if (dataArray[0][last] > 1e9) {
+            const now = Date.now() / 1000;
+            const intervalSec = (window._lastKnownInterval || 200) / 1000;
+            dataArray[0][last] = now;
+            dataArray[0][0]    = now - last * intervalSec;  // anchor left edge; prevents 4px tick snap at 5Hz
+        } else {
+            const intervalSec = (window._lastKnownInterval || 200) / 1000;
+            for (let i = 0; i <= last; i++) {
+                dataArray[0][i] = -(last - i) * intervalSec - elapsedSec;
+            }
+        }
+
         for (let s = 0; s < seriesCount; s++) {
             dataArray[s + 1][last] = lerp(state.prevY[s], state.nextY[s], t);
         }
         return true;
     }
 
-    // True when the main plots tab is the active visible tab
     function plotsTabVisible() {
         const el = document.getElementById('plots');
         return el && el.classList.contains('active');
     }
-    // True when the tuning tab is the active visible tab
     function tuningTabVisible() {
         const el = document.getElementById('tuning');
         return el && el.classList.contains('active');
     }
 
     function frame() {
+        const frameStart = performance.now();
+
+        // ── Frame timing ─────────────────────────────────────────────────
+        const frameGap = frameStart - diag.lastFrameTime;
+        diag.lastFrameTime = frameStart;
+        diag.frameCount++;
+        if (frameGap > diag.worstFrameGapMs) diag.worstFrameGapMs = frameGap;
+        if (frameGap > 33) {
+            diag.glitchFrames++;
+            if (frameGap > 50) diagWarn(`[INTERP] Dropped frame: ${frameGap.toFixed(1)}ms gap`);
+        }
+
+        // ── Plot updates ──────────────────────────────────────────────────
+        const renderStart = performance.now();
+
         if (plotsTabVisible()) {
             if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 3)) {
-                const s = performance.now();
                 currentTempPlot.setData(currentTempData);
-                const d = performance.now() - s;
                 plotRenderTracker.plots.current.count++;
-                plotRenderTracker.plots.current.totalTime += d;
-                plotRenderTracker.plots.current.maxTime = Math.max(plotRenderTracker.plots.current.maxTime, d);
             }
             if (voltagePlot && applyInterp(plotInterp.voltage, voltageData, 2)) {
-                const s = performance.now();
                 voltagePlot.setData(voltageData);
-                const d = performance.now() - s;
                 plotRenderTracker.plots.voltage.count++;
-                plotRenderTracker.plots.voltage.totalTime += d;
-                plotRenderTracker.plots.voltage.maxTime = Math.max(plotRenderTracker.plots.voltage.maxTime, d);
             }
             if (rpmPlot && applyInterp(plotInterp.rpm, rpmData, 1)) {
-                const s = performance.now();
                 rpmPlot.setData(rpmData);
-                const d = performance.now() - s;
                 plotRenderTracker.plots.rpm.count++;
-                plotRenderTracker.plots.rpm.totalTime += d;
-                plotRenderTracker.plots.rpm.maxTime = Math.max(plotRenderTracker.plots.rpm.maxTime, d);
             }
             if (temperaturePlot && applyInterp(plotInterp.temperature, temperatureData, 1)) {
-                const s = performance.now();
                 temperaturePlot.setData(temperatureData);
-                const d = performance.now() - s;
                 plotRenderTracker.plots.temperature.count++;
-                plotRenderTracker.plots.temperature.totalTime += d;
-                plotRenderTracker.plots.temperature.maxTime = Math.max(plotRenderTracker.plots.temperature.maxTime, d);
             }
         }
         if (tuningTabVisible()) {
@@ -1813,6 +1844,32 @@ function startInterpLoop() {
                 cvTuningPlot.setData(cvTuningData);
             }
         }
+
+        const renderMs = performance.now() - renderStart;
+        diag.totalRenderMs += renderMs;
+        if (renderMs > diag.worstRenderMs) diag.worstRenderMs = renderMs;
+        diag.lerpDurationSum += plotInterp.current.lerpDuration;
+
+        // ── Periodic smoothness report ────────────────────────────────────
+        if (frameStart >= diag.nextReportTime && diag.frameCount > 0) {
+            const periodMs = frameStart - (diag.nextReportTime - 10000);
+            const fps = (diag.frameCount / (periodMs / 1000)).toFixed(1);
+            const avgRender = (diag.totalRenderMs / diag.frameCount).toFixed(2);
+            const avgLerp = (diag.lerpDurationSum / diag.frameCount).toFixed(0);
+            diagLog(
+                `[INTERP] fps:${fps} | worstGap:${diag.worstFrameGapMs.toFixed(1)}ms` +
+                ` | render/frame:${avgRender}ms | worstRender:${diag.worstRenderMs.toFixed(1)}ms` +
+                ` | glitches:${diag.glitchFrames} | avgLerp:${avgLerp}ms`
+            );
+            diag.frameCount = 0;
+            diag.worstFrameGapMs = 0;
+            diag.glitchFrames = 0;
+            diag.totalRenderMs = 0;
+            diag.worstRenderMs = 0;
+            diag.lerpDurationSum = 0;
+            diag.nextReportTime = frameStart + 10000;
+        }
+
         requestAnimationFrame(frame);
     }
 
@@ -3870,7 +3927,7 @@ function initCVTuningPlot() {
             },
         ],
         scales: {
-            x:     { time: false },
+            x:     { time: false, auto: false, range: [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
             volts: {},
             amps:  {},
         },
@@ -4779,6 +4836,22 @@ function updateAnchorColorCoding(data) {
         applyAnchorColor('imu_heading_swing_120s_ID',   data.imu_heading_swing_120s,   10,  20, 45);  // TODO: tune thresholds
 }
 
+// Reorders the two context-sensitive card-groups inside the IMU grid so
+// the relevant mode's section appears first. Runs only when moving state changes.
+window._lastIMUMovingStateForReorder = undefined;
+function reorderIMUSections(moving) {
+    const neutralGroup = document.getElementById('imu-current-motion-group');
+    const underwayGroup = document.getElementById('imu-underway-group');
+    const anchorGroup   = document.getElementById('imu-anchor-group');
+    if (!neutralGroup || !underwayGroup || !anchorGroup) return;
+
+    if (moving === true) {
+        neutralGroup.after(underwayGroup, anchorGroup);
+    } else {
+        neutralGroup.after(anchorGroup, underwayGroup);
+    }
+}
+
 function updateIMUModeStyles() {
     if (window.imuMovingState === null) return;  // no GPS yet — leave everything at full opacity
     const moving = window.imuMovingState;
@@ -4801,6 +4874,12 @@ function updateIMUModeStyles() {
         'imu_pitch_deviation_120s_ID',
         'imu_heading_swing_120s_ID',
     ].forEach(id => applyModeStyle(id, !moving, 'Active at anchor only (SOG < 1.3 kt)'));
+
+    // Reorder card-groups so the contextually active section is on top
+    if (window._lastIMUMovingStateForReorder !== moving) {
+        window._lastIMUMovingStateForReorder = moving;
+        reorderIMUSections(moving);
+    }
 }
 
 function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD_DEFAULT_MS) {
@@ -5145,6 +5224,10 @@ function setNewPassword() {
 function triggerWeatherUpdate() {
     if (!currentAdminPassword) {
         alert("Please unlock settings first");
+        return;
+    }
+    if (window._debugData && window._debugData.fieldActiveStatus > 0) {
+        alert("The field must be disabled before updating weather data.");
         return;
     }
 
@@ -6015,9 +6098,6 @@ window.addEventListener("load", function () {
                 ["imu_msi_score_ID", "imu_msi_score"],
                 ["imu_vomit_pct_ID", "imu_vomit_pct"],
                 ["imu_anchorage_comfort_ID", "imu_anchorage_comfort"],
-                ["imu_heel_deviation_120s_ID", "imu_heel_deviation_120s"],
-                ["imu_pitch_deviation_120s_ID", "imu_pitch_deviation_120s"],
-                ["imu_heading_swing_120s_ID", "imu_heading_swing_120s"]
             ];
 
             // Update alarm status, this is GPIO21 buzzer/alarm
@@ -6599,6 +6679,11 @@ window.addEventListener("load", function () {
 
                 // IMU Wave Period
                 ["imu_wave_period_sec_ID", "imu_wave_period_sec"],
+
+                // IMU 120s Anchor Metrics (CSV2 fields 270-272)
+                ["imu_heel_deviation_120s_ID", "imu_heel_deviation_120s"],
+                ["imu_pitch_deviation_120s_ID", "imu_pitch_deviation_120s"],
+                ["imu_heading_swing_120s_ID", "imu_heading_swing_120s"],
 
                 // IMU Lifetime Maximums
                 ["imu_heel_max_lifetime_ID", "imu_heel_max_lifetime"],
@@ -9520,7 +9605,9 @@ async function fetchAndRenderThermalLog() {
         console.error('thermallog fetch:', err);
     }
     requestAnimationFrame(() => {
-        requestAnimationFrame(() => { window.scrollTo(0, scrollY); });
+        requestAnimationFrame(() => {
+            if (Math.abs(window.scrollY - scrollY) > 2) window.scrollTo(0, scrollY);
+        });
     });
 }
 

@@ -126,6 +126,16 @@ void updateSystemHealthStats() {
     Heapfrag = (FreeInternalRam > 0)
                  ? 100 - (LargestInternalBlock * 100 / FreeInternalRam)
                  : 100;
+
+    // TLS handshake needs ~32-40 KB contiguous internal RAM. Warn early so there is
+    // time to investigate before HTTPS starts silently failing.
+    static bool heapWarnSent = false;
+    if (LargestInternalBlock < 34 && !heapWarnSent) {
+      heapWarnSent = true;
+      queueConsoleMessage("WARNING: Internal RAM fragmented — HTTPS may fail. Check ESP32 Stats panel.");
+    } else if (LargestInternalBlock >= 38) {
+      heapWarnSent = false;  // Re-arm once conditions improve
+    }
   }
 }
 
@@ -255,6 +265,13 @@ void updateWeatherMode() {
   // Use existing valid data if fresh
   if (weatherDataValid && (now - weatherLastUpdate < WeatherUpdateInterval)) {
     analyzeWeatherMode();
+    return;
+  }
+
+  // Internet fetch requires field off for 75s. Do not advance nextWeatherUpdate
+  // while blocked — it fires promptly once the gate opens.
+  if (!fieldOffSettled(15000)) {
+    if (weatherDataValid) analyzeWeatherMode();
     return;
   }
 
@@ -501,7 +518,10 @@ void imuInit() {
     return;
   }
 
-  // Set ODRs (ST library uses 417 Hz, not 416)
+  // Set ODRs (ST library uses 417 Hz, not 416).
+  // 417 Hz is kept for future high-frequency engine diagnostics (vibration signature analysis).
+  // If that feature is not implemented, drop to 208 Hz to reduce I2C load and free ~5% Core 1 CPU.
+  // Also update Set_FIFO_X_BDR and ACCEL_INTERVAL_US (2398 → 4808 µs) if changed.
   if (imu.Set_X_ODR(417.0f) != LSM6DSOX_OK) {
     Serial.println("ERROR: Failed to set accel ODR");
     queueConsoleMessageF("IMU: failed to set accel ODR");

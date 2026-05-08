@@ -1907,7 +1907,7 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                     <span class="tooltip-box">How long battery voltage must remain continuously at or above Bulk voltage
                       before Absorption begins. Prevents transient voltage spikes from triggering an early Absorption
-                      entry. 1s typical. Note that there isn't any controls difference between Bulk and Absorb other
+                      entry. 0.25s typical. Note that there isn't any controls difference between Bulk and Absorb other
                       than the limiting voltage, if those are set differently, so this is more a question of display
                       nomenclature.</span>
                   </span>
@@ -5946,8 +5946,8 @@
             <p class="reading" style="font-size: 36px;"><span id="imu_vertical_accel_g_ID">0.00</span> g</p>
           </div>
 
-          <!-- Current Motion -->
-          <div class="card-group">
+          <!-- Current Motion — always-on basics -->
+          <div class="card-group" id="imu-current-motion-group">
             <p class="card-group-title">Current Motion</p>
             <div class="metric-row">
               <span class="metric-label">Total Acceleration</span>
@@ -5958,21 +5958,14 @@
               <span class="metric-value"><span id="imu_yaw_rate_dps_ID">0.0</span> °/s</span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Wave Period <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dominant wave period in seconds, auto-detected from the vertical acceleration signal. Calculated via zero-crossings of the 10 Hz-decimated vertical accel after DC (gravity) removal. Shows "--" until enough crossings are detected.</span></span></span>
-              <span class="metric-value"><span id="imu_wave_period_sec_ID">--</span> s</span>
-            </div>
-            <div class="metric-row">
               <span class="metric-label">HF Vibration Energy <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">High-frequency (above 20 Hz) vibration energy from the accelerometer, displayed as RMS² in g². Reflects engine vibration, chop, and mechanical noise. Gravity and slow vessel motion are removed by a high-pass filter. ~1 second smoothing.</span></span></span>
               <span class="metric-value"><span id="imu_hf_vibration_energy_ID">0</span> RMS²</span>
             </div>
-            <div class="metric-row">
-              <span class="metric-label">Motion Sickness Index <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lawther &amp; Griffin (1987) motion sickness index. Frequency-weights vertical acceleration — peaks at 0.2 Hz (5-second waves), which causes the most sickness. Scale: 0–30 low, 30–70 moderate, 70+ severe. Not a percentage; higher is worse. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor. Resets to zero on departure and arrival — no cross-contamination between trips.</span></span></span>
-              <span class="metric-value"><span id="imu_msi_score_ID">--</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Vomit Probability (2hr) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Estimated percentage of an average population who would vomit during a 2-hour voyage at the current sustained motion level. Derived from the Motion Sickness Index using the Lawther &amp; Griffin power-law model. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor.</span></span></span>
-              <span class="metric-value"><span id="imu_vomit_pct_ID">--</span> %</span>
-            </div>
+          </div>
+
+          <!-- At-Anchor Metrics — moves to top when anchored (SOG < 1.3 kt) -->
+          <div class="card-group" id="imu-anchor-group">
+            <p class="card-group-title">Anchorage Comfort</p>
             <div class="metric-row">
               <span class="metric-label">Anchorage Comfort <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Comfort score at anchor on a 0–100 scale (100 = flat calm). Based on rolling (heel deviation, 65% weight) and hobby-horsing (pitch deviation, 35% weight) over the last 60 seconds. Full penalty at 12° heel deviation or 8° pitch deviation. Grayed out underway — contextually meaningful only at anchor. Motion history resets on departure so passage data never skews the score. Activates below 1.3 kt.</span></span></span>
               <span class="metric-value"><span id="imu_anchorage_comfort_ID">--</span> / 100</span>
@@ -5988,6 +5981,39 @@
             <div class="metric-row">
               <span class="metric-label">Yaw Swing (2 min) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Peak-to-peak heading swing over the last 2 minutes from the NMEA2000 compass. Shows how much the boat swings on its anchor rode. "--" if no compass data. Color coded: green = steady, yellow = moderate swing, red = wide swing. Grayed out underway.</span></span></span>
               <span class="metric-value"><span id="imu_heading_swing_120s_ID">--</span> °</span>
+            </div>
+          </div>
+
+          <!-- Underway Metrics — moves to top when underway (SOG > 1.7 kt) -->
+          <div class="card-group" id="imu-underway-group">
+            <p class="card-group-title">Underway Metrics</p>
+            <div class="metric-row">
+              <span class="metric-label">Wave Period <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dominant wave period in seconds, auto-detected from the vertical acceleration signal. Calculated via zero-crossings of the 10 Hz-decimated vertical accel after DC (gravity) removal. Shows "--" until enough crossings are detected.</span></span></span>
+              <span class="metric-value"><span id="imu_wave_period_sec_ID">--</span> s</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Motion Sickness Index <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lawther &amp; Griffin (1987) motion sickness index. Frequency-weights vertical acceleration — peaks at 0.2 Hz (5-second waves), which causes the most sickness. Scale: 0–30 low, 30–70 moderate, 70+ severe. Not a percentage; higher is worse. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor. Resets to zero on departure and arrival — no cross-contamination between trips.</span></span></span>
+              <span class="metric-value"><span id="imu_msi_score_ID">--</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Vomit Probability (2hr) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Estimated percentage of an average population who would vomit during a 2-hour voyage at the current sustained motion level. Derived from the Motion Sickness Index using the Lawther &amp; Griffin power-law model. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor.</span></span></span>
+              <span class="metric-value"><span id="imu_vomit_pct_ID">--</span> %</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Heel Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in heel angle over the last 60 seconds (latest minus oldest sample). Captures slow, persistent roll shifts — e.g. a jibe or load transfer.</span></span></span>
+              <span class="metric-value"><span id="imu_heel_change_60s_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Heel Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean heel angle. Measures how much the boat is rocking side-to-side regardless of its steady list. High deviation = active rolling. Used in the Anchorage Comfort score.</span></span></span>
+              <span class="metric-value"><span id="imu_heel_deviation_60s_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Pitch Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in pitch angle over the last 60 seconds (latest minus oldest). Captures slow fore-aft trim shifts.</span></span></span>
+              <span class="metric-value"><span id="imu_pitch_change_60s_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Pitch Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean pitch angle. Measures fore-aft hobby-horsing. High deviation = active pitching. Used in the Anchorage Comfort score.</span></span></span>
+              <span class="metric-value"><span id="imu_pitch_deviation_60s_ID">0.0</span>°</span>
             </div>
           </div>
 
@@ -6018,27 +6044,6 @@
             <div class="metric-row">
               <span class="metric-label">Pitchpole Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times pitch angle has exceeded the configurable Pitchpole Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
               <span class="metric-value"><span id="imu_pitchpole_count_ID">0</span></span>
-            </div>
-          </div>
-
-          <!-- 60s Rolling Window Metrics -->
-          <div class="card-group">
-            <p class="card-group-title">60-Second Rolling Metrics</p>
-            <div class="metric-row">
-              <span class="metric-label">Heel Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in heel angle over the last 60 seconds (latest minus oldest sample). Captures slow, persistent roll shifts — e.g. a jibe or load transfer.</span></span></span>
-              <span class="metric-value"><span id="imu_heel_change_60s_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Heel Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean heel angle. Measures how much the boat is rocking side-to-side regardless of its steady list. High deviation = active rolling. Used in the Anchorage Comfort score.</span></span></span>
-              <span class="metric-value"><span id="imu_heel_deviation_60s_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Pitch Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in pitch angle over the last 60 seconds (latest minus oldest). Captures slow fore-aft trim shifts.</span></span></span>
-              <span class="metric-value"><span id="imu_pitch_change_60s_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Pitch Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean pitch angle. Measures fore-aft hobby-horsing. High deviation = active pitching. Used in the Anchorage Comfort score.</span></span></span>
-              <span class="metric-value"><span id="imu_pitch_deviation_60s_ID">0.0</span>°</span>
             </div>
           </div>
 
@@ -7774,7 +7779,6 @@
   <div id="console" class="tab-content">
     <div class="settings-card wide-card">
       <div class="form-label">
-        Console
         <button type="button" id="pauseConsoleBtn" onclick="toggleConsolePause()"
           style="font-size: 12px; margin-left: 10px;">Pause</button>
         <button type="button" onclick="copyConsole()" style="font-size: 12px; margin-left: 5px;">Copy</button>
