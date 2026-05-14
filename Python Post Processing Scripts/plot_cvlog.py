@@ -33,15 +33,15 @@ import numpy as np
 DOWNLOADS = os.path.expanduser("~/Downloads")
 
 plt.rcParams.update({
-    "font.size": 14,
-    "axes.titlesize": 18,
-    "axes.labelsize": 15,
-    "xtick.labelsize": 13,
-    "ytick.labelsize": 13,
-    "legend.fontsize": 12,
-    "figure.titlesize": 16,
-    "legend.handlelength": 3.5,
-    "legend.handleheight": 1.5,
+    "font.size": 9,
+    "axes.titlesize": 11,
+    "axes.labelsize": 10,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 8,
+    "figure.titlesize": 10,
+    "legend.handlelength": 2.5,
+    "legend.handleheight": 1.2,
 })
 
 # ---------------------------------------------------------------------------
@@ -364,7 +364,7 @@ def save_fig(fig, suffix):
 
 
 def make_fig(title_suffix, num):
-    fig = plt.figure(figsize=(18, 8), num=num)
+    fig = plt.figure(figsize=(9, 4), num=num)
     gs  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
     ax  = fig.add_subplot(gs[0])
     axs = fig.add_subplot(gs[1], sharex=ax)
@@ -458,7 +458,7 @@ draw_state_strip(ax2s, df)
 #   3b: iMeas_A vs iMeas_filt_A — current filter lag / noise rejection
 #   3c: ch1_interval_ms — ADC scheduling jitter (gaps → stale readings)
 # ---------------------------------------------------------------------------
-fig3 = plt.figure(figsize=(18, 11), num="Plot 3 — Filtered Signal Quality")
+fig3 = plt.figure(figsize=(9, 5.5), num="Plot 3 — Filtered Signal Quality")
 gs3  = gridspec.GridSpec(4, 1, height_ratios=[3, 3, 1.5, 1], hspace=0.10)
 ax3a = fig3.add_subplot(gs3[0])
 ax3b = fig3.add_subplot(gs3[1], sharex=ax3a)
@@ -512,7 +512,7 @@ draw_state_strip(ax3s, df)
 #            Does duty follow Icv promptly or is the governor slewing it?
 #            Where do softClamp / hardClamp / iExcess actually fire?
 # ---------------------------------------------------------------------------
-fig4 = plt.figure(figsize=(18, 9), num="Plot 4 — Duty + OV Supervisor")
+fig4 = plt.figure(figsize=(9, 4.5), num="Plot 4 — Duty + OV Supervisor")
 gs4  = gridspec.GridSpec(3, 1, height_ratios=[3.5, 1.5, 1], hspace=0.10)
 ax4a = fig4.add_subplot(gs4[0])
 ax4b = fig4.add_subplot(gs4[1], sharex=ax4a)
@@ -603,14 +603,113 @@ add_voltloop_vlines(ax5, df)
 draw_state_strip(ax5s, df)
 # save_fig(fig5, "plot5_rpm")
 
+
+# ---------------------------------------------------------------------------
+# PLOT 6 — iExcess Signal Inspector (interactive)
+#
+# Shows raw iMeas, firmware EMA, and a computed moving average alongside
+# commanded current. Sliders let you sweep MA window N, threshold K, and
+# consecutive-tick count; radio buttons switch which signal drives the
+# simulated iExcess firing markers.
+# ---------------------------------------------------------------------------
+from matplotlib.widgets import Slider, RadioButtons
+
+fig6 = plt.figure(figsize=(9, 7), num="Plot 6 — iExcess Signal Inspector")
+
+ax6  = fig6.add_axes([0.11, 0.44, 0.86, 0.48])
+ax6s = fig6.add_axes([0.11, 0.37, 0.86, 0.06], sharex=ax6)
+ax_sn   = fig6.add_axes([0.20, 0.28, 0.58, 0.025])
+ax_sk   = fig6.add_axes([0.20, 0.22, 0.58, 0.025])
+ax_scn  = fig6.add_axes([0.20, 0.16, 0.58, 0.025])
+ax_rad  = fig6.add_axes([0.20, 0.04, 0.30, 0.10])
+
+slider_n   = Slider(ax_sn,  "MA window N",            1,  20, valinit=3,  valstep=1)
+slider_k   = Slider(ax_sk,  "iExcessK  (A above sp)", 0.5, 20, valinit=5, valstep=0.5)
+slider_ncn = Slider(ax_scn, "N consec ticks",         1,  10, valinit=3,  valstep=1)
+radio_sig  = RadioButtons(ax_rad, ("Raw", "EMA (log)", "MA(N)"), active=1)
+
+_t6   = df["t_plot"].values
+_raw6 = df["iMeas_A"].fillna(0).values
+_ema6 = df["iMeas_filt_A"].fillna(0).values
+_sp6  = df["spLimited_A"].fillna(0).values
+
+def _ma6(n):
+    return pd.Series(_raw6).rolling(window=int(n), min_periods=1).mean().values
+
+def _sim_fire(sig, sp, k, n_cn):
+    above = (sig - sp) > k
+    count = 0
+    fire = np.zeros(len(sig), dtype=bool)
+    for i in range(len(above)):
+        if above[i]:
+            count += 1
+            if count >= int(n_cn):
+                fire[i] = True
+        else:
+            count = 0
+    return fire
+
+_fire_init = _sim_fire(_ema6, _sp6, 5.0, 3)
+
+ln6_raw,  = ax6.plot(_t6, _raw6,    color="#43a047", lw=1.2, alpha=0.45, label="iMeas raw")
+ln6_ema,  = ax6.plot(_t6, _ema6,    color="#1b5e20", lw=2.0,             label="iMeas EMA (log)")
+ln6_ma,   = ax6.plot(_t6, _ma6(3),  color="#ff6f00", lw=1.8, ls="--",   label="iMeas MA(N=3)")
+ln6_sp,   = ax6.plot(_t6, _sp6,     color="#e91e63", lw=1.8, ls=":",     label="spLimited (cmd)")
+ln6_thr,  = ax6.plot(_t6, _sp6 + 5, color="#c62828", lw=1.2, ls="--", alpha=0.60,
+                     label="sp + IExcessK (5.0 A)")
+sc6_fire  = ax6.scatter(
+    _t6[_fire_init], _ema6[_fire_init],
+    color="#c62828", s=40, zorder=5, marker="v",
+    label="sim iExcess (EMA, K=5.0, N≥3)"
+)
+
+ax6.set_ylabel("Current (A)")
+ax6.grid(**GRID_KW)
+ax6.legend(loc="upper left", fontsize=7)
+add_ov_shading(ax6, df)
+plt.setp(ax6.get_xticklabels(), visible=False)
+fig6.suptitle(f"Plot 6 — iExcess Signal Inspector  |  {outer_label}", fontsize=10)
+draw_state_strip(ax6s, df)
+
+def _upd6(_=None):
+    n    = int(slider_n.val)
+    k    = float(slider_k.val)
+    n_cn = int(slider_ncn.val)
+    src  = radio_sig.value_selected
+
+    ma = _ma6(n)
+    ln6_ma.set_ydata(ma)
+    ln6_ma.set_label(f"iMeas MA(N={n})")
+    ln6_thr.set_ydata(_sp6 + k)
+    ln6_thr.set_label(f"sp + {k:.1f} A")
+
+    sig = {"Raw": _raw6, "EMA (log)": _ema6, "MA(N)": ma}[src]
+    fire = _sim_fire(sig, _sp6, k, n_cn)
+    fire_t   = _t6[fire]
+    fire_sig = sig[fire]
+    sc6_fire.set_offsets(
+        np.column_stack([fire_t, fire_sig]) if len(fire_t) else np.empty((0, 2))
+    )
+    sc6_fire.set_label(f"sim iExcess ({src}, K={k:.1f}, N≥{n_cn})")
+
+    ax6.legend(loc="upper left", fontsize=7)
+    ax6.relim()
+    ax6.autoscale_view()
+    fig6.canvas.draw_idle()
+
+slider_n.on_changed(_upd6)
+slider_k.on_changed(_upd6)
+slider_ncn.on_changed(_upd6)
+radio_sig.on_clicked(_upd6)
+
 # ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # Registers xlim_changed on the primary (top) axes of each figure; because
 # sub-axes within a figure already share x via sharex, only one representative
 # per figure is needed.
 # ---------------------------------------------------------------------------
-_all_primary_axes = [ax1, ax2, ax3a, ax4a, ax5]
-_all_figs         = [fig1, fig2, fig3, fig4, fig5]
+_all_primary_axes = [ax1, ax2, ax3a, ax4a, ax5, ax6]
+_all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
 _syncing = [False]   # mutable container so the closure can write to it
 
 def _on_xlim_changed(changed_ax):
