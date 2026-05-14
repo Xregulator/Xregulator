@@ -1066,14 +1066,17 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_fastOvSoftActive) e.flags |= (1 << 3);
   if (g_fastOvHardActive) e.flags |= (1 << 4);
 
-  e.pad = 0;
+  e.awState = g_awState;
   e.rpm = (int16_t)constrain((int)RPM, -32768, 32767);
   e.battV_filt_x100 = (int16_t)clamp_f(IBV_filtered * 100.0f, -32767.0f, 32767.0f);
   e.iMeas_filt_x10 = (int16_t)clamp_f(MeasuredAmps_filtered * 10.0f, -32767.0f, 32767.0f);
-  e.pad2 = 0;
+  e.cvDSlope_x10000 = (int16_t)clamp_f(cvDSlope * 10000.0f, -32767.0f, 32767.0f);
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;
+  e.battI_x10 = (int16_t)clamp_f(getBatteryCurrent() * 10.0f, -32767.0f, 32767.0f);
+  e.dBcur_dt_Aps = (int16_t)clamp_f(g_dBcur_dt, -32767.0f, 32767.0f);
 
-  if (g_iExcessActive) e.flags |= (1 << 5);
+  if (g_iExcessActive)   e.flags |= (1 << 5);
+  if (g_loadDumpActive)  e.flags |= (1 << 6);
 
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
@@ -1407,7 +1410,10 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint32_t holdMs = 0;
   static bool bufFullWarned = false;
   static uint32_t stabilizeLastAdjMs = 0;   // last 1Hz duty adjustment in STABILIZE
-  static uint32_t stabilizeSettledMs = 0;   // when amps first entered ±2A window
+  // Rolling 5-sample ring buffer for average-based settle check (1Hz sampling)
+  static float stabRing[SYSID_STABILIZE_SAMPLES];
+  static uint8_t stabRingIdx = 0;
+  static uint8_t stabRingCount = 0;
 
   // phaseStartMs[0..8]: STABILIZE[0] BASELINE[1] UP_1[2] DOWN_1[3]
   //                     UP_2[4] DOWN_2[5] UP_3[6] DOWN_3[7] test-end[8]
@@ -1434,7 +1440,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     systemIDActive = 0;
     phase = SYSID_IDLE;
     stabilizeLastAdjMs = 0;
-    stabilizeSettledMs = 0;
+    stabRingIdx = 0;
+    stabRingCount = 0;
     dutyOut = lastAppliedDuty;
     return false;
   }
@@ -1446,6 +1453,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       return false;
     }
     systemIDRequested = false;
+    systemIDAbortRequested = false;   // clear any stale abort that arrived after previous test ended
 
     Serial.printf("SystemID: starting | sysMode=%d lastAppliedDuty=%.1f\n",
                   sysMode, lastAppliedDuty);
@@ -1468,7 +1476,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     sysIDSampleCount = 0;
     bufFullWarned = false;
     stabilizeLastAdjMs = 0;
-    stabilizeSettledMs = 0;
+    stabRingIdx = 0;
+    stabRingCount = 0;
     systemIDResultsReady = false;
     baseDuty = lastAppliedDuty;
     holdMs = (uint32_t)(15.0f * InputFilterTC);
@@ -1484,38 +1493,43 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   }
 
   // ── STABILIZE phase: P-control to SYSID_STABILIZE_AMPS before baseline ──
-  // Adjust duty once per second; advance when settled within ±2A for 5s.
-  // Abort if timeout exceeded.
+  // Adjust duty once per second. Once the 5-second rolling average is within
+  // ±3A of the target, advance. Abort if timeout exceeded.
   if (phase == SYSID_STABILIZE) {
     if (nowMs - stabilizeLastAdjMs >= 1000) {
       float err = SYSID_STABILIZE_AMPS - ampsRaw;
       baseDuty = constrain(baseDuty + err * 0.5f, 5.0f, 80.0f);
+      // Push ampsRaw into the ring buffer on each 1Hz duty update
+      stabRing[stabRingIdx] = ampsRaw;
+      stabRingIdx = (stabRingIdx + 1) % SYSID_STABILIZE_SAMPLES;
+      if (stabRingCount < SYSID_STABILIZE_SAMPLES) stabRingCount++;
       stabilizeLastAdjMs = nowMs;
+
+      // Once we have a full 5-second window, check if the average is within band
+      if (stabRingCount >= SYSID_STABILIZE_SAMPLES) {
+        float sum = 0;
+        for (uint8_t i = 0; i < SYSID_STABILIZE_SAMPLES; i++) sum += stabRing[i];
+        float avg = sum / SYSID_STABILIZE_SAMPLES;
+        if (fabsf(avg - SYSID_STABILIZE_AMPS) < SYSID_STABILIZE_BAND_A) {
+          stabRingIdx = 0;
+          stabRingCount = 0;
+          stabilizeLastAdjMs = 0;
+          phaseStartMs[1] = nowMs;  // BASELINE start
+          phase = SYSID_BASELINE;
+          systemIDActive = (uint8_t)SYSID_BASELINE;
+          queueConsoleMessageF(
+            "SystemID: 5s avg=%.1fA (duty=%.1f%%) within %.0fA of target — starting baseline | holdMs=%u",
+            avg, baseDuty, SYSID_STABILIZE_BAND_A, holdMs);
+          Serial.printf("SystemID: BASELINE\n");
+        }
+      }
     }
     dutyOut = baseDuty;
 
-    float stabErr = SYSID_STABILIZE_AMPS - ampsRaw;
-    if (fabsf(stabErr) < 2.0f) {
-      if (stabilizeSettledMs == 0) stabilizeSettledMs = nowMs;
-    } else {
-      stabilizeSettledMs = 0;
-    }
-
-    if (stabilizeSettledMs > 0 && (nowMs - stabilizeSettledMs) >= SYSID_STABILIZE_SETTLE_MS) {
-      stabilizeLastAdjMs = 0;
-      stabilizeSettledMs = 0;
-      phaseStartMs[1] = nowMs;  // BASELINE start
-      phase = SYSID_BASELINE;
-      systemIDActive = (uint8_t)SYSID_BASELINE;
-      queueConsoleMessageF(
-        "SystemID: stabilized at %.1fA (duty=%.1f%%) — starting baseline | holdMs=%u",
-        ampsRaw, baseDuty, holdMs);
-      Serial.printf("SystemID: BASELINE\n");
-    }
-
     if ((nowMs - phaseStartMs[0]) >= SYSID_STABILIZE_TIMEOUT_MS) {
       stabilizeLastAdjMs = 0;
-      stabilizeSettledMs = 0;
+      stabRingIdx = 0;
+      stabRingCount = 0;
       queueConsoleMessageF(
         "SystemID: ABORTED — could not stabilize at %.0fA within %us "
         "(last reading: %.1fA duty=%.1f%%)",
@@ -1790,6 +1804,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
     systemIDResultsReady = true;
     systemIDActive = 0;
+    systemIDLastEndMs = millis();
     phase = SYSID_IDLE;  // reset for next run
     dutyOut = baseDuty;  // restore base duty on exit tick
     return false;

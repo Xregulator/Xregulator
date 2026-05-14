@@ -2,17 +2,16 @@
 plot_cvlog.py
 Diagnostic plotter for CVlog data from the ESP32 alternator regulator.
 
-4 plot windows, each with a state strip below:
-  Plot 1 — Voltage: battV, targV, vError_V, vPred, dvdt_Vs
-  Plot 2 — CV command chain: cv_I_A, Icv_A, uTarget_A, spLimited_A vs iMeas_A
-  Plot 3 — Current signal quality: iMeas / iMA2 / iMA4 + dIdt2 / dIdt4 + CH1 interval
-  Plot 4 — Duty pipeline + OV supervisor flags + fastOvCap_A
+3 plot windows:
+  Plot 1 — Voltage: battV, battV_filt_V, targV, vPred | duty% right axis
+  Plot 2 — Current command chain (top) + overvoltage protection layers (bottom)
+  Plot 3 — Engine RPM + CH1 scheduling jitter | duty% right axis
 
-State strip shows:
+State strip (below each plot):
   - cvActive bar (green when CV active, grey otherwise)
-  - fastOvActive overlay (red when any OV clamp active)
-  - Orange tick marks where voltLoopFired=1
-  - softClamp / hardClamp / iExcess tick marks
+  - fastOvActive overlay (red when FastOV or iExcess active; load dump has its own track)
+  - Tick marks: voltLoopFired (pink), softClamp (yellow), hardClamp (purple),
+                iExcess (teal), loadDumpActive (orange)
 
 File picker searches ~/Downloads for *.csv, newest first.
 PNGs saved to Downloads alongside source CSV.
@@ -33,15 +32,15 @@ import numpy as np
 DOWNLOADS = os.path.expanduser("~/Downloads")
 
 plt.rcParams.update({
-    "font.size": 9,
-    "axes.titlesize": 11,
-    "axes.labelsize": 10,
-    "xtick.labelsize": 8,
-    "ytick.labelsize": 8,
-    "legend.fontsize": 8,
-    "figure.titlesize": 10,
-    "legend.handlelength": 2.5,
-    "legend.handleheight": 1.2,
+    "font.size": 14,
+    "axes.titlesize": 18,
+    "axes.labelsize": 15,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "legend.fontsize": 12,
+    "figure.titlesize": 16,
+    "legend.handlelength": 3.5,
+    "legend.handleheight": 1.5,
 })
 
 # ---------------------------------------------------------------------------
@@ -150,8 +149,7 @@ if not path:
 basename = os.path.splitext(os.path.basename(path))[0]
 print(f"Loading: {path}")
 
-# Robust header search — same approach as plot_pidlog.py.
-# Handles truncated/concatenated comment+header lines.
+# Robust header search
 with open(path, encoding="utf-8", errors="replace") as _f:
     _lines = _f.readlines()
 
@@ -191,6 +189,8 @@ numeric_cols = [
     "rpm",
     "battV_filt_V", "iMeas_filt_A",
     "ch1_interval_ms", "iExcess",
+    "battI_A", "dBcur_dt_Aps", "loadDumpActive",
+    "cvDSlope_Vps", "awState",
 ]
 
 for col in numeric_cols:
@@ -221,12 +221,13 @@ def _to_int(col):
         return pd.Series(0, index=df.index)
     return pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-df["fastOvActive"]  = _to_int("fastOvActive")
-df["voltLoopFired"] = _to_int("voltLoopFired")
-df["cvActive"]      = _to_int("cvActive")
-df["softClamp"]     = _to_int("softClamp")
-df["hardClamp"]     = _to_int("hardClamp")
-df["iExcess"]   = _to_int("iExcess")
+df["fastOvActive"]   = _to_int("fastOvActive")
+df["voltLoopFired"]  = _to_int("voltLoopFired")
+df["cvActive"]       = _to_int("cvActive")
+df["softClamp"]      = _to_int("softClamp")
+df["hardClamp"]      = _to_int("hardClamp")
+df["iExcess"]        = _to_int("iExcess")
+df["loadDumpActive"] = _to_int("loadDumpActive")
 
 # Extract Kp/Ki/Kd from comment line in header if present
 _kp = float("nan")
@@ -249,25 +250,17 @@ print(f"Voltage loop gains: {outer_label}")
 # ---------------------------------------------------------------------------
 # 3. Shared drawing helpers
 # ---------------------------------------------------------------------------
-GRID_KW = dict(alpha=0.4, linewidth=0.7)
+GRID_KW    = dict(alpha=0.4, linewidth=0.7)
+DUTY_COLOR = "#78909c"   # field duty % line — neutral grey-blue on all plots
 
 EV_COLOR_VLOOP = "#e91e63"   # voltLoopFired ticks  (hot pink)
-EV_COLOR_SOFT  = "#ffeb3b"   # softClamp ticks      (bright yellow — distinct from red fastOV overlay and blue palette)
+EV_COLOR_SOFT  = "#ffeb3b"   # softClamp ticks      (bright yellow)
 EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks      (purple)
 EV_COLOR_FAST  = "#00838f"   # iExcess ticks        (teal)
+EV_COLOR_LDUMP = "#f57c00"   # loadDumpActive ticks (orange)
 
 
 def draw_state_strip(ax, df):
-    """
-    State strip:
-      Top band   — cvActive bar (green=active, grey=inactive)
-      OV overlay — red fill where fastOvActive=1
-      Tick lanes:
-        row ~0.9  hot pink  = voltLoopFired
-        row ~0.5  yellow    = softClamp
-        row ~0.3  purple    = hardClamp
-        row ~0.1  teal      = iExcess
-    """
     ax.set_ylim(0, 3)
     ax.set_yticks([])
     ax.set_xlim(df["t_plot"].iloc[0], df["t_plot"].iloc[-1])
@@ -275,59 +268,49 @@ def draw_state_strip(ax, df):
 
     span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
 
-    # --- cvActive background bar ---
+    # cvActive background bar
     prev_t   = df["t_plot"].iloc[0]
     prev_val = df["cvActive"].iloc[0]
     for i in range(1, len(df)):
         val = df["cvActive"].iloc[i]
         if val != prev_val or i == len(df) - 1:
-            t = df["t_plot"].iloc[i]
-            color  = "#2e7d32" if prev_val else "#cccccc"
-            label  = "CV" if prev_val else ""
-            width  = t - prev_t
+            t     = df["t_plot"].iloc[i]
+            color = "#2e7d32" if prev_val else "#cccccc"
+            width = t - prev_t
             ax.barh(2, width, left=prev_t, height=0.75,
                     color=color, alpha=0.85, align="center")
             if prev_val and width > span * 0.04:
-                ax.text(prev_t + width / 2, 2, label,
+                ax.text(prev_t + width / 2, 2, "CV",
                         ha="center", va="center",
                         fontsize=8, color="white", fontweight="bold", clip_on=True)
             prev_t  = t
             prev_val = val
 
-    # --- fastOvActive red overlay ---
+    # fastOvActive red overlay
     ov_rows = df[df["fastOvActive"] == 1]
     for t in ov_rows["t_plot"]:
         ax.axvspan(t - 0.002 * span, t + 0.002 * span,
                    ymin=0.5, ymax=1.0, color="#c62828", alpha=0.4)
 
-    # --- Tick lanes ---
+    # Tick lanes
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.62, ymax=0.78,
-                   color=EV_COLOR_VLOOP, linewidth=1.2, alpha=0.9)
-
+        ax.axvline(x=t, ymin=0.65, ymax=0.78, color=EV_COLOR_VLOOP, linewidth=1.2, alpha=0.9)
     for t in df.loc[df["softClamp"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.40, ymax=0.55,
-                   color=EV_COLOR_SOFT, linewidth=1.2, alpha=0.85)
-
+        ax.axvline(x=t, ymin=0.49, ymax=0.62, color=EV_COLOR_SOFT,  linewidth=1.2, alpha=0.85)
     for t in df.loc[df["hardClamp"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.22, ymax=0.37,
-                   color=EV_COLOR_HARD, linewidth=1.2, alpha=0.85)
-
+        ax.axvline(x=t, ymin=0.34, ymax=0.47, color=EV_COLOR_HARD,  linewidth=1.2, alpha=0.85)
     for t in df.loc[df["iExcess"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.05, ymax=0.18,
-                   color=EV_COLOR_FAST, linewidth=1.2, alpha=0.85)
+        ax.axvline(x=t, ymin=0.19, ymax=0.32, color=EV_COLOR_FAST,  linewidth=1.2, alpha=0.85)
+    for t in df.loc[df["loadDumpActive"] == 1, "t_plot"]:
+        ax.axvline(x=t, ymin=0.05, ymax=0.17, color=EV_COLOR_LDUMP, linewidth=1.2, alpha=0.85)
 
     # Legend text
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 2.55,
-            "cvActive", fontsize=7, color="#1b5e20", va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.68,
-            "VLoop▲", fontsize=7, color=EV_COLOR_VLOOP, va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.35,
-            "softClamp▲", fontsize=7, color=EV_COLOR_SOFT, va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.02,
-            "hardClamp▲", fontsize=7, color=EV_COLOR_HARD, va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 0.72,
-            "iExcess▲", fontsize=7, color=EV_COLOR_FAST, va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.01, 2.55, "cvActive",    fontsize=7, color="#1b5e20", va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.75, "VLoop▲",      fontsize=7, color=EV_COLOR_VLOOP, va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.45, "softClamp▲",  fontsize=7, color=EV_COLOR_SOFT,  va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.15, "hardClamp▲",  fontsize=7, color=EV_COLOR_HARD,  va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.01, 0.85, "iExcess▲",    fontsize=7, color=EV_COLOR_FAST,  va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.01, 0.55, "loadDump▲",   fontsize=7, color=EV_COLOR_LDUMP, va="center")
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -336,25 +319,42 @@ def draw_state_strip(ax, df):
 
 def add_ov_shading(ax, df):
     """Light red background fill where fastOvActive=1."""
-    in_ov   = False
+    in_ov    = False
     ov_start = None
     for i, row in df.iterrows():
         if row["fastOvActive"] and not in_ov:
             ov_start = row["t_plot"]
             in_ov    = True
         elif not row["fastOvActive"] and in_ov:
-            ax.axvspan(ov_start, row["t_plot"],
-                       color="#c62828", alpha=0.08)
+            ax.axvspan(ov_start, row["t_plot"], color="#c62828", alpha=0.08)
             in_ov = False
     if in_ov:
-        ax.axvspan(ov_start, df["t_plot"].iloc[-1],
-                   color="#c62828", alpha=0.08)
+        ax.axvspan(ov_start, df["t_plot"].iloc[-1], color="#c62828", alpha=0.08)
 
 
 def add_voltloop_vlines(ax, df):
-    """Faint orange vlines where voltage loop fired."""
+    """Faint pink vlines where voltage loop fired."""
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
         ax.axvline(x=t, color=EV_COLOR_VLOOP, linewidth=0.6, alpha=0.35)
+
+
+def add_duty_axis(ax):
+    """Add field duty % as a secondary right axis. Returns the twin axis."""
+    ax_d = ax.twinx()
+    if "duty_pct" in df.columns:
+        ax_d.plot(df["t_plot"], df["duty_pct"],
+                  color=DUTY_COLOR, lw=1.3, alpha=0.55, linestyle="-.",
+                  label="Field duty (%)")
+    ax_d.set_ylabel("Field duty (%)", color=DUTY_COLOR, fontsize=12)
+    ax_d.set_ylim(0, 115)
+    ax_d.tick_params(axis="y", colors=DUTY_COLOR, labelsize=11)
+    return ax_d
+
+
+def add_subtitle(fig, text, y=0.955):
+    """Small italic subtitle below suptitle."""
+    fig.text(0.5, y, text, ha="center", va="top",
+             fontsize=9.5, color="#555555", style="italic")
 
 
 def save_fig(fig, suffix):
@@ -363,354 +363,302 @@ def save_fig(fig, suffix):
     print(f"Saved: {out}")
 
 
-def make_fig(title_suffix, num):
-    fig = plt.figure(figsize=(9, 4), num=num)
-    gs  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
-    ax  = fig.add_subplot(gs[0])
-    axs = fig.add_subplot(gs[1], sharex=ax)
-    plt.setp(ax.get_xticklabels(), visible=False)
-    fig.suptitle(f"{title_suffix}  |  {outer_label}", fontsize=14)
-    return fig, ax, axs
+def draw_flag_bars(ax, df):
+    """Filled horizontal duration bars for each binary protection flag."""
+    flag_h = 0.75
+    for offset, col, color, label in [
+        (4.0, "fastOvActive",   "#c62828", "fastOvActive  (FastOV or iExcess; load dump separate)"),
+        (3.0, "softClamp",      "#0277bd", "softClamp     (layer 1 — gentle ceiling)"),
+        (2.0, "hardClamp",      "#6a1b9a", "hardClamp     (layer 2 — hard ceiling)"),
+        (1.0, "iExcess",        "#00838f", "iExcess       (current excess protection)"),
+        (0.0, "loadDumpActive", "#f57c00", "loadDumpActive (sudden load drop detected)"),
+    ]:
+        vals = df[col].values
+        t    = df["t_plot"].values
+        in_flag    = False
+        flag_start = None
+        for i in range(len(vals)):
+            if vals[i] and not in_flag:
+                flag_start = t[i]
+                in_flag    = True
+            elif not vals[i] and in_flag:
+                ax.barh(offset + flag_h / 2, t[i] - flag_start,
+                        left=flag_start, height=flag_h,
+                        color=color, alpha=0.80, align="center")
+                in_flag = False
+        if in_flag:
+            ax.barh(offset + flag_h / 2, t[-1] - flag_start,
+                    left=flag_start, height=flag_h,
+                    color=color, alpha=0.80, align="center")
+
+        ax.text(df["t_plot"].iloc[0], offset + flag_h / 2, f"  {label}",
+                va="center", fontsize=9, color=color)
+
+    ax.set_ylim(-0.2, 5.2)
+    ax.set_yticks([])
+    ax.set_ylabel("Protection layers")
+    ax.grid(**GRID_KW)
 
 
 # ---------------------------------------------------------------------------
-# PLOT 1 — Voltage: what the voltage loop sees
-#
-# Diagnoses: battV vs target, vError sign/magnitude, vPred vs battV,
-#            dvdt_Vs sign (rising/falling), OV shading.
+# PLOT 1 — Voltage
 # ---------------------------------------------------------------------------
-fig1, ax1, ax1s = make_fig("Plot 1 — Voltage Loop Input", "Plot 1 — Voltage")
-ax1b = ax1.twinx()
+fig1 = plt.figure(figsize=(18, 8), num="Plot 1 — Voltage")
+gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
+ax1  = fig1.add_subplot(gs1[0])
+ax1s = fig1.add_subplot(gs1[1], sharex=ax1)
+plt.setp(ax1.get_xticklabels(), visible=False)
+fig1.suptitle(f"Plot 1 — Voltage  |  {outer_label}", fontsize=14, y=0.99)
+add_subtitle(fig1,
+    "Was the voltage setpoint reached? Did the regulator approach it cleanly, "
+    "or did it overshoot? vPred shows how far ahead the loop was looking.")
+fig1.subplots_adjust(top=0.90)
 
 ax1.plot(df["t_plot"], df["battV"],
-         color="#1565c0", lw=2.5, label="battV")
+         color="#1565c0", lw=2.5, label="battV (measured)")
+ax1.plot(df["t_plot"], df["battV_filt_V"],
+         color="#90caf9", lw=1.6, linestyle="--", alpha=0.85, label="battV_filt_V (EMA)")
 ax1.plot(df["t_plot"], df["targV"],
-         color="#e91e63", lw=2.2, linestyle="--", label="targV")
+         color="#e91e63", lw=2.2, linestyle="--", label="targV (setpoint)")
 ax1.plot(df["t_plot"], df["vPred"],
-         color="#00838f", lw=2.0, linestyle="-.", label="vPred (battV + TD·dvdt⁺)", alpha=0.85)
-
-ax1b.plot(df["t_plot"], df["vError_V"],
-          color="#c62828", lw=2.0, label="vError_V", alpha=0.9)
-ax1b.plot(df["t_plot"], df["dvdt_Vs"],
-          color="#37474f", lw=2.2, linestyle="--", label="dvdt_Vs (EMA)", alpha=0.95)
-ax1b.axhline(0, color="#c62828", linewidth=0.6, linestyle=":", alpha=0.4)
-
-ax1.set_ylabel("Voltage (V)", color="#1565c0")
-ax1b.set_ylabel("vError (V) / dvdt (V/s)", color="#c62828")
+         color="#00838f", lw=2.0, linestyle="-.", label="vPred (predicted)", alpha=0.85)
+ax1.set_ylabel("Voltage (V)")
 ax1.grid(**GRID_KW)
+add_duty_axis(ax1)
 
-# Collect handles before decorative vlines are added to ax1
-_h1 = [l for l in ax1.get_lines() + ax1b.get_lines() if not l.get_label().startswith("_")]
+_h1 = [l for l in ax1.get_lines() if not l.get_label().startswith("_")]
 ax1.legend(_h1, [l.get_label() for l in _h1], loc="upper left")
 
 add_ov_shading(ax1, df)
 add_voltloop_vlines(ax1, df)
-
 draw_state_strip(ax1s, df)
 # save_fig(fig1, "plot1_voltage")
 
 
 # ---------------------------------------------------------------------------
-# PLOT 2 — CV command chain
-#
-# Diagnoses: is cv_I settled or drifting? Is Icv tracking setpoint or
-#            being clamped by uTarget? Is spLimited lagging Icv?
-#            How does iMeas_A compare to the commanded setpoint?
-#            OV clamp squeezes fastOvCap_A below uTarget — visible here.
+# PLOT 2 — Current command chain (top) + protection layers (bottom)
 # ---------------------------------------------------------------------------
-fig2, ax2, ax2s = make_fig("Plot 2 — CV Command Chain (cv_I, Icv, limits, iMeas)", "Plot 2 — Command Chain")
-ax2b = ax2.twinx()
+fig2 = plt.figure(figsize=(18, 12), num="Plot 2 — Command Chain & Protections")
+gs2  = gridspec.GridSpec(3, 1, height_ratios=[4, 2.5, 1], hspace=0.12)
+ax2a = fig2.add_subplot(gs2[0])
+ax2b = fig2.add_subplot(gs2[1], sharex=ax2a)
+ax2s = fig2.add_subplot(gs2[2], sharex=ax2a)
+plt.setp(ax2a.get_xticklabels(), visible=False)
+plt.setp(ax2b.get_xticklabels(), visible=False)
+fig2.suptitle(f"Plot 2 — Current Command Chain & Protections  |  {outer_label}", fontsize=14, y=0.99)
+add_subtitle(fig2,
+    "Top: which limit is dominating the current setpoint, and did the alternator deliver it?  "
+    "Bottom: when each overvoltage protection layer fired and for how long.")
+fig2.subplots_adjust(top=0.92)
 
-ax2.plot(df["t_plot"], df["uTarget_A"],
-         color="#1565c0", lw=2.5, label="uTarget_A (RPM/thermal ceiling, post-OV cap)")
-ax2.plot(df["t_plot"], df["Icv_A"],
-         color="#e91e63", lw=2.2, linestyle="--", label="Icv_A (CV setpoint)")
-ax2.plot(df["t_plot"], df["spLimited_A"],
-         color="#2e7d32", lw=2.0, label="spLimited_A (slew-limited → output current PID)")
-ax2.plot(df["t_plot"], df["fastOvCap_A"],
-         color="#455a64", lw=1.6, linestyle=":", label="fastOvCap_A (OV ceiling)", alpha=0.80)
+# --- 2a: command chain ---
+ax2a.plot(df["t_plot"], df["uTarget_A"],
+          color="#1565c0", lw=2.5, label="Current ceiling after all caps  (uTarget_A)")
+ax2a.plot(df["t_plot"], df["Icv_A"],
+          color="#e91e63", lw=2.2, linestyle="--", label="CV setpoint  (Icv_A)")
+ax2a.plot(df["t_plot"], df["fastOvCap_A"],
+          color="#455a64", lw=1.6, linestyle=":", label="FastOV voltage ceiling  (fastOvCap_A)", alpha=0.85)
+ax2a.plot(df["t_plot"], df["spLimited_A"],
+          color="#2e7d32", lw=2.0, label="PID command  (spLimited_A)")
+ax2a.plot(df["t_plot"], df["iMeas_A"],
+          color="#c62828", lw=2.0, label="Actual current  (iMeas_A)", alpha=0.90)
+if "iMeas_filt_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["iMeas_filt_A"],
+              color="#ef9a9a", lw=1.4, linestyle="--", label="Actual current EMA  (iMeas_filt_A)", alpha=0.75)
 
-ax2b.plot(df["t_plot"], df["cv_I_A"],
-          color="#6a1b9a", lw=2.0, label="cv_I_A (integrator state)", alpha=0.85)
-ax2b.set_ylabel("cv_I (A) — integrator", color="#6a1b9a")
-ax2.set_ylabel("Current (A)")
-ax2.grid(**GRID_KW)
+ax2a.set_ylabel("Current (A)")
+ax2a.grid(**GRID_KW)
+ax2a.set_title("Command chain — which limit is lowest wins; field duty on right axis",
+               fontsize=10, color="#444444", style="italic", pad=4)
+add_duty_axis(ax2a)
 
-# iMeas on right axis too — overlay with cv_I axis
-ax2b.plot(df["t_plot"], df["iMeas_A"],
-          color="#c62828", lw=1.8, linestyle="--", label="iMeas_A", alpha=0.75)
+_h2a = [l for l in ax2a.get_lines() if not l.get_label().startswith("_")]
+ax2a.legend(_h2a, [l.get_label() for l in _h2a], loc="upper left", fontsize=11)
 
-# Collect handles before decorative vlines are added to ax2
-_h2 = [l for l in ax2.get_lines() + ax2b.get_lines() if not l.get_label().startswith("_")]
-ax2.legend(_h2, [l.get_label() for l in _h2], loc="upper left")
+add_ov_shading(ax2a, df)
+add_voltloop_vlines(ax2a, df)
 
-add_ov_shading(ax2, df)
-add_voltloop_vlines(ax2, df)
-
-draw_state_strip(ax2s, df)
-# save_fig(fig2, "plot2_command_chain")
-
-# ---------------------------------------------------------------------------
-# PLOT 3 — Filtered signal quality
-#
-# Three sub-panels:
-#   3a: battV vs battV_filt_V — voltage filter lag / noise rejection
-#   3b: iMeas_A vs iMeas_filt_A — current filter lag / noise rejection
-#   3c: ch1_interval_ms — ADC scheduling jitter (gaps → stale readings)
-# ---------------------------------------------------------------------------
-fig3 = plt.figure(figsize=(9, 5.5), num="Plot 3 — Filtered Signal Quality")
-gs3  = gridspec.GridSpec(4, 1, height_ratios=[3, 3, 1.5, 1], hspace=0.10)
-ax3a = fig3.add_subplot(gs3[0])
-ax3b = fig3.add_subplot(gs3[1], sharex=ax3a)
-ax3c = fig3.add_subplot(gs3[2], sharex=ax3a)
-ax3s = fig3.add_subplot(gs3[3], sharex=ax3a)
-
-plt.setp(ax3a.get_xticklabels(), visible=False)
-plt.setp(ax3b.get_xticklabels(), visible=False)
-plt.setp(ax3c.get_xticklabels(), visible=False)
-fig3.suptitle(f"Plot 3 — Filtered Signal Quality  |  {outer_label}", fontsize=14)
-
-# 3a: battery voltage raw vs filtered, plus target reference
-ax3a.plot(df["t_plot"], df["battV"],
-          color="#64b5f6", lw=1.6, alpha=0.70, label="battV (raw)")
-ax3a.plot(df["t_plot"], df["battV_filt_V"],
-          color="#1565c0", lw=2.2, label="battV_filt_V (filtered)")
-ax3a.plot(df["t_plot"], df["targV"],
-          color="#e91e63", lw=1.8, linestyle="--", alpha=0.85, label="targV")
-ax3a.set_ylabel("Voltage (V)")
-ax3a.grid(**GRID_KW)
-ax3a.legend(loc="upper left")
-add_ov_shading(ax3a, df)
-
-# 3b: measured current raw vs filtered
-ax3b.plot(df["t_plot"], df["iMeas_A"],
-          color="#43a047", lw=1.6, alpha=0.70, label="iMeas_A (raw)")
-ax3b.plot(df["t_plot"], df["iMeas_filt_A"],
-          color="#1b5e20", lw=2.2, label="iMeas_filt_A (filtered)")
-ax3b.set_ylabel("Current (A)")
-ax3b.grid(**GRID_KW)
-ax3b.legend(loc="upper left")
-add_ov_shading(ax3b, df)
-
-# 3c: CH1 interval
-ax3c.plot(df["t_plot"], df["ch1_interval_ms"],
-          color="#00838f", lw=1.8, label="ch1_interval_ms")
-ax3c.axhline(5, color="#2e7d32", linewidth=0.8, linestyle=":",
-             alpha=0.70, label="5 ms nominal")
-ax3c.axhline(15, color="#c62828", linewidth=0.8, linestyle=":",
-             alpha=0.70, label="15 ms (3× — stale reading risk)")
-ax3c.set_ylabel("CH1 interval (ms)")
-ax3c.grid(**GRID_KW)
-ax3c.legend(loc="upper right", fontsize=10)
-
-draw_state_strip(ax3s, df)
-# save_fig(fig3, "plot3_filtered_signals")
-# ---------------------------------------------------------------------------
-# PLOT 4 — Duty pipeline + OV supervisor
-#
-# Diagnoses: how aggressively is the OV supervisor cutting fastOvCap_A?
-#            Does duty follow Icv promptly or is the governor slewing it?
-#            Where do softClamp / hardClamp / iExcess actually fire?
-# ---------------------------------------------------------------------------
-fig4 = plt.figure(figsize=(9, 4.5), num="Plot 4 — Duty + OV Supervisor")
-gs4  = gridspec.GridSpec(3, 1, height_ratios=[3.5, 1.5, 1], hspace=0.10)
-ax4a = fig4.add_subplot(gs4[0])
-ax4b = fig4.add_subplot(gs4[1], sharex=ax4a)
-ax4s = fig4.add_subplot(gs4[2], sharex=ax4a)
-
-plt.setp(ax4a.get_xticklabels(), visible=False)
-plt.setp(ax4b.get_xticklabels(), visible=False)
-fig4.suptitle(f"Plot 4 — Duty Pipeline & OV Supervisor  |  {outer_label}", fontsize=14)
-
-# 4a: duty + OV cap + iMeas
-ax4a_r = ax4a.twinx()
-ax4a.plot(df["t_plot"], df["duty_pct"],
-          color="#2e7d32", lw=2.5, label="duty_pct")
-ax4a.plot(df["t_plot"], df["spLimited_A"],
-          color="#e91e63", lw=1.8, linestyle="--", label="spLimited_A (output current PID setpoint)", alpha=0.80)
-ax4a_r.plot(df["t_plot"], df["iMeas_A"],
-            color="#c62828", lw=2.0, label="iMeas_A", alpha=0.85)
-ax4a_r.plot(df["t_plot"], df["fastOvCap_A"],
-            color="#455a64", lw=1.6, linestyle=":", label="fastOvCap_A", alpha=0.75)
-ax4a.set_ylabel("Duty (%) / Setpoint (A)")
-ax4a_r.set_ylabel("iMeas / OV cap (A)", color="#c62828")
-ax4a.grid(**GRID_KW)
-add_ov_shading(ax4a, df)
-
-lines4  = ax4a.get_lines() + ax4a_r.get_lines()
-labels4 = [l.get_label() for l in lines4 if not l.get_label().startswith("_")]
-ax4a.legend(lines4[:len(labels4)], labels4, loc="upper left")
-
-# 4b: binary flag lanes stacked as bar-style fills
-flag_h = 0.8
-for offset, col, color, label in [
-    (3.0, "fastOvActive", "#c62828",  "fastOvActive"),
-    (2.0, "softClamp",    "#0277bd",  "softClamp"),
-    (1.0, "hardClamp",    "#6a1b9a",  "hardClamp"),
-    (0.0, "iExcess",      "#00838f",  "iExcess"),
-]:
-    vals = df[col].values
-    t    = df["t_plot"].values
-    # Fill spans where flag=1
-    in_flag   = False
-    flag_start = None
-    for i in range(len(vals)):
-        if vals[i] and not in_flag:
-            flag_start = t[i]
-            in_flag    = True
-        elif not vals[i] and in_flag:
-            ax4b.barh(offset + flag_h / 2, t[i] - flag_start,
-                      left=flag_start, height=flag_h,
-                      color=color, alpha=0.80, align="center")
-            in_flag = False
-    if in_flag:
-        ax4b.barh(offset + flag_h / 2, t[-1] - flag_start,
-                  left=flag_start, height=flag_h,
-                  color=color, alpha=0.80, align="center")
-
-    ax4b.text(df["t_plot"].iloc[0], offset + flag_h / 2, f"  {label}",
-              va="center", fontsize=9, color=color)
-
-ax4b.set_ylim(-0.2, 4.2)
-ax4b.set_yticks([])
-ax4b.set_ylabel("Flags")
-ax4b.grid(**GRID_KW)
-
-draw_state_strip(ax4s, df)
-# save_fig(fig4, "plot4_duty_ov")
-
-# ---------------------------------------------------------------------------
-# PLOT 5 — RPM
-#
-# Shows engine/alternator RPM over time so you can correlate speed changes
-# with voltage/current behaviour in the other plots.
-# ---------------------------------------------------------------------------
-fig5, ax5, ax5s = make_fig("Plot 5 — Engine RPM", "Plot 5 — RPM")
-
-if "rpm" in df.columns:
-    ax5.plot(df["t_plot"], df["rpm"],
-             color="#f9a825", lw=2.2, label="rpm")
-else:
-    ax5.text(0.5, 0.5, "rpm column not present in this log",
-             ha="center", va="center", transform=ax5.transAxes,
-             color="#888888", fontsize=13)
-
-ax5.set_ylabel("RPM")
-ax5.grid(**GRID_KW)
-ax5.legend(loc="upper left")
-add_voltloop_vlines(ax5, df)
-
-draw_state_strip(ax5s, df)
-# save_fig(fig5, "plot5_rpm")
-
-
-# ---------------------------------------------------------------------------
-# PLOT 6 — iExcess Signal Inspector (interactive)
-#
-# Shows raw iMeas, firmware EMA, and a computed moving average alongside
-# commanded current. Sliders let you sweep MA window N, threshold K, and
-# consecutive-tick count; radio buttons switch which signal drives the
-# simulated iExcess firing markers.
-# ---------------------------------------------------------------------------
-from matplotlib.widgets import Slider, RadioButtons
-
-fig6 = plt.figure(figsize=(9, 7), num="Plot 6 — iExcess Signal Inspector")
-
-ax6  = fig6.add_axes([0.11, 0.44, 0.86, 0.48])
-ax6s = fig6.add_axes([0.11, 0.37, 0.86, 0.06], sharex=ax6)
-ax_sn   = fig6.add_axes([0.20, 0.28, 0.58, 0.025])
-ax_sk   = fig6.add_axes([0.20, 0.22, 0.58, 0.025])
-ax_scn  = fig6.add_axes([0.20, 0.16, 0.58, 0.025])
-ax_rad  = fig6.add_axes([0.20, 0.04, 0.30, 0.10])
-
-slider_n   = Slider(ax_sn,  "MA window N",            1,  20, valinit=3,  valstep=1)
-slider_k   = Slider(ax_sk,  "iExcessK  (A above sp)", 0.5, 20, valinit=5, valstep=0.5)
-slider_ncn = Slider(ax_scn, "N consec ticks",         1,  10, valinit=3,  valstep=1)
-radio_sig  = RadioButtons(ax_rad, ("Raw", "EMA (log)", "MA(N)"), active=1)
-
-_t6   = df["t_plot"].values
-_raw6 = df["iMeas_A"].fillna(0).values
-_ema6 = df["iMeas_filt_A"].fillna(0).values
-_sp6  = df["spLimited_A"].fillna(0).values
-
-def _ma6(n):
-    return pd.Series(_raw6).rolling(window=int(n), min_periods=1).mean().values
-
-def _sim_fire(sig, sp, k, n_cn):
-    above = (sig - sp) > k
-    count = 0
-    fire = np.zeros(len(sig), dtype=bool)
-    for i in range(len(above)):
-        if above[i]:
-            count += 1
-            if count >= int(n_cn):
-                fire[i] = True
-        else:
-            count = 0
-    return fire
-
-_fire_init = _sim_fire(_ema6, _sp6, 5.0, 3)
-
-ln6_raw,  = ax6.plot(_t6, _raw6,    color="#43a047", lw=1.2, alpha=0.45, label="iMeas raw")
-ln6_ema,  = ax6.plot(_t6, _ema6,    color="#1b5e20", lw=2.0,             label="iMeas EMA (log)")
-ln6_ma,   = ax6.plot(_t6, _ma6(3),  color="#ff6f00", lw=1.8, ls="--",   label="iMeas MA(N=3)")
-ln6_sp,   = ax6.plot(_t6, _sp6,     color="#e91e63", lw=1.8, ls=":",     label="spLimited (cmd)")
-ln6_thr,  = ax6.plot(_t6, _sp6 + 5, color="#c62828", lw=1.2, ls="--", alpha=0.60,
-                     label="sp + IExcessK (5.0 A)")
-sc6_fire  = ax6.scatter(
-    _t6[_fire_init], _ema6[_fire_init],
-    color="#c62828", s=40, zorder=5, marker="v",
-    label="sim iExcess (EMA, K=5.0, N≥3)"
+# Variable key table — maps legend nicknames to internal variable names
+_p2_key = (
+    "  Current ceiling/all caps =  uTarget_A      (A)\n"
+    "  CV setpoint              =  Icv_A          (A)\n"
+    "  FastOV voltage ceiling   =  fastOvCap_A    (A)\n"
+    "  PID command              =  spLimited_A    (A)\n"
+    "  Actual current (raw)     =  iMeas_A        (A)\n"
+    "  Actual current (EMA)     =  iMeas_filt_A   (A)\n"
+    "  Field duty               =  duty_pct       (%)"
+)
+fig2.text(
+    0.01, 0.385, _p2_key,
+    fontsize=8, family="monospace",
+    va="top", ha="left",
+    bbox=dict(boxstyle="round,pad=0.35", fc="#f9f9f9", ec="#cccccc", alpha=0.92)
 )
 
-ax6.set_ylabel("Current (A)")
-ax6.grid(**GRID_KW)
-ax6.legend(loc="upper left", fontsize=7)
-add_ov_shading(ax6, df)
-plt.setp(ax6.get_xticklabels(), visible=False)
-fig6.suptitle(f"Plot 6 — iExcess Signal Inspector  |  {outer_label}", fontsize=10)
-draw_state_strip(ax6s, df)
+# --- 2b: protection flag duration bars + battery current ---
+ax2b.set_title(
+    "Protection layers — bar length = time active; battery current (right axis) gives load-dump context",
+    fontsize=10, color="#444444", style="italic", pad=4)
 
-def _upd6(_=None):
-    n    = int(slider_n.val)
-    k    = float(slider_k.val)
-    n_cn = int(slider_ncn.val)
-    src  = radio_sig.value_selected
+draw_flag_bars(ax2b, df)
 
-    ma = _ma6(n)
-    ln6_ma.set_ydata(ma)
-    ln6_ma.set_label(f"iMeas MA(N={n})")
-    ln6_thr.set_ydata(_sp6 + k)
-    ln6_thr.set_label(f"sp + {k:.1f} A")
+ax2b_r = ax2b.twinx()
+if "battI_A" in df.columns:
+    ax2b_r.plot(df["t_plot"], df["battI_A"],
+                color="#f9a825", lw=1.8, alpha=0.80, label="battI_A (battery current)")
+    ax2b_r.axhline(0, color="#888888", linewidth=0.6, linestyle=":", alpha=0.5)
+    ax2b_r.set_ylabel("Battery current (A)", color="#f9a825", fontsize=12)
+    ax2b_r.tick_params(axis="y", colors="#f9a825", labelsize=11)
+    ax2b_r.legend(loc="upper right", fontsize=10)
+else:
+    ax2b_r.set_yticks([])
 
-    sig = {"Raw": _raw6, "EMA (log)": _ema6, "MA(N)": ma}[src]
-    fire = _sim_fire(sig, _sp6, k, n_cn)
-    fire_t   = _t6[fire]
-    fire_sig = sig[fire]
-    sc6_fire.set_offsets(
-        np.column_stack([fire_t, fire_sig]) if len(fire_t) else np.empty((0, 2))
-    )
-    sc6_fire.set_label(f"sim iExcess ({src}, K={k:.1f}, N≥{n_cn})")
+draw_state_strip(ax2s, df)
+# save_fig(fig2, "plot2_command_chain_protections")
 
-    ax6.legend(loc="upper left", fontsize=7)
-    ax6.relim()
-    ax6.autoscale_view()
-    fig6.canvas.draw_idle()
 
-slider_n.on_changed(_upd6)
-slider_k.on_changed(_upd6)
-slider_ncn.on_changed(_upd6)
-radio_sig.on_clicked(_upd6)
+# ---------------------------------------------------------------------------
+# PLOT 3 — Engine & scheduling context
+# ---------------------------------------------------------------------------
+fig3 = plt.figure(figsize=(18, 9), num="Plot 3 — RPM & Context")
+gs3  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 1], hspace=0.10)
+ax3  = fig3.add_subplot(gs3[0])
+ax3b = fig3.add_subplot(gs3[1], sharex=ax3)
+ax3s = fig3.add_subplot(gs3[2], sharex=ax3)
+plt.setp(ax3.get_xticklabels(),  visible=False)
+plt.setp(ax3b.get_xticklabels(), visible=False)
+fig3.suptitle(f"Plot 3 — Engine & Scheduling Context  |  {outer_label}", fontsize=14, y=0.99)
+add_subtitle(fig3,
+    "RPM, ADC scheduling jitter, and field duty — the mechanical and timing backdrop "
+    "for everything in Plots 1 and 2.")
+fig3.subplots_adjust(top=0.90)
+
+if "rpm" in df.columns:
+    ax3.plot(df["t_plot"], df["rpm"],
+             color="#f9a825", lw=2.2, label="RPM")
+else:
+    ax3.text(0.5, 0.5, "rpm not present in this log",
+             ha="center", va="center", transform=ax3.transAxes,
+             color="#888888", fontsize=13)
+ax3.set_ylabel("RPM")
+ax3.grid(**GRID_KW)
+ax3.legend(loc="upper left")
+add_duty_axis(ax3)
+add_voltloop_vlines(ax3, df)
+
+if "ch1_interval_ms" in df.columns:
+    ax3b.plot(df["t_plot"], df["ch1_interval_ms"],
+              color="#00838f", lw=1.8, label="ch1_interval_ms")
+    ax3b.axhline(5,  color="#2e7d32", linewidth=0.8, linestyle=":", alpha=0.70, label="5 ms nominal")
+    ax3b.axhline(15, color="#c62828", linewidth=0.8, linestyle=":", alpha=0.70,
+                 label="15 ms (3× — stale reading risk)")
+else:
+    ax3b.text(0.5, 0.5, "ch1_interval_ms not present in this log (older firmware)",
+              ha="center", va="center", transform=ax3b.transAxes,
+              color="#888888", fontsize=12)
+ax3b.set_ylabel("CH1 interval (ms)")
+ax3b.grid(**GRID_KW)
+ax3b.legend(loc="upper right", fontsize=10)
+
+draw_state_strip(ax3s, df)
+# save_fig(fig3, "plot3_rpm_context")
+
+
+# ---------------------------------------------------------------------------
+# PLOT 4 — CV PID term decomposition
+#
+# Reconstructs P, I, D contributions from logged signals + header gains.
+# D term is subtracted in the firmware, so it appears as a negative contribution
+# when voltage is rising. P + I − D should equal Icv_A (before clamping).
+# ---------------------------------------------------------------------------
+fig4 = plt.figure(figsize=(18, 9), num="Plot 4 — PID Term Decomposition")
+gs4  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 1], hspace=0.10)
+ax4  = fig4.add_subplot(gs4[0])
+ax4b = fig4.add_subplot(gs4[1], sharex=ax4)
+ax4s = fig4.add_subplot(gs4[2], sharex=ax4)
+plt.setp(ax4.get_xticklabels(),  visible=False)
+plt.setp(ax4b.get_xticklabels(), visible=False)
+fig4.suptitle(f"Plot 4 — CV PID Term Decomposition  |  {outer_label}", fontsize=14, y=0.99)
+add_subtitle(fig4,
+    "What is the voltage loop actually doing? P reacts to filtered voltage error (targV − battV_filt_V), "
+    "I holds the running correction, D backs off current as voltage rises. "
+    "Sum of P + I − D should closely match Icv_A (slew target not logged — minor discrepancy on CV entry).")
+fig4.subplots_adjust(top=0.90)
+
+# Compute P and D terms from header gains + logged signals.
+# P term uses (targV - battV_filt_V): the firmware always uses IBV_filtered (getFiltV())
+# for the voltage error, so this matches the actual signal fed to Kp.
+# voltageTargetSlewed (the slewed target) is not logged; targV is used as the target
+# approximation — differs only briefly on CV entry or setpoint change.
+if not (np.isnan(_kp) or np.isnan(_kd)):
+    df["pid_P"] = _kp * (df["targV"] - df["battV_filt_V"])
+    _have_gains = True
+else:
+    _have_gains = False
+    print("WARNING: VoltageKp/Kd not found in log header — P and D terms cannot be computed")
+
+if "cvDSlope_Vps" in df.columns and not np.isnan(_kd):
+    df["pid_D"] = _kd * df["cvDSlope_Vps"]   # D contribution (positive = suppressing)
+else:
+    df["pid_D"] = pd.Series(0.0, index=df.index)
+    print("WARNING: cvDSlope_Vps not in log — D term set to zero (re-download log from updated firmware)")
+
+# I term is cv_I_A directly (already Ki-scaled, in amps)
+# Reconstructed total for sanity check
+if _have_gains and "cv_I_A" in df.columns:
+    df["pid_reconstructed"] = df["pid_P"] + df["cv_I_A"] - df["pid_D"]
+
+# --- Plot P, I, D, and total ---
+if _have_gains:
+    ax4.plot(df["t_plot"], df["pid_P"],
+             color="#1565c0", lw=2.0, label=f"P term  =  Kp({_kp:.4g}) × (targV − battV_filt_V)  (A)")
+if "cv_I_A" in df.columns:
+    ax4.plot(df["t_plot"], df["cv_I_A"],
+             color="#2e7d32", lw=2.0, label="I term  =  cv_I_A  (running integral, A)")
+if "pid_D" in df.columns and df["pid_D"].abs().max() > 0:
+    ax4.plot(df["t_plot"], -df["pid_D"],
+             color="#e65100", lw=2.0, linestyle="--",
+             label=f"−D term  =  −Kd({_kd:.4g}) × cvDSlope  (A, negative = suppressing)", alpha=0.85)
+if "Icv_A" in df.columns:
+    ax4.plot(df["t_plot"], df["Icv_A"],
+             color="#c62828", lw=2.2, linestyle="-.",
+             label="Icv_A  (total CV output — P + I − D, clamped)", alpha=0.90)
+if "pid_reconstructed" in df.columns:
+    ax4.plot(df["t_plot"], df["pid_reconstructed"],
+             color="#888888", lw=1.2, linestyle=":",
+             label="P + I − D  (reconstructed — should match Icv_A)", alpha=0.70)
+
+ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+ax4.set_ylabel("Current contribution (A)")
+ax4.grid(**GRID_KW)
+add_duty_axis(ax4)
+_h4 = [l for l in ax4.get_lines() if not l.get_label().startswith("_")]
+ax4.legend(_h4, [l.get_label() for l in _h4], loc="upper left", fontsize=10)
+add_ov_shading(ax4, df)
+add_voltloop_vlines(ax4, df)
+
+# vError context panel — shows the filtered error the P term actually reacted to.
+# Uses (targV - battV_filt_V) to match what the firmware feeds to Kp.
+df["filt_error_V"] = df["targV"] - df["battV_filt_V"]
+ax4b.plot(df["t_plot"], df["filt_error_V"],
+          color="#1565c0", lw=1.8, alpha=0.85, label="targV − battV_filt_V  (filtered error fed to P term)")
+ax4b.plot(df["t_plot"], df["vError_V"],
+          color="#90caf9", lw=1.2, linestyle="--", alpha=0.65, label="vError_V  (raw IBV, logged reference)")
+ax4b.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+ax4b.set_ylabel("vError (V)")
+ax4b.grid(**GRID_KW)
+ax4b.legend(loc="upper left", fontsize=10)
+
+draw_state_strip(ax4s, df)
+# save_fig(fig4, "plot4_pid_decomposition")
+
 
 # ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
-# Registers xlim_changed on the primary (top) axes of each figure; because
-# sub-axes within a figure already share x via sharex, only one representative
-# per figure is needed.
 # ---------------------------------------------------------------------------
-_all_primary_axes = [ax1, ax2, ax3a, ax4a, ax5, ax6]
-_all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
-_syncing = [False]   # mutable container so the closure can write to it
+_all_primary_axes = [ax1, ax2a, ax3, ax4]
+_all_figs         = [fig1, fig2, fig3, fig4]
+_syncing = [False]
 
 def _on_xlim_changed(changed_ax):
     if _syncing[0]:

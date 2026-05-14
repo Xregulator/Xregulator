@@ -335,251 +335,244 @@ const CSV2_FIELDS = [
     "AlarmLatchState",                  // 49
     "ResetAlarmLatch",                  // 50
     "MaintainMode",                     // 51
-    "_unused52",                        // 52 — ResetTemp flag removed (always 0; button uses hasParam, not this var)
-    "_unused53",                        // 53 — ResetVoltage flag removed
-    "_unused54",                        // 54 — ResetCurrent flag removed
-    "_unused55",                        // 55 — ResetEngineRunTime flag removed
-    "_unused56",                        // 56 — ResetAlternatorOnTime flag removed
-    "_unused57",                        // 57 — ResetEnergy flag removed
-    "ManualSOCPoint",                   // 58
-    "LearningMode",                     // 59
-    "LearningPaused",                   // 60
-    "IgnoreLearningDuringPenalty",      // 61
-    "ShowLearningDebugMessages",        // 62
-    "LogAllLearningEvents",             // 63
-    "CloudFeatures",                    // 64
-    "LearningDryRunMode",               // 65
-    "_unused66",                        // 66 — AutoSaveLearningTable removed from UI
-    "ResetLearningTable",               // 67
-    "ClearOverheatHistory",             // 68
-    "AutoShuntGainCorrection",          // 69
-    "DynamicShuntGainFactor",           // 70
-    "AutoAltCurrentZero",               // 71
-    "DynamicAltCurrentZero",            // 72
-    "InsulationLifePercent",            // 73
-    "GreaseLifePercent",                // 74
-    "BrushLifePercent",                 // 75
-    "PredictedLifeHours",               // 76
-    "LifeIndicatorColor",               // 77
-    "WindingTempOffset",                // 78
-    "ManualLifePercentage",             // 79
-    "UVThresholdHigh",                  // 80
-    "weatherModeEnabled",               // 81
-    "pKwHrToday",                       // 82
-    "pKwHrTomorrow",                    // 83
-    "pKwHr2days",                       // 84
-    "ambientTemp",                      // 85
-    "baroPressure",                     // 86
-    "firmwareVersionInt",               // 87
-    "deviceIdUpper",                    // 88
-    "deviceIdLower",                    // 89
-    "ChargedEnergy_AllTime",            // 90
-    "AlternatorFuelUsed_AllTime",       // 91
-    "PeakVoltage_AllTime",              // 92
-    "EngineRunTime_AllTime",            // 93
-    "MinVoltage",                       // 94
-    "MinVoltage_AllTime",               // 95
-    "ChargeCycles",                     // 96
-    "ChargeCycles_AllTime",             // 97
-    "EngineFuelUsed",                   // 98
-    "EngineFuelUsed_AllTime",           // 99
-    "TotalDistance",                    // 100
-    "TotalDistance_AllTime",            // 101
-    "MaxSpeed",                         // 102
-    "MaxSpeed_AllTime",                 // 103
-    "SolarChargedEnergy",               // 104
-    "SolarChargedEnergy_AllTime",       // 105
-    "AlternatorChargedEnergy_AllTime",  // 106
-    "DischargedEnergy_AllTime",         // 107
-    "AvgSOC_AllTime",                   // 108
-    "AvgSpeed_AllTime",                 // 109
-    "AvgSpeed",                         // 110
-    "AlternatorOnTime_AllTime",         // 111
-    "EngineCycles_AllTime",             // 112
-    "MaxAlternatorTemperatureF_AllTime",// 113
-    "MaxTemperatureThermistor_AllTime", // 114
-    "MeasuredAmpsMax_AllTime",          // 115
-    "RPMMax_AllTime",                   // 116
-    "Ignition",                         // 117
-    "BulkStage",                        // 118
-    "WifiWakeSecondsRemaining",         // 119
-    "BufferedRecordCount",              // 120
-    "BufferedRecordPercent",            // 121
-    "MAX_BUFFERED_RECORDS",             // 122
-    "COGNMEA",                          // 123
-    "SOGNMEA",                          // 124
-    "ApparentWindSpeedNMEA",            // 125
-    "ApparentWindAngleNMEA",            // 126
-    "TrueWindSpeedNMEA",                // 127
-    "TrueWindAngleNMEA",                // 128
-    "LeewayNMEA",                       // 129
-    "VMGNMEA",                          // 130
-    "VMGTargetBearing",                 // 131
-    "VMGUseTrueWind",                   // 132
-    "SENSOR_UPLOAD_INTERVAL",           // 133
-    "cpuLoadCore0",                     // 134
-    "cpuLoadCore0Max",                  // 135
-    "cpuLoadCore1",                     // 136
-    "cpuLoadCore1Max",                  // 137
-    "hasForcedUpdate",                  // 138
-    "forcedFwVersionInt",               // 139
-    "forcedUpdateDeadline",             // 140
-    "stateRevision",                    // 141
-    "hardwarePresent",                  // 142
-    "imu_accel_x_raw",                  // 143
-    "imu_accel_y_raw",                  // 144
-    "imu_accel_z_raw",                  // 145
-    "imu_gyro_x_raw",                   // 146
-    "imu_gyro_y_raw",                   // 147
-    "imu_gyro_z_raw",                   // 148
-    "accel_x_min",                      // 149
-    "accel_x_max",                      // 150
-    "accel_x_avg",                      // 151
-    "accel_y_min",                      // 152
-    "accel_y_max",                      // 153
-    "accel_y_avg",                      // 154
-    "accel_z_min",                      // 155
-    "accel_z_max",                      // 156
-    "accel_z_avg",                      // 157
-    "gyro_x_min",                       // 158
-    "gyro_x_max",                       // 159
-    "gyro_x_avg",                       // 160
-    "gyro_y_min",                       // 161
-    "gyro_y_max",                       // 162
-    "gyro_y_avg",                       // 163
-    "gyro_z_min",                       // 164
-    "gyro_z_max",                       // 165
-    "gyro_z_avg",                       // 166
-    "heel_min",                         // 167
-    "heel_max",                         // 168
-    "heel_avg",                         // 169
-    "pitch_min",                        // 170
-    "pitch_max",                        // 171
-    "pitch_avg",                        // 172
-    "vertical_accel_min",               // 173
-    "vertical_accel_max",               // 174
-    "vertical_accel_avg",               // 175
-    "total_accel_min",                  // 176
-    "total_accel_max",                  // 177
-    "total_accel_avg",                  // 178
-    "imu_slam_count",                   // 179
-    "imu_slam_peak_max",                // 180
-    "imu_slam_count_lifetime",          // 181
-    "imu_capsize_count",                // 182
-    "imu_pitchpole_count",              // 183
-    "imu_heel_change_60s",              // 184
-    "imu_heel_deviation_60s",           // 185
-    "imu_pitch_change_60s",             // 186
-    "imu_pitch_deviation_60s",          // 187
-    "imu_wave_period_sec",              // 188
-    "imu_heel_max_lifetime",            // 189
-    "imu_pitch_max_lifetime",           // 190
-    "imu_slam_peak_lifetime",           // 191
-    "imuEnabled",                       // 192
-    "imuMountOrientation",              // 193
-    "imu_fifo_overrun_count",           // 194
-    "imu_i2c_error_count",              // 195
-    "imu_unknown_tag_count",            // 196
-    "imu_accel_dropped",                // 197
-    "imu_gyro_dropped",                 // 198
-    "imu_total_samples_accel",          // 199
-    "imu_total_samples_gyro",           // 200
-    "IMUReadTime2",                     // 201
-    "IMUReadTime",                      // 202
-    "adsI2CErrorCount",                 // 203
-    "tempPIDActive",                    // 204
-    "tempPIDInput_d",                   // 205
-    "tempPIDSetpoint_d",                // 206
-    "thermalPenaltyAmps",               // 207
-    "innerTermP",                       // 208
-    "innerTermI",                       // 209
-    "innerTermD",                       // 210
-    "outerTermP",                       // 211
-    "outerTermI",                       // 212
-    "outerTermD",                       // 213
-    "thermalSlopeFPerSec",              // 214
-    "AbsorptionVoltage",                // 215
-    "AbsorptionTimeoutMs",              // 216
-    "bulkVoltageHoldMs",                // 217
-    "chargeStageDisplay",               // 218
-    "voltageControlActive",             // 219
-    "voltageTarget",                    // 220
-    "voltageError",                     // 221
-    "Icv",                              // 222
-    "cv_I",                             // 223
-    "capLimitMode",                     // 224
-    "TargetVoltageMode",                // 225
-    "TargetVoltageSetpoint",            // 226
-    "RebulkCurrent_A",                  // 227
-    "UseFloat",                         // 228
-    "inIdleStage",                      // 229
-    "referenceFinalized",               // 230
-    "sessionErrorCount",                // 231
-    "anomalyMarginAmps",                // 232
-    "anomalyAlarmThreshold",            // 233
-    "anomalyAlarmEnable",               // 234
-    "degradationThreshold",             // 235
-    "ft_rai_total_win",                 // 236
-    "ft_rai_total_ses",                 // 237
-    "ft_rai_ina228_win",                // 238
-    "ft_rai_ina228_ses",                // 239
-    "ft_rai_ads_state_win",             // 240
-    "ft_rai_ads_state_ses",             // 241
-    "ft_rai_bmp_state_win",             // 242
-    "ft_rai_bmp_state_ses",             // 243
-    "ft_rai_imu_win",                   // 244
-    "ft_rai_imu_ses",                   // 245
-    "fsWriteQueueDrops",                // 246
-    "TempAlarmLow",                     // 247
-    "cv_D",                             // 248
-    "tempReadFailCount",                // 249
-    "tempCrcFailCount",                 // 250
-    "tempCrcRecoveredCount",            // 251
-    "tempAllFFCount",                   // 252
-    "tempPowerOn85Count",               // 253
-    "tempOutOfRangeCount",              // 254
-    "tempRequestFailCount",             // 255
-    "tempConnectedFailCount",           // 256
-    "tempResolutionFixCount",           // 257
-    "tempRereadFailCount",              // 258
-    "tempResolutionFixCrcFailCount",    // 259
-    "tempEnumerateFailCount",           // 260
-    "warmupCeiling",                    // 261
-    "imu_min_moving_gentle",            // 262
-    "imu_min_moving_moderate",          // 263
-    "imu_min_moving_rough",             // 264
-    "imu_min_moving_extreme",           // 265
-    "imu_min_stat_gentle",              // 266
-    "imu_min_stat_moderate",            // 267
-    "imu_min_stat_rough",               // 268
-    "imu_min_stat_extreme",             // 269
-    "imu_heel_deviation_120s",          // 270
-    "imu_pitch_deviation_120s",         // 271
-    "imu_heading_swing_120s",           // 272
-    "LoadDumpDtThresh",                 // 273
-    "LoadDumpCurrentDrop",              // 274
-    "dBcur_dt",                         // 275
-    "loadDumpActive",                   // 276
-    "CVTuningMode",                     // 277
-    "cvWaveAmplitudeV",                 // 278 — ×100
-    "cvWavePeriodSec",                  // 279
-    "cvKOvershoot",                     // 280 — ×10
-    "cvConsecutiveReads",               // 281
-    "ThermalTuningMode",                // 282
-    "thermalWaveLowF",                  // 283 — ×10
-    "thermalWaveHighF",                 // 284 — ×10
-    "thermalWaveHalfPeriodMin",         // 285 — ×10
-    "thermalKOvershoot",                // 286 — ×100
-    "thermalKUndershoot",               // 287 — ×100
-    "thermalSettleThreshF",             // 288 — ×10
-    "thermalConsecutiveReads",          // 289
-    "thermalLiveScore0",                // 290 — ×10000
-    "thermalLiveScore1",                // 291 — ×10000
-    "thermalLiveScore2",                // 292 — ×10000
-    "thermalLiveScore3",                // 293 — ×10000
-    "thermalTuningTestPhase",           // 294
-    "ft_updateAccelMetrics_win",        // 295 — µs
-    "ft_updateAccelMetrics_ses",        // 296 — µs
+    "ManualSOCPoint",                   // 52
+    "LearningMode",                     // 53
+    "LearningPaused",                   // 54
+    "IgnoreLearningDuringPenalty",      // 55
+    "ShowLearningDebugMessages",        // 56
+    "LogAllLearningEvents",             // 57
+    "CloudFeatures",                    // 58
+    "LearningDryRunMode",               // 59
+    "ResetLearningTable",               // 60
+    "ClearOverheatHistory",             // 61
+    "AutoShuntGainCorrection",          // 62
+    "DynamicShuntGainFactor",           // 63
+    "AutoAltCurrentZero",               // 64
+    "DynamicAltCurrentZero",            // 65
+    "InsulationLifePercent",            // 66
+    "GreaseLifePercent",                // 67
+    "BrushLifePercent",                 // 68
+    "PredictedLifeHours",               // 69
+    "LifeIndicatorColor",               // 70
+    "WindingTempOffset",                // 71
+    "ManualLifePercentage",             // 72
+    "UVThresholdHigh",                  // 73
+    "weatherModeEnabled",               // 74
+    "pKwHrToday",                       // 75
+    "pKwHrTomorrow",                    // 76
+    "pKwHr2days",                       // 77
+    "ambientTemp",                      // 78
+    "baroPressure",                     // 79
+    "firmwareVersionInt",               // 80
+    "deviceIdUpper",                    // 81
+    "deviceIdLower",                    // 82
+    "ChargedEnergy_AllTime",            // 83
+    "AlternatorFuelUsed_AllTime",       // 84
+    "PeakVoltage_AllTime",              // 85
+    "EngineRunTime_AllTime",            // 86
+    "MinVoltage",                       // 87
+    "MinVoltage_AllTime",               // 88
+    "ChargeCycles",                     // 89
+    "ChargeCycles_AllTime",             // 90
+    "EngineFuelUsed",                   // 91
+    "EngineFuelUsed_AllTime",           // 92
+    "TotalDistance",                    // 93
+    "TotalDistance_AllTime",            // 94
+    "MaxSpeed",                         // 95
+    "MaxSpeed_AllTime",                 // 96
+    "SolarChargedEnergy",               // 97
+    "SolarChargedEnergy_AllTime",       // 98
+    "AlternatorChargedEnergy_AllTime",  // 99
+    "DischargedEnergy_AllTime",         // 100
+    "AvgSOC_AllTime",                   // 101
+    "AvgSpeed_AllTime",                 // 102
+    "AvgSpeed",                         // 103
+    "AlternatorOnTime_AllTime",         // 104
+    "EngineCycles_AllTime",             // 105
+    "MaxAlternatorTemperatureF_AllTime",// 106
+    "MaxTemperatureThermistor_AllTime", // 107
+    "MeasuredAmpsMax_AllTime",          // 108
+    "RPMMax_AllTime",                   // 109
+    "Ignition",                         // 110
+    "BulkStage",                        // 111
+    "WifiWakeSecondsRemaining",         // 112
+    "BufferedRecordCount",              // 113
+    "BufferedRecordPercent",            // 114
+    "MAX_BUFFERED_RECORDS",             // 115
+    "COGNMEA",                          // 116
+    "SOGNMEA",                          // 117
+    "ApparentWindSpeedNMEA",            // 118
+    "ApparentWindAngleNMEA",            // 119
+    "TrueWindSpeedNMEA",                // 120
+    "TrueWindAngleNMEA",                // 121
+    "LeewayNMEA",                       // 122
+    "VMGNMEA",                          // 123
+    "VMGTargetBearing",                 // 124
+    "VMGUseTrueWind",                   // 125
+    "SENSOR_UPLOAD_INTERVAL",           // 126
+    "cpuLoadCore0",                     // 127
+    "cpuLoadCore0Max",                  // 128
+    "cpuLoadCore1",                     // 129
+    "cpuLoadCore1Max",                  // 130
+    "hasForcedUpdate",                  // 131
+    "forcedFwVersionInt",               // 132
+    "forcedUpdateDeadline",             // 133
+    "stateRevision",                    // 134
+    "hardwarePresent",                  // 135
+    "imu_accel_x_raw",                  // 136
+    "imu_accel_y_raw",                  // 137
+    "imu_accel_z_raw",                  // 138
+    "imu_gyro_x_raw",                   // 139
+    "imu_gyro_y_raw",                   // 140
+    "imu_gyro_z_raw",                   // 141
+    "accel_x_min",                      // 142
+    "accel_x_max",                      // 143
+    "accel_x_avg",                      // 144
+    "accel_y_min",                      // 145
+    "accel_y_max",                      // 146
+    "accel_y_avg",                      // 147
+    "accel_z_min",                      // 148
+    "accel_z_max",                      // 149
+    "accel_z_avg",                      // 150
+    "gyro_x_min",                       // 151
+    "gyro_x_max",                       // 152
+    "gyro_x_avg",                       // 153
+    "gyro_y_min",                       // 154
+    "gyro_y_max",                       // 155
+    "gyro_y_avg",                       // 156
+    "gyro_z_min",                       // 157
+    "gyro_z_max",                       // 158
+    "gyro_z_avg",                       // 159
+    "heel_min",                         // 160
+    "heel_max",                         // 161
+    "heel_avg",                         // 162
+    "pitch_min",                        // 163
+    "pitch_max",                        // 164
+    "pitch_avg",                        // 165
+    "vertical_accel_min",               // 166
+    "vertical_accel_max",               // 167
+    "vertical_accel_avg",               // 168
+    "total_accel_min",                  // 169
+    "total_accel_max",                  // 170
+    "total_accel_avg",                  // 171
+    "imu_slam_count",                   // 172
+    "imu_slam_peak_max",                // 173
+    "imu_slam_count_lifetime",          // 174
+    "imu_capsize_count",                // 175
+    "imu_pitchpole_count",              // 176
+    "imu_heel_change_60s",              // 177
+    "imu_heel_deviation_60s",           // 178
+    "imu_pitch_change_60s",             // 179
+    "imu_pitch_deviation_60s",          // 180
+    "imu_wave_period_sec",              // 181
+    "imu_heel_max_lifetime",            // 182
+    "imu_pitch_max_lifetime",           // 183
+    "imu_slam_peak_lifetime",           // 184
+    "imuEnabled",                       // 185
+    "imuMountOrientation",              // 186
+    "imu_fifo_overrun_count",           // 187
+    "imu_i2c_error_count",              // 188
+    "imu_unknown_tag_count",            // 189
+    "imu_accel_dropped",                // 190
+    "imu_gyro_dropped",                 // 191
+    "imu_total_samples_accel",          // 192
+    "imu_total_samples_gyro",           // 193
+    "IMUReadTime2",                     // 194
+    "IMUReadTime",                      // 195
+    "adsI2CErrorCount",                 // 196
+    "tempPIDActive",                    // 197
+    "tempPIDInput_d",                   // 198
+    "tempPIDSetpoint_d",                // 199
+    "thermalPenaltyAmps",               // 200
+    "innerTermP",                       // 201
+    "innerTermI",                       // 202
+    "innerTermD",                       // 203
+    "outerTermP",                       // 204
+    "outerTermI",                       // 205
+    "outerTermD",                       // 206
+    "thermalSlopeFPerSec",              // 207
+    "AbsorptionVoltage",                // 208
+    "AbsorptionTimeoutMs",              // 209
+    "bulkVoltageHoldMs",                // 210
+    "chargeStageDisplay",               // 211
+    "voltageControlActive",             // 212
+    "voltageTarget",                    // 213
+    "voltageError",                     // 214
+    "Icv",                              // 215
+    "cv_I",                             // 216
+    "capLimitMode",                     // 217
+    "TargetVoltageMode",                // 218
+    "TargetVoltageSetpoint",            // 219
+    "RebulkCurrent_A",                  // 220
+    "UseFloat",                         // 221
+    "inIdleStage",                      // 222
+    "referenceFinalized",               // 223
+    "sessionErrorCount",                // 224
+    "anomalyMarginAmps",                // 225
+    "anomalyAlarmThreshold",            // 226
+    "anomalyAlarmEnable",               // 227
+    "degradationThreshold",             // 228
+    "ft_rai_total_win",                 // 229
+    "ft_rai_total_ses",                 // 230
+    "ft_rai_ina228_win",                // 231
+    "ft_rai_ina228_ses",                // 232
+    "ft_rai_ads_state_win",             // 233
+    "ft_rai_ads_state_ses",             // 234
+    "ft_rai_bmp_state_win",             // 235
+    "ft_rai_bmp_state_ses",             // 236
+    "ft_rai_imu_win",                   // 237
+    "ft_rai_imu_ses",                   // 238
+    "fsWriteQueueDrops",                // 239
+    "TempAlarmLow",                     // 240
+    "cv_D",                             // 241
+    "tempReadFailCount",                // 242
+    "tempCrcFailCount",                 // 243
+    "tempCrcRecoveredCount",            // 244
+    "tempAllFFCount",                   // 245
+    "tempPowerOn85Count",               // 246
+    "tempOutOfRangeCount",              // 247
+    "tempRequestFailCount",             // 248
+    "tempConnectedFailCount",           // 249
+    "tempResolutionFixCount",           // 250
+    "tempRereadFailCount",              // 251
+    "tempResolutionFixCrcFailCount",    // 252
+    "tempEnumerateFailCount",           // 253
+    "warmupCeiling",                    // 254
+    "imu_min_moving_gentle",            // 255
+    "imu_min_moving_moderate",          // 256
+    "imu_min_moving_rough",             // 257
+    "imu_min_moving_extreme",           // 258
+    "imu_min_stat_gentle",              // 259
+    "imu_min_stat_moderate",            // 260
+    "imu_min_stat_rough",               // 261
+    "imu_min_stat_extreme",             // 262
+    "imu_heel_deviation_120s",          // 263
+    "imu_pitch_deviation_120s",         // 264
+    "imu_heading_swing_120s",           // 265
+    "LoadDumpDtThresh",                 // 266
+    "LoadDumpCurrentDrop",              // 267
+    "dBcur_dt",                         // 268
+    "loadDumpActive",                   // 269
+    "CVTuningMode",                     // 270
+    "cvWaveAmplitudeV",                 // 271 — ×100
+    "cvWavePeriodSec",                  // 272
+    "cvKOvershoot",                     // 273 — ×10
+    "cvConsecutiveReads",               // 274
+    "ThermalTuningMode",                // 275
+    "thermalWaveLowF",                  // 276 — ×10
+    "thermalWaveHighF",                 // 277 — ×10
+    "thermalWaveHalfPeriodMin",         // 278 — ×10
+    "thermalKOvershoot",                // 279 — ×100
+    "thermalKUndershoot",               // 280 — ×100
+    "thermalSettleThreshF",             // 281 — ×10
+    "thermalConsecutiveReads",          // 282
+    "thermalLiveScore0",                // 283 — ×10000
+    "thermalLiveScore1",                // 284 — ×10000
+    "thermalLiveScore2",                // 285 — ×10000
+    "thermalLiveScore3",                // 286 — ×10000
+    "thermalTuningTestPhase",           // 287
+    "ft_updateAccelMetrics_win",        // 288 — µs
+    "ft_updateAccelMetrics_ses",        // 289 — µs
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -601,266 +594,266 @@ const CSV3_FIELDS = [
     "IgnoreTemperature",               // 16
     "bmsLogic",                        // 17
     "bmsLogicLevelOff",                // 18
-    "FourWay",                         // 19
-    "RPMScalingFactor",                // 20
-    "MaximumAllowedBatteryAmps",       // 21
-    "BatteryVoltageSource",            // 22
-    "LearningUpwardEnabled",           // 23
-    "LearningDownwardEnabled",         // 24
-    "AlternatorNominalAmps",           // 25
-    "LearningUpStep",                  // 26
-    "LearningDownStep",                // 27
-    "AmbientTempCorrectionFactor",     // 28
-    "xTime",                           // 29
-    "MinLearningInterval",             // 30
-    "SafeOperationThreshold",          // 31
-    "PidKp",                           // 32
-    "PidKi",                           // 33
-    "PidKd",                           // 34
-    "PidSampleDivisor",                // 35
-    "MaxTableValue",                   // 36
-    "_unused37",                       // 37 — MinTableValue removed from UI
-    "MaxPenaltyPercent",               // 38
-    "MaxPenaltyDuration",              // 39
-    "NeighborLearningFactor",          // 40
-    "yyMax",                           // 41
-    "LearningMemoryDuration",          // 42
-    "EnableNeighborLearning",          // 43
-    "EnableAmbientCorrection",         // 44
-    "TuningMode",                      // 45
-    "_unused46",                       // 46 — LearningTableSaveInterval removed from UI
-    "rpmCurrentTable0",                // 47
-    "rpmCurrentTable1",                // 48
-    "rpmCurrentTable2",                // 49
-    "rpmCurrentTable3",                // 50
-    "rpmCurrentTable4",                // 51
-    "rpmCurrentTable5",                // 52
-    "rpmCurrentTable6",                // 53
-    "rpmCurrentTable7",                // 54
-    "rpmCurrentTable8",                // 55
-    "rpmCurrentTable9",                // 56
-    "currentRPMTableIndex",            // 57
-    "pidInitialized",                  // 58
-    "ShuntResistanceMicroOhm",         // 59
-    "InvertAltAmps",                   // 60
-    "InvertBattAmps",                  // 61
-    "MaxDuty",                         // 62
-    "MinDuty",                         // 63
-    "FieldResistance",                 // 64
-    "maxPoints",                       // 65
-    "AlternatorCOffset",               // 66
-    "BatteryCOffset",                  // 67
-    "BatteryCapacity_Ah",              // 68
-    "AmpSensorRange",                  // 69
-    "R_fixed",                         // 70
-    "Beta",                            // 71
-    "T0_C",                            // 72
-    "TempSource",                      // 73
-    "IgnitionOverride",                // 74
-    "FLOAT_DURATION",                  // 75
-    "PulleyRatio",                     // 76
-    "BatteryCurrentSource",            // 77
-    "overheatCount0",                  // 78
-    "overheatCount1",                  // 79
-    "overheatCount2",                  // 80
-    "overheatCount3",                  // 81
-    "overheatCount4",                  // 82
-    "overheatCount5",                  // 83
-    "overheatCount6",                  // 84
-    "overheatCount7",                  // 85
-    "overheatCount8",                  // 86
-    "overheatCount9",                  // 87
-    "cumulativeNoOverheatTime0",       // 88
-    "cumulativeNoOverheatTime1",       // 89
-    "cumulativeNoOverheatTime2",       // 90
-    "cumulativeNoOverheatTime3",       // 91
-    "cumulativeNoOverheatTime4",       // 92
-    "cumulativeNoOverheatTime5",       // 93
-    "cumulativeNoOverheatTime6",       // 94
-    "cumulativeNoOverheatTime7",       // 95
-    "cumulativeNoOverheatTime8",       // 96
-    "cumulativeNoOverheatTime9",       // 97
-    "totalLearningEvents",             // 98
-    "totalOverheats",                  // 99
-    "totalSafeHours",                  // 100
-    "averageTableValue",               // 101
-    "timeSinceLastOverheat",           // 102
-    "learningTargetFromRPM",           // 103
-    "ambientTempCorrection",           // 104
-    "finalLearningTarget",             // 105
-    "overheatingPenaltyTimer",         // 106
-    "overheatingPenaltyAmps",          // 107
-    "pidSetpoint",                     // 108
-    "TempToUse",                       // 109
-    "rpmTableRPMPoints0",              // 110
-    "rpmTableRPMPoints1",              // 111
-    "rpmTableRPMPoints2",              // 112
-    "rpmTableRPMPoints3",              // 113
-    "rpmTableRPMPoints4",              // 114
-    "rpmTableRPMPoints5",              // 115
-    "rpmTableRPMPoints6",              // 116
-    "rpmTableRPMPoints7",              // 117
-    "rpmTableRPMPoints8",              // 118
-    "rpmTableRPMPoints9",              // 119
-    "LearningSettlingPeriod",          // 120
-    "LearningRPMChangeThreshold",      // 121
-    "LearningTempHysteresis",          // 122
-    "fuelTableRPM0",                   // 123
-    "fuelTableRPM1",                   // 124
-    "fuelTableRPM2",                   // 125
-    "fuelTableRPM3",                   // 126
-    "fuelTableRPM4",                   // 127
-    "fuelTableRPM5",                   // 128
-    "fuelTableRPM6",                   // 129
-    "fuelTableRPM7",                   // 130
-    "fuelTableRPM8",                   // 131
-    "fuelTableRPM9",                   // 132
-    "fuelTableGPH0",                   // 133
-    "fuelTableGPH1",                   // 134
-    "fuelTableGPH2",                   // 135
-    "fuelTableGPH3",                   // 136
-    "fuelTableGPH4",                   // 137
-    "fuelTableGPH5",                   // 138
-    "fuelTableGPH6",                   // 139
-    "fuelTableGPH7",                   // 140
-    "fuelTableGPH8",                   // 141
-    "fuelTableGPH9",                   // 142
-    "stateRevision",                   // 143
-    "SetpointRampRate",                // 144
-    "DutyRampRate",                    // 145
-    "SettleTimeBeforeCut",             // 146
-    "TempWarnExcess",                  // 147
-    "TempCritExcess",                  // 148
-    "TempSustainedTimeout",            // 149
-    "VoltageSpikeMargin",              // 150
-    "VoltageDisagreeThreshold",        // 151
-    "VoltageDisagreeTimeout",          // 152
-    "rpmMinDutyTable0",                // 153
-    "rpmMinDutyTable1",                // 154
-    "rpmMinDutyTable2",                // 155
-    "rpmMinDutyTable3",                // 156
-    "rpmMinDutyTable4",                // 157
-    "rpmMinDutyTable5",                // 158
-    "rpmMinDutyTable6",                // 159
-    "rpmMinDutyTable7",                // 160
-    "rpmMinDutyTable8",                // 161
-    "rpmMinDutyTable9",                // 162
-    "rpmCapCurrentTable0",             // 163
-    "rpmCapCurrentTable1",             // 164
-    "rpmCapCurrentTable2",             // 165
-    "rpmCapCurrentTable3",             // 166
-    "rpmCapCurrentTable4",             // 167
-    "rpmCapCurrentTable5",             // 168
-    "rpmCapCurrentTable6",             // 169
-    "rpmCapCurrentTable7",             // 170
-    "rpmCapCurrentTable8",             // 171
-    "rpmCapCurrentTable9",             // 172
-    "VoltageKp",                       // 173
-    "VoltageLoopInterval",             // 174
-    "FIELD_COLLAPSE_DELAY",            // 175
-    "SetpointRiseRate",                // 176
-    "SetpointFallRate",                // 177
-    "PIDTrackingGain",                 // 178
-    "CAPSIZE_THRESHOLD_DEG",           // 179
-    "PITCHPOLE_THRESHOLD_DEG",         // 180
-    "SLAM_THRESHOLD_G",                // 181
-    "imuMountOrientation",             // 182
-    "socInfoAvailable",                // 183
-    "TailCurrent_A",                   // 184
-    "RebulkVoltage",                   // 185
-    "rebulkDebounceTime",              // 186
-    "MinFloatTime",                    // 187
-    "SOC_BlockRebulk_percent",         // 188
-    "SOC_AllowRebulk_percent",         // 189
-    "accelEnabled",                    // 190
-    "DutySlowRampRate",                // 191
-    "ShutdownPhase2HoldMs",            // 192
-    "learningUpCount0",                // 193
-    "learningUpCount1",                // 194
-    "learningUpCount2",                // 195
-    "learningUpCount3",                // 196
-    "learningUpCount4",                // 197
-    "learningUpCount5",                // 198
-    "learningUpCount6",                // 199
-    "learningUpCount7",                // 200
-    "learningUpCount8",                // 201
-    "learningUpCount9",                // 202
-    "TempPIDKp",                       // 203
-    "TempPIDKi",                       // 204
-    "UNUSED_205",                      // 205 (was TempPIDKd, removed)
-    "ThermalLookaheadSec",             // 206
-    "TempPIDIntervalMs",               // 207
-    "TempPIDFilterAlpha",              // 208
-    "_unused_209",                     // 209 (was TempPIDStaleMs, removed)
-    "_unused_210",                     // 210 (was TempPIDAntiWindupMarginA, removed)
-    "FreeInternalRam",                 // 211
-    "TotalInternalRam",                // 212
-    "LargestInternalBlock",            // 213
-    "FreePSRAM",                       // 214
-    "TotalPSRAM",                      // 215
-    "Heapfrag",                        // 216
-    "UNUSED_217",                      // 217 (was TempPIDKdExternal, removed)
-    "VoltageKi",                       // 218
-    "rpmCapPowerTable0",               // 219
-    "rpmCapPowerTable1",               // 220
-    "rpmCapPowerTable2",               // 221
-    "rpmCapPowerTable3",               // 222
-    "rpmCapPowerTable4",               // 223
-    "rpmCapPowerTable5",               // 224
-    "rpmCapPowerTable6",               // 225
-    "rpmCapPowerTable7",               // 226
-    "rpmCapPowerTable8",               // 227
-    "rpmCapPowerTable9",               // 228
-    "VoltageTrimLimit",                // 229
-    "ft_ReadAnalogInputs_win",         // 230
-    "ft_ReadAnalogInputs_ses",         // 231
-    "ft_AdjustFieldLearnMode_win",     // 232
-    "ft_AdjustFieldLearnMode_ses",     // 233
-    "ft_uploadSensorHistory_win",      // 234
-    "ft_uploadSensorHistory_ses",      // 235
-    "ft_uploadBufferedRecords_win",    // 236
-    "ft_uploadBufferedRecords_ses",    // 237
-    "ft_buildConfigPayload_win",       // 238
-    "ft_buildConfigPayload_ses",       // 239
-    "VeTime2",                         // 240
-    "systemIDActive",           // 241
-    "systemIDResultsReady",     // 242
-    "systemIDRiseDelay_0",      // 243
-    "systemIDRiseDelay_1",      // 244
-    "systemIDRiseDelay_2",      // 245
-    "systemIDFallDelay_0",      // 246
-    "systemIDFallDelay_1",      // 247
-    "systemIDFallDelay_2",      // 248
-    "systemIDRiseAvg",          // 249
-    "systemIDFallAvg",          // 250
-    "InputFilterTC",            // 251
-    "SystemIDStepAmplitude",    // 252
-    "HardOCTripAmps",           // 253
-    "HardOCDebounceMs",         // 254
-    "IExcessK",                 // 255
-    "IExcessN",                 // 256
-    "IExcessKBleed",            // 257
-    "IgnoreRPM",                // 258
-    "MinRPMForField",           // 259
-    "UNUSED_260",               // 260 (was ThermalTimeConstantSec, removed)
-    "AwBleedRate",              // 261
-    "AwRecoverRate",            // 262
-    "KSoft",                    // 263
-    "KHard",                    // 264
-    "IExcessReseedFrac",        // 265
-    "AwSeedProtectMs",          // 266
-    "VoltageKd",                // 267
-    "UNUSED_268",               // 268 (was ThermistorFilterAlpha, removed)
-    "displayTempUnit",          // 269
-    "WarmupRampRate",           // 270
-    "nvsPhase",                 // 271 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
-    "ft_saveNVSData_win",               // 272 — saveNVSData worst 5s window (µs)
-    "ft_saveNVSData_ses",               // 273 — saveNVSData worst session (µs)
-    "nvsCycleMs",                       // 274 — last full NVS drain duration (ms)
-    "ft_FlushFileWriteQueue_win",       // 275 — FlushFileWriteQueue worst 5s window (µs)
-    "ft_FlushFileWriteQueue_ses",       // 276 — FlushFileWriteQueue worst session (µs)
-    "ft_efficiencyTracker_win",         // 277 — efficiencyTracker_tick() worst 5s window (µs)
-    "ft_efficiencyTracker_ses",         // 278 — efficiencyTracker_tick() worst session (µs)
+    "RPMScalingFactor",                // 19
+    "MaximumAllowedBatteryAmps",       // 20
+    "BatteryVoltageSource",            // 21
+    "LearningUpwardEnabled",           // 22
+    "LearningDownwardEnabled",         // 23
+    "AlternatorNominalAmps",           // 24
+    "LearningUpStep",                  // 25
+    "LearningDownStep",                // 26
+    "AmbientTempCorrectionFactor",     // 27
+    "xTime",                           // 28
+    "MinLearningInterval",             // 29
+    "SafeOperationThreshold",          // 30
+    "PidKp",                           // 31
+    "PidKi",                           // 32
+    "PidKd",                           // 33
+    "PidSampleDivisor",                // 34
+    "MaxTableValue",                   // 35
+    "MaxPenaltyPercent",               // 36
+    "MaxPenaltyDuration",              // 37
+    "NeighborLearningFactor",          // 38
+    "yyMax",                           // 39
+    "LearningMemoryDuration",          // 40
+    "EnableNeighborLearning",          // 41
+    "EnableAmbientCorrection",         // 42
+    "TuningMode",                      // 43
+    "rpmCurrentTable0",                // 44
+    "rpmCurrentTable1",                // 45
+    "rpmCurrentTable2",                // 46
+    "rpmCurrentTable3",                // 47
+    "rpmCurrentTable4",                // 48
+    "rpmCurrentTable5",                // 49
+    "rpmCurrentTable6",                // 50
+    "rpmCurrentTable7",                // 51
+    "rpmCurrentTable8",                // 52
+    "rpmCurrentTable9",                // 53
+    "currentRPMTableIndex",            // 54
+    "pidInitialized",                  // 55
+    "ShuntResistanceMicroOhm",         // 56
+    "InvertAltAmps",                   // 57
+    "InvertBattAmps",                  // 58
+    "MaxDuty",                         // 59
+    "MinDuty",                         // 60
+    "FieldResistance",                 // 61
+    "maxPoints",                       // 62
+    "AlternatorCOffset",               // 63
+    "BatteryCOffset",                  // 64
+    "BatteryCapacity_Ah",              // 65
+    "AmpSensorRange",                  // 66
+    "R_fixed",                         // 67
+    "Beta",                            // 68
+    "T0_C",                            // 69
+    "TempSource",                      // 70
+    "IgnitionOverride",                // 71
+    "FLOAT_DURATION",                  // 72
+    "PulleyRatio",                     // 73
+    "BatteryCurrentSource",            // 74
+    "overheatCount0",                  // 75
+    "overheatCount1",                  // 76
+    "overheatCount2",                  // 77
+    "overheatCount3",                  // 78
+    "overheatCount4",                  // 79
+    "overheatCount5",                  // 80
+    "overheatCount6",                  // 81
+    "overheatCount7",                  // 82
+    "overheatCount8",                  // 83
+    "overheatCount9",                  // 84
+    "cumulativeNoOverheatTime0",       // 85
+    "cumulativeNoOverheatTime1",       // 86
+    "cumulativeNoOverheatTime2",       // 87
+    "cumulativeNoOverheatTime3",       // 88
+    "cumulativeNoOverheatTime4",       // 89
+    "cumulativeNoOverheatTime5",       // 90
+    "cumulativeNoOverheatTime6",       // 91
+    "cumulativeNoOverheatTime7",       // 92
+    "cumulativeNoOverheatTime8",       // 93
+    "cumulativeNoOverheatTime9",       // 94
+    "totalLearningEvents",             // 95
+    "totalOverheats",                  // 96
+    "totalSafeHours",                  // 97
+    "averageTableValue",               // 98
+    "timeSinceLastOverheat",           // 99
+    "learningTargetFromRPM",           // 100
+    "ambientTempCorrection",           // 101
+    "finalLearningTarget",             // 102
+    "overheatingPenaltyTimer",         // 103
+    "overheatingPenaltyAmps",          // 104
+    "pidSetpoint",                     // 105
+    "TempToUse",                       // 106
+    "rpmTableRPMPoints0",              // 107
+    "rpmTableRPMPoints1",              // 108
+    "rpmTableRPMPoints2",              // 109
+    "rpmTableRPMPoints3",              // 110
+    "rpmTableRPMPoints4",              // 111
+    "rpmTableRPMPoints5",              // 112
+    "rpmTableRPMPoints6",              // 113
+    "rpmTableRPMPoints7",              // 114
+    "rpmTableRPMPoints8",              // 115
+    "rpmTableRPMPoints9",              // 116
+    "LearningSettlingPeriod",          // 117
+    "LearningRPMChangeThreshold",      // 118
+    "LearningTempHysteresis",          // 119
+    "fuelTableRPM0",                   // 120
+    "fuelTableRPM1",                   // 121
+    "fuelTableRPM2",                   // 122
+    "fuelTableRPM3",                   // 123
+    "fuelTableRPM4",                   // 124
+    "fuelTableRPM5",                   // 125
+    "fuelTableRPM6",                   // 126
+    "fuelTableRPM7",                   // 127
+    "fuelTableRPM8",                   // 128
+    "fuelTableRPM9",                   // 129
+    "fuelTableGPH0",                   // 130
+    "fuelTableGPH1",                   // 131
+    "fuelTableGPH2",                   // 132
+    "fuelTableGPH3",                   // 133
+    "fuelTableGPH4",                   // 134
+    "fuelTableGPH5",                   // 135
+    "fuelTableGPH6",                   // 136
+    "fuelTableGPH7",                   // 137
+    "fuelTableGPH8",                   // 138
+    "fuelTableGPH9",                   // 139
+    "stateRevision",                   // 140
+    "SetpointRampRate",                // 141
+    "DutyRampRate",                    // 142
+    "SettleTimeBeforeCut",             // 143
+    "TempWarnExcess",                  // 144
+    "TempCritExcess",                  // 145
+    "TempSustainedTimeout",            // 146
+    "VoltageSpikeMargin",              // 147
+    "VoltageDisagreeThreshold",        // 148
+    "VoltageDisagreeTimeout",          // 149
+    "rpmMinDutyTable0",                // 150
+    "rpmMinDutyTable1",                // 151
+    "rpmMinDutyTable2",                // 152
+    "rpmMinDutyTable3",                // 153
+    "rpmMinDutyTable4",                // 154
+    "rpmMinDutyTable5",                // 155
+    "rpmMinDutyTable6",                // 156
+    "rpmMinDutyTable7",                // 157
+    "rpmMinDutyTable8",                // 158
+    "rpmMinDutyTable9",                // 159
+    "rpmCapCurrentTable0",             // 160
+    "rpmCapCurrentTable1",             // 161
+    "rpmCapCurrentTable2",             // 162
+    "rpmCapCurrentTable3",             // 163
+    "rpmCapCurrentTable4",             // 164
+    "rpmCapCurrentTable5",             // 165
+    "rpmCapCurrentTable6",             // 166
+    "rpmCapCurrentTable7",             // 167
+    "rpmCapCurrentTable8",             // 168
+    "rpmCapCurrentTable9",             // 169
+    "VoltageKp",                       // 170
+    "VoltageLoopInterval",             // 171
+    "FIELD_COLLAPSE_DELAY",            // 172
+    "SetpointRiseRate",                // 173
+    "SetpointFallRate",                // 174
+    "PIDTrackingGain",                 // 175
+    "CAPSIZE_THRESHOLD_DEG",           // 176
+    "PITCHPOLE_THRESHOLD_DEG",         // 177
+    "SLAM_THRESHOLD_G",                // 178
+    "imuMountOrientation",             // 179
+    "socInfoAvailable",                // 180
+    "TailCurrent_A",                   // 181
+    "RebulkVoltage",                   // 182
+    "rebulkDebounceTime",              // 183
+    "MinFloatTime",                    // 184
+    "SOC_BlockRebulk_percent",         // 185
+    "SOC_AllowRebulk_percent",         // 186
+    "accelEnabled",                    // 187
+    "DutySlowRampRate",                // 188
+    "ShutdownPhase2HoldMs",            // 189
+    "learningUpCount0",                // 190
+    "learningUpCount1",                // 191
+    "learningUpCount2",                // 192
+    "learningUpCount3",                // 193
+    "learningUpCount4",                // 194
+    "learningUpCount5",                // 195
+    "learningUpCount6",                // 196
+    "learningUpCount7",                // 197
+    "learningUpCount8",                // 198
+    "learningUpCount9",                // 199
+    "TempPIDKp",                       // 200
+    "TempPIDKi",                       // 201
+    "ThermalLookaheadSec",             // 202
+    "TempPIDIntervalMs",               // 203
+    "TempPIDFilterAlpha",              // 204
+    "FreeInternalRam",                 // 205
+    "TotalInternalRam",                // 206
+    "LargestInternalBlock",            // 207
+    "FreePSRAM",                       // 208
+    "TotalPSRAM",                      // 209
+    "Heapfrag",                        // 210
+    "VoltageKi",                       // 211
+    "rpmCapPowerTable0",               // 212
+    "rpmCapPowerTable1",               // 213
+    "rpmCapPowerTable2",               // 214
+    "rpmCapPowerTable3",               // 215
+    "rpmCapPowerTable4",               // 216
+    "rpmCapPowerTable5",               // 217
+    "rpmCapPowerTable6",               // 218
+    "rpmCapPowerTable7",               // 219
+    "rpmCapPowerTable8",               // 220
+    "rpmCapPowerTable9",               // 221
+    "VoltageTrimLimit",                // 222
+    "ft_ReadAnalogInputs_win",         // 223
+    "ft_ReadAnalogInputs_ses",         // 224
+    "ft_AdjustFieldLearnMode_win",     // 225
+    "ft_AdjustFieldLearnMode_ses",     // 226
+    "ft_uploadSensorHistory_win",      // 227
+    "ft_uploadSensorHistory_ses",      // 228
+    "ft_uploadBufferedRecords_win",    // 229
+    "ft_uploadBufferedRecords_ses",    // 230
+    "ft_buildConfigPayload_win",       // 231
+    "ft_buildConfigPayload_ses",       // 232
+    "VeTime2",                         // 233
+    "systemIDRiseDelay_0",      // 234
+    "systemIDRiseDelay_1",      // 235
+    "systemIDRiseDelay_2",      // 236
+    "systemIDFallDelay_0",      // 237
+    "systemIDFallDelay_1",      // 238
+    "systemIDFallDelay_2",      // 239
+    "systemIDRiseAvg",          // 240
+    "systemIDFallAvg",          // 241
+    "InputFilterTC",            // 242
+    "SystemIDStepAmplitude",    // 243
+    "HardOCTripAmps",           // 244
+    "HardOCDebounceMs",         // 245
+    "IExcessK",                 // 246
+    "IExcessN",                 // 247
+    "IExcessKBleed",            // 248
+    "IgnoreRPM",                // 249
+    "MinRPMForField",           // 250
+    "AwBleedRate",              // 251
+    "AwRecoverRate",            // 252
+    "KSoft",                    // 253
+    "KHard",                    // 254
+    "IExcessReseedFrac",        // 255
+    "AwSeedProtectMs",          // 256
+    "VoltageKd",                // 257
+    "displayTempUnit",          // 258
+    "WarmupRampRate",           // 259
+    "nvsPhase",                 // 260 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
+    "ft_saveNVSData_win",               // 261 — saveNVSData worst 5s window (µs)
+    "ft_saveNVSData_ses",               // 262 — saveNVSData worst session (µs)
+    "nvsCycleMs",                       // 263 — last full NVS drain duration (ms)
+    "ft_FlushFileWriteQueue_win",       // 264 — FlushFileWriteQueue worst 5s window (µs)
+    "ft_FlushFileWriteQueue_ses",       // 265 — FlushFileWriteQueue worst session (µs)
+    "ft_efficiencyTracker_win",         // 266 — efficiencyTracker_tick() worst 5s window (µs)
+    "ft_efficiencyTracker_ses",         // 267 — efficiencyTracker_tick() worst session (µs)
+    "systemIDActive",                   // 268 — 0=idle, 1-9=current phase
+    "systemIDResultsReady",             // 269 — 1=results available
+    "OvLayer1Enable",                   // 270
+    "OvLayer2Enable",                   // 271
+    "OvLayer3Enable",                   // 272
+    "IExcessSigSrc",                    // 273
+    "IExcessMA_N",                      // 274
+    "OutputPIDSigSrc",                  // 275
+    "TdPred",                           // 276
+    "VSoftMarginV",                     // 277
+    "VHardMarginV",                     // 278
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2535,12 +2528,14 @@ function processCSVDataOptimized(data) {
             plotInterp.pid.arrivalTime = performance.now();
         }
 
-        // CV voltage tuning plot data
+        // CV voltage tuning plot data.
+        // IBV and BatteryV_filtered are CSV1 — read directly from `data`.
+        // voltageTarget and Icv are CSV2 — arrive via cvPlotCache updated by the CSV2 handler.
         if (cvTuningData) {
-            const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
+            const voltTarget = cvPlotCache.voltageTarget !== null ? cvPlotCache.voltageTarget / 100 : null;
             const filtV      = 'BatteryV_filtered' in data ? parseFloat(data.BatteryV_filtered) / 100 : null;
             const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
-            const icv        = 'Icv' in data ? parseFloat(data.Icv) / 100 : null;
+            const icv        = cvPlotCache.Icv !== null ? cvPlotCache.Icv / 100 : null;
             const last_cv = cvTuningData[1].length - 1;
             const prevY_cv = [
                 cvTuningData[1][last_cv], cvTuningData[2][last_cv],
@@ -2641,12 +2636,19 @@ function updatePlotConfiguration(data) {
         }
         cachedXTime = data.xTime;
 
-        // Reinitialize data structures and recreate plot
+        // Reinitialize data structures and recreate both tuning plots
         if (pidTuningPlot) {
             pidTuningPlot.destroy();
         }
         initPidTuningDataStructures();
         initPidTuningPlot();
+
+        // CV plot uses xTime as its fallback window when cvXTime is null
+        if (cvTuningPlot && cvXTime === null) {
+            cvTuningPlot.destroy();
+            initCVTuningDataStructures();
+            initCVTuningPlot();
+        }
 
         configChanged = true;
     }
@@ -2788,13 +2790,13 @@ function updateAllEchosOptimized(data) {
         { key: 'yyMin', id: 'yyMin_echo', transform: v => v },
         { key: 'FieldAdjustmentInterval', id: 'FieldAdjustmentInterval_echo', transform: v => v },
         { key: 'ManualDutyTarget', id: 'ManualDutyTarget_echo', transform: v => v },
-        { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v },
-        { key: 'OnOff', id: 'OnOff_echo', transform: v => v },
+        { key: 'SwitchControlOverride', id: 'SwitchControlOverride_echo', transform: v => v == 1 ? 'Override' : 'Normal' },
+        { key: 'OnOff', id: 'OnOff_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'ManualFieldToggle', id: 'ManualFieldToggle_echo', transform: v => v === 0 ? 1 : 0 },
-        { key: 'LimpHome', id: 'LimpHome_echo', transform: v => v },
-        { key: 'VeData', id: 'VeData_echo', transform: v => v },
-        { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v },
-        { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v },
+        { key: 'LimpHome', id: 'LimpHome_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'VeData', id: 'VeData_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
         { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
         { key: 'PeukertExponent_scaled', id: 'PeukertExponent_echo', transform: v => (v / 100).toFixed(2) },
@@ -2802,18 +2804,17 @@ function updateAllEchosOptimized(data) {
         { key: 'ChargedVoltage_Scaled', id: 'ChargedVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TailCurrent', id: 'TailCurrent_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'ChargedDetectionTime', id: 'ChargedDetectionTime_echo', transform: v => v },
-        { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v },
-        { key: 'IgnoreRPM', id: 'IgnoreRPM_echo', transform: v => v },
+        { key: 'IgnoreTemperature', id: 'IgnoreTemperature_echo', transform: v => v == 1 ? 'Yes' : 'No' },
+        { key: 'IgnoreRPM', id: 'IgnoreRPM_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'MinRPMForField', id: 'MinRPMForField_echo', transform: v => v },
-        { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v },
-        { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v },
-        { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v },
+        { key: 'bmsLogic', id: 'bmsLogic_echo', transform: v => v == 1 ? 'Yes' : 'No' },
+        { key: 'bmsLogicLevelOff', id: 'bmsLogicLevelOff_echo', transform: v => v == 0 ? 'Low' : 'High' },
+        { key: 'AlarmActivate', id: 'AlarmActivate_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'TempAlarm', id: 'TempAlarm_echo', transform: v => Math.round(toDisplayTemp(v)) },
         { key: 'TempAlarmLow', id: 'TempAlarmLow_echo', transform: v => Math.round(toDisplayTemp(v)) },
         { key: 'VoltageAlarmHigh', id: 'VoltageAlarmHigh_echo', transform: v => v },
         { key: 'VoltageAlarmLow', id: 'VoltageAlarmLow_echo', transform: v => v },
         { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
-        { key: 'FourWay', id: 'FourWay_echo', transform: v => v },
         { key: 'RPMScalingFactor', id: 'RPMScalingFactor_echo', transform: v => v },
         { key: 'MaximumAllowedBatteryAmps', id: 'MaximumAllowedBatteryAmps_echo', transform: v => v },
         { key: 'LoadDumpDtThresh',    id: 'LoadDumpDtThresh_echo',    transform: v => v },
@@ -2821,8 +2822,8 @@ function updateAllEchosOptimized(data) {
         { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
         { key: 'BatteryVoltageSource', id: 'BatteryVoltageSource_echo', transform: v => v },
         { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
-        { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v },
-        { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v },
+        { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
+        { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'MaxDuty', id: 'MaxDuty_echo', transform: v => v },
         { key: 'MinDuty', id: 'MinDuty_echo', transform: v => v },
         { key: 'FieldResistance', id: 'FieldResistance_echo', transform: v => (v / 100).toFixed(2) },
@@ -2833,25 +2834,24 @@ function updateAllEchosOptimized(data) {
         { key: 'R_fixed', id: 'R_fixed_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'Beta', id: 'Beta_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'T0_C', id: 'T0_C_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'TempSource', id: 'TempSource_echo', transform: v => v },
-        { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v },
-        { key: 'AmpSensorRange', id: 'AmpSensorRange_echo', transform: v => v },
-        { key: 'AlarmLatchEnabled', id: 'AlarmLatchEnabled_echo', transform: v => v },
-        { key: 'AlarmTest', id: 'AlarmTest_echo', transform: v => v },
-        { key: 'ResetAlarmLatch', id: 'ResetAlarmLatch_echo', transform: v => v },
-        { key: 'MaintainMode', id: 'MaintainMode_echo', transform: v => v },
-        { key: 'UseFloat', id: 'UseFloat_echo', transform: v => v },
+        { key: 'TempSource', id: 'TempSource_echo', transform: v => v == 0 ? 'Digital' : 'Thermistor' },
+        { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'AmpSensorRange', id: 'AmpSensorRange_echo', transform: v => (['±200A', '±300A', '±500A'][v] ?? v) },
+        { key: 'AlarmLatchEnabled', id: 'AlarmLatchEnabled_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
+        { key: 'AlarmTest', id: 'AlarmTest_echo', transform: v => v == 1 ? 'Active' : '---' },
+        { key: 'MaintainMode', id: 'MaintainMode_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'UseFloat', id: 'UseFloat_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'RebulkCurrent_A', id: 'RebulkCurrent_A_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'TargetVoltageMode', id: 'TargetVoltageMode_echo', transform: v => v },
+        { key: 'TargetVoltageMode', id: 'TargetVoltageMode_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'absorptionCompleteTime', id: 'absorptionCompleteTime_echo', transform: v => Math.round(v / 1000) },
         { key: 'FLOAT_DURATION', id: 'FLOAT_DURATION_echo', transform: v => (v / 3600).toFixed(2) },
-        { key: 'AutoShuntGainCorrection', id: 'AutoShuntGainCorrection_echo', transform: v => v },
-        { key: 'AutoAltCurrentZero', id: 'AutoAltCurrentZero_echo', transform: v => v },
+        { key: 'AutoShuntGainCorrection', id: 'AutoShuntGainCorrection_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'AutoAltCurrentZero', id: 'AutoAltCurrentZero_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'WindingTempOffset', id: 'WindingTempOffset_echo', transform: v => Math.round(toDisplayTempDelta(v)) },
         { key: 'PulleyRatio', id: 'PulleyRatio_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'ManualLifePercentage', id: 'ManualLifePercentage_echo', transform: v => v },
-        { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => v },
-        { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v },
+        { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => ({0: 'INA228 Shunt', 1: 'NMEA2K', 2: 'NMEA0183', 3: 'Victron VE.Direct'}[v] ?? v) },
+        { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v == 1 ? 'UNIX' : 'Elapsed' },
         { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
         { key: 'plotTimeWindow', id: 'plotTimeWindow_echo', transform: v => v },
         { key: 'Ymin1', id: 'Ymin1_echo', transform: v => v },
@@ -2862,13 +2862,13 @@ function updateAllEchosOptimized(data) {
         { key: 'Ymax3', id: 'Ymax3_echo', transform: v => v },
         { key: 'Ymin4', id: 'Ymin4_echo', transform: v => v },
         { key: 'Ymax4', id: 'Ymax4_echo', transform: v => v },
-        { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v },
+        { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
         { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
-        { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v },
-        { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v },
-        { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v },
+        { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'PidKi', id: 'PidKi_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'PidKd', id: 'PidKd_echo', transform: v => (v / 1000).toFixed(3) },
@@ -2905,7 +2905,7 @@ function updateAllEchosOptimized(data) {
         { key: 'CAPSIZE_THRESHOLD_DEG', id: 'CAPSIZE_THRESHOLD_DEG_echo', transform: v => v },
         { key: 'PITCHPOLE_THRESHOLD_DEG', id: 'PITCHPOLE_THRESHOLD_DEG_echo', transform: v => v },
         { key: 'SLAM_THRESHOLD_G', id: 'SLAM_THRESHOLD_G_echo', transform: v => (v / 10).toFixed(1) },
-        { key: 'socInfoAvailable', id: 'socInfoAvailable_echo', transform: v => v },
+        { key: 'socInfoAvailable', id: 'socInfoAvailable_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'TailCurrent_A', id: 'TailCurrent_A_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'RebulkVoltage', id: 'RebulkVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'rebulkDebounceTime', id: 'rebulkDebounceTime_echo', transform: v => Math.round(v / 1000) },
@@ -2923,6 +2923,15 @@ function updateAllEchosOptimized(data) {
         { key: 'KHard',             id: 'KHard_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'IExcessReseedFrac', id: 'IExcessReseedFrac_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AwSeedProtectMs',   id: 'AwSeedProtectMs_echo',   transform: v => v },
+        { key: 'OvLayer1Enable',    id: 'OvLayer1Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'OvLayer2Enable',    id: 'OvLayer2Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'OvLayer3Enable',    id: 'OvLayer3Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'TdPred',            id: 'TdPred_echo',            transform: v => v.toFixed(3) },
+        { key: 'VSoftMarginV',      id: 'VSoftMarginV_echo',      transform: v => v.toFixed(3) },
+        { key: 'VHardMarginV',      id: 'VHardMarginV_echo',      transform: v => v.toFixed(3) },
+        { key: 'IExcessSigSrc',     id: 'IExcessSigSrc_echo',     transform: v => (['MA(N)', 'EMA(TC)', 'Raw'][v] ?? v) },
+        { key: 'IExcessMA_N',       id: 'IExcessMA_N_echo',       transform: v => Math.round(v) },
+        { key: 'OutputPIDSigSrc',   id: 'OutputPIDSigSrc_echo',   transform: v => (['EMA(TC)', 'MA(N)', 'Raw'][v] ?? v) },
         { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
@@ -2935,14 +2944,15 @@ function updateAllEchosOptimized(data) {
         { key: 'fsWriteQueueDropsID', id: 'fsWriteQueueDrops', transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_echo', transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_ID', transform: v => v },
+        { key: 'InputFilterTC', id: 'InputFilterTC_echo2', transform: v => (v / 1000).toFixed(3) },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
-        { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v },
+        { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'cvWaveAmplitudeV',  id: 'cvWaveAmplitudeV_echo',  transform: v => (v / 100).toFixed(2) },
         { key: 'cvWavePeriodSec',   id: 'cvWavePeriodSec_echo',   transform: v => v },
         { key: 'cvKOvershoot',      id: 'cvKOvershoot_echo',      transform: v => (v / 10).toFixed(1) },
         { key: 'cvConsecutiveReads', id: 'cvConsecutiveReads_echo', transform: v => v },
-        { key: 'ThermalTuningMode',         id: 'ThermalTuningMode_echo',         transform: v => v },
+        { key: 'ThermalTuningMode',         id: 'ThermalTuningMode_echo',         transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'thermalWaveLowF',           id: 'thermalWaveLowF_echo',           transform: v => (v / 10).toFixed(1) },
         { key: 'thermalWaveHighF',          id: 'thermalWaveHighF_echo',          transform: v => (v / 10).toFixed(1) },
         { key: 'thermalWaveHalfPeriodMin',  id: 'thermalWaveHalfPeriodMin_echo',  transform: v => (v / 10).toFixed(1) },
@@ -2979,6 +2989,18 @@ function updateAllEchosOptimized(data) {
             if (updateEchoIfChanged(update.id, newValue)) {
                 updatesCount++;
             }
+        }
+    });
+
+    // Sync <select> elements to current firmware values
+    const selectSyncs = [
+        { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
+        { key: 'BatteryCurrentSource',  name: 'BatteryCurrentSource' },
+    ];
+    selectSyncs.forEach(({ key, name }) => {
+        if (key in data) {
+            const sel = document.querySelector(`select[name="${name}"]`);
+            if (sel && sel.value !== String(data[key])) sel.value = String(data[key]);
         }
     });
 
@@ -3490,8 +3512,34 @@ function renderTuningLog(data) {
             const ttgl = document.getElementById('testToggleCount');
             if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
             if (ttgl) ttgl.textContent = data.tt;
+            // Push live score into the floating test panel
+            if (_testPanelCurrentTest === 'curr') {
+                const scored = Math.max(0, (data.tt || 0) - 4);
+                updateTestPanelScore(data.ts, scored + ' scored',
+                    (data.tt || 0) < 4 ? 'Ring-in (' + (data.tt || 0) + '/4)' : 'Scoring');
+            }
         } else {
             testRow.style.display = 'none';
+        }
+    }
+
+    // Commit section: show when TuningMode is active, update progress
+    const commitSection = document.getElementById('tuningCommitSection');
+    if (commitSection) {
+        commitSection.style.display = data.ta ? '' : 'none';
+        if (data.ta) {
+            const scored  = Math.max(0, (data.tt || 0) - 4);   // ring-in is first 4 toggles
+            const pct     = Math.min(100, (scored / 4) * 100);
+            const ready   = scored >= 4;
+            const cyclesEl = document.getElementById('tuningCyclesCount');
+            const barEl    = document.getElementById('tuningCyclesBar');
+            const badgeEl  = document.getElementById('tuningReadyBadge');
+            const btnEl    = document.getElementById('commitTuningBtn');
+            if (cyclesEl) cyclesEl.textContent = scored;
+            if (barEl)    barEl.style.width = pct.toFixed(0) + '%';
+            if (badgeEl)  { badgeEl.textContent = ready ? 'Ready to commit' : 'waiting…';
+                            badgeEl.style.color  = ready ? '#22c55e' : '#888'; }
+            if (btnEl)    btnEl.disabled = !ready;
         }
     }
 
@@ -3507,7 +3555,7 @@ function renderTuningLog(data) {
     if (!tbody) return;
 
     tbody.innerHTML = records.map(r => {
-        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 20 ? '#eab308' : '#ef4444';
+        const scoreColor = r.s < 2 ? '#22c55e' : r.s < 6 ? '#eab308' : '#ef4444';
         const isMatch = !isNaN(curKp) &&
             Math.abs(r.kp - curKp) < 0.0001 &&
             Math.abs(r.ki - curKi) < 0.0001 &&
@@ -3532,6 +3580,24 @@ function renderTuningLog(data) {
             <td style="padding:2px 5px;">${r.t.toFixed(0)}</td>
         </tr>`;
     }).join('');
+}
+
+function commitTuningScore() {
+    const btn = document.getElementById('commitTuningBtn');
+    const status = document.getElementById('tuningCommitStatus');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Sending…';
+    const pw = currentAdminPassword || '';
+    fetch(buildURL('/get?commitTuningScore=1&password=' + encodeURIComponent(pw)))
+        .then(r => {
+            if (status) status.textContent = 'Committed — check Score Log.';
+            setTimeout(() => { if (status) status.textContent = ''; }, 4000);
+            fetchTuningLog();
+        })
+        .catch(() => {
+            if (btn) btn.disabled = false;
+            if (status) status.textContent = 'Send failed.';
+        });
 }
 
 function resetTuningLog() {
@@ -3586,6 +3652,11 @@ function renderCVTuningLog(data) {
             const ttgl = document.getElementById('cvTestCycleCount');
             if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
             if (ttgl) ttgl.textContent = data.tc;
+            // Push live score into the floating test panel
+            if (_testPanelCurrentTest === 'cv') {
+                updateTestPanelScore(data.ts, (data.tc || 0) + ' cycles',
+                    (data.tc || 0) === 0 ? 'Ring-in' : 'Scoring');
+            }
         } else {
             testRow.style.display = 'none';
         }
@@ -3605,7 +3676,7 @@ function renderCVTuningLog(data) {
     if (!tbody) return;
 
     tbody.innerHTML = records.map(r => {
-        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 20 ? '#eab308' : '#ef4444';
+        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 12 ? '#eab308' : '#ef4444';
         const isMatch = !isNaN(curVkp) &&
             Math.abs(r.vkp - curVkp) < 0.001 &&
             Math.abs(r.vki - curVki) < 0.001 &&
@@ -3614,7 +3685,7 @@ function renderCVTuningLog(data) {
             r.wp === curWp && Math.abs(r.ko - curKo) < 0.05 && r.cr === curCr;
         const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
 
-        const lowScoreColor = (r.ls || 0) < 5 ? '#22c55e' : (r.ls || 0) < 20 ? '#eab308' : '#ef4444';
+        const lowScoreColor = (r.ls || 0) < 5 ? '#22c55e' : (r.ls || 0) < 12 ? '#eab308' : '#ef4444';
         return `<tr style="${rowStyle}">
             <td style="padding:2px 4px;">${r.n}</td>
             <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
@@ -3712,6 +3783,11 @@ function renderThermalTuningLog(data) {
             const ttgl = document.getElementById('thermalTestStepCount');
             if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
             if (ttgl) ttgl.textContent = data.tc;
+            // Push live score into the floating test panel
+            if (_testPanelCurrentTest === 'thermal') {
+                updateTestPanelScore(data.ts, (data.tc || 0) + ' steps',
+                    (data.tc || 0) === 0 ? 'Waiting for LOW stable' : 'Scoring');
+            }
         } else {
             testRow.style.display = 'none';
         }
@@ -3789,6 +3865,18 @@ let cvTuningPlot = null;
 let cvTuningData = null;
 let cvTuningPlotResizeObserver = null;
 
+// Cache of last-seen CSV2 values for the CV tuning plot.
+// voltageTarget and Icv are CSV2 — not available in processCSVDataOptimized's data object.
+// BatteryV_filtered is CSV1 and is read directly from data; it is NOT cached here.
+let cvPlotCache = { voltageTarget: null, Icv: null };
+
+// Local axis range state — JS only, not firmware-persisted.
+let cvXTime    = null;   // null = use global xTime
+let cvVoltsMin = null;
+let cvVoltsMax = null;
+let cvAmpsMin  = null;
+let cvAmpsMax  = null;
+
 let cvTuningSeriesVisible = {
     voltTarget: true,
     filtV:      true,
@@ -3798,7 +3886,8 @@ let cvTuningSeriesVisible = {
 
 function initCVTuningDataStructures() {
     const intervalMs = window._lastKnownInterval || 200;
-    const timeWindowSec = (xTime && xTime > 0 && !isNaN(xTime)) ? xTime : 30;
+    const cvT = (cvXTime && cvXTime > 0 && !isNaN(cvXTime)) ? cvXTime : xTime;
+    const timeWindowSec = (cvT && cvT > 0 && !isNaN(cvT)) ? cvT : 30;
     const maxPoints = Math.ceil(timeWindowSec * 1000 / intervalMs);
     const intervalSec = intervalMs / 1000;
     const xAxisData = [];
@@ -3869,8 +3958,8 @@ function initCVTuningPlot() {
         ],
         scales: {
             x:     { time: false, auto: false, range: [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
-            volts: {},
-            amps:  {},
+            volts: (cvVoltsMin !== null && cvVoltsMax !== null) ? { auto: false, range: [cvVoltsMin, cvVoltsMax] } : {},
+            amps:  (cvAmpsMin  !== null && cvAmpsMax  !== null) ? { auto: false, range: [cvAmpsMin,  cvAmpsMax]  } : {},
         },
     };
 
@@ -3933,6 +4022,37 @@ function queueCVTuningPlotUpdate() {
         if (cvTuningPlot && cvTuningData) cvTuningPlot.setData(cvTuningData);
         cvTuningPlotUpdateScheduled = false;
     });
+}
+
+function setCVXTime(val) {
+    const v = parseFloat(val);
+    if (!isFinite(v) || v <= 0) return;
+    cvXTime = v;
+    if (cvTuningPlot) cvTuningPlot.destroy();
+    initCVTuningDataStructures();
+    initCVTuningPlot();
+}
+
+function setCVVoltsRange(minVal, maxVal) {
+    const mn = parseFloat(minVal), mx = parseFloat(maxVal);
+    if (!isFinite(mn) || !isFinite(mx) || mn >= mx) return;
+    cvVoltsMin = mn; cvVoltsMax = mx;
+    if (cvTuningPlot) cvTuningPlot.setScale('volts', { min: mn, max: mx });
+}
+
+function setCVAmpsRange(minVal, maxVal) {
+    const mn = parseFloat(minVal), mx = parseFloat(maxVal);
+    if (!isFinite(mn) || !isFinite(mx) || mn >= mx) return;
+    cvAmpsMin = mn; cvAmpsMax = mx;
+    if (cvTuningPlot) cvTuningPlot.setScale('amps', { min: mn, max: mx });
+}
+
+function resetCVAxisRanges() {
+    cvVoltsMin = null; cvVoltsMax = null;
+    cvAmpsMin  = null; cvAmpsMax  = null;
+    if (cvTuningPlot) cvTuningPlot.destroy();
+    initCVTuningDataStructures();
+    initCVTuningPlot();
 }
 
 function resetVoltageProtectionCounters() {
@@ -5334,6 +5454,8 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("VMGUseTrueWind_checkbox", data.VMGUseTrueWind, "VMGUseTrueWind");
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
+        if (data.IExcessSigSrc !== undefined)   updateTripleBtn('iExcessSigSrc_',   data.IExcessSigSrc);
+        if (data.OutputPIDSigSrc !== undefined)  updateTripleBtn('outputPIDSigSrc_', data.OutputPIDSigSrc);
         // // Apply the ESP32 state to the plot system
         // if (data.timeAxisModeChanging !== undefined) {
         //     useTimestamps = (data.timeAxisModeChanging === 1);
@@ -5414,6 +5536,32 @@ function handleChargeRateModeToggle(mode) {
     pendingToggles.set('HiLow', { desiredValue: desiredValue, baseRev: lastSeenRev });
     setChargeRateMode(mode); // optimistic UI immediately
     submitChargeRateModeImmediately(desiredValue).catch(err => diagLog('chargeRateMode submit failed: ' + err));
+}
+
+function updateTripleBtn(prefix, val) {
+    [0, 1, 2].forEach(i => {
+        const btn = document.getElementById(prefix + i + '_btn');
+        if (btn) btn.classList.toggle('cap-mode-active', i === val);
+    });
+}
+
+function submitSimpleParam(paramName, val) {
+    const pw = (document.querySelector('.password_field') || {}).value || '';
+    const params = new URLSearchParams();
+    params.set(paramName, String(val));
+    if (pw) params.set('password', pw);
+    fetchWithTimeout(buildURL('/get?' + params.toString()), { method: 'GET', cache: 'no-store' }, 4000)
+        .catch(err => diagLog(paramName + ' submit failed: ' + err));
+}
+
+function setIExcessSigSrc(val) {
+    updateTripleBtn('iExcessSigSrc_', val);
+    submitSimpleParam('IExcessSigSrc', val);
+}
+
+function setOutputPIDSigSrc(val) {
+    updateTripleBtn('outputPIDSigSrc_', val);
+    submitSimpleParam('OutputPIDSigSrc', val);
 }
 
 function getLiveBatteryV() {
@@ -6222,6 +6370,10 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
 
+            // Feed CV tuning plot cache — voltageTarget and Icv are CSV2-only;
+            // BatteryV_filtered is CSV1 and is read directly in processCSVDataOptimized.
+            if (data.voltageTarget !== undefined)    cvPlotCache.voltageTarget    = parseFloat(data.voltageTarget);
+            if (data.Icv !== undefined)              cvPlotCache.Icv              = parseFloat(data.Icv);
 
             if (data.stateRevision !== undefined) {
                 lastSeenRev = data.stateRevision;
@@ -6802,10 +6954,25 @@ window.addEventListener("load", function () {
             // Update life indicators
             updateLifeIndicators(data);
 
+            gLastChargeStage = data.chargeStageDisplay; // keep gate functions up to date
+
             const chargeStageEl = document.getElementById('charge-stage');
             if (chargeStageEl) {
                 const stage = data.chargeStageDisplay;
-                if (stage === 1) {
+                // Active test modes override the normal charge stage label
+                if (sysidPollInterval !== null) {
+                    chargeStageEl.textContent = 'PLANT TEST';
+                    chargeStageEl.className = 'charge-stage charge-stage-test';
+                } else if (data.TuningMode) {
+                    chargeStageEl.textContent = 'CURR TEST';
+                    chargeStageEl.className = 'charge-stage charge-stage-test';
+                } else if (data.CVTuningMode) {
+                    chargeStageEl.textContent = 'CV TEST';
+                    chargeStageEl.className = 'charge-stage charge-stage-test';
+                } else if (data.ThermalTuningMode) {
+                    chargeStageEl.textContent = 'THERM TEST';
+                    chargeStageEl.className = 'charge-stage charge-stage-test';
+                } else if (stage === 1) {
                     chargeStageEl.textContent = 'BULK';
                     chargeStageEl.className = 'charge-stage charge-stage-bulk';
                 } else if (stage === 2) {
@@ -6833,6 +7000,10 @@ window.addEventListener("load", function () {
                 }
             }
             updateVoltageModeGreyout(data.chargeStageDisplay);
+
+            // Update the test-active floating panel from the CSV1/2 stream
+            _testActiveCSV1 = data.TuningMode ? 'curr' : data.CVTuningMode ? 'cv' : data.ThermalTuningMode ? 'thermal' : null;
+            updateTestActivePanel();
 
             updateFirmwareVersion(data.firmwareVersionInt);
             updateDeviceId();
@@ -6992,7 +7163,8 @@ window.addEventListener("load", function () {
                 ["ft_efficiencyTracker_win_ID", "ft_efficiencyTracker_win"],
                 ["ft_efficiencyTracker_ses_ID", "ft_efficiencyTracker_ses"],
                 ["VeTime2_ID", "VeTime2"],
-                // systemIDActive (241) and systemIDResultsReady (242) OBSOLETE — firmware sends 0
+                ["systemIDActive_ID", "systemIDActive"],
+                ["systemIDResultsReady_ID", "systemIDResultsReady"],
                 ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
                 ["systemIDRiseDelay_1_ID", "systemIDRiseDelay_1"],
                 ["systemIDRiseDelay_2_ID", "systemIDRiseDelay_2"],
@@ -7007,6 +7179,14 @@ window.addEventListener("load", function () {
             // CSVData3
             updateFields(otherFields);   // Step 3: Process the whitelist
             updatePidTuningConfiguration(data);  // ADD THIS LINE - Update PID plot config
+
+            // Update test-active panel with sysid phase from CSV3
+            _testActiveCSV3 = (parseInt(data.systemIDActive ?? 0) > 0) ? 'sysid' : null;
+            if (_testPanelCurrentTest === 'sysid') {
+                const sysidPhaseNum = parseInt(data.systemIDActive ?? 0);
+                updateTestPanelScore(undefined, undefined, SYSID_PHASE_NAMES[sysidPhaseNum] ?? ('Phase ' + sysidPhaseNum));
+            }
+            updateTestActivePanel();
 
             // Update learning table inputs
             // CRITICAL: Read mode from incoming data, not DOM (which may be stale)
@@ -9475,10 +9655,9 @@ let thermalWindowMin = 30;
 
 // Default visibility — hide the four requested series
 let thermalSeriesVisible = {
-    tempFilt: true, tempProjected: true, tempSetpoint: true, penaltyAmps: false,
-    outerP: true, outerI: false, outerD: false,
-    impliedPenalty: true, outerDExternal: true,
-    measAmps: false, uTarget: true
+    tempFilt: true, tempProjected: true, tempSetpoint: true, dCorrection: true,
+    penaltyAmps: true, measAmps: true, uTarget: true,
+    outerP: true, outerI: true, outerD: true, impliedPenalty: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -9536,22 +9715,24 @@ function drawThermalWatermark(u) {
 async function fetchAndRenderThermalLog() {
     const statusEl = document.getElementById('thermallog-status');
     if (statusEl) statusEl.textContent = 'Fetching…';
-    const scrollY = window.scrollY;
     try {
         const resp = await fetch('/thermallog.bin');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const buf = await resp.arrayBuffer();
+        // Capture scroll position only when we're about to do real DOM work (chart rebuild).
+        // Moving this inside the try block means failed fetches never clobber user scroll position.
+        const scrollY = window.scrollY;
         parseThermalBin(buf);
         if (statusEl) statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                if (Math.abs(window.scrollY - scrollY) > 2) window.scrollTo(0, scrollY);
+            });
+        });
     } catch (err) {
         if (statusEl) statusEl.textContent = `Fetch error: ${err.message}`;
         console.error('thermallog fetch:', err);
     }
-    requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-            if (Math.abs(window.scrollY - scrollY) > 2) window.scrollTo(0, scrollY);
-        });
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -9623,12 +9804,14 @@ function parseThermalBin(buf) {
         outerI[i] = view.getInt16(b + 38, true) / 10.0;
         outerD[i] = view.getInt16(b + 40, true) / 10.0;
         implied[i] = view.getInt16(b + 42, true) / 10.0;
-        outerDExt[i] = view.getInt16(b + 44, true) / 10.0;
+        outerDExt[i] = view.getInt16(b + 44, true) / 1000.0;  // thermalSlopeFPerSec (°F/s) — unused in plots, kept for future use
     }
 
-    renderThermalPlot1([t, tempFilt, tempProjected, tempSetpoint, penalty, measAmps, uTarget], t[0]);
+    const dCorrection = tempProjected.map((tp, i) => tp - tempFilt[i]);
+
+    renderThermalPlot1([t, tempFilt, tempProjected, tempSetpoint, dCorrection, penalty, measAmps, uTarget], t[0]);
     renderThermalPlotState([t, new Array(count).fill(null)], t[0], flagsArr, antiWindup, stageArr, t);
-    renderThermalPlot2([t, outerP, outerI, outerD, implied, outerDExt], t[0]);
+    renderThermalPlot2([t, outerP, outerI, outerD, implied], t[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -9730,6 +9913,11 @@ function renderThermalPlot1(data, tMin) {
                 show: thermalSeriesVisible.tempSetpoint !== false
             },
             {
+                label: 'D Correction (°F)', stroke: '#1abc9c', width: 1.5,
+                scale: 'temp', dash: [3, 3],
+                show: thermalSeriesVisible.dCorrection !== false
+            },
+            {
                 label: 'Penalty Amps (A)', stroke: '#2ecc71', width: 1.5,
                 scale: 'amps',
                 show: thermalSeriesVisible.penaltyAmps !== false
@@ -9769,12 +9957,13 @@ function renderThermalPlot1(data, tMin) {
     thermalLogPlots[0] = new uPlot(opts, data, el);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[0]);
     _createThermalLegend(el, 0, [
-        { key: 'tempFilt',      label: 'Temp Filtered',   color: '#e74c3c', idx: 1 },
-        { key: 'tempProjected', label: 'Temp Projected',  color: '#e67e22', idx: 2 },
-        { key: 'tempSetpoint',  label: 'Setpoint',        color: '#f39c12', idx: 3 },
-        { key: 'penaltyAmps',   label: 'Penalty Amps',    color: '#2ecc71', idx: 4 },
-        { key: 'measAmps',      label: 'Measured Amps',   color: '#3498db', idx: 5 },
-        { key: 'uTarget',       label: 'U Target',        color: '#9b59b6', idx: 6 }
+        { key: 'tempFilt',      label: 'Temp Filtered',    color: '#e74c3c', idx: 1 },
+        { key: 'tempProjected', label: 'Temp Projected',   color: '#e67e22', idx: 2 },
+        { key: 'tempSetpoint',  label: 'Setpoint',         color: '#f39c12', idx: 3 },
+        { key: 'dCorrection',   label: 'D Correction (°F)',color: '#1abc9c', idx: 4 },
+        { key: 'penaltyAmps',   label: 'Penalty Amps',     color: '#2ecc71', idx: 5 },
+        { key: 'measAmps',      label: 'Measured Amps',    color: '#3498db', idx: 6 },
+        { key: 'uTarget',       label: 'U Target',         color: '#9b59b6', idx: 7 }
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[0] && el.clientWidth > 0)
@@ -9804,8 +9993,7 @@ function renderThermalPlot2(data, tMin) {
             { label: 'Outer P', stroke: '#3498db', width: 1.5, scale: 'amps' },
             { label: 'Outer I', stroke: '#e67e22', width: 1.5, scale: 'amps' },
             { label: 'Outer D', stroke: '#9b59b6', width: 1.5, scale: 'amps' },
-            { label: 'Implied Penalty', stroke: '#2ecc71', width: 2, scale: 'amps' },
-            { label: 'D External', stroke: '#1abc9c', width: 1.5, scale: 'amps', dash: [3, 3] }
+            { label: 'Implied Penalty', stroke: '#2ecc71', width: 2, scale: 'amps' }
         ],
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
@@ -9829,11 +10017,10 @@ function renderThermalPlot2(data, tMin) {
     thermalLogPlots[2] = new uPlot(opts, data, el);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[2]);
     _createThermalLegend(el, 2, [
-        { key: 'outerP', label: 'Outer P', color: '#3498db', idx: 1 },
-        { key: 'outerI', label: 'Outer I', color: '#e67e22', idx: 2 },
-        { key: 'outerD', label: 'Outer D', color: '#9b59b6', idx: 3 },
-        { key: 'impliedPenalty', label: 'Implied Penalty', color: '#2ecc71', idx: 4 },
-        { key: 'outerDExternal', label: 'D External', color: '#1abc9c', idx: 5 }
+        { key: 'outerP',        label: 'Outer P',         color: '#3498db', idx: 1 },
+        { key: 'outerI',        label: 'Outer I',         color: '#e67e22', idx: 2 },
+        { key: 'outerD',        label: 'Outer D',         color: '#9b59b6', idx: 3 },
+        { key: 'impliedPenalty',label: 'Implied Penalty', color: '#2ecc71', idx: 4 },
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[2] && el.clientWidth > 0)
@@ -10084,7 +10271,7 @@ function applyThermalRanges() {
         det.addEventListener('toggle', () => {
             if (det.open) {
                 setTimeout(() => { fetchAndRenderThermalLog(); }, 50);
-                thermalLogAutoRefreshTimer = setInterval(fetchAndRenderThermalLog, 10000);
+                thermalLogAutoRefreshTimer = setInterval(fetchAndRenderThermalLog, 5000);
             } else {
                 clearInterval(thermalLogAutoRefreshTimer);
                 thermalLogAutoRefreshTimer = null;
@@ -10316,17 +10503,17 @@ function updateFloatVisibility() {
 // CV / Voltage Tuner Log — JavaScript
 //
 // Decodes /cvlog.bin and downloads as CSV.
-// Binary layout: 24-byte header + N × 32-byte CvLogEntry structs (little-endian).
+// Binary layout: 24-byte header + N × 44-byte CvLogEntry structs (little-endian).
 //
 // Header (24 bytes):
 //   offset  0  uint32  count
-//   offset  4  uint32  entrySize (= 32)
+//   offset  4  uint32  entrySize (= 44)
 //   offset  8  float32 VoltageKp
 //   offset 12  float32 VoltageKi
 //   offset 16  uint32  VoltageLoopInterval (ms)
-//   offset 20  uint32  reserved
+//   offset 20  float32 VoltageKd
 //
-// Entry (42 bytes):
+// Entry (44 bytes):
 //   offset  0  uint32   ts
 //   offset  4  int16    battV       / 100  → V
 //   offset  6  int16    targV       / 100  → V
@@ -10342,17 +10529,19 @@ function updateFloatVisibility() {
 //   offset 26  int16    duty        / 10   → %
 //   offset 28  uint8    flags       (b0=fastOvActive b1=voltLoopFired b2=cvActive
 //                                    b3=soft b4=hard b5=iExcess)
-//   offset 29  uint8    pad
+//   offset 29  uint8    awState     (0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless)
 //   offset 30  int16    rpm
-//   offset 32  int16    iMA2_x10    / 10   → A
-//   offset 34  int16    iMA4_x10    / 10   → A
-//   offset 36  int16    dIdt2_x10   / 10   → A/s
-//   offset 38  int16    dIdt4_x10   / 10   → A/s
-//   offset 40  int16    ch1IntervalMs       → ms
+//   offset 32  int16    battV_filt_x100 / 100 → V  (IBV_filtered, EMA)
+//   offset 34  int16    iMeas_filt_x10  / 10  → A  (MeasuredAmps_filtered, EMA)
+//   offset 36  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
+//   offset 38  int16    cvDSlope_x10000 / 10000 → V/s (500ms backward diff on filtered V)
+//   offset 40  int16    battI_x10       / 10  → A  (getBatteryCurrent — INA228 or Victron)
+//   offset 42  int16    dBcur_dt_Aps    raw A/s   (g_dBcur_dt clamped to int16)
+//   flags bit 6: loadDumpActive
 // ===========================================================================
 
 const CV_LOG_HEADER_SIZE = 24;
-const CV_LOG_ENTRY_SIZE = 40;
+const CV_LOG_ENTRY_SIZE = 44;
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -10406,7 +10595,12 @@ function parseCvBin(buf) {
     const battV_filt = new Array(count);
     const iMeas_filt = new Array(count);
     const ch1Interval = new Array(count);
+    const cvDSlope = new Array(count);
     const iExcess = new Array(count);
+    const battI = new Array(count);
+    const dBcur_dt = new Array(count);
+    const loadDumpActive = new Array(count);
+    const awState = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
@@ -10433,12 +10627,16 @@ function parseCvBin(buf) {
         cvActive[i] = (f >> 2) & 1;
         softClamp[i] = (f >> 3) & 1;
         hardClamp[i] = (f >> 4) & 1;
+        awState[i] = view.getUint8(b + 29);
         rpm[i] = view.getInt16(b + 30, true);
         battV_filt[i] = view.getInt16(b + 32, true) / 100.0;
         iMeas_filt[i] = view.getInt16(b + 34, true) / 10.0;
-       ch1Interval[i] = view.getInt16(b + 36, true);  // correct offset for ch1IntervalMs
-// pad2 at b+38 intentionally skipped
-        iExcess[i] = (f >> 5) & 1;                  // move up alongside other flag bits (optional but clean)
+       ch1Interval[i] = view.getInt16(b + 36, true);
+        cvDSlope[i] = view.getInt16(b + 38, true) / 10000.0;
+        battI[i] = view.getInt16(b + 40, true) / 10.0;
+        dBcur_dt[i] = view.getInt16(b + 42, true);
+        iExcess[i] = (f >> 5) & 1;
+        loadDumpActive[i] = (f >> 6) & 1;
     }
 
     return {
@@ -10447,7 +10645,8 @@ function parseCvBin(buf) {
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
         fastOvActive, voltLoopFired, cvActive, softClamp, hardClamp,
-        rpm, battV_filt, iMeas_filt, ch1Interval, iExcess,
+        rpm, battV_filt, iMeas_filt, ch1Interval, cvDSlope, iExcess, battI,
+        dBcur_dt, loadDumpActive, awState,
     };
 }
 
@@ -10476,6 +10675,8 @@ function cvBinToCsv(d) {
         'fastOvActive', 'voltLoopFired', 'cvActive', 'softClamp', 'hardClamp',
         'rpm',
         'battV_filt_V', 'iMeas_filt_A', 'ch1_interval_ms', 'iExcess',
+        'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
+        'cvDSlope_Vps', 'awState',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -10493,6 +10694,8 @@ function cvBinToCsv(d) {
             d.rpm[i],
             d.battV_filt[i].toFixed(2), d.iMeas_filt[i].toFixed(1),
             d.ch1Interval[i], d.iExcess[i],
+            d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
+            d.cvDSlope[i].toFixed(4), d.awState[i],
         ].join(','));
     }
 
@@ -10557,6 +10760,196 @@ function getField(id) {
     return (el.textContent ?? el.innerText ?? "").trim();
 }
 
+// ── Test mode gate helpers ──────────────────────────────────────────────────
+// Last-known chargeStageDisplay from CSVData2 (updated each frame)
+let gLastChargeStage = 0;
+
+// Stage codes (must match firmware CHARGE_STAGE_* enum)
+const CS_BULK        = 1;
+const CS_ABSORPTION  = 2;
+const CS_FLOAT       = 3;
+const CS_MAINTAIN    = 5;
+const CS_TARGET_V    = 6;
+const CS_IDLE        = 7;
+
+// ── Test Active Floating Panel ──────────────────────────────────────────────
+// Panel sits outside .tab-content in the HTML so position:fixed keeps it
+// visible regardless of which tab is active.
+
+let _testActiveCSV1 = null;   // 'curr' | 'cv' | 'thermal' | null  (updated from CSV1/2 stream)
+let _testActiveCSV3 = null;   // 'sysid' | null                     (updated from CSV3 stream)
+let _testPanelCurrentTest = null;
+
+const TEST_PANEL_META = {
+    curr:    { title: 'Current Waveform Test', dot: '#f97316' },
+    cv:      { title: 'CV Step Test',          dot: '#4a9eff' },
+    thermal: { title: 'Thermal Step Test',     dot: '#ef4444' },
+    sysid:   { title: 'Plant Delay Test',      dot: '#a855f7' },
+};
+
+function getActiveTestKey() {
+    return _testActiveCSV3 || _testActiveCSV1 || null;
+}
+
+function testPanelInitDrag() {
+    const panel  = document.getElementById('test-panel');
+    const handle = document.getElementById('test-panel-drag');
+    if (!handle || handle._dragInit) return;
+    handle._dragInit = true;
+    let startX, startY, origLeft, origTop;
+    handle.addEventListener('mousedown', e => {
+        startX = e.clientX; startY = e.clientY;
+        origLeft = panel.offsetLeft; origTop = panel.offsetTop;
+        function onMove(e2) {
+            panel.style.left  = (origLeft + e2.clientX - startX) + 'px';
+            panel.style.top   = (origTop  + e2.clientY - startY) + 'px';
+            panel.style.right = 'auto';
+        }
+        function onUp() {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup',   onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup',   onUp);
+    });
+}
+
+function updateTestActivePanel() {
+    const testName = getActiveTestKey();
+    const overlay  = document.getElementById('test-panel-overlay');
+    if (!overlay) return;
+
+    if (!testName) {
+        overlay.style.display = 'none';
+        _testPanelCurrentTest = null;
+        return;
+    }
+
+    overlay.style.display = '';
+    testPanelInitDrag();
+
+    // Only reset content when the active test changes identity
+    if (testName !== _testPanelCurrentTest) {
+        _testPanelCurrentTest = testName;
+        const meta = TEST_PANEL_META[testName] || { title: 'Test Active', dot: '#fff' };
+        document.getElementById('test-panel-title').textContent  = meta.title;
+        document.getElementById('test-panel-dot').style.color    = meta.dot;
+        document.getElementById('test-panel-phase').textContent  = 'Phase: —';
+        document.getElementById('test-panel-cycles').textContent = 'Cycles: —';
+        document.getElementById('test-panel-score').textContent  = 'Score: —';
+        updateTestPanelParams(testName);
+        ensureTestPollRunning(testName);
+    }
+}
+
+function updateTestPanelParams(testName) {
+    const el = document.getElementById('test-panel-params');
+    if (!el) return;
+    const g = id => document.getElementById(id)?.textContent ?? '—';
+    if (testName === 'curr') {
+        el.textContent = 'Amp: ' + g('waveAmplitude_echo') + ' A  •  Period: ' + g('wavePeriod_echo') + ' s';
+    } else if (testName === 'cv') {
+        el.textContent = 'Amp: ' + g('cvWaveAmplitudeV_echo') + ' V  •  Period: ' + g('cvWavePeriodSec_echo') + ' s';
+    } else if (testName === 'thermal') {
+        el.textContent = g('thermalWaveLowF_echo') + '°F → ' + g('thermalWaveHighF_echo') + '°F\n' + g('thermalWaveHalfPeriodMin_echo') + ' min half-period';
+    } else {
+        el.textContent = '';
+    }
+}
+
+// Called by the three render functions to push live score data into the panel
+function updateTestPanelScore(score, cycles, phase) {
+    const scoreEl  = document.getElementById('test-panel-score');
+    const cyclesEl = document.getElementById('test-panel-cycles');
+    const phaseEl  = document.getElementById('test-panel-phase');
+    if (scoreEl  && score   !== undefined) scoreEl.textContent  = score > 0 ? 'Score: ' + score.toFixed(3) : 'Score: —';
+    if (cyclesEl && cycles  !== undefined) cyclesEl.textContent = 'Cycles: ' + cycles;
+    if (phaseEl  && phase   !== undefined) phaseEl.textContent  = 'Phase: '  + phase;
+}
+
+// Ensure the tuning-log poll is running so score data reaches the panel even off-tab
+function ensureTestPollRunning(testName) {
+    if (testName === 'curr' && !_tuningLogPollTimer) {
+        fetchTuningLog();
+        _tuningLogPollTimer = setInterval(fetchTuningLog, 4000);
+    } else if (testName === 'cv' && !_cvTuningLogPollTimer) {
+        fetchCVTuningLog();
+        _cvTuningLogPollTimer = setInterval(fetchCVTuningLog, 4000);
+    } else if (testName === 'thermal' && !_thermalTuningLogPollTimer) {
+        fetchThermalTuningLog();
+        _thermalTuningLogPollTimer = setInterval(fetchThermalTuningLog, 8000);
+    }
+}
+
+// Turn off whichever test is currently shown — called by the ✕ and "Turn Off" button
+function turnOffActiveTest() {
+    const test = _testPanelCurrentTest;
+    if (!test) return;
+    if (test === 'sysid') { abortSystemIDTest(); return; }
+    const pw = currentAdminPassword;
+    if (!pw) { alert('Enter your password first.'); return; }
+    const paramMap = { curr: 'TuningMode', cv: 'CVTuningMode', thermal: 'ThermalTuningMode' };
+    const param = paramMap[test];
+    if (!param) return;
+    fetchWithTimeout(buildURL('/get?' + param + '=0&password=' + encodeURIComponent(pw)), {}, 4000)
+        .then(() => {
+            const cb = document.getElementById(param + '_checkbox');
+            if (cb) cb.checked = false;
+        })
+        .catch(e => console.warn('turnOffActiveTest failed:', e));
+}
+
+// Returns false (and shows alert) when test-ON gate fails; always passes for test-OFF.
+function checkCurrTestGate(checkbox) {
+    if (!checkbox.checked) return true; // turning OFF: always allow
+    const conflict = getActiveTestKey();
+    if (conflict && conflict !== 'curr') {
+        checkbox.checked = false;
+        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
+        return false;
+    }
+    if (gLastChargeStage !== CS_BULK) {
+        checkbox.checked = false;
+        alert('Current Waveform Test requires BULK stage.\n\nThe inner current loop only has full authority when the system is bulk charging. In absorption / float / CV, the voltage loop caps current and the score is meaningless.\n\nWait for BULK, then enable the test.');
+        return false;
+    }
+    return true;
+}
+
+function checkCVTestGate(checkbox) {
+    if (!checkbox.checked) return true;
+    const conflict = getActiveTestKey();
+    if (conflict && conflict !== 'cv') {
+        checkbox.checked = false;
+        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
+        return false;
+    }
+    const voltageStages = [CS_ABSORPTION, CS_FLOAT, CS_MAINTAIN, CS_TARGET_V];
+    if (!voltageStages.includes(gLastChargeStage)) {
+        checkbox.checked = false;
+        alert('CV Step Test requires voltage-controlled mode.\n\nThe CV loop is only active in ABSORPTION, FLOAT, MAINTAIN, or TARGET V. In BULK the voltage loop has no authority and the test produces no useful data.\n\nEnter a voltage-controlled stage, then enable the test.');
+        return false;
+    }
+    return true;
+}
+
+function checkThermalTestGate(checkbox) {
+    if (!checkbox.checked) return true;
+    const conflict = getActiveTestKey();
+    if (conflict && conflict !== 'thermal') {
+        checkbox.checked = false;
+        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
+        return false;
+    }
+    const amps = parseFloat(getField('MeasAmpsID') ?? 0);
+    if (amps < 5) {
+        checkbox.checked = false;
+        alert('Thermal Step Test requires the alternator to be actively producing current (> 5 A).\n\nStart the engine, bring the alternator under load, then enable the test.');
+        return false;
+    }
+    return true;
+}
+
 // ── System ID Modal ────────────────────────────────────────────────────────
 
 let sysidPollInterval = null;
@@ -10578,13 +10971,59 @@ const SYSID_PHASE_NAMES = {
     9: 'Processing results'
 };
 
+function sysidInitDrag() {
+    const panel  = document.getElementById('sysid-modal-panel');
+    const handle = document.getElementById('sysid-drag-handle');
+    if (!handle || handle._dragInit) return;
+    handle._dragInit = true;
+    let startX, startY, startL, startT;
+    function getPos() {
+        const r = panel.getBoundingClientRect();
+        return { left: r.left, top: r.top };
+    }
+    function onDown(e) {
+        const pt = e.touches ? e.touches[0] : e;
+        const pos = getPos();
+        startX = pt.clientX; startY = pt.clientY;
+        startL = pos.left;   startT = pos.top;
+        panel.style.left  = startL + 'px';
+        panel.style.top   = startT + 'px';
+        panel.style.right = 'auto';
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup',   onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend',  onUp);
+        e.preventDefault();
+    }
+    function onMove(e) {
+        const pt = e.touches ? e.touches[0] : e;
+        const newL = Math.max(0, Math.min(window.innerWidth  - panel.offsetWidth,  startL + pt.clientX - startX));
+        const newT = Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, startT + pt.clientY - startY));
+        panel.style.left = newL + 'px';
+        panel.style.top  = newT + 'px';
+        e.preventDefault();
+    }
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend',  onUp);
+    }
+    handle.addEventListener('mousedown',  onDown);
+    handle.addEventListener('touchstart', onDown, { passive: false });
+}
+
 function openSystemIDModal() {
     if (!currentAdminPassword) {
         alert("Please unlock settings first.");
         return;
     }
+    // Reset panel position to default top-right on each open
+    const panel = document.getElementById('sysid-modal-panel');
+    if (panel) { panel.style.left = ''; panel.style.top = '80px'; panel.style.right = '20px'; }
     sysidShowScreen('preflight');
     document.getElementById('sysid-modal-overlay').style.display = 'block';
+    sysidInitDrag();
     sysidUpdatePreflight();
     sysidPreflightInterval = setInterval(sysidUpdatePreflight, 1000);
 }

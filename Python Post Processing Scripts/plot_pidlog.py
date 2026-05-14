@@ -233,6 +233,7 @@ numeric_cols = [
     "rpm", "measAmps",
     "gainKp", "gainKi", "gainKd", "flags",
     "battV_filt", "iMeas_filt",
+    "ovFlags", "dBcur_dt", "battI",
 ]
 
 for col in numeric_cols:
@@ -277,6 +278,13 @@ df["TargetVoltageMode"]         = _to_int("TargetVoltageMode")
 
 _flags_num = pd.to_numeric(df["flags"], errors="coerce").fillna(0)
 df["f_govBypass"] = (_flags_num // 16 % 2).astype(int)
+
+_ov_num = pd.to_numeric(df["ovFlags"] if "ovFlags" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
+df["f_fastOvActive"]  = (_ov_num.astype(int) >> 0 & 1).astype(int)
+df["f_softClamp"]     = (_ov_num.astype(int) >> 1 & 1).astype(int)
+df["f_hardClamp"]     = (_ov_num.astype(int) >> 2 & 1).astype(int)
+df["f_iExcess"]       = (_ov_num.astype(int) >> 3 & 1).astype(int)
+df["f_loadDump"]      = (_ov_num.astype(int) >> 4 & 1).astype(int)
 
 # ---------------------------------------------------------------------------
 # 3. Stage colors and mode helpers
@@ -562,12 +570,100 @@ draw_state_strip(ax5s, df, state_changes)
 # save_fig(fig5, "plot5_rpm")
 
 # ---------------------------------------------------------------------------
+# PLOT 6 — Protection flags + battery current
+#
+# Diagnoses: which protection layers fired, when, and what the battery
+#            current / load-dump derivative looked like at those moments.
+# ---------------------------------------------------------------------------
+fig6 = plt.figure(figsize=(18, 9), num="Plot 6 — Protection Flags & Battery Current")
+gs6  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 1], hspace=0.10)
+ax6a = fig6.add_subplot(gs6[0])
+ax6b = fig6.add_subplot(gs6[1], sharex=ax6a)
+ax6s = fig6.add_subplot(gs6[2], sharex=ax6a)
+
+plt.setp(ax6a.get_xticklabels(), visible=False)
+plt.setp(ax6b.get_xticklabels(), visible=False)
+fig6.suptitle(f"Plot 6 — Protection Flags & Battery Current", fontsize=14)
+
+# 6a: battery current + dBcur_dt
+ax6a_r = ax6a.twinx()
+if "battI" in df.columns:
+    ax6a.plot(df["t_plot"], df["battI"],
+              color="#f9a825", lw=2.0, label="battI (A)")
+    ax6a.axhline(0, color="#888888", linewidth=0.7, linestyle=":", alpha=0.6)
+else:
+    ax6a.text(0.5, 0.7, "battI not present (older firmware)",
+              ha="center", va="center", transform=ax6a.transAxes,
+              color="#888888", fontsize=12)
+if "dBcur_dt" in df.columns:
+    ax6a_r.plot(df["t_plot"], df["dBcur_dt"],
+                color="#e91e63", lw=1.8, linestyle="--", label="dBcur_dt (A/s)", alpha=0.80)
+    ax6a_r.axhline(0, color="#e91e63", linewidth=0.5, linestyle=":", alpha=0.4)
+
+ax6a.set_ylabel("Battery Current (A)", color="#f9a825")
+ax6a_r.set_ylabel("dBcur/dt (A/s)", color="#e91e63")
+ax6a.grid(**GRID_KW)
+
+_h6a = [l for l in ax6a.get_lines() + ax6a_r.get_lines() if not l.get_label().startswith("_")]
+ax6a.legend(_h6a, [l.get_label() for l in _h6a], loc="upper left")
+
+# Red shading where fastOvActive
+_in_ov = False
+_ov_start = None
+for _i, _row in df.iterrows():
+    if _row["f_fastOvActive"] and not _in_ov:
+        _ov_start = _row["t_plot"]
+        _in_ov = True
+    elif not _row["f_fastOvActive"] and _in_ov:
+        ax6a.axvspan(_ov_start, _row["t_plot"], color="#c62828", alpha=0.08)
+        _in_ov = False
+if _in_ov:
+    ax6a.axvspan(_ov_start, df["t_plot"].iloc[-1], color="#c62828", alpha=0.08)
+
+# 6b: flag lanes
+_flag_h6 = 0.75
+for _off, _col, _color, _lbl in [
+    (4.0, "f_fastOvActive", "#c62828", "fastOvActive"),
+    (3.0, "f_softClamp",    "#0277bd", "softClamp"),
+    (2.0, "f_hardClamp",    "#6a1b9a", "hardClamp"),
+    (1.0, "f_iExcess",      "#00838f", "iExcess"),
+    (0.0, "f_loadDump",     "#f57c00", "loadDumpActive"),
+]:
+    if _col not in df.columns:
+        continue
+    _vals = df[_col].values
+    _t    = df["t_plot"].values
+    _in_f = False
+    _fs   = None
+    for _i in range(len(_vals)):
+        if _vals[_i] and not _in_f:
+            _fs = _t[_i]
+            _in_f = True
+        elif not _vals[_i] and _in_f:
+            ax6b.barh(_off + _flag_h6 / 2, _t[_i] - _fs,
+                      left=_fs, height=_flag_h6, color=_color, alpha=0.80, align="center")
+            _in_f = False
+    if _in_f:
+        ax6b.barh(_off + _flag_h6 / 2, _t[-1] - _fs,
+                  left=_fs, height=_flag_h6, color=_color, alpha=0.80, align="center")
+    ax6b.text(df["t_plot"].iloc[0], _off + _flag_h6 / 2, f"  {_lbl}",
+              va="center", fontsize=9, color=_color)
+
+ax6b.set_ylim(-0.2, 5.2)
+ax6b.set_yticks([])
+ax6b.set_ylabel("Flags")
+ax6b.grid(**GRID_KW)
+
+draw_state_strip(ax6s, df, state_changes)
+# save_fig(fig6, "plot6_protection")
+
+# ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # Registers xlim_changed on the primary (top) axes of each figure; sub-axes
 # within a figure already share x via sharex so only one per figure is needed.
 # ---------------------------------------------------------------------------
-_all_primary_axes = [ax1, ax2, ax3a, ax4, ax5]
-_all_figs         = [fig1, fig2, fig3, fig4, fig5]
+_all_primary_axes = [ax1, ax2, ax3a, ax4, ax5, ax6a]
+_all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
 _syncing = [False]   # mutable container so the closure can write to it
 
 def _on_xlim_changed(changed_ax):

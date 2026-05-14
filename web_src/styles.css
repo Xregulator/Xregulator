@@ -241,6 +241,12 @@ textarea {
   animation: stage-pulse 5s ease-in-out infinite;
 }
 
+/* TEST ACTIVE — any diagnostic test mode running → bright orange (clearly not normal operation) */
+.charge-stage-test {
+  color: #ff9800;
+  animation: stage-pulse 1.5s ease-in-out infinite;
+}
+
 /* UNKNOWN */
 .charge-stage-unknown {
   color: #666;
@@ -2965,5 +2971,33 @@ input:checked+.slider:before {
 .anchor-good { color: #4caf50; }
 .anchor-warn { color: #ff9800; }
 .anchor-bad  { color: #f44336; }
+
+/* OV/iExcess layer boxes */
+.layer-box {
+  border: 1px solid rgba(0, 161, 154, 0.35);
+  border-radius: 6px;
+  padding: 10px 12px 6px 12px;
+  margin: 12px 0 4px 0;
+}
+.layer-box-header {
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+  margin-bottom: 3px;
+}
+.layer-box-desc {
+  font-size: 11px;
+  opacity: 0.65;
+  margin-bottom: 8px;
+  line-height: 1.45;
+}
+.layer-box-disabled {
+  border-color: rgba(180, 0, 0, 0.30);
+}
+.layer-box-disabled .layer-box-header {
+  color: #c62828;
+}
 
 /* XREG_END */

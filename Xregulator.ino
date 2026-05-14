@@ -156,6 +156,8 @@ TaskHandle_t httpsTaskHandle;
 
 SemaphoreHandle_t fsMutex = NULL;  // mutex protection for littlefs
 
+int FourWay = 0; // REMOVE OBSOLET
+
 enum HttpsRequestType {
   HTTPS_UPLOAD_PAYLOAD,
   HTTPS_UPLOAD_CONFIG,
@@ -645,6 +647,7 @@ char *configPayloadBuffer;
 unsigned long lastConfigSnapshotTime = 0;
 unsigned long lastConfigSnapshotAttempt = 0;
 int configSnapshotRetryCount = 0;
+unsigned long queueDrainHoldStart = 0;  // millis() when we started waiting for queue to drain before low power; 0 = not waiting
 const unsigned long CONFIG_RETRY_DELAYS[] = {
   5000,     // 5 sec
   30000,    // 30 sec
@@ -867,10 +870,12 @@ volatile bool systemIDRequested = false;       // set true by UI handler to trig
 volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
 uint8_t systemIDActive = 0;                    // 0=idle, 1-9=current phase (sent to UI for progress)
 bool systemIDResultsReady = false;             // set true when post-processing is complete
+uint32_t systemIDLastEndMs = 0;                // millis() when last test ended (cooldown guard)
 
 // ── Stabilize-phase constants ────────────────────────────────────────────────
 #define SYSID_STABILIZE_AMPS 10.0f        // target alternator output before baseline begins
-#define SYSID_STABILIZE_SETTLE_MS 5000    // must hold within ±2A for this long before proceeding
+#define SYSID_STABILIZE_SAMPLES 5         // ring buffer size: 5 samples × 1Hz = 5-second window
+#define SYSID_STABILIZE_BAND_A 3.0f       // 5-s rolling average must be within ±3A of target
 #define SYSID_STABILIZE_TIMEOUT_MS 30000  // abort if can't stabilize within this window
 
 float systemIDRiseDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // rising-step delays, ms
@@ -1642,7 +1647,6 @@ int VoltageAlarmHigh = 15;            // above this value, sound alarm
 int VoltageAlarmLow = 11;             // below this value, sound alarm
 int CurrentAlarmHigh = 100;           // above this value, sound alarm
 int MaximumAllowedBatteryAmps = 150;  // safety for battery, optional
-int FourWay = 0;                      // OBSOLETE REMOVE
 int RPMScalingFactor = 1330;          // self explanatory, adjust until it matches your trusted tachometer
 float AlternatorCOffset = 0;          // tare for alt current
 float BatteryCOffset = 0;             // tare or batt current
@@ -1958,7 +1962,8 @@ uint8_t tuningLogCount = 0;         // records currently in ring buffer (0–50)
 uint8_t tuningLogHead = 0;          // next write index
 uint16_t tuningRunCounter = 0;      // increments each commit, persists via loadTuningLog
 TuningScoreState tuningScore = {};  // active test accumulator
-bool tuningParamChanged = false;    // set by server handlers when a tuning param is updated
+bool tuningParamChanged = false;             // set by server handlers when a tuning param is updated
+volatile bool manualCommitTuningRequested = false;  // set by UI commit button
 
 ScoreBucket *liveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
 uint8_t liveScoreHead[4] = {};
@@ -2183,6 +2188,15 @@ float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage t
 // --- FastOV supervisor ---
 float KSoft = 12.0f;  // A/V — soft OV cap slope (fires when Vpred > target+0.08V)
 float KHard = 35.0f;  // A/V — hard OV cap slope (fires when Vpred > target+0.15V)
+bool  OvLayer1Enable = true;    // Layer 1 — soft-cap prediction enable
+bool  OvLayer2Enable = true;    // Layer 2 — hard-cap prediction enable
+bool  OvLayer3Enable = true;    // Layer 3 — hysteresis clamp enable
+int   IExcessSigSrc   = 0;      // Layer 4 — 0=MA(N), 1=EMA(TC), 2=Raw
+int   IExcessMA_N     = 2;      // Layer 4 — MA window size (1–10 samples)
+int   OutputPIDSigSrc = 0;      // Output current PID — 0=EMA(TC), 1=MA(N), 2=Raw
+float TdPred         = 0.045f;  // Layers 1+2 lookahead horizon (s)
+float VSoftMarginV   = 0.100f;  // Layer 1/3 voltage margin above target (V)
+float VHardMarginV   = 0.150f;  // Layer 2 voltage margin above target (V)
 // --- iExcess current supervisor ---
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
@@ -2462,6 +2476,13 @@ bool thermalSlopeBufFull = false;
 float projectedTempF = NAN;           // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
 uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDIntervalMs cadence
 
+// CV D-term slope ring buffer: CV_DSLOPE_BUF readings × VoltageLoopInterval = ~500ms window
+#define CV_DSLOPE_BUF 5              // 5 × 100ms = 500ms window
+float cvDSlopeBuffer[CV_DSLOPE_BUF];
+uint8_t cvDSlopeBufIdx = 0;
+bool cvDSlopeBufFull = false;
+float cvDSlope = 0.0f;              // V/s — long-window backward diff on filtered voltage
+
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
 
@@ -2639,7 +2660,7 @@ struct PidLogEntry {
   uint8_t chargeStageDisplay;  // getChargeStageDisplayCode() enum value
   uint8_t TargetVoltageMode;   // runtime TargetVoltageMode flag (0 or 1)
   uint8_t flags;               // bit0=AUTO bit1=voltCtrl bit4=govBypass
-  uint8_t pad0;
+  uint8_t ovFlags;             // bit0=fastOvActive bit1=softClamp bit2=hardClamp bit3=iExcess bit4=loadDumpActive
 
   // ── CV loop ──────────────────────────────────────────────────────
   float battV;                  // tick.currentBatteryVoltage
@@ -2678,7 +2699,10 @@ struct PidLogEntry {
   // ── Filtered signals ─────────────────────────────────────────────
   float battV_filt;  // IBV_filtered
   float iMeas_filt;  // MeasuredAmps_filtered
-};                   // 104 bytes — naturally aligned, no implicit holes
+  // ── Protection flags & signals ───────────────────────────────────────────
+  float dBcur_dt;    // g_dBcur_dt (A/s) — battery current derivative for load dump
+  float battI;       // getBatteryCurrent() (A) — INA228 or Victron
+};                   // 112 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
@@ -2715,38 +2739,46 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 // CV / Voltage Tuner Log
 // Logs every CH1 sample (~213 Hz / ~4.7ms interval) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
-// 32 bytes/entry × 6000 entries = 192 KB PSRAM → ~28 sec at full rate.
+// 42 bytes/entry × 6000 entries = 252 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// STRUCT  (32 bytes, offsets below match JS parser exactly)
+// STRUCT  (42 bytes, offsets below match JS parser exactly)
 // ---------------------------------------------------------------------------
 //
-//  offset  field          scale      notes
-//  ──────  ─────          ─────      ─────
-//   0      ts             raw ms     millis()
-//   4      battV          ×100       BatteryV
-//   6      targV          ×100       ChargingVoltageTarget
-//   8      vErrorMv       ×1000      (target − batt), millivolts resolution
-//  10      dvdt_x1000     ×1000      filtered dV/dt, signed
-//  12      vPred          ×100       BatteryV + TD_PRED*max(0,dvdt)
-//  14      fastOvCap      ×10        fastOvCurrentCap ceiling this tick
-//  16      cv_I_x10       ×10        cv_I integrator state
-//  18      Icv_x10        ×10        Icv PI output (current setpoint to output current loop)
-//  20      uTarget        ×10        uTargetAmps (table+thermal+user ceiling)
-//  22      spLimited      ×10        setpointLimited (slewed command to PID)
-//  24      iMeas          ×10        MeasuredAmps
-//  26      duty           ×10        dutyCycle
-//  28      flags          —          see bit definitions below
-//  29      pad            —          zero
-//  30      rpm            raw        RPM, clamped to int16 range
+//  offset  field            scale      notes
+//  ──────  ─────            ─────      ─────
+//   0      ts               raw ms     millis()
+//   4      battV            ×100       IBV (raw bus voltage)
+//   6      targV            ×100       ChargingVoltageTarget
+//   8      vErrorMv         ×1000      (target − batt), millivolts resolution
+//  10      dvdt_x1000       ×1000      filtered dV/dt, signed
+//  12      vPred            ×100       IBV + TdPred × max(0,dvdt)
+//  14      fastOvCap        ×10        fastOvCurrentCap ceiling this tick
+//  16      cv_I_x10         ×10        cv_I integrator state
+//  18      Icv_x10          ×10        Icv PI output (current setpoint to output current loop)
+//  20      uTarget          ×10        uTargetAmps (table+thermal+user ceiling)
+//  22      spLimited        ×10        setpointLimited (slewed command to PID)
+//  24      iMeas            ×10        MeasuredAmps (raw alternator current)
+//  26      duty             ×10        dutyCycle
+//  28      flags            —          see bit definitions below
+//  29      pad              —          zero
+//  30      rpm              raw        RPM, clamped to int16 range
+//  32      battV_filt_x100  ×100       IBV_filtered (EMA)
+//  34      iMeas_filt_x10   ×10        MeasuredAmps_filtered (EMA)
+//  36      ch1IntervalMs    raw ms     last CH1 inter-sample gap
+//  38      cvDSlope_x10000  ×10000     cvDSlope (500ms backward diff on filtered V)
+//  40      battI_x10        ×10        getBatteryCurrent() — INA228 or Victron
+//  42      dBcur_dt_Aps     raw A/s    g_dBcur_dt clamped to int16
 //
 //  flags bits:
 //    b0  fastOvActive    any OV clamp fired this tick
 //    b1  voltLoopFired   voltage PI ran this tick (100ms cadence)
 //    b2  cvActive        voltageControlActive
-//    b3  softClamp       K_SOFT correction applied
-//    b4  hardClamp       K_HARD or HARD_CLAMP_HYST block applied
+//    b3  softClamp       Layer 1 (soft cap prediction) applied
+//    b4  hardClamp       Layer 2 (hard cap prediction) applied
+//    b5  iExcess         Layer 4 (iExcess supervisor) fired this tick
+//    b6  loadDumpActive  load dump feedforward active this tick
 
 
 
@@ -2765,16 +2797,17 @@ struct CvLogEntry {
   int16_t spLimited;
   int16_t iMeas;
   int16_t duty;
-  uint8_t flags;
-  uint8_t pad;
+  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=softClamp b4=hardClamp b5=iExcess b6=loadDumpActive
+  uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV_filtered × 100    (V)
   int16_t iMeas_filt_x10;   // MeasuredAmps_filtered × 10 (A)
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
-  int16_t pad2;             // explicit alignment pad — keeps sizeof == 40
-  // pack into existing flags: bit 5 = iExcess
+  int16_t cvDSlope_x10000;  // cvDSlope × 10000 (V/s × 10000 → ~0.0001 V/s per count)
+  int16_t battI_x10;        // getBatteryCurrent() × 10 (A) — INA228 or Victron
+  int16_t dBcur_dt_Aps;    // g_dBcur_dt clamped to int16 (A/s) — load dump derivative
 };
-static_assert(sizeof(CvLogEntry) == 40, "CvLogEntry must be 40 bytes");
+static_assert(sizeof(CvLogEntry) == 44, "CvLogEntry must be 44 bytes");
 
 
 struct CvBinDLState {
@@ -2818,7 +2851,7 @@ uint32_t g_fastOvHardCount = 0;
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────
 // Written in ADS case 1, read by AdjustFieldLearnMode and cvLog_tick
-#define I_RING_SIZE 4
+#define I_RING_SIZE 10
 struct IAmpEntry {
   uint32_t ts;
   float val;
@@ -2827,10 +2860,7 @@ static IAmpEntry iAmpRing[I_RING_SIZE];
 static uint8_t iAmpHead = 0;
 static uint8_t iAmpCount = 0;
 
-float g_iMA2 = 0.0f;
-float g_iMA4 = 0.0f;
-float g_dIdt2 = 0.0f;              // A/s, newest-to-prev
-float g_dIdt4 = 0.0f;              // A/s, newest-to-oldest in ring
+float g_iMA_N = 0.0f;   // MA(N) where N = IExcessMA_N
 uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
 bool g_iExcessActive = false;
@@ -2840,6 +2870,7 @@ float g_iExcessDutyCap = 100.0f;
 float LoadDumpDtThresh = 500.0f;    // A/s — threshold to declare a load dump event
 float LoadDumpCurrentDrop = 30.0f;  // A   — how much to reduce fastOvCurrentCap on event
 bool g_loadDumpActive = false;
+uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
 uint32_t g_loadDumpCount = 0;
 
 // Protection event counters — rising-edge, cleared by web UI reset buttons
@@ -3764,13 +3795,29 @@ void loop() {
             shutdownNVSFlushDone = false;
             shutdownCloudDeadlineMs = 0;
           }
-        } else {
-          // Low power mode - save battery
+        } else if (!core0Busy && uxQueueMessagesWaiting(httpsQueue) == 0) {
+          // Queue drained — go low power
+          queueDrainHoldStart = 0;
           WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
           if (tempTaskHandle != NULL) {
             vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
           }
           setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
+        } else {
+          // Upload in flight — hold at 240MHz/WiFi-on, but cap the wait to 5 minutes
+          // so a stuck upload (bad WiFi, server error, malformed payload) can't hold
+          // the device at high power indefinitely
+          if (queueDrainHoldStart == 0) queueDrainHoldStart = millis();
+          if (millis() - queueDrainHoldStart > 300000UL) {
+            queueDrainHoldStart = 0;
+            queueConsoleMessage("Upload drain timeout - forcing low power");
+            WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
+            if (tempTaskHandle != NULL) {
+              vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
+            }
+            setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
+          }
+          // else: within 5-min window — retry next tick
         }
       }
 
@@ -3781,6 +3828,7 @@ void loop() {
         pendingShutdownFlush = false;  // ignition back on — cancel any pending flush
         shutdownNVSFlushDone = false;
         shutdownCloudDeadlineMs = 0;
+        queueDrainHoldStart = 0;
         Serial.println("Ignition ON - Normal operation mode");
         lastIgnitionState = 1;
       }

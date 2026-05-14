@@ -1140,11 +1140,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     CurrentAlarmHigh = readFile(LittleFS, "/CurrentAlarmHigh.txt").toInt();
   }
-  if (!fsExists("/FourWay.txt")) {
-    writeFile(LittleFS, "/FourWay.txt", String(FourWay).c_str());
-  } else {
-    FourWay = readFile(LittleFS, "/FourWay.txt").toInt();
-  }
   if (!fsExists("/RPMScalingFactor.txt")) {
     writeFile(LittleFS, "/RPMScalingFactor.txt", String(RPMScalingFactor).c_str());
   } else {
@@ -1811,6 +1806,51 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/IExcessReseedFrac.txt", String(IExcessReseedFrac, 2).c_str());
   } else {
     IExcessReseedFrac = readFile(LittleFS, "/IExcessReseedFrac.txt").toFloat();
+  }
+  if (!fsExists("/OvLayer1Enable.txt")) {
+    writeFile(LittleFS, "/OvLayer1Enable.txt", String((int)OvLayer1Enable).c_str());
+  } else {
+    OvLayer1Enable = readFile(LittleFS, "/OvLayer1Enable.txt").toInt() != 0;
+  }
+  if (!fsExists("/OvLayer2Enable.txt")) {
+    writeFile(LittleFS, "/OvLayer2Enable.txt", String((int)OvLayer2Enable).c_str());
+  } else {
+    OvLayer2Enable = readFile(LittleFS, "/OvLayer2Enable.txt").toInt() != 0;
+  }
+  if (!fsExists("/OvLayer3Enable.txt")) {
+    writeFile(LittleFS, "/OvLayer3Enable.txt", String((int)OvLayer3Enable).c_str());
+  } else {
+    OvLayer3Enable = readFile(LittleFS, "/OvLayer3Enable.txt").toInt() != 0;
+  }
+  if (!fsExists("/IExcessSigSrc.txt")) {
+    writeFile(LittleFS, "/IExcessSigSrc.txt", String(IExcessSigSrc).c_str());
+  } else {
+    IExcessSigSrc = constrain(readFile(LittleFS, "/IExcessSigSrc.txt").toInt(), 0, 2);
+  }
+  if (!fsExists("/IExcessMA_N.txt")) {
+    writeFile(LittleFS, "/IExcessMA_N.txt", String(IExcessMA_N).c_str());
+  } else {
+    IExcessMA_N = constrain(readFile(LittleFS, "/IExcessMA_N.txt").toInt(), 1, I_RING_SIZE);
+  }
+  if (!fsExists("/OutputPIDSigSrc.txt")) {
+    writeFile(LittleFS, "/OutputPIDSigSrc.txt", String(OutputPIDSigSrc).c_str());
+  } else {
+    OutputPIDSigSrc = constrain(readFile(LittleFS, "/OutputPIDSigSrc.txt").toInt(), 0, 2);
+  }
+  if (!fsExists("/TdPred.txt")) {
+    writeFile(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());
+  } else {
+    TdPred = readFile(LittleFS, "/TdPred.txt").toFloat();
+  }
+  if (!fsExists("/VSoftMarginV.txt")) {
+    writeFile(LittleFS, "/VSoftMarginV.txt", String(VSoftMarginV, 3).c_str());
+  } else {
+    VSoftMarginV = readFile(LittleFS, "/VSoftMarginV.txt").toFloat();
+  }
+  if (!fsExists("/VHardMarginV.txt")) {
+    writeFile(LittleFS, "/VHardMarginV.txt", String(VHardMarginV, 3).c_str());
+  } else {
+    VHardMarginV = readFile(LittleFS, "/VHardMarginV.txt").toFloat();
   }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());

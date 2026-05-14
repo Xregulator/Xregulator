@@ -213,255 +213,248 @@ enum Csv2Index {
   CSV2_AlarmLatchState,                    // 49
   CSV2_ResetAlarmLatch,                    // 50
   CSV2_MaintainMode,                       // 51
-  CSV2_ResetTemp,                          // 52
-  CSV2_ResetVoltage,                       // 53
-  CSV2_ResetCurrent,                       // 54
-  CSV2_ResetEngineRunTime,                 // 55
-  CSV2_ResetAlternatorOnTime,              // 56
-  CSV2_ResetEnergy,                        // 57
-  CSV2_ManualSOCPoint,                     // 58
-  CSV2_LearningMode,                       // 59
-  CSV2_LearningPaused,                     // 60
-  CSV2_IgnoreLearningDuringPenalty,        // 61
-  CSV2_ShowLearningDebugMessages,          // 62
-  CSV2_LogAllLearningEvents,               // 63
-  CSV2_CloudFeatures,                      // 64
-  CSV2_LearningDryRunMode,                 // 65
-  CSV2_AutoSaveLearningTable,              // 66
-  CSV2_ResetLearningTable,                 // 67
-  CSV2_ClearOverheatHistory,               // 68
-  CSV2_AutoShuntGainCorrection,            // 69
-  CSV2_DynamicShuntGainFactor,             // 70
-  CSV2_AutoAltCurrentZero,                 // 71
-  CSV2_DynamicAltCurrentZero,              // 72
-  CSV2_InsulationLifePercent,              // 73
-  CSV2_GreaseLifePercent,                  // 74
-  CSV2_BrushLifePercent,                   // 75
-  CSV2_PredictedLifeHours,                 // 76
-  CSV2_LifeIndicatorColor,                 // 77
-  CSV2_WindingTempOffset,                  // 78
-  CSV2_ManualLifePercentage,               // 79
-  CSV2_UVThresholdHigh,                    // 80
-  CSV2_weatherModeEnabled,                 // 81
-  CSV2_pKwHrToday,                         // 82
-  CSV2_pKwHrTomorrow,                      // 83
-  CSV2_pKwHr2days,                         // 84
-  CSV2_ambientTemp,                        // 85
-  CSV2_baroPressure,                       // 86
-  CSV2_firmwareVersionInt,                 // 87
-  CSV2_deviceIdUpper,                      // 88
-  CSV2_deviceIdLower,                      // 89
-  CSV2_ChargedEnergy_AllTime,              // 90
-  CSV2_AlternatorFuelUsed_AllTime,         // 91
-  CSV2_PeakVoltage_AllTime,                // 92
-  CSV2_EngineRunTime_AllTime,              // 93
-  CSV2_MinVoltage,                         // 94
-  CSV2_MinVoltage_AllTime,                 // 95
-  CSV2_ChargeCycles,                       // 96
-  CSV2_ChargeCycles_AllTime,               // 97
-  CSV2_EngineFuelUsed,                     // 98
-  CSV2_EngineFuelUsed_AllTime,             // 99
-  CSV2_TotalDistance,                      // 100
-  CSV2_TotalDistance_AllTime,              // 101
-  CSV2_MaxSpeed,                           // 102
-  CSV2_MaxSpeed_AllTime,                   // 103
-  CSV2_SolarChargedEnergy,                 // 104
-  CSV2_SolarChargedEnergy_AllTime,         // 105
-  CSV2_AlternatorChargedEnergy_AllTime,    // 106
-  CSV2_DischargedEnergy_AllTime,           // 107
-  CSV2_AvgSOC_AllTime,                     // 108
-  CSV2_AvgSpeed_AllTime,                   // 109
-  CSV2_AvgSpeed,                           // 110
-  CSV2_AlternatorOnTime_AllTime,           // 111
-  CSV2_EngineCycles_AllTime,               // 112
-  CSV2_MaxAlternatorTemperatureF_AllTime,  // 113
-  CSV2_MaxTemperatureThermistor_AllTime,   // 114
-  CSV2_MeasuredAmpsMax_AllTime,            // 115
-  CSV2_RPMMax_AllTime,                     // 116
-  CSV2_Ignition,                           // 117
-  CSV2_BulkStage,                          // 118
-  CSV2_WifiWakeSecondsRemaining,           // 119
-  CSV2_BufferedRecordCount,                // 120
-  CSV2_BufferedRecordPercent,              // 121
-  CSV2_MAX_BUFFERED_RECORDS,               // 122
-  CSV2_COGNMEA,                            // 123
-  CSV2_SOGNMEA,                            // 124
-  CSV2_ApparentWindSpeedNMEA,              // 125
-  CSV2_ApparentWindAngleNMEA,              // 126
-  CSV2_TrueWindSpeedNMEA,                  // 127
-  CSV2_TrueWindAngleNMEA,                  // 128
-  CSV2_LeewayNMEA,                         // 129
-  CSV2_VMGNMEA,                            // 130
-  CSV2_VMGTargetBearing,                   // 131
-  CSV2_VMGUseTrueWind,                     // 132
-  CSV2_SENSOR_UPLOAD_INTERVAL,             // 133
-  CSV2_cpuLoadCore0,                       // 134
-  CSV2_cpuLoadCore0Max,                    // 135
-  CSV2_cpuLoadCore1,                       // 136
-  CSV2_cpuLoadCore1Max,                    // 137
-  CSV2_hasForcedUpdate,                    // 138
-  CSV2_forcedFwVersionInt,                 // 139
-  CSV2_forcedUpdateDeadline,               // 140
-  CSV2_stateRevision,                      // 141
-  CSV2_hardwarePresent,                    // 142
-  CSV2_imu_accel_x_raw,                    // 143
-  CSV2_imu_accel_y_raw,                    // 144
-  CSV2_imu_accel_z_raw,                    // 145
-  CSV2_imu_gyro_x_raw,                     // 146
-  CSV2_imu_gyro_y_raw,                     // 147
-  CSV2_imu_gyro_z_raw,                     // 148
-  CSV2_accel_x_min,                        // 149
-  CSV2_accel_x_max,                        // 150
-  CSV2_accel_x_avg,                        // 151
-  CSV2_accel_y_min,                        // 152
-  CSV2_accel_y_max,                        // 153
-  CSV2_accel_y_avg,                        // 154
-  CSV2_accel_z_min,                        // 155
-  CSV2_accel_z_max,                        // 156
-  CSV2_accel_z_avg,                        // 157
-  CSV2_gyro_x_min,                         // 158
-  CSV2_gyro_x_max,                         // 159
-  CSV2_gyro_x_avg,                         // 160
-  CSV2_gyro_y_min,                         // 161
-  CSV2_gyro_y_max,                         // 162
-  CSV2_gyro_y_avg,                         // 163
-  CSV2_gyro_z_min,                         // 164
-  CSV2_gyro_z_max,                         // 165
-  CSV2_gyro_z_avg,                         // 166
-  CSV2_heel_min,                           // 167
-  CSV2_heel_max,                           // 168
-  CSV2_heel_avg,                           // 169
-  CSV2_pitch_min,                          // 170
-  CSV2_pitch_max,                          // 171
-  CSV2_pitch_avg,                          // 172
-  CSV2_vertical_accel_min,                 // 173
-  CSV2_vertical_accel_max,                 // 174
-  CSV2_vertical_accel_avg,                 // 175
-  CSV2_total_accel_min,                    // 176
-  CSV2_total_accel_max,                    // 177
-  CSV2_total_accel_avg,                    // 178
-  CSV2_imu_slam_count,                     // 179
-  CSV2_imu_slam_peak_max,                  // 180
-  CSV2_imu_slam_count_lifetime,            // 181
-  CSV2_imu_capsize_count,                  // 182
-  CSV2_imu_pitchpole_count,                // 183
-  CSV2_imu_heel_change_60s,                // 184
-  CSV2_imu_heel_deviation_60s,             // 185
-  CSV2_imu_pitch_change_60s,               // 186
-  CSV2_imu_pitch_deviation_60s,            // 187
-  CSV2_imu_wave_period_sec,                // 188
-  CSV2_imu_heel_max_lifetime,              // 189
-  CSV2_imu_pitch_max_lifetime,             // 190
-  CSV2_imu_slam_peak_lifetime,             // 191
-  CSV2_imuEnabled,                         // 192
-  CSV2_imuMountOrientation,                // 193
-  CSV2_imu_fifo_overrun_count,             // 194
-  CSV2_imu_i2c_error_count,                // 195
-  CSV2_imu_unknown_tag_count,              // 196
-  CSV2_imu_accel_dropped,                  // 197
-  CSV2_imu_gyro_dropped,                   // 198
-  CSV2_imu_total_samples_accel,            // 199
-  CSV2_imu_total_samples_gyro,             // 200
-  CSV2_IMUReadTime2,                       // 201
-  CSV2_IMUReadTime,                        // 202
-  CSV2_adsI2CErrorCount,                   // 203
-  CSV2_tempPIDActive,                      // 204
-  CSV2_tempPIDInput_d,                     // 205
-  CSV2_tempPIDSetpoint_d,                  // 206
-  CSV2_thermalPenaltyAmps,                 // 207
-  CSV2_innerTermP,                         // 208
-  CSV2_innerTermI,                         // 209
-  CSV2_innerTermD,                         // 210
-  CSV2_outerTermP,                         // 211
-  CSV2_outerTermI,                         // 212
-  CSV2_outerTermD,                         // 213
-  CSV2_thermalSlopeFPerSec,                // 214
-  CSV2_AbsorptionVoltage,                  // 215
-  CSV2_AbsorptionTimeoutMs,                // 216
-  CSV2_bulkVoltageHoldMs,                  // 217
-  CSV2_chargeStageDisplay,                 // 218
-  CSV2_voltageControlActive,               // 219
-  CSV2_voltageTarget,                      // 220
-  CSV2_voltageError,                       // 221
-  CSV2_Icv,                                // 222
-  CSV2_cv_I,                               // 223
-  CSV2_capLimitMode,                       // 224
-  CSV2_TargetVoltageMode,                  // 225
-  CSV2_TargetVoltageSetpoint,              // 226
-  CSV2_RebulkCurrent_A,                    // 227
-  CSV2_UseFloat,                           // 228
-  CSV2_inIdleStage,                        // 229
-  CSV2_referenceFinalized,                 // 230
-  CSV2_sessionErrorCount,                  // 231
-  CSV2_anomalyMarginAmps,                  // 232
-  CSV2_anomalyAlarmThreshold,              // 233
-  CSV2_anomalyAlarmEnable,                 // 234
-  CSV2_degradationThreshold,               // 235
-  CSV2_ft_rai_total_win,                   // 236
-  CSV2_ft_rai_total_ses,                   // 237
-  CSV2_ft_rai_ina228_win,                  // 238
-  CSV2_ft_rai_ina228_ses,                  // 239
-  CSV2_ft_rai_ads_state_win,               // 240
-  CSV2_ft_rai_ads_state_ses,               // 241
-  CSV2_ft_rai_bmp_state_win,               // 242
-  CSV2_ft_rai_bmp_state_ses,               // 243
-  CSV2_ft_rai_imu_win,                     // 244
-  CSV2_ft_rai_imu_ses,                     // 245
-  CSV2_fsWriteQueueDrops,                  // 246
-  CSV2_TempAlarmLow,                       // 247
-  CSV2_cv_D,                               // 248 — D term contribution: VoltageKd × dV/dt (amps, ×100)
-  CSV2_tempReadFailCount,                  // 249
-  CSV2_tempCrcFailCount,                   // 250
-  CSV2_tempCrcRecoveredCount,              // 251
-  CSV2_tempAllFFCount,                     // 252
-  CSV2_tempPowerOn85Count,                 // 253
-  CSV2_tempOutOfRangeCount,               // 254
-  CSV2_tempRequestFailCount,               // 255
-  CSV2_tempConnectedFailCount,             // 256
-  CSV2_tempResolutionFixCount,             // 257
-  CSV2_tempRereadFailCount,                // 258
-  CSV2_tempResolutionFixCrcFailCount,      // 259
-  CSV2_tempEnumerateFailCount,             // 260
-  CSV2_warmupCeiling,                      // 261
-  CSV2_imu_min_moving_gentle,              // 262
-  CSV2_imu_min_moving_moderate,            // 263
-  CSV2_imu_min_moving_rough,               // 264
-  CSV2_imu_min_moving_extreme,             // 265
-  CSV2_imu_min_stat_gentle,                // 266
-  CSV2_imu_min_stat_moderate,              // 267
-  CSV2_imu_min_stat_rough,                 // 268
-  CSV2_imu_min_stat_extreme,               // 269
-  CSV2_imu_heel_deviation_120s,            // 270
-  CSV2_imu_pitch_deviation_120s,           // 271
-  CSV2_imu_heading_swing_120s,             // 272
+  CSV2_ManualSOCPoint,                     // 52
+  CSV2_LearningMode,                       // 53
+  CSV2_LearningPaused,                     // 54
+  CSV2_IgnoreLearningDuringPenalty,        // 55
+  CSV2_ShowLearningDebugMessages,          // 56
+  CSV2_LogAllLearningEvents,               // 57
+  CSV2_CloudFeatures,                      // 58
+  CSV2_LearningDryRunMode,                 // 59
+  CSV2_ResetLearningTable,                 // 60
+  CSV2_ClearOverheatHistory,               // 61
+  CSV2_AutoShuntGainCorrection,            // 62
+  CSV2_DynamicShuntGainFactor,             // 63
+  CSV2_AutoAltCurrentZero,                 // 64
+  CSV2_DynamicAltCurrentZero,              // 65
+  CSV2_InsulationLifePercent,              // 66
+  CSV2_GreaseLifePercent,                  // 67
+  CSV2_BrushLifePercent,                   // 68
+  CSV2_PredictedLifeHours,                 // 69
+  CSV2_LifeIndicatorColor,                 // 70
+  CSV2_WindingTempOffset,                  // 71
+  CSV2_ManualLifePercentage,               // 72
+  CSV2_UVThresholdHigh,                    // 73
+  CSV2_weatherModeEnabled,                 // 74
+  CSV2_pKwHrToday,                         // 75
+  CSV2_pKwHrTomorrow,                      // 76
+  CSV2_pKwHr2days,                         // 77
+  CSV2_ambientTemp,                        // 78
+  CSV2_baroPressure,                       // 79
+  CSV2_firmwareVersionInt,                 // 80
+  CSV2_deviceIdUpper,                      // 81
+  CSV2_deviceIdLower,                      // 82
+  CSV2_ChargedEnergy_AllTime,              // 83
+  CSV2_AlternatorFuelUsed_AllTime,         // 84
+  CSV2_PeakVoltage_AllTime,                // 85
+  CSV2_EngineRunTime_AllTime,              // 86
+  CSV2_MinVoltage,                         // 87
+  CSV2_MinVoltage_AllTime,                 // 88
+  CSV2_ChargeCycles,                       // 89
+  CSV2_ChargeCycles_AllTime,               // 90
+  CSV2_EngineFuelUsed,                     // 91
+  CSV2_EngineFuelUsed_AllTime,             // 92
+  CSV2_TotalDistance,                      // 93
+  CSV2_TotalDistance_AllTime,              // 94
+  CSV2_MaxSpeed,                           // 95
+  CSV2_MaxSpeed_AllTime,                   // 96
+  CSV2_SolarChargedEnergy,                 // 97
+  CSV2_SolarChargedEnergy_AllTime,         // 98
+  CSV2_AlternatorChargedEnergy_AllTime,    // 99
+  CSV2_DischargedEnergy_AllTime,           // 100
+  CSV2_AvgSOC_AllTime,                     // 101
+  CSV2_AvgSpeed_AllTime,                   // 102
+  CSV2_AvgSpeed,                           // 103
+  CSV2_AlternatorOnTime_AllTime,           // 104
+  CSV2_EngineCycles_AllTime,               // 105
+  CSV2_MaxAlternatorTemperatureF_AllTime,  // 106
+  CSV2_MaxTemperatureThermistor_AllTime,   // 107
+  CSV2_MeasuredAmpsMax_AllTime,            // 108
+  CSV2_RPMMax_AllTime,                     // 109
+  CSV2_Ignition,                           // 110
+  CSV2_BulkStage,                          // 111
+  CSV2_WifiWakeSecondsRemaining,           // 112
+  CSV2_BufferedRecordCount,                // 113
+  CSV2_BufferedRecordPercent,              // 114
+  CSV2_MAX_BUFFERED_RECORDS,               // 115
+  CSV2_COGNMEA,                            // 116
+  CSV2_SOGNMEA,                            // 117
+  CSV2_ApparentWindSpeedNMEA,              // 118
+  CSV2_ApparentWindAngleNMEA,              // 119
+  CSV2_TrueWindSpeedNMEA,                  // 120
+  CSV2_TrueWindAngleNMEA,                  // 121
+  CSV2_LeewayNMEA,                         // 122
+  CSV2_VMGNMEA,                            // 123
+  CSV2_VMGTargetBearing,                   // 124
+  CSV2_VMGUseTrueWind,                     // 125
+  CSV2_SENSOR_UPLOAD_INTERVAL,             // 126
+  CSV2_cpuLoadCore0,                       // 127
+  CSV2_cpuLoadCore0Max,                    // 128
+  CSV2_cpuLoadCore1,                       // 129
+  CSV2_cpuLoadCore1Max,                    // 130
+  CSV2_hasForcedUpdate,                    // 131
+  CSV2_forcedFwVersionInt,                 // 132
+  CSV2_forcedUpdateDeadline,               // 133
+  CSV2_stateRevision,                      // 134
+  CSV2_hardwarePresent,                    // 135
+  CSV2_imu_accel_x_raw,                    // 136
+  CSV2_imu_accel_y_raw,                    // 137
+  CSV2_imu_accel_z_raw,                    // 138
+  CSV2_imu_gyro_x_raw,                     // 139
+  CSV2_imu_gyro_y_raw,                     // 140
+  CSV2_imu_gyro_z_raw,                     // 141
+  CSV2_accel_x_min,                        // 142
+  CSV2_accel_x_max,                        // 143
+  CSV2_accel_x_avg,                        // 144
+  CSV2_accel_y_min,                        // 145
+  CSV2_accel_y_max,                        // 146
+  CSV2_accel_y_avg,                        // 147
+  CSV2_accel_z_min,                        // 148
+  CSV2_accel_z_max,                        // 149
+  CSV2_accel_z_avg,                        // 150
+  CSV2_gyro_x_min,                         // 151
+  CSV2_gyro_x_max,                         // 152
+  CSV2_gyro_x_avg,                         // 153
+  CSV2_gyro_y_min,                         // 154
+  CSV2_gyro_y_max,                         // 155
+  CSV2_gyro_y_avg,                         // 156
+  CSV2_gyro_z_min,                         // 157
+  CSV2_gyro_z_max,                         // 158
+  CSV2_gyro_z_avg,                         // 159
+  CSV2_heel_min,                           // 160
+  CSV2_heel_max,                           // 161
+  CSV2_heel_avg,                           // 162
+  CSV2_pitch_min,                          // 163
+  CSV2_pitch_max,                          // 164
+  CSV2_pitch_avg,                          // 165
+  CSV2_vertical_accel_min,                 // 166
+  CSV2_vertical_accel_max,                 // 167
+  CSV2_vertical_accel_avg,                 // 168
+  CSV2_total_accel_min,                    // 169
+  CSV2_total_accel_max,                    // 170
+  CSV2_total_accel_avg,                    // 171
+  CSV2_imu_slam_count,                     // 172
+  CSV2_imu_slam_peak_max,                  // 173
+  CSV2_imu_slam_count_lifetime,            // 174
+  CSV2_imu_capsize_count,                  // 175
+  CSV2_imu_pitchpole_count,                // 176
+  CSV2_imu_heel_change_60s,                // 177
+  CSV2_imu_heel_deviation_60s,             // 178
+  CSV2_imu_pitch_change_60s,               // 179
+  CSV2_imu_pitch_deviation_60s,            // 180
+  CSV2_imu_wave_period_sec,                // 181
+  CSV2_imu_heel_max_lifetime,              // 182
+  CSV2_imu_pitch_max_lifetime,             // 183
+  CSV2_imu_slam_peak_lifetime,             // 184
+  CSV2_imuEnabled,                         // 185
+  CSV2_imuMountOrientation,                // 186
+  CSV2_imu_fifo_overrun_count,             // 187
+  CSV2_imu_i2c_error_count,                // 188
+  CSV2_imu_unknown_tag_count,              // 189
+  CSV2_imu_accel_dropped,                  // 190
+  CSV2_imu_gyro_dropped,                   // 191
+  CSV2_imu_total_samples_accel,            // 192
+  CSV2_imu_total_samples_gyro,             // 193
+  CSV2_IMUReadTime2,                       // 194
+  CSV2_IMUReadTime,                        // 195
+  CSV2_adsI2CErrorCount,                   // 196
+  CSV2_tempPIDActive,                      // 197
+  CSV2_tempPIDInput_d,                     // 198
+  CSV2_tempPIDSetpoint_d,                  // 199
+  CSV2_thermalPenaltyAmps,                 // 200
+  CSV2_innerTermP,                         // 201
+  CSV2_innerTermI,                         // 202
+  CSV2_innerTermD,                         // 203
+  CSV2_outerTermP,                         // 204
+  CSV2_outerTermI,                         // 205
+  CSV2_outerTermD,                         // 206
+  CSV2_thermalSlopeFPerSec,                // 207
+  CSV2_AbsorptionVoltage,                  // 208
+  CSV2_AbsorptionTimeoutMs,                // 209
+  CSV2_bulkVoltageHoldMs,                  // 210
+  CSV2_chargeStageDisplay,                 // 211
+  CSV2_voltageControlActive,               // 212
+  CSV2_voltageTarget,                      // 213
+  CSV2_voltageError,                       // 214
+  CSV2_Icv,                                // 215
+  CSV2_cv_I,                               // 216
+  CSV2_capLimitMode,                       // 217
+  CSV2_TargetVoltageMode,                  // 218
+  CSV2_TargetVoltageSetpoint,              // 219
+  CSV2_RebulkCurrent_A,                    // 220
+  CSV2_UseFloat,                           // 221
+  CSV2_inIdleStage,                        // 222
+  CSV2_referenceFinalized,                 // 223
+  CSV2_sessionErrorCount,                  // 224
+  CSV2_anomalyMarginAmps,                  // 225
+  CSV2_anomalyAlarmThreshold,              // 226
+  CSV2_anomalyAlarmEnable,                 // 227
+  CSV2_degradationThreshold,               // 228
+  CSV2_ft_rai_total_win,                   // 229
+  CSV2_ft_rai_total_ses,                   // 230
+  CSV2_ft_rai_ina228_win,                  // 231
+  CSV2_ft_rai_ina228_ses,                  // 232
+  CSV2_ft_rai_ads_state_win,               // 233
+  CSV2_ft_rai_ads_state_ses,               // 234
+  CSV2_ft_rai_bmp_state_win,               // 235
+  CSV2_ft_rai_bmp_state_ses,               // 236
+  CSV2_ft_rai_imu_win,                     // 237
+  CSV2_ft_rai_imu_ses,                     // 238
+  CSV2_fsWriteQueueDrops,                  // 239
+  CSV2_TempAlarmLow,                       // 240
+  CSV2_cv_D,                               // 241 — D term contribution: VoltageKd × dV/dt (amps, ×100)
+  CSV2_tempReadFailCount,                  // 242
+  CSV2_tempCrcFailCount,                   // 243
+  CSV2_tempCrcRecoveredCount,              // 244
+  CSV2_tempAllFFCount,                     // 245
+  CSV2_tempPowerOn85Count,                 // 246
+  CSV2_tempOutOfRangeCount,                // 247
+  CSV2_tempRequestFailCount,               // 248
+  CSV2_tempConnectedFailCount,             // 249
+  CSV2_tempResolutionFixCount,             // 250
+  CSV2_tempRereadFailCount,                // 251
+  CSV2_tempResolutionFixCrcFailCount,      // 252
+  CSV2_tempEnumerateFailCount,             // 253
+  CSV2_warmupCeiling,                      // 254
+  CSV2_imu_min_moving_gentle,              // 255
+  CSV2_imu_min_moving_moderate,            // 256
+  CSV2_imu_min_moving_rough,               // 257
+  CSV2_imu_min_moving_extreme,             // 258
+  CSV2_imu_min_stat_gentle,                // 259
+  CSV2_imu_min_stat_moderate,              // 260
+  CSV2_imu_min_stat_rough,                 // 261
+  CSV2_imu_min_stat_extreme,               // 262
+  CSV2_imu_heel_deviation_120s,            // 263
+  CSV2_imu_pitch_deviation_120s,           // 264
+  CSV2_imu_heading_swing_120s,             // 265
 
-  CSV2_loadDumpDtThresh,                   // 273
-  CSV2_loadDumpCurrentDrop,                // 274
-  CSV2_dBcur_dt,                           // 275
-  CSV2_loadDumpActive,                     // 276
-  CSV2_CVTuningMode,                       // 277
-  CSV2_cvWaveAmplitudeV,                   // 278 — ×100
-  CSV2_cvWavePeriodSec,                    // 279
-  CSV2_cvKOvershoot,                       // 280 — ×10
-  CSV2_cvConsecutiveReads,                 // 281
+  CSV2_loadDumpDtThresh,                   // 266
+  CSV2_loadDumpCurrentDrop,                // 267
+  CSV2_dBcur_dt,                           // 268
+  CSV2_loadDumpActive,                     // 269
+  CSV2_CVTuningMode,                       // 270
+  CSV2_cvWaveAmplitudeV,                   // 271 — ×100
+  CSV2_cvWavePeriodSec,                    // 272
+  CSV2_cvKOvershoot,                       // 273 — ×10
+  CSV2_cvConsecutiveReads,                 // 274
 
-  CSV2_ThermalTuningMode,                  // 282
-  CSV2_thermalWaveLowF,                    // 283 — ×10
-  CSV2_thermalWaveHighF,                   // 284 — ×10
-  CSV2_thermalWaveHalfPeriodMin,           // 285 — ×10
-  CSV2_thermalKOvershoot,                  // 286 — ×100
-  CSV2_thermalKUndershoot,                 // 287 — ×100
-  CSV2_thermalSettleThreshF,               // 288 — ×10
-  CSV2_thermalConsecutiveReads,            // 289
-  CSV2_thermalLiveScore0,                  // 290 — ×10000, 10-min window
-  CSV2_thermalLiveScore1,                  // 291 — ×10000, 1-hr window
-  CSV2_thermalLiveScore2,                  // 292 — ×10000, 10-hr window
-  CSV2_thermalLiveScore3,                  // 293 — ×10000, 100-hr window
-  CSV2_thermalTuningTestPhase,             // 294 — 0=off/ring-in 1=scored active
-  CSV2_ft_updateAccelMetrics_win,          // 295 — µs, 5s worst
-  CSV2_ft_updateAccelMetrics_ses,          // 296 — µs, session worst
+  CSV2_ThermalTuningMode,                  // 275
+  CSV2_thermalWaveLowF,                    // 276 — ×10
+  CSV2_thermalWaveHighF,                   // 277 — ×10
+  CSV2_thermalWaveHalfPeriodMin,           // 278 — ×10
+  CSV2_thermalKOvershoot,                  // 279 — ×100
+  CSV2_thermalKUndershoot,                 // 280 — ×100
+  CSV2_thermalSettleThreshF,               // 281 — ×10
+  CSV2_thermalConsecutiveReads,            // 282
+  CSV2_thermalLiveScore0,                  // 283 — ×10000, 10-min window
+  CSV2_thermalLiveScore1,                  // 284 — ×10000, 1-hr window
+  CSV2_thermalLiveScore2,                  // 285 — ×10000, 10-hr window
+  CSV2_thermalLiveScore3,                  // 286 — ×10000, 100-hr window
+  CSV2_thermalTuningTestPhase,             // 287 — 0=off/ring-in 1=scored active
+  CSV2_ft_updateAccelMetrics_win,          // 288 — µs, 5s worst
+  CSV2_ft_updateAccelMetrics_ses,          // 289 — µs, session worst
 
-  CSV2_FIELD_COUNT  // ← always last, = 297
+  CSV2_FIELD_COUNT  // ← always last, = 290
 };
 
 enum Csv3Index {
@@ -484,8 +477,7 @@ enum Csv3Index {
   CSV3_IgnoreTemperature,             // 16
   CSV3_bmsLogic,                      // 17
   CSV3_bmsLogicLevelOff,              // 18
-  CSV3_FourWay,                       // 19
-  CSV3_RPMScalingFactor,              // 20
+  CSV3_RPMScalingFactor,              // 19
   CSV3_MaximumAllowedBatteryAmps,     // 21
   CSV3_BatteryVoltageSource,          // 22
   CSV3_LearningUpwardEnabled,         // 23
@@ -502,248 +494,249 @@ enum Csv3Index {
   CSV3_PidKd,                         // 34
   CSV3_PidSampleDivisor,              // 35
   CSV3_MaxTableValue,                 // 36
-  CSV3_MinTableValue,                 // 37
-  CSV3_MaxPenaltyPercent,             // 38
-  CSV3_MaxPenaltyDuration,            // 39
-  CSV3_NeighborLearningFactor,        // 40
-  CSV3_yyMax,                         // 41
-  CSV3_LearningMemoryDuration,        // 42
-  CSV3_EnableNeighborLearning,        // 43
-  CSV3_EnableAmbientCorrection,       // 44
-  CSV3_TuningMode,                    // 45
-  CSV3_LearningTableSaveInterval,     // 46
-  CSV3_rpmCurrentTable_0,             // 47
-  CSV3_rpmCurrentTable_1,             // 48
-  CSV3_rpmCurrentTable_2,             // 49
-  CSV3_rpmCurrentTable_3,             // 50
-  CSV3_rpmCurrentTable_4,             // 51
-  CSV3_rpmCurrentTable_5,             // 52
-  CSV3_rpmCurrentTable_6,             // 53
-  CSV3_rpmCurrentTable_7,             // 54
-  CSV3_rpmCurrentTable_8,             // 55
-  CSV3_rpmCurrentTable_9,             // 56
-  CSV3_currentRPMTableIndex,          // 57
-  CSV3_pidInitialized,                // 58
-  CSV3_ShuntResistanceMicroOhm,       // 59
-  CSV3_InvertAltAmps,                 // 60
-  CSV3_InvertBattAmps,                // 61
-  CSV3_MaxDuty,                       // 62
-  CSV3_MinDuty,                       // 63
-  CSV3_FieldResistance,               // 64
-  CSV3_maxPoints,                     // 65
-  CSV3_AlternatorCOffset,             // 66
-  CSV3_BatteryCOffset,                // 67
-  CSV3_BatteryCapacity_Ah,            // 68
-  CSV3_AmpSensorRange,                // 69
-  CSV3_R_fixed,                       // 70
-  CSV3_Beta,                          // 71
-  CSV3_T0_C,                          // 72
-  CSV3_TempSource,                    // 73
-  CSV3_IgnitionOverride,              // 74
-  CSV3_FLOAT_DURATION,                // 75
-  CSV3_PulleyRatio,                   // 76
-  CSV3_BatteryCurrentSource,          // 77
-  CSV3_overheatCount_0,               // 78
-  CSV3_overheatCount_1,               // 79
-  CSV3_overheatCount_2,               // 80
-  CSV3_overheatCount_3,               // 81
-  CSV3_overheatCount_4,               // 82
-  CSV3_overheatCount_5,               // 83
-  CSV3_overheatCount_6,               // 84
-  CSV3_overheatCount_7,               // 85
-  CSV3_overheatCount_8,               // 86
-  CSV3_overheatCount_9,               // 87
-  CSV3_cumulativeNoOverheatTime_0,    // 88
-  CSV3_cumulativeNoOverheatTime_1,    // 89
-  CSV3_cumulativeNoOverheatTime_2,    // 90
-  CSV3_cumulativeNoOverheatTime_3,    // 91
-  CSV3_cumulativeNoOverheatTime_4,    // 92
-  CSV3_cumulativeNoOverheatTime_5,    // 93
-  CSV3_cumulativeNoOverheatTime_6,    // 94
-  CSV3_cumulativeNoOverheatTime_7,    // 95
-  CSV3_cumulativeNoOverheatTime_8,    // 96
-  CSV3_cumulativeNoOverheatTime_9,    // 97
-  CSV3_totalLearningEvents,           // 98
-  CSV3_totalOverheats,                // 99
-  CSV3_totalSafeHours,                // 100
-  CSV3_averageTableValue,             // 101
-  CSV3_timeSinceLastOverheat,         // 102
-  CSV3_learningTargetFromRPM,         // 103
-  CSV3_ambientTempCorrection,         // 104
-  CSV3_finalLearningTarget,           // 105
-  CSV3_overheatingPenaltyTimer,       // 106
-  CSV3_overheatingPenaltyAmps,        // 107
-  CSV3_pidSetpoint,                   // 108
-  CSV3_TempToUse,                     // 109
-  CSV3_rpmTableRPMPoints_0,           // 110
-  CSV3_rpmTableRPMPoints_1,           // 111
-  CSV3_rpmTableRPMPoints_2,           // 112
-  CSV3_rpmTableRPMPoints_3,           // 113
-  CSV3_rpmTableRPMPoints_4,           // 114
-  CSV3_rpmTableRPMPoints_5,           // 115
-  CSV3_rpmTableRPMPoints_6,           // 116
-  CSV3_rpmTableRPMPoints_7,           // 117
-  CSV3_rpmTableRPMPoints_8,           // 118
-  CSV3_rpmTableRPMPoints_9,           // 119
-  CSV3_LearningSettlingPeriod,        // 120
-  CSV3_LearningRPMChangeThreshold,    // 121
-  CSV3_LearningTempHysteresis,        // 122
-  CSV3_fuelTableRPM_0,                // 123
-  CSV3_fuelTableRPM_1,                // 124
-  CSV3_fuelTableRPM_2,                // 125
-  CSV3_fuelTableRPM_3,                // 126
-  CSV3_fuelTableRPM_4,                // 127
-  CSV3_fuelTableRPM_5,                // 128
-  CSV3_fuelTableRPM_6,                // 129
-  CSV3_fuelTableRPM_7,                // 130
-  CSV3_fuelTableRPM_8,                // 131
-  CSV3_fuelTableRPM_9,                // 132
-  CSV3_fuelTableGPH_0,                // 133
-  CSV3_fuelTableGPH_1,                // 134
-  CSV3_fuelTableGPH_2,                // 135
-  CSV3_fuelTableGPH_3,                // 136
-  CSV3_fuelTableGPH_4,                // 137
-  CSV3_fuelTableGPH_5,                // 138
-  CSV3_fuelTableGPH_6,                // 139
-  CSV3_fuelTableGPH_7,                // 140
-  CSV3_fuelTableGPH_8,                // 141
-  CSV3_fuelTableGPH_9,                // 142
-  CSV3_stateRevision,                 // 143
-  CSV3_SetpointRampRate,              // 144
-  CSV3_DutyRampRate,                  // 145
-  CSV3_SettleTimeBeforeCut,           // 146
-  CSV3_TempWarnExcess,                // 147
-  CSV3_TempCritExcess,                // 148
-  CSV3_TempSustainedTimeout,          // 149
-  CSV3_VoltageSpikeMargin,            // 150
-  CSV3_VoltageDisagreeThreshold,      // 151
-  CSV3_VoltageDisagreeTimeout,        // 152
-  CSV3_rpmMinDutyTable_0,             // 153
-  CSV3_rpmMinDutyTable_1,             // 154
-  CSV3_rpmMinDutyTable_2,             // 155
-  CSV3_rpmMinDutyTable_3,             // 156
-  CSV3_rpmMinDutyTable_4,             // 157
-  CSV3_rpmMinDutyTable_5,             // 158
-  CSV3_rpmMinDutyTable_6,             // 159
-  CSV3_rpmMinDutyTable_7,             // 160
-  CSV3_rpmMinDutyTable_8,             // 161
-  CSV3_rpmMinDutyTable_9,             // 162
-  CSV3_rpmCapCurrentTable_0,          // 163
-  CSV3_rpmCapCurrentTable_1,          // 164
-  CSV3_rpmCapCurrentTable_2,          // 165
-  CSV3_rpmCapCurrentTable_3,          // 166
-  CSV3_rpmCapCurrentTable_4,          // 167
-  CSV3_rpmCapCurrentTable_5,          // 168
-  CSV3_rpmCapCurrentTable_6,          // 169
-  CSV3_rpmCapCurrentTable_7,          // 170
-  CSV3_rpmCapCurrentTable_8,          // 171
-  CSV3_rpmCapCurrentTable_9,          // 172
-  CSV3_VoltageKp,                     // 173
-  CSV3_VoltageLoopInterval,           // 174
-  CSV3_FIELD_COLLAPSE_DELAY,          // 175
-  CSV3_SetpointRiseRate,              // 176
-  CSV3_SetpointFallRate,              // 177
-  CSV3_PIDTrackingGain,               // 178
-  CSV3_CAPSIZE_THRESHOLD_DEG,         // 179
-  CSV3_PITCHPOLE_THRESHOLD_DEG,       // 180
-  CSV3_SLAM_THRESHOLD_G,              // 181
-  CSV3_imuMountOrientation,           // 182
-  CSV3_socInfoAvailable,              // 183
-  CSV3_TailCurrent_A,                 // 184
-  CSV3_RebulkVoltage,                 // 185
-  CSV3_rebulkDebounceTime,            // 186
-  CSV3_MinFloatTime,                  // 187
-  CSV3_SOC_BlockRebulk_percent,       // 188
-  CSV3_SOC_AllowRebulk_percent,       // 189
-  CSV3_accelEnabled,                  // 190
-  CSV3_DutySlowRampRate,              // 191
-  CSV3_ShutdownPhase2HoldMs,          // 192
-  CSV3_learningUpCount_0,             // 193
-  CSV3_learningUpCount_1,             // 194
-  CSV3_learningUpCount_2,             // 195
-  CSV3_learningUpCount_3,             // 196
-  CSV3_learningUpCount_4,             // 197
-  CSV3_learningUpCount_5,             // 198
-  CSV3_learningUpCount_6,             // 199
-  CSV3_learningUpCount_7,             // 200
-  CSV3_learningUpCount_8,             // 201
-  CSV3_learningUpCount_9,             // 202
-  CSV3_TempPIDKp,                     // 203
-  CSV3_TempPIDKi,                     // 204
-  CSV3_UNUSED_205,                    // 205 (was TempPIDKd, removed)
-  CSV3_ThermalLookaheadSec,          // 206 (was TempPIDMarginF — same conceptual slot)
-  CSV3_TempPIDIntervalMs,             // 207
-  CSV3_TempPIDFilterAlpha,            // 208
-  CSV3_UNUSED_209,                    // 209 (was TempPIDStaleMs, removed)
-  CSV3_UNUSED_210,                    // 210 (was TempPIDAntiWindupMarginA, removed)
-  CSV3_FreeInternalRam,               // 211
-  CSV3_TotalInternalRam,              // 212
-  CSV3_LargestInternalBlock,          // 213
-  CSV3_FreePSRAM,                     // 214
-  CSV3_TotalPSRAM,                    // 215
-  CSV3_Heapfrag,                      // 216
-  CSV3_UNUSED_217,                    // 217 (was TempPIDKdExternal, removed)
-  CSV3_VoltageKi,                     // 218
-  CSV3_rpmCapPowerTable_0,            // 219
-  CSV3_rpmCapPowerTable_1,            // 220
-  CSV3_rpmCapPowerTable_2,            // 221
-  CSV3_rpmCapPowerTable_3,            // 222
-  CSV3_rpmCapPowerTable_4,            // 223
-  CSV3_rpmCapPowerTable_5,            // 224
-  CSV3_rpmCapPowerTable_6,            // 225
-  CSV3_rpmCapPowerTable_7,            // 226
-  CSV3_rpmCapPowerTable_8,            // 227
-  CSV3_rpmCapPowerTable_9,            // 228
-  CSV3_VoltageTrimLimit,              // 229
-  CSV3_ft_ReadAnalogInputs_win,       // 230
-  CSV3_ft_ReadAnalogInputs_ses,       // 231
-  CSV3_ft_AdjustFieldLearnMode_win,   // 232
-  CSV3_ft_AdjustFieldLearnMode_ses,   // 233
-  CSV3_ft_uploadSensorHistory_win,    // 234
-  CSV3_ft_uploadSensorHistory_ses,    // 235
-  CSV3_ft_uploadBufferedRecords_win,  // 236
-  CSV3_ft_uploadBufferedRecords_ses,  // 237
-  CSV3_ft_buildConfigPayload_win,     // 238
-  CSV3_ft_buildConfigPayload_ses,     // 239
-  CSV3_VeTime2,                       // 240
-  CSV3_systemIDActive,                // 241 OBSOLETE — HTML removed, firmware sends 0
-  CSV3_systemIDResultsReady,          // 242 OBSOLETE — HTML removed, firmware sends 0
-  CSV3_systemIDRiseDelay_0,           // 243
-  CSV3_systemIDRiseDelay_1,           // 244
-  CSV3_systemIDRiseDelay_2,           // 245
-  CSV3_systemIDFallDelay_0,           // 246
-  CSV3_systemIDFallDelay_1,           // 247
-  CSV3_systemIDFallDelay_2,           // 248
-  CSV3_systemIDRiseAvg,               // 249
-  CSV3_systemIDFallAvg,               // 250
-  CSV3_InputFilterTC,                 // 251
-  CSV3_SystemIDStepAmplitude,         // 252
-  CSV3_HardOCTripAmps,                // 253
-  CSV3_HardOCDebounceMs,              // 254
-  CSV3_IExcessK,                      // 255
-  CSV3_IExcessN,                      // 256
-  CSV3_IExcessKBleed,                 // 257
-  CSV3_IgnoreRPM,                     // 258
-  CSV3_MinRPMForField,                // 259
-  CSV3_UNUSED_260,                    // 260 (was ThermalTimeConstantSec, removed)
-  CSV3_AwBleedRate,                   // 261
-  CSV3_AwRecoverRate,                 // 262
-  CSV3_KSoft,                         // 263
-  CSV3_KHard,                         // 264
-  CSV3_IExcessReseedFrac,             // 265
-  CSV3_AwSeedProtectMs,               // 266
-  CSV3_VoltageKd,                     // 267
-  CSV3_UNUSED_268,                    // 268 (was ThermistorFilterAlpha, removed)
-  CSV3_displayTempUnit,               // 269
-  CSV3_WarmupRampRate,                // 270
-  CSV3_nvsPhase,                      // 271 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
-  CSV3_ft_saveNVSData_win,               // 272 — saveNVSData worst 5s window (µs)
-  CSV3_ft_saveNVSData_ses,               // 273 — saveNVSData worst session (µs)
-  CSV3_nvsCycleMs,                       // 274 — last full NVS drain duration (ms)
-  CSV3_ft_FlushFileWriteQueue_win,       // 275 — FlushFileWriteQueue worst 5s window (µs)
-  CSV3_ft_FlushFileWriteQueue_ses,       // 276 — FlushFileWriteQueue worst session (µs)
-  CSV3_ft_efficiencyTracker_win,         // 277 — efficiencyTracker_tick() worst 5s window (µs)
-  CSV3_ft_efficiencyTracker_ses,         // 278 — efficiencyTracker_tick() worst session (µs)
+  CSV3_MaxPenaltyPercent,             // 37
+  CSV3_MaxPenaltyDuration,            // 38
+  CSV3_NeighborLearningFactor,        // 39
+  CSV3_yyMax,                         // 40
+  CSV3_LearningMemoryDuration,        // 41
+  CSV3_EnableNeighborLearning,        // 42
+  CSV3_EnableAmbientCorrection,       // 43
+  CSV3_TuningMode,                    // 44
+  CSV3_rpmCurrentTable_0,             // 45
+  CSV3_rpmCurrentTable_1,             // 46
+  CSV3_rpmCurrentTable_2,             // 47
+  CSV3_rpmCurrentTable_3,             // 48
+  CSV3_rpmCurrentTable_4,             // 49
+  CSV3_rpmCurrentTable_5,             // 50
+  CSV3_rpmCurrentTable_6,             // 51
+  CSV3_rpmCurrentTable_7,             // 52
+  CSV3_rpmCurrentTable_8,             // 53
+  CSV3_rpmCurrentTable_9,             // 54
+  CSV3_currentRPMTableIndex,          // 55
+  CSV3_pidInitialized,                // 56
+  CSV3_ShuntResistanceMicroOhm,       // 57
+  CSV3_InvertAltAmps,                 // 58
+  CSV3_InvertBattAmps,                // 59
+  CSV3_MaxDuty,                       // 60
+  CSV3_MinDuty,                       // 61
+  CSV3_FieldResistance,               // 62
+  CSV3_maxPoints,                     // 63
+  CSV3_AlternatorCOffset,             // 64
+  CSV3_BatteryCOffset,                // 65
+  CSV3_BatteryCapacity_Ah,            // 66
+  CSV3_AmpSensorRange,                // 67
+  CSV3_R_fixed,                       // 68
+  CSV3_Beta,                          // 69
+  CSV3_T0_C,                          // 70
+  CSV3_TempSource,                    // 71
+  CSV3_IgnitionOverride,              // 72
+  CSV3_FLOAT_DURATION,                // 73
+  CSV3_PulleyRatio,                   // 74
+  CSV3_BatteryCurrentSource,          // 75
+  CSV3_overheatCount_0,               // 76
+  CSV3_overheatCount_1,               // 77
+  CSV3_overheatCount_2,               // 78
+  CSV3_overheatCount_3,               // 79
+  CSV3_overheatCount_4,               // 80
+  CSV3_overheatCount_5,               // 81
+  CSV3_overheatCount_6,               // 82
+  CSV3_overheatCount_7,               // 83
+  CSV3_overheatCount_8,               // 84
+  CSV3_overheatCount_9,               // 85
+  CSV3_cumulativeNoOverheatTime_0,    // 86
+  CSV3_cumulativeNoOverheatTime_1,    // 87
+  CSV3_cumulativeNoOverheatTime_2,    // 88
+  CSV3_cumulativeNoOverheatTime_3,    // 89
+  CSV3_cumulativeNoOverheatTime_4,    // 90
+  CSV3_cumulativeNoOverheatTime_5,    // 91
+  CSV3_cumulativeNoOverheatTime_6,    // 92
+  CSV3_cumulativeNoOverheatTime_7,    // 93
+  CSV3_cumulativeNoOverheatTime_8,    // 94
+  CSV3_cumulativeNoOverheatTime_9,    // 95
+  CSV3_totalLearningEvents,           // 96
+  CSV3_totalOverheats,                // 97
+  CSV3_totalSafeHours,                // 98
+  CSV3_averageTableValue,             // 99
+  CSV3_timeSinceLastOverheat,         // 100
+  CSV3_learningTargetFromRPM,         // 101
+  CSV3_ambientTempCorrection,         // 102
+  CSV3_finalLearningTarget,           // 103
+  CSV3_overheatingPenaltyTimer,       // 104
+  CSV3_overheatingPenaltyAmps,        // 105
+  CSV3_pidSetpoint,                   // 106
+  CSV3_TempToUse,                     // 107
+  CSV3_rpmTableRPMPoints_0,           // 108
+  CSV3_rpmTableRPMPoints_1,           // 109
+  CSV3_rpmTableRPMPoints_2,           // 110
+  CSV3_rpmTableRPMPoints_3,           // 111
+  CSV3_rpmTableRPMPoints_4,           // 112
+  CSV3_rpmTableRPMPoints_5,           // 113
+  CSV3_rpmTableRPMPoints_6,           // 114
+  CSV3_rpmTableRPMPoints_7,           // 115
+  CSV3_rpmTableRPMPoints_8,           // 116
+  CSV3_rpmTableRPMPoints_9,           // 117
+  CSV3_LearningSettlingPeriod,        // 118
+  CSV3_LearningRPMChangeThreshold,    // 119
+  CSV3_LearningTempHysteresis,        // 120
+  CSV3_fuelTableRPM_0,                // 121
+  CSV3_fuelTableRPM_1,                // 122
+  CSV3_fuelTableRPM_2,                // 123
+  CSV3_fuelTableRPM_3,                // 124
+  CSV3_fuelTableRPM_4,                // 125
+  CSV3_fuelTableRPM_5,                // 126
+  CSV3_fuelTableRPM_6,                // 127
+  CSV3_fuelTableRPM_7,                // 128
+  CSV3_fuelTableRPM_8,                // 129
+  CSV3_fuelTableRPM_9,                // 130
+  CSV3_fuelTableGPH_0,                // 131
+  CSV3_fuelTableGPH_1,                // 132
+  CSV3_fuelTableGPH_2,                // 133
+  CSV3_fuelTableGPH_3,                // 134
+  CSV3_fuelTableGPH_4,                // 135
+  CSV3_fuelTableGPH_5,                // 136
+  CSV3_fuelTableGPH_6,                // 137
+  CSV3_fuelTableGPH_7,                // 138
+  CSV3_fuelTableGPH_8,                // 139
+  CSV3_fuelTableGPH_9,                // 140
+  CSV3_stateRevision,                 // 141
+  CSV3_SetpointRampRate,              // 142
+  CSV3_DutyRampRate,                  // 143
+  CSV3_SettleTimeBeforeCut,           // 144
+  CSV3_TempWarnExcess,                // 145
+  CSV3_TempCritExcess,                // 146
+  CSV3_TempSustainedTimeout,          // 147
+  CSV3_VoltageSpikeMargin,            // 148
+  CSV3_VoltageDisagreeThreshold,      // 149
+  CSV3_VoltageDisagreeTimeout,        // 150
+  CSV3_rpmMinDutyTable_0,             // 151
+  CSV3_rpmMinDutyTable_1,             // 152
+  CSV3_rpmMinDutyTable_2,             // 153
+  CSV3_rpmMinDutyTable_3,             // 154
+  CSV3_rpmMinDutyTable_4,             // 155
+  CSV3_rpmMinDutyTable_5,             // 156
+  CSV3_rpmMinDutyTable_6,             // 157
+  CSV3_rpmMinDutyTable_7,             // 158
+  CSV3_rpmMinDutyTable_8,             // 159
+  CSV3_rpmMinDutyTable_9,             // 160
+  CSV3_rpmCapCurrentTable_0,          // 161
+  CSV3_rpmCapCurrentTable_1,          // 162
+  CSV3_rpmCapCurrentTable_2,          // 163
+  CSV3_rpmCapCurrentTable_3,          // 164
+  CSV3_rpmCapCurrentTable_4,          // 165
+  CSV3_rpmCapCurrentTable_5,          // 166
+  CSV3_rpmCapCurrentTable_6,          // 167
+  CSV3_rpmCapCurrentTable_7,          // 168
+  CSV3_rpmCapCurrentTable_8,          // 169
+  CSV3_rpmCapCurrentTable_9,          // 170
+  CSV3_VoltageKp,                     // 171
+  CSV3_VoltageLoopInterval,           // 172
+  CSV3_FIELD_COLLAPSE_DELAY,          // 173
+  CSV3_SetpointRiseRate,              // 174
+  CSV3_SetpointFallRate,              // 175
+  CSV3_PIDTrackingGain,               // 176
+  CSV3_CAPSIZE_THRESHOLD_DEG,         // 177
+  CSV3_PITCHPOLE_THRESHOLD_DEG,       // 178
+  CSV3_SLAM_THRESHOLD_G,              // 179
+  CSV3_imuMountOrientation,           // 180
+  CSV3_socInfoAvailable,              // 181
+  CSV3_TailCurrent_A,                 // 182
+  CSV3_RebulkVoltage,                 // 183
+  CSV3_rebulkDebounceTime,            // 184
+  CSV3_MinFloatTime,                  // 185
+  CSV3_SOC_BlockRebulk_percent,       // 186
+  CSV3_SOC_AllowRebulk_percent,       // 187
+  CSV3_accelEnabled,                  // 188
+  CSV3_DutySlowRampRate,              // 189
+  CSV3_ShutdownPhase2HoldMs,          // 190
+  CSV3_learningUpCount_0,             // 191
+  CSV3_learningUpCount_1,             // 192
+  CSV3_learningUpCount_2,             // 193
+  CSV3_learningUpCount_3,             // 194
+  CSV3_learningUpCount_4,             // 195
+  CSV3_learningUpCount_5,             // 196
+  CSV3_learningUpCount_6,             // 197
+  CSV3_learningUpCount_7,             // 198
+  CSV3_learningUpCount_8,             // 199
+  CSV3_learningUpCount_9,             // 200
+  CSV3_TempPIDKp,                     // 201
+  CSV3_TempPIDKi,                     // 202
+  CSV3_ThermalLookaheadSec,          // 203 (was TempPIDMarginF — same conceptual slot)
+  CSV3_TempPIDIntervalMs,             // 204
+  CSV3_TempPIDFilterAlpha,            // 205
+  CSV3_FreeInternalRam,               // 206
+  CSV3_TotalInternalRam,              // 207
+  CSV3_LargestInternalBlock,          // 208
+  CSV3_FreePSRAM,                     // 209
+  CSV3_TotalPSRAM,                    // 210
+  CSV3_Heapfrag,                      // 211
+  CSV3_VoltageKi,                     // 212
+  CSV3_rpmCapPowerTable_0,            // 213
+  CSV3_rpmCapPowerTable_1,            // 214
+  CSV3_rpmCapPowerTable_2,            // 215
+  CSV3_rpmCapPowerTable_3,            // 216
+  CSV3_rpmCapPowerTable_4,            // 217
+  CSV3_rpmCapPowerTable_5,            // 218
+  CSV3_rpmCapPowerTable_6,            // 219
+  CSV3_rpmCapPowerTable_7,            // 220
+  CSV3_rpmCapPowerTable_8,            // 221
+  CSV3_rpmCapPowerTable_9,            // 222
+  CSV3_VoltageTrimLimit,              // 223
+  CSV3_ft_ReadAnalogInputs_win,       // 224
+  CSV3_ft_ReadAnalogInputs_ses,       // 225
+  CSV3_ft_AdjustFieldLearnMode_win,   // 226
+  CSV3_ft_AdjustFieldLearnMode_ses,   // 227
+  CSV3_ft_uploadSensorHistory_win,    // 228
+  CSV3_ft_uploadSensorHistory_ses,    // 229
+  CSV3_ft_uploadBufferedRecords_win,  // 230
+  CSV3_ft_uploadBufferedRecords_ses,  // 231
+  CSV3_ft_buildConfigPayload_win,     // 232
+  CSV3_ft_buildConfigPayload_ses,     // 233
+  CSV3_VeTime2,                       // 234
+  CSV3_systemIDRiseDelay_0,           // 235
+  CSV3_systemIDRiseDelay_1,           // 236
+  CSV3_systemIDRiseDelay_2,           // 237
+  CSV3_systemIDFallDelay_0,           // 238
+  CSV3_systemIDFallDelay_1,           // 239
+  CSV3_systemIDFallDelay_2,           // 240
+  CSV3_systemIDRiseAvg,               // 241
+  CSV3_systemIDFallAvg,               // 242
+  CSV3_InputFilterTC,                 // 243
+  CSV3_SystemIDStepAmplitude,         // 244
+  CSV3_HardOCTripAmps,                // 245
+  CSV3_HardOCDebounceMs,              // 246
+  CSV3_IExcessK,                      // 247
+  CSV3_IExcessN,                      // 248
+  CSV3_IExcessKBleed,                 // 249
+  CSV3_IgnoreRPM,                     // 250
+  CSV3_MinRPMForField,                // 251
+  CSV3_AwBleedRate,                   // 252
+  CSV3_AwRecoverRate,                 // 253
+  CSV3_KSoft,                         // 254
+  CSV3_KHard,                         // 255
+  CSV3_IExcessReseedFrac,             // 256
+  CSV3_AwSeedProtectMs,               // 257
+  CSV3_VoltageKd,                     // 258
+  CSV3_displayTempUnit,               // 259
+  CSV3_WarmupRampRate,                // 260
+  CSV3_nvsPhase,                      // 261 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
+  CSV3_ft_saveNVSData_win,               // 262 — saveNVSData worst 5s window (µs)
+  CSV3_ft_saveNVSData_ses,               // 263 — saveNVSData worst session (µs)
+  CSV3_nvsCycleMs,                       // 264 — last full NVS drain duration (ms)
+  CSV3_ft_FlushFileWriteQueue_win,       // 265 — FlushFileWriteQueue worst 5s window (µs)
+  CSV3_ft_FlushFileWriteQueue_ses,       // 266 — FlushFileWriteQueue worst session (µs)
+  CSV3_ft_efficiencyTracker_win,         // 267 — efficiencyTracker_tick() worst 5s window (µs)
+  CSV3_ft_efficiencyTracker_ses,         // 268 — efficiencyTracker_tick() worst session (µs)
+  CSV3_systemIDActive,                   // 269 — 0=idle, 1-9=current phase
+  CSV3_systemIDResultsReady,             // 270 — 1=results available
+  CSV3_OvLayer1Enable,                   // 270
+  CSV3_OvLayer2Enable,                   // 271
+  CSV3_OvLayer3Enable,                   // 272
+  CSV3_IExcessSigSrc,                    // 273
+  CSV3_IExcessMA_N,                      // 274
+  CSV3_OutputPIDSigSrc,                  // 275
+  CSV3_TdPred,                           // 276
+  CSV3_VSoftMarginV,                     // 277
+  CSV3_VHardMarginV,                     // 278
 
   CSV3_FIELD_COUNT  // = 279
 };
@@ -1531,12 +1524,15 @@ void setupServer() {
                 state.line, sizeof(state.line),
                 "# PID diagnostic log — CV loop / output current PID / duty pipeline\n"
                 "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass\n"
+                "# ovFlags: bit0=fastOvActive bit1=softClamp bit2=hardClamp bit3=iExcess bit4=loadDumpActive\n"
                 "# voltageLoopRanThisTick=1 means Icv/cv_I updated this row\n"
                 "# vError: always fresh every tick regardless of loop interval\n"
                 "# Icv: CV velocity-form PI output — the direct current setpoint in CV modes\n"
                 "# cv_I: CV position-form PI integrator state\n"
                 "# tableThermalLimit: RPM cap minus thermal penalty, before CV\n"
-                "# setpointCmd: Icv in CV modes, tableThermalLimit in bulk\n");
+                "# setpointCmd: Icv in CV modes, tableThermalLimit in bulk\n"
+                "# dBcur_dt: battery current derivative (A/s) — positive = load dump event\n"
+                "# battI: battery current from INA228 or Victron (A)\n");
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
             } else if (state.row == 1) {
@@ -1571,7 +1567,10 @@ void setupServer() {
                 "gainKd,"
                 "battV_filt_V,"
                 "iMeas_filt_A,"
-                "flags\n");
+                "flags,"
+                "ovFlags,"
+                "dBcur_dt,"
+                "battI\n");
 
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
@@ -1603,7 +1602,8 @@ void setupServer() {
                 "%.0f,%.2f,"
                 "%.4f,%.4f,%.4f,"
                 "%.3f,%.3f,"  // battV_filt, iMeas_filt
-                "%u\n",
+                "%u,%u,"      // flags, ovFlags
+                "%.2f,%.3f\n",  // dBcur_dt, battI
                 (unsigned long)e.ts,
                 (unsigned)e.chargeStageDisplay,
                 (unsigned)e.TargetVoltageMode,
@@ -1633,7 +1633,10 @@ void setupServer() {
                 e.gainKd,
                 e.battV_filt,
                 e.iMeas_filt,
-                (unsigned)e.flags);
+                (unsigned)e.flags,
+                (unsigned)e.ovFlags,
+                e.dBcur_dt,
+                e.battI);
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
             }
 
@@ -2006,9 +2009,14 @@ void setupServer() {
 
     else if (request->hasParam("startSystemID")) {
       foundParameter = true;
-      systemIDRequested = true;
-      systemIDResultsReady = false;
-      queueConsoleMessage("SystemID: test requested via web UI");
+      if (systemIDActive == 0 && (millis() - systemIDLastEndMs) > 2000UL) {
+        systemIDRequested = true;
+        systemIDResultsReady = false;
+        systemIDAbortRequested = false;   // clear any stale abort from a prior run
+        queueConsoleMessage("SystemID: test requested via web UI");
+      } else {
+        queueConsoleMessage("SystemID: start ignored (cooldown or already active)");
+      }
     }
 
     else if (request->hasParam("cancelSystemID")) {
@@ -2386,12 +2394,6 @@ void setupServer() {
       inputMessage = request->getParam("CurrentAlarmHigh")->value();
       writeFile(LittleFS, "/CurrentAlarmHigh.txt", inputMessage.c_str());
       CurrentAlarmHigh = inputMessage.toInt();
-    }
-    if (request->hasParam("FourWay")) {
-      foundParameter = true;
-      inputMessage = request->getParam("FourWay")->value();
-      writeFile(LittleFS, "/FourWay.txt", inputMessage.c_str());
-      FourWay = inputMessage.toInt();
     }
     if (request->hasParam("RPMScalingFactor")) {
       foundParameter = true;
@@ -2958,6 +2960,11 @@ void setupServer() {
       writeFile(LittleFS, "/TuningMode.txt", inputMessage.c_str());
       TuningMode = inputMessage.toInt();
     }
+    if (request->hasParam("commitTuningScore")) {
+      foundParameter = true;
+      manualCommitTuningRequested = true;
+      queueConsoleMessage("TuningScore: manual commit requested via UI");
+    }
     if (request->hasParam("ShowLearningDebugMessages")) {
       foundParameter = true;
       inputMessage = request->getParam("ShowLearningDebugMessages")->value();
@@ -3471,6 +3478,71 @@ void setupServer() {
       writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
       queueConsoleMessageF("KHard set to: %.1f A/V", KHard);
       if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("OvLayer1Enable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvLayer1Enable")->value();
+      OvLayer1Enable = inputMessage.toInt() != 0;
+      writeFile(LittleFS, "/OvLayer1Enable.txt", String((int)OvLayer1Enable).c_str());
+      queueConsoleMessageF("OV Layer 1 (soft cap prediction): %s", OvLayer1Enable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("OvLayer2Enable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvLayer2Enable")->value();
+      OvLayer2Enable = inputMessage.toInt() != 0;
+      writeFile(LittleFS, "/OvLayer2Enable.txt", String((int)OvLayer2Enable).c_str());
+      queueConsoleMessageF("OV Layer 2 (hard cap prediction): %s", OvLayer2Enable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("OvLayer3Enable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OvLayer3Enable")->value();
+      OvLayer3Enable = inputMessage.toInt() != 0;
+      writeFile(LittleFS, "/OvLayer3Enable.txt", String((int)OvLayer3Enable).c_str());
+      queueConsoleMessageF("OV Layer 3 (hysteresis clamp): %s", OvLayer3Enable ? "ENABLED" : "DISABLED");
+    }
+    if (request->hasParam("IExcessSigSrc")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessSigSrc")->value();
+      IExcessSigSrc = constrain(inputMessage.toInt(), 0, 2);
+      writeFile(LittleFS, "/IExcessSigSrc.txt", String(IExcessSigSrc).c_str());
+      const char* sigNames[] = { "MA(N)", "EMA(TC)", "Raw" };
+      queueConsoleMessageF("iExcess signal source: %s", sigNames[IExcessSigSrc]);
+    }
+    if (request->hasParam("IExcessMA_N")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessMA_N")->value();
+      IExcessMA_N = constrain(inputMessage.toInt(), 1, I_RING_SIZE);
+      writeFile(LittleFS, "/IExcessMA_N.txt", String(IExcessMA_N).c_str());
+      queueConsoleMessageF("iExcess MA window: N=%d", IExcessMA_N);
+    }
+    if (request->hasParam("OutputPIDSigSrc")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OutputPIDSigSrc")->value();
+      OutputPIDSigSrc = constrain(inputMessage.toInt(), 0, 2);
+      writeFile(LittleFS, "/OutputPIDSigSrc.txt", String(OutputPIDSigSrc).c_str());
+      const char* sigNames[] = { "EMA(TC)", "MA(N)", "Raw" };
+      queueConsoleMessageF("Output PID signal source: %s", sigNames[OutputPIDSigSrc]);
+    }
+    if (request->hasParam("TdPred")) {
+      foundParameter = true;
+      inputMessage = request->getParam("TdPred")->value();
+      TdPred = constrain(inputMessage.toFloat(), 0.01f, 0.30f);
+      writeFile(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());
+      queueConsoleMessageF("OV prediction horizon set to: %.3f s", TdPred);
+    }
+    if (request->hasParam("VSoftMarginV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("VSoftMarginV")->value();
+      VSoftMarginV = constrain(inputMessage.toFloat(), 0.020f, 0.500f);
+      writeFile(LittleFS, "/VSoftMarginV.txt", String(VSoftMarginV, 3).c_str());
+      queueConsoleMessageF("Layer 1/3 soft margin set to: %.0f mV", VSoftMarginV * 1000.0f);
+    }
+    if (request->hasParam("VHardMarginV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("VHardMarginV")->value();
+      VHardMarginV = constrain(inputMessage.toFloat(), 0.050f, 1.000f);
+      writeFile(LittleFS, "/VHardMarginV.txt", String(VHardMarginV, 3).c_str());
+      queueConsoleMessageF("Layer 2 hard margin set to: %.0f mV", VHardMarginV * 1000.0f);
     }
     if (request->hasParam("IExcessReseedFrac")) {
       foundParameter = true;
@@ -4823,7 +4895,7 @@ void SendWifiData() {
   // PRIORITY 3: CSVData2 (status data - every 2 seconds)
   if (!sentSomething && now - lastpayload2send >= 2000 && events.count() > 0) {
     static char *payload2 = nullptr;
-    static const size_t PAYLOAD2_SIZE = 2550;
+    static const size_t PAYLOAD2_SIZE = 2100;  // (290 fields + 1) × 7 = 2037, rounded to 2100
     if (!payload2) {
       payload2 = (char *)ps_malloc(PAYLOAD2_SIZE);  // allocated to PSRAM
       if (!payload2) {
@@ -4835,34 +4907,34 @@ void SendWifiData() {
 
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%u,%u,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%u,%u,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d",
-
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d",
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                                                                                                                                     //0
                                SafeInt(MeasuredAmpsMax, 100),                                                                                                                            //1
@@ -4916,257 +4988,250 @@ void SendWifiData() {
                                SafeInt(alarmLatch ? 1 : 0),                                                                                                                              //49
                                SafeInt(ResetAlarmLatch),                                                                                                                                 //50
                                SafeInt(MaintainMode),                                                                                                                                    //51
-                               0,                                                                                                                                                        //52 reserved
-                               0,                                                                                                                                                         //53 reserved
-                               0,                                                                                                                                                         //54 reserved
-                               0,                                                                                                                                                         //55 reserved
-                               0,                                                                                                                                                         //56 reserved
-                               0,                                                                                                                                                         //57 reserved
-                               SafeInt(ManualSOCPoint),                                                                                                                                  //58
-                               SafeInt(LearningMode),                                                                                                                                    //59
-                               SafeInt(LearningPaused),                                                                                                                                  //60
-                               SafeInt(IgnoreLearningDuringPenalty),                                                                                                                     //61
-                               SafeInt(ShowLearningDebugMessages),                                                                                                                       //62
-                               SafeInt(LogAllLearningEvents),                                                                                                                            //63
-                               SafeInt(CloudFeatures),                                                                                                                                   //64
-                               SafeInt(LearningDryRunMode),                                                                                                                              //65
-                               0,                                                                                                                                                 //66 OBSOLETE AutoSaveLearningTable
-                               SafeInt(ResetLearningTable),                                                                                                                              //67
-                               SafeInt(ClearOverheatHistory),                                                                                                                            //68
-                               SafeInt(AutoShuntGainCorrection),                                                                                                                         //69
-                               SafeInt(DynamicShuntGainFactor, 1000),                                                                                                                    //70
-                               SafeInt(AutoAltCurrentZero),                                                                                                                              //71
-                               SafeInt(DynamicAltCurrentZero, 1000),                                                                                                                     //72
-                               SafeInt(InsulationLifePercent, 100),                                                                                                                      //73
-                               SafeInt(GreaseLifePercent, 100),                                                                                                                          //74
-                               SafeInt(BrushLifePercent, 100),                                                                                                                           //75
-                               SafeInt(PredictedLifeHours),                                                                                                                              //76
-                               SafeInt(LifeIndicatorColor),                                                                                                                              //77
-                               SafeInt(WindingTempOffset),                                                                                                                               //78
-                               SafeInt(ManualLifePercentage),                                                                                                                            //79
-                               SafeInt(UVThresholdHigh, 100),                                                                                                                            //80
-                               SafeInt(weatherModeEnabled),                                                                                                                              //81
-                               SafeInt(pKwHrToday, 100),                                                                                                                                 //82
-                               SafeInt(pKwHrTomorrow, 100),                                                                                                                              //83
-                               SafeInt(pKwHr2days, 100),                                                                                                                                 //84
-                               SafeInt(ambientTemp),                                                                                                                                     //85
-                               SafeInt(baroPressure),                                                                                                                                    //86
-                               SafeInt(firmwareVersionInt),                                                                                                                              //87
-                               deviceIdUpper,                                                                                                                                            //88
-                               deviceIdLower,                                                                                                                                            //89
-                               SafeInt(ChargedEnergy_AllTime),                                                                                                                           //90
-                               SafeInt(AlternatorFuelUsed_AllTime, 100),                                                                                                                 //91
-                               SafeInt(PeakVoltage_AllTime, 100),                                                                                                                        //92
-                               SafeInt(EngineRunTime_AllTime * 100 / 3600, 1),                                                                                                           //93
-                               SafeInt(MinVoltage, 100),                                                                                                                                 //94
-                               SafeInt(MinVoltage_AllTime, 100),                                                                                                                         //95
-                               SafeInt(ChargeCycles, 100),                                                                                                                               //96
-                               SafeInt(ChargeCycles_AllTime, 100),                                                                                                                       //97
-                               SafeInt(EngineFuelUsed, 100),                                                                                                                             //98
-                               SafeInt(EngineFuelUsed_AllTime, 100),                                                                                                                     //99
-                               SafeInt(TotalDistance, 10),                                                                                                                               //100
-                               SafeInt(TotalDistance_AllTime, 10),                                                                                                                       //101
-                               SafeInt(MaxSpeed, 100),                                                                                                                                   //102
-                               SafeInt(MaxSpeed_AllTime, 100),                                                                                                                           //103
-                               SafeInt(SolarChargedEnergy),                                                                                                                              //104
-                               SafeInt(SolarChargedEnergy_AllTime),                                                                                                                      //105
-                               SafeInt(AlternatorChargedEnergy_AllTime),                                                                                                                 //106
-                               SafeInt(DischargedEnergy_AllTime),                                                                                                                        //107
-                               SafeInt(AvgSOC_AllTime, 100),                                                                                                                             //108
-                               SafeInt(AvgSpeed_AllTime, 100),                                                                                                                           //109
-                               SafeInt(AvgSpeed, 100),                                                                                                                                   //110
-                               SafeInt(AlternatorOnTime_AllTime * 100 / 3600, 1),                                                                                                        //111
-                               SafeInt(EngineCycles_AllTime),                                                                                                                            //112
-                               SafeInt(MaxAlternatorTemperatureF_AllTime),                                                                                                               //113
-                               SafeInt(MaxTemperatureThermistor_AllTime),                                                                                                                //114
-                               SafeInt(MeasuredAmpsMax_AllTime, 100),                                                                                                                    //115
-                               SafeInt(RPMMax_AllTime),                                                                                                                                  //116
-                               SafeInt(Ignition),                                                                                                                                        //117
-                               SafeInt(inBulkStage ? 1 : 0),                                                                                                                             //118
-                               // 119: seconds of WiFi remaining — WiFi wake OR shutdown drain window (shown as countdown banner)
+                               SafeInt(ManualSOCPoint),                                                                                                                                  //52
+                               SafeInt(LearningMode),                                                                                                                                    //53
+                               SafeInt(LearningPaused),                                                                                                                                  //54
+                               SafeInt(IgnoreLearningDuringPenalty),                                                                                                                     //55
+                               SafeInt(ShowLearningDebugMessages),                                                                                                                       //56
+                               SafeInt(LogAllLearningEvents),                                                                                                                            //57
+                               SafeInt(CloudFeatures),                                                                                                                                   //58
+                               SafeInt(LearningDryRunMode),                                                                                                                              //59
+                               SafeInt(ResetLearningTable),                                                                                                                              //60
+                               SafeInt(ClearOverheatHistory),                                                                                                                            //61
+                               SafeInt(AutoShuntGainCorrection),                                                                                                                         //62
+                               SafeInt(DynamicShuntGainFactor, 1000),                                                                                                                    //63
+                               SafeInt(AutoAltCurrentZero),                                                                                                                              //64
+                               SafeInt(DynamicAltCurrentZero, 1000),                                                                                                                     //65
+                               SafeInt(InsulationLifePercent, 100),                                                                                                                      //66
+                               SafeInt(GreaseLifePercent, 100),                                                                                                                          //67
+                               SafeInt(BrushLifePercent, 100),                                                                                                                           //68
+                               SafeInt(PredictedLifeHours),                                                                                                                              //69
+                               SafeInt(LifeIndicatorColor),                                                                                                                              //70
+                               SafeInt(WindingTempOffset),                                                                                                                               //71
+                               SafeInt(ManualLifePercentage),                                                                                                                            //72
+                               SafeInt(UVThresholdHigh, 100),                                                                                                                            //73
+                               SafeInt(weatherModeEnabled),                                                                                                                              //74
+                               SafeInt(pKwHrToday, 100),                                                                                                                                 //75
+                               SafeInt(pKwHrTomorrow, 100),                                                                                                                              //76
+                               SafeInt(pKwHr2days, 100),                                                                                                                                 //77
+                               SafeInt(ambientTemp),                                                                                                                                     //78
+                               SafeInt(baroPressure),                                                                                                                                    //79
+                               SafeInt(firmwareVersionInt),                                                                                                                              //80
+                               deviceIdUpper,                                                                                                                                            //81
+                               deviceIdLower,                                                                                                                                            //82
+                               SafeInt(ChargedEnergy_AllTime),                                                                                                                           //83
+                               SafeInt(AlternatorFuelUsed_AllTime, 100),                                                                                                                 //84
+                               SafeInt(PeakVoltage_AllTime, 100),                                                                                                                        //85
+                               SafeInt(EngineRunTime_AllTime * 100 / 3600, 1),                                                                                                           //86
+                               SafeInt(MinVoltage, 100),                                                                                                                                 //87
+                               SafeInt(MinVoltage_AllTime, 100),                                                                                                                         //88
+                               SafeInt(ChargeCycles, 100),                                                                                                                               //89
+                               SafeInt(ChargeCycles_AllTime, 100),                                                                                                                       //90
+                               SafeInt(EngineFuelUsed, 100),                                                                                                                             //91
+                               SafeInt(EngineFuelUsed_AllTime, 100),                                                                                                                     //92
+                               SafeInt(TotalDistance, 10),                                                                                                                               //93
+                               SafeInt(TotalDistance_AllTime, 10),                                                                                                                       //94
+                               SafeInt(MaxSpeed, 100),                                                                                                                                   //95
+                               SafeInt(MaxSpeed_AllTime, 100),                                                                                                                           //96
+                               SafeInt(SolarChargedEnergy),                                                                                                                              //97
+                               SafeInt(SolarChargedEnergy_AllTime),                                                                                                                      //98
+                               SafeInt(AlternatorChargedEnergy_AllTime),                                                                                                                 //99
+                               SafeInt(DischargedEnergy_AllTime),                                                                                                                        //100
+                               SafeInt(AvgSOC_AllTime, 100),                                                                                                                             //101
+                               SafeInt(AvgSpeed_AllTime, 100),                                                                                                                           //102
+                               SafeInt(AvgSpeed, 100),                                                                                                                                   //103
+                               SafeInt(AlternatorOnTime_AllTime * 100 / 3600, 1),                                                                                                        //104
+                               SafeInt(EngineCycles_AllTime),                                                                                                                            //105
+                               SafeInt(MaxAlternatorTemperatureF_AllTime),                                                                                                               //106
+                               SafeInt(MaxTemperatureThermistor_AllTime),                                                                                                                //107
+                               SafeInt(MeasuredAmpsMax_AllTime, 100),                                                                                                                    //108
+                               SafeInt(RPMMax_AllTime),                                                                                                                                  //109
+                               SafeInt(Ignition),                                                                                                                                        //110
+                               SafeInt(inBulkStage ? 1 : 0),                                                                                                                             //111
+                               // 112: seconds of WiFi remaining — WiFi wake OR shutdown drain window (shown as countdown banner)
                                SafeInt(
                                  (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION)
                                    ? (WIFI_WAKE_DURATION - (millis() - wifiWakeStart)) / 1000
                                    : (pendingShutdownFlush && shutdownCloudDeadlineMs > millis())
                                        ? (shutdownCloudDeadlineMs - millis()) / 1000
-                                       : 0),                                                                                                                                                 //119
-                               SafeInt(bufferedRecordCount),                                                                                                                             //120
-                               SafeInt((bufferedRecordCount * 100) / MAX_BUFFERED_RECORDS),                                                                                              //121
-                               SafeInt(MAX_BUFFERED_RECORDS),                                                                                                                            //122
-                               SafeInt(COGNMEA),                                                                                                                                         //123
-                               SafeInt(SOGNMEA, 100),                                                                                                                                    //124
-                               SafeInt(ApparentWindSpeedNMEA, 100),                                                                                                                      //125
-                               SafeInt(ApparentWindAngleNMEA),                                                                                                                           //126
-                               SafeInt(TrueWindSpeedNMEA, 100),                                                                                                                          //127
-                               SafeInt(TrueWindAngleNMEA),                                                                                                                               //128
-                               SafeInt(LeewayNMEA),                                                                                                                                      //129
-                               SafeInt(VMGNMEA, 100),                                                                                                                                    //130
-                               SafeInt(VMGTargetBearing),                                                                                                                                //131
-                               SafeInt(VMGUseTrueWind),                                                                                                                                  //132
-                               SafeInt(SENSOR_UPLOAD_INTERVAL),                                                                                                                          //133
-                               SafeInt(cpuLoadCore0),                                                                                                                                    //134
-                               SafeInt(cpuLoadCore0Max),                                                                                                                                 //135
-                               SafeInt(cpuLoadCore1),                                                                                                                                    //136
-                               SafeInt(cpuLoadCore1Max),                                                                                                                                 //137
-                               SafeInt(hasForcedUpdate ? 1 : 0),                                                                                                                         //138
-                               SafeInt(forcedFwVersionInt),                                                                                                                              //139
-                               (forcedUpdateDeadline),                                                                                                                                   //140
-                               SafeInt(stateRevision),                                                                                                                                   //141
-                               SafeInt(hardwarePresent),                                                                                                                                 //142
-                               SafeInt(imu_accel_x_raw, 1000),                                                                                                                           //143
-                               SafeInt(imu_accel_y_raw, 1000),                                                                                                                           //144
-                               SafeInt(imu_accel_z_raw, 1000),                                                                                                                           //145
-                               SafeInt(imu_gyro_x_raw, 100),                                                                                                                             //146
-                               SafeInt(imu_gyro_y_raw, 100),                                                                                                                             //147
-                               SafeInt(imu_gyro_z_raw, 100),                                                                                                                             //148
-                               SafeInt(imuWindow->accel_x_min),                                                                                                                          //149
-                               SafeInt(imuWindow->accel_x_max),                                                                                                                          //150
-                               SafeInt(imuWindow->accel_x_valid_us > 0 ? (int)((int64_t)imuWindow->accel_x_area_v_us / (int64_t)imuWindow->accel_x_valid_us) : 0),                       //151
-                               SafeInt(imuWindow->accel_y_min),                                                                                                                          //152
-                               SafeInt(imuWindow->accel_y_max),                                                                                                                          //153
-                               SafeInt(imuWindow->accel_y_valid_us > 0 ? (int)((int64_t)imuWindow->accel_y_area_v_us / (int64_t)imuWindow->accel_y_valid_us) : 0),                       //154
-                               SafeInt(imuWindow->accel_z_min),                                                                                                                          //155
-                               SafeInt(imuWindow->accel_z_max),                                                                                                                          //156
-                               SafeInt(imuWindow->accel_z_valid_us > 0 ? (int)((int64_t)imuWindow->accel_z_area_v_us / (int64_t)imuWindow->accel_z_valid_us) : 0),                       //157
-                               SafeInt(imuWindow->gyro_x_min),                                                                                                                           //158
-                               SafeInt(imuWindow->gyro_x_max),                                                                                                                           //159
-                               SafeInt(imuWindow->gyro_x_valid_us > 0 ? (int)((int64_t)imuWindow->gyro_x_area_v_us / (int64_t)imuWindow->gyro_x_valid_us) : 0),                          //160
-                               SafeInt(imuWindow->gyro_y_min),                                                                                                                           //161
-                               SafeInt(imuWindow->gyro_y_max),                                                                                                                           //162
-                               SafeInt(imuWindow->gyro_y_valid_us > 0 ? (int)((int64_t)imuWindow->gyro_y_area_v_us / (int64_t)imuWindow->gyro_y_valid_us) : 0),                          //163
-                               SafeInt(imuWindow->gyro_z_min),                                                                                                                           //164
-                               SafeInt(imuWindow->gyro_z_max),                                                                                                                           //165
-                               SafeInt(imuWindow->gyro_z_valid_us > 0 ? (int)((int64_t)imuWindow->gyro_z_area_v_us / (int64_t)imuWindow->gyro_z_valid_us) : 0),                          //166
-                               SafeInt(imuWindow->heel_min),                                                                                                                             //167
-                               SafeInt(imuWindow->heel_max),                                                                                                                             //168
-                               SafeInt(imuWindow->heel_valid_us > 0 ? (int)((int64_t)imuWindow->heel_area_v_us / (int64_t)imuWindow->heel_valid_us) : 0),                                //169
-                               SafeInt(imuWindow->pitch_min),                                                                                                                            //170
-                               SafeInt(imuWindow->pitch_max),                                                                                                                            //171
-                               SafeInt(imuWindow->pitch_valid_us > 0 ? (int)((int64_t)imuWindow->pitch_area_v_us / (int64_t)imuWindow->pitch_valid_us) : 0),                             //172
-                               SafeInt(imuWindow->vertical_accel_min),                                                                                                                   //173
-                               SafeInt(imuWindow->vertical_accel_max),                                                                                                                   //174
-                               SafeInt(imuWindow->vertical_accel_valid_us > 0 ? (int)((int64_t)imuWindow->vertical_accel_area_v_us / (int64_t)imuWindow->vertical_accel_valid_us) : 0),  //175
-                               SafeInt(imuWindow->total_accel_min),                                                                                                                      //176
-                               SafeInt(imuWindow->total_accel_max),                                                                                                                      //177
-                               SafeInt(imuWindow->total_accel_valid_us > 0 ? (int)((int64_t)imuWindow->total_accel_area_v_us / (int64_t)imuWindow->total_accel_valid_us) : 0),           //178
-                               SafeInt(imuWindow->slam_count),                                                                                                                           //179
-                               SafeInt(imuWindow->slam_peak_max),                                                                                                                        //180
-                               SafeInt(imu_slam_count_lifetime),                                                                                                                         //181
-                               SafeInt(imu_capsize_count),                                                                                                                               //182
-                               SafeInt(imu_pitchpole_count),                                                                                                                             //183
-                               SafeInt(imuWindow->heel_change_60s),                                                                                                                      //184
-                               SafeInt(imuWindow->heel_deviation_60s),                                                                                                                   //185
-                               SafeInt(imuWindow->pitch_change_60s),                                                                                                                     //186
-                               SafeInt(imuWindow->pitch_deviation_60s),                                                                                                                  //187
-                               SafeInt(imuWindow->wave_period),                                                                                                                          //188
-                               SafeInt(imu_heel_max_lifetime, 100),                                                                                                                      //189
-                               SafeInt(imu_pitch_max_lifetime, 100),                                                                                                                     //190
-                               SafeInt(imu_slam_peak_lifetime, 1000),                                                                                                                    //191
-                               SafeInt(imuEnabled ? 1 : 0),                                                                                                                              //192
-                               SafeInt(imuMountOrientation),                                                                                                                             //193
-                               SafeInt(imu_fifo_overrun_count),                                                                                                                          //194
-                               SafeInt(imu_i2c_error_count),                                                                                                                             //195
-                               SafeInt(imu_unknown_tag_count),                                                                                                                           //196
-                               SafeInt(imuRingBuffer->accel_dropped),                                                                                                                    //197
-                               SafeInt(imuRingBuffer->gyro_dropped),                                                                                                                     //198
-                               SafeInt(imu_total_samples_accel),                                                                                                                         //199
-                               SafeInt(imu_total_samples_gyro),                                                                                                                          //200
-                               SafeInt(IMUReadTime2),                                                                                                                                    //201
-                               SafeInt(IMUReadTime),                                                                                                                                     //202
-                               SafeInt(adsI2CErrorCount),                                                                                                                                //203
-                               SafeInt(tempPIDActive ? 1 : 0),                                                                                                                           //204
-                               SafeInt(tempPIDInput_d, 100),                                                                                                                             //205
-                               SafeInt(tempPIDSetpoint_d, 100),                                                                                                                          //206
-                               SafeInt(thermalPenaltyAmps, 100),                                                                                                                         //207
-                               SafeInt(innerTermP, 100),                                                                                                                                 //208
-                               SafeInt(innerTermI, 100),                                                                                                                                 //209
-                               SafeInt(innerTermD, 100),                                                                                                                                 //210
-                               SafeInt(outerTermP, 100),                                                                                                                                 //211
-                               SafeInt(outerTermI, 100),                                                                                                                                 //212
-                               SafeInt(outerTermD, 100),                                                                                                                                 //213
-                               SafeInt(thermalSlopeFPerSec, 1000),                                                                                                                       //214
-                               SafeInt(AbsorptionVoltage * 100),                                                                                                                         // 215
-                               SafeInt(AbsorptionTimeoutMs),                                                                                                                             // 216
-                               SafeInt(bulkVoltageHoldMs),                                                                                                                               // 217
-                               SafeInt(chargeStageDisplay),                                                                                                                              // 218
-                               SafeInt(voltageControlActive),                                                                                                                            // 219
-                               SafeInt(ChargingVoltageTarget * 100),                                                                                                                     // 220
-                               SafeInt((ChargingVoltageTarget - getBatteryVoltage()) * 100),                                                                                             // 221
-                               SafeInt(Icv * 100),                                                                                                                                       // 222
-                               SafeInt(cv_I * 100),                                                                                                                                      // 223
+                                       : 0),                                                                                                                                                 //113
+                               SafeInt(bufferedRecordCount),                                                                                                                             //114
+                               SafeInt((bufferedRecordCount * 100) / MAX_BUFFERED_RECORDS),                                                                                              //115
+                               SafeInt(MAX_BUFFERED_RECORDS),                                                                                                                            //116
+                               SafeInt(COGNMEA),                                                                                                                                         //117
+                               SafeInt(SOGNMEA, 100),                                                                                                                                    //118
+                               SafeInt(ApparentWindSpeedNMEA, 100),                                                                                                                      //119
+                               SafeInt(ApparentWindAngleNMEA),                                                                                                                           //120
+                               SafeInt(TrueWindSpeedNMEA, 100),                                                                                                                          //121
+                               SafeInt(TrueWindAngleNMEA),                                                                                                                               //122
+                               SafeInt(LeewayNMEA),                                                                                                                                      //123
+                               SafeInt(VMGNMEA, 100),                                                                                                                                    //124
+                               SafeInt(VMGTargetBearing),                                                                                                                                //125
+                               SafeInt(VMGUseTrueWind),                                                                                                                                  //126
+                               SafeInt(SENSOR_UPLOAD_INTERVAL),                                                                                                                          //127
+                               SafeInt(cpuLoadCore0),                                                                                                                                    //128
+                               SafeInt(cpuLoadCore0Max),                                                                                                                                 //129
+                               SafeInt(cpuLoadCore1),                                                                                                                                    //130
+                               SafeInt(cpuLoadCore1Max),                                                                                                                                 //131
+                               SafeInt(hasForcedUpdate ? 1 : 0),                                                                                                                         //132
+                               SafeInt(forcedFwVersionInt),                                                                                                                              //133
+                               (forcedUpdateDeadline),                                                                                                                                   //134
+                               SafeInt(stateRevision),                                                                                                                                   //135
+                               SafeInt(hardwarePresent),                                                                                                                                 //136
+                               SafeInt(imu_accel_x_raw, 1000),                                                                                                                           //137
+                               SafeInt(imu_accel_y_raw, 1000),                                                                                                                           //138
+                               SafeInt(imu_accel_z_raw, 1000),                                                                                                                           //139
+                               SafeInt(imu_gyro_x_raw, 100),                                                                                                                             //140
+                               SafeInt(imu_gyro_y_raw, 100),                                                                                                                             //141
+                               SafeInt(imu_gyro_z_raw, 100),                                                                                                                             //142
+                               SafeInt(imuWindow->accel_x_min),                                                                                                                          //143
+                               SafeInt(imuWindow->accel_x_max),                                                                                                                          //144
+                               SafeInt(imuWindow->accel_x_valid_us > 0 ? (int)((int64_t)imuWindow->accel_x_area_v_us / (int64_t)imuWindow->accel_x_valid_us) : 0),                       //145
+                               SafeInt(imuWindow->accel_y_min),                                                                                                                          //146
+                               SafeInt(imuWindow->accel_y_max),                                                                                                                          //147
+                               SafeInt(imuWindow->accel_y_valid_us > 0 ? (int)((int64_t)imuWindow->accel_y_area_v_us / (int64_t)imuWindow->accel_y_valid_us) : 0),                       //148
+                               SafeInt(imuWindow->accel_z_min),                                                                                                                          //149
+                               SafeInt(imuWindow->accel_z_max),                                                                                                                          //150
+                               SafeInt(imuWindow->accel_z_valid_us > 0 ? (int)((int64_t)imuWindow->accel_z_area_v_us / (int64_t)imuWindow->accel_z_valid_us) : 0),                       //151
+                               SafeInt(imuWindow->gyro_x_min),                                                                                                                           //152
+                               SafeInt(imuWindow->gyro_x_max),                                                                                                                           //153
+                               SafeInt(imuWindow->gyro_x_valid_us > 0 ? (int)((int64_t)imuWindow->gyro_x_area_v_us / (int64_t)imuWindow->gyro_x_valid_us) : 0),                          //154
+                               SafeInt(imuWindow->gyro_y_min),                                                                                                                           //155
+                               SafeInt(imuWindow->gyro_y_max),                                                                                                                           //156
+                               SafeInt(imuWindow->gyro_y_valid_us > 0 ? (int)((int64_t)imuWindow->gyro_y_area_v_us / (int64_t)imuWindow->gyro_y_valid_us) : 0),                          //157
+                               SafeInt(imuWindow->gyro_z_min),                                                                                                                           //158
+                               SafeInt(imuWindow->gyro_z_max),                                                                                                                           //159
+                               SafeInt(imuWindow->gyro_z_valid_us > 0 ? (int)((int64_t)imuWindow->gyro_z_area_v_us / (int64_t)imuWindow->gyro_z_valid_us) : 0),                          //160
+                               SafeInt(imuWindow->heel_min),                                                                                                                             //161
+                               SafeInt(imuWindow->heel_max),                                                                                                                             //162
+                               SafeInt(imuWindow->heel_valid_us > 0 ? (int)((int64_t)imuWindow->heel_area_v_us / (int64_t)imuWindow->heel_valid_us) : 0),                                //163
+                               SafeInt(imuWindow->pitch_min),                                                                                                                            //164
+                               SafeInt(imuWindow->pitch_max),                                                                                                                            //165
+                               SafeInt(imuWindow->pitch_valid_us > 0 ? (int)((int64_t)imuWindow->pitch_area_v_us / (int64_t)imuWindow->pitch_valid_us) : 0),                             //166
+                               SafeInt(imuWindow->vertical_accel_min),                                                                                                                   //167
+                               SafeInt(imuWindow->vertical_accel_max),                                                                                                                   //168
+                               SafeInt(imuWindow->vertical_accel_valid_us > 0 ? (int)((int64_t)imuWindow->vertical_accel_area_v_us / (int64_t)imuWindow->vertical_accel_valid_us) : 0),  //169
+                               SafeInt(imuWindow->total_accel_min),                                                                                                                      //170
+                               SafeInt(imuWindow->total_accel_max),                                                                                                                      //171
+                               SafeInt(imuWindow->total_accel_valid_us > 0 ? (int)((int64_t)imuWindow->total_accel_area_v_us / (int64_t)imuWindow->total_accel_valid_us) : 0),           //172
+                               SafeInt(imuWindow->slam_count),                                                                                                                           //173
+                               SafeInt(imuWindow->slam_peak_max),                                                                                                                        //174
+                               SafeInt(imu_slam_count_lifetime),                                                                                                                         //175
+                               SafeInt(imu_capsize_count),                                                                                                                               //176
+                               SafeInt(imu_pitchpole_count),                                                                                                                             //177
+                               SafeInt(imuWindow->heel_change_60s),                                                                                                                      //178
+                               SafeInt(imuWindow->heel_deviation_60s),                                                                                                                   //179
+                               SafeInt(imuWindow->pitch_change_60s),                                                                                                                     //180
+                               SafeInt(imuWindow->pitch_deviation_60s),                                                                                                                  //181
+                               SafeInt(imuWindow->wave_period),                                                                                                                          //182
+                               SafeInt(imu_heel_max_lifetime, 100),                                                                                                                      //183
+                               SafeInt(imu_pitch_max_lifetime, 100),                                                                                                                     //184
+                               SafeInt(imu_slam_peak_lifetime, 1000),                                                                                                                    //185
+                               SafeInt(imuEnabled ? 1 : 0),                                                                                                                              //186
+                               SafeInt(imuMountOrientation),                                                                                                                             //187
+                               SafeInt(imu_fifo_overrun_count),                                                                                                                          //188
+                               SafeInt(imu_i2c_error_count),                                                                                                                             //189
+                               SafeInt(imu_unknown_tag_count),                                                                                                                           //190
+                               SafeInt(imuRingBuffer->accel_dropped),                                                                                                                    //191
+                               SafeInt(imuRingBuffer->gyro_dropped),                                                                                                                     //192
+                               SafeInt(imu_total_samples_accel),                                                                                                                         //193
+                               SafeInt(imu_total_samples_gyro),                                                                                                                          //194
+                               SafeInt(IMUReadTime2),                                                                                                                                    //195
+                               SafeInt(IMUReadTime),                                                                                                                                     //196
+                               SafeInt(adsI2CErrorCount),                                                                                                                                //197
+                               SafeInt(tempPIDActive ? 1 : 0),                                                                                                                           //198
+                               SafeInt(tempPIDInput_d, 100),                                                                                                                             //199
+                               SafeInt(tempPIDSetpoint_d, 100),                                                                                                                          //200
+                               SafeInt(thermalPenaltyAmps, 100),                                                                                                                         //201
+                               SafeInt(innerTermP, 100),                                                                                                                                 //202
+                               SafeInt(innerTermI, 100),                                                                                                                                 //203
+                               SafeInt(innerTermD, 100),                                                                                                                                 //204
+                               SafeInt(outerTermP, 100),                                                                                                                                 //205
+                               SafeInt(outerTermI, 100),                                                                                                                                 //206
+                               SafeInt(outerTermD, 100),                                                                                                                                 //207
+                               SafeInt(thermalSlopeFPerSec, 1000),                                                                                                                       //208
+                               SafeInt(AbsorptionVoltage * 100),                                                                                                                         // 209
+                               SafeInt(AbsorptionTimeoutMs),                                                                                                                             // 210
+                               SafeInt(bulkVoltageHoldMs),                                                                                                                               // 211
+                               SafeInt(chargeStageDisplay),                                                                                                                              // 212
+                               SafeInt(voltageControlActive),                                                                                                                            // 213
+                               SafeInt(ChargingVoltageTarget * 100),                                                                                                                     // 214
+                               SafeInt((ChargingVoltageTarget - getBatteryVoltage()) * 100),                                                                                             // 215
+                               SafeInt(Icv * 100),                                                                                                                                       // 216
+                               SafeInt(cv_I * 100),                                                                                                                                      // 217
                                SafeInt(capLimitMode),
-                               SafeInt(TargetVoltageMode),              //225
-                               SafeInt(TargetVoltageSetpoint, 100),     // 226
-                               SafeInt(RebulkCurrent_A, 100),           // 227
-                               SafeInt(UseFloat),                       // 228
-                               SafeInt(inIdleStage),                    // 229
-                               SafeInt(referenceFinalized),             // 230
-                               SafeInt(sessionErrorCount),              // 231
-                               SafeInt(anomalyMarginAmps, 10),          // 232  — 1 decimal, divide by 10 in JS
-                               SafeInt(anomalyAlarmThreshold),          // 233
-                               SafeInt(anomalyAlarmEnable),             // 234
-                               SafeInt(degradationThreshold, 100),      // 235
-                               SafeInt(ft_rai_total.worstWindow),       // 236
-                               SafeInt(ft_rai_total.worstSession),      // 237
-                               SafeInt(ft_rai_ina228.worstWindow),      // 238
-                               SafeInt(ft_rai_ina228.worstSession),     // 239
-                               SafeInt(ft_rai_ads_state.worstWindow),   // 240
-                               SafeInt(ft_rai_ads_state.worstSession),  // 241
-                               SafeInt(ft_rai_bmp_state.worstWindow),   // 242
-                               SafeInt(ft_rai_bmp_state.worstSession),  // 243
-                               SafeInt(ft_rai_imu.worstWindow),         // 244
-                               SafeInt(ft_rai_imu.worstSession),        // 245
-                               SafeInt(fsWriteQueueDrops),              // 246
-                               SafeInt(TempAlarmLow),                   // 247
-                               SafeInt(VoltageKd * g_fastOvDvdt, 100), // 248
-                               SafeInt(tempReadFailCount),              // 249
-                               SafeInt(tempCrcFailCount),               // 250
-                               SafeInt(tempCrcRecoveredCount),          // 251
-                               SafeInt(tempAllFFCount),                 // 252
-                               SafeInt(tempPowerOn85Count),             // 253
-                               SafeInt(tempOutOfRangeCount),            // 254
-                               SafeInt(tempRequestFailCount),           // 255
-                               SafeInt(tempConnectedFailCount),         // 256
-                               SafeInt(tempResolutionFixCount),         // 257
-                               SafeInt(tempRereadFailCount),            // 258
-                               SafeInt(tempResolutionFixCrcFailCount),  // 259
-                               SafeInt(tempEnumerateFailCount),         // 260
-                               SafeInt(warmupCeiling),                  // 261
-                               SafeInt(imu_min_moving_gentle),          // 262
-                               SafeInt(imu_min_moving_moderate),        // 263
-                               SafeInt(imu_min_moving_rough),           // 264
-                               SafeInt(imu_min_moving_extreme),         // 265
-                               SafeInt(imu_min_stat_gentle),            // 266
-                               SafeInt(imu_min_stat_moderate),          // 267
-                               SafeInt(imu_min_stat_rough),             // 268
-                               SafeInt(imu_min_stat_extreme),           // 269
-                               SafeInt(imu_heel_deviation_120s, 100),   // 270 — ×100, 2dp degrees
-                               SafeInt(imu_pitch_deviation_120s, 100),  // 271 — ×100, 2dp degrees
-                               SafeInt(imu_heading_swing_120s, 10),     // 272 — ×10, 1dp degrees; -10 = no compass data
-                               SafeInt(LoadDumpDtThresh),               // 273 — A/s threshold for load dump detection
-                               SafeInt(LoadDumpCurrentDrop),            // 274 — A current drop cap on load dump
-                               SafeInt(g_dBcur_dt, 10),                 // 275 — ×10, 1dp A/s battery current rate of change
-                               (int)g_loadDumpActive,                   // 276 — 1 if load dump feedforward is active
-                               (int)CVTuningMode,                       // 277
-                               SafeInt(cvWaveAmplitudeV, 100),          // 278 — ×100, 2dp V
-                               (int)cvWavePeriodSec,                    // 279
-                               SafeInt(cvKOvershoot, 10),               // 280 — ×10, 1dp
-                               (int)cvConsecutiveReads,                 // 281
-                               (int)ThermalTuningMode,                  // 282
-                               SafeInt(thermalWaveLowF, 10),            // 283 — ×10, 1dp °F
-                               SafeInt(thermalWaveHighF, 10),           // 284 — ×10, 1dp °F
-                               SafeInt(thermalWaveHalfPeriodMin, 10),   // 285 — ×10, 1dp min
-                               SafeInt(thermalKOvershoot, 100),         // 286 — ×100, 2dp
-                               SafeInt(thermalKUndershoot, 100),        // 287 — ×100, 2dp
-                               SafeInt(thermalSettleThreshF, 10),       // 288 — ×10, 1dp °F
-                               (int)thermalConsecutiveReads,            // 289
-                               SafeInt(thermalLiveScoreVal[0], 10000),  // 290 — ×10000
-                               SafeInt(thermalLiveScoreVal[1], 10000),  // 291 — ×10000
-                               SafeInt(thermalLiveScoreVal[2], 10000),  // 292 — ×10000
-                               SafeInt(thermalLiveScoreVal[3], 10000),  // 293 — ×10000
-                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0,  // 294
-                               SafeInt(ft_updateAccelMetrics.worstWindow / 1000),   // 295
-                               SafeInt(ft_updateAccelMetrics.worstSession / 1000)   // 296
+                               SafeInt(TargetVoltageMode),              //218
+                               SafeInt(TargetVoltageSetpoint, 100),     // 219
+                               SafeInt(RebulkCurrent_A, 100),           // 220
+                               SafeInt(UseFloat),                       // 221
+                               SafeInt(inIdleStage),                    // 222
+                               SafeInt(referenceFinalized),             // 223
+                               SafeInt(sessionErrorCount),              // 224
+                               SafeInt(anomalyMarginAmps, 10),          // 225  — 1 decimal, divide by 10 in JS
+                               SafeInt(anomalyAlarmThreshold),          // 226
+                               SafeInt(anomalyAlarmEnable),             // 227
+                               SafeInt(degradationThreshold, 100),      // 228
+                               SafeInt(ft_rai_total.worstWindow),       // 229
+                               SafeInt(ft_rai_total.worstSession),      // 230
+                               SafeInt(ft_rai_ina228.worstWindow),      // 231
+                               SafeInt(ft_rai_ina228.worstSession),     // 232
+                               SafeInt(ft_rai_ads_state.worstWindow),   // 233
+                               SafeInt(ft_rai_ads_state.worstSession),  // 234
+                               SafeInt(ft_rai_bmp_state.worstWindow),   // 235
+                               SafeInt(ft_rai_bmp_state.worstSession),  // 236
+                               SafeInt(ft_rai_imu.worstWindow),         // 237
+                               SafeInt(ft_rai_imu.worstSession),        // 238
+                               SafeInt(fsWriteQueueDrops),              // 239
+                               SafeInt(TempAlarmLow),                   // 240
+                               SafeInt(VoltageKd * g_fastOvDvdt, 100), // 241
+                               SafeInt(tempReadFailCount),              // 242
+                               SafeInt(tempCrcFailCount),               // 243
+                               SafeInt(tempCrcRecoveredCount),          // 244
+                               SafeInt(tempAllFFCount),                 // 245
+                               SafeInt(tempPowerOn85Count),             // 246
+                               SafeInt(tempOutOfRangeCount),            // 247
+                               SafeInt(tempRequestFailCount),           // 248
+                               SafeInt(tempConnectedFailCount),         // 249
+                               SafeInt(tempResolutionFixCount),         // 250
+                               SafeInt(tempRereadFailCount),            // 251
+                               SafeInt(tempResolutionFixCrcFailCount),  // 252
+                               SafeInt(tempEnumerateFailCount),         // 253
+                               SafeInt(warmupCeiling),                  // 254
+                               SafeInt(imu_min_moving_gentle),          // 255
+                               SafeInt(imu_min_moving_moderate),        // 256
+                               SafeInt(imu_min_moving_rough),           // 257
+                               SafeInt(imu_min_moving_extreme),         // 258
+                               SafeInt(imu_min_stat_gentle),            // 259
+                               SafeInt(imu_min_stat_moderate),          // 260
+                               SafeInt(imu_min_stat_rough),             // 261
+                               SafeInt(imu_min_stat_extreme),           // 262
+                               SafeInt(imu_heel_deviation_120s, 100),   // 263 — ×100, 2dp degrees
+                               SafeInt(imu_pitch_deviation_120s, 100),  // 264 — ×100, 2dp degrees
+                               SafeInt(imu_heading_swing_120s, 10),     // 265 — ×10, 1dp degrees; -10 = no compass data
+                               SafeInt(LoadDumpDtThresh),               // 266 — A/s threshold for load dump detection
+                               SafeInt(LoadDumpCurrentDrop),            // 267 — A current drop cap on load dump
+                               SafeInt(g_dBcur_dt, 10),                 // 268 — ×10, 1dp A/s battery current rate of change
+                               (int)g_loadDumpActive,                   // 269 — 1 if load dump feedforward is active
+                               (int)CVTuningMode,                       // 270
+                               SafeInt(cvWaveAmplitudeV, 100),          // 271 — ×100, 2dp V
+                               (int)cvWavePeriodSec,                    // 272
+                               SafeInt(cvKOvershoot, 10),               // 273 — ×10, 1dp
+                               (int)cvConsecutiveReads,                 // 274
+                               (int)ThermalTuningMode,                  // 275
+                               SafeInt(thermalWaveLowF, 10),            // 276 — ×10, 1dp °F
+                               SafeInt(thermalWaveHighF, 10),           // 277 — ×10, 1dp °F
+                               SafeInt(thermalWaveHalfPeriodMin, 10),   // 278 — ×10, 1dp min
+                               SafeInt(thermalKOvershoot, 100),         // 279 — ×100, 2dp
+                               SafeInt(thermalKUndershoot, 100),        // 280 — ×100, 2dp
+                               SafeInt(thermalSettleThreshF, 10),       // 281 — ×10, 1dp °F
+                               (int)thermalConsecutiveReads,            // 282
+                               SafeInt(thermalLiveScoreVal[0], 10000),  // 283 — ×10000
+                               SafeInt(thermalLiveScoreVal[1], 10000),  // 284 — ×10000
+                               SafeInt(thermalLiveScoreVal[2], 10000),  // 285 — ×10000
+                               SafeInt(thermalLiveScoreVal[3], 10000),  // 286 — ×10000
+                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0,  // 287
+                               SafeInt(ft_updateAccelMetrics.worstWindow / 1000),   // 288
+                               SafeInt(ft_updateAccelMetrics.worstSession / 1000)   // 289
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -5182,7 +5247,7 @@ void SendWifiData() {
   // PRIORITY 4: CSVData3 (settings data - every 2 seconds)
   if (!sentSomething && now - lastpayload3send >= 2000 && events.count() > 0) {
     static char *payload3 = nullptr;
-    static const size_t PAYLOAD3_SIZE = 1400;
+    static const size_t PAYLOAD3_SIZE = 1900;  // (269 fields + 1) × 7 = 1890, rounded to 1900
     if (!payload3) {
       payload3 = (char *)ps_malloc(PAYLOAD3_SIZE);  // allocated to PSRAM
       if (!payload3) {
@@ -5194,12 +5259,34 @@ void SendWifiData() {
     //WifiSendTime was 834uS before increasing csv3 payload size from 1100 to 1400     No change after.  Again, this separation into groups and worry about wifi packet size seems like AI nonsense.
 
     int payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -5221,8 +5308,7 @@ void SendWifiData() {
                                SafeInt(IgnoreTemperature),                             // 16
                                SafeInt(bmsLogic),                                      // 17
                                SafeInt(bmsLogicLevelOff),                              // 18
-                               SafeInt(FourWay),                                       // 19
-                               SafeInt(RPMScalingFactor),                              // 20
+                               SafeInt(RPMScalingFactor),                              // 19
                                SafeInt(MaximumAllowedBatteryAmps),                     // 21
                                SafeInt(BatteryVoltageSource),                          // 22
                                SafeInt(LearningUpwardEnabled),                         // 23
@@ -5239,248 +5325,249 @@ void SendWifiData() {
                                SafeInt(PidKd, 1000),                                   // 34
                                SafeInt(PidSampleDivisor),                              // 35
                                SafeInt(MaxTableValue, 100),                            // 36
-                               0,                                                      // 37 OBSOLETE MinTableValue
-                               SafeInt(MaxPenaltyPercent, 100),                        // 38
-                               SafeInt(MaxPenaltyDuration / 1000),                     // 39
-                               SafeInt(NeighborLearningFactor, 1000),                  // 40
-                               SafeInt(yyMax),                                         // 41
-                               SafeInt(LearningMemoryDuration / 86400000),             // 42
-                               SafeInt(EnableNeighborLearning),                        // 43
-                               SafeInt(EnableAmbientCorrection),                       // 44
-                               SafeInt(TuningMode),                                    // 45
-                               0,                                                      // 46 OBSOLETE LearningTableSaveInterval
-                               SafeInt(rpmCurrentTable[0]),                            // 47
-                               SafeInt(rpmCurrentTable[1]),                            // 48
-                               SafeInt(rpmCurrentTable[2]),                            // 49
-                               SafeInt(rpmCurrentTable[3]),                            // 50
-                               SafeInt(rpmCurrentTable[4]),                            // 51
-                               SafeInt(rpmCurrentTable[5]),                            // 52
-                               SafeInt(rpmCurrentTable[6]),                            // 53
-                               SafeInt(rpmCurrentTable[7]),                            // 54
-                               SafeInt(rpmCurrentTable[8]),                            // 55
-                               SafeInt(rpmCurrentTable[9]),                            // 56
-                               SafeInt(currentRPMTableIndex),                          // 57
-                               SafeInt(pidInitialized ? 1 : 0),                        // 58
-                               SafeInt(ShuntResistanceMicroOhm),                       // 59
-                               SafeInt(InvertAltAmps),                                 // 60
-                               SafeInt(InvertBattAmps),                                // 61
-                               SafeInt(MaxDuty),                                       // 62
-                               SafeInt(MinDuty),                                       // 63
-                               SafeInt(FieldResistance, 100),                          // 64
-                               SafeInt(maxPoints),                                     // 65
-                               SafeInt(AlternatorCOffset, 100),                        // 66
-                               SafeInt(BatteryCOffset, 100),                           // 67
-                               SafeInt(BatteryCapacity_Ah),                            // 68
-                               SafeInt(AmpSensorRange),                                // 69
-                               SafeInt(R_fixed, 100),                                  // 70
-                               SafeInt(Beta, 100),                                     // 71
-                               SafeInt(T0_C, 100),                                     // 72
-                               SafeInt(TempSource),                                    // 73
-                               SafeInt(IgnitionOverride),                              // 74
-                               SafeInt(FLOAT_DURATION),                                // 75
-                               SafeInt(PulleyRatio, 100),                              // 76
-                               SafeInt(BatteryCurrentSource),                          // 77
-                               SafeInt(overheatCount[0]),                              // 78
-                               SafeInt(overheatCount[1]),                              // 79
-                               SafeInt(overheatCount[2]),                              // 80
-                               SafeInt(overheatCount[3]),                              // 81
-                               SafeInt(overheatCount[4]),                              // 82
-                               SafeInt(overheatCount[5]),                              // 83
-                               SafeInt(overheatCount[6]),                              // 84
-                               SafeInt(overheatCount[7]),                              // 85
-                               SafeInt(overheatCount[8]),                              // 86
-                               SafeInt(overheatCount[9]),                              // 87
-                               SafeInt(cumulativeNoOverheatTime[0] / 1000),            // 88
-                               SafeInt(cumulativeNoOverheatTime[1] / 1000),            // 89
-                               SafeInt(cumulativeNoOverheatTime[2] / 1000),            // 90
-                               SafeInt(cumulativeNoOverheatTime[3] / 1000),            // 91
-                               SafeInt(cumulativeNoOverheatTime[4] / 1000),            // 92
-                               SafeInt(cumulativeNoOverheatTime[5] / 1000),            // 93
-                               SafeInt(cumulativeNoOverheatTime[6] / 1000),            // 94
-                               SafeInt(cumulativeNoOverheatTime[7] / 1000),            // 95
-                               SafeInt(cumulativeNoOverheatTime[8] / 1000),            // 96
-                               SafeInt(cumulativeNoOverheatTime[9] / 1000),            // 97
-                               SafeInt(totalLearningEvents),                           // 98
-                               SafeInt(totalOverheats),                                // 99
-                               SafeInt(totalSafeHours),                                // 100
-                               SafeInt(averageTableValue, 100),                        // 101
-                               SafeInt(timeSinceLastOverheat / 1000),                  // 102
-                               SafeInt(learningTargetFromRPM, 100),                    // 103
-                               SafeInt(ambientTempCorrection, 100),                    // 104
-                               SafeInt(finalLearningTarget, 100),                      // 105
-                               SafeInt(overheatingPenaltyTimer / 1000),                // 106
-                               SafeInt(overheatingPenaltyAmps, 100),                   // 107
-                               SafeInt(pidSetpoint, 100),                              // 108
-                               SafeInt(TempToUse),                                     // 109
-                               SafeInt(rpmTableRPMPoints[0]),                          // 110
-                               SafeInt(rpmTableRPMPoints[1]),                          // 111
-                               SafeInt(rpmTableRPMPoints[2]),                          // 112
-                               SafeInt(rpmTableRPMPoints[3]),                          // 113
-                               SafeInt(rpmTableRPMPoints[4]),                          // 114
-                               SafeInt(rpmTableRPMPoints[5]),                          // 115
-                               SafeInt(rpmTableRPMPoints[6]),                          // 116
-                               SafeInt(rpmTableRPMPoints[7]),                          // 117
-                               SafeInt(rpmTableRPMPoints[8]),                          // 118
-                               SafeInt(rpmTableRPMPoints[9]),                          // 119
-                               SafeInt(LearningSettlingPeriod),                        // 120
-                               SafeInt(LearningRPMChangeThreshold),                    // 121
-                               SafeInt(LearningTempHysteresis),                        // 122
-                               SafeInt(fuelTableRPM[0]),                               // 123
-                               SafeInt(fuelTableRPM[1]),                               // 124
-                               SafeInt(fuelTableRPM[2]),                               // 125
-                               SafeInt(fuelTableRPM[3]),                               // 126
-                               SafeInt(fuelTableRPM[4]),                               // 127
-                               SafeInt(fuelTableRPM[5]),                               // 128
-                               SafeInt(fuelTableRPM[6]),                               // 129
-                               SafeInt(fuelTableRPM[7]),                               // 130
-                               SafeInt(fuelTableRPM[8]),                               // 131
-                               SafeInt(fuelTableRPM[9]),                               // 132
-                               SafeInt(fuelTableGPH[0], 100),                          // 133
-                               SafeInt(fuelTableGPH[1], 100),                          // 134
-                               SafeInt(fuelTableGPH[2], 100),                          // 135
-                               SafeInt(fuelTableGPH[3], 100),                          // 136
-                               SafeInt(fuelTableGPH[4], 100),                          // 137
-                               SafeInt(fuelTableGPH[5], 100),                          // 138
-                               SafeInt(fuelTableGPH[6], 100),                          // 139
-                               SafeInt(fuelTableGPH[7], 100),                          // 140
-                               SafeInt(fuelTableGPH[8], 100),                          // 141
-                               SafeInt(fuelTableGPH[9], 100),                          // 142
-                               SafeInt(stateRevision),                                 // 143
-                               SafeInt(SetpointRampRate, 100),                         // 144
-                               SafeInt(DutyRampRate, 100),                             // 145
-                               SafeInt(SettleTimeBeforeCut),                           // 146
-                               SafeInt(TempWarnExcess, 100),                           // 147
-                               SafeInt(TempCritExcess, 100),                           // 148
-                               SafeInt(TempSustainedTimeout / 1000),                   // 149
-                               SafeInt(VoltageSpikeMargin, 100),                       // 150
-                               SafeInt(VoltageDisagreeThreshold, 100),                 // 151
-                               SafeInt(VoltageDisagreeTimeout / 1000),                 // 152
-                               SafeInt(rpmMinDutyTable[0], 100),                       // 153
-                               SafeInt(rpmMinDutyTable[1], 100),                       // 154
-                               SafeInt(rpmMinDutyTable[2], 100),                       // 155
-                               SafeInt(rpmMinDutyTable[3], 100),                       // 156
-                               SafeInt(rpmMinDutyTable[4], 100),                       // 157
-                               SafeInt(rpmMinDutyTable[5], 100),                       // 158
-                               SafeInt(rpmMinDutyTable[6], 100),                       // 159
-                               SafeInt(rpmMinDutyTable[7], 100),                       // 160
-                               SafeInt(rpmMinDutyTable[8], 100),                       // 161
-                               SafeInt(rpmMinDutyTable[9], 100),                       // 162
-                               SafeInt(rpmCapCurrentTable[0], 100),                    // 163
-                               SafeInt(rpmCapCurrentTable[1], 100),                    // 164
-                               SafeInt(rpmCapCurrentTable[2], 100),                    // 165
-                               SafeInt(rpmCapCurrentTable[3], 100),                    // 166
-                               SafeInt(rpmCapCurrentTable[4], 100),                    // 167
-                               SafeInt(rpmCapCurrentTable[5], 100),                    // 168
-                               SafeInt(rpmCapCurrentTable[6], 100),                    // 169
-                               SafeInt(rpmCapCurrentTable[7], 100),                    // 170
-                               SafeInt(rpmCapCurrentTable[8], 100),                    // 171
-                               SafeInt(rpmCapCurrentTable[9], 100),                    // 172
-                               SafeInt(VoltageKp, 100),                                // 173
-                               SafeInt(VoltageLoopInterval),                           // 174
-                               SafeInt(FIELD_COLLAPSE_DELAY),                          // 175
-                               SafeInt(SetpointRiseRate, 100),                         // 176
-                               SafeInt(SetpointFallRate, 100),                         // 177
-                               SafeInt(PIDTrackingGain, 100),                          // 178
-                               SafeInt(CAPSIZE_THRESHOLD_DEG),                         // 179
-                               SafeInt(PITCHPOLE_THRESHOLD_DEG),                       // 180
-                               SafeInt(SLAM_THRESHOLD_G, 10),                          // 181
-                               SafeInt(imuMountOrientation),                           // 182
-                               SafeInt(socInfoAvailable),                              // 183
-                               SafeInt(TailCurrent_A, 100),                            // 184
-                               SafeInt(RebulkVoltage, 100),                            // 185
-                               SafeInt(rebulkDebounceTime),                            // 186
-                               SafeInt(MinFloatTime),                                  // 187
-                               SafeInt(SOC_BlockRebulk_percent),                       // 188
-                               SafeInt(SOC_AllowRebulk_percent),                       // 189
-                               SafeInt(accelEnabled),                                  //190
-                               SafeInt(DutySlowRampRate, 100),                         // 191
-                               SafeInt(ShutdownPhase2HoldMs),                          // 192
-                               SafeInt(learningUpCount[0]),                            // 193
-                               SafeInt(learningUpCount[1]),                            // 194
-                               SafeInt(learningUpCount[2]),                            // 195
-                               SafeInt(learningUpCount[3]),                            // 196
-                               SafeInt(learningUpCount[4]),                            // 197
-                               SafeInt(learningUpCount[5]),                            // 198
-                               SafeInt(learningUpCount[6]),                            // 199
-                               SafeInt(learningUpCount[7]),                            // 200
-                               SafeInt(learningUpCount[8]),                            // 201
-                               SafeInt(learningUpCount[9]),                            // 202
-                               SafeInt(TempPIDKp, 1000),                               // 203
-                               SafeInt(TempPIDKi, 1000),                               // 204
-                               0,                                                      // 205 (was TempPIDKd, removed)
-                               SafeInt(ThermalLookaheadSec),                           // 206
-                               SafeInt(TempPIDIntervalMs),                             // 207
-                               SafeInt(TempPIDFilterAlpha, 1000),                      // 208
-                               0,                                                      // 209 (was TempPIDStaleMs, removed)
-                               0,                                                      // 210 (was TempPIDAntiWindupMarginA, removed)
-                               SafeInt(FreeInternalRam),                               // 211
-                               SafeInt(TotalInternalRam),                              // 212
-                               SafeInt(LargestInternalBlock),                          // 213
-                               SafeInt(FreePSRAM),                                     // 214
-                               SafeInt(TotalPSRAM),                                    // 215
-                               SafeInt(Heapfrag),                                      // 216
-                               0,                                                      // 217 (was TempPIDKdExternal, removed)
-                               SafeInt(VoltageKi, 100),                                // 218
-                               (int)rpmCapPowerTable[0],                               // 219
-                               (int)rpmCapPowerTable[1],                               // 220
-                               (int)rpmCapPowerTable[2],                               // 221
-                               (int)rpmCapPowerTable[3],                               // 222
-                               (int)rpmCapPowerTable[4],                               // 223
-                               (int)rpmCapPowerTable[5],                               // 224
-                               (int)rpmCapPowerTable[6],                               // 225
-                               (int)rpmCapPowerTable[7],                               // 226
-                               (int)rpmCapPowerTable[8],                               // 227
-                               (int)rpmCapPowerTable[9],                               // 228
-                               SafeInt(VoltageTrimLimit, 100),                         // 229
-                               SafeInt(ft_ReadAnalogInputs.worstWindow),        // 230 — Read Analog Inputs worst 5s window (µs)
-                               SafeInt(ft_ReadAnalogInputs.worstSession),       // 231 — Read Analog Inputs worst session (µs)
-                               SafeInt(ft_AdjustFieldLearnMode.worstWindow),    // 232 — Alternator Control Logic worst 5s window (µs)
-                               SafeInt(ft_AdjustFieldLearnMode.worstSession),   // 233 — Alternator Control Logic worst session (µs)
-                               SafeInt(ft_uploadSensorHistory.worstWindow),     // 234 — Upload Sensor History worst 5s window (µs)
-                               SafeInt(ft_uploadSensorHistory.worstSession),    // 235 — Upload Sensor History worst session (µs)
-                               SafeInt(ft_uploadBufferedRecords.worstWindow),   // 236 — Upload Buffered Records worst 5s window (µs)
-                               SafeInt(ft_uploadBufferedRecords.worstSession),  // 237 — Upload Buffered Records worst session (µs)
-                               SafeInt(ft_buildConfigPayload.worstWindow),      // 238 — Build Config Payload worst 5s window (µs)
-                               SafeInt(ft_buildConfigPayload.worstSession),     // 239 — Build Config Payload worst session (µs)
-                               SafeInt(VeTime2),                                       //240
-                               0,                                                      // 241 OBSOLETE systemIDActive
-                               0,                                                      // 242 OBSOLETE systemIDResultsReady
-                               (int)systemIDRiseDelay_ms[0],                           // 243
-                               (int)systemIDRiseDelay_ms[1],                           // 244
-                               (int)systemIDRiseDelay_ms[2],                           // 245
-                               (int)systemIDFallDelay_ms[0],                           // 246
-                               (int)systemIDFallDelay_ms[1],                           // 247
-                               (int)systemIDFallDelay_ms[2],                           // 248
-                               (int)systemIDRiseAvg_ms,                                // 249
-                               (int)systemIDFallAvg_ms,                                // 250
-                               (int)InputFilterTC,                                     // 251
-                               (int)SystemIDStepAmplitude,                             // 252
-                               SafeInt(HardOCTripAmps, 10),                            // 253 — ×10, 1 decimal
-                               SafeInt(HardOCDebounceMs),                              // 254 — raw ms
-                               SafeInt(IExcessK, 10),                                  // 255 — ×10, 1 decimal
-                               SafeInt(IExcessN),                                       // 256 — raw int
-                               SafeInt(IExcessKBleed, 100),                             // 257 — ×100, 2 decimals
-                               SafeInt(IgnoreRPM),                                      // 258
-                               SafeInt(MinRPMForField),                                 // 259
-                               0,                                                       // 260 (was ThermalTimeConstantSec, removed)
-                               SafeInt(AwBleedRate, 10),                                // 261 — ×10, 1 decimal
-                               SafeInt(AwRecoverRate, 10),                              // 262 — ×10, 1 decimal
-                               SafeInt(KSoft, 10),                                      // 263 — ×10, 1 decimal
-                               SafeInt(KHard, 10),                                      // 264 — ×10, 1 decimal
-                               SafeInt(IExcessReseedFrac, 100),                         // 265 — ×100, 2 decimal
-                               (int)AwSeedProtectMs,                                    // 266
-                               SafeInt(VoltageKd, 100),                                 // 267
-                               0,                                                       // 268 (was ThermistorFilterAlpha, removed)
-                               SafeInt(displayTempUnit),                                // 269
-                               SafeInt(WarmupRampRate, 10),                             // 270 — ×10, 1 decimal
-                               (int)nvsPhase,                                           // 271 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
-                               SafeInt(ft_saveNVSData.worstWindow),                     // 272 — saveNVSData worst 5s window (µs)
-                               SafeInt(ft_saveNVSData.worstSession),                    // 273 — saveNVSData worst session (µs)
-                               SafeInt(nvsCycleMs),                                     // 274 — last full NVS drain duration (ms)
-                               SafeInt(ft_FlushFileWriteQueue.worstWindow),             // 275 — FlushFileWriteQueue worst 5s window (µs)
-                               SafeInt(ft_FlushFileWriteQueue.worstSession),            // 276 — FlushFileWriteQueue worst session (µs)
-                               SafeInt(ft_efficiencyTracker.worstWindow),               // 277 — efficiencyTracker_tick() worst 5s window (µs)
-                               SafeInt(ft_efficiencyTracker.worstSession)               // 278 — efficiencyTracker_tick() worst session (µs)
+                               SafeInt(MaxPenaltyPercent, 100),                        // 37
+                               SafeInt(MaxPenaltyDuration / 1000),                     // 38
+                               SafeInt(NeighborLearningFactor, 1000),                  // 39
+                               SafeInt(yyMax),                                         // 40
+                               SafeInt(LearningMemoryDuration / 86400000),             // 41
+                               SafeInt(EnableNeighborLearning),                        // 42
+                               SafeInt(EnableAmbientCorrection),                       // 43
+                               SafeInt(TuningMode),                                    // 44
+                               SafeInt(rpmCurrentTable[0]),                            // 45
+                               SafeInt(rpmCurrentTable[1]),                            // 46
+                               SafeInt(rpmCurrentTable[2]),                            // 47
+                               SafeInt(rpmCurrentTable[3]),                            // 48
+                               SafeInt(rpmCurrentTable[4]),                            // 49
+                               SafeInt(rpmCurrentTable[5]),                            // 50
+                               SafeInt(rpmCurrentTable[6]),                            // 51
+                               SafeInt(rpmCurrentTable[7]),                            // 52
+                               SafeInt(rpmCurrentTable[8]),                            // 53
+                               SafeInt(rpmCurrentTable[9]),                            // 54
+                               SafeInt(currentRPMTableIndex),                          // 55
+                               SafeInt(pidInitialized ? 1 : 0),                        // 56
+                               SafeInt(ShuntResistanceMicroOhm),                       // 57
+                               SafeInt(InvertAltAmps),                                 // 58
+                               SafeInt(InvertBattAmps),                                // 59
+                               SafeInt(MaxDuty),                                       // 60
+                               SafeInt(MinDuty),                                       // 61
+                               SafeInt(FieldResistance, 100),                          // 62
+                               SafeInt(maxPoints),                                     // 63
+                               SafeInt(AlternatorCOffset, 100),                        // 64
+                               SafeInt(BatteryCOffset, 100),                           // 65
+                               SafeInt(BatteryCapacity_Ah),                            // 66
+                               SafeInt(AmpSensorRange),                                // 67
+                               SafeInt(R_fixed, 100),                                  // 68
+                               SafeInt(Beta, 100),                                     // 69
+                               SafeInt(T0_C, 100),                                     // 70
+                               SafeInt(TempSource),                                    // 71
+                               SafeInt(IgnitionOverride),                              // 72
+                               SafeInt(FLOAT_DURATION),                                // 73
+                               SafeInt(PulleyRatio, 100),                              // 74
+                               SafeInt(BatteryCurrentSource),                          // 75
+                               SafeInt(overheatCount[0]),                              // 76
+                               SafeInt(overheatCount[1]),                              // 77
+                               SafeInt(overheatCount[2]),                              // 78
+                               SafeInt(overheatCount[3]),                              // 79
+                               SafeInt(overheatCount[4]),                              // 80
+                               SafeInt(overheatCount[5]),                              // 81
+                               SafeInt(overheatCount[6]),                              // 82
+                               SafeInt(overheatCount[7]),                              // 83
+                               SafeInt(overheatCount[8]),                              // 84
+                               SafeInt(overheatCount[9]),                              // 85
+                               SafeInt(cumulativeNoOverheatTime[0] / 1000),            // 86
+                               SafeInt(cumulativeNoOverheatTime[1] / 1000),            // 87
+                               SafeInt(cumulativeNoOverheatTime[2] / 1000),            // 88
+                               SafeInt(cumulativeNoOverheatTime[3] / 1000),            // 89
+                               SafeInt(cumulativeNoOverheatTime[4] / 1000),            // 90
+                               SafeInt(cumulativeNoOverheatTime[5] / 1000),            // 91
+                               SafeInt(cumulativeNoOverheatTime[6] / 1000),            // 92
+                               SafeInt(cumulativeNoOverheatTime[7] / 1000),            // 93
+                               SafeInt(cumulativeNoOverheatTime[8] / 1000),            // 94
+                               SafeInt(cumulativeNoOverheatTime[9] / 1000),            // 95
+                               SafeInt(totalLearningEvents),                           // 96
+                               SafeInt(totalOverheats),                                // 97
+                               SafeInt(totalSafeHours),                                // 98
+                               SafeInt(averageTableValue, 100),                        // 99
+                               SafeInt(timeSinceLastOverheat / 1000),                  // 100
+                               SafeInt(learningTargetFromRPM, 100),                    // 101
+                               SafeInt(ambientTempCorrection, 100),                    // 102
+                               SafeInt(finalLearningTarget, 100),                      // 103
+                               SafeInt(overheatingPenaltyTimer / 1000),                // 104
+                               SafeInt(overheatingPenaltyAmps, 100),                   // 105
+                               SafeInt(pidSetpoint, 100),                              // 106
+                               SafeInt(TempToUse),                                     // 107
+                               SafeInt(rpmTableRPMPoints[0]),                          // 108
+                               SafeInt(rpmTableRPMPoints[1]),                          // 109
+                               SafeInt(rpmTableRPMPoints[2]),                          // 110
+                               SafeInt(rpmTableRPMPoints[3]),                          // 111
+                               SafeInt(rpmTableRPMPoints[4]),                          // 112
+                               SafeInt(rpmTableRPMPoints[5]),                          // 113
+                               SafeInt(rpmTableRPMPoints[6]),                          // 114
+                               SafeInt(rpmTableRPMPoints[7]),                          // 115
+                               SafeInt(rpmTableRPMPoints[8]),                          // 116
+                               SafeInt(rpmTableRPMPoints[9]),                          // 117
+                               SafeInt(LearningSettlingPeriod),                        // 118
+                               SafeInt(LearningRPMChangeThreshold),                    // 119
+                               SafeInt(LearningTempHysteresis),                        // 120
+                               SafeInt(fuelTableRPM[0]),                               // 121
+                               SafeInt(fuelTableRPM[1]),                               // 122
+                               SafeInt(fuelTableRPM[2]),                               // 123
+                               SafeInt(fuelTableRPM[3]),                               // 124
+                               SafeInt(fuelTableRPM[4]),                               // 125
+                               SafeInt(fuelTableRPM[5]),                               // 126
+                               SafeInt(fuelTableRPM[6]),                               // 127
+                               SafeInt(fuelTableRPM[7]),                               // 128
+                               SafeInt(fuelTableRPM[8]),                               // 129
+                               SafeInt(fuelTableRPM[9]),                               // 130
+                               SafeInt(fuelTableGPH[0], 100),                          // 131
+                               SafeInt(fuelTableGPH[1], 100),                          // 132
+                               SafeInt(fuelTableGPH[2], 100),                          // 133
+                               SafeInt(fuelTableGPH[3], 100),                          // 134
+                               SafeInt(fuelTableGPH[4], 100),                          // 135
+                               SafeInt(fuelTableGPH[5], 100),                          // 136
+                               SafeInt(fuelTableGPH[6], 100),                          // 137
+                               SafeInt(fuelTableGPH[7], 100),                          // 138
+                               SafeInt(fuelTableGPH[8], 100),                          // 139
+                               SafeInt(fuelTableGPH[9], 100),                          // 140
+                               SafeInt(stateRevision),                                 // 141
+                               SafeInt(SetpointRampRate, 100),                         // 142
+                               SafeInt(DutyRampRate, 100),                             // 143
+                               SafeInt(SettleTimeBeforeCut),                           // 144
+                               SafeInt(TempWarnExcess, 100),                           // 145
+                               SafeInt(TempCritExcess, 100),                           // 146
+                               SafeInt(TempSustainedTimeout / 1000),                   // 147
+                               SafeInt(VoltageSpikeMargin, 100),                       // 148
+                               SafeInt(VoltageDisagreeThreshold, 100),                 // 149
+                               SafeInt(VoltageDisagreeTimeout / 1000),                 // 150
+                               SafeInt(rpmMinDutyTable[0], 100),                       // 151
+                               SafeInt(rpmMinDutyTable[1], 100),                       // 152
+                               SafeInt(rpmMinDutyTable[2], 100),                       // 153
+                               SafeInt(rpmMinDutyTable[3], 100),                       // 154
+                               SafeInt(rpmMinDutyTable[4], 100),                       // 155
+                               SafeInt(rpmMinDutyTable[5], 100),                       // 156
+                               SafeInt(rpmMinDutyTable[6], 100),                       // 157
+                               SafeInt(rpmMinDutyTable[7], 100),                       // 158
+                               SafeInt(rpmMinDutyTable[8], 100),                       // 159
+                               SafeInt(rpmMinDutyTable[9], 100),                       // 160
+                               SafeInt(rpmCapCurrentTable[0], 100),                    // 161
+                               SafeInt(rpmCapCurrentTable[1], 100),                    // 162
+                               SafeInt(rpmCapCurrentTable[2], 100),                    // 163
+                               SafeInt(rpmCapCurrentTable[3], 100),                    // 164
+                               SafeInt(rpmCapCurrentTable[4], 100),                    // 165
+                               SafeInt(rpmCapCurrentTable[5], 100),                    // 166
+                               SafeInt(rpmCapCurrentTable[6], 100),                    // 167
+                               SafeInt(rpmCapCurrentTable[7], 100),                    // 168
+                               SafeInt(rpmCapCurrentTable[8], 100),                    // 169
+                               SafeInt(rpmCapCurrentTable[9], 100),                    // 170
+                               SafeInt(VoltageKp, 100),                                // 171
+                               SafeInt(VoltageLoopInterval),                           // 172
+                               SafeInt(FIELD_COLLAPSE_DELAY),                          // 173
+                               SafeInt(SetpointRiseRate, 100),                         // 174
+                               SafeInt(SetpointFallRate, 100),                         // 175
+                               SafeInt(PIDTrackingGain, 100),                          // 176
+                               SafeInt(CAPSIZE_THRESHOLD_DEG),                         // 177
+                               SafeInt(PITCHPOLE_THRESHOLD_DEG),                       // 178
+                               SafeInt(SLAM_THRESHOLD_G, 10),                          // 179
+                               SafeInt(imuMountOrientation),                           // 180
+                               SafeInt(socInfoAvailable),                              // 181
+                               SafeInt(TailCurrent_A, 100),                            // 182
+                               SafeInt(RebulkVoltage, 100),                            // 183
+                               SafeInt(rebulkDebounceTime),                            // 184
+                               SafeInt(MinFloatTime),                                  // 185
+                               SafeInt(SOC_BlockRebulk_percent),                       // 186
+                               SafeInt(SOC_AllowRebulk_percent),                       // 187
+                               SafeInt(accelEnabled),                                  //188
+                               SafeInt(DutySlowRampRate, 100),                         // 189
+                               SafeInt(ShutdownPhase2HoldMs),                          // 190
+                               SafeInt(learningUpCount[0]),                            // 191
+                               SafeInt(learningUpCount[1]),                            // 192
+                               SafeInt(learningUpCount[2]),                            // 193
+                               SafeInt(learningUpCount[3]),                            // 194
+                               SafeInt(learningUpCount[4]),                            // 195
+                               SafeInt(learningUpCount[5]),                            // 196
+                               SafeInt(learningUpCount[6]),                            // 197
+                               SafeInt(learningUpCount[7]),                            // 198
+                               SafeInt(learningUpCount[8]),                            // 199
+                               SafeInt(learningUpCount[9]),                            // 200
+                               SafeInt(TempPIDKp, 1000),                               // 201
+                               SafeInt(TempPIDKi, 1000),                               // 202
+                               SafeInt(ThermalLookaheadSec),                           // 203
+                               SafeInt(TempPIDIntervalMs),                             // 204
+                               SafeInt(TempPIDFilterAlpha, 1000),                      // 205
+                               SafeInt(FreeInternalRam),                               // 206
+                               SafeInt(TotalInternalRam),                              // 207
+                               SafeInt(LargestInternalBlock),                          // 208
+                               SafeInt(FreePSRAM),                                     // 209
+                               SafeInt(TotalPSRAM),                                    // 210
+                               SafeInt(Heapfrag),                                      // 211
+                               SafeInt(VoltageKi, 100),                                // 212
+                               (int)rpmCapPowerTable[0],                               // 213
+                               (int)rpmCapPowerTable[1],                               // 214
+                               (int)rpmCapPowerTable[2],                               // 215
+                               (int)rpmCapPowerTable[3],                               // 216
+                               (int)rpmCapPowerTable[4],                               // 217
+                               (int)rpmCapPowerTable[5],                               // 218
+                               (int)rpmCapPowerTable[6],                               // 219
+                               (int)rpmCapPowerTable[7],                               // 220
+                               (int)rpmCapPowerTable[8],                               // 221
+                               (int)rpmCapPowerTable[9],                               // 222
+                               SafeInt(VoltageTrimLimit, 100),                         // 223
+                               SafeInt(ft_ReadAnalogInputs.worstWindow),        // 224 — Read Analog Inputs worst 5s window (µs)
+                               SafeInt(ft_ReadAnalogInputs.worstSession),       // 225 — Read Analog Inputs worst session (µs)
+                               SafeInt(ft_AdjustFieldLearnMode.worstWindow),    // 226 — Alternator Control Logic worst 5s window (µs)
+                               SafeInt(ft_AdjustFieldLearnMode.worstSession),   // 227 — Alternator Control Logic worst session (µs)
+                               SafeInt(ft_uploadSensorHistory.worstWindow),     // 228 — Upload Sensor History worst 5s window (µs)
+                               SafeInt(ft_uploadSensorHistory.worstSession),    // 229 — Upload Sensor History worst session (µs)
+                               SafeInt(ft_uploadBufferedRecords.worstWindow),   // 230 — Upload Buffered Records worst 5s window (µs)
+                               SafeInt(ft_uploadBufferedRecords.worstSession),  // 231 — Upload Buffered Records worst session (µs)
+                               SafeInt(ft_buildConfigPayload.worstWindow),      // 232 — Build Config Payload worst 5s window (µs)
+                               SafeInt(ft_buildConfigPayload.worstSession),     // 233 — Build Config Payload worst session (µs)
+                               SafeInt(VeTime2),                                       //234
+                               (int)systemIDRiseDelay_ms[0],                           // 235
+                               (int)systemIDRiseDelay_ms[1],                           // 236
+                               (int)systemIDRiseDelay_ms[2],                           // 237
+                               (int)systemIDFallDelay_ms[0],                           // 238
+                               (int)systemIDFallDelay_ms[1],                           // 239
+                               (int)systemIDFallDelay_ms[2],                           // 240
+                               (int)systemIDRiseAvg_ms,                                // 241
+                               (int)systemIDFallAvg_ms,                                // 242
+                               (int)InputFilterTC,                                     // 243
+                               (int)SystemIDStepAmplitude,                             // 244
+                               SafeInt(HardOCTripAmps, 10),                            // 245 — ×10, 1 decimal
+                               SafeInt(HardOCDebounceMs),                              // 246 — raw ms
+                               SafeInt(IExcessK, 10),                                  // 247 — ×10, 1 decimal
+                               SafeInt(IExcessN),                                       // 248 — raw int
+                               SafeInt(IExcessKBleed, 100),                             // 249 — ×100, 2 decimals
+                               SafeInt(IgnoreRPM),                                      // 250
+                               SafeInt(MinRPMForField),                                 // 251
+                               SafeInt(AwBleedRate, 10),                                // 252 — ×10, 1 decimal
+                               SafeInt(AwRecoverRate, 10),                              // 253 — ×10, 1 decimal
+                               SafeInt(KSoft, 10),                                      // 254 — ×10, 1 decimal
+                               SafeInt(KHard, 10),                                      // 255 — ×10, 1 decimal
+                               SafeInt(IExcessReseedFrac, 100),                         // 256 — ×100, 2 decimal
+                               (int)AwSeedProtectMs,                                    // 257
+                               SafeInt(VoltageKd, 100),                                 // 258
+                               SafeInt(displayTempUnit),                                // 259
+                               SafeInt(WarmupRampRate, 10),                             // 260 — ×10, 1 decimal
+                               (int)nvsPhase,                                           // 261 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
+                               SafeInt(ft_saveNVSData.worstWindow),                     // 262 — saveNVSData worst 5s window (µs)
+                               SafeInt(ft_saveNVSData.worstSession),                    // 263 — saveNVSData worst session (µs)
+                               SafeInt(nvsCycleMs),                                     // 264 — last full NVS drain duration (ms)
+                               SafeInt(ft_FlushFileWriteQueue.worstWindow),             // 265 — FlushFileWriteQueue worst 5s window (µs)
+                               SafeInt(ft_FlushFileWriteQueue.worstSession),            // 266 — FlushFileWriteQueue worst session (µs)
+                               SafeInt(ft_efficiencyTracker.worstWindow),               // 267 — efficiencyTracker_tick() worst 5s window (µs)
+                               SafeInt(ft_efficiencyTracker.worstSession),              // 268 — efficiencyTracker_tick() worst session (µs)
+                               (int)systemIDActive,                                    // 269 — 0=idle, 1-9=current phase
+                               (int)systemIDResultsReady,                              // 270 — 1=results available
+                               (int)OvLayer1Enable,                                    // 270
+                               (int)OvLayer2Enable,                                    // 271
+                               (int)OvLayer3Enable,                                    // 272
+                               IExcessSigSrc,                                          // 273
+                               IExcessMA_N,                                            // 274
+                               OutputPIDSigSrc,                                        // 275
+                               TdPred,                                                  // 276
+                               VSoftMarginV,                                            // 277
+                               VHardMarginV                                             // 278
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

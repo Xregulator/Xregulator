@@ -2389,34 +2389,16 @@ void _ReadAnalogInputs_inner() {
                              iAmpHead = (iAmpHead + 1) % I_RING_SIZE;
                              if (iAmpCount < I_RING_SIZE) iAmpCount++;
 
-                             // Indices, newest-first (iAmpHead already advanced past newest)
-                             uint8_t i0 = (iAmpHead + I_RING_SIZE - 1) % I_RING_SIZE;  // newest
-                             uint8_t i1 = (iAmpHead + I_RING_SIZE - 2) % I_RING_SIZE;
-                             uint8_t i2 = (iAmpHead + I_RING_SIZE - 3) % I_RING_SIZE;
-                             uint8_t i3 = iAmpHead;  // oldest
-
-                             if (iAmpCount >= 2) {
-                               g_iMA2 = (iAmpRing[i0].val + iAmpRing[i1].val) * 0.5f;
-                               uint32_t dt2 = iAmpRing[i0].ts - iAmpRing[i1].ts;
-                               g_dIdt2 = (dt2 > 0) ? (iAmpRing[i0].val - iAmpRing[i1].val)
-                                                       / ((float)dt2 * 0.001f)
-                                                   : 0.0f;
-                             } else {
-                               g_iMA2 = MeasuredAmps;
-                               g_dIdt2 = 0.0f;
-                             }
-
-                             if (iAmpCount >= 4) {
-                               g_iMA4 = (iAmpRing[i0].val + iAmpRing[i1].val
-                                         + iAmpRing[i2].val + iAmpRing[i3].val)
-                                        * 0.25f;
-                               uint32_t dt4 = iAmpRing[i0].ts - iAmpRing[i3].ts;
-                               g_dIdt4 = (dt4 > 0) ? (iAmpRing[i0].val - iAmpRing[i3].val)
-                                                       / ((float)dt4 * 0.001f)
-                                                   : 0.0f;
-                             } else {
-                               g_iMA4 = g_iMA2;
-                               g_dIdt4 = g_dIdt2;
+                             // MA(N) — user-configurable window, clamped to available samples
+                             {
+                               int n = IExcessMA_N < (int)iAmpCount ? IExcessMA_N : (int)iAmpCount;
+                               if (n < 1) n = 1;
+                               float sum = 0.0f;
+                               for (int k = 0; k < n; k++) {
+                                 uint8_t idx = (iAmpHead + I_RING_SIZE - 1 - k) % I_RING_SIZE;
+                                 sum += iAmpRing[idx].val;
+                               }
+                               g_iMA_N = sum / (float)n;
                              }
                            }
 
