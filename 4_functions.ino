@@ -1607,6 +1607,26 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     VoltageKd = readFile(LittleFS, "/VoltageKd.txt").toFloat();
   }
+  if (!fsExists("/VoltageDWindowMs.txt")) {
+    writeFile(LittleFS, "/VoltageDWindowMs.txt", String(VoltageDWindowMs).c_str());
+  } else {
+    VoltageDWindowMs = (uint16_t)readFile(LittleFS, "/VoltageDWindowMs.txt").toInt();
+  }
+  if (!fsExists("/ProtectionProxGateV.txt")) {
+    writeFile(LittleFS, "/ProtectionProxGateV.txt", String(ProtectionProxGateV, 2).c_str());
+  } else {
+    ProtectionProxGateV = readFile(LittleFS, "/ProtectionProxGateV.txt").toFloat();
+  }
+  if (!fsExists("/SlopeBleedThresh.txt")) {
+    writeFile(LittleFS, "/SlopeBleedThresh.txt", String(SlopeBleedThresh, 3).c_str());
+  } else {
+    SlopeBleedThresh = readFile(LittleFS, "/SlopeBleedThresh.txt").toFloat();
+  }
+  if (!fsExists("/SlopeBleedK.txt")) {
+    writeFile(LittleFS, "/SlopeBleedK.txt", String(SlopeBleedK, 1).c_str());
+  } else {
+    SlopeBleedK = readFile(LittleFS, "/SlopeBleedK.txt").toFloat();
+  }
   if (!fsExists("/PidKp.txt")) {
     writeFile(LittleFS, "/PidKp.txt", String(PidKp, 3).c_str());
   } else {
@@ -1836,6 +1856,21 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/OutputPIDSigSrc.txt", String(OutputPIDSigSrc).c_str());
   } else {
     OutputPIDSigSrc = constrain(readFile(LittleFS, "/OutputPIDSigSrc.txt").toInt(), 0, 2);
+  }
+  if (!fsExists("/OutputPIDMA_N.txt")) {
+    writeFile(LittleFS, "/OutputPIDMA_N.txt", String(OutputPIDMA_N).c_str());
+  } else {
+    OutputPIDMA_N = constrain(readFile(LittleFS, "/OutputPIDMA_N.txt").toInt(), 1, I_RING_SIZE);
+  }
+  if (!fsExists("/OutputPIDFilterTC.txt")) {
+    writeFile(LittleFS, "/OutputPIDFilterTC.txt", String(OutputPIDFilterTC).c_str());
+  } else {
+    OutputPIDFilterTC = readFile(LittleFS, "/OutputPIDFilterTC.txt").toFloat();
+  }
+  if (!fsExists("/VoltageFilterTC.txt")) {
+    writeFile(LittleFS, "/VoltageFilterTC.txt", String(VoltageFilterTC).c_str());
+  } else {
+    VoltageFilterTC = readFile(LittleFS, "/VoltageFilterTC.txt").toFloat();
   }
   if (!fsExists("/TdPred.txt")) {
     writeFile(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());

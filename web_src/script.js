@@ -213,7 +213,7 @@ const CSV1_FIELDS = [
     "ch1_worst_at",               // 64
     "ch1_over2x_at",              // 65
     "ch1_n_at",                   // 66
-    "BatteryV_filtered",          // 67
+    "BatteryV_raw",               // 67
     "MeasuredAmps_filtered",      // 68
     "iExcessCount",               // 69
     "inaOVCount",                 // 70
@@ -281,6 +281,8 @@ const CSV1_FIELDS = [
     "ft_updateSensorWindow_ses",               // 132
     "ft_checkTimeSync_win",                    // 133
     "ft_checkTimeSync_ses",                    // 134
+    "voltageTarget",                           // 135
+    "Icv",                                     // 136
 ];
 const CSV2_FIELDS = [
     "IBVMax",                           // 0
@@ -854,6 +856,13 @@ const CSV3_FIELDS = [
     "TdPred",                           // 276
     "VSoftMarginV",                     // 277
     "VHardMarginV",                     // 278
+    "OutputPIDMA_N",                    // 279
+    "OutputPIDFilterTC",                // 280
+    "VoltageFilterTC",                  // 281
+    "VoltageDWindowMs",                 // 282
+    "ProtectionProxGateV",             // 283
+    "SlopeBleedThresh",                // 284
+    "SlopeBleedK",                     // 285
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2528,14 +2537,12 @@ function processCSVDataOptimized(data) {
             plotInterp.pid.arrivalTime = performance.now();
         }
 
-        // CV voltage tuning plot data.
-        // IBV and BatteryV_filtered are CSV1 — read directly from `data`.
-        // voltageTarget and Icv are CSV2 — arrive via cvPlotCache updated by the CSV2 handler.
+        // CV voltage tuning plot data — all four series now come from CSV1 (fast rate).
         if (cvTuningData) {
-            const voltTarget = cvPlotCache.voltageTarget !== null ? cvPlotCache.voltageTarget / 100 : null;
-            const filtV      = 'BatteryV_filtered' in data ? parseFloat(data.BatteryV_filtered) / 100 : null;
+            const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
+            const battV      = 'BatteryV_raw' in data ? parseFloat(data.BatteryV_raw) / 100 : null;
             const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
-            const icv        = cvPlotCache.Icv !== null ? cvPlotCache.Icv / 100 : null;
+            const icv        = 'Icv' in data ? parseFloat(data.Icv) / 100 : null;
             const last_cv = cvTuningData[1].length - 1;
             const prevY_cv = [
                 cvTuningData[1][last_cv], cvTuningData[2][last_cv],
@@ -2549,11 +2556,11 @@ function processCSVDataOptimized(data) {
             }
             const last = cvTuningData[1].length - 1;
             cvTuningData[1][last] = voltTarget;
-            cvTuningData[2][last] = filtV;
+            cvTuningData[2][last] = battV;
             cvTuningData[3][last] = ibvRaw;
             cvTuningData[4][last] = icv;
             plotInterp.cv.prevY = prevY_cv;
-            plotInterp.cv.nextY = [voltTarget, filtV, ibvRaw, icv];
+            plotInterp.cv.nextY = [voltTarget, battV, ibvRaw, icv];
             plotInterp.cv.arrivalTime = performance.now();
         }
 
@@ -2928,10 +2935,14 @@ function updateAllEchosOptimized(data) {
         { key: 'OvLayer3Enable',    id: 'OvLayer3Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'TdPred',            id: 'TdPred_echo',            transform: v => v.toFixed(3) },
         { key: 'VSoftMarginV',      id: 'VSoftMarginV_echo',      transform: v => v.toFixed(3) },
+        { key: 'VSoftMarginV',      id: 'VSoftMarginV_echo2',     transform: v => v.toFixed(3) },
         { key: 'VHardMarginV',      id: 'VHardMarginV_echo',      transform: v => v.toFixed(3) },
-        { key: 'IExcessSigSrc',     id: 'IExcessSigSrc_echo',     transform: v => (['MA(N)', 'EMA(TC)', 'Raw'][v] ?? v) },
-        { key: 'IExcessMA_N',       id: 'IExcessMA_N_echo',       transform: v => Math.round(v) },
-        { key: 'OutputPIDSigSrc',   id: 'OutputPIDSigSrc_echo',   transform: v => (['EMA(TC)', 'MA(N)', 'Raw'][v] ?? v) },
+        { key: 'KHard',             id: 'KHard_echo2',            transform: v => v.toFixed(1) },
+        { key: 'IExcessSigSrc',       id: 'IExcessSigSrc_echo',       transform: v => (['MA(N)', 'EMA(TC)', 'Raw'][v] ?? v) },
+        { key: 'IExcessMA_N',         id: 'IExcessMA_N_echo',         transform: v => Math.round(v) },
+        { key: 'OutputPIDSigSrc',     id: 'OutputPIDSigSrc_echo',     transform: v => (['EMA(TC)', 'MA(N)', 'Raw'][v] ?? v) },
+        { key: 'OutputPIDMA_N',       id: 'OutputPIDMA_N_echo',       transform: v => Math.round(v) },
+        { key: 'OutputPIDFilterTC',   id: 'OutputPIDFilterTC_echo',   transform: v => v },
         { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
@@ -2942,9 +2953,16 @@ function updateAllEchosOptimized(data) {
         { key: 'anomalyAlarmEnable', id: 'anomalyAlarmEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'degradationThreshold', id: 'degradationThreshold_echo', transform: v => (v).toFixed(2) },
         { key: 'fsWriteQueueDropsID', id: 'fsWriteQueueDrops', transform: v => v },
-        { key: 'InputFilterTC', id: 'InputFilterTC_echo', transform: v => v },
-        { key: 'InputFilterTC', id: 'InputFilterTC_ID', transform: v => v },
-        { key: 'InputFilterTC', id: 'InputFilterTC_echo2', transform: v => (v / 1000).toFixed(3) },
+        { key: 'InputFilterTC', id: 'InputFilterTC_echo',      transform: v => v },
+        { key: 'InputFilterTC', id: 'InputFilterTC_ID',        transform: v => v },
+        { key: 'InputFilterTC', id: 'InputFilterTC_echo_grp3', transform: v => v },
+        { key: 'OutputPIDFilterTC', id: 'OutputPIDFilterTC_echo_pid', transform: v => v },
+        { key: 'VoltageFilterTC',   id: 'VoltageFilterTC_echo',       transform: v => v },
+        { key: 'VoltageFilterTC',   id: 'VoltageFilterTC_echo_cv',    transform: v => v },
+        { key: 'VoltageDWindowMs',      id: 'VoltageDWindowMs_echo',          transform: v => v },
+        { key: 'ProtectionProxGateV',   id: 'ProtectionProxGateV_echo',       transform: v => (v / 100).toFixed(2) },
+        { key: 'SlopeBleedThresh',      id: 'SlopeBleedThresh_echo',          transform: v => (v / 100).toFixed(2) },
+        { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
@@ -3607,6 +3625,39 @@ function resetTuningLog() {
         .catch(() => {});
 }
 
+function commitCVTuningScore() {
+    const btn = document.getElementById('commitCVTuningBtn');
+    const status = document.getElementById('cvTuningCommitStatus');
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = 'Sending…';
+    const pw = currentAdminPassword || '';
+    fetch(buildURL('/get?commitCVTuningScore=1&password=' + encodeURIComponent(pw)))
+        .then(r => {
+            if (status) status.textContent = 'Committed — check Score Log.';
+            setTimeout(() => { if (status) status.textContent = ''; }, 4000);
+            fetchCVTuningLog();
+        })
+        .catch(() => {
+            if (btn) btn.disabled = false;
+            if (status) status.textContent = 'Send failed.';
+        });
+}
+
+function restartCVTest() {
+    const status = document.getElementById('cvTuningCommitStatus');
+    if (status) status.textContent = 'Restarting…';
+    const pw = currentAdminPassword || '';
+    fetch(buildURL('/get?restartCVTest=1&password=' + encodeURIComponent(pw)))
+        .then(() => {
+            if (status) status.textContent = 'Restarted.';
+            setTimeout(() => { if (status) status.textContent = ''; }, 3000);
+            fetchCVTuningLog();
+        })
+        .catch(() => {
+            if (status) status.textContent = 'Send failed.';
+        });
+}
+
 // Poll while the tuning score section is open
 document.addEventListener('DOMContentLoaded', () => {
     const section = document.getElementById('tuningScoreSection');
@@ -3614,7 +3665,7 @@ document.addEventListener('DOMContentLoaded', () => {
     section.addEventListener('toggle', e => {
         if (e.target.open) {
             fetchTuningLog();
-            _tuningLogPollTimer = setInterval(fetchTuningLog, 4000);
+            _tuningLogPollTimer = setInterval(fetchTuningLog, 1000);
         } else {
             clearInterval(_tuningLogPollTimer);
             _tuningLogPollTimer = null;
@@ -3652,13 +3703,24 @@ function renderCVTuningLog(data) {
             const ttgl = document.getElementById('cvTestCycleCount');
             if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
             if (ttgl) ttgl.textContent = data.tc;
-            // Push live score into the floating test panel
+            // Push cycle count into the floating test panel (phase slot is used for Δ voltage)
             if (_testPanelCurrentTest === 'cv') {
-                updateTestPanelScore(data.ts, (data.tc || 0) + ' cycles',
-                    (data.tc || 0) === 0 ? 'Ring-in' : 'Scoring');
+                updateTestPanelScore(undefined, (data.tc || 0) + ' cycles', undefined);
             }
         } else {
             testRow.style.display = 'none';
+        }
+    }
+
+    // Commit section: show when CV test is active, enable button when ≥1 scored HIGH cycle
+    const cvCommitSection = document.getElementById('cvTuningCommitSection');
+    if (cvCommitSection) {
+        cvCommitSection.style.display = data.ta ? '' : 'none';
+        if (data.ta) {
+            const countEl = document.getElementById('cvScoredHighCount');
+            const btnEl   = document.getElementById('commitCVTuningBtn');
+            if (countEl) countEl.textContent = data.tc || 0;
+            if (btnEl)   btnEl.disabled = !((data.tc || 0) >= 1);
         }
     }
 
@@ -3668,7 +3730,6 @@ function renderCVTuningLog(data) {
     const curVkd = parseFloat(document.getElementById('VoltageKd_echo')?.textContent);
     const curWa  = parseFloat(document.getElementById('cvWaveAmplitudeV_echo')?.textContent);
     const curWp  = parseInt(document.getElementById('cvWavePeriodSec_echo')?.textContent);
-    const curKo  = parseFloat(document.getElementById('cvKOvershoot_echo')?.textContent);
     const curCr  = parseInt(document.getElementById('cvConsecutiveReads_echo')?.textContent);
 
     const records = (data.rec || []).slice();
@@ -3676,16 +3737,16 @@ function renderCVTuningLog(data) {
     if (!tbody) return;
 
     tbody.innerHTML = records.map(r => {
-        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 12 ? '#eab308' : '#ef4444';
+        const scoreColor = r.s < 2 ? '#22c55e' : r.s < 10 ? '#eab308' : '#ef4444';
         const isMatch = !isNaN(curVkp) &&
             Math.abs(r.vkp - curVkp) < 0.001 &&
             Math.abs(r.vki - curVki) < 0.001 &&
             Math.abs(r.vkd - curVkd) < 0.01  &&
             Math.abs(r.wa  - curWa)  < 0.005 &&
-            r.wp === curWp && Math.abs(r.ko - curKo) < 0.05 && r.cr === curCr;
+            r.wp === curWp && r.cr === curCr;
         const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
 
-        const lowScoreColor = (r.ls || 0) < 5 ? '#22c55e' : (r.ls || 0) < 12 ? '#eab308' : '#ef4444';
+        const lowScoreColor = (r.ls || 0) < 2 ? '#22c55e' : (r.ls || 0) < 10 ? '#eab308' : '#ef4444';
         return `<tr style="${rowStyle}">
             <td style="padding:2px 4px;">${r.n}</td>
             <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
@@ -3867,8 +3928,9 @@ let cvTuningPlotResizeObserver = null;
 
 // Cache of last-seen CSV2 values for the CV tuning plot.
 // voltageTarget and Icv are CSV2 — not available in processCSVDataOptimized's data object.
-// BatteryV_filtered is CSV1 and is read directly from data; it is NOT cached here.
+// BatteryV_raw is CSV1 and is read directly from data; it is NOT cached here.
 let cvPlotCache = { voltageTarget: null, Icv: null };
+let _lastBatteryV = null;  // last CSV1 BatteryV_raw in volts (÷100 applied)
 
 // Local axis range state — JS only, not firmware-persisted.
 let cvXTime    = null;   // null = use global xTime
@@ -3879,7 +3941,7 @@ let cvAmpsMax  = null;
 
 let cvTuningSeriesVisible = {
     voltTarget: true,
-    filtV:      true,
+    battV:      true,
     ibv:        true,
     icv:        true,
 };
@@ -3896,7 +3958,7 @@ function initCVTuningDataStructures() {
     cvTuningData = [
         [...xAxisData],
         new Array(maxPoints).fill(null),   // [1] voltageTarget (V)
-        new Array(maxPoints).fill(null),   // [2] BatteryV_filtered / filtV (V)
+        new Array(maxPoints).fill(null),   // [2] BatteryV_raw / battV (V)
         new Array(maxPoints).fill(null),   // [3] IBV raw (V)
         new Array(maxPoints).fill(null),   // [4] Icv (A) — right axis
     ];
@@ -3923,7 +3985,7 @@ function initCVTuningPlot() {
             },
             {
                 label:  'Filtered Voltage',
-                stroke: cvTuningSeriesVisible.filtV ? '#4CAF50' : 'transparent',
+                stroke: cvTuningSeriesVisible.battV ? '#4CAF50' : 'transparent',
                 width:  2,
                 scale:  'volts',
             },
@@ -3987,7 +4049,7 @@ function createCVTuningLegend() {
 
     const items = [
         { key: 'voltTarget', label: 'Voltage Target', color: '#FF6B6B', idx: 1 },
-        { key: 'filtV',      label: 'Filtered Voltage', color: '#4CAF50', idx: 2 },
+        { key: 'battV',      label: 'Battery Voltage',  color: '#4CAF50', idx: 2 },
         { key: 'ibv',        label: 'IBV (raw)',         color: '#B0BEC5', idx: 3 },
         { key: 'icv',        label: 'Icv (A)',           color: '#FFA726', idx: 4 },
     ];
@@ -5454,6 +5516,9 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("VMGUseTrueWind_checkbox", data.VMGUseTrueWind, "VMGUseTrueWind");
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
+        updateCheckbox("OvLayer1Enable_checkbox", data.OvLayer1Enable, "OvLayer1Enable");
+        updateCheckbox("OvLayer2Enable_checkbox", data.OvLayer2Enable, "OvLayer2Enable");
+        updateCheckbox("OvLayer3Enable_checkbox", data.OvLayer3Enable, "OvLayer3Enable");
         if (data.IExcessSigSrc !== undefined)   updateTripleBtn('iExcessSigSrc_',   data.IExcessSigSrc);
         if (data.OutputPIDSigSrc !== undefined)  updateTripleBtn('outputPIDSigSrc_', data.OutputPIDSigSrc);
         // // Apply the ESP32 state to the plot system
@@ -5562,6 +5627,10 @@ function setIExcessSigSrc(val) {
 function setOutputPIDSigSrc(val) {
     updateTripleBtn('outputPIDSigSrc_', val);
     submitSimpleParam('OutputPIDSigSrc', val);
+    const nRow  = document.getElementById('outputPIDMA_N_row');
+    const tcRow = document.getElementById('outputPIDFilterTC_row');
+    if (nRow)  nRow.style.display  = (val === 1) ? '' : 'none';
+    if (tcRow) tcRow.style.display = (val === 0) ? '' : 'none';
 }
 
 function getLiveBatteryV() {
@@ -6108,7 +6177,7 @@ window.addEventListener("load", function () {
                     else if (key === "AlternatorTemperatureF") {
                         newTextContent = toDisplayTemp(value / 100).toFixed(1);
                     }
-                    else if (["BatteryV", "uTargetAmps", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "BatteryV_filtered", "MeasuredAmps_filtered"].includes(key)) {
+                    else if (["BatteryV", "uTargetAmps", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "BatteryV_raw", "MeasuredAmps_filtered"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -6288,7 +6357,7 @@ window.addEventListener("load", function () {
                 ["ina_avg_at_ID", "ina_avg_at"],
                 ["ina_worst_at_ID", "ina_worst_at"],
                 ["ina_over2x_at_ID", "ina_over2x_at"],
-                ["BatteryV_filtered_ID", "BatteryV_filtered"],
+                ["BatteryV_rawID", "BatteryV_raw"],
                 ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"]
             ];
 
@@ -6296,6 +6365,10 @@ window.addEventListener("load", function () {
             updateFields(criticalFields);
             processCSVDataOptimized(data); // this is for plotting
             updateIMUAlignmentDisplayFromData(data);
+            if (data.BatteryV_raw !== undefined) {
+                _lastBatteryV = data.BatteryV_raw / 100;
+                if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
+            }
 
             // Update other stuff every 4th cycle
             if (window.updateCounter % 4 === 0) {
@@ -6371,8 +6444,11 @@ window.addEventListener("load", function () {
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
 
             // Feed CV tuning plot cache — voltageTarget and Icv are CSV2-only;
-            // BatteryV_filtered is CSV1 and is read directly in processCSVDataOptimized.
-            if (data.voltageTarget !== undefined)    cvPlotCache.voltageTarget    = parseFloat(data.voltageTarget);
+            // BatteryV_raw is CSV1 and is read directly in processCSVDataOptimized.
+            if (data.voltageTarget !== undefined) {
+                cvPlotCache.voltageTarget = parseFloat(data.voltageTarget);
+                if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
+            }
             if (data.Icv !== undefined)              cvPlotCache.Icv              = parseFloat(data.Icv);
 
             if (data.stateRevision !== undefined) {
@@ -10674,7 +10750,7 @@ function cvBinToCsv(d) {
         'iMeas_A', 'duty_pct',
         'fastOvActive', 'voltLoopFired', 'cvActive', 'softClamp', 'hardClamp',
         'rpm',
-        'battV_filt_V', 'iMeas_filt_A', 'ch1_interval_ms', 'iExcess',
+        'battV_filt_V', 'iMeas_filt_A', 'ch1_last_ms', 'iExcess',
         'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
         'cvDSlope_Vps', 'awState',
     ].join(','));
@@ -10825,6 +10901,13 @@ function updateTestActivePanel() {
         return;
     }
 
+    // Plant Delay test uses its own modal — keep the floating panel hidden
+    if (testName === 'sysid') {
+        overlay.style.display = 'none';
+        _testPanelCurrentTest = testName;
+        return;
+    }
+
     overlay.style.display = '';
     testPanelInitDrag();
 
@@ -10834,9 +10917,14 @@ function updateTestActivePanel() {
         const meta = TEST_PANEL_META[testName] || { title: 'Test Active', dot: '#fff' };
         document.getElementById('test-panel-title').textContent  = meta.title;
         document.getElementById('test-panel-dot').style.color    = meta.dot;
-        document.getElementById('test-panel-phase').textContent  = 'Phase: —';
         document.getElementById('test-panel-cycles').textContent = 'Cycles: —';
         document.getElementById('test-panel-score').textContent  = 'Score: —';
+        const isSysid = (testName === 'sysid');
+        const isCv    = (testName === 'cv');
+        // CV uses the phase slot for live Δ voltage; sysid/cv don't use score
+        document.getElementById('test-panel-phase').textContent  = isCv ? 'Δ  — V' : 'Phase: —';
+        document.getElementById('test-panel-cycles').style.display = isSysid ? 'none' : '';
+        document.getElementById('test-panel-score').style.display  = (isSysid || isCv) ? 'none' : '';
         updateTestPanelParams(testName);
         ensureTestPollRunning(testName);
     }
@@ -10853,8 +10941,19 @@ function updateTestPanelParams(testName) {
     } else if (testName === 'thermal') {
         el.textContent = g('thermalWaveLowF_echo') + '°F → ' + g('thermalWaveHighF_echo') + '°F\n' + g('thermalWaveHalfPeriodMin_echo') + ' min half-period';
     } else {
-        el.textContent = '';
+        el.innerHTML = '<button onclick="document.getElementById(\'sysid-modal-overlay\').style.display=\'block\'" class="btn-secondary" style="width:100%;font-size:0.88em;">Show test details ↗</button>';
     }
+}
+
+function updateCVPanelDelta() {
+    if (cvPlotCache.voltageTarget === null || _lastBatteryV === null) return;
+    const el = document.getElementById('test-panel-phase');
+    if (!el) return;
+    const delta = _lastBatteryV - (cvPlotCache.voltageTarget / 100);
+    const sign  = delta >= 0 ? '+' : '';
+    const abs   = Math.abs(delta);
+    const color = abs < 0.05 ? '#22c55e' : abs < 0.15 ? '#eab308' : '#ef4444';
+    el.innerHTML = 'Δ <span style="color:' + color + ';font-weight:600;">' + sign + delta.toFixed(3) + ' V</span>';
 }
 
 // Called by the three render functions to push live score data into the panel
@@ -10871,7 +10970,7 @@ function updateTestPanelScore(score, cycles, phase) {
 function ensureTestPollRunning(testName) {
     if (testName === 'curr' && !_tuningLogPollTimer) {
         fetchTuningLog();
-        _tuningLogPollTimer = setInterval(fetchTuningLog, 4000);
+        _tuningLogPollTimer = setInterval(fetchTuningLog, 1000);
     } else if (testName === 'cv' && !_cvTuningLogPollTimer) {
         fetchCVTuningLog();
         _cvTuningLogPollTimer = setInterval(fetchCVTuningLog, 4000);
@@ -11034,6 +11133,28 @@ function closeSystemIDModal() {
     if (sysidPollInterval)      { clearInterval(sysidPollInterval);      sysidPollInterval = null; }
 }
 
+function sysidRunAgain() {
+    if (sysidPollInterval) { clearInterval(sysidPollInterval); sysidPollInterval = null; }
+    const applyBtn = document.getElementById('sysid-apply-btn');
+    if (applyBtn) applyBtn.style.display = '';
+    sysidShowScreen('preflight');
+    sysidUpdatePreflight();
+    if (!sysidPreflightInterval) {
+        sysidPreflightInterval = setInterval(sysidUpdatePreflight, 1000);
+    }
+}
+
+function sysidShowAborted(msg) {
+    const tbody = document.getElementById('sysid-results-body');
+    if (tbody) tbody.innerHTML = '';
+    document.getElementById('sysid-results-summary').textContent = '';
+    const warnEl = document.getElementById('sysid-results-warning');
+    if (warnEl) { warnEl.textContent = msg; warnEl.style.display = ''; }
+    const applyBtn = document.getElementById('sysid-apply-btn');
+    if (applyBtn) applyBtn.style.display = 'none';
+    sysidShowScreen('results');
+}
+
 function sysidShowScreen(name) {
     document.getElementById('sysid-screen-preflight').style.display = (name === 'preflight') ? '' : 'none';
     document.getElementById('sysid-screen-progress').style.display  = (name === 'progress')  ? '' : 'none';
@@ -11102,7 +11223,13 @@ function sysidStartProgressPoll() {
     const holdMs = Math.max(15 * tcMs, 5000);
     const maxWaitMs = (SYSID_STABILIZE_TIMEOUT_HINT + 7 * holdMs + 10000);
     let elapsed = 0;
+    let sysidEverActive = false;
     const pollMs = 400;
+
+    // Zero out the results-ready DOM field so a stale 1 from the previous run
+    // can't short-circuit the poll before the firmware's first CSV3 update arrives.
+    const rrEl = document.getElementById('systemIDResultsReady_ID');
+    if (rrEl) rrEl.textContent = '0';
 
     // Reset all phase rows
     for (let i = 1; i <= 9; i++) {
@@ -11116,6 +11243,8 @@ function sysidStartProgressPoll() {
 
         const phase = parseInt(getField("systemIDActive_ID") ?? 0);
         const ready = parseInt(getField("systemIDResultsReady_ID") ?? 0);
+
+        if (phase > 0) sysidEverActive = true;
 
         // Mark completed phases
         for (const [p, name] of Object.entries(SYSID_PHASE_NAMES)) {
@@ -11157,6 +11286,16 @@ function sysidStartProgressPoll() {
             return;
         }
 
+        // Protection layer fired mid-test — firmware aborted it, results are invalid
+        if (phase === 0 && ready !== 1 && sysidEverActive) {
+            clearInterval(sysidPollInterval); sysidPollInterval = null;
+            sysidShowAborted(
+                '⚠ Test aborted — a protection layer (RPM drop, overcurrent, or overvoltage) fired mid-test. ' +
+                'Check the serial console for details. Bring the engine to stable RPM and run again.'
+            );
+            return;
+        }
+
         if (elapsed > maxWaitMs) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
             alert("SystemID timed out after " + (elapsed / 1000).toFixed(0) + "s. Check serial console for details.");
@@ -11182,7 +11321,11 @@ function showSystemIDResults() {
     const ra = parseFloat(getField("systemIDRiseAvg_ID") ?? -1);
     const fa = parseFloat(getField("systemIDFallAvg_ID") ?? -1);
 
-    sysidSuggestedTC = Math.max(ra, fa);
+    // Recommended TC = highest single trial across all rise and fall measurements.
+    // Using the worst-case individual reading (not the average) ensures the filter
+    // is always long enough to cover the slowest response the plant actually showed.
+    const allValid = [...r, ...f].filter(v => v >= 0);
+    sysidSuggestedTC = allValid.length > 0 ? Math.max(...allValid) : 0;
 
     // Build results table
     const tbody = document.getElementById('sysid-results-body');
@@ -11203,10 +11346,13 @@ function showSystemIDResults() {
     tbody.appendChild(avgRow);
 
     document.getElementById('sysid-results-summary').innerHTML =
-        'Suggested Input Filter TC: <strong style="color:#4a9eff;">' + sysidSuggestedTC.toFixed(0) + ' ms</strong>' +
-        ' (max of rise/fall average)';
+        'Recommended TC: <strong style="color:#4a9eff;">' + sysidSuggestedTC.toFixed(0) + ' ms</strong>' +
+        ' (highest single trial)';
 
-    // Variance check: if spread within rise or fall trials > 35%, flag it
+    const applyBtn = document.getElementById('sysid-apply-btn');
+    if (applyBtn) { applyBtn.style.display = ''; applyBtn.textContent = 'Set All Filters = ' + sysidSuggestedTC.toFixed(0) + ' ms'; }
+
+    // Variance check: if spread within rise or fall trials > 25%, recommend re-run
     const warnEl = document.getElementById('sysid-results-warning');
     const validR = r.filter(v => v >= 0);
     const validF = f.filter(v => v >= 0);
@@ -11217,9 +11363,9 @@ function showSystemIDResults() {
     }
     const rSpread = spreadPct(validR);
     const fSpread = spreadPct(validF);
-    if (rSpread > 35 || fSpread > 35) {
+    if (rSpread > 25 || fSpread > 25) {
         warnEl.textContent = '⚠ High variance between trials (rise: ' + rSpread.toFixed(0) + '%, fall: ' + fSpread.toFixed(0) + '%). ' +
-            'Try again, or try again with different parameters if this happens multiple times.';
+            'Results are unreliable — run the test again.';
         warnEl.style.display = '';
     } else {
         warnEl.style.display = 'none';
@@ -11230,14 +11376,26 @@ function showSystemIDResults() {
 
 function applySystemIDResults() {
     if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
-    fetch(buildURL("/get?InputFilterTC=" + encodeURIComponent(sysidSuggestedTC) +
-        "&password=" + encodeURIComponent(currentAdminPassword)))
+    const tc = encodeURIComponent(sysidSuggestedTC);
+    const pw = encodeURIComponent(currentAdminPassword);
+    fetch(buildURL("/get?InputFilterTC=" + tc + "&password=" + pw))
+        .then(() => fetch(buildURL("/get?OutputPIDFilterTC=" + tc + "&password=" + pw)))
+        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tc + "&password=" + pw)))
         .then(() => {
-            console.log("InputFilterTC updated to " + sysidSuggestedTC + " ms");
+            console.log("All filter TCs updated to " + sysidSuggestedTC + " ms");
             closeSystemIDModal();
         })
-        .catch(err => console.error("InputFilterTC update failed:", err));
+        .catch(err => console.error("Filter TC update failed:", err));
 }
 
+
+// Auto-login via URL parameter for local automation (e.g. SwiftBar shortcut)
+window.addEventListener('load', function () {
+  const autopass = new URLSearchParams(window.location.search).get('autopass');
+  if (autopass) {
+    const el = document.getElementById('admin_password');
+    if (el) { el.value = autopass; setAdminPassword(); }
+  }
+});
 
 /* XREG_END */

@@ -1385,7 +1385,9 @@ bool serveCachedGz(AsyncWebServerRequest *request, const String &path, const Str
 //
 // Detection thresholds:
 //  Rising : current must exceed quietMax × 1.2 (20% above prior-phase max)
-//  Falling: current must drop below upMin × 0.8  (20% below high-phase min)
+//  Falling: current must drop below upMin − 0.3 × stepAmp (30% of step below high-phase min)
+//           stepAmp = upMin − quietMax, making fall threshold step-relative not absolute-percentage.
+//           Scan bounded by t_down_end so it cannot bleed into later phases.
 //  A delay of -1 ms means the threshold crossing was not found in the buffer.
 // ============================================================
 
@@ -1436,7 +1438,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // ── Abort check ─────────────────────────────────────────────────────────
   if (phase != SYSID_IDLE && systemIDAbortRequested) {
     systemIDAbortRequested = false;
-    queueConsoleMessage("SystemID: test aborted by user");
+    queueConsoleMessage("SystemID: test aborted");
     systemIDActive = 0;
     phase = SYSID_IDLE;
     stabilizeLastAdjMs = 0;
@@ -1654,6 +1656,9 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
     const uint32_t REF_WINDOW_MS = 2000;  // last 2 seconds of each phase used as reference
 
+    // Saved across rise and fall loops so fall can compute step-relative thresholds.
+    float quietMaxArr[3] = { 0.0f, 0.0f, 0.0f };
+
     // ── Rise delays ─────────────────────────────────────────────────────
     for (int i = 0; i < 3; i++) {
       uint32_t t_quiet_start = phaseStartMs[quietIdx[i]];
@@ -1681,6 +1686,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         Serial.printf("SystemID rise %d: no samples in ref window\n", i + 1);
       }
 
+      quietMaxArr[i] = quietMax;
       float riseThresh = quietMax * 1.2f;
 
       // First sample after UP command that crosses above threshold.
@@ -1712,6 +1718,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       uint32_t t_up_start = phaseStartMs[upIdx[i]];
       uint32_t t_up_end = phaseStartMs[downIdx[i]];
       uint32_t t_down_start = phaseStartMs[downIdx[i]];
+      uint32_t t_down_end = phaseStartMs[downIdx[i] + 1];  // bounded: [4],[6],[8]=test-end
 
       // Min current in the last 2 seconds of the UP phase.
       // Current is settled at the high level here.
@@ -1734,12 +1741,18 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         Serial.printf("SystemID fall %d: no samples in ref window\n", i + 1);
       }
 
-      float fallThresh = upMin * 0.8f;
+      // Step-relative threshold: 30% of step amplitude below the settled high level.
+      // upMin * 0.8 breaks when baseline is non-zero because 80% of an absolute high
+      // level can land near the baseline, causing late or inconsistent detection.
+      float stepAmp = fmaxf(upMin - quietMaxArr[i], 0.5f);  // guard against near-zero step
+      float fallThresh = upMin - 0.3f * stepAmp;
 
       // First sample after DOWN command that crosses below threshold.
+      // Scan bounded by t_down_end so it cannot bleed into the next UP phase or beyond.
       systemIDFallDelay_ms[i] = -1.0f;
       for (int s = 0; s < sysIDSampleCount; s++) {
         if (sysIDBuffer[s].ts < t_down_start) continue;
+        if (sysIDBuffer[s].ts >= t_down_end) break;
         if (sysIDBuffer[s].amps < fallThresh) {
           systemIDFallDelay_ms[i] = (float)(sysIDBuffer[s].ts - t_down_start);
           break;
@@ -1747,16 +1760,16 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
 
       if (systemIDFallDelay_ms[i] < 0.0f) {
-        queueConsoleMessageF("SystemID fall %d: NOT FOUND | upMin=%.1fA thresh=%.1fA — "
-                             "current never dropped below threshold after DOWN command. "
+        queueConsoleMessageF("SystemID fall %d: NOT FOUND | upMin=%.1fA base=%.1fA step=%.1fA thresh=%.1fA — "
+                             "current never dropped below threshold in DOWN window. "
                              "Step amplitude may be too small or sensor not responding.",
-                             i + 1, upMin, fallThresh);
+                             i + 1, upMin, quietMaxArr[i], stepAmp, fallThresh);
       } else {
-        queueConsoleMessageF("SystemID fall %d | upMin(2s)=%.1fA thresh=%.1fA delay=%.0f ms",
-                             i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
+        queueConsoleMessageF("SystemID fall %d | upMin=%.1fA base=%.1fA step=%.1fA thresh=%.1fA delay=%.0f ms",
+                             i + 1, upMin, quietMaxArr[i], stepAmp, fallThresh, systemIDFallDelay_ms[i]);
       }
-      Serial.printf("SystemID fall %d | upMin(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
-                    i + 1, upMin, fallThresh, systemIDFallDelay_ms[i]);
+      Serial.printf("SystemID fall %d | upMin=%.1fA base=%.1fA step=%.1fA thresh=%.1fA delay=%.0f ms\n",
+                    i + 1, upMin, quietMaxArr[i], stepAmp, fallThresh, systemIDFallDelay_ms[i]);
     }
 
     // ── Averages (skip -1 not-found entries) ────────────────────────────

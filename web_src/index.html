@@ -3106,8 +3106,6 @@
                   </form>
                 </div>
               </div>
-              </document_content>
-              </document>
 
               <hr />
               <div class="form-row">
@@ -3629,13 +3627,13 @@
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Apply Results</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">Set the Input Filter Time Constant to match the measured average plant delay.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measured the field coil's electrical lag — how long a PWM change takes to produce a measurable change in alternator current. Set the filters below to match. The "Set All" button applies the recommended value to all three simultaneously.</p>
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Input Filter Time Constant (ms) (<span id="InputFilterTC_echo">?</span>):</span>
+            <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA filter time constant applied to BatteryV, MeasuredAmps, and RPM before they reach the control loops. Higher values smooth noise but slow response. Set to match the measured plant delay from the step test above. Default: 100 ms. Safeties always use unfiltered values.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal used by the excess current (overcurrent trip) detector. A faster value lets the detector react sooner to real overcurrent events. Echoed read-only in Current tab → OV Protection Group 3. Default: 140 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3647,104 +3645,51 @@
           </div>
         </div>
 
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo">?</span>):</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID controller. Independent from the excess current detector filter. Echoed read-only in Current tab → Output Current Controller. Default: 140 ms.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="OutputPIDFilterTC" type="number" step="1" min="1" max="2000" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>Voltage control loop filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">EMA time constant for the INA228 battery voltage signal used by the CV (constant voltage) control loop. Smooths noise on the voltage measurement. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="VoltageFilterTC" type="number" step="1" min="1" max="2000" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
       </div>
 
-      <!-- System ID Modal (non-blocking floating panel) -->
-              <div id="sysid-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
-                <div id="sysid-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:380px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:85vh; overflow-y:auto;">
-
-                  <!-- Drag handle header -->
-                  <div id="sysid-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
-                    <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Plant Delay Test</span>
-                    <button onclick="closeSystemIDModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1; pointer-events:auto;">✕</button>
-                  </div>
-
-                  <div style="padding:20px;">
-
-                  <!-- SCREEN 1: Pre-flight -->
-                  <div id="sysid-screen-preflight">
-                    <h3 style="margin-top:0; color:#fff;">Plant Delay Measurement</h3>
-                    <p style="margin:0 0 12px; font-size:0.92em; line-height:1.5;">
-                      This test makes small step changes to the field duty and measures how quickly alternator output responds.
-                      Before starting, the regulator will ramp to <strong>10A</strong> and hold there for 5 seconds to establish a stable baseline.
-                    </p>
-                    <p style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
-                      ⚠️ <strong>Bring the engine to your typical operating RPM</strong> before clicking Start. The test is most accurate at normal cruising speed.
-                    </p>
-
-                    <div style="margin-bottom:16px; font-size:0.9em;">
-                      <div style="margin-bottom:6px; font-weight:bold; color:#aaa;">Pre-flight checks</div>
-                      <div id="sysid-check-rpm"    style="padding:4px 0;">⬜ Engine running</div>
-                      <div id="sysid-check-amps"   style="padding:4px 0;">⬜ Alternator producing current</div>
-                      <div id="sysid-check-volt"   style="padding:4px 0;">⬜ Battery voltage OK</div>
-                    </div>
-
-                    <div id="sysid-est-time" style="font-size:0.88em; color:#aaa; margin-bottom:20px;"></div>
-
-                    <div style="display:flex; gap:10px; justify-content:flex-end;">
-                      <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Cancel</button>
-                      <button id="sysid-start-btn" onclick="confirmSystemIDStart()" class="btn-secondary" style="flex:1;" disabled>Start Test</button>
-                    </div>
-                  </div>
-
-                  <!-- SCREEN 2: Progress -->
-                  <div id="sysid-screen-progress" style="display:none;">
-                    <h3 style="margin-top:0; color:#fff;">Test Running…</h3>
-                    <div id="sysid-phase-list" style="font-size:0.9em; margin-bottom:16px;">
-                      <div id="sysid-p1" class="sysid-phase-row">⬜ Stabilizing at 10A</div>
-                      <div id="sysid-p2" class="sysid-phase-row">⬜ Baseline measurement</div>
-                      <div id="sysid-p3" class="sysid-phase-row">⬜ Step up 1/3</div>
-                      <div id="sysid-p4" class="sysid-phase-row">⬜ Step down 1/3</div>
-                      <div id="sysid-p5" class="sysid-phase-row">⬜ Step up 2/3</div>
-                      <div id="sysid-p6" class="sysid-phase-row">⬜ Step down 2/3</div>
-                      <div id="sysid-p7" class="sysid-phase-row">⬜ Step up 3/3</div>
-                      <div id="sysid-p8" class="sysid-phase-row">⬜ Step down 3/3</div>
-                      <div id="sysid-p9" class="sysid-phase-row">⬜ Processing results</div>
-                    </div>
-                    <div style="margin-bottom:8px; font-size:0.85em; color:#aaa;">Current phase progress</div>
-                    <div style="background:#333; border-radius:4px; height:10px; overflow:hidden; margin-bottom:16px;">
-                      <div id="sysid-phase-bar" style="height:100%; width:0%; background:#4a9eff; transition:width 0.5s;"></div>
-                    </div>
-                    <div id="sysid-elapsed" style="font-size:0.85em; color:#aaa; margin-bottom:20px;"></div>
-                    <div style="display:flex; justify-content:flex-end;">
-                      <button onclick="abortSystemIDTest()" class="btn-secondary">Abort</button>
-                    </div>
-                  </div>
-
-                  <!-- SCREEN 3: Results -->
-                  <div id="sysid-screen-results" style="display:none;">
-                    <h3 style="margin-top:0; color:#fff;">Results</h3>
-                    <table id="sysid-results-table" style="width:100%; border-collapse:collapse; font-size:0.9em; margin-bottom:12px;">
-                      <thead>
-                        <tr style="color:#aaa; text-align:left; border-bottom:1px solid #444;">
-                          <th style="padding:6px 4px;">Trial</th>
-                          <th style="padding:6px 4px;">Rise (ms)</th>
-                          <th style="padding:6px 4px;">Fall (ms)</th>
-                        </tr>
-                      </thead>
-                      <tbody id="sysid-results-body"></tbody>
-                    </table>
-                    <div id="sysid-results-summary" style="font-size:0.9em; margin-bottom:8px;"></div>
-                    <div id="sysid-results-warning" style="font-size:0.85em; color:#f0a500; margin-bottom:16px; display:none;"></div>
-                    <div style="display:flex; gap:10px; justify-content:flex-end;">
-                      <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Dismiss</button>
-                      <button id="sysid-apply-btn" onclick="applySystemIDResults()" class="btn-secondary" style="flex:1;">Apply &amp; Save</button>
-                    </div>
-                  </div>
-
-                  </div><!-- END screens padding wrapper -->
-                </div><!-- END sysid-modal-panel -->
-              </div>
-              <!-- END System ID Modal -->
 
     </div>
 
     <div id="tuning-current" class="sub-tab-content">
       <div class="settings-card">
 
-              <!-- Telemetry (open) -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Telemetry</p>
+              <!-- Telemetry (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Telemetry</summary>
 
                 <div class="grid telemetry-groups">
 
@@ -3858,215 +3803,17 @@
 
 
 
-              </div> <!-- END Output Current Telemetry -->
+              </details> <!-- END Output Current Telemetry -->
 
-              <!-- Controller Parameters (closed) -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Controller Parameters</p>
+              <!-- Live Plot View (open by default) -->
+              <details open class="tuning-section">
+                <summary class="tuning-section-title">Live Plot View</summary>
+                <div class="plot-container" id="pid-tuning-plot"></div>
+              </details>
 
-                <!-- Reset Output Current PID -->
-                <div style="margin:8px 0;">
-                  <button onclick="resetInnerPID()" class="btn-secondary">Reset Output Current PID</button>
-                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeros the output current PID integrator. Duty will ramp back up from 0 via the slew limiter. Use if the integrator has accumulated badly during manual tuning.</span></span>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Kp (Proportional) (<span id="PidKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Immediate response to current error. Higher = faster correction but more
-                        overshoot. Start with 0.3, increase if too slow, decrease if oscillating.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="PidKp" type="number" step="0.001" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Ki (Integral) (<span id="PidKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Eliminates steady-state error over time. Higher = faster elimination of
-                        offset but may cause instability. Start with 0.5, increase slowly if needed.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="PidKi" type="number" step="0.001" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Kd (Derivative) (<span id="PidKd_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dampens
-                        rapid changes to reduce overshoot. Usually kept at 0.0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="PidKd" type="number" step="0.001" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 2
-                        makes it update half as often, etc. Don't adjust.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="PidSampleDivisor" type="number" step="1" min="1" max="500000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Tracking Gain (1/s) (<span id="PIDTrackingGain_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Anti-windup tracking gain for PID. Keeps the integrator aligned with actual
-                        duty when governor limits output. Higher = faster correction. Typical: 2.0. Set to 0 to disable.
-                        Only active when Ki > 0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="PIDTrackingGain" type="number" step="0.01" min="0" max="10" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>PID Signal Source (<span id="OutputPIDSigSrc_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Current signal fed into the output current PID as the process variable. EMA(TC): exponential average — default, smooth. MA(N): moving average of N samples. Raw: instantaneous ADC reading. Filter parameters N (for moving average) and TC (for the EMA) are set in the Voltage tab → Current Signal — Filter Parameters box.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <div class="cap-mode-toggle">
-                      <button type="button" id="outputPIDSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setOutputPIDSigSrc(0)">EMA(TC)</button>
-                      <button type="button" id="outputPIDSigSrc_1_btn" class="cap-mode-btn" onclick="setOutputPIDSigSrc(1)">MA(N)</button>
-                      <button type="button" id="outputPIDSigSrc_2_btn" class="cap-mode-btn" onclick="setOutputPIDSigSrc(2)">Raw</button>
-                    </div>
-                  </div>
-                </div>
-
-              </div> <!-- END Output Current Controller Parameters -->
-
-              <!-- Rate Limiting (closed) -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Rate Limiting</p>
-
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Setpoint Rise Rate (A/s) (<span id="SetpointRiseRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        rate the current target can increase during AUTO operation. Does not apply during on/off
-                        transitions — only Duty Ramp Rate applies then. Use a slower rate (e.g. 5 A/s) to prevent sudden
-                        demand spikes.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SetpointRiseRate" type="number" step="0.1" min="0.1" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Setpoint Fall Rate (A/s) (<span id="SetpointFallRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        rate the current target can decrease during AUTO operation. No effect during on/off transitions
-                        — only Duty Ramp Rate applies then.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SetpointFallRate" type="number" step="0.1" min="0.1" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Duty Ramp Rate (%/s) (<span id="DutyRampRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        rate of duty cycle change in ALL cases including on/off transitions. Lower values prevent rapid
-                        field changes that can disturb the tachometer signal.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="DutyRampRate" type="number" step="0.01" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Shutdown Slow Ramp Rate (%/s) (<span id="DutySlowRampRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at
-                        which field duty ramps from minimum to 0% during Phase 3 shutdown. Lower = slower, gentler on
-                        LM2907 tach signal. Default 1%/s takes ~5s from 5% to 0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="DutySlowRampRate" type="number" step="0.1" min="0.1" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Shutdown Phase 2 Hold Time (ms) (<span id="ShutdownPhase2HoldMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                        to hold at minimum field duty before beginning slow ramp to 0. Set to 0 to skip Phase 2
-                        entirely.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="ShutdownPhase2HoldMs" type="number" step="1" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-              </div> <!-- END Rate Limiting -->
-
-              <!-- Current Target Generator (closed) -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Current Target Generator</p>
+              <!-- Current Target Generator (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Current Target Generator</summary>
 
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -4173,13 +3920,7 @@
                   </div>
                 </div>
 
-              </div> <!-- END Current Target Generator -->
-
-              <!-- Live Plot View -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Live Plot View</p>
-                <div class="plot-container" id="pid-tuning-plot"></div>
-              </div>
+              </details> <!-- END Current Target Generator -->
 
               <!-- Test Progress & Manual Commit -->
               <div id="tuningCommitSection" class="tuning-section" style="display:none;">
@@ -4201,10 +3942,10 @@
                 </div>
               </div>
 
-              <!-- PID Tuning Score Log -->
-              <details id="tuningScoreSection" class="tuning-section" style="padding:0;">
-                <summary style="padding:12px 16px;cursor:pointer;font-weight:600;font-size:14px;color:var(--text-dark);">Tuning Score Log</summary>
-                <div style="padding:0 16px 16px 16px;">
+              <!-- PID Tuning Score Log (collapsed) -->
+              <details id="tuningScoreSection" class="tuning-section">
+                <summary class="tuning-section-title">Tuning Score Log</summary>
+                <div>
 
                 <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
                   <span style="color:var(--text-muted);">Live score (1/10/100/1000 min):</span>
@@ -4253,15 +3994,249 @@
                 </div>
               </details>
 
+              <!-- Controller Parameters (open by default) -->
+              <details open class="tuning-section">
+                <summary class="tuning-section-title">Controller Parameters</summary>
+
+                <!-- Reset Output Current PID -->
+                <div style="margin:8px 0;">
+                  <button onclick="resetInnerPID()" class="btn-secondary">Reset Output Current PID</button>
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeros the output current PID integrator. Duty will ramp back up from 0 via the slew limiter. Use if the integrator has accumulated badly during manual tuning.</span></span>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>PID Kp (Proportional) (<span id="PidKp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Immediate response to current error. Higher = faster correction but more
+                        overshoot. Start with 0.3, increase if too slow, decrease if oscillating.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="PidKp" type="number" step="0.001" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>PID Ki (Integral) (<span id="PidKi_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Eliminates steady-state error over time. Higher = faster elimination of
+                        offset but may cause instability. Start with 0.5, increase slowly if needed.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="PidKi" type="number" step="0.001" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>PID Kd (Derivative) (<span id="PidKd_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dampens
+                        rapid changes to reduce overshoot. Usually kept at 0.0.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="PidKd" type="number" step="0.001" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 2
+                        makes it update half as often, etc. Don't adjust.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="PidSampleDivisor" type="number" step="1" min="1" max="500000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>PID Tracking Gain (1/s) (<span id="PIDTrackingGain_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Anti-windup tracking gain for PID. Keeps the integrator aligned with actual
+                        duty when governor limits output. Higher = faster correction. Typical: 2.0. Set to 0 to disable.
+                        Only active when Ki > 0.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="PIDTrackingGain" type="number" step="0.01" min="0" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Signal Source (<span id="OutputPIDSigSrc_echo">?</span>) — alternator current (ADS1115):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator output current is filtered before entering the PID as its process variable. EMA(TC): exponential moving average — default, smooth. MA(N): moving average of N samples. Raw: instantaneous ADC reading, no filtering. N and TC are set independently from the iExcess filter in the OV Protection section.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <div class="cap-mode-toggle">
+                      <button type="button" id="outputPIDSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setOutputPIDSigSrc(0)">EMA(TC)</button>
+                      <button type="button" id="outputPIDSigSrc_1_btn" class="cap-mode-btn" onclick="setOutputPIDSigSrc(1)">MA(N)</button>
+                      <button type="button" id="outputPIDSigSrc_2_btn" class="cap-mode-btn" onclick="setOutputPIDSigSrc(2)">Raw</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="outputPIDMA_N_row" style="display:none;">
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>MA Window — N samples (<span id="OutputPIDMA_N_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal fed into the Output Current PID. Each sample is ~7 ms apart (CH1 cadence), so N=2 ≈ 14 ms window. Independent from the iExcess MA window. Default 2.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="OutputPIDMA_N" type="number" step="1" min="1" max="10" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="outputPIDFilterTC_row" style="display:none;">
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo_pid">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal fed into this PID as its feedback. Independent from the excess current detection filter. Set in Tuning → Plant Delay.</span></span>
+                    </div>
+                    <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
+                      Read-only — set in Tuning → Plant Delay
+                    </div>
+                  </div>
+                </div>
+
+              </details> <!-- END Output Current Controller Parameters -->
+
+              <!-- Rate Limiting (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Rate Limiting</summary>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Setpoint Rise Rate (A/s) (<span id="SetpointRiseRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
+                        rate the current target can increase during AUTO operation. Does not apply during on/off
+                        transitions — only Duty Ramp Rate applies then. Use a slower rate (e.g. 5 A/s) to prevent sudden
+                        demand spikes.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SetpointRiseRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Setpoint Fall Rate (A/s) (<span id="SetpointFallRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
+                        rate the current target can decrease during AUTO operation. No effect during on/off transitions
+                        — only Duty Ramp Rate applies then.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SetpointFallRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Duty Ramp Rate (%/s) (<span id="DutyRampRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
+                        rate of duty cycle change in ALL cases including on/off transitions. Lower values prevent rapid
+                        field changes that can disturb the tachometer signal.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="DutyRampRate" type="number" step="0.01" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Shutdown Slow Ramp Rate (%/s) (<span id="DutySlowRampRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at
+                        which field duty ramps from minimum to 0% during Phase 3 shutdown. Lower = slower, gentler on
+                        LM2907 tach signal. Default 1%/s takes ~5s from 5% to 0.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="DutySlowRampRate" type="number" step="0.1" min="0.1" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Shutdown Phase 2 Hold Time (ms) (<span id="ShutdownPhase2HoldMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                        to hold at minimum field duty before beginning slow ramp to 0. Set to 0 to skip Phase 2
+                        entirely.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ShutdownPhase2HoldMs" type="number" step="1" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+              </details> <!-- END Rate Limiting -->
+
       </div>
     </div>
 
     <!-- Voltage (CV) Loop -->
     <div id="tuning-voltage" class="sub-tab-content">
       <div class="settings-card">
-              <!-- Telemetry -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Telemetry</p>
+              <!-- Telemetry (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Telemetry</summary>
 
                 <div class="grid telemetry-groups">
                   <div class="card-group telemetry-group" data-mode="cv">
@@ -4343,414 +4318,63 @@
                   </div>
                 </div>
 
-              </div> <!-- END Telemetry -->
+              </details> <!-- END Telemetry -->
 
-              <!-- Controller Parameters -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Controller Parameters</p>
+              <!-- Live Plot View (open by default) -->
+              <details open class="tuning-section">
+                <summary class="tuning-section-title">Live Plot View</summary>
 
-                <!-- Reset CV Integrator -->
-                <div style="margin:8px 0;">
-                  <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
-                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeroes the voltage loop integrator (cv_I). Use if the integrator is stuck at zero or wound up to a bad value — the PI will rebuild from scratch on the next tick. Useful after changing Kp/Ki during a tuning session.</span></span>
+                <!-- Active test score banner -->
+                <div id="cvTestScoreRow" style="display:none; background:rgba(99,102,241,0.12); border:1px solid #6366f1; border-radius:6px; padding:8px 12px; margin:8px 0; font-size:0.88em;">
+                  <strong>Test active</strong> &mdash;
+                  Current score: <strong id="cvCurrentTestScore">—</strong> &nbsp;|&nbsp;
+                  Scored high cycles: <strong id="cvTestCycleCount">0</strong>
                 </div>
 
+                <!-- CV plot axis controls -->
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 2px 0; font-size:0.83em; color:var(--text-muted);">
+                  <span style="font-weight:600; white-space:nowrap;">Plot axes:</span>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
-                        Voltage loop gain. Active in absorption and float only — caps current setpoint based on voltage
-                        error.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKp" type="number" step="0.01" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
+                  <span style="white-space:nowrap;">
+                    X (s):
+                    <input id="cvXTimeInput" type="number" step="1" min="1" max="3600"
+                           style="width:54px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
+                    <button onclick="setCVXTime(document.getElementById('cvXTimeInput').value)"
+                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
+                  </span>
+
+                  <span style="white-space:nowrap;">
+                    V min:
+                    <input id="cvVoltsMinInput" type="number" step="0.1"
+                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
+                    max:
+                    <input id="cvVoltsMaxInput" type="number" step="0.1"
+                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
+                    <button onclick="setCVVoltsRange(document.getElementById('cvVoltsMinInput').value, document.getElementById('cvVoltsMaxInput').value)"
+                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
+                  </span>
+
+                  <span style="white-space:nowrap;">
+                    A min:
+                    <input id="cvAmpsMinInput" type="number" step="1"
+                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
+                    max:
+                    <input id="cvAmpsMaxInput" type="number" step="1"
+                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
+                    <button onclick="setCVAmpsRange(document.getElementById('cvAmpsMinInput').value, document.getElementById('cvAmpsMaxInput').value)"
+                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
+                  </span>
+
+                  <button onclick="resetCVAxisRanges()" class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Auto</button>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
-                        Integral gain for the voltage loop. Accumulates over time to eliminate steady-state voltage error.
-                        Active in absorption and float only. Integrator is reset to zero on CV entry. Start small —
-                        try 0.1. Set to 0 to disable.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKi" type="number" step="0.01" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+                <!-- Live plot -->
+                <div class="plot-container" id="cv-tuning-plot" style="margin:8px 0;"></div>
+              </details>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Kd (A per V/s) (<span id="VoltageKd_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop. Subtracts Kd × (voltage rise rate) from the current setpoint, preemptively reducing current as voltage rises toward target. Higher values reduce overshoot on target step-ups. Default: 40.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKd" type="number" step="1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the voltage loop recalculates. Active in absorption and float only. Typical:
-                        500ms.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <!-- ═══════════════════════════════════════════════════
-                     OV PROTECTION — 5-LAYER SUPERVISOR
-                     ═══════════════════════════════════════════════════ -->
-                <hr />
-                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:10px 0 4px 0;">OV Protection — 5-Layer Supervisor</p>
-                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Five layers protect against overvoltage in CV mode. Layers 1–3 are voltage-based; Layer 4 is current-based. Layer 5 (govBypass) is automatic. Enable/disable individual layers to isolate their contribution during testing.</p>
-
-                <!-- ─── LAYER 1: Soft Cap (Prediction) ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Layer 1 — Soft Cap (Prediction)</div>
-                  <div class="layer-box-desc">Fires when <em>predicted</em> voltage (IBV + TD·dvdt⁺) exceeds target + VSoftMargin. Applies a proportional current ceiling via KSoft. Most sensitive to belt resonance noise — safe to disable for idle testing.</div>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Layer 1 Enable (<span id="OvLayer1Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">1 = enabled (default). Set to 0 to disable the soft-cap prediction layer. Disabling removes the primary source of false fastOV triggers at idle caused by belt resonance, but removes early warning on real RPM blips.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="OvLayer1Enable" type="number" step="1" min="0" max="1" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>KSoft — Soft Cap Slope (A/V) (<span id="KSoft_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">KSoft: slope of the current ceiling when predicted voltage exceeds target + VSoftMargin. For every volt of predicted overshoot, the ceiling drops by this many amps below the current operating point. Default 12. Higher = sharper initial current ramp-down.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="KSoft" type="number" step="0.5" min="1" max="100" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>VSoftMargin — Layer 1/3 Voltage Margin (V) (<span id="VSoftMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage above ChargingTarget at which Layer 1 (prediction) and Layer 3 (hysteresis) engage. Default 0.080 V (80 mV). Raising this reduces false fires on belt noise — 0.100–0.120 V is a good starting point for idle testing. Layer 3 fires when actual IBV exceeds target + this value.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="VSoftMarginV" type="number" step="0.005" min="0.02" max="0.5" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (in seconds) the predicted voltage is projected: Vpred = IBV + TdPred × dvdt⁺. Used by both Layer 1 and Layer 2. Default 0.080 s (80 ms). Shorter values reduce false triggers from belt noise dvdt spikes; longer values give more lead time on real events.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-                </div><!-- end Layer 1 box -->
-
-                <!-- ─── LAYER 2: Hard Cap (Prediction) ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Layer 2 — Hard Cap (Prediction)</div>
-                  <div class="layer-box-desc">Fires when predicted voltage exceeds target + VHardMargin (default 150 mV). Applies a stronger KHard ceiling on top of Layer 1. Higher threshold makes it far less likely to false-fire on belt noise.</div>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Layer 2 Enable (<span id="OvLayer2Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">1 = enabled (default). Set to 0 to disable the hard-cap prediction layer. Rarely false-fires at idle — disabling mainly useful to isolate Layer 1 from Layer 2 response during a real blip.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="OvLayer2Enable" type="number" step="1" min="0" max="1" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>KHard — Hard Cap Slope (A/V) (<span id="KHard_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">KHard: slope of the current ceiling for Layer 2 (prediction) and Layer 3 (hysteresis). Default 35. Higher = faster field reduction on severe transients. Also used by Layer 3 (actual-voltage hysteresis clamp).</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="KHard" type="number" step="0.5" min="1" max="200" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>VHardMargin — Layer 2 Voltage Margin (V) (<span id="VHardMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Predicted voltage above ChargingTarget at which Layer 2 engages. Default 0.150 V (150 mV). Higher values further suppress false fires from belt noise on Layer 2 — rarely needs adjustment unless you have an unusually noisy alternator.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="VHardMarginV" type="number" step="0.01" min="0.05" max="1.0" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-                </div><!-- end Layer 2 box -->
-
-                <!-- ─── LAYER 3: Hysteresis Clamp (Actual Voltage) ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Layer 3 — Hysteresis Clamp (Actual Voltage)</div>
-                  <div class="layer-box-desc">Fires when <em>actual</em> IBV exceeds target + VSoftMargin (80 mV). No prediction — purely voltage-triggered. Noise-immune at idle (belt resonance max ~30 mV over target). Recommended to keep enabled even during testing.</div>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Layer 3 Enable (<span id="OvLayer3Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">1 = enabled (default). Set to 0 to disable the actual-voltage hysteresis clamp. This is the cleanest discriminator between idle noise and real events. Only disable to test pure current-based (Layer 4) protection.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="OvLayer3Enable" type="number" step="1" min="0" max="1" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-                </div><!-- end Layer 3 box -->
-
-                <!-- ─── LAYER 4: iExcess (Current Supervisor) ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Layer 4 — iExcess (Current Supervisor)</div>
-                  <div class="layer-box-desc">Fires when measured current exceeds the commanded setpoint by K_excess for N consecutive ticks (~5 ms each). Current-based; can detect RPM blips before significant voltage rise. Gated out by postFastOvMismatch after any Layer 1-3 trigger.</div>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>K_excess — Threshold (A above sp) (<span id="IExcessK_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above commanded setpoint the measured current must exceed before the supervisor fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default: 5.0 A.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessK" type="number" step="0.1" min="0.5" max="50" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>N — Persistence (ticks) (<span id="IExcessN_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Consecutive measurement ticks the current must remain above threshold. Each tick ≈ 5 ms. Higher values filter noise spikes but cost lead time. Default: 3 (tuned for 28 Hz belt resonance).</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessN" type="number" step="1" min="1" max="20" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Signal Source (<span id="IExcessSigSrc_echo">?</span>) — applies in all charging modes:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">MA(N): moving average of N samples — default, smooth, few false trips. EMA(TC): exponential average controlled by InputFilterTC (set in Plant Delay subtab). Raw: instantaneous ADC reading — fastest, most noise-sensitive. N and TC are set in the Filter Parameters box below.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <div class="cap-mode-toggle">
-                        <button type="button" id="iExcessSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setIExcessSigSrc(0)">MA(N)</button>
-                        <button type="button" id="iExcessSigSrc_1_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(1)">EMA(TC)</button>
-                        <button type="button" id="iExcessSigSrc_2_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(2)">Raw</button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how cv_I is driven down when iExcess fires. 0 = snap to zero immediately (maximum response, default). Any value above 0 = proportional bleed at that rate in A/s per amp of excess — gentler, less undershoot risk. Try 2–5 if snap causes unacceptable voltage dip.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessKBleed" type="number" step="0.1" min="0" max="50" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Recovery Seed Fraction (<span id="IExcessReseedFrac_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Fraction of pre-event cv_I to seed recovery after iExcess fires. 0.5 = restart at half the pre-event level. Lower = safer, slower rebuild. Range 0.1–0.9.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessReseedFrac" type="number" step="0.05" min="0.1" max="0.9" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-                </div><!-- end Layer 4 box -->
-
-                <!-- ─── FILTER PARAMETERS (shared — used by Layer 4 and Output Current PID) ─── -->
-                <div class="layer-box" style="margin-top:10px;">
-                  <div class="layer-box-header">Current Signal — Filter Parameters</div>
-                  <div class="layer-box-desc">Shared filter settings used by Layer 4 (iExcess) and the Output Current PID. MA window N controls the moving average width. EMA time constant is set in the Tuning → Plant Delay subtab.</div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>MA Window — N samples (<span id="IExcessMA_N_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of current samples to average for the MA(N) signal. Default 2. Each sample is ~7 ms apart (CH1 cadence), so N=2 ≈ 14 ms window, N=10 ≈ 70 ms. Larger N = smoother signal, more lag. Max 10.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessMA_N" type="number" step="1" min="1" max="10" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>EMA Time Constant — TC (<span id="InputFilterTC_echo2">?</span> s):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The exponential moving average time constant in seconds. Controls the EMA(TC) signal used by Layer 4 and the Output Current PID when EMA(TC) is selected. Adjusted in the Tuning → Plant Delay subtab after running a plant delay test. Shown here for reference only.</span></span>
-                    </div>
-                    <div class="form-input" style="font-style:italic;color:var(--text-muted,#888);padding:6px 0;">
-                      Read-only — set in Tuning → Plant Delay
-                    </div>
-                  </div>
-                </div>
-
-                <!-- ─── LAYER 5: govBypass (Automatic) ─── -->
-                <div class="layer-box" style="background:rgba(0,0,0,0.02);">
-                  <div class="layer-box-header" style="opacity:0.5;">Layer 5 — govBypass (Automatic)</div>
-                  <div class="layer-box-desc">Active automatically whenever any Layer 1-4 clamp is active. Bypasses the governor slew limiter to allow instantaneous duty reduction. Not directly configurable.</div>
-                </div><!-- end Layer 5 box -->
-
-                <!-- ─── Shared Response Tuning ─── -->
-                <p style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.07em;opacity:0.6;margin:14px 0 4px 0;">Shared Response Tuning</p>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup bleed rate as a fraction of the RPM table ceiling per second. Scales with alternator size. Default 2.0: at 150A table gives 300 A/s. A 100 ms fastOV event at default bleeds ~30A from cv_I.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Recovery Rate (×Table/s) (<span id="AwRecoverRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup ceiling recovery rate as a fraction of the RPM table ceiling per second. Default 0.1. Lower = more inter-event damping; higher = faster current restoration after transients.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after a bumpless seed fires during which AwBleed and the CC-tracker are suppressed. Prevents the seeded cv_I from being immediately destroyed by a brief fastOV at that transition. 0 = disabled. Default 150.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Voltage Spike Margin (V) (<span id="VoltageSpikeMargin_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts above BulkVoltage that triggers fast-response mode (bypasses slew limiting). Allows aggressive duty reduction during voltage spikes or load dump events. Typical: 0.2 V.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageSpikeMargin" type="number" step="0.01" min="0" max="999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-              </div> <!-- END VTM Controller Parameters -->
-
-              <!-- Voltage Step Generator -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Voltage Step Generator</p>
+              <!-- Voltage Step Generator (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Voltage Step Generator</summary>
 
                 <!-- Enable/Disable Test Mode -->
                 <div class="form-row">
@@ -4820,7 +4444,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Overshoot Penalty (K) (<span id="cvKOvershoot_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Penalty weight applied to integrated overshoot in the score formula: Score = AvgSettleTime + K × AvgIntegratedOvershoot. Higher K penalises overshoot more aggressively relative to settling speed. Start at 10 and increase until you're happy with the tradeoff — overshoot is the dominant constraint in battery CV charging.</span>
+                      <span class="tooltip-box">Stored with each record for reference but no longer used in the score formula. Scoring now uses fixed ×4 overshoot weighting baked into the ISE accumulator.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4850,65 +4474,27 @@
                     </form>
                   </div>
                 </div>
+              </details> <!-- END Voltage Step Generator -->
+
+              <!-- CV Commit Section -->
+              <div id="cvTuningCommitSection" class="tuning-section" style="display:none;">
+                <div style="font-size:0.88em; color:var(--text-muted); margin-bottom:8px;">
+                  Scored HIGH phases accumulate after the initial LOW ring-in. Commit when you have enough.
+                </div>
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                  <span style="font-size:0.88em; white-space:nowrap;">Scored HIGH cycles: <strong id="cvScoredHighCount">0</strong></span>
+                  <button id="commitCVTuningBtn" onclick="commitCVTuningScore()" class="btn-primary"
+                          style="padding:7px 18px;" disabled>Commit This Test</button>
+                  <button onclick="restartCVTest()" class="btn-secondary"
+                          style="padding:7px 18px;">Restart Test</button>
+                  <span id="cvTuningCommitStatus" style="font-size:0.83em; color:var(--text-muted);"></span>
+                </div>
               </div>
 
-              <!-- Live Plot View -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Live Plot View</p>
-
-                <!-- Active test score banner -->
-                <div id="cvTestScoreRow" style="display:none; background:rgba(99,102,241,0.12); border:1px solid #6366f1; border-radius:6px; padding:8px 12px; margin:8px 0; font-size:0.88em;">
-                  <strong>Test active</strong> &mdash;
-                  Current score: <strong id="cvCurrentTestScore">—</strong> &nbsp;|&nbsp;
-                  Scored high cycles: <strong id="cvTestCycleCount">0</strong>
-                  <span style="color:var(--text-muted);font-size:0.85em;"> (commit requires ≥2)</span>
-                </div>
-
-                <!-- CV plot axis controls -->
-                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 2px 0; font-size:0.83em; color:var(--text-muted);">
-                  <span style="font-weight:600; white-space:nowrap;">Plot axes:</span>
-
-                  <span style="white-space:nowrap;">
-                    X (s):
-                    <input id="cvXTimeInput" type="number" step="1" min="1" max="3600"
-                           style="width:54px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    <button onclick="setCVXTime(document.getElementById('cvXTimeInput').value)"
-                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
-                  </span>
-
-                  <span style="white-space:nowrap;">
-                    V min:
-                    <input id="cvVoltsMinInput" type="number" step="0.1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    max:
-                    <input id="cvVoltsMaxInput" type="number" step="0.1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    <button onclick="setCVVoltsRange(document.getElementById('cvVoltsMinInput').value, document.getElementById('cvVoltsMaxInput').value)"
-                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
-                  </span>
-
-                  <span style="white-space:nowrap;">
-                    A min:
-                    <input id="cvAmpsMinInput" type="number" step="1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    max:
-                    <input id="cvAmpsMaxInput" type="number" step="1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    <button onclick="setCVAmpsRange(document.getElementById('cvAmpsMinInput').value, document.getElementById('cvAmpsMaxInput').value)"
-                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
-                  </span>
-
-                  <button onclick="resetCVAxisRanges()" class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Auto</button>
-                </div>
-
-                <!-- Live plot -->
-                <div class="plot-container" id="cv-tuning-plot" style="margin:8px 0;"></div>
-              </div>
-
-              <!-- CV Tuning Score Log -->
-              <details id="cvTuningScoreSection" class="tuning-section" style="padding:0;">
-                <summary style="padding:12px 16px;cursor:pointer;font-weight:600;font-size:14px;color:var(--text-dark);">CV Tuning Score Log</summary>
-                <div style="padding:0 16px 16px 16px;">
+              <!-- CV Tuning Score Log (collapsed) -->
+              <details id="cvTuningScoreSection" class="tuning-section">
+                <summary class="tuning-section-title">CV Tuning Score Log</summary>
+                <div>
 
                 <!-- Live score spans -->
                 <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
@@ -4925,14 +4511,14 @@
                     <thead>
                       <tr style="background:var(--card-light); text-align:left;">
                         <th style="padding:3px 4px;">#</th>
-                        <th style="padding:3px 4px;" title="Step-up score: settle(s) + K×integrated_overshoot">↑Score</th>
-                        <th style="padding:3px 4px;" title="Step-up: seconds to settle within ±0.1V of real target">↑Settle</th>
-                        <th style="padding:3px 4px;" title="Step-up: worst overshoot above real target (V)">↑OvV</th>
-                        <th style="padding:3px 4px;" title="Step-up: avg integrated overshoot (V·s)">↑IntOv</th>
-                        <th style="padding:3px 4px;" title="Step-down score: settle(s) + K×integrated_overvoltage above low target">↓Score</th>
+                        <th style="padding:3px 4px;" title="Combined ISE/T score ×1000: (weighted HIGH ISE + LOW ISE) ÷ total active time. Lower is better.">Score</th>
+                        <th style="padding:3px 4px;" title="Step-up: seconds to settle within ±0.1V of high target">↑Settle</th>
+                        <th style="padding:3px 4px;" title="Step-up: worst peak overshoot above high target (V, unfiltered)">↑OvV</th>
+                        <th style="padding:3px 4px;" title="Step-up: avg weighted ISE per scored cycle (V²·s). Overshoot weighted ×4.">↑ISE</th>
+                        <th style="padding:3px 4px;" title="Step-down share of combined score ×1000: low ISE ÷ total active time">↓Score</th>
                         <th style="padding:3px 4px;" title="Step-down: seconds to settle within ±0.1V of low target">↓Settle</th>
-                        <th style="padding:3px 4px;" title="Step-down: worst overvoltage above low target (V)">↓OvV</th>
-                        <th style="padding:3px 4px;" title="Step-down: avg integrated overvoltage (V·s)">↓IntOv</th>
+                        <th style="padding:3px 4px;" title="Step-down: worst peak above low target (V)">↓OvV</th>
+                        <th style="padding:3px 4px;" title="Step-down: avg one-sided ISE per scored cycle (V²·s, normal weight)">↓ISE</th>
                         <th style="padding:3px 4px;">VKp</th>
                         <th style="padding:3px 4px;">VKi</th>
                         <th style="padding:3px 4px;">VKd</th>
@@ -4972,12 +4558,13 @@
                 </div>
 
                 <p style="font-size:0.74em; color:var(--text-muted); margin-top:6px;">
-                  ↑Score = step-up (base→base+amplitude): AvgSettle + K × AvgIntegratedOvershoot(V·s) — how fast voltage reaches the elevated target.
-                  ↓Score = step-down (base+amplitude→base): AvgSettle + K × AvgIntegratedOvervoltage(V·s) — how long voltage takes to decay back to normal setpoint.
+                  Score = (weighted HIGH ISE + LOW ISE) ÷ total active time, ×1000.
+                  HIGH phase: squared error, overshoot (above target) weighted ×4 vs undershoot.
+                  LOW phase: one-sided squared error, normal weight.
                   Both lower is better.
-                  <span style="color:#22c55e;">&#9632;</span> &lt;5 &nbsp;
-                  <span style="color:#eab308;">&#9632;</span> &lt;12 &nbsp;
-                  <span style="color:#ef4444;">&#9632;</span> &ge;12.
+                  <span style="color:#22c55e;">&#9632;</span> &lt;2 &nbsp;
+                  <span style="color:#eab308;">&#9632;</span> &lt;10 &nbsp;
+                  <span style="color:#ef4444;">&#9632;</span> &ge;10.
                   Highlighted rows match current VKp/VKi/VKd + wave settings.
                   OVf/IEf/LDf/HOCf = protection fire counts during scored phases.
                 </p>
@@ -4987,6 +4574,503 @@
                 </div>
               </details>
 
+              <!-- Controller Parameters (open by default) -->
+              <details open class="tuning-section">
+                <summary class="tuning-section-title">Controller Parameters</summary>
+
+                <!-- Reset CV Integrator -->
+                <div style="margin:8px 0;">
+                  <button onclick="resetVoltageLoop()" class="btn-secondary">Reset CV Integrator</button>
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeroes the voltage loop integrator (cv_I). Use if the integrator is stuck at zero or wound up to a bad value — the PI will rebuild from scratch on the next tick. Useful after changing Kp/Ki during a tuning session.</span></span>
+                </div>
+
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
+                        Voltage loop gain. Active in absorption and float only — caps current setpoint based on voltage
+                        error.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageKp" type="number" step="0.01" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
+                        Integral gain for the voltage loop. Accumulates over time to eliminate steady-state voltage error.
+                        Active in absorption and float only. Integrator is reset to zero on CV entry. Start small —
+                        try 0.1. Set to 0 to disable.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageKi" type="number" step="0.01" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Kd (A per V/s) (<span id="VoltageKd_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop. Subtracts Kd × (voltage rise rate) from the current setpoint, preemptively reducing current as voltage rises toward target. Higher values reduce overshoot on target step-ups. Default: 40.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageKd" type="number" step="1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>D slope window (ms) (<span id="VoltageDWindowMs_echo">?</span>) — D term only:</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far back in time the D term looks when measuring the voltage rise rate. Shorter = reacts faster to transients (try 200 ms). Longer = smoother but slower to see a fast approach. Each step is one voltage loop interval. Default: 200 ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageDWindowMs" type="number" step="100" min="100" max="900" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Slope bleed threshold (V/s) (<span id="SlopeBleedThresh_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Integrator bleed activates when voltage is rising faster than this rate. Set to your intended max approach speed — 0.10 V/s means no faster than 1V per 10 seconds. Below this rate the integrator is unaffected. Default: 0.10 V/s.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SlopeBleedThresh" type="number" step="0.01" min="0.01" max="2" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Slope bleed gain (A per V/s) (<span id="SlopeBleedK_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">How aggressively to drain the voltage integrator (cv_I) when slope exceeds the threshold. At 50 with 0.2 V/s excess slope, drains 1A per 100ms tick. Higher = more aggressive preemptive wind-down. Default: 50.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SlopeBleedK" type="number" step="5" min="0" max="500" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo_cv">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the INA228 battery voltage reading used as the process variable for this control loop. Set in Tuning → Plant Delay.</span></span>
+                  </div>
+                  <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
+                    Read-only — set in Tuning → Plant Delay
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                        often the voltage loop recalculates. Active in absorption and float only. Typical:
+                        500ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageLoopInterval" type="number" step="1" min="1" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- ═══════════════════════════════════════════════════
+                     OV PROTECTION — 4-GROUP SUPERVISOR
+                     ═══════════════════════════════════════════════════ -->
+                <hr />
+                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:10px 0 4px 0;">OV Protections</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Four independent protection groups act in CV mode. Groups 1 &amp; 2 use predicted future voltage to get ahead of transients. Group 3 acts on the present voltage. Group 4 acts on alternator current.</p>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Protection proximity gate (V) (<span id="ProtectionProxGateV_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">All OV protections (Groups 1–4) only arm when the active voltage target is within this many volts below BulkVoltage. When tuning at float or a lower test target, small overshoots carry no battery risk and protections would interfere with results. Set to 0 to disable the gate (always armed). Default: 0.30 V.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ProtectionProxGateV" type="number" step="0.05" min="0" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- ─── GROUP 1: Prediction-Based (Layers 1 & 2) ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 1 — Prediction-Based (Layers 1 &amp; 2)</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    <strong>Signal:</strong> INA228 battery voltage (raw) + predicted rise.<br>
+                    <strong>Formula:</strong> Vpred = measured voltage + (TdPred × rate of voltage rise). 
+                  </div>
+
+                  <!-- Shared: TdPred -->
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>) — used by both layers:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (in seconds) is projected: Vpred = IBV + TdPred × dvdt⁺. Used by both Layer 1 and Layer 2. </span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <p style="font-size:11px;font-weight:600;margin:8px 0 4px 0;opacity:0.7;">Layer 1 — Soft Cap</p>
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Layer 1 Enable (<span id="OvLayer1Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable the soft-cap prediction layer. The "Soft Events" counter only increments when Layer 1 fires — it is the exclusive source of soft events.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvLayer1Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvLayer1Enable_checkbox', 'OvLayer1Enable', 'OvLayer1Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvLayer1Enable" name="OvLayer1Enable" type="number" value="" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>VSoftMargin — Trigger Margin (V) (<span id="VSoftMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Predicted voltage above ChargingTarget at which Layer 1 engages. Default 0.080 V (80 mV). Also used by Group 2 (Layer 3) as its measured-voltage trigger threshold. Raising this reduces false fires — 0.100–0.120 V is a good starting point for idle testing.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="VSoftMarginV" type="number" step="0.005" min="0.02" max="0.5" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>KSoft — Response Slope (A/V) (<span id="KSoft_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">For every volt of predicted overshoot above VSoftMargin, the current ceiling drops by this many amps below the current operating point. Default 12. Higher = sharper initial current ramp-down.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="KSoft" type="number" step="0.5" min="1" max="100" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <p style="font-size:11px;font-weight:600;margin:8px 0 4px 0;opacity:0.7;">Layer 2 — Hard Cap</p>
+
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Layer 2 Enable (<span id="OvLayer2Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable the hard-cap prediction layer. Note: the "Hard Events" counter is shared between Layer 2 and Layer 3 — disabling Layer 2 alone will not stop hard events if Layer 3 is still on.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvLayer2Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvLayer2Enable_checkbox', 'OvLayer2Enable', 'OvLayer2Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvLayer2Enable" name="OvLayer2Enable" type="number" value="" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>VHardMargin — Trigger Margin (V) (<span id="VHardMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Predicted voltage above ChargingTarget at which Layer 2 engages. Default 0.150 V (150 mV). Higher than VSoftMargin by design — separates real transients from noise. Rarely needs adjustment.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="VHardMarginV" type="number" step="0.01" min="0.05" max="1.0" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>KHard — Response Slope (A/V) (<span id="KHard_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Steeper current ceiling slope used by Layer 2. Default 35. Also used by Group 2 (Layer 3) as its response slope. Higher = faster field reduction on severe transients.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="KHard" type="number" step="0.5" min="1" max="200" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div><!-- end Group 1 box -->
+
+                <!-- ─── GROUP 2: Voltage Threshold (Layer 3) ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 2 — Voltage Threshold (Layer 3)</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    <strong>Signal:</strong> INA228 battery voltage, measured directly.<br>
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Layer 3 Enable (<span id="OvLayer3Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable the actual-voltage hysteresis clamp. This is the cleanest discriminator between idle noise and real events — keep enabled during normal operation. Only disable to test pure current-based (Group 4) protection. Note: Layer 3 increments the "Hard Events" counter — disabling Layer 2 but leaving Layer 3 on will still show hard event counts.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvLayer3Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvLayer3Enable_checkbox', 'OvLayer3Enable', 'OvLayer3Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvLayer3Enable" name="OvLayer3Enable" type="number" value="" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <p style="font-size:11px;opacity:0.65;margin:6px 0 2px 0;">Fires when measured voltage &gt; target + <span id="VSoftMarginV_echo2">?</span> V (VSoftMargin — set in Group 1)</p>
+                  <p style="font-size:11px;opacity:0.65;margin:2px 0 4px 0;">Response slope: KHard = <span id="KHard_echo2">?</span> A/V (KHard — set in Group 1)</p>
+                </div><!-- end Group 2 box -->
+
+                <!-- ─── GROUP 3: Current-Based (Layer 4 — iExcess) ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 3 — Current-Based (Layer 4 — iExcess)</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    <strong>Signal:</strong> Alternator output current (ADS1115, Channel 1).<br>
+                    Fires when measured alternator current exceeds the commanded setpoint by K_excess for N consecutive ticks (~5 ms each). Gated out briefly after any Group 1/2 trigger.
+                  </div>
+
+                  <!-- Signal source selector -->
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Signal Filter (<span id="IExcessSigSrc_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator current is filtered before comparison. MA(N): moving average of N samples — default, smooth, few false trips. EMA(TC): exponential moving average with time constant TC. Raw: instantaneous ADC reading — fastest response, most noise-sensitive. N and TC are set below and are independent from the Output Current PID filter.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <div class="cap-mode-toggle">
+                        <button type="button" id="iExcessSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setIExcessSigSrc(0)">MA(N)</button>
+                        <button type="button" id="iExcessSigSrc_1_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(1)">EMA(TC)</button>
+                        <button type="button" id="iExcessSigSrc_2_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(2)">Raw</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>MA Window — N samples (<span id="IExcessMA_N_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal. Default 2. Each sample is ~7 ms apart (CH1 cadence), so N=2 ≈ 14 ms window, N=10 ≈ 70 ms. Larger N = smoother signal, more lag. Independent from the Output Current PID MA window.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessMA_N" type="number" step="1" min="1" max="10" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo_grp3">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal used by this excess current detector. A faster (lower) value lets it react sooner. Set in Tuning → Plant Delay.</span></span>
+                    </div>
+                    <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
+                      Read-only — set in Tuning → Plant Delay
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>K_excess — Threshold (A above setpoint) (<span id="IExcessK_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before the supervisor fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default: 5.0 A.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessK" type="number" step="0.1" min="0.5" max="50" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>N — Persistence (consecutive ticks) (<span id="IExcessN_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many consecutive measurement ticks the current must remain above threshold before the supervisor fires. Each tick ≈ 5 ms. Higher values filter noise spikes but cost lead time. Default: 3.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessN" type="number" step="1" min="1" max="20" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how cv_I (the CV integrator) is driven down when iExcess fires. 0 = snap to zero immediately (maximum response, default). Any value above 0 = proportional bleed at that rate in A/s per amp of excess — gentler, less undershoot risk. Try 2–5 if snap causes unacceptable voltage dip.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessKBleed" type="number" step="0.1" min="0" max="50" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Recovery Seed Fraction (<span id="IExcessReseedFrac_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Fraction of the pre-event cv_I value used to seed recovery after iExcess clears. 0.5 = restart at half the pre-event level. Lower = safer, slower rebuild. Range 0.1–0.9.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessReseedFrac" type="number" step="0.05" min="0.1" max="0.9" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div><!-- end Group 3 box -->
+
+                <!-- ─── Shared Response Tuning ─── -->
+                <p style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.07em;opacity:0.6;margin:14px 0 4px 0;">Shared Response Tuning</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 8px 0;line-height:1.5;">Controls what happens to the CV integrator (cv_I) when any protection group fires. When a protection event occurs, cv_I is bled down to reduce current demand — these settings control how aggressively it bleeds and how quickly it recovers afterward. Applies to Groups 1, 2, and 3.</p>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup bleed rate as a fraction of the RPM table ceiling per second. Scales with alternator size. Default 2.0: at 150A table gives 300 A/s. A 100 ms fastOV event at default bleeds ~30A from cv_I.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Recovery Rate (×Table/s) (<span id="AwRecoverRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup ceiling recovery rate as a fraction of the RPM table ceiling per second. Default 0.1. Lower = more inter-event damping; higher = faster current restoration after transients.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after a bumpless seed fires during which AwBleed and the CC-tracker are suppressed. Prevents the seeded cv_I from being immediately destroyed by a brief fastOV at that transition. 0 = disabled. Default 150.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Voltage Spike Margin (V) (<span id="VoltageSpikeMargin_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts above BulkVoltage that triggers fast-response mode (bypasses slew limiting). Allows aggressive duty reduction during voltage spikes or load dump events. Typical: 0.2 V.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="VoltageSpikeMargin" type="number" step="0.01" min="0" max="999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+              </details> <!-- END VTM Controller Parameters -->
+
       </div>
     </div>
 
@@ -4994,9 +5078,9 @@
     <div id="tuning-temperature" class="sub-tab-content">
       <div class="settings-card">
 
-              <!-- Telemetry (open) -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Telemetry</p>
+              <!-- Telemetry (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Telemetry</summary>
 
                 <div class="grid telemetry-groups">
 
@@ -5084,148 +5168,12 @@
 
                 </div>
 
-              </div> <!-- END Temperature Telemetry -->
+              </details> <!-- END Temperature Telemetry -->
 
-              <!-- Controller Parameters (closed) -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Controller Parameters</p>
-
-                <!-- Reset Thermal PID -->
-                <div style="margin:8px 0;">
-                  <button onclick="resetThermalPID()" class="btn-secondary">Reset Thermal PID</button>
-                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeros the penalty output, integrator, IIR filter, and 60-second slope buffer; sets PID to MANUAL (inactive). The slope buffer takes ~65s to refill before full lookahead prediction resumes. Use if the integrator has wound up or the filter is stuck on a bad reading.</span></span>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain (A per °F of projected temperature error). Error is projectedTemp − setpoint. Higher values derate current more aggressively as projected temperature approaches the limit. Default: 0.5.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKp" type="number" step="0.01" min="0" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while projected temperature stays above setpoint. Bounded by the penalty output limits (0 to MaxTableValue). Default: 0.05.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDKi" type="number" step="0.001" min="0" max="10" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. projectedTemp = tempNow + slope × ThermalLookaheadSec, where tempNow is the raw sensor reading (DS18B20) or IIR-filtered reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Clamped to 0–300s. Default: 90.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="ThermalLookaheadSec" type="number" step="1" min="0" max="300" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the temperature PID runs and the slope buffer is updated. Also sets the slope window: 12 intervals × this value (default 12 × 5000ms = 60s). Independent of the output current loop rate. Default: 5000ms.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDIntervalMs" type="number" step="1" min="500" max="60000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp PID Filter Alpha (<span id="TempPIDFilterAlpha_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">IIR smoothing coefficient for tempFiltered. For DS18B20, tempFiltered is computed but the PID lookahead and slope buffer both use the raw sensor reading directly — this alpha affects the logged/plotted filtered value but does not affect the PID input. For thermistor, alpha is hardcoded to 0.02 regardless of this setting. Default: 0.2.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempPIDFilterAlpha" type="number" step="0.01" min="0.01" max="1.0" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-
-
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers WARNING. Duty ramps to zero and lockout starts. If temperature stays above warning for TempSustainedTimeout, escalates to TEMP_SUSTAINED and GPIO4 cuts after duty settles. Compares raw sensor temperature (not projected). Default: 2°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers an immediate field cut (GPIO4 LOW, no ramp, no settle wait). Compares raw sensor temperature (not projected). Highest-priority thermal protection event. Default: 10°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to TEMP_SUSTAINED, which ramps duty to zero then cuts GPIO4. Timer resets if temp drops below the warning threshold. Enter in seconds — stored internally as milliseconds. Default: 120s.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-              </div> <!-- END Temperature Controller Parameters -->
-
-              <!-- Live Plot View -->
-              <details id="thermallog-details" class="tuning-section" style="padding:0;">
-                <summary style="padding:12px 16px;cursor:pointer;font-weight:600;font-size:14px;color:var(--text-dark);">Live Plot View</summary>
-                <div style="padding:0 16px 16px 16px;">
+              <!-- Live Plot View (open by default) -->
+              <details open id="thermallog-details" class="tuning-section">
+                <summary class="tuning-section-title">Live Plot View</summary>
+                <div>
 
                 <div style="display:flex; justify-content:space-between; align-items:center;
               margin: 8px 0 12px 0;">
@@ -5246,20 +5194,20 @@
                   <div id="thermal-manual-ranges" style="display:none;flex-wrap:wrap;gap:12px;">
 
                     <span style="color:var(--text-muted);">Plot 1 Temp:</span>
-                    <input id="p1-temp-min" type="number" value="100" style="width:60px;" placeholder="min">
-                    <input id="p1-temp-max" type="number" value="250" style="width:60px;" placeholder="max">
+                    <input id="p1-temp-min" type="number" value="100" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
+                    <input id="p1-temp-max" type="number" value="250" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
 
                     <span style="color:var(--text-muted);">Plot 1 Amps:</span>
-                    <input id="p1-amps-min" type="number" value="-5" style="width:60px;" placeholder="min">
-                    <input id="p1-amps-max" type="number" value="50" style="width:60px;" placeholder="max">
+                    <input id="p1-amps-min" type="number" value="-5" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
+                    <input id="p1-amps-max" type="number" value="50" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
 
                     <span style="color:var(--text-muted);">Plot 2:</span>
-                    <input id="p2-min" type="number" value="-20" style="width:60px;" placeholder="min">
-                    <input id="p2-max" type="number" value="80" style="width:60px;" placeholder="max">
+                    <input id="p2-min" type="number" value="-20" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
+                    <input id="p2-max" type="number" value="80" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
 
                     <span style="color:var(--text-muted);">Plot 3:</span>
-                    <input id="p3-min" type="number" value="0" style="width:60px;" placeholder="min">
-                    <input id="p3-max" type="number" value="100" style="width:60px;" placeholder="max">
+                    <input id="p3-min" type="number" value="0" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
+                    <input id="p3-max" type="number" value="100" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
 
                     <button type="button" class="btn-secondary" onclick="applyThermalRanges()">Apply</button>
                   </div>
@@ -5298,9 +5246,9 @@
                 </div>
               </details>
 
-              <!-- Step Test Parameters -->
-              <div class="tuning-section">
-                <p class="tuning-section-title">Step Test Parameters</p>
+              <!-- Step Test Parameters (collapsed) -->
+              <details class="tuning-section">
+                <summary class="tuning-section-title">Step Test Parameters</summary>
 
                 <p style="font-size:12px;color:var(--text-muted);margin:8px 0 12px 0;">
                   Steps the temperature setpoint between a low and high value. Scores each step-up transition on settling time and overshoot. Requires alternator to be thermally engaged — run at steady mid-RPM with unconstrained current demand and a low setpoint so the loop is active. Allow 2 full cycles to ring in before scoring begins.
@@ -5432,14 +5380,12 @@
                   </div>
                 </div>
 
-              </div> <!-- END Step Test Parameters -->
+              </details> <!-- END Step Test Parameters -->
 
-              <!-- Score Log -->
-              <details id="thermalTuningScoreSection" class="tuning-section" style="padding:0;">
-                <summary style="padding:12px 16px;cursor:pointer;font-weight:600;font-size:14px;color:var(--text-dark);">
-                  Step Test Score Log
-                </summary>
-                <div style="padding:0 16px 16px 16px;">
+              <!-- Score Log (collapsed) -->
+              <details id="thermalTuningScoreSection" class="tuning-section">
+                <summary class="tuning-section-title">Step Test Score Log</summary>
+                <div>
 
                   <!-- Live score spans (10m, 1h, 10h, 100h) -->
                   <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;">
@@ -5497,6 +5443,142 @@
                   </p>
                 </div>
               </details>
+
+              <!-- Controller Parameters (open by default) -->
+              <details open class="tuning-section">
+                <summary class="tuning-section-title">Controller Parameters</summary>
+
+                <!-- Reset Thermal PID -->
+                <div style="margin:8px 0;">
+                  <button onclick="resetThermalPID()" class="btn-secondary">Reset Thermal PID</button>
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeros the penalty output, integrator, IIR filter, and 60-second slope buffer; sets PID to MANUAL (inactive). The slope buffer takes ~65s to refill before full lookahead prediction resumes. Use if the integrator has wound up or the filter is stuck on a bad reading.</span></span>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Proportional gain (A per °F of projected temperature error). Error is projectedTemp − setpoint. Higher values derate current more aggressively as projected temperature approaches the limit. Default: 0.5.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKp" type="number" step="0.01" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while projected temperature stays above setpoint. Bounded by the penalty output limits (0 to MaxTableValue). Default: 0.05.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKi" type="number" step="0.001" min="0" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. projectedTemp = tempNow + slope × ThermalLookaheadSec, where tempNow is the raw sensor reading (DS18B20) or IIR-filtered reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Clamped to 0–300s. Default: 90.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ThermalLookaheadSec" type="number" step="1" min="0" max="300" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the temperature PID runs and the slope buffer is updated. Also sets the slope window: 12 intervals × this value (default 12 × 5000ms = 60s). Independent of the output current loop rate. Default: 5000ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDIntervalMs" type="number" step="1" min="500" max="60000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp PID Filter Alpha (<span id="TempPIDFilterAlpha_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">IIR smoothing coefficient for tempFiltered. For DS18B20, tempFiltered is computed but the PID lookahead and slope buffer both use the raw sensor reading directly — this alpha affects the logged/plotted filtered value but does not affect the PID input. For thermistor, alpha is hardcoded to 0.02 regardless of this setting. Default: 0.2.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDFilterAlpha" type="number" step="0.01" min="0.01" max="1.0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+
+
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers WARNING. Duty ramps to zero and lockout starts. If temperature stays above warning for TempSustainedTimeout, escalates to TEMP_SUSTAINED and GPIO4 cuts after duty settles. Compares raw sensor temperature (not projected). Default: 2°F.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers an immediate field cut (GPIO4 LOW, no ramp, no settle wait). Compares raw sensor temperature (not projected). Highest-priority thermal protection event. Default: 10°F.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to TEMP_SUSTAINED, which ramps duty to zero then cuts GPIO4. Timer resets if temp drops below the warning threshold. Enter in seconds — stored internally as milliseconds. Default: 120s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+              </details> <!-- END Temperature Controller Parameters -->
 
       </div>
     </div>
@@ -7633,7 +7715,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">FastOV Soft Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: soft FastOV only (predictive soft zone). Normal early-warning action. Frequent events at stable RPM suggest V_SOFT is too tight or dv/dt is noisy.</span>
+              <span class="tooltip-box">Rising-edge count: Layer 1 (soft-cap prediction) only. Layer 1 is the exclusive source — this counter stays at zero if Layer 1 is disabled. Normal early-warning action. Frequent events at stable RPM suggest V_SOFT is too tight or dv/dt is noisy.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="fastOvSoftCountID">?</span></span>
@@ -7641,7 +7723,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">FastOV Hard Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: hard FastOV only (predictive hard zone or hysteresis clamp). Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
+              <span class="tooltip-box">Rising-edge count: Layer 2 (hard-cap prediction) OR Layer 3 (hysteresis clamp) — both contribute to this single counter. Disabling Layer 2 alone will not stop this counter if Layer 3 is still active. Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="fastOvHardCountID">?</span></span>
@@ -8968,7 +9050,7 @@
     <span id="AbsorptionTimeoutMs_echo" style="display:none;">0</span>
     <span id="bulkVoltageHoldMs_echo" style="display:none;">0</span>
     <span id="capLimitMode_echo" style="display:none;">0</span>
-    <span id="BatteryV_filtered_ID" style="display:none"></span>
+    <span id="BatteryV_rawID" style="display:none"></span>
 <span id="MeasuredAmps_filtered_ID" style="display:none"></span>
 <span id="InputFilterTC_ID" style="display:none"></span>   <!-- This one is a total mess to clean at some point! -->
 
@@ -9153,6 +9235,97 @@
       </div>
     </div>
   </div>
+
+  <!-- ── Plant Delay Test Panel ────────────────────────────────────────────
+       Lives outside ALL .tab-content divs so position:fixed is never
+       cancelled by a parent display:none when tabs switch.
+  ──────────────────────────────────────────────────────────────────────────-->
+  <div id="sysid-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
+    <div id="sysid-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:380px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:85vh; overflow-y:auto;">
+
+      <!-- Drag handle header -->
+      <div id="sysid-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Plant Delay Test</span>
+        <button onclick="closeSystemIDModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1; pointer-events:auto;">✕</button>
+      </div>
+
+      <div style="padding:20px;">
+
+      <!-- SCREEN 1: Pre-flight -->
+      <div id="sysid-screen-preflight">
+        <h3 style="margin-top:0; color:#fff;">Plant Delay Measurement</h3>
+        <p style="margin:0 0 12px; font-size:0.92em; line-height:1.5;">
+          This test makes small step changes to the field duty and measures how quickly alternator output responds.
+          Before starting, the regulator will ramp to <strong>10A</strong> and hold there for 5 seconds to establish a stable baseline.
+        </p>
+        <p style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
+          ⚠️ <strong>Bring the engine to your typical operating RPM</strong> before clicking Start. The test is most accurate at normal cruising speed.
+        </p>
+
+        <div style="margin-bottom:16px; font-size:0.9em;">
+          <div style="margin-bottom:6px; font-weight:bold; color:#aaa;">Pre-flight checks</div>
+          <div id="sysid-check-rpm"    style="padding:4px 0;">⬜ Engine running</div>
+          <div id="sysid-check-amps"   style="padding:4px 0;">⬜ Alternator producing current</div>
+          <div id="sysid-check-volt"   style="padding:4px 0;">⬜ Battery voltage OK</div>
+        </div>
+
+        <div id="sysid-est-time" style="font-size:0.88em; color:#aaa; margin-bottom:20px;"></div>
+
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+          <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Cancel</button>
+          <button id="sysid-start-btn" onclick="confirmSystemIDStart()" class="btn-secondary" style="flex:1;" disabled>Start Test</button>
+        </div>
+      </div>
+
+      <!-- SCREEN 2: Progress -->
+      <div id="sysid-screen-progress" style="display:none;">
+        <h3 style="margin-top:0; color:#fff;">Test Running…</h3>
+        <div id="sysid-phase-list" style="font-size:0.9em; margin-bottom:16px;">
+          <div id="sysid-p1" class="sysid-phase-row">⬜ Stabilizing at 10A</div>
+          <div id="sysid-p2" class="sysid-phase-row">⬜ Baseline measurement</div>
+          <div id="sysid-p3" class="sysid-phase-row">⬜ Step up 1/3</div>
+          <div id="sysid-p4" class="sysid-phase-row">⬜ Step down 1/3</div>
+          <div id="sysid-p5" class="sysid-phase-row">⬜ Step up 2/3</div>
+          <div id="sysid-p6" class="sysid-phase-row">⬜ Step down 2/3</div>
+          <div id="sysid-p7" class="sysid-phase-row">⬜ Step up 3/3</div>
+          <div id="sysid-p8" class="sysid-phase-row">⬜ Step down 3/3</div>
+          <div id="sysid-p9" class="sysid-phase-row">⬜ Processing results</div>
+        </div>
+        <div style="margin-bottom:8px; font-size:0.85em; color:#aaa;">Current phase progress</div>
+        <div style="background:#333; border-radius:4px; height:10px; overflow:hidden; margin-bottom:16px;">
+          <div id="sysid-phase-bar" style="height:100%; width:0%; background:#4a9eff; transition:width 0.5s;"></div>
+        </div>
+        <div id="sysid-elapsed" style="font-size:0.85em; color:#aaa; margin-bottom:20px;"></div>
+        <div style="display:flex; justify-content:flex-end;">
+          <button onclick="abortSystemIDTest()" class="btn-secondary">Abort</button>
+        </div>
+      </div>
+
+      <!-- SCREEN 3: Results -->
+      <div id="sysid-screen-results" style="display:none;">
+        <h3 style="margin-top:0; color:#fff;">Results</h3>
+        <table id="sysid-results-table" style="width:100%; border-collapse:collapse; font-size:0.9em; margin-bottom:12px;">
+          <thead>
+            <tr style="color:#aaa; text-align:left; border-bottom:1px solid #444;">
+              <th style="padding:6px 4px;">Trial</th>
+              <th style="padding:6px 4px;">Rise (ms)</th>
+              <th style="padding:6px 4px;">Fall (ms)</th>
+            </tr>
+          </thead>
+          <tbody id="sysid-results-body"></tbody>
+        </table>
+        <div id="sysid-results-summary" style="font-size:0.9em; margin-bottom:8px;"></div>
+        <div id="sysid-results-warning" style="font-size:0.85em; color:#f0a500; margin-bottom:16px; display:none;"></div>
+        <div style="display:flex; gap:10px; justify-content:flex-end;">
+          <button onclick="closeSystemIDModal()" class="btn-secondary" style="flex:1;">Close</button>
+          <button onclick="sysidRunAgain()" class="btn-secondary" style="flex:1;">Run Again</button>
+          <button id="sysid-apply-btn" onclick="applySystemIDResults()" class="btn-secondary" style="flex:1;">Set All Filters</button>
+        </div>
+      </div>
+
+      </div><!-- END screens padding wrapper -->
+    </div><!-- END sysid-modal-panel -->
+  </div><!-- END sysid-modal-overlay -->
 
 </body>
 

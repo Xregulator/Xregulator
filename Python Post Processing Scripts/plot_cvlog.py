@@ -26,6 +26,8 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.widgets import CheckButtons
+from matplotlib.lines import Line2D
 import pandas as pd
 import numpy as np
 
@@ -149,32 +151,94 @@ if not path:
 basename = os.path.splitext(os.path.basename(path))[0]
 print(f"Loading: {path}")
 
-# Robust header search
+# Robust header search — accepts both old format (t_s, comma-sep) and new (ts_ms, tab-sep).
+# Some firmware builds write the last comment and the header on the same line (missing newline),
+# e.g. "# cv_I: ... PI ints_ms,chargeStageDisplay,...". Detect by presence of both "battV"
+# and "ts_ms"/"t_s", then repair the garbled first column after splitting.
 with open(path, encoding="utf-8", errors="replace") as _f:
     _lines = _f.readlines()
 
 _header_idx  = None
 _header_line = None
 for _i, _raw in enumerate(_lines):
-    if "t_s" in _raw and "battV" in _raw:
+    if "battV" in _raw and ("ts_ms" in _raw or "t_s" in _raw):
         _header_idx  = _i
-        _header_line = _raw[_raw.find("t_s"):].strip()
+        _header_line = _raw.strip()
         break
 
 if _header_idx is None:
     raise SystemExit(
-        f"ERROR: No line containing 't_s' and 'battV' found in {path}.\n"
+        f"ERROR: No line containing a time column and 'battV' found in {path}.\n"
         "Check that the CVlog header was written correctly by the firmware."
     )
 
-print(f"Header found at file line {_header_idx}: {_header_line[:80]}...")
+# Auto-detect delimiter
+_sep = "\t" if "\t" in _header_line else ","
+_col_names = [c.strip() for c in _header_line.split(_sep)]
 
-_col_names = [c.strip() for c in _header_line.split(",")]
+# Repair garbled first column: firmware sometimes omits the newline between the last
+# comment line and the header, so "...PI int" + "s_ms,col1,..." becomes "...PI ints_ms,col1,...".
+# The first field ends up as e.g. "# cv_I: CV position-form PI ints_ms" instead of "ts_ms".
+if _col_names:
+    if _col_names[0] != "ts_ms" and "ts_ms" in _col_names[0]:
+        _col_names[0] = "ts_ms"
+    elif _col_names[0] != "t_s" and _col_names[0].endswith("t_s"):
+        _col_names[0] = "t_s"
+
+print(f"Header found at file line {_header_idx} (sep={'TAB' if _sep == chr(9) else 'comma'}): {_header_line[:80]}...")
 print(f"Columns ({len(_col_names)}): {_col_names}")
 
 from io import StringIO
 _data_text = "".join(_lines[_header_idx + 1:])
-df = pd.read_csv(StringIO(_data_text), names=_col_names, on_bad_lines="skip")
+df = pd.read_csv(StringIO(_data_text), names=_col_names, sep=_sep, on_bad_lines="skip")
+
+# ---------------------------------------------------------------------------
+# Normalise new log format → names the rest of the script expects.
+# New format is tab-separated with different column names and packed bitfields.
+# ---------------------------------------------------------------------------
+_rename_map = {
+    # time
+    "ts_ms":                   "ts_ms_raw",
+    # voltage
+    "ChargingVoltageTarget":   "targV",
+    "vError":                  "vError_V",
+    # current
+    "Icv":                     "Icv_A",
+    "cv_I":                    "cv_I_A",
+    "tableThermalLimit":       "uTarget_A",
+    "setpointCmd":             "spLimited_A",
+    "measAmps":                "iMeas_A",
+    # duty
+    "dutyApplied":             "duty_pct",
+    # loop event
+    "voltageLoopRanThisTick":  "voltLoopFired",
+    # misc
+    "dBcur_dt":                "dBcur_dt_Aps",
+    "battI":                   "battI_A",
+}
+df.rename(columns={k: v for k, v in _rename_map.items() if k in df.columns}, inplace=True)
+
+# Derive t_s (seconds) from ts_ms_raw if present; old format already has t_s
+if "ts_ms_raw" in df.columns:
+    df["t_s"] = pd.to_numeric(df["ts_ms_raw"], errors="coerce") / 1000.0
+elif "t_s" not in df.columns:
+    raise SystemExit(f"ERROR: no time column found in parsed columns: {list(df.columns)}")
+
+# Unpack ovFlags bitmask → individual flag columns (new format)
+if "ovFlags" in df.columns:
+    _ov = pd.to_numeric(df["ovFlags"], errors="coerce").fillna(0).astype("int64")
+    df["fastOvActive"]   = (_ov & 1)
+    df["softClamp"]      = ((_ov & 2) > 0).astype("int64")
+    df["hardClamp"]      = ((_ov & 4) > 0).astype("int64")
+    df["iExcess"]        = ((_ov & 8) > 0).astype("int64")
+    df["loadDumpActive"] = ((_ov & 16) > 0).astype("int64")
+
+# Unpack flags bitmask → cvActive (bit1 = voltCtrl = CV loop running)
+if "flags" in df.columns and "cvActive" not in df.columns:
+    _fl = pd.to_numeric(df["flags"], errors="coerce").fillna(0).astype("int64")
+    df["cvActive"] = ((_fl & 2) > 0).astype("int64")
+
+# ---------------------------------------------------------------------------
 
 if "t_s" not in df.columns:
     raise SystemExit(f"ERROR: 't_s' not in parsed columns: {list(df.columns)}")
@@ -188,7 +252,7 @@ numeric_cols = [
     "softClamp", "hardClamp",
     "rpm",
     "battV_filt_V", "iMeas_filt_A",
-    "ch1_interval_ms", "iExcess",
+    "ch1_last_ms", "iExcess",
     "battI_A", "dBcur_dt_Aps", "loadDumpActive",
     "cvDSlope_Vps", "awState",
 ]
@@ -229,20 +293,39 @@ df["hardClamp"]      = _to_int("hardClamp")
 df["iExcess"]        = _to_int("iExcess")
 df["loadDumpActive"] = _to_int("loadDumpActive")
 
-# Extract Kp/Ki/Kd from comment line in header if present
+# Extract voltage loop Kp/Ki/Kd.
+# New log format: per-row voltageKp/Ki/Kd columns hold the actual outer voltage loop gains.
+# Old log format: only gainKp/Ki/Kd existed — those are INNER current-loop gains (PidKp/Ki/Kd),
+#   NOT the voltage loop gains. Do not use them as voltage loop gains.
+import re
 _kp = float("nan")
 _ki = float("nan")
 _kd = float("nan")
-for _raw in _lines[:_header_idx]:
-    if "VoltageKp" in _raw:
-        import re
-        m = re.search(r"VoltageKp=([\d.]+)", _raw)
-        if m: _kp = float(m.group(1))
-        m = re.search(r"VoltageKi=([\d.]+)", _raw)
-        if m: _ki = float(m.group(1))
-        m = re.search(r"VoltageKd=([\d.]+)", _raw)
-        if m: _kd = float(m.group(1))
-        break
+# Primary: new per-row voltage loop columns
+if "voltageKp" in df.columns:
+    _v = pd.to_numeric(df["voltageKp"], errors="coerce").dropna()
+    if len(_v): _kp = float(_v.iloc[0])
+if "voltageKi" in df.columns:
+    _v = pd.to_numeric(df["voltageKi"], errors="coerce").dropna()
+    if len(_v): _ki = float(_v.iloc[0])
+if "voltageKd" in df.columns:
+    _v = pd.to_numeric(df["voltageKd"], errors="coerce").dropna()
+    if len(_v): _kd = float(_v.iloc[0])
+# Legacy: header comment with VoltageKp= (never produced by firmware, kept for future use)
+if np.isnan(_kp):
+    for _raw in _lines[:_header_idx]:
+        if "VoltageKp" in _raw:
+            m = re.search(r"VoltageKp=([\d.]+)", _raw)
+            if m: _kp = float(m.group(1))
+            m = re.search(r"VoltageKi=([\d.]+)", _raw)
+            if m: _ki = float(m.group(1))
+            m = re.search(r"VoltageKd=([\d.]+)", _raw)
+            if m: _kd = float(m.group(1))
+            break
+# Old-format log warning: gainKp/Ki/Kd = inner current-loop gains, not voltage loop gains
+if np.isnan(_kp) and ("gainKp" in df.columns or "innerKp" in df.columns):
+    print("WARNING: old log format — voltage loop gains unavailable. "
+          "gainKp/Ki/Kd (if present) are inner current-loop gains, not VoltageKp/Ki/Kd.")
 
 outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}  VoltageKd={_kd:.4g}"
 print(f"Voltage loop gains: {outer_label}")
@@ -253,22 +336,48 @@ print(f"Voltage loop gains: {outer_label}")
 GRID_KW    = dict(alpha=0.4, linewidth=0.7)
 DUTY_COLOR = "#78909c"   # field duty % line — neutral grey-blue on all plots
 
-EV_COLOR_VLOOP = "#e91e63"   # voltLoopFired ticks  (hot pink)
-EV_COLOR_SOFT  = "#ffeb3b"   # softClamp ticks      (bright yellow)
+EV_COLOR_VLOOP = "#aeea00"   # voltLoopFired ticks  (lime)
+EV_COLOR_SOFT  = "#00e5ff"   # softClamp ticks      (bright cyan)
 EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks      (purple)
 EV_COLOR_FAST  = "#00838f"   # iExcess ticks        (teal)
 EV_COLOR_LDUMP = "#f57c00"   # loadDumpActive ticks (orange)
 
+_checkbox_refs = []  # keep CheckButtons alive — GC drops them without this
+
+def _make_checkbox_panel(fig, lines):
+    """Add a CheckButtons panel on the right margin to toggle line visibility."""
+    lines = [l for l in lines if not l.get_label().startswith("_")]
+    if not lines:
+        return None
+    labels = [l.get_label() for l in lines]
+    n = len(labels)
+    panel_h = min(0.85, max(0.12, n * 0.10))
+    y0 = max(0.05, 0.52 - panel_h / 2)
+    ax_cb = fig.add_axes([0.82, y0, 0.16, panel_h])
+    ax_cb.set_frame_on(False)
+    check = CheckButtons(ax_cb, labels, [True] * n)
+    for lbl_obj, line in zip(check.labels, lines):
+        lbl_obj.set_color(line.get_color())
+        lbl_obj.set_fontsize(8)
+    def toggle(label):
+        for line in lines:
+            if line.get_label() == label:
+                line.set_visible(not line.get_visible())
+        fig.canvas.draw_idle()
+    check.on_clicked(toggle)
+    _checkbox_refs.append(check)
+    return check
+
 
 def draw_state_strip(ax, df):
-    ax.set_ylim(0, 3)
+    ax.set_ylim(0, 1)
     ax.set_yticks([])
     ax.set_xlim(df["t_plot"].iloc[0], df["t_plot"].iloc[-1])
     ax.set_xlabel(time_label, fontsize=13)
 
     span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
 
-    # cvActive background bar
+    # cvActive background bar — fills almost the full strip height
     prev_t   = df["t_plot"].iloc[0]
     prev_val = df["cvActive"].iloc[0]
     for i in range(1, len(df)):
@@ -277,40 +386,22 @@ def draw_state_strip(ax, df):
             t     = df["t_plot"].iloc[i]
             color = "#2e7d32" if prev_val else "#cccccc"
             width = t - prev_t
-            ax.barh(2, width, left=prev_t, height=0.75,
+            ax.barh(0.5, width, left=prev_t, height=0.82,
                     color=color, alpha=0.85, align="center")
             if prev_val and width > span * 0.04:
-                ax.text(prev_t + width / 2, 2, "CV",
+                ax.text(prev_t + width / 2, 0.5, "CV",
                         ha="center", va="center",
                         fontsize=8, color="white", fontweight="bold", clip_on=True)
             prev_t  = t
             prev_val = val
 
-    # fastOvActive red overlay
-    ov_rows = df[df["fastOvActive"] == 1]
-    for t in ov_rows["t_plot"]:
-        ax.axvspan(t - 0.002 * span, t + 0.002 * span,
-                   ymin=0.5, ymax=1.0, color="#c62828", alpha=0.4)
-
-    # Tick lanes
+    # voltLoopFired ticks — span full bar height
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.65, ymax=0.78, color=EV_COLOR_VLOOP, linewidth=1.2, alpha=0.9)
-    for t in df.loc[df["softClamp"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.49, ymax=0.62, color=EV_COLOR_SOFT,  linewidth=1.2, alpha=0.85)
-    for t in df.loc[df["hardClamp"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.34, ymax=0.47, color=EV_COLOR_HARD,  linewidth=1.2, alpha=0.85)
-    for t in df.loc[df["iExcess"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.19, ymax=0.32, color=EV_COLOR_FAST,  linewidth=1.2, alpha=0.85)
-    for t in df.loc[df["loadDumpActive"] == 1, "t_plot"]:
-        ax.axvline(x=t, ymin=0.05, ymax=0.17, color=EV_COLOR_LDUMP, linewidth=1.2, alpha=0.85)
+        ax.axvline(x=t, ymin=0.09, ymax=0.91, color=EV_COLOR_VLOOP, linewidth=1.0, alpha=0.9)
 
-    # Legend text
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 2.55, "cvActive",    fontsize=7, color="#1b5e20", va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.75, "VLoop▲",      fontsize=7, color=EV_COLOR_VLOOP, va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.45, "softClamp▲",  fontsize=7, color=EV_COLOR_SOFT,  va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 1.15, "hardClamp▲",  fontsize=7, color=EV_COLOR_HARD,  va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 0.85, "iExcess▲",    fontsize=7, color=EV_COLOR_FAST,  va="center")
-    ax.text(df["t_plot"].iloc[0] + span * 0.01, 0.55, "loadDump▲",   fontsize=7, color=EV_COLOR_LDUMP, va="center")
+    # Legend
+    ax.text(df["t_plot"].iloc[0] + span * 0.005, 0.88, "cvActive", fontsize=7, color="#1b5e20", va="center")
+    ax.text(df["t_plot"].iloc[0] + span * 0.005, 0.12, "VLoop▲",   fontsize=7, color=EV_COLOR_VLOOP, va="center")
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -364,15 +455,48 @@ def save_fig(fig, suffix):
 
 
 def draw_flag_bars(ax, df):
-    """Filled horizontal duration bars for each binary protection flag."""
-    flag_h = 0.75
-    for offset, col, color, label in [
-        (4.0, "fastOvActive",   "#c62828", "fastOvActive  (FastOV or iExcess; load dump separate)"),
-        (3.0, "softClamp",      "#0277bd", "softClamp     (layer 1 — gentle ceiling)"),
-        (2.0, "hardClamp",      "#6a1b9a", "hardClamp     (layer 2 — hard ceiling)"),
-        (1.0, "iExcess",        "#00838f", "iExcess       (current excess protection)"),
-        (0.0, "loadDumpActive", "#f57c00", "loadDumpActive (sudden load drop detected)"),
-    ]:
+    """Mode bar + duration bars + VLoop ticks — replaces state strip on all plots."""
+    flag_h  = 0.18
+    spacing = 0.26
+    n_rows  = 7   # cvActive + voltLoopFired + 5 protection flags
+    top     = (n_rows - 1) * spacing + flag_h + 0.06
+
+    span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
+
+    # --- Row 6 (top): cvActive mode bar — green/grey segments ---
+    cv_offset = 6 * spacing
+    prev_t   = df["t_plot"].iloc[0]
+    prev_val = df["cvActive"].iloc[0]
+    for i in range(1, len(df)):
+        val = df["cvActive"].iloc[i]
+        if val != prev_val or i == len(df) - 1:
+            t     = df["t_plot"].iloc[i]
+            color = "#2e7d32" if prev_val else "#aaaaaa"
+            width = t - prev_t
+            ax.barh(cv_offset + flag_h / 2, width, left=prev_t, height=flag_h,
+                    color=color, alpha=0.85, align="center")
+            prev_t   = t
+            prev_val = val
+    ax.text(df["t_plot"].iloc[0], cv_offset + flag_h / 2, "  cvActive (mode)",
+            va="center", fontsize=7, color="#ffffff", fontweight="bold")
+
+    # --- Row 5: voltLoopFired — tick marks (fires every loop tick) ---
+    vl_offset = 5 * spacing
+    for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
+        ax.axvline(x=t, ymin=vl_offset / top, ymax=(vl_offset + flag_h) / top,
+                   color=EV_COLOR_VLOOP, linewidth=0.8, alpha=0.7)
+    ax.text(df["t_plot"].iloc[0], vl_offset + flag_h / 2, "  voltLoopFired (voltage loop tick)",
+            va="center", fontsize=7, color="#212121", fontweight="bold")
+
+    # --- Rows 4–0: protection duration bars ---
+    bar_rows = [
+        (4 * spacing, "fastOvActive",   "#c62828", "fastOvActive  (FastOV or iExcess; load dump separate)"),
+        (3 * spacing, "softClamp",      "#0277bd", "softClamp     (layer 1 — gentle ceiling)"),
+        (2 * spacing, "hardClamp",      "#6a1b9a", "hardClamp     (layer 2 — hard ceiling)"),
+        (1 * spacing, "iExcess",        "#00838f", "iExcess       (current excess protection)"),
+        (0 * spacing, "loadDumpActive", "#f57c00", "loadDumpActive (sudden load drop detected)"),
+    ]
+    for offset, col, color, label in bar_rows:
         vals = df[col].values
         t    = df["t_plot"].values
         in_flag    = False
@@ -390,13 +514,17 @@ def draw_flag_bars(ax, df):
             ax.barh(offset + flag_h / 2, t[-1] - flag_start,
                     left=flag_start, height=flag_h,
                     color=color, alpha=0.80, align="center")
-
         ax.text(df["t_plot"].iloc[0], offset + flag_h / 2, f"  {label}",
-                va="center", fontsize=9, color=color)
+                va="center", fontsize=7, color=color)
 
-    ax.set_ylim(-0.2, 5.2)
+    ax.set_ylim(-0.03, top)
     ax.set_yticks([])
-    ax.set_ylabel("Protection layers")
+    ax.set_xlim(df["t_plot"].iloc[0], df["t_plot"].iloc[-1])
+    ax.set_xlabel(time_label, fontsize=13)
+    ax.set_ylabel("Events", fontsize=9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
     ax.grid(**GRID_KW)
 
 
@@ -404,7 +532,7 @@ def draw_flag_bars(ax, df):
 # PLOT 1 — Voltage
 # ---------------------------------------------------------------------------
 fig1 = plt.figure(figsize=(18, 8), num="Plot 1 — Voltage")
-gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
+gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 0.6], hspace=0.08)
 ax1  = fig1.add_subplot(gs1[0])
 ax1s = fig1.add_subplot(gs1[1], sharex=ax1)
 plt.setp(ax1.get_xticklabels(), visible=False)
@@ -412,7 +540,7 @@ fig1.suptitle(f"Plot 1 — Voltage  |  {outer_label}", fontsize=14, y=0.99)
 add_subtitle(fig1,
     "Was the voltage setpoint reached? Did the regulator approach it cleanly, "
     "or did it overshoot? vPred shows how far ahead the loop was looking.")
-fig1.subplots_adjust(top=0.90)
+fig1.subplots_adjust(top=0.90, right=0.80)
 
 ax1.plot(df["t_plot"], df["battV"],
          color="#1565c0", lw=2.5, label="battV (measured)")
@@ -420,18 +548,22 @@ ax1.plot(df["t_plot"], df["battV_filt_V"],
          color="#90caf9", lw=1.6, linestyle="--", alpha=0.85, label="battV_filt_V (EMA)")
 ax1.plot(df["t_plot"], df["targV"],
          color="#e91e63", lw=2.2, linestyle="--", label="targV (setpoint)")
-ax1.plot(df["t_plot"], df["vPred"],
-         color="#00838f", lw=2.0, linestyle="-.", label="vPred (predicted)", alpha=0.85)
+if "vPred" in df.columns:
+    ax1.plot(df["t_plot"], df["vPred"],
+             color="#00838f", lw=2.0, linestyle="-.", label="vPred (predicted)", alpha=0.85)
 ax1.set_ylabel("Voltage (V)")
 ax1.grid(**GRID_KW)
-add_duty_axis(ax1)
+ax1_d = add_duty_axis(ax1)
 
 _h1 = [l for l in ax1.get_lines() if not l.get_label().startswith("_")]
-ax1.legend(_h1, [l.get_label() for l in _h1], loc="upper left")
+_h1_duty = [l for l in ax1_d.get_lines() if not l.get_label().startswith("_")]
+_leg1 = ax1_d.legend(_h1 + _h1_duty, [l.get_label() for l in _h1 + _h1_duty], loc="upper left")
+_leg1.set_draggable(True)
+_cb1 = _make_checkbox_panel(fig1, _h1 + _h1_duty)
 
 add_ov_shading(ax1, df)
 add_voltloop_vlines(ax1, df)
-draw_state_strip(ax1s, df)
+draw_flag_bars(ax1s, df)
 # save_fig(fig1, "plot1_voltage")
 
 
@@ -439,46 +571,54 @@ draw_state_strip(ax1s, df)
 # PLOT 2 — Current command chain (top) + protection layers (bottom)
 # ---------------------------------------------------------------------------
 fig2 = plt.figure(figsize=(18, 12), num="Plot 2 — Command Chain & Protections")
-gs2  = gridspec.GridSpec(3, 1, height_ratios=[4, 2.5, 1], hspace=0.12)
+gs2  = gridspec.GridSpec(2, 1, height_ratios=[4, 0.6], hspace=0.12)
 ax2a = fig2.add_subplot(gs2[0])
 ax2b = fig2.add_subplot(gs2[1], sharex=ax2a)
-ax2s = fig2.add_subplot(gs2[2], sharex=ax2a)
 plt.setp(ax2a.get_xticklabels(), visible=False)
-plt.setp(ax2b.get_xticklabels(), visible=False)
 fig2.suptitle(f"Plot 2 — Current Command Chain & Protections  |  {outer_label}", fontsize=14, y=0.99)
 add_subtitle(fig2,
     "Top: which limit is dominating the current setpoint, and did the alternator deliver it?  "
     "Bottom: when each overvoltage protection layer fired and for how long.")
-fig2.subplots_adjust(top=0.92)
+fig2.subplots_adjust(top=0.92, right=0.80)
 
 # --- 2a: command chain ---
-ax2a.plot(df["t_plot"], df["uTarget_A"],
-          color="#1565c0", lw=2.5, label="Current ceiling after all caps  (uTarget_A)")
-ax2a.plot(df["t_plot"], df["Icv_A"],
-          color="#e91e63", lw=2.2, linestyle="--", label="CV setpoint  (Icv_A)")
-ax2a.plot(df["t_plot"], df["fastOvCap_A"],
-          color="#455a64", lw=1.6, linestyle=":", label="FastOV voltage ceiling  (fastOvCap_A)", alpha=0.85)
-ax2a.plot(df["t_plot"], df["spLimited_A"],
-          color="#2e7d32", lw=2.0, label="PID command  (spLimited_A)")
-ax2a.plot(df["t_plot"], df["iMeas_A"],
-          color="#c62828", lw=2.0, label="Actual current  (iMeas_A)", alpha=0.90)
+if "uTarget_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["uTarget_A"],
+              color="#1565c0", lw=2.5, label="Current ceiling after all caps  (uTarget_A)")
+if "Icv_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["Icv_A"],
+              color="#e91e63", lw=2.2, linestyle="--", label="CV setpoint  (Icv_A)")
+if "fastOvCap_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["fastOvCap_A"],
+              color="#455a64", lw=1.6, linestyle=":", label="FastOV voltage ceiling  (fastOvCap_A)", alpha=0.85)
+if "spLimited_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["spLimited_A"],
+              color="#2e7d32", lw=2.0, label="PID command  (spLimited_A)")
+if "iMeas_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["iMeas_A"],
+              color="#c62828", lw=2.0, label="Actual current  (iMeas_A)", alpha=0.90)
 if "iMeas_filt_A" in df.columns:
     ax2a.plot(df["t_plot"], df["iMeas_filt_A"],
               color="#ef9a9a", lw=1.4, linestyle="--", label="Actual current EMA  (iMeas_filt_A)", alpha=0.75)
+if "battI_A" in df.columns:
+    ax2a.plot(df["t_plot"], df["battI_A"],
+              color="#f9a825", lw=1.8, alpha=0.80, label="Battery current  (battI_A)")
 
 ax2a.set_ylabel("Current (A)")
 ax2a.grid(**GRID_KW)
 ax2a.set_title("Command chain — which limit is lowest wins; field duty on right axis",
                fontsize=10, color="#444444", style="italic", pad=4)
-add_duty_axis(ax2a)
+ax2a_d = add_duty_axis(ax2a)
 
 _h2a = [l for l in ax2a.get_lines() if not l.get_label().startswith("_")]
-ax2a.legend(_h2a, [l.get_label() for l in _h2a], loc="upper left", fontsize=11)
+_h2a_duty = [l for l in ax2a_d.get_lines() if not l.get_label().startswith("_")]
+_leg2a = ax2a_d.legend(_h2a + _h2a_duty, [l.get_label() for l in _h2a + _h2a_duty], loc="upper left", fontsize=11)
+_leg2a.set_draggable(True)
 
 add_ov_shading(ax2a, df)
 add_voltloop_vlines(ax2a, df)
 
-# Variable key table — maps legend nicknames to internal variable names
+# Variable key table — maps legend nicknames to internal variable names; drag anywhere to reposition
 _p2_key = (
     "  Current ceiling/all caps =  uTarget_A      (A)\n"
     "  CV setpoint              =  Icv_A          (A)\n"
@@ -488,32 +628,52 @@ _p2_key = (
     "  Actual current (EMA)     =  iMeas_filt_A   (A)\n"
     "  Field duty               =  duty_pct       (%)"
 )
-fig2.text(
-    0.01, 0.385, _p2_key,
+_key_text = fig2.text(
+    0.01, 0.30, _p2_key,
     fontsize=8, family="monospace",
     va="top", ha="left",
-    bbox=dict(boxstyle="round,pad=0.35", fc="#f9f9f9", ec="#cccccc", alpha=0.92)
+    bbox=dict(boxstyle="round,pad=0.35", fc="#f9f9f9", ec="#cccccc", alpha=0.92),
+    zorder=10,
 )
 
-# --- 2b: protection flag duration bars + battery current ---
-ax2b.set_title(
-    "Protection layers — bar length = time active; battery current (right axis) gives load-dump context",
-    fontsize=10, color="#444444", style="italic", pad=4)
+_key_drag = {"on": False, "x": 0.0, "y": 0.0, "pos": (0.01, 0.30)}
 
+def _kpress(ev):
+    if ev.button != 1:
+        return
+    try:
+        bb = _key_text.get_window_extent(fig2.canvas.get_renderer())
+    except Exception:
+        return
+    if bb.contains(ev.x, ev.y):
+        _key_drag["on"] = True
+        _key_drag["x"] = ev.x
+        _key_drag["y"] = ev.y
+        _key_drag["pos"] = _key_text.get_position()
+
+def _kmove(ev):
+    if not _key_drag["on"]:
+        return
+    fw = fig2.get_figwidth() * fig2.dpi
+    fh = fig2.get_figheight() * fig2.dpi
+    nx = _key_drag["pos"][0] + (ev.x - _key_drag["x"]) / fw
+    ny = _key_drag["pos"][1] + (ev.y - _key_drag["y"]) / fh
+    _key_text.set_position((nx, ny))
+    fig2.canvas.draw_idle()
+
+def _krelease(ev):
+    _key_drag["on"] = False
+
+fig2.canvas.mpl_connect("button_press_event", _kpress)
+fig2.canvas.mpl_connect("motion_notify_event", _kmove)
+fig2.canvas.mpl_connect("button_release_event", _krelease)
+
+# --- 2b: mode + protection events panel ---
 draw_flag_bars(ax2b, df)
 
-ax2b_r = ax2b.twinx()
-if "battI_A" in df.columns:
-    ax2b_r.plot(df["t_plot"], df["battI_A"],
-                color="#f9a825", lw=1.8, alpha=0.80, label="battI_A (battery current)")
-    ax2b_r.axhline(0, color="#888888", linewidth=0.6, linestyle=":", alpha=0.5)
-    ax2b_r.set_ylabel("Battery current (A)", color="#f9a825", fontsize=12)
-    ax2b_r.tick_params(axis="y", colors="#f9a825", labelsize=11)
-    ax2b_r.legend(loc="upper right", fontsize=10)
-else:
-    ax2b_r.set_yticks([])
+# Checkbox panel for ax2a lines only (battI_A now lives there)
+_cb2 = _make_checkbox_panel(fig2, _h2a + _h2a_duty)
 
-draw_state_strip(ax2s, df)
 # save_fig(fig2, "plot2_command_chain_protections")
 
 
@@ -521,7 +681,7 @@ draw_state_strip(ax2s, df)
 # PLOT 3 — Engine & scheduling context
 # ---------------------------------------------------------------------------
 fig3 = plt.figure(figsize=(18, 9), num="Plot 3 — RPM & Context")
-gs3  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 1], hspace=0.10)
+gs3  = gridspec.GridSpec(3, 1, height_ratios=[2, 1.5, 0.6], hspace=0.10)
 ax3  = fig3.add_subplot(gs3[0])
 ax3b = fig3.add_subplot(gs3[1], sharex=ax3)
 ax3s = fig3.add_subplot(gs3[2], sharex=ax3)
@@ -531,7 +691,7 @@ fig3.suptitle(f"Plot 3 — Engine & Scheduling Context  |  {outer_label}", fonts
 add_subtitle(fig3,
     "RPM, ADC scheduling jitter, and field duty — the mechanical and timing backdrop "
     "for everything in Plots 1 and 2.")
-fig3.subplots_adjust(top=0.90)
+fig3.subplots_adjust(top=0.90, right=0.80)
 
 if "rpm" in df.columns:
     ax3.plot(df["t_plot"], df["rpm"],
@@ -542,25 +702,33 @@ else:
              color="#888888", fontsize=13)
 ax3.set_ylabel("RPM")
 ax3.grid(**GRID_KW)
-ax3.legend(loc="upper left")
-add_duty_axis(ax3)
+ax3_d = add_duty_axis(ax3)
+_h3 = [l for l in ax3.get_lines() if not l.get_label().startswith("_")]
+_h3_duty = [l for l in ax3_d.get_lines() if not l.get_label().startswith("_")]
+_leg3 = ax3_d.legend(_h3 + _h3_duty, [l.get_label() for l in _h3 + _h3_duty], loc="upper left")
+_leg3.set_draggable(True)
 add_voltloop_vlines(ax3, df)
 
-if "ch1_interval_ms" in df.columns:
-    ax3b.plot(df["t_plot"], df["ch1_interval_ms"],
-              color="#00838f", lw=1.8, label="ch1_interval_ms")
+if "ch1_last_ms" in df.columns:
+    ax3b.plot(df["t_plot"], df["ch1_last_ms"],
+              color="#00838f", lw=1.8, label="ch1_last_ms")
     ax3b.axhline(5,  color="#2e7d32", linewidth=0.8, linestyle=":", alpha=0.70, label="5 ms nominal")
     ax3b.axhline(15, color="#c62828", linewidth=0.8, linestyle=":", alpha=0.70,
                  label="15 ms (3× — stale reading risk)")
 else:
-    ax3b.text(0.5, 0.5, "ch1_interval_ms not present in this log (older firmware)",
+    ax3b.text(0.5, 0.5, "ch1_last_ms not present in this log (older firmware)",
               ha="center", va="center", transform=ax3b.transAxes,
               color="#888888", fontsize=12)
 ax3b.set_ylabel("CH1 interval (ms)")
 ax3b.grid(**GRID_KW)
-ax3b.legend(loc="upper right", fontsize=10)
+_h3b = [l for l in ax3b.get_lines() if not l.get_label().startswith("_")]
+_leg3b = ax3b.legend(loc="upper right", fontsize=10)
+_leg3b.set_draggable(True)
 
-draw_state_strip(ax3s, df)
+# One checkbox panel for both ax3 and ax3b lines
+_cb3 = _make_checkbox_panel(fig3, _h3 + _h3_duty + _h3b)
+
+draw_flag_bars(ax3s, df)
 # save_fig(fig3, "plot3_rpm_context")
 
 
@@ -572,7 +740,7 @@ draw_state_strip(ax3s, df)
 # when voltage is rising. P + I − D should equal Icv_A (before clamping).
 # ---------------------------------------------------------------------------
 fig4 = plt.figure(figsize=(18, 9), num="Plot 4 — PID Term Decomposition")
-gs4  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 1], hspace=0.10)
+gs4  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 0.6], hspace=0.10)
 ax4  = fig4.add_subplot(gs4[0])
 ax4b = fig4.add_subplot(gs4[1], sharex=ax4)
 ax4s = fig4.add_subplot(gs4[2], sharex=ax4)
@@ -583,7 +751,7 @@ add_subtitle(fig4,
     "What is the voltage loop actually doing? P reacts to filtered voltage error (targV − battV_filt_V), "
     "I holds the running correction, D backs off current as voltage rises. "
     "Sum of P + I − D should closely match Icv_A (slew target not logged — minor discrepancy on CV entry).")
-fig4.subplots_adjust(top=0.90)
+fig4.subplots_adjust(top=0.90, right=0.80)
 
 # Compute P and D terms from header gains + logged signals.
 # P term uses (targV - battV_filt_V): the firmware always uses IBV_filtered (getFiltV())
@@ -615,7 +783,7 @@ if _have_gains:
 if "cv_I_A" in df.columns:
     ax4.plot(df["t_plot"], df["cv_I_A"],
              color="#2e7d32", lw=2.0, label="I term  =  cv_I_A  (running integral, A)")
-if "pid_D" in df.columns and df["pid_D"].abs().max() > 0:
+if "pid_D" in df.columns:
     ax4.plot(df["t_plot"], -df["pid_D"],
              color="#e65100", lw=2.0, linestyle="--",
              label=f"−D term  =  −Kd({_kd:.4g}) × cvDSlope  (A, negative = suppressing)", alpha=0.85)
@@ -631,9 +799,11 @@ if "pid_reconstructed" in df.columns:
 ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4.set_ylabel("Current contribution (A)")
 ax4.grid(**GRID_KW)
-add_duty_axis(ax4)
+ax4_d = add_duty_axis(ax4)
 _h4 = [l for l in ax4.get_lines() if not l.get_label().startswith("_")]
-ax4.legend(_h4, [l.get_label() for l in _h4], loc="upper left", fontsize=10)
+_h4_duty = [l for l in ax4_d.get_lines() if not l.get_label().startswith("_")]
+_leg4 = ax4_d.legend(_h4 + _h4_duty, [l.get_label() for l in _h4 + _h4_duty], loc="upper left", fontsize=10)
+_leg4.set_draggable(True)
 add_ov_shading(ax4, df)
 add_voltloop_vlines(ax4, df)
 
@@ -647,9 +817,14 @@ ax4b.plot(df["t_plot"], df["vError_V"],
 ax4b.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4b.set_ylabel("vError (V)")
 ax4b.grid(**GRID_KW)
-ax4b.legend(loc="upper left", fontsize=10)
+_h4b = [l for l in ax4b.get_lines() if not l.get_label().startswith("_")]
+_leg4b = ax4b.legend(loc="upper left", fontsize=10)
+_leg4b.set_draggable(True)
 
-draw_state_strip(ax4s, df)
+# One checkbox panel for both ax4 and ax4b lines
+_cb4 = _make_checkbox_panel(fig4, _h4 + _h4_duty + _h4b)
+
+draw_flag_bars(ax4s, df)
 # save_fig(fig4, "plot4_pid_decomposition")
 
 
@@ -678,4 +853,5 @@ for _ax in _all_primary_axes:
     _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
 
 # ---------------------------------------------------------------------------
+print("Tip: use the checkboxes on the right of each plot to show/hide series.")
 plt.show()

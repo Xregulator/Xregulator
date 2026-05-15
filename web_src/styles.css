@@ -617,6 +617,28 @@ textarea {
   opacity: 0.75;
 }
 
+/* Collapsible tuning sections */
+details.tuning-section > summary.tuning-section-title {
+  cursor: pointer;
+  list-style: none;
+  padding-right: 20px;
+  position: relative;
+}
+details.tuning-section > summary.tuning-section-title::-webkit-details-marker { display: none; }
+details.tuning-section > summary.tuning-section-title::marker { display: none; }
+details.tuning-section > summary.tuning-section-title::after {
+  content: '▾';
+  position: absolute;
+  right: 2px;
+  top: 5px;
+  font-size: 12px;
+  transition: transform 0.2s;
+  opacity: 0.6;
+}
+details.tuning-section[open] > summary.tuning-section-title::after {
+  transform: rotate(-180deg);
+}
+
 /* History Row (bucket stats) */
 .history-row td {
   padding: 10px 10px;
@@ -1088,10 +1110,10 @@ input[type="submit"] {
 
 /* Chip card — each reading pair is its own white card with a teal border */
 /* 3-column grid: label | number (right-aligned) | unit                  */
-/* Keeps unit letters vertically aligned regardless of sign character     */
+/* Number column is fixed-width so digit count changes don't shift layout */
 .reading-duo {
   display: grid;
-  grid-template-columns: auto minmax(28px, auto) auto;
+  grid-template-columns: auto 3.5em auto;
   align-items: baseline;
   align-content: center;
   column-gap: 4px;

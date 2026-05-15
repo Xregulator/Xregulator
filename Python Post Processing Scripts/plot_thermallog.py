@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.widgets import CheckButtons
 import pandas as pd
 
 DOWNLOADS = os.path.expanduser("~/Downloads")
@@ -297,6 +298,32 @@ def save_fig(fig, suffix):
 # ---------------------------------------------------------------------------
 GRID_KW = dict(alpha=0.4, linewidth=0.7)
 
+_checkbox_refs = []  # keep CheckButtons alive — GC drops them without this
+
+def _make_checkbox_panel(fig, lines):
+    """Add a CheckButtons panel on the right margin to toggle line visibility."""
+    lines = [l for l in lines if not l.get_label().startswith("_")]
+    if not lines:
+        return None
+    labels = [l.get_label() for l in lines]
+    n = len(labels)
+    panel_h = min(0.85, max(0.12, n * 0.10))
+    y0 = max(0.05, 0.52 - panel_h / 2)
+    ax_cb = fig.add_axes([0.82, y0, 0.16, panel_h])
+    ax_cb.set_frame_on(False)
+    check = CheckButtons(ax_cb, labels, [True] * n)
+    for lbl_obj, line in zip(check.labels, lines):
+        lbl_obj.set_color(line.get_color())
+        lbl_obj.set_fontsize(8)
+    def toggle(label):
+        for line in lines:
+            if line.get_label() == label:
+                line.set_visible(not line.get_visible())
+        fig.canvas.draw_idle()
+    check.on_clicked(toggle)
+    _checkbox_refs.append(check)
+    return check
+
 # ---------------------------------------------------------------------------
 # PLOT 1 — Temperature control & penalty output
 # ---------------------------------------------------------------------------
@@ -305,6 +332,7 @@ gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax1a = fig1.add_subplot(gs1[0])
 ax1b = ax1a.twinx()
 ax1s = fig1.add_subplot(gs1[1], sharex=ax1a)
+fig1.subplots_adjust(right=0.80)
 
 ax1a.plot(df["t_plot"], df["tempFilt_F"],  color="#c62828", lw=2.5, label="tempFilt_F (measured)")
 ax1a.plot(df["t_plot"], df["tempProj_F"], color="#e91e63", lw=2.2, linestyle="--", label="tempProj_F (PID input)")
@@ -317,7 +345,9 @@ plt.setp(ax1a.get_xticklabels(), visible=False)
 
 lines1  = ax1a.get_lines() + ax1b.get_lines()
 labels1 = [l.get_label() for l in lines1]
-ax1a.legend(lines1, labels1, loc="upper left")
+_leg1 = ax1b.legend(lines1, labels1, loc="upper left")
+_leg1.set_draggable(True)
+_cb1 = _make_checkbox_panel(fig1, lines1)
 
 add_mode_vlines(ax1a, df, state_changes)
 draw_state_strip(ax1s, df, state_changes)
@@ -331,6 +361,7 @@ fig2 = plt.figure(figsize=(16, 8), num="Plot 2 — PID Term Decomposition")
 gs2  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax2  = fig2.add_subplot(gs2[0])
 ax2s = fig2.add_subplot(gs2[1], sharex=ax2)
+fig2.subplots_adjust(right=0.80)
 
 ax2.plot(df["t_plot"], df["outerP"],          color="#1565c0", lw=2.2, label="outerP")
 ax2.plot(df["t_plot"], df["outerI"],          color="#f9a825", lw=2.2, label="outerI")
@@ -340,7 +371,11 @@ ax2.plot(df["t_plot"], df["thermalSlope_F_sec"], color="#00838f", lw=2.0, linest
 
 ax2.set_ylabel("PID Terms")
 ax2.grid(**GRID_KW)
-ax2.legend(loc="upper left")
+_h2, _ = ax2.get_legend_handles_labels()
+_leg2 = ax2.legend(loc="upper left")
+_leg2.set_draggable(True)
+_h2_lines = [l for l in ax2.get_lines() if not l.get_label().startswith("_")]
+_cb2 = _make_checkbox_panel(fig2, _h2_lines)
 plt.setp(ax2.get_xticklabels(), visible=False)
 
 add_mode_vlines(ax2, df, state_changes)
@@ -355,6 +390,7 @@ fig3 = plt.figure(figsize=(16, 8), num="Plot 3 — Constraint Context")
 gs3  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax3  = fig3.add_subplot(gs3[0])
 ax3s = fig3.add_subplot(gs3[1], sharex=ax3)
+fig3.subplots_adjust(right=0.80)
 
 ax3.plot(df["t_plot"], df["measAmps_A"],  color="#c62828", lw=2.5, label="measAmps_A")
 ax3.plot(df["t_plot"], df["uTarget_A"],   color="#1565c0", lw=2.2, label="uTarget_A")
@@ -365,7 +401,11 @@ ax3.plot(df["t_plot"], df["duty_pct"],
 
 ax3.set_ylabel("Amps (A)")
 ax3.grid(**GRID_KW)
-ax3.legend(loc="upper left")
+_h3, _ = ax3.get_legend_handles_labels()
+_leg3 = ax3.legend(loc="upper left")
+_leg3.set_draggable(True)
+_h3_lines = [l for l in ax3.get_lines() if not l.get_label().startswith("_")]
+_cb3 = _make_checkbox_panel(fig3, _h3_lines)
 plt.setp(ax3.get_xticklabels(), visible=False)
 
 add_mode_vlines(ax3, df, state_changes)
@@ -383,6 +423,7 @@ gs4  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax4a = fig4.add_subplot(gs4[0])
 ax4b = ax4a.twinx()
 ax4s = fig4.add_subplot(gs4[1], sharex=ax4a)
+fig4.subplots_adjust(right=0.80)
 
 # Left axis: battery voltage
 ax4a.plot(df["t_plot"], df["battV"],
@@ -401,7 +442,9 @@ plt.setp(ax4a.get_xticklabels(), visible=False)
 # Combined legend (same pattern as Plot 1)
 lines4  = ax4a.get_lines() + ax4b.get_lines()
 labels4 = [l.get_label() for l in lines4]
-ax4a.legend(lines4, labels4, loc="upper left")
+_leg4 = ax4b.legend(lines4, labels4, loc="upper left")
+_leg4.set_draggable(True)
+_cb4 = _make_checkbox_panel(fig4, lines4)
 
 add_mode_vlines(ax4a, df, state_changes)
 draw_state_strip(ax4s, df, state_changes)
@@ -436,4 +479,5 @@ for _ax in _all_primary_axes:
     _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
 
 # ---------------------------------------------------------------------------
+print("Tip: use the checkboxes on the right of each plot to show/hide series.")
 plt.show()

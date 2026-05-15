@@ -27,6 +27,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.widgets import CheckButtons
 import pandas as pd
 import numpy as np
 
@@ -231,7 +232,10 @@ numeric_cols = [
     "dutyRequest", "dutyApplied",
     "enteringCV", "enteringTargetVoltageMode",
     "rpm", "measAmps",
-    "gainKp", "gainKi", "gainKd", "flags",
+    "gainKp", "gainKi", "gainKd",   # old log format — inner current-loop gains
+    "innerKp", "innerKi", "innerKd",  # new log format — inner current-loop gains
+    "voltageKp", "voltageKi", "voltageKd",  # new log format — outer voltage loop gains
+    "flags",
     "battV_filt", "iMeas_filt",
     "ovFlags", "dBcur_dt", "battI",
 ]
@@ -260,10 +264,16 @@ else:
 df["pid_saturation"] = (df["pidUnsatOutput"] - df["pidOutput"]).abs()
 df["duty_clamp"]     = (df["dutyRequest"] - df["dutyApplied"]).abs()
 
-# Gain label from first non-null row
-kp_inner = df["gainKp"].dropna().iloc[0] if "gainKp" in df.columns and not df["gainKp"].dropna().empty else float("nan")
-ki_inner = df["gainKi"].dropna().iloc[0] if "gainKi" in df.columns and not df["gainKi"].dropna().empty else float("nan")
-kd_inner = df["gainKd"].dropna().iloc[0] if "gainKd" in df.columns and not df["gainKd"].dropna().empty else float("nan")
+# Gain label from first non-null row — supports both old (gainKp) and new (innerKp) column names
+def _first_val(cols):
+    for c in cols:
+        if c in df.columns:
+            v = df[c].dropna()
+            if not v.empty: return float(v.iloc[0])
+    return float("nan")
+kp_inner = _first_val(["innerKp", "gainKp"])
+ki_inner = _first_val(["innerKi", "gainKi"])
+kd_inner = _first_val(["innerKd", "gainKd"])
 inner_label = f"Output Current PID  Kp={kp_inner:.4g}  Ki={ki_inner:.4g}  Kd={kd_inner:.4g}"
 print(f"Gains: {inner_label}")
 
@@ -280,11 +290,11 @@ _flags_num = pd.to_numeric(df["flags"], errors="coerce").fillna(0)
 df["f_govBypass"] = (_flags_num // 16 % 2).astype(int)
 
 _ov_num = pd.to_numeric(df["ovFlags"] if "ovFlags" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
-df["f_fastOvActive"]  = (_ov_num.astype(int) >> 0 & 1).astype(int)
-df["f_softClamp"]     = (_ov_num.astype(int) >> 1 & 1).astype(int)
-df["f_hardClamp"]     = (_ov_num.astype(int) >> 2 & 1).astype(int)
-df["f_iExcess"]       = (_ov_num.astype(int) >> 3 & 1).astype(int)
-df["f_loadDump"]      = (_ov_num.astype(int) >> 4 & 1).astype(int)
+df["f_fastOvActive"]  = (_ov_num       % 2).astype(int)   # bit 0
+df["f_softClamp"]     = (_ov_num // 2  % 2).astype(int)   # bit 1
+df["f_hardClamp"]     = (_ov_num // 4  % 2).astype(int)   # bit 2
+df["f_iExcess"]       = (_ov_num // 8  % 2).astype(int)   # bit 3
+df["f_loadDump"]      = (_ov_num // 16 % 2).astype(int)   # bit 4
 
 # ---------------------------------------------------------------------------
 # 3. Stage colors and mode helpers
@@ -302,7 +312,34 @@ STAGE_COLORS = {
 
 EV_COLOR_CV     = "#00838f"   # enteringCV vlines
 EV_COLOR_TVM    = "#1565c0"   # enteringTargetVoltageMode vlines
-EV_COLOR_VLOOP  = "#e91e63"   # voltageLoopRanThisTick ticks
+EV_COLOR_VLOOP  = "#aeea00"   # voltageLoopRanThisTick ticks (lime — distinct from red stages)
+
+_checkbox_refs = []  # keep CheckButtons alive — GC drops them without this
+
+def _make_checkbox_panel(fig, lines):
+    """Add a CheckButtons panel on the right margin to toggle line visibility."""
+    lines = [l for l in lines if not l.get_label().startswith("_")]
+    if not lines:
+        return None
+    labels = [l.get_label() for l in lines]
+    n = len(labels)
+    panel_h = min(0.85, max(0.12, n * 0.10))
+    y0 = max(0.05, 0.52 - panel_h / 2)
+    ax_cb = fig.add_axes([0.82, y0, 0.16, panel_h])
+    ax_cb.set_frame_on(False)
+    check = CheckButtons(ax_cb, labels, [True] * n)
+    for lbl_obj, line in zip(check.labels, lines):
+        lbl_obj.set_color(line.get_color())
+        lbl_obj.set_fontsize(8)
+    def toggle(label):
+        for line in lines:
+            if line.get_label() == label:
+                line.set_visible(not line.get_visible())
+        fig.canvas.draw_idle()
+    check.on_clicked(toggle)
+    _checkbox_refs.append(check)
+    return check
+
 
 def stage_color_label(stage_int):
     return STAGE_COLORS.get(int(stage_int), ("#777777", "?"))
@@ -321,40 +358,40 @@ GRID_KW = dict(alpha=0.4, linewidth=0.7)
 
 
 def draw_state_strip(ax, df, state_changes):
-    ax.set_ylim(0, 3)
+    ax.set_ylim(0, 1)
     ax.set_yticks([])
     ax.set_xlim(df["t_plot"].iloc[0], df["t_plot"].iloc[-1])
     ax.set_xlabel(time_label, fontsize=13)
 
     span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
 
+    # Stage bar — top portion of the strip
     boundaries = state_changes + [len(df) - 1]
     prev_t   = df["t_plot"].iloc[0]
     prev_row = df.iloc[0]
-
     for idx in boundaries:
         t = df.loc[idx, "t_plot"] if idx < len(df) else df["t_plot"].iloc[-1]
         color, label = stage_color_label(prev_row["chargeStageDisplay"])
         width = t - prev_t
-        ax.barh(2, width, left=prev_t, height=0.75,
+        ax.barh(0.72, width, left=prev_t, height=0.42,
                 color=color, alpha=0.85, align="center")
         if width > span * 0.03:
-            ax.text(prev_t + width / 2, 2, label,
+            ax.text(prev_t + width / 2, 0.72, label,
                     ha="center", va="center",
                     fontsize=8, color="white", fontweight="bold", clip_on=True)
         if idx < len(df):
             prev_row = df.loc[idx]
         prev_t = t
 
+    # VLoop ticks — bottom portion, dense field: bold near-black label
     vloop_rows = df[df["voltageLoopRanThisTick"] == 1]
     for t in vloop_rows["t_plot"]:
-        ax.axvline(x=t, ymin=0, ymax=0.33,
-                   color=EV_COLOR_VLOOP, linewidth=1.2, alpha=0.85)
-
+        ax.axvline(x=t, ymin=0.0, ymax=0.30,
+                   color=EV_COLOR_VLOOP, linewidth=1.0, alpha=0.85)
     if not vloop_rows.empty:
-        ax.text(df["t_plot"].iloc[0] + span * 0.01, 0.45,
-                "VLoop ▲",
-                fontsize=8, color=EV_COLOR_VLOOP, va="center")
+        ax.text(df["t_plot"].iloc[0] + span * 0.005, 0.13,
+                "VLoop ▲", fontsize=7, color="#212121",
+                fontweight="bold", va="center")
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -386,11 +423,12 @@ def save_fig(fig, suffix):
 
 def make_fig(title_suffix, num):
     fig = plt.figure(figsize=(18, 8), num=num)
-    gs  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
+    gs  = gridspec.GridSpec(2, 1, height_ratios=[5, 0.5], hspace=0.08)
     ax  = fig.add_subplot(gs[0])
     axs = fig.add_subplot(gs[1], sharex=ax)
     plt.setp(ax.get_xticklabels(), visible=False)
     fig.suptitle(f"{title_suffix}  |  {inner_label}", fontsize=14)
+    fig.subplots_adjust(right=0.80)
     return fig, ax, axs
 
 
@@ -416,7 +454,9 @@ ax1.grid(**GRID_KW)
 
 lines1  = ax1.get_lines() + ax1b.get_lines()
 labels1 = [l.get_label() for l in lines1 if not l.get_label().startswith("_")]
-ax1.legend(lines1[:len(labels1)], labels1, loc="upper left")
+_leg1 = ax1b.legend(lines1[:len(labels1)], labels1, loc="upper left")
+_leg1.set_draggable(True)
+_cb1 = _make_checkbox_panel(fig1, lines1)
 
 add_event_vlines(ax1, df)
 add_mode_vlines(ax1, df, state_changes)
@@ -440,7 +480,7 @@ ax2b = ax2.twinx()
 ax2.plot(df["t_plot"], df["tableThermalLimit"],
          color="#1565c0", lw=2.5, label="tableThermalLimit (RPM/thermal ceiling — pre-OV cap)")
 ax2.plot(df["t_plot"], df["setpointCmd"],
-         color="#2e7d32", lw=2.5, label="setpointCmd (=Icv in CV, =tableThermalLimit in bulk)")
+         color="#2e7d32", lw=2.5, label="setpointCmd (=Icv in CV, =uTargetAmps in bulk)")
 ax2.plot(df["t_plot"], df["Icv"],
          color="#e91e63", lw=2.2, linestyle="--", label="Icv (CV setpoint)")
 
@@ -451,7 +491,9 @@ ax2.grid(**GRID_KW)
 
 lines2  = ax2.get_lines() + ax2b.get_lines()
 labels2 = [l.get_label() for l in lines2 if not l.get_label().startswith("_")]
-ax2.legend(lines2[:len(labels2)], labels2, loc="upper left")
+_leg2 = ax2b.legend(lines2[:len(labels2)], labels2, loc="upper left")
+_leg2.set_draggable(True)
+_cb2 = _make_checkbox_panel(fig2, lines2)
 
 add_event_vlines(ax2, df)
 add_mode_vlines(ax2, df, state_changes)
@@ -466,7 +508,7 @@ for t in df.loc[df["voltageLoopRanThisTick"] == 1, "t_plot"]:
 # PLOT 3 — Output current PID internals
 # ---------------------------------------------------------------------------
 fig3 = plt.figure(figsize=(18, 10), num="Plot 3 — Output Current PID")
-gs3  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 1], hspace=0.10)
+gs3  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 0.5], hspace=0.10)
 ax3a = fig3.add_subplot(gs3[0])
 ax3b = fig3.add_subplot(gs3[1], sharex=ax3a)
 ax3s = fig3.add_subplot(gs3[2], sharex=ax3a)
@@ -474,6 +516,7 @@ ax3s = fig3.add_subplot(gs3[2], sharex=ax3a)
 plt.setp(ax3a.get_xticklabels(), visible=False)
 plt.setp(ax3b.get_xticklabels(), visible=False)
 fig3.suptitle(f"Plot 3 — Output Current PID Internals  |  {inner_label}", fontsize=14)
+fig3.subplots_adjust(right=0.80)
 
 ax3a.plot(df["t_plot"], df["pidSetpoint"],
           color="#e91e63", lw=2.5, linestyle="--", label="pidSetpoint")
@@ -492,7 +535,9 @@ ax3a.fill_between(df["t_plot"], df["pidOutput"], df["pidUnsatOutput"],
 
 ax3a.set_ylabel("Amps / Duty %")
 ax3a.grid(**GRID_KW)
-ax3a.legend(loc="upper left")
+_h3a, _ = ax3a.get_legend_handles_labels()
+_leg3a = ax3a.legend(loc="upper left")
+_leg3a.set_draggable(True)
 
 ax3b.plot(df["t_plot"], df["innerTermP"],
           color="#1565c0", lw=2.2, label="innerTermP")
@@ -503,7 +548,14 @@ ax3b.plot(df["t_plot"], df["innerTermD"],
 ax3b.axhline(0, color="#888888", linewidth=0.5, alpha=0.5)
 ax3b.set_ylabel("PID Term Value")
 ax3b.grid(**GRID_KW)
-ax3b.legend(loc="upper left")
+_h3b, _ = ax3b.get_legend_handles_labels()
+_leg3b = ax3b.legend(loc="upper left")
+_leg3b.set_draggable(True)
+
+# One checkbox panel for both ax3a and ax3b lines
+_h3a_lines = [l for l in ax3a.get_lines() if not l.get_label().startswith("_")]
+_h3b_lines = [l for l in ax3b.get_lines() if not l.get_label().startswith("_")]
+_cb3 = _make_checkbox_panel(fig3, _h3a_lines + _h3b_lines)
 
 add_event_vlines(ax3a, df)
 add_event_vlines(ax3b, df)
@@ -539,7 +591,9 @@ ax4.grid(**GRID_KW)
 
 lines4  = ax4.get_lines() + ax4b.get_lines()
 labels4 = [l.get_label() for l in lines4 if not l.get_label().startswith("_")]
-ax4.legend(lines4[:len(labels4)], labels4, loc="upper left")
+_leg4 = ax4b.legend(lines4[:len(labels4)], labels4, loc="upper left")
+_leg4.set_draggable(True)
+_cb4 = _make_checkbox_panel(fig4, lines4)
 
 add_event_vlines(ax4, df)
 add_mode_vlines(ax4, df, state_changes)
@@ -562,7 +616,11 @@ else:
 
 ax5.set_ylabel("RPM")
 ax5.grid(**GRID_KW)
-ax5.legend(loc="upper left")
+_h5, _ = ax5.get_legend_handles_labels()
+_leg5 = ax5.legend(loc="upper left")
+_leg5.set_draggable(True)
+_h5_lines = [l for l in ax5.get_lines() if not l.get_label().startswith("_")]
+_cb5 = _make_checkbox_panel(fig5, _h5_lines)
 add_event_vlines(ax5, df)
 add_mode_vlines(ax5, df, state_changes)
 draw_state_strip(ax5s, df, state_changes)
@@ -576,7 +634,7 @@ draw_state_strip(ax5s, df, state_changes)
 #            current / load-dump derivative looked like at those moments.
 # ---------------------------------------------------------------------------
 fig6 = plt.figure(figsize=(18, 9), num="Plot 6 — Protection Flags & Battery Current")
-gs6  = gridspec.GridSpec(3, 1, height_ratios=[3, 2, 1], hspace=0.10)
+gs6  = gridspec.GridSpec(3, 1, height_ratios=[3, 1.0, 0.5], hspace=0.10)
 ax6a = fig6.add_subplot(gs6[0])
 ax6b = fig6.add_subplot(gs6[1], sharex=ax6a)
 ax6s = fig6.add_subplot(gs6[2], sharex=ax6a)
@@ -584,6 +642,7 @@ ax6s = fig6.add_subplot(gs6[2], sharex=ax6a)
 plt.setp(ax6a.get_xticklabels(), visible=False)
 plt.setp(ax6b.get_xticklabels(), visible=False)
 fig6.suptitle(f"Plot 6 — Protection Flags & Battery Current", fontsize=14)
+fig6.subplots_adjust(right=0.80)
 
 # 6a: battery current + dBcur_dt
 ax6a_r = ax6a.twinx()
@@ -605,7 +664,9 @@ ax6a_r.set_ylabel("dBcur/dt (A/s)", color="#e91e63")
 ax6a.grid(**GRID_KW)
 
 _h6a = [l for l in ax6a.get_lines() + ax6a_r.get_lines() if not l.get_label().startswith("_")]
-ax6a.legend(_h6a, [l.get_label() for l in _h6a], loc="upper left")
+_leg6a = ax6a_r.legend(_h6a, [l.get_label() for l in _h6a], loc="upper left")
+_leg6a.set_draggable(True)
+_cb6 = _make_checkbox_panel(fig6, _h6a)
 
 # Red shading where fastOvActive
 _in_ov = False
@@ -620,15 +681,17 @@ for _i, _row in df.iterrows():
 if _in_ov:
     ax6a.axvspan(_ov_start, df["t_plot"].iloc[-1], color="#c62828", alpha=0.08)
 
-# 6b: flag lanes
-_flag_h6 = 0.75
-for _off, _col, _color, _lbl in [
-    (4.0, "f_fastOvActive", "#c62828", "fastOvActive"),
-    (3.0, "f_softClamp",    "#0277bd", "softClamp"),
-    (2.0, "f_hardClamp",    "#6a1b9a", "hardClamp"),
-    (1.0, "f_iExcess",      "#00838f", "iExcess"),
-    (0.0, "f_loadDump",     "#f57c00", "loadDumpActive"),
-]:
+# 6b: flag lanes — tight style
+_flag_h6  = 0.18
+_spacing6 = 0.26
+for _i6, (_col, _color, _lbl) in enumerate([
+    ("f_fastOvActive", "#c62828", "fastOvActive  (FastOV or iExcess)"),
+    ("f_softClamp",    "#0277bd", "softClamp     (layer 1 — gentle ceiling)"),
+    ("f_hardClamp",    "#6a1b9a", "hardClamp     (layer 2 — hard ceiling)"),
+    ("f_iExcess",      "#00838f", "iExcess       (current excess protection)"),
+    ("f_loadDump",     "#f57c00", "loadDumpActive (sudden load drop detected)"),
+]):
+    _off = (4 - _i6) * _spacing6
     if _col not in df.columns:
         continue
     _vals = df[_col].values
@@ -647,11 +710,11 @@ for _off, _col, _color, _lbl in [
         ax6b.barh(_off + _flag_h6 / 2, _t[-1] - _fs,
                   left=_fs, height=_flag_h6, color=_color, alpha=0.80, align="center")
     ax6b.text(df["t_plot"].iloc[0], _off + _flag_h6 / 2, f"  {_lbl}",
-              va="center", fontsize=9, color=_color)
+              va="center", fontsize=7, color=_color)
 
-ax6b.set_ylim(-0.2, 5.2)
+ax6b.set_ylim(-0.03, 4 * _spacing6 + _flag_h6 + 0.08)
 ax6b.set_yticks([])
-ax6b.set_ylabel("Flags")
+ax6b.set_ylabel("Flags", fontsize=9)
 ax6b.grid(**GRID_KW)
 
 draw_state_strip(ax6s, df, state_changes)
@@ -684,4 +747,5 @@ for _ax in _all_primary_axes:
     _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
 
 # ---------------------------------------------------------------------------
+print("Tip: use the checkboxes on the right of each plot to show/hide series.")
 plt.show()

@@ -83,7 +83,7 @@ enum Csv1Index {
   CSV1_ch1_worst_at,             // 64
   CSV1_ch1_over2x_at,            // 65
   CSV1_ch1_n_at,                 // 66
-  CSV1_battV_filtered,           // 67
+  CSV1_battV_raw,                // 67
   CSV1_iMeas_filtered,           // 68
   CSV1_g_iExcessCount,           // 69
   CSV1_g_inaOVCount,             // 70
@@ -155,8 +155,10 @@ enum Csv1Index {
   CSV1_ft_updateSensorWindow_ses,               // 132
   CSV1_ft_checkTimeSync_win,                    // 133
   CSV1_ft_checkTimeSync_ses,                    // 134
+  CSV1_voltageTarget,                           // 135
+  CSV1_Icv,                                     // 136
 
-  CSV1_FIELD_COUNT  // = 135
+  CSV1_FIELD_COUNT  // = 137
 
 };
 
@@ -726,8 +728,8 @@ enum Csv3Index {
   CSV3_ft_FlushFileWriteQueue_ses,       // 266 — FlushFileWriteQueue worst session (µs)
   CSV3_ft_efficiencyTracker_win,         // 267 — efficiencyTracker_tick() worst 5s window (µs)
   CSV3_ft_efficiencyTracker_ses,         // 268 — efficiencyTracker_tick() worst session (µs)
-  CSV3_systemIDActive,                   // 269 — 0=idle, 1-9=current phase
-  CSV3_systemIDResultsReady,             // 270 — 1=results available
+  CSV3_systemIDActive,                   // 268 — 0=idle, 1-9=current phase
+  CSV3_systemIDResultsReady,             // 269 — 1=results available
   CSV3_OvLayer1Enable,                   // 270
   CSV3_OvLayer2Enable,                   // 271
   CSV3_OvLayer3Enable,                   // 272
@@ -737,8 +739,15 @@ enum Csv3Index {
   CSV3_TdPred,                           // 276
   CSV3_VSoftMarginV,                     // 277
   CSV3_VHardMarginV,                     // 278
+  CSV3_OutputPIDMA_N,                    // 279
+  CSV3_OutputPIDFilterTC,                // 280
+  CSV3_VoltageFilterTC,                  // 281
+  CSV3_VoltageDWindowMs,                 // 282
+  CSV3_ProtectionProxGateV,             // 283
+  CSV3_SlopeBleedThresh,                // 284
+  CSV3_SlopeBleedK,                     // 285
 
-  CSV3_FIELD_COUNT  // = 279
+  CSV3_FIELD_COUNT  // = 286
 };
 
 
@@ -1527,7 +1536,7 @@ void setupServer() {
                 "# ovFlags: bit0=fastOvActive bit1=softClamp bit2=hardClamp bit3=iExcess bit4=loadDumpActive\n"
                 "# voltageLoopRanThisTick=1 means Icv/cv_I updated this row\n"
                 "# vError: always fresh every tick regardless of loop interval\n"
-                "# Icv: CV velocity-form PI output — the direct current setpoint in CV modes\n"
+                "# Icv: CV position-form PI output — the direct current setpoint in CV modes\n"
                 "# cv_I: CV position-form PI integrator state\n"
                 "# tableThermalLimit: RPM cap minus thermal penalty, before CV\n"
                 "# setpointCmd: Icv in CV modes, tableThermalLimit in bulk\n"
@@ -1562,9 +1571,12 @@ void setupServer() {
                 "enteringTargetVoltageMode,"
                 "rpm,"
                 "measAmps,"
-                "gainKp,"
-                "gainKi,"
-                "gainKd,"
+                "innerKp,"
+                "innerKi,"
+                "innerKd,"
+                "voltageKp,"
+                "voltageKi,"
+                "voltageKd,"
                 "battV_filt_V,"
                 "iMeas_filt_A,"
                 "flags,"
@@ -1600,7 +1612,8 @@ void setupServer() {
                 "%.2f,%.2f,"
                 "%u,%u,"
                 "%.0f,%.2f,"
-                "%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,"   // innerKp, innerKi, innerKd
+                "%.4f,%.4f,%.4f,"   // voltageKp, voltageKi, voltageKd
                 "%.3f,%.3f,"  // battV_filt, iMeas_filt
                 "%u,%u,"      // flags, ovFlags
                 "%.2f,%.3f\n",  // dBcur_dt, battI
@@ -1628,9 +1641,12 @@ void setupServer() {
                 (unsigned)e.enteringTargetVoltageMode,
                 e.rpm,
                 e.measAmps,
-                e.gainKp,
-                e.gainKi,
-                e.gainKd,
+                e.innerKp,
+                e.innerKi,
+                e.innerKd,
+                e.voltageKp,
+                e.voltageKi,
+                e.voltageKd,
                 e.battV_filt,
                 e.iMeas_filt,
                 (unsigned)e.flags,
@@ -3204,6 +3220,34 @@ void setupServer() {
       writeFile(LittleFS, "/VoltageKd.txt", String(VoltageKd).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    if (request->hasParam("VoltageDWindowMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("VoltageDWindowMs")->value();
+      VoltageDWindowMs = (uint16_t)inputMessage.toInt();
+      writeFile(LittleFS, "/VoltageDWindowMs.txt", String(VoltageDWindowMs).c_str());
+      queueConsoleMessageF("Voltage D slope window: %d ms", VoltageDWindowMs);
+    }
+    if (request->hasParam("ProtectionProxGateV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("ProtectionProxGateV")->value();
+      ProtectionProxGateV = inputMessage.toFloat();
+      writeFile(LittleFS, "/ProtectionProxGateV.txt", String(ProtectionProxGateV, 2).c_str());
+      queueConsoleMessageF("Protection proximity gate: %.2f V below BulkVoltage", ProtectionProxGateV);
+    }
+    if (request->hasParam("SlopeBleedThresh")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SlopeBleedThresh")->value();
+      SlopeBleedThresh = inputMessage.toFloat();
+      writeFile(LittleFS, "/SlopeBleedThresh.txt", String(SlopeBleedThresh, 3).c_str());
+      queueConsoleMessageF("Slope bleed threshold: %.3f V/s", SlopeBleedThresh);
+    }
+    if (request->hasParam("SlopeBleedK")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SlopeBleedK")->value();
+      SlopeBleedK = inputMessage.toFloat();
+      writeFile(LittleFS, "/SlopeBleedK.txt", String(SlopeBleedK, 1).c_str());
+      queueConsoleMessageF("Slope bleed gain: %.1f A/(V/s)", SlopeBleedK);
+    }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKp")->value();
@@ -3523,6 +3567,27 @@ void setupServer() {
       const char* sigNames[] = { "EMA(TC)", "MA(N)", "Raw" };
       queueConsoleMessageF("Output PID signal source: %s", sigNames[OutputPIDSigSrc]);
     }
+    if (request->hasParam("OutputPIDMA_N")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OutputPIDMA_N")->value();
+      OutputPIDMA_N = constrain(inputMessage.toInt(), 1, I_RING_SIZE);
+      writeFile(LittleFS, "/OutputPIDMA_N.txt", String(OutputPIDMA_N).c_str());
+      queueConsoleMessageF("Output PID MA window: N=%d", OutputPIDMA_N);
+    }
+    if (request->hasParam("OutputPIDFilterTC")) {
+      foundParameter = true;
+      inputMessage = request->getParam("OutputPIDFilterTC")->value();
+      OutputPIDFilterTC = inputMessage.toFloat();
+      writeFile(LittleFS, "/OutputPIDFilterTC.txt", String(OutputPIDFilterTC).c_str());
+      queueConsoleMessageF("Output PID EMA TC: %.1f ms", OutputPIDFilterTC);
+    }
+    if (request->hasParam("VoltageFilterTC")) {
+      foundParameter = true;
+      inputMessage = request->getParam("VoltageFilterTC")->value();
+      VoltageFilterTC = inputMessage.toFloat();
+      writeFile(LittleFS, "/VoltageFilterTC.txt", String(VoltageFilterTC).c_str());
+      queueConsoleMessageF("Voltage EMA TC: %.1f ms", VoltageFilterTC);
+    }
     if (request->hasParam("TdPred")) {
       foundParameter = true;
       inputMessage = request->getParam("TdPred")->value();
@@ -3557,6 +3622,17 @@ void setupServer() {
       inputMessage = request->getParam("CVTuningMode")->value();
       writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
       CVTuningMode = inputMessage.toInt();
+    }
+    if (request->hasParam("commitCVTuningScore")) {
+      foundParameter = true;
+      manualCommitCVTuningRequested = true;
+      queueConsoleMessage("CVTuningScore: manual commit requested via UI");
+    }
+    if (request->hasParam("restartCVTest")) {
+      foundParameter = true;
+      cvTuningScore = {};
+      cvTuningParamChanged = false;
+      queueConsoleMessage("CVTuningScore: test restarted via UI");
     }
     if (request->hasParam("cvWaveAmplitudeV")) {
       foundParameter = true;
@@ -4327,10 +4403,9 @@ void setupServer() {
     // Active test state
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
     float cvts = 0.0f;
-    if (cvTestActive && cvTuningScore.scoredHighCount > 0) {
-      float n = (float)cvTuningScore.scoredHighCount;
-      cvts = (cvTuningScore.totalSettlingTimeSec / n)
-           + cvKOvershoot * (cvTuningScore.totalIntegratedOvershootVs / n);
+    if (cvTestActive && cvTuningScore.activeTimeSec > 0.0f) {
+      cvts = 1000.0f * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs)
+             / cvTuningScore.activeTimeSec;
     }
     pos += snprintf(buf + pos, 16384 - pos,
       "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
@@ -4739,7 +4814,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),    // 0
@@ -4810,7 +4885,7 @@ void SendWifiData() {
                                SafeInt(ch1_worst_at),               // 64
                                SafeInt(ch1_over2x_at),              // 65
                                SafeInt(ch1_n_at),                   // 66
-                               SafeInt(BatteryV_filtered, 100),     // 67 — 2 decimal places
+                               SafeInt(BatteryV, 100),              // 67 — 2 decimal places, raw ADS1115
                                SafeInt(MeasuredAmps_filtered, 100), // 68 — 2 decimal places
                                SafeInt(g_iExcessCount),             // 69
                                SafeInt(g_inaOVCount),               // 70
@@ -4877,7 +4952,9 @@ void SendWifiData() {
                                SafeInt(ft_updateSensorWindow.worstWindow / 1000),              // 131
                                SafeInt(ft_updateSensorWindow.worstSession / 1000),             // 132
                                SafeInt(ft_checkTimeSync.worstWindow / 1000),                   // 133
-                               SafeInt(ft_checkTimeSync.worstSession / 1000)                   // 134
+                               SafeInt(ft_checkTimeSync.worstSession / 1000),                  // 134
+                               SafeInt(ChargingVoltageTarget * 100),                           // 135
+                               SafeInt(Icv * 100)                                              // 136
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -5247,7 +5324,7 @@ void SendWifiData() {
   // PRIORITY 4: CSVData3 (settings data - every 2 seconds)
   if (!sentSomething && now - lastpayload3send >= 2000 && events.count() > 0) {
     static char *payload3 = nullptr;
-    static const size_t PAYLOAD3_SIZE = 1900;  // (269 fields + 1) × 7 = 1890, rounded to 1900
+    static const size_t PAYLOAD3_SIZE = 2100;  // (283 fields + 1) × 7 = 1988, rounded up
     if (!payload3) {
       payload3 = (char *)ps_malloc(PAYLOAD3_SIZE);  // allocated to PSRAM
       if (!payload3) {
@@ -5286,7 +5363,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -5557,8 +5634,8 @@ void SendWifiData() {
                                SafeInt(ft_FlushFileWriteQueue.worstSession),            // 266 — FlushFileWriteQueue worst session (µs)
                                SafeInt(ft_efficiencyTracker.worstWindow),               // 267 — efficiencyTracker_tick() worst 5s window (µs)
                                SafeInt(ft_efficiencyTracker.worstSession),              // 268 — efficiencyTracker_tick() worst session (µs)
-                               (int)systemIDActive,                                    // 269 — 0=idle, 1-9=current phase
-                               (int)systemIDResultsReady,                              // 270 — 1=results available
+                               (int)systemIDActive,                                    // 268 — 0=idle, 1-9=current phase
+                               (int)systemIDResultsReady,                              // 269 — 1=results available
                                (int)OvLayer1Enable,                                    // 270
                                (int)OvLayer2Enable,                                    // 271
                                (int)OvLayer3Enable,                                    // 272
@@ -5567,7 +5644,14 @@ void SendWifiData() {
                                OutputPIDSigSrc,                                        // 275
                                TdPred,                                                  // 276
                                VSoftMarginV,                                            // 277
-                               VHardMarginV                                             // 278
+                               VHardMarginV,                                            // 278
+                               OutputPIDMA_N,                                          // 279
+                               (int)OutputPIDFilterTC,                                 // 280
+                               (int)VoltageFilterTC,                                   // 281
+                               (int)VoltageDWindowMs,                                  // 282
+                               SafeInt(ProtectionProxGateV, 100),                      // 283
+                               SafeInt(SlopeBleedThresh, 100),                         // 284
+                               (int)SlopeBleedK                                        // 285
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

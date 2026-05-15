@@ -2131,7 +2131,7 @@ void _ReadAnalogInputs_inner() {
                            ibv_ema_init = true;
                          } else {
                            float dt_f = fmaxf(1.0f, (float)(nowIna - lastIbvEmaMs));
-                           float alpha = dt_f / (InputFilterTC + dt_f);
+                           float alpha = dt_f / (VoltageFilterTC + dt_f);
                            IBV_filtered = alpha * IBV + (1.0f - alpha) * IBV_filtered;
                          }
                          lastIbvEmaMs = nowIna;
@@ -2299,23 +2299,6 @@ void _ReadAnalogInputs_inner() {
                            if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
                              MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
                              battVFreshFlag = true;
-                             // ── EMA filter ─────────────────────────────────────────────────────────
-                             // α = dt / (TC + dt); seeded on first valid reading so output
-                             // starts at measured value rather than ramping up from zero.
-                             {
-                               static bool battV_filter_init = false;
-                               static uint32_t lastBattVFilterMs = 0;
-                               if (!battV_filter_init) {
-                                 BatteryV_filtered = BatteryV;
-                                 battV_filter_init = true;
-                               } else {
-                                 float dt_f = fmaxf(1.0f, (float)(now - lastBattVFilterMs));
-                                 float alpha = dt_f / (InputFilterTC + dt_f);
-                                 BatteryV_filtered = alpha * BatteryV
-                                                     + (1.0f - alpha) * BatteryV_filtered;
-                               }
-                               lastBattVFilterMs = now;
-                             }
                            }
                            break;
 
@@ -2363,18 +2346,22 @@ void _ReadAnalogInputs_inner() {
                            if (MeasuredAmps > -kSanityLim[rIdx] && MeasuredAmps < kSanityLim[rIdx]) {  // Sanity check
                              MARK_FRESH(IDX_MEASURED_AMPS);
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
-                             // ── EMA filter ─────────────────────────────────────────────────────────
+                             // ── EMA filters ────────────────────────────────────────────────────────
+                             // iExcess EMA (InputFilterTC) and Output PID EMA (OutputPIDFilterTC) run
+                             // independently so each can be tuned for its role.
                              {
                                static bool amps_filter_init = false;
                                static uint32_t lastAmpsFilterMs = 0;
                                if (!amps_filter_init) {
                                  MeasuredAmps_filtered = MeasuredAmps;
+                                 g_pidI_filtered       = MeasuredAmps;
                                  amps_filter_init = true;
                                } else {
                                  float dt_f = fmaxf(1.0f, (float)(now - lastAmpsFilterMs));
-                                 float alpha = dt_f / (InputFilterTC + dt_f);
-                                 MeasuredAmps_filtered = alpha * MeasuredAmps
-                                                         + (1.0f - alpha) * MeasuredAmps_filtered;
+                                 float alpha_ie  = dt_f / (InputFilterTC      + dt_f);
+                                 float alpha_pid = dt_f / (OutputPIDFilterTC  + dt_f);
+                                 MeasuredAmps_filtered = alpha_ie  * MeasuredAmps + (1.0f - alpha_ie)  * MeasuredAmps_filtered;
+                                 g_pidI_filtered       = alpha_pid * MeasuredAmps + (1.0f - alpha_pid) * g_pidI_filtered;
                                }
                                lastAmpsFilterMs = now;
                              }
@@ -2389,16 +2376,22 @@ void _ReadAnalogInputs_inner() {
                              iAmpHead = (iAmpHead + 1) % I_RING_SIZE;
                              if (iAmpCount < I_RING_SIZE) iAmpCount++;
 
-                             // MA(N) — user-configurable window, clamped to available samples
+                             // MA(N) — independent windows for iExcess and Output PID
                              {
-                               int n = IExcessMA_N < (int)iAmpCount ? IExcessMA_N : (int)iAmpCount;
-                               if (n < 1) n = 1;
-                               float sum = 0.0f;
-                               for (int k = 0; k < n; k++) {
+                               int n_ie  = IExcessMA_N  < (int)iAmpCount ? IExcessMA_N  : (int)iAmpCount;
+                               int n_pid = OutputPIDMA_N < (int)iAmpCount ? OutputPIDMA_N : (int)iAmpCount;
+                               if (n_ie  < 1) n_ie  = 1;
+                               if (n_pid < 1) n_pid = 1;
+                               float sum_ie = 0.0f, sum_pid = 0.0f;
+                               int n_max = n_ie > n_pid ? n_ie : n_pid;
+                               for (int k = 0; k < n_max; k++) {
                                  uint8_t idx = (iAmpHead + I_RING_SIZE - 1 - k) % I_RING_SIZE;
-                                 sum += iAmpRing[idx].val;
+                                 float v = iAmpRing[idx].val;
+                                 if (k < n_ie)  sum_ie  += v;
+                                 if (k < n_pid) sum_pid += v;
                                }
-                               g_iMA_N = sum / (float)n;
+                               g_iMA_N   = sum_ie  / (float)n_ie;
+                               g_pidMA_N = sum_pid / (float)n_pid;
                              }
                            }
 
@@ -2447,23 +2440,6 @@ void _ReadAnalogInputs_inner() {
                            }
                            if (RPM >= 0 && RPM < 10000) {  // Sanity check
                              MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
-                             // ── EMA filter ─────────────────────────────────────────────────────────
-                             // RPM < 100 → 0 clamp already applied above, so filter sees
-                             // the zeroed value when the engine is stopped.
-                             {
-                               static bool rpm_filter_init = false;
-                               static uint32_t lastRPMFilterMs = 0;
-                               if (!rpm_filter_init) {
-                                 RPM_filtered = RPM;
-                                 rpm_filter_init = true;
-                               } else {
-                                 float dt_f = fmaxf(1.0f, (float)(now - lastRPMFilterMs));
-                                 float alpha = dt_f / (InputFilterTC + dt_f);
-                                 RPM_filtered = alpha * RPM
-                                                + (1.0f - alpha) * RPM_filtered;
-                               }
-                               lastRPMFilterMs = now;
-                             }
                            }
                            break;
 

@@ -853,18 +853,19 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Safeties continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC = 100.0f;  // ms — web-configurable, LittleFS-backed
-float BatteryV_filtered = 0.0f;
+float InputFilterTC = 140.0f;      // ms — iExcess EMA TC, LittleFS-backed
+float OutputPIDFilterTC = 140.0f;  // ms — Output Current PID EMA TC, LittleFS-backed
+float VoltageFilterTC = 100.0f;    // ms — IBV EMA TC for CV voltage loop, LittleFS-backed
 float IBV_filtered = 0.0f;  // EMA of INA228 bus voltage — used by getFiltV() and CV loop
-float MeasuredAmps_filtered = 0.0f;
-float RPM_filtered = 0.0f;
+float MeasuredAmps_filtered = 0.0f;  // iExcess EMA signal
+float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 
 // ── SystemID — plant delay measurement ───────────────────────────────────
 // Step test: baseline → 3× (duty up / duty down) → post-process.
 // Samples stored in PSRAM. Buffer allocated on first test run, never freed.
 // Results populate the JS popup and optionally update InputFilterTC in flash.
 // Only legal in SYS_MODE_AUTO; systemID_tick() enforces this.
-float SystemIDStepAmplitude = 15.0f;  // % duty step — will be web-configurable later
+float SystemIDStepAmplitude = 5.0f;  // % duty step — will be web-configurable later
 
 volatile bool systemIDRequested = false;       // set true by UI handler to trigger a test run
 volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
@@ -1858,8 +1859,8 @@ int timeAxisModeChanging = 0;  // toggle the time axis on and off in Plots.  Off
 int RPMThreshold = -20000;  //below this, there will be no field output in auto mode (Update this if we have RPM at low speeds and no field, otherwise, depend on Ignition) Check this later
 
 int maxPoints;                 //number of points plotted per plot (X axis length)
-int Ymin1 = -10, Ymax1 = 90;   // Current plot
-float Ymin2 = 10, Ymax2 = 20;  // Voltage plot
+int Ymin1 = -10, Ymax1 = 50;    // Current plot
+float Ymin2 = 12.0, Ymax2 = 16.0;  // Voltage plot
 int Ymin3 = 0, Ymax3 = 4000;   // RPM plot
 int Ymin4 = 50, Ymax4 = 250;   // Temperature plot
 
@@ -1963,7 +1964,8 @@ uint8_t tuningLogHead = 0;          // next write index
 uint16_t tuningRunCounter = 0;      // increments each commit, persists via loadTuningLog
 TuningScoreState tuningScore = {};  // active test accumulator
 bool tuningParamChanged = false;             // set by server handlers when a tuning param is updated
-volatile bool manualCommitTuningRequested = false;  // set by UI commit button
+volatile bool manualCommitTuningRequested = false;   // set by UI commit button
+volatile bool manualCommitCVTuningRequested = false; // set by UI commit button
 
 ScoreBucket *liveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
 uint8_t liveScoreHead[4] = {};
@@ -1984,7 +1986,7 @@ bool cvLiveScore_inWindow = false;
 
 // === CV Loop Tuning Score System ===
 float cvWaveAmplitudeV = 0.30f;   // V — target dips by this during LOW phase
-int cvWavePeriodSec = 60;         // s — half-period of CV test wave
+int cvWavePeriodSec = 20;         // s — half-period of CV test wave
 float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
 uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
 int CVTuningMode = 0;             // 0=off, 1=on
@@ -2183,6 +2185,9 @@ float PidKd = 0.01f;  // derivative gain
 float VoltageKp = 25.0f;             // A/V — proportional gain
 float VoltageKi = 2.5f;              // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
 float VoltageKd = 40.0f;             // A/(V/s) — derivative gain; at dvdt=0.5V/s subtracts 20A from Icv
+uint16_t VoltageDWindowMs = 200;     // ms — D slope window; must be >= VoltageLoopInterval, <= CV_DSLOPE_BUF × VoltageLoopInterval
+float SlopeBleedThresh = 0.10f;      // V/s — integrator bleed activates when cvDSlope exceeds this (intended max rise rate)
+float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
@@ -2194,9 +2199,12 @@ bool  OvLayer3Enable = true;    // Layer 3 — hysteresis clamp enable
 int   IExcessSigSrc   = 0;      // Layer 4 — 0=MA(N), 1=EMA(TC), 2=Raw
 int   IExcessMA_N     = 2;      // Layer 4 — MA window size (1–10 samples)
 int   OutputPIDSigSrc = 0;      // Output current PID — 0=EMA(TC), 1=MA(N), 2=Raw
+int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10 samples)
 float TdPred         = 0.045f;  // Layers 1+2 lookahead horizon (s)
 float VSoftMarginV   = 0.100f;  // Layer 1/3 voltage margin above target (V)
 float VHardMarginV   = 0.150f;  // Layer 2 voltage margin above target (V)
+// --- Protection proximity gate ---
+float ProtectionProxGateV = 0.3f; // V — protections only arm when ChargingVoltageTarget >= BulkVoltage - this
 // --- iExcess current supervisor ---
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
@@ -2396,8 +2404,8 @@ int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100,
 
 // ===== TARGET CURRENT TABLE =====
 // Maximum amps the regulator will command at each RPM breakpoint in Normal mode (HiLow=1).
-// In Low mode (HiLow=0) the regulator halves these values before sending to the PID,
-// so Normal=50A → Low=25A automatically — no separate Low-mode table is needed.
+// In Low mode (HiLow=0) the regulator quarters these values before sending to the PID,
+// so Normal=50A → Low=12A (closest integer) automatically — no separate Low-mode table is needed.
 // The first entry (≤100 RPM = effectively stopped) is 0 to guarantee no field
 // current when the alternator is not spinning. The factory reset button restores
 // defaultCurrentValues below.
@@ -2476,12 +2484,12 @@ bool thermalSlopeBufFull = false;
 float projectedTempF = NAN;           // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
 uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDIntervalMs cadence
 
-// CV D-term slope ring buffer: CV_DSLOPE_BUF readings × VoltageLoopInterval = ~500ms window
-#define CV_DSLOPE_BUF 5              // 5 × 100ms = 500ms window
+// CV D-term slope ring buffer: stores up to CV_DSLOPE_BUF voltage readings; active window
+// controlled at runtime by VoltageDWindowMs (user-adjustable, LittleFS-backed).
+#define CV_DSLOPE_BUF 10             // max 10 × 100ms = 900ms window at default loop rate
 float cvDSlopeBuffer[CV_DSLOPE_BUF];
 uint8_t cvDSlopeBufIdx = 0;
-bool cvDSlopeBufFull = false;
-float cvDSlope = 0.0f;              // V/s — long-window backward diff on filtered voltage
+float cvDSlope = 0.0f;              // V/s — backward diff on filtered voltage over VoltageDWindowMs
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -2666,7 +2674,7 @@ struct PidLogEntry {
   float battV;                  // tick.currentBatteryVoltage
   float ChargingVoltageTarget;  // target voltage this tick
   float vError;                 // ChargingVoltageTarget - battV (always fresh)
-  float Icv;                    // CV velocity-form PI output — direct current setpoint (A)
+  float Icv;                    // CV position-form PI output — direct current setpoint (A)
   float cv_I;                   // CV position-form PI integrator state
   float tableThermalLimit;      // uTargetAmps before CV — RPM cap minus thermal penalty
   float setpointCmd;            // value fed to setpointCommand (Icv in CV, tableThermalLimit in bulk)
@@ -2693,23 +2701,26 @@ struct PidLogEntry {
   // ── Context ──────────────────────────────────────────────────────
   float rpm;
   float measAmps;
-  float gainKp;
-  float gainKi;
-  float gainKd;
+  float innerKp;    // PidKp  — inner output-current PID gain (NOT voltage loop Kp)
+  float innerKi;    // PidKi  — inner output-current PID gain (NOT voltage loop Ki)
+  float innerKd;    // PidKd  — inner output-current PID gain (NOT voltage loop Kd)
+  float voltageKp;  // VoltageKp — outer voltage loop proportional gain (A/V)
+  float voltageKi;  // VoltageKi — outer voltage loop integral gain (A/(V·s))
+  float voltageKd;  // VoltageKd — outer voltage loop derivative gain (A/(V/s))
   // ── Filtered signals ─────────────────────────────────────────────
   float battV_filt;  // IBV_filtered
   float iMeas_filt;  // MeasuredAmps_filtered
   // ── Protection flags & signals ───────────────────────────────────────────
   float dBcur_dt;    // g_dBcur_dt (A/s) — battery current derivative for load dump
   float battI;       // getBatteryCurrent() (A) — INA228 or Victron
-};                   // 112 bytes — naturally aligned, no implicit holes
+};                   // 124 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
   int oldest;
   int row;
   bool done;
-  char line[440];  // header row = 364 chars; comment block = 348 chars; was 320, too small
+  char line[440];  // header row = 402 chars; comment block = ~711 chars (truncated fine); was 320, too small
   int lineLen;
   int linePos;
 };
@@ -2860,7 +2871,8 @@ static IAmpEntry iAmpRing[I_RING_SIZE];
 static uint8_t iAmpHead = 0;
 static uint8_t iAmpCount = 0;
 
-float g_iMA_N = 0.0f;   // MA(N) where N = IExcessMA_N
+float g_iMA_N   = 0.0f;   // MA(N) where N = IExcessMA_N (iExcess signal)
+float g_pidMA_N = 0.0f;   // MA(N) where N = OutputPIDMA_N (Output Current PID signal)
 uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
 bool g_iExcessActive = false;
@@ -3058,7 +3070,7 @@ unsigned long wifiWakeStart = 0;                  // millis() when wake was trig
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
 AsyncEventSource events("/events");         // Create an Event Source on /events
 unsigned long webgaugesinterval = 200;      // delay in ms between sensor updates on webpage
-int plotTimeWindow = 120;                   // Plot time window in seconds
+int plotTimeWindow = 60;                    // Plot time window in seconds
 unsigned long healthystuffinterval = 5000;  // check hardware health parameters only every 5 seconds, not that they consume much   THIS IS DEAD CODE, REMOVE LATER
 
 // WiFi provisioning settings
