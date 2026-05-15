@@ -1627,6 +1627,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     SlopeBleedK = readFile(LittleFS, "/SlopeBleedK.txt").toFloat();
   }
+  if (!fsExists("/SlopeBleedProxV.txt")) {
+    writeFile(LittleFS, "/SlopeBleedProxV.txt", String(SlopeBleedProxV, 2).c_str());
+  } else {
+    SlopeBleedProxV = readFile(LittleFS, "/SlopeBleedProxV.txt").toFloat();
+  }
   if (!fsExists("/PidKp.txt")) {
     writeFile(LittleFS, "/PidKp.txt", String(PidKp, 3).c_str());
   } else {
@@ -1886,6 +1891,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/VHardMarginV.txt", String(VHardMarginV, 3).c_str());
   } else {
     VHardMarginV = readFile(LittleFS, "/VHardMarginV.txt").toFloat();
+  }
+  if (!fsExists("/DvdtAlpha.txt")) {
+    writeFile(LittleFS, "/DvdtAlpha.txt", String(DvdtAlpha, 3).c_str());
+  } else {
+    DvdtAlpha = constrain(readFile(LittleFS, "/DvdtAlpha.txt").toFloat(), 0.01f, 0.50f);
   }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());

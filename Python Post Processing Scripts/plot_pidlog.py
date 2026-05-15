@@ -27,7 +27,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.widgets import CheckButtons
+from matplotlib.widgets import CheckButtons, TextBox, Button as MplButton
 import pandas as pd
 import numpy as np
 
@@ -246,19 +246,14 @@ for col in numeric_cols:
 
 df.dropna(subset=["ts_ms"], inplace=True)
 df.reset_index(drop=True, inplace=True)
-df["t_s"] = (df["ts_ms"] - df["ts_ms"].iloc[0]) / 1000.0
-
-total_time_s = df["t_s"].iloc[-1]
-
-if total_time_s > 7200:
-    df["t_plot"] = df["t_s"] / 3600.0
-    time_label = "Time (hours)"
-elif total_time_s > 120:
-    df["t_plot"] = df["t_s"] / 60.0
-    time_label = "Time (minutes)"
+df["t_ms"] = df["ts_ms"] - df["ts_ms"].iloc[0]
+df["t_s"] = df["t_ms"] / 1000.0
+if df["t_ms"].iloc[-1] > 5000:
+    df["t_plot"] = df["t_ms"] / 1000.0
+    time_label = "Time (s)"
 else:
-    df["t_plot"] = df["t_s"]
-    time_label = "Time (seconds)"
+    df["t_plot"] = df["t_ms"]
+    time_label = "Time (ms)"
 
 # Derived signals
 df["pid_saturation"] = (df["pidUnsatOutput"] - df["pidOutput"]).abs()
@@ -745,6 +740,76 @@ def _on_xlim_changed(changed_ax):
 
 for _ax in _all_primary_axes:
     _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
+
+fig1.subplots_adjust(bottom=0.10)
+
+# ---------------------------------------------------------------------------
+# File Trimmer
+# ---------------------------------------------------------------------------
+_trim_total_s = df["t_s"].iloc[-1]
+
+def _fmt_trim_t(t):
+    return f"{int(t)}" if t == int(t) else f"{t:.3f}".rstrip("0").rstrip(".")
+
+def _do_trim(event=None):
+    try:
+        _s = float(_tb_trim_start.text)
+        _e = float(_tb_trim_end.text)
+    except ValueError:
+        _trim_status_lbl.set_text("Bad input — start/end must be numbers")
+        fig1.canvas.draw_idle()
+        return
+    if _s < 0 or _s >= _e or _e > _trim_total_s * 1.001:
+        _trim_status_lbl.set_text(f"Range error  (file is 0 – {_trim_total_s:.1f} s)")
+        fig1.canvas.draw_idle()
+        return
+    from io import StringIO as _TrimSI
+    _tsep = "\t" if "\t" in _header_line else ","
+    _trdf = pd.read_csv(
+        _TrimSI("".join(_lines[_header_idx + 1:])),
+        sep=_tsep, names=_col_names, on_bad_lines="skip"
+    )
+    _tcol = next((c for c in ("ts_ms", "t_s") if c in _trdf.columns), None)
+    if _tcol is None:
+        _trim_status_lbl.set_text("No time column found")
+        fig1.canvas.draw_idle()
+        return
+    _trdf[_tcol] = pd.to_numeric(_trdf[_tcol], errors="coerce")
+    _trdf.dropna(subset=[_tcol], inplace=True)
+    _t_zero = _trdf[_tcol].iloc[0]
+    _t_s_col = (_trdf[_tcol] - _t_zero) / (1000.0 if _tcol == "ts_ms" else 1.0)
+    _tmask = (_t_s_col >= _s) & (_t_s_col <= _e)
+    _tout  = _trdf[_tmask]
+    if _tout.empty:
+        _trim_status_lbl.set_text("No rows in that range")
+        fig1.canvas.draw_idle()
+        return
+    _tname = f"{basename}_{_fmt_trim_t(_s)}s_{_fmt_trim_t(_e)}s.csv"
+    _tpath = os.path.join(DOWNLOADS, _tname)
+    with open(_tpath, "w", encoding="utf-8", newline="") as _tf:
+        for _tln in _lines[:_header_idx]:
+            _tf.write(_tln)
+        _tf.write(_header_line + "\n")
+        _tout.to_csv(_tf, index=False, header=False, columns=_col_names)
+    _trim_status_lbl.set_text(f"Saved: {_tname}  ({len(_tout)} rows)")
+    fig1.canvas.draw_idle()
+
+_ax_trim_s   = fig1.add_axes([0.12, 0.018, 0.10, 0.05])
+_ax_trim_e   = fig1.add_axes([0.28, 0.018, 0.10, 0.05])
+_ax_trim_go  = fig1.add_axes([0.40, 0.018, 0.04, 0.05])
+_tb_trim_start = TextBox(_ax_trim_s, "Start (s) ", initial="0")
+_tb_trim_end   = TextBox(_ax_trim_e, "End (s) ",   initial=str(round(_trim_total_s, 1)))
+_btn_trim_go   = MplButton(_ax_trim_go, "Go", color="#1565c0", hovercolor="#0d47a1")
+_btn_trim_go.label.set_color("white")
+_btn_trim_go.label.set_fontsize(10)
+_btn_trim_go.on_clicked(_do_trim)
+_trim_status_lbl = fig1.text(
+    0.46, 0.043,
+    f"File: {basename}  ({_trim_total_s:.1f} s)",
+    fontsize=9, color="#555555", verticalalignment="center"
+)
+fig1.text(0.03, 0.043, "Trim file:", fontsize=10, color="#1a1a1a",
+          fontweight="bold", verticalalignment="center")
 
 # ---------------------------------------------------------------------------
 print("Tip: use the checkboxes on the right of each plot to show/hide series.")

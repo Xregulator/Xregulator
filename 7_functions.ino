@@ -1656,38 +1656,73 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
     const uint32_t REF_WINDOW_MS = 2000;  // last 2 seconds of each phase used as reference
 
-    // Saved across rise and fall loops so fall can compute step-relative thresholds.
-    float quietMaxArr[3] = { 0.0f, 0.0f, 0.0f };
+    // Reference statistics saved between rise and fall loops.
+    // Mean anchors the threshold to a stable baseline; max/min measures the local noise
+    // half-amplitude. Threshold = mean ± 2× noise_half_amplitude, so the detection point
+    // stays just above the noise floor — close to the true transport delay — while a single
+    // spike can no longer move the threshold the way raw max/min could.
+    float quietMeanArr[3] = { 0.0f, 0.0f, 0.0f };
+    float quietMaxArr[3]  = { 0.0f, 0.0f, 0.0f };
+    float upMeanArr[3]    = { 0.0f, 0.0f, 0.0f };
+    float upMinArr[3]     = { 0.0f, 0.0f, 0.0f };
 
     // ── Rise delays ─────────────────────────────────────────────────────
     for (int i = 0; i < 3; i++) {
       uint32_t t_quiet_start = phaseStartMs[quietIdx[i]];
-      uint32_t t_up_start = phaseStartMs[upIdx[i]];
-      uint32_t t_up_end = phaseStartMs[upEndIdx[i]];
+      uint32_t t_up_start    = phaseStartMs[upIdx[i]];
+      uint32_t t_up_end      = phaseStartMs[upEndIdx[i]];
 
-      // Max current in the last 2 seconds of the preceding quiet phase.
-      // Current is settled here — not mid-transient.
-      uint32_t refWindowStart = (t_up_start > REF_WINDOW_MS)
-                                  ? (t_up_start - REF_WINDOW_MS)
-                                  : t_quiet_start;
+      // Mean + max of the last 2 seconds of the quiet phase.
+      // Mean = stable baseline; max - mean = noise half-amplitude.
+      uint32_t quietRefStart = (t_up_start > REF_WINDOW_MS)
+                                 ? (t_up_start - REF_WINDOW_MS)
+                                 : t_quiet_start;
+      float quietSum = 0.0f;
       float quietMax = -1.0e9f;
-      int refSamples = 0;
+      int quietSamples = 0;
       for (int s = 0; s < sysIDSampleCount; s++) {
-        if (sysIDBuffer[s].ts < refWindowStart) continue;
+        if (sysIDBuffer[s].ts < quietRefStart) continue;
         if (sysIDBuffer[s].ts >= t_up_start) break;
+        quietSum += sysIDBuffer[s].amps;
         if (sysIDBuffer[s].amps > quietMax) quietMax = sysIDBuffer[s].amps;
-        refSamples++;
+        quietSamples++;
       }
 
-      if (refSamples == 0) {
-        queueConsoleMessageF("SystemID rise %d: WARNING — no samples in 2s ref window "
-                             "(refWindowStart=%u t_up_start=%u). quietMax invalid, threshold unreliable.",
-                             i + 1, refWindowStart, t_up_start);
-        Serial.printf("SystemID rise %d: no samples in ref window\n", i + 1);
+      if (quietSamples == 0) {
+        queueConsoleMessageF("SystemID rise %d: WARNING — no samples in 2s quiet ref window "
+                             "(quietRefStart=%u t_up_start=%u). threshold unreliable.",
+                             i + 1, quietRefStart, t_up_start);
+        Serial.printf("SystemID rise %d: no samples in quiet ref window\n", i + 1);
+      }
+      float quietMean = (quietSamples > 0) ? (quietSum / quietSamples) : 0.0f;
+      quietMeanArr[i] = quietMean;
+      quietMaxArr[i]  = quietMax;
+
+      // Mean + min of the last 2 seconds of the UP phase.
+      // Mean = stable settled high level; mean - min = noise half-amplitude (downward).
+      uint32_t upRefStart = (t_up_end > REF_WINDOW_MS)
+                              ? (t_up_end - REF_WINDOW_MS)
+                              : t_up_start;
+      float upSum = 0.0f;
+      float upMin = 1.0e9f;
+      int upSamples = 0;
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        if (sysIDBuffer[s].ts < upRefStart) continue;
+        if (sysIDBuffer[s].ts >= t_up_end) break;
+        upSum += sysIDBuffer[s].amps;
+        if (sysIDBuffer[s].amps < upMin) upMin = sysIDBuffer[s].amps;
+        upSamples++;
       }
 
-      quietMaxArr[i] = quietMax;
-      float riseThresh = quietMax * 1.2f;
+      float upMean = (upSamples > 0) ? (upSum / upSamples) : quietMean;
+      upMeanArr[i] = upMean;
+      upMinArr[i]  = upMin;
+
+      // Rise threshold: quiet mean + 2× noise half-amplitude (floored at 0.5A).
+      // This sits just above the noise ceiling while the mean anchor keeps it stable
+      // across trials — matching the earliest reliable detection of field response.
+      float quietNoise = fmaxf(quietMax - quietMean, 0.5f);
+      float riseThresh = quietMean + 2.0f * quietNoise;
 
       // First sample after UP command that crosses above threshold.
       systemIDRiseDelay_ms[i] = -1.0f;
@@ -1701,51 +1736,31 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
 
       if (systemIDRiseDelay_ms[i] < 0.0f) {
-        queueConsoleMessageF("SystemID rise %d: NOT FOUND | quietMax=%.1fA thresh=%.1fA — "
+        queueConsoleMessageF("SystemID rise %d: NOT FOUND | quietMean=%.1fA quietMax=%.1fA noise=%.2fA thresh=%.1fA — "
                              "current never crossed threshold during UP phase. "
                              "Step amplitude may be too small or sensor not responding.",
-                             i + 1, quietMax, riseThresh);
+                             i + 1, quietMean, quietMax, quietNoise, riseThresh);
       } else {
-        queueConsoleMessageF("SystemID rise %d | quietMax(2s)=%.1fA thresh=%.1fA delay=%.0f ms",
-                             i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
+        queueConsoleMessageF("SystemID rise %d | quietMean=%.1fA quietMax=%.1fA noise=%.2fA thresh=%.1fA delay=%.0f ms",
+                             i + 1, quietMean, quietMax, quietNoise, riseThresh, systemIDRiseDelay_ms[i]);
       }
-      Serial.printf("SystemID rise %d | quietMax(2s)=%.1fA thresh=%.1fA delay=%.0f ms\n",
-                    i + 1, quietMax, riseThresh, systemIDRiseDelay_ms[i]);
+      Serial.printf("SystemID rise %d | quietMean=%.1fA quietMax=%.1fA noise=%.2fA thresh=%.1fA delay=%.0f ms\n",
+                    i + 1, quietMean, quietMax, quietNoise, riseThresh, systemIDRiseDelay_ms[i]);
     }
 
     // ── Fall delays ─────────────────────────────────────────────────────
     for (int i = 0; i < 3; i++) {
-      uint32_t t_up_start = phaseStartMs[upIdx[i]];
-      uint32_t t_up_end = phaseStartMs[downIdx[i]];
       uint32_t t_down_start = phaseStartMs[downIdx[i]];
-      uint32_t t_down_end = phaseStartMs[downIdx[i] + 1];  // bounded: [4],[6],[8]=test-end
+      uint32_t t_down_end   = phaseStartMs[downIdx[i] + 1];  // bounded: [4],[6],[8]=test-end
 
-      // Min current in the last 2 seconds of the UP phase.
-      // Current is settled at the high level here.
-      uint32_t refWindowStart = (t_up_end > REF_WINDOW_MS)
-                                  ? (t_up_end - REF_WINDOW_MS)
-                                  : t_up_start;
-      float upMin = 1.0e9f;
-      int refSamples = 0;
-      for (int s = 0; s < sysIDSampleCount; s++) {
-        if (sysIDBuffer[s].ts < refWindowStart) continue;
-        if (sysIDBuffer[s].ts >= t_up_end) break;
-        if (sysIDBuffer[s].amps < upMin) upMin = sysIDBuffer[s].amps;
-        refSamples++;
-      }
+      // Reuse statistics computed in the rise loop — same reference windows.
+      float upMean = upMeanArr[i];
+      float upMin  = upMinArr[i];
 
-      if (refSamples == 0) {
-        queueConsoleMessageF("SystemID fall %d: WARNING — no samples in 2s ref window "
-                             "(refWindowStart=%u t_up_end=%u). upMin invalid, threshold unreliable.",
-                             i + 1, refWindowStart, t_up_end);
-        Serial.printf("SystemID fall %d: no samples in ref window\n", i + 1);
-      }
-
-      // Step-relative threshold: 30% of step amplitude below the settled high level.
-      // upMin * 0.8 breaks when baseline is non-zero because 80% of an absolute high
-      // level can land near the baseline, causing late or inconsistent detection.
-      float stepAmp = fmaxf(upMin - quietMaxArr[i], 0.5f);  // guard against near-zero step
-      float fallThresh = upMin - 0.3f * stepAmp;
+      // Fall threshold: UP mean − 2× noise half-amplitude (floored at 0.5A).
+      // Symmetric to the rise: sits just below the noise floor of the settled high level.
+      float upNoise  = fmaxf(upMean - upMin, 0.5f);
+      float fallThresh = upMean - 2.0f * upNoise;
 
       // First sample after DOWN command that crosses below threshold.
       // Scan bounded by t_down_end so it cannot bleed into the next UP phase or beyond.
@@ -1760,16 +1775,16 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
 
       if (systemIDFallDelay_ms[i] < 0.0f) {
-        queueConsoleMessageF("SystemID fall %d: NOT FOUND | upMin=%.1fA base=%.1fA step=%.1fA thresh=%.1fA — "
+        queueConsoleMessageF("SystemID fall %d: NOT FOUND | upMean=%.1fA upMin=%.1fA noise=%.2fA thresh=%.1fA — "
                              "current never dropped below threshold in DOWN window. "
                              "Step amplitude may be too small or sensor not responding.",
-                             i + 1, upMin, quietMaxArr[i], stepAmp, fallThresh);
+                             i + 1, upMean, upMin, upNoise, fallThresh);
       } else {
-        queueConsoleMessageF("SystemID fall %d | upMin=%.1fA base=%.1fA step=%.1fA thresh=%.1fA delay=%.0f ms",
-                             i + 1, upMin, quietMaxArr[i], stepAmp, fallThresh, systemIDFallDelay_ms[i]);
+        queueConsoleMessageF("SystemID fall %d | upMean=%.1fA upMin=%.1fA noise=%.2fA thresh=%.1fA delay=%.0f ms",
+                             i + 1, upMean, upMin, upNoise, fallThresh, systemIDFallDelay_ms[i]);
       }
-      Serial.printf("SystemID fall %d | upMin=%.1fA base=%.1fA step=%.1fA thresh=%.1fA delay=%.0f ms\n",
-                    i + 1, upMin, quietMaxArr[i], stepAmp, fallThresh, systemIDFallDelay_ms[i]);
+      Serial.printf("SystemID fall %d | upMean=%.1fA upMin=%.1fA noise=%.2fA thresh=%.1fA delay=%.0f ms\n",
+                    i + 1, upMean, upMin, upNoise, fallThresh, systemIDFallDelay_ms[i]);
     }
 
     // ── Averages (skip -1 not-found entries) ────────────────────────────

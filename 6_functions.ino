@@ -479,73 +479,6 @@ void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEvent
 
 // ==================== MAIN CONTROL FUNCTION ====================
 
-
-/**
- * AdjustFieldLearnMode - Main field control
- *
- * Architecture:
- *  1.  Build TickSnapshot and timing state
- *  2.  Pre-gate immediate-cut fault check
- *  3.  Fast voltage safety override (runs every loop, before CH1 gate)
- *  4.  Limp-home: handleLimpHome() → return
- *  5.  Gate on fresh CH1 ADC data, with optional PidSampleDivisor
- *  6.  Re-check critical faults and determine control/system mode
- *  7.  Handle mode transitions
- *  8.  Non-normal path: runShutdownPath() → return
- *  9.  Normal path: iExcess supervisor, fastOvCurrentCap application,
- *                   setpoint management and PID compute
- *  10. Build duty request
- *  11. Apply through governor
- *  12. Tell PID what actually happened
- *  13. Update state, telemetry, and logging
- */
-
-// ── OUTPUT CURRENT PID ───────────────────────────────────────
-//   Runs every CH1 ADS1115 sample (÷ PidSampleDivisor).
-//   ADS sequence {1,0,1,2,1,3}: CH1 fires 3× per 6-step cycle.
-//   Back-to-back trigger in ADS_READ_RESULT saves one loop() call per channel.
-//
-//   Measured performance (preliminary — full hardware validation pending):
-//   CH1 interval: ~5ms typical; worst-case not yet characterised.
-//   PidSampleDivisor=1 (default) → PID runs every CH1 hit.
-//   PidSampleDivisor=2           → every other CH1 hit.
-//
-// ── VOLTAGE / CV LOOP ────────────────────────────────────────
-//   Asymmetric Ki: unwind rate = 7× Ki above target (K_DOWN — hardcoded in CV loop body)
-//   History: baseline 3× (too slow, cv_I drifted high), tried 10× (over-wound, integrator
-//   froze), settled at 7× as interpolated middle. Do not reduce below 5× or cv_I
-//   accumulates during blips; do not exceed 10× or steady-state centering degrades.
-//
-// ── FAST OV VOLTAGE SUPERVISOR (backstop only) ───────────────
-//   Runs every loop before the CH1 gate. Now secondary to the fast
-//   current rise supervisor for CV-mode transient protection.
-//   Still active as a last-resort voltage backstop (sensor glitch,
-//   non-CV modes, cases where iExcess detection misses).
-//   ibvFreshFlag fires at ~5ms cadence (field on, INA228 fast mode) or ~1100ms (field off).
-//   dvdt EMA alpha=0.08 → effective time constant ~190ms.
-//
-// ── TEMPERATURE LOOP PID ─────────────────────────────────────
-//   Kd External creates noise at current defaults — needs tuning/updating.
-//   Loop interval may need adjustment to address Kd External noise.
-//
-// ── ADS1115 TIMING (output current loop clock source) ────────
-//   Conversion time    ~1.16 ms theoretical at 860 SPS.
-//   Sequence {1,0,1,2,1,3}: CH1 at positions 0,2,4 → 3× per cycle.
-//   Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
-//   collapsing 3 loop() calls per channel to 2.
-//
-//   Measured performance (preliminary — full hardware validation pending):
-//   loop() duration:  3–14ms typical; one-time spike ~150ms on first client page load.
-//   ADS read time:    ~2ms avg.
-//   CH1 interval:     ~5ms typical.
-//   CH0/CH2/CH3:      1× per cycle → ~3× CH1 interval avg cadence.
-//   Worst-case intervals not yet characterised under full load with all hardware present.
-//   Verify via ch1IntervalMs in cvLog after any loop() cadence changes.
-//
-//   Channel assignments: CH0=BatteryV  CH1=MeasuredAmps  CH2=RPM  CH3=Thermistor
-//   PidSampleDivisor=1 (default) → output current PID runs every CH1 hit.
-//   ADS_TIMEOUT_MS = 50          → conversion timeout before retry.
-
 // ============================================================================
 // PID TUNING SCORE — helpers called from AdjustFieldLearnMode
 // ============================================================================
@@ -1106,7 +1039,7 @@ void AdjustFieldLearnMode() {
         float dtV = (currentMillis - vPrevMs) / 1000.0f;
         if (dtV > 0.001f && dtV < 0.1f) {
           float raw = (IBV - vPrev) / dtV;
-          dvdt = 0.08 * raw + 0.92 * dvdt;
+          dvdt = DvdtAlpha * raw + (1.0f - DvdtAlpha) * dvdt;
         }
       }
       vPrev = IBV;
@@ -1200,6 +1133,13 @@ void AdjustFieldLearnMode() {
   }
   if (g_fastOvHardActive && !g_fastOvHardActive_prev) {
     g_fastOvHardCount++;  // rising-edge only — count each new hard FastOV activation
+    // Collapse inner PID integrator on hard OV onset. fastOvCap already drives
+    // setpoint to near-zero on this tick; without this, a wound-up integrator
+    // resists the setpoint collapse and grinds duty down at ~40%/s instead of
+    // reaching MinDuty in 1–2 inner PID cycles. PID stays in AUTOMATIC —
+    // recovery rebuilds from integrator=0 once fastOV clears.
+    currentPID.ResetIntegratorTo(0.0);
+    queueConsoleMessage("FastOV hard: inner PID integrator reset");
   }
 
   g_fastOvClampActive = fastOvClampActive;
@@ -1214,8 +1154,8 @@ void AdjustFieldLearnMode() {
   }
 
   // ========== GATE ON FRESH CH1 DATA ==========
-  // PidSampleDivisor=1: PID runs every CH1 sample (~16Hz)
-  // PidSampleDivisor=2: every other sample (~8Hz), etc.
+  // PidSampleDivisor=1: PID runs every CH1 sample (~200Hz, ~5ms interval)
+  // PidSampleDivisor=2: every other sample (~100Hz), etc.
   static uint8_t ch1SampleCount = 0;
 
   if (!ch1FreshFlag) {
@@ -1683,7 +1623,7 @@ void AdjustFieldLearnMode() {
         //   uTargetAmps  I_cap minus thermal penalty, clamped to [0, MaxTableValue],
         //                with user overrides applied. This is the table+thermal limit
         //                and the upper bound passed to the CV controller.
-        //   Icv          CV position-form PI output — the direct current setpoint in
+        //   Icv          CV position-form PID output — the direct current setpoint in
         //                absorption, float, and TargetVoltageMode. Clamped to
         //                [0, uTargetAmps]. Never written back to thermalPenaltyAmps
         //                or the thermal integrator.
@@ -1694,7 +1634,9 @@ void AdjustFieldLearnMode() {
         //      table-load time via loadCapTablesForMode() — no runtime halving.
         //   In CV modes: position-form PID (P+I+D) produces Icv; setpointCommand = Icv.
         //      D term = VoltageKd * dvdt, subtracted to preemptively reduce current as voltage rises.
-        //      Integrator anti-windup: upward integration frozen when P+I saturates at uTargetAmps ceiling.
+        //      Integrator anti-windup: upward integration frozen when P+I saturates at uTargetAmps ceiling;
+        //      slope-aware bleed (SlopeBleedK) also drains cv_I when voltage rises fast, scaled by
+        //      proximity to setpoint (SlopeBleedProxV) so it is inactive far below target.
         //   In idle/MaintainMode: setpointCommand = uTargetAmps directly.
 
         float I_cap;
@@ -1763,22 +1705,33 @@ void AdjustFieldLearnMode() {
             // new level — a subsequent real RPM step is then correctly detected.
             static bool postFastOvMismatch = false;
             static bool prevFastOvActive_ie = false;
-            if (fastOvClampActive && !prevFastOvActive_ie) {
-              postFastOvMismatch = true;  // rising edge: arm the gate
-            }
+            // fastOvFirstTick: true only on the rising edge of fastOvClampActive.
+            // Computed before prev update so we can allow iExcess to count (and fire)
+            // on the exact same tick that fastOV first asserts. Without this, a blip
+            // where iExcess conditions built for N-1 ticks and fastOV fired on tick N
+            // would block iExcess via both !fastOvClampActive and the gate arm.
+            bool fastOvFirstTick = (fastOvClampActive && !prevFastOvActive_ie);
             prevFastOvActive_ie = fastOvClampActive;
             if (postFastOvMismatch && !fastOvClampActive
                 && (iSigEx <= setpointLimited + IExcessK)) {
               postFastOvMismatch = false;  // mismatch gone — release gate
             }
 
-            // Only count persistence when fastOV is NOT already active and the
-            // post-fastOV mismatch has cleared — iExcess is a pre-voltage detector;
-            // it must not fire on conditions created by fastOV's own action.
-            if (aboveThreshold && !fastOvClampActive && !postFastOvMismatch) {
+            // Allow counting when fastOV is not active, OR on exactly the first tick
+            // fastOV asserts (simultaneous detection case). On all subsequent fastOV
+            // ticks !fastOvClampActive blocks counting as before — prevents spurious
+            // re-fire while the field coil is still wound up from fastOV's own action.
+            if (aboveThreshold && (!fastOvClampActive || fastOvFirstTick) && !postFastOvMismatch) {
               iExcessPersistCount++;
             } else {
               iExcessPersistCount = 0;
+            }
+
+            // Arm gate after the count check so the first-tick count runs first.
+            // If iExcess fires this tick it arms the gate itself (below);
+            // this handles the case where fastOV just started but iExcess didn't fire.
+            if (fastOvFirstTick) {
+              postFastOvMismatch = true;
             }
 
             if (iExcessPersistCount >= IExcessN) {
@@ -1991,10 +1944,9 @@ void AdjustFieldLearnMode() {
         }
 
         // Voltage target rise governor.
-        // Now only active in the final CV_ENGAGE_MARGIN window before target (vGap <= 0.15V).
-        // During bulk approach, current-limited state commands uTargetAmps directly and this governor
-        // is a mathematical no-op (e_needed >> vGap, so voltageTargetSlewed saturates to
-        // Falls are always instantaneous.
+        // Clamps voltageTargetSlewed to IBV + e_needed, where e_needed is the voltage
+        // error the current cv_I can support at current uTargetAmps. This prevents the
+        // integrator from seeing a large step when target jumps. Falls are instantaneous.
         static float voltageTargetSlewed = 0.0f;
         if (enteringCV) {
           voltageTargetSlewed = ChargingVoltageTarget;
@@ -2005,7 +1957,7 @@ void AdjustFieldLearnMode() {
             float e_needed = (icvHi_gov - cv_I) / VoltageKp;
             e_needed = fmaxf(e_needed, 0.02f);
             voltageTargetSlewed = fminf(ChargingVoltageTarget,
-                                        getFiltV() + e_needed);  // filtered — control path
+                                        IBV + e_needed);  // raw INA228 — no filter lag on governor
           } else {
             voltageTargetSlewed = ChargingVoltageTarget;
           }
@@ -2024,7 +1976,7 @@ void AdjustFieldLearnMode() {
           // post-event cap does not constrain the CV loop on entry.
           //   seed = g_pidI_filtered - Kp*e  →  Icv = g_pidI_filtered  →  no step in setpointLimited.
           if (voltageControlActive && enteringCV) {
-            float e_cv = ChargingVoltageTarget - getFiltV();
+            float e_cv = ChargingVoltageTarget - IBV;  // raw INA228 — bumpless seed uses true voltage
             float seed = clamp_f(g_pidI_filtered - VoltageKp * e_cv, 0.0f, (float)uTargetAmps);
             cv_I = seed;
             cv_I_track = seed;
@@ -2055,7 +2007,7 @@ void AdjustFieldLearnMode() {
           float icvHi_bt = fminf(clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue), cv_I_aw_cap);
           if (!voltageControlActive) {
             if (!seedProtected) {
-              float e_bt = ChargingVoltageTarget - getFiltV();  // filtered — control path
+              float e_bt = ChargingVoltageTarget - IBV;  // raw INA228 — no filter lag on bumpless tracker
               float cv_I_target = clamp_f(g_pidI_filtered - VoltageKp * e_bt, 0.0f, icvHi_bt);
               const float Kt = 2.0f;
               cv_I_track += Kt * (cv_I_target - cv_I_track) * actualDtSec;
@@ -2087,7 +2039,7 @@ void AdjustFieldLearnMode() {
             pidLog_voltageLoopRanThisTick = 1;
             pidLog_enteringCV = enteringCV ? 1 : 0;
 
-            float e = voltageTargetSlewed - getFiltV();  // filtered — control path
+            float e = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on PI error
             float dtSec = (prevVoltageLoopMs == 0)
                             ? ((float)VoltageLoopInterval / 1000.0f)
                             : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
@@ -2148,11 +2100,13 @@ void AdjustFieldLearnMode() {
               }
 
               // Slope-aware integrator bleed — drains cv_I when voltage is rising faster than
-              // SlopeBleedThresh (user's intended max rise rate, default 0.1 V/s).
-              // Only active while still below setpoint (e > 0); above setpoint, KiDown already
-              // drives cv_I down. Targets integrator wind-up from plant nonlinearity near absorption.
-              if (cvDSlope > SlopeBleedThresh && e > 0.0f) {
-                float slopeBleedAmps = SlopeBleedK * (cvDSlope - SlopeBleedThresh) * dtSec;
+              // SlopeBleedThresh (V/s). proxGain scales bleed linearly with proximity to setpoint:
+              // zero when e >= SlopeBleedProxV (far below target), full when e <= 0 (at or above).
+              // Prevents bleed from firing during a legitimate fast rise toward a distant target.
+              // KiDown still handles steady-state correction above setpoint independently.
+              if (cvDSlope > SlopeBleedThresh) {
+                float proxGain = clamp_f(1.0f - e / SlopeBleedProxV, 0.0f, 1.0f);
+                float slopeBleedAmps = SlopeBleedK * (cvDSlope - SlopeBleedThresh) * dtSec * proxGain;
                 cv_I = fmaxf(0.0f, cv_I - slopeBleedAmps);
                 // cv_I_track synced on next tick by bumpless tracker (out of scope here)
               }
@@ -2174,7 +2128,7 @@ void AdjustFieldLearnMode() {
         // Per-tick Icv recompute — proportional path responds every output current loop tick;
         // cv_I still updates only on VoltageLoopInterval cadence.
         {
-          float e_now = voltageTargetSlewed - getFiltV();  // filtered — control path
+          float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional
           float icvHi_tick = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
           if (!enteringCV) {
             Icv = clamp_f(VoltageKp * e_now + cv_I - VoltageKd * cvDSlope, 0.0f, icvHi_tick);
@@ -2188,14 +2142,14 @@ void AdjustFieldLearnMode() {
         // HIGH target = cvBaseTarget + cvWaveAmplitudeV (the step-up we're testing).
         if (CVTuningMode && voltageControlActive && cvTuningScore.waveHigh && cvTuningScore.ringInDone) {
           float highTarget = cvBaseTarget + cvWaveAmplitudeV;
-          float e_high = getFiltV() - highTarget;
+          float e_high = IBV - highTarget;  // raw INA228 — no filter lag on tuning score
           float w_high = (e_high > 0.0f) ? 4.0f : 1.0f;  // overshoot costs 4× more than undershoot
           cvTuningScore.totalIntegratedOvershootVs += e_high * e_high * w_high * actualDtSec;
-          float peakOv = fmaxf(0.0f, IBV - highTarget);   // unfiltered peak for worst-case display
+          float peakOv = fmaxf(0.0f, IBV - highTarget);
           if (peakOv > cvTuningScore.worstOvershootV) cvTuningScore.worstOvershootV = peakOv;
 
           if (!cvTuningScore.phaseSettled) {
-            float vErr = fabsf(getFiltV() - highTarget);
+            float vErr = fabsf(IBV - highTarget);  // raw INA228 — settle detection on true voltage
             if (vErr <= CV_SETTLE_V_THRESH) {
               if (++cvTuningScore.consecutiveInBand >= cvConsecutiveReads) {
                 cvTuningScore.phaseSettled = true;
@@ -2217,13 +2171,13 @@ void AdjustFieldLearnMode() {
         // ===== CV TUNING SCORE ACCUMULATION — LOW phase (return to normal setpoint after step-up) =====
         if (CVTuningMode && voltageControlActive && !cvTuningScore.waveHigh && cvTuningScore.ringInDone) {
           float lowTarget = cvBaseTarget;  // LOW phase is the normal setpoint; track voltage return from high step
-          float e_low = fmaxf(0.0f, getFiltV() - lowTarget);  // one-sided: only penalise being above target
+          float e_low = fmaxf(0.0f, IBV - lowTarget);  // raw INA228 — one-sided: only penalise above target
           cvTuningScore.totalLowIntOvVs += e_low * e_low * actualDtSec;  // squared, normal weight
           if (e_low > cvTuningScore.worstLowOvV) cvTuningScore.worstLowOvV = e_low;
           cvTuningScore.activeTimeSec += actualDtSec;  // LOW time counts toward the shared denominator
 
           if (!cvTuningScore.lowPhaseSettled) {
-            float vErr = fabsf(getFiltV() - lowTarget);
+            float vErr = fabsf(IBV - lowTarget);  // raw INA228 — settle detection on true voltage
             if (vErr <= CV_SETTLE_V_THRESH) {
               if (++cvTuningScore.lowConsecInBand >= cvConsecutiveReads) {
                 cvTuningScore.lowPhaseSettled = true;
@@ -2333,7 +2287,7 @@ void AdjustFieldLearnMode() {
         cvLiveScore_inWindow = false;
       }
       if (cvLiveScore_inWindow) {
-        float vErr = getFiltV() - ChargingVoltageTarget;  // positive = overvoltage
+        float vErr = IBV - ChargingVoltageTarget;  // raw INA228 — positive = overvoltage
         accumulateCVLiveScore(vErr, actualDtSec, tick.nowMs);
       }
     }

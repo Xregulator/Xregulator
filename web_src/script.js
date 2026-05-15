@@ -145,6 +145,8 @@ let isAppInBackground = false;
 
 let activeTimers = []; // Track all active timers
 
+let g_lastCsv3 = null; // Last received CSV3 data object — used by cvBinToCsv for header constants
+
 const CSV1_FIELDS = [
     "AlternatorTemperatureF",     // 0
     "dutyCycle",                  // 1
@@ -863,6 +865,8 @@ const CSV3_FIELDS = [
     "ProtectionProxGateV",             // 283
     "SlopeBleedThresh",                // 284
     "SlopeBleedK",                     // 285
+    "DvdtAlpha",                       // 286
+    "SlopeBleedProxV",                 // 287
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2963,6 +2967,8 @@ function updateAllEchosOptimized(data) {
         { key: 'ProtectionProxGateV',   id: 'ProtectionProxGateV_echo',       transform: v => (v / 100).toFixed(2) },
         { key: 'SlopeBleedThresh',      id: 'SlopeBleedThresh_echo',          transform: v => (v / 100).toFixed(2) },
         { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
+        { key: 'DvdtAlpha',             id: 'DvdtAlpha_echo',                 transform: v => (v / 1000).toFixed(3) },
+        { key: 'SlopeBleedProxV',       id: 'SlopeBleedProxV_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
@@ -7107,6 +7113,7 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV3_FIELDS.map((key, i) => [key, values[i]]));
+            g_lastCsv3 = data;  // cache for cvBinToCsv header
 
             //CSVData3
             /*             ## 🎯 **Summary**
@@ -10732,14 +10739,26 @@ function parseCvBin(buf) {
 // Converts a parsed cvlog object to a CSV string.
 // First row is a settings comment; second row is column headers.
 // ---------------------------------------------------------------------------
-function cvBinToCsv(d) {
+function cvBinToCsv(d, csv3) {
     const lines = [];
 
-    // Settings header row — hardcoded OV constants match AdjustFieldLearnMode()
+    // Settings header — PID gains from binary log; fastOV/slope constants from last CSV3 frame.
+    // Scaling matches echo registry transforms (same raw CSV3 values, same divisors).
+    const c = csv3 || {};
+    const fmtRaw = (v, dec) => (v !== undefined && !isNaN(v)) ? Number(v).toFixed(dec) : 'N/A';
+    const fmtDiv = (v, div, dec) => (v !== undefined && !isNaN(v)) ? (Number(v) / div).toFixed(dec) : 'N/A';
     lines.push(
         `# VoltageKp=${d.voltKp.toFixed(2)} VoltageKi=${d.voltKi.toFixed(3)} VoltageKd=${d.voltKd.toFixed(1)}` +
-        ` VoltageLoopInterval=${d.voltInterval}ms` +
-        ` | FastOV constants not logged — ask firmware for values`
+        ` VoltageLoopInterval=${d.voltInterval}ms VoltageFilterTC=${fmtRaw(c.VoltageFilterTC, 0)}ms`
+    );
+    lines.push(
+        `# FastOV: VSoftMarginV=${fmtRaw(c.VSoftMarginV, 3)}V VHardMarginV=${fmtRaw(c.VHardMarginV, 3)}V` +
+        ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtAlpha=${fmtDiv(c.DvdtAlpha, 1000, 3)}` +
+        ` KSoft=${fmtDiv(c.KSoft, 10, 1)}A/V KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
+        ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s AwRecoverRate=${fmtDiv(c.AwRecoverRate, 10, 2)}A/s`
+    );
+    lines.push(
+        `# SlopeBleed: SlopeBleedThresh=${fmtDiv(c.SlopeBleedThresh, 100, 3)}V/s SlopeBleedK=${fmtRaw(c.SlopeBleedK, 1)}A/(V/s)`
     );
 
     // Column headers
@@ -10811,7 +10830,7 @@ async function downloadCvLog() {
         return;
     }
 
-    const csv = cvBinToCsv(d);
+    const csv = cvBinToCsv(d, g_lastCsv3);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const ts = getLogTimestamp();
@@ -10844,6 +10863,7 @@ let gLastChargeStage = 0;
 const CS_BULK        = 1;
 const CS_ABSORPTION  = 2;
 const CS_FLOAT       = 3;
+const CS_MANUAL      = 4;
 const CS_MAINTAIN    = 5;
 const CS_TARGET_V    = 6;
 const CS_IDLE        = 7;
@@ -11171,11 +11191,28 @@ function sysidUpdatePreflight() {
     const rpmOK   = rpm >= minRpm;
     const ampsOK  = amps > 2.0;
     const voltOK  = battV > 11.0 && battV < (bulkV - 0.3);
-    const allOK   = rpmOK && ampsOK && voltOK;
+
+    const stage   = gLastChargeStage;
+    const modeOK  = (stage === CS_BULK || stage === CS_MANUAL);
+    const stageName = {
+        [CS_ABSORPTION]: 'Absorption',
+        [CS_FLOAT]:      'Float',
+        [CS_MAINTAIN]:   'Maintain',
+        [CS_TARGET_V]:   'Target Voltage',
+        [CS_IDLE]:       'Idle',
+    }[stage] ?? null;
+    const modeMsg = modeOK
+        ? (stage === CS_MANUAL ? '✅ Mode: Manual' : '✅ Mode: Bulk charging')
+        : (stageName
+            ? '❌ Mode: ' + stageName + ' — must be in bulk or manual to run this test'
+            : '❌ Mode: Charging not active — must be in bulk or manual to run this test');
+
+    const allOK   = rpmOK && ampsOK && voltOK && modeOK;
 
     document.getElementById('sysid-check-rpm').textContent  = (rpmOK  ? '✅' : '❌') + ' Engine running (RPM: ' + rpm.toFixed(0) + ' / min ' + minRpm.toFixed(0) + ')';
     document.getElementById('sysid-check-amps').textContent = (ampsOK ? '✅' : '❌') + ' Alternator producing current (' + amps.toFixed(1) + 'A)';
     document.getElementById('sysid-check-volt').textContent = (voltOK ? '✅' : '❌') + ' Battery voltage OK (' + battV.toFixed(2) + 'V)';
+    document.getElementById('sysid-check-mode').textContent = modeMsg;
 
     // Estimated duration: 20s stabilize overhead + 7 hold phases
     const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);

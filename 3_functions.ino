@@ -746,8 +746,10 @@ enum Csv3Index {
   CSV3_ProtectionProxGateV,             // 283
   CSV3_SlopeBleedThresh,                // 284
   CSV3_SlopeBleedK,                     // 285
+  CSV3_DvdtAlpha,                       // 286
+  CSV3_SlopeBleedProxV,                 // 287
 
-  CSV3_FIELD_COUNT  // = 286
+  CSV3_FIELD_COUNT  // = 288
 };
 
 
@@ -2025,7 +2027,11 @@ void setupServer() {
 
     else if (request->hasParam("startSystemID")) {
       foundParameter = true;
-      if (systemIDActive == 0 && (millis() - systemIDLastEndMs) > 2000UL) {
+      bool sysidModeOK = (sysMode == SYS_MODE_MANUAL) ||
+                         (sysMode == SYS_MODE_AUTO && !voltageControlActive);
+      if (!sysidModeOK) {
+        queueConsoleMessage("SystemID: start blocked — only allowed in bulk or manual mode (CV / absorption / float not permitted)");
+      } else if (systemIDActive == 0 && (millis() - systemIDLastEndMs) > 2000UL) {
         systemIDRequested = true;
         systemIDResultsReady = false;
         systemIDAbortRequested = false;   // clear any stale abort from a prior run
@@ -3248,6 +3254,13 @@ void setupServer() {
       writeFile(LittleFS, "/SlopeBleedK.txt", String(SlopeBleedK, 1).c_str());
       queueConsoleMessageF("Slope bleed gain: %.1f A/(V/s)", SlopeBleedK);
     }
+    if (request->hasParam("SlopeBleedProxV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SlopeBleedProxV")->value();
+      SlopeBleedProxV = inputMessage.toFloat();
+      writeFile(LittleFS, "/SlopeBleedProxV.txt", String(SlopeBleedProxV, 2).c_str());
+      queueConsoleMessageF("Slope bleed proximity gate: %.2f V", SlopeBleedProxV);
+    }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKp")->value();
@@ -3608,6 +3621,13 @@ void setupServer() {
       VHardMarginV = constrain(inputMessage.toFloat(), 0.050f, 1.000f);
       writeFile(LittleFS, "/VHardMarginV.txt", String(VHardMarginV, 3).c_str());
       queueConsoleMessageF("Layer 2 hard margin set to: %.0f mV", VHardMarginV * 1000.0f);
+    }
+    if (request->hasParam("DvdtAlpha")) {
+      foundParameter = true;
+      inputMessage = request->getParam("DvdtAlpha")->value();
+      DvdtAlpha = constrain(inputMessage.toFloat(), 0.01f, 0.50f);
+      writeFile(LittleFS, "/DvdtAlpha.txt", String(DvdtAlpha, 3).c_str());
+      queueConsoleMessageF("dvdt EMA alpha set to: %.3f (~%.0f ms TC at 5ms cadence)", DvdtAlpha, 5.0f * (1.0f - DvdtAlpha) / DvdtAlpha);
     }
     if (request->hasParam("IExcessReseedFrac")) {
       foundParameter = true;
@@ -5363,7 +5383,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -5634,7 +5654,7 @@ void SendWifiData() {
                                SafeInt(ft_FlushFileWriteQueue.worstSession),            // 266 — FlushFileWriteQueue worst session (µs)
                                SafeInt(ft_efficiencyTracker.worstWindow),               // 267 — efficiencyTracker_tick() worst 5s window (µs)
                                SafeInt(ft_efficiencyTracker.worstSession),              // 268 — efficiencyTracker_tick() worst session (µs)
-                               (int)systemIDActive,                                    // 268 — 0=idle, 1-9=current phase
+                               (int)systemIDActive,                                    // 268 — 0=idle, 1-9=current phase  (comment: same index as ft_efficiencyTracker.worstSession above — pre-existing numbering gap; does not affect runtime)
                                (int)systemIDResultsReady,                              // 269 — 1=results available
                                (int)OvLayer1Enable,                                    // 270
                                (int)OvLayer2Enable,                                    // 271
@@ -5651,7 +5671,9 @@ void SendWifiData() {
                                (int)VoltageDWindowMs,                                  // 282
                                SafeInt(ProtectionProxGateV, 100),                      // 283
                                SafeInt(SlopeBleedThresh, 100),                         // 284
-                               (int)SlopeBleedK                                        // 285
+                               (int)SlopeBleedK,                                       // 285
+                               SafeInt(DvdtAlpha, 1000),                               // 286 — ×1000, 3 decimals
+                               SafeInt(SlopeBleedProxV, 100)                           // 287 — ×100, 2 decimals
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

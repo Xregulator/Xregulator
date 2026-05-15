@@ -3667,7 +3667,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Voltage control loop filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the INA228 battery voltage signal used by the CV (constant voltage) control loop. Smooths noise on the voltage measurement. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant applied ONLY to the D-term slope buffer (cvDSlope). The PI error terms and the fastOV protection voltage comparisons all use raw INA228 voltage directly — this setting does not affect them. Note: fastOV uses a separate EMA on the voltage rate-of-change (dvdt) signal — that filter is controlled by DvdtAlpha (adjustable in Voltage → Voltage Loop Parameters). Increasing VoltageFilterTC smooths the D-slope signal at the cost of slower D-term response. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4683,12 +4683,27 @@
                     </form>
                   </div>
                 </div>
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Slope bleed proximity gate (V) (<span id="SlopeBleedProxV_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Proximity gate for slope bleed. Bleed scales linearly from zero (when voltage error &ge; this value) to full strength (when at or above setpoint). Prevents bleed from firing during a legitimate fast rise toward a distant target. Default: 0.15.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SlopeBleedProxV" type="number" step="0.05" min="0.05" max="1.0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo_cv">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the INA228 battery voltage reading used as the process variable for this control loop. Set in Tuning → Plant Delay.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied ONLY to the D-term slope buffer. PI error terms and fastOV voltage comparisons use raw INA228 voltage — this setting does not affect them. FastOV's dvdt signal uses a separate EMA controlled by DvdtAlpha (adjustable in this tab, see Layer 1 group). Set in Tuning → Plant Delay.</span></span>
                   </div>
                   <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
                     Read-only — set in Tuning → Plant Delay
@@ -4753,6 +4768,23 @@
                       <form action="/get" method="GET" target="hidden-form">
                         <input type="hidden" name="password" class="password_field">
                         <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <!-- Shared: DvdtAlpha -->
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>dvdt EMA Alpha (<span id="DvdtAlpha_echo">?</span>) — smoothing for rate-of-rise signal:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                        <span class="tooltip-box">EMA alpha applied to the raw voltage rate-of-rise (dvdt) signal before it enters Vpred. Lower alpha = more smoothing, more lag, fewer false fires. Higher alpha = faster response, noisier. Effective TC ≈ (1−alpha)/alpha × poll interval. Default: 0.08 (~190 ms TC at 15 ms cadence). Constraint: do not exceed ~0.15 without retesting false-fire rate at idle — the 16 mV noise margin is thin.</span>
+                      </span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="DvdtAlpha" type="number" step="0.005" min="0.01" max="0.5" />
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </form>
                     </div>
@@ -9267,6 +9299,7 @@
           <div id="sysid-check-rpm"    style="padding:4px 0;">⬜ Engine running</div>
           <div id="sysid-check-amps"   style="padding:4px 0;">⬜ Alternator producing current</div>
           <div id="sysid-check-volt"   style="padding:4px 0;">⬜ Battery voltage OK</div>
+          <div id="sysid-check-mode"   style="padding:4px 0;">⬜ Charging mode</div>
         </div>
 
         <div id="sysid-est-time" style="font-size:0.88em; color:#aaa; margin-bottom:20px;"></div>

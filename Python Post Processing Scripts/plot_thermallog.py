@@ -14,7 +14,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.widgets import CheckButtons
+from matplotlib.widgets import CheckButtons, TextBox, Button as MplButton
 import pandas as pd
 
 DOWNLOADS = os.path.expanduser("~/Downloads")
@@ -154,9 +154,23 @@ lookahead = constants.get("lookahead", float("nan"))
 const_label = f"Kp={kp}  Ki={ki}  Lookahead={lookahead}s"
 print(f"Constants: {const_label}")
 
-# Load data rows
-df = pd.read_csv(path, on_bad_lines="skip")
-df = df[df["ts_ms"] != "CONST"].copy()
+# Load data rows — parse raw lines first so the trimmer has _lines/_header_idx/_col_names
+with open(path, encoding="utf-8", errors="replace") as _f:
+    _lines = _f.readlines()
+_header_idx  = None
+_header_line = None
+for _i, _raw in enumerate(_lines):
+    if _raw.strip().startswith("ts_ms"):
+        _header_idx  = _i
+        _header_line = _raw.strip()
+        break
+if _header_idx is None:
+    raise SystemExit(f"ERROR: No 'ts_ms' header row found in {path}.")
+_sep_th = "," if "\t" not in _header_line else "\t"
+_col_names = [c.strip() for c in _header_line.split(_sep_th)]
+from io import StringIO as _SI_th
+_th_data = "".join(_lines[_header_idx + 1:])
+df = pd.read_csv(_SI_th(_th_data), sep=_sep_th, names=_col_names, on_bad_lines="skip")
 
 numeric_cols = [
     "ts_ms", "tempFilt_F", "tempProj_F", "nominalTarget_A", "rpmCap_A",
@@ -172,19 +186,14 @@ for col in numeric_cols:
 
 df.dropna(subset=["ts_ms"], inplace=True)
 df.reset_index(drop=True, inplace=True)
-df["t_s"] = (df["ts_ms"] - df["ts_ms"].iloc[0]) / 1000.0
-
-total_time_s = df["t_s"].iloc[-1]
-
-if total_time_s > 7200:  # >2 hours
-    df["t_plot"] = df["t_s"] / 3600.0
-    time_label = "Time (hours)"
-elif total_time_s > 120:  # >2 minutes
-    df["t_plot"] = df["t_s"] / 60.0
-    time_label = "Time (minutes)"
+df["t_ms"] = df["ts_ms"] - df["ts_ms"].iloc[0]
+df["t_s"] = df["t_ms"] / 1000.0
+if df["t_ms"].iloc[-1] > 5000:
+    df["t_plot"] = df["t_ms"] / 1000.0
+    time_label = "Time (s)"
 else:
-    df["t_plot"] = df["t_s"]
-    time_label = "Time (seconds)"
+    df["t_plot"] = df["t_ms"]
+    time_label = "Time (ms)"
 
 # Decode flags and stage
 flags = pd.to_numeric(df["flags"], errors="coerce").fillna(0).astype("int64")
@@ -332,7 +341,7 @@ gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 1], hspace=0.08)
 ax1a = fig1.add_subplot(gs1[0])
 ax1b = ax1a.twinx()
 ax1s = fig1.add_subplot(gs1[1], sharex=ax1a)
-fig1.subplots_adjust(right=0.80)
+fig1.subplots_adjust(right=0.80, bottom=0.10)
 
 ax1a.plot(df["t_plot"], df["tempFilt_F"],  color="#c62828", lw=2.5, label="tempFilt_F (measured)")
 ax1a.plot(df["t_plot"], df["tempProj_F"], color="#e91e63", lw=2.2, linestyle="--", label="tempProj_F (PID input)")
@@ -477,6 +486,74 @@ def _on_xlim_changed(changed_ax):
 
 for _ax in _all_primary_axes:
     _ax.callbacks.connect("xlim_changed", _on_xlim_changed)
+
+# ---------------------------------------------------------------------------
+# File Trimmer
+# ---------------------------------------------------------------------------
+_trim_total_s = df["t_s"].iloc[-1]
+
+def _fmt_trim_t(t):
+    return f"{int(t)}" if t == int(t) else f"{t:.3f}".rstrip("0").rstrip(".")
+
+def _do_trim(event=None):
+    try:
+        _s = float(_tb_trim_start.text)
+        _e = float(_tb_trim_end.text)
+    except ValueError:
+        _trim_status_lbl.set_text("Bad input — start/end must be numbers")
+        fig1.canvas.draw_idle()
+        return
+    if _s < 0 or _s >= _e or _e > _trim_total_s * 1.001:
+        _trim_status_lbl.set_text(f"Range error  (file is 0 – {_trim_total_s:.1f} s)")
+        fig1.canvas.draw_idle()
+        return
+    from io import StringIO as _TrimSI
+    _tsep = "\t" if "\t" in _header_line else ","
+    _trdf = pd.read_csv(
+        _TrimSI("".join(_lines[_header_idx + 1:])),
+        sep=_tsep, names=_col_names, on_bad_lines="skip"
+    )
+    _tcol = next((c for c in ("ts_ms", "t_s") if c in _trdf.columns), None)
+    if _tcol is None:
+        _trim_status_lbl.set_text("No time column found")
+        fig1.canvas.draw_idle()
+        return
+    _trdf[_tcol] = pd.to_numeric(_trdf[_tcol], errors="coerce")
+    _trdf.dropna(subset=[_tcol], inplace=True)
+    _t_zero = _trdf[_tcol].iloc[0]
+    _t_s_col = (_trdf[_tcol] - _t_zero) / (1000.0 if _tcol == "ts_ms" else 1.0)
+    _tmask = (_t_s_col >= _s) & (_t_s_col <= _e)
+    _tout  = _trdf[_tmask]
+    if _tout.empty:
+        _trim_status_lbl.set_text("No rows in that range")
+        fig1.canvas.draw_idle()
+        return
+    _tname = f"{basename}_{_fmt_trim_t(_s)}s_{_fmt_trim_t(_e)}s.csv"
+    _tpath = os.path.join(DOWNLOADS, _tname)
+    with open(_tpath, "w", encoding="utf-8", newline="") as _tf:
+        for _tln in _lines[:_header_idx]:
+            _tf.write(_tln)
+        _tf.write(_header_line + "\n")
+        _tout.to_csv(_tf, index=False, header=False, columns=_col_names)
+    _trim_status_lbl.set_text(f"Saved: {_tname}  ({len(_tout)} rows)")
+    fig1.canvas.draw_idle()
+
+_ax_trim_s   = fig1.add_axes([0.12, 0.018, 0.10, 0.05])
+_ax_trim_e   = fig1.add_axes([0.28, 0.018, 0.10, 0.05])
+_ax_trim_go  = fig1.add_axes([0.40, 0.018, 0.04, 0.05])
+_tb_trim_start = TextBox(_ax_trim_s, "Start (s) ", initial="0")
+_tb_trim_end   = TextBox(_ax_trim_e, "End (s) ",   initial=str(round(_trim_total_s, 1)))
+_btn_trim_go   = MplButton(_ax_trim_go, "Go", color="#1565c0", hovercolor="#0d47a1")
+_btn_trim_go.label.set_color("white")
+_btn_trim_go.label.set_fontsize(10)
+_btn_trim_go.on_clicked(_do_trim)
+_trim_status_lbl = fig1.text(
+    0.46, 0.043,
+    f"File: {basename}  ({_trim_total_s:.1f} s)",
+    fontsize=9, color="#555555", verticalalignment="center"
+)
+fig1.text(0.03, 0.043, "Trim file:", fontsize=10, color="#1a1a1a",
+          fontweight="bold", verticalalignment="center")
 
 # ---------------------------------------------------------------------------
 print("Tip: use the checkboxes on the right of each plot to show/hide series.")

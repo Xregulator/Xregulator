@@ -864,8 +864,9 @@ float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 // Step test: baseline → 3× (duty up / duty down) → post-process.
 // Samples stored in PSRAM. Buffer allocated on first test run, never freed.
 // Results populate the JS popup and optionally update InputFilterTC in flash.
-// Only legal in SYS_MODE_AUTO; systemID_tick() enforces this.
-float SystemIDStepAmplitude = 5.0f;  // % duty step — will be web-configurable later
+// Only legal in bulk (SYS_MODE_AUTO + !voltageControlActive) or SYS_MODE_MANUAL.
+// Enforced in the /get startSystemID handler and in the JS preflight check.
+float SystemIDStepAmplitude = 15.0f;  // % duty step — web-configurable; 15% is a good default
 
 volatile bool systemIDRequested = false;       // set true by UI handler to trigger a test run
 volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
@@ -2188,12 +2189,13 @@ float VoltageKd = 40.0f;             // A/(V/s) — derivative gain; at dvdt=0.5
 uint16_t VoltageDWindowMs = 200;     // ms — D slope window; must be >= VoltageLoopInterval, <= CV_DSLOPE_BUF × VoltageLoopInterval
 float SlopeBleedThresh = 0.10f;      // V/s — integrator bleed activates when cvDSlope exceeds this (intended max rise rate)
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
+float SlopeBleedProxV = 0.15f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0)
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
 float KSoft = 12.0f;  // A/V — soft OV cap slope (fires when Vpred > target+0.08V)
 float KHard = 35.0f;  // A/V — hard OV cap slope (fires when Vpred > target+0.15V)
-bool  OvLayer1Enable = true;    // Layer 1 — soft-cap prediction enable
+bool  OvLayer1Enable = false;   // Layer 1 — soft-cap prediction (off by default — false fires at idle from belt resonance dvdt spikes; see CV_Loop_Dev_Summary.md)
 bool  OvLayer2Enable = true;    // Layer 2 — hard-cap prediction enable
 bool  OvLayer3Enable = true;    // Layer 3 — hysteresis clamp enable
 int   IExcessSigSrc   = 0;      // Layer 4 — 0=MA(N), 1=EMA(TC), 2=Raw
@@ -2203,6 +2205,7 @@ int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10
 float TdPred         = 0.045f;  // Layers 1+2 lookahead horizon (s)
 float VSoftMarginV   = 0.100f;  // Layer 1/3 voltage margin above target (V)
 float VHardMarginV   = 0.150f;  // Layer 2 voltage margin above target (V)
+float DvdtAlpha      = 0.08f;   // EMA alpha for dvdt (rate-of-rise) signal fed into Vpred (lower = smoother, more lag)
 // --- Protection proximity gate ---
 float ProtectionProxGateV = 0.3f; // V — protections only arm when ChargingVoltageTarget >= BulkVoltage - this
 // --- iExcess current supervisor ---
