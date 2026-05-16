@@ -867,6 +867,7 @@ const CSV3_FIELDS = [
     "SlopeBleedK",                     // 285
     "DvdtAlpha",                       // 286
     "SlopeBleedProxV",                 // 287
+    "StartupRiseRate",                 // 288 — ×100, 2 decimals
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -1614,6 +1615,27 @@ let voltagePlot;
 let rpmPlot;
 let temperaturePlot;
 
+// Autoscale state — computed at data rate, applied in rAF; persisted in localStorage
+let autoScaleCurrent = localStorage.getItem('autoScaleCurrent') === 'true';
+let autoScaleCurrentLocked = false;
+let _autoScaleCurrentLeft  = null;  // { min, max }
+let _autoScaleCurrentRight = null;
+
+let autoScaleVoltage = localStorage.getItem('autoScaleVoltage') === 'true';
+let autoScaleVoltageLocked = false;
+let _autoScaleVoltageLeft  = null;
+let _autoScaleVoltageRight = null;
+
+let autoScaleRPM = localStorage.getItem('autoScaleRPM') === 'true';
+let autoScaleRPMLocked = false;
+let _autoScaleRPMLeft  = null;
+let _autoScaleRPMRight = null;
+
+let autoScaleTemp = localStorage.getItem('autoScaleTemp') === 'true';
+let autoScaleTempLocked = false;
+let _autoScaleTempLeft  = null;
+let _autoScaleTempRight = null;
+
 
 // Plot update batching system
 const plotUpdateQueue = new Set();
@@ -1696,10 +1718,10 @@ function lerp(a, b, t) {
 }
 
 const plotInterp = {
-    current:     { prevY: [0, 0, 0],                  nextY: [0, 0, 0],                  arrivalTime: 0, lerpDuration: 200 },
-    voltage:     { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0, lerpDuration: 200 },
-    rpm:         { prevY: [0],                        nextY: [0],                        arrivalTime: 0, lerpDuration: 200 },
-    temperature: { prevY: [0],                        nextY: [0],                        arrivalTime: 0, lerpDuration: 200 },
+    current:     { prevY: [0, 0, 0, 0],                nextY: [0, 0, 0, 0],                arrivalTime: 0, lerpDuration: 200 },
+    voltage:     { prevY: [0, 0, 0],                  nextY: [0, 0, 0],                  arrivalTime: 0, lerpDuration: 200 },
+    rpm:         { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0, lerpDuration: 200 },
+    temperature: { prevY: [0, 0],                     nextY: [0, 0],                     arrivalTime: 0, lerpDuration: 200 },
     pid:         { prevY: [0, 0, 0, 0, 0, 0, 0],      nextY: [0, 0, 0, 0, 0, 0, 0],      arrivalTime: 0, lerpDuration: 200 },
     cv:          { prevY: [null, null, null, null],    nextY: [null, null, null, null],    arrivalTime: 0, lerpDuration: 200 },
 };
@@ -1780,19 +1802,35 @@ function startInterpLoop() {
         const renderStart = performance.now();
 
         if (plotsTabVisible()) {
-            if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 3)) {
+            if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 4)) {
+                if (autoScaleCurrent) {
+                    if (_autoScaleCurrentLeft)  currentTempPlot.setScale('current', _autoScaleCurrentLeft);
+                    if (_autoScaleCurrentRight) currentTempPlot.setScale('pct',     _autoScaleCurrentRight);
+                }
                 currentTempPlot.setData(currentTempData);
                 plotRenderTracker.plots.current.count++;
             }
-            if (voltagePlot && applyInterp(plotInterp.voltage, voltageData, 2)) {
+            if (voltagePlot && applyInterp(plotInterp.voltage, voltageData, 3)) {
+                if (autoScaleVoltage) {
+                    if (_autoScaleVoltageLeft)  voltagePlot.setScale('voltage', _autoScaleVoltageLeft);
+                    if (_autoScaleVoltageRight) voltagePlot.setScale('pct',     _autoScaleVoltageRight);
+                }
                 voltagePlot.setData(voltageData);
                 plotRenderTracker.plots.voltage.count++;
             }
-            if (rpmPlot && applyInterp(plotInterp.rpm, rpmData, 1)) {
+            if (rpmPlot && applyInterp(plotInterp.rpm, rpmData, 2)) {
+                if (autoScaleRPM) {
+                    if (_autoScaleRPMLeft)  rpmPlot.setScale('rpm', _autoScaleRPMLeft);
+                    if (_autoScaleRPMRight) rpmPlot.setScale('pct', _autoScaleRPMRight);
+                }
                 rpmPlot.setData(rpmData);
                 plotRenderTracker.plots.rpm.count++;
             }
-            if (temperaturePlot && applyInterp(plotInterp.temperature, temperatureData, 1)) {
+            if (temperaturePlot && applyInterp(plotInterp.temperature, temperatureData, 2)) {
+                if (autoScaleTemp) {
+                    if (_autoScaleTempLeft)  temperaturePlot.setScale('temperature', _autoScaleTempLeft);
+                    if (_autoScaleTempRight) temperaturePlot.setScale('pct',         _autoScaleTempRight);
+                }
                 temperaturePlot.setData(temperatureData);
                 plotRenderTracker.plots.temperature.count++;
             }
@@ -2380,6 +2418,32 @@ function getConfigCheckInterval(webgaugesIntervalMs) {
     return Math.max(1, Math.round((CONFIG_CHECK_INTERVAL_SECONDS * 1000) / webgaugesIntervalMs));
 }
 
+// Computes a padded min/max range from selected series in a data array.
+// minSpan prevents zooming in too far; marginFrac adds padding; hardMin clamps the lower bound.
+function computeScaleRange(dataArray, seriesIndices, minSpan, marginFrac, hardMin) {
+    let lo = Infinity, hi = -Infinity;
+    for (const idx of seriesIndices) {
+        const arr = dataArray[idx];
+        for (let i = 0; i < arr.length; i++) {
+            const v = arr[i];
+            if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        }
+    }
+    if (!isFinite(lo) || !isFinite(hi)) return null;
+    let span = hi - lo;
+    if (span < minSpan) {
+        const mid = (lo + hi) / 2;
+        lo = mid - minSpan / 2;
+        hi = mid + minSpan / 2;
+        span = minSpan;
+    }
+    const margin = span * marginFrac;
+    lo -= margin;
+    hi += margin;
+    if (hardMin !== undefined) lo = Math.max(hardMin, lo);
+    return { min: lo, max: hi };
+}
+
 // wrapper function
 function processCSVDataOptimized(data) {
     return profileOperation('dataProcessing', () => {
@@ -2408,12 +2472,14 @@ function processCSVDataOptimized(data) {
         const battCurrent = 'Bcur' in data ? parseFloat(data.Bcur) / 100 : 0;
         const altCurrent = 'MeasuredAmps' in data ? parseFloat(data.MeasuredAmps) / 100 : 0;
         const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
+        const fieldPct = 'dutyCycle' in data ? parseFloat(data.dutyCycle) / 100 : 0;
 
         // Shift all current data left and add new data at the end
         const prevY_current = [
             currentTempData[1][currentTempData[1].length - 1],
             currentTempData[2][currentTempData[2].length - 1],
             currentTempData[3][currentTempData[3].length - 1],
+            currentTempData[4][currentTempData[4].length - 1],
         ];
         for (let i = 1; i < currentTempData[1].length; i++) {
             if (useTimestamps) {
@@ -2422,6 +2488,7 @@ function processCSVDataOptimized(data) {
             currentTempData[1][i - 1] = currentTempData[1][i];
             currentTempData[2][i - 1] = currentTempData[2][i];
             currentTempData[3][i - 1] = currentTempData[3][i];
+            currentTempData[4][i - 1] = currentTempData[4][i];
         }
         const lastCurrentIndex = currentTempData[1].length - 1;
         if (useTimestamps) {
@@ -2430,9 +2497,14 @@ function processCSVDataOptimized(data) {
         currentTempData[1][lastCurrentIndex] = battCurrent;
         currentTempData[2][lastCurrentIndex] = altCurrent;
         currentTempData[3][lastCurrentIndex] = fieldCurrent;
+        currentTempData[4][lastCurrentIndex] = fieldPct;
         plotInterp.current.prevY = prevY_current;
-        plotInterp.current.nextY = [battCurrent, altCurrent, fieldCurrent];
+        plotInterp.current.nextY = [battCurrent, altCurrent, fieldCurrent, fieldPct];
         plotInterp.current.arrivalTime = performance.now();
+        if (autoScaleCurrent && !autoScaleCurrentLocked) {
+            _autoScaleCurrentLeft  = computeScaleRange(currentTempData, [1, 2, 3], 5, 0.10);
+            _autoScaleCurrentRight = computeScaleRange(currentTempData, [4], 20, 0.10, 0);
+        }
 
         // ALWAYS UPDATE DATA STRUCTURES - Voltage plot data
         const adsBattV = 'BatteryV' in data ? parseFloat(data.BatteryV) / 100 : 0;
@@ -2441,6 +2513,7 @@ function processCSVDataOptimized(data) {
         const prevY_voltage = [
             voltageData[1][voltageData[1].length - 1],
             voltageData[2][voltageData[2].length - 1],
+            voltageData[3][voltageData[3].length - 1],
         ];
         for (let i = 1; i < voltageData[1].length; i++) {
             if (useTimestamps) {
@@ -2448,6 +2521,7 @@ function processCSVDataOptimized(data) {
             }
             voltageData[1][i - 1] = voltageData[1][i];
             voltageData[2][i - 1] = voltageData[2][i];
+            voltageData[3][i - 1] = voltageData[3][i];
         }
         const lastVoltageIndex = voltageData[1].length - 1;
         if (useTimestamps) {
@@ -2455,47 +2529,70 @@ function processCSVDataOptimized(data) {
         }
         voltageData[1][lastVoltageIndex] = adsBattV;
         voltageData[2][lastVoltageIndex] = inaBattV;
+        voltageData[3][lastVoltageIndex] = fieldPct;
         plotInterp.voltage.prevY = prevY_voltage;
-        plotInterp.voltage.nextY = [adsBattV, inaBattV];
+        plotInterp.voltage.nextY = [adsBattV, inaBattV, fieldPct];
         plotInterp.voltage.arrivalTime = performance.now();
+        if (autoScaleVoltage && !autoScaleVoltageLocked) {
+            _autoScaleVoltageLeft  = computeScaleRange(voltageData, [1, 2], 0.5, 0.10);
+            _autoScaleVoltageRight = computeScaleRange(voltageData, [3], 20, 0.10, 0);
+        }
 
         // ALWAYS UPDATE DATA STRUCTURES - RPM plot data
         const rpmValue = 'RPM' in data ? parseFloat(data.RPM) : 0;
 
-        const prevY_rpm = [rpmData[1][rpmData[1].length - 1]];
+        const prevY_rpm = [
+            rpmData[1][rpmData[1].length - 1],
+            rpmData[2][rpmData[2].length - 1],
+        ];
         for (let i = 1; i < rpmData[1].length; i++) {
             if (useTimestamps) {
                 rpmData[0][i - 1] = rpmData[0][i];
             }
             rpmData[1][i - 1] = rpmData[1][i];
+            rpmData[2][i - 1] = rpmData[2][i];
         }
         const lastRPMIndex = rpmData[1].length - 1;
         if (useTimestamps) {
             rpmData[0][lastRPMIndex] = now;
         }
         rpmData[1][lastRPMIndex] = rpmValue;
+        rpmData[2][lastRPMIndex] = fieldPct;
         plotInterp.rpm.prevY = prevY_rpm;
-        plotInterp.rpm.nextY = [rpmValue];
+        plotInterp.rpm.nextY = [rpmValue, fieldPct];
         plotInterp.rpm.arrivalTime = performance.now();
+        if (autoScaleRPM && !autoScaleRPMLocked) {
+            _autoScaleRPMLeft  = computeScaleRange(rpmData, [1], 200, 0.10);
+            _autoScaleRPMRight = computeScaleRange(rpmData, [2], 20, 0.10, 0);
+        }
 
         // ALWAYS UPDATE DATA STRUCTURES - Temperature plot data
         const altTemp = 'AlternatorTemperatureF' in data ? parseFloat(data.AlternatorTemperatureF) / 100 : 0;
 
-        const prevY_temp = [temperatureData[1][temperatureData[1].length - 1]];
+        const prevY_temp = [
+            temperatureData[1][temperatureData[1].length - 1],
+            temperatureData[2][temperatureData[2].length - 1],
+        ];
         for (let i = 1; i < temperatureData[1].length; i++) {
             if (useTimestamps) {
                 temperatureData[0][i - 1] = temperatureData[0][i];
             }
             temperatureData[1][i - 1] = temperatureData[1][i];
+            temperatureData[2][i - 1] = temperatureData[2][i];
         }
         const lastTempIndex = temperatureData[1].length - 1;
         if (useTimestamps) {
             temperatureData[0][lastTempIndex] = now;
         }
         temperatureData[1][lastTempIndex] = altTemp;
+        temperatureData[2][lastTempIndex] = fieldPct;
         plotInterp.temperature.prevY = prevY_temp;
-        plotInterp.temperature.nextY = [altTemp];
+        plotInterp.temperature.nextY = [altTemp, fieldPct];
         plotInterp.temperature.arrivalTime = performance.now();
+        if (autoScaleTemp && !autoScaleTempLocked) {
+            _autoScaleTempLeft  = computeScaleRange(temperatureData, [1], 10, 0.10);
+            _autoScaleTempRight = computeScaleRange(temperatureData, [2], 20, 0.10, 0);
+        }
 
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
@@ -2692,24 +2789,28 @@ function reinitializePlotsWithNewTiming(data) {
     currentTempData = [
         [...xAxisData], // X values (timestamps)
         new Array(newMaxPoints).fill(0), // Battery current
-        new Array(newMaxPoints).fill(0), // Alt current  
-        new Array(newMaxPoints).fill(0)  // Field current
+        new Array(newMaxPoints).fill(0), // Alt current
+        new Array(newMaxPoints).fill(0), // Field current
+        new Array(newMaxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     voltageData = [
         [...xAxisData], // X values
         new Array(newMaxPoints).fill(0), // ADS voltage
-        new Array(newMaxPoints).fill(0)  // INA voltage
+        new Array(newMaxPoints).fill(0), // INA voltage
+        new Array(newMaxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     rpmData = [
         [...xAxisData], // X values
-        new Array(newMaxPoints).fill(0)  // RPM
+        new Array(newMaxPoints).fill(0), // RPM
+        new Array(newMaxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     temperatureData = [
-        [...xAxisData], // X values  
-        new Array(newMaxPoints).fill(0)  // Temperature
+        [...xAxisData], // X values
+        new Array(newMaxPoints).fill(0), // Temperature
+        new Array(newMaxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     // Reset circular buffer indices
@@ -2969,6 +3070,7 @@ function updateAllEchosOptimized(data) {
         { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
         { key: 'DvdtAlpha',             id: 'DvdtAlpha_echo',                 transform: v => (v / 1000).toFixed(3) },
         { key: 'SlopeBleedProxV',       id: 'SlopeBleedProxV_echo',           transform: v => (v / 100).toFixed(2) },
+        { key: 'StartupRiseRate',       id: 'StartupRiseRate_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
@@ -3763,6 +3865,7 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${(r.lst || 0).toFixed(1)}</td>
             <td style="padding:2px 4px;">${(r.lwo || 0).toFixed(3)}</td>
             <td style="padding:2px 4px;">${(r.lio || 0).toFixed(4)}</td>
+            <td style="padding:2px 4px;">${(r.lus || 0).toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vkp.toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vki.toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vkd.toFixed(2)}</td>
@@ -4522,23 +4625,27 @@ function initPlotDataStructures() {
         [...xAxisData],
         new Array(maxPoints).fill(0),
         new Array(maxPoints).fill(0),
-        new Array(maxPoints).fill(0)
+        new Array(maxPoints).fill(0),
+        new Array(maxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     voltageData = [
         [...xAxisData],
         new Array(maxPoints).fill(0),
-        new Array(maxPoints).fill(0)
+        new Array(maxPoints).fill(0),
+        new Array(maxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     rpmData = [
         [...xAxisData],
-        new Array(maxPoints).fill(0)
+        new Array(maxPoints).fill(0),
+        new Array(maxPoints).fill(0)  // Field% (duty cycle)
     ];
 
     temperatureData = [
         [...xAxisData],
-        new Array(maxPoints).fill(0)
+        new Array(maxPoints).fill(0),
+        new Array(maxPoints).fill(0)  // Field% (duty cycle)
     ];
 }
 
@@ -4572,26 +4679,42 @@ function initCurrentTempPlot() {
                 stroke: "#9C27B0",
                 width: 2,
                 scale: "current"
+            },
+            {
+                label: "Field %",
+                stroke: "#9E9E9E",
+                width: 2,
+                scale: "pct",
+                dash: [4, 2]
             }
         ],
         scales: useTimestamps ? {
             x: { time: true },
-            current: { auto: false, range: [Ymin1, Ymax1] }
+            current: { auto: false, range: [Ymin1, Ymax1] },
+            pct: { auto: false, range: [0, 100] }
         } : {
             x: {
                 time: false,
                 auto: false,
                 range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
             },
-            current: { auto: false, range: [Ymin1, Ymax1] }
+            current: { auto: false, range: [Ymin1, Ymax1] },
+            pct: { auto: false, range: [0, 100] }
         },
         axes: useTimestamps ? [
             { grid: { show: true } },
             {
-                scale: "current", // Use appropriate scale name for each plot
-                label: "Amperes", // Use appropriate label for each plot
+                scale: "current",
+                label: "Amperes",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ] : [
             {
@@ -4599,10 +4722,17 @@ function initCurrentTempPlot() {
                 grid: { show: true }
             },
             {
-                scale: "current", // Use appropriate scale name for each plot
-                label: "Amperes", // Use appropriate label for each plot
+                scale: "current",
+                label: "Amperes",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ],
         legend: {
@@ -4615,7 +4745,8 @@ function initCurrentTempPlot() {
                         createCustomLegend('current-temp-plot', [
                             { label: "Battery Current (A)", color: "#4CAF50" },
                             { label: "Alternator Current (A)", color: "#2196F3" },
-                            { label: "Field Current (A)", color: "#9C27B0" }
+                            { label: "Field Current (A)", color: "#9C27B0" },
+                            { label: "Field %", color: "#9E9E9E" }
                         ]);
 
                         const resizePlot = debounce(() => {
@@ -4638,6 +4769,40 @@ function initCurrentTempPlot() {
 
     currentTempPlot = new uPlot(opts, currentTempData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(currentTempPlot);
+
+    // Autoscale checkbox + lock button — re-injected on each init so re-inits stay clean
+    plotEl.style.position = 'relative';
+    const existingAs = plotEl.querySelector('.autoscale-ctrl');
+    if (existingAs) existingAs.remove();
+    autoScaleCurrentLocked = false;
+    const asDiv = document.createElement('div');
+    asDiv.className = 'autoscale-ctrl';
+    asDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    asDiv.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-current-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-current-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="lock-current-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(asDiv);
+    const asCb = document.getElementById('autoscale-current-cb');
+    const lockBtnC = document.getElementById('lock-current-btn');
+    asCb.checked = autoScaleCurrent;
+    if (autoScaleCurrent) lockBtnC.style.display = 'block';
+    lockBtnC.addEventListener('click', () => {
+        autoScaleCurrentLocked = !autoScaleCurrentLocked;
+        lockBtnC.textContent = autoScaleCurrentLocked ? 'unlock' : 'lock';
+        lockBtnC.style.opacity = autoScaleCurrentLocked ? '1' : '0.6';
+    });
+    asCb.addEventListener('change', e => {
+        autoScaleCurrent = e.target.checked;
+        localStorage.setItem('autoScaleCurrent', autoScaleCurrent);
+        lockBtnC.style.display = autoScaleCurrent ? 'block' : 'none';
+        if (!autoScaleCurrent) {
+            autoScaleCurrentLocked = false;
+            lockBtnC.textContent = 'lock';
+            lockBtnC.style.opacity = '0.6';
+            _autoScaleCurrentLeft = null;
+            _autoScaleCurrentRight = null;
+            currentTempPlot.setScale('current', { min: Ymin1, max: Ymax1 });
+            currentTempPlot.setScale('pct', { min: 0, max: 100 });
+        }
+    });
 }
 
 function initVoltagePlot() {
@@ -4664,26 +4829,42 @@ function initVoltagePlot() {
                 stroke: "#607D8B",
                 width: 2,
                 scale: "voltage"
+            },
+            {
+                label: "Field %",
+                stroke: "#9E9E9E",
+                width: 2,
+                scale: "pct",
+                dash: [4, 2]
             }
         ],
         scales: useTimestamps ? {
             x: { time: true },
-            voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] }
+            voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] },
+            pct: { auto: false, range: [0, 100] }
         } : {
             x: {
                 time: false,
                 auto: false,
                 range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
             },
-            voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] }
+            voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] },
+            pct: { auto: false, range: [0, 100] }
         },
         axes: useTimestamps ? [
             { grid: { show: true } },
             {
-                scale: "voltage", // Use appropriate scale name for each plot
-                label: "Volts", // Use appropriate label for each plot
+                scale: "voltage",
+                label: "Volts",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ] : [
             {
@@ -4691,10 +4872,17 @@ function initVoltagePlot() {
                 grid: { show: true }
             },
             {
-                scale: "voltage", // Use appropriate scale name for each plot
-                label: "Volts", // Use appropriate label for each plot
+                scale: "voltage",
+                label: "Volts",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ],
         legend: {
@@ -4706,7 +4894,8 @@ function initVoltagePlot() {
                     (u) => {
                         createCustomLegend('voltage-plot', [
                             { label: "ADS Battery (V)", color: "#FF9800" },
-                            { label: "INA Battery (V)", color: "#607D8B" }
+                            { label: "INA Battery (V)", color: "#607D8B" },
+                            { label: "Field %", color: "#9E9E9E" }
                         ]);
 
                         const resizePlot = debounce(() => {
@@ -4729,6 +4918,39 @@ function initVoltagePlot() {
 
     voltagePlot = new uPlot(opts, voltageData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(voltagePlot);
+
+    plotEl.style.position = 'relative';
+    const existingAsV = plotEl.querySelector('.autoscale-ctrl');
+    if (existingAsV) existingAsV.remove();
+    autoScaleVoltageLocked = false;
+    const asDivV = document.createElement('div');
+    asDivV.className = 'autoscale-ctrl';
+    asDivV.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    asDivV.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-voltage-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-voltage-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="lock-voltage-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(asDivV);
+    const asCbV = document.getElementById('autoscale-voltage-cb');
+    const lockBtnV = document.getElementById('lock-voltage-btn');
+    asCbV.checked = autoScaleVoltage;
+    if (autoScaleVoltage) lockBtnV.style.display = 'block';
+    lockBtnV.addEventListener('click', () => {
+        autoScaleVoltageLocked = !autoScaleVoltageLocked;
+        lockBtnV.textContent = autoScaleVoltageLocked ? 'unlock' : 'lock';
+        lockBtnV.style.opacity = autoScaleVoltageLocked ? '1' : '0.6';
+    });
+    asCbV.addEventListener('change', e => {
+        autoScaleVoltage = e.target.checked;
+        localStorage.setItem('autoScaleVoltage', autoScaleVoltage);
+        lockBtnV.style.display = autoScaleVoltage ? 'block' : 'none';
+        if (!autoScaleVoltage) {
+            autoScaleVoltageLocked = false;
+            lockBtnV.textContent = 'lock';
+            lockBtnV.style.opacity = '0.6';
+            _autoScaleVoltageLeft = null;
+            _autoScaleVoltageRight = null;
+            voltagePlot.setScale('voltage', { min: Ymin2 / 100, max: Ymax2 / 100 });
+            voltagePlot.setScale('pct', { min: 0, max: 100 });
+        }
+    });
 }
 
 function initRPMPlot() {
@@ -4749,27 +4971,43 @@ function initRPMPlot() {
                 stroke: "#E91E63",
                 width: 2,
                 scale: "rpm"
+            },
+            {
+                label: "Field %",
+                stroke: "#9E9E9E",
+                width: 2,
+                scale: "pct",
+                dash: [4, 2]
             }
         ],
         scales: useTimestamps ? {
             x: { time: true },
-            rpm: { auto: false, range: [Ymin3, Ymax3] }
+            rpm: { auto: false, range: [Ymin3, Ymax3] },
+            pct: { auto: false, range: [0, 100] }
         } : {
             x: {
                 time: false,
                 auto: false,
                 range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
             },
-            rpm: { auto: false, range: [Ymin3, Ymax3] }
+            rpm: { auto: false, range: [Ymin3, Ymax3] },
+            pct: { auto: false, range: [0, 100] }
         },
 
         axes: useTimestamps ? [
             { grid: { show: true } },
             {
-                scale: "rpm", // Use appropriate scale name for each plot
-                label: "revs/min", // Use appropriate label for each plot
+                scale: "rpm",
+                label: "revs/min",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ] : [
             {
@@ -4777,10 +5015,17 @@ function initRPMPlot() {
                 grid: { show: true }
             },
             {
-                scale: "rpm", // Use appropriate scale name for each plot
-                label: "revs/min", // Use appropriate label for each plot
+                scale: "rpm",
+                label: "revs/min",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ],
         legend: {
@@ -4791,7 +5036,8 @@ function initRPMPlot() {
                 init: [
                     (u) => {
                         createCustomLegend('rpm-plot', [
-                            { label: "RPM", color: "#E91E63" }
+                            { label: "RPM", color: "#E91E63" },
+                            { label: "Field %", color: "#9E9E9E" }
                         ]);
 
                         const resizePlot = debounce(() => {
@@ -4814,6 +5060,39 @@ function initRPMPlot() {
 
     rpmPlot = new uPlot(opts, rpmData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(rpmPlot);
+
+    plotEl.style.position = 'relative';
+    const existingAsR = plotEl.querySelector('.autoscale-ctrl');
+    if (existingAsR) existingAsR.remove();
+    autoScaleRPMLocked = false;
+    const asDivR = document.createElement('div');
+    asDivR.className = 'autoscale-ctrl';
+    asDivR.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    asDivR.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-rpm-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-rpm-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="lock-rpm-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(asDivR);
+    const asCbR = document.getElementById('autoscale-rpm-cb');
+    const lockBtnR = document.getElementById('lock-rpm-btn');
+    asCbR.checked = autoScaleRPM;
+    if (autoScaleRPM) lockBtnR.style.display = 'block';
+    lockBtnR.addEventListener('click', () => {
+        autoScaleRPMLocked = !autoScaleRPMLocked;
+        lockBtnR.textContent = autoScaleRPMLocked ? 'unlock' : 'lock';
+        lockBtnR.style.opacity = autoScaleRPMLocked ? '1' : '0.6';
+    });
+    asCbR.addEventListener('change', e => {
+        autoScaleRPM = e.target.checked;
+        localStorage.setItem('autoScaleRPM', autoScaleRPM);
+        lockBtnR.style.display = autoScaleRPM ? 'block' : 'none';
+        if (!autoScaleRPM) {
+            autoScaleRPMLocked = false;
+            lockBtnR.textContent = 'lock';
+            lockBtnR.style.opacity = '0.6';
+            _autoScaleRPMLeft = null;
+            _autoScaleRPMRight = null;
+            rpmPlot.setScale('rpm', { min: Ymin3, max: Ymax3 });
+            rpmPlot.setScale('pct', { min: 0, max: 100 });
+        }
+    });
 }
 
 function initTemperaturePlot() {
@@ -4834,26 +5113,42 @@ function initTemperaturePlot() {
                 stroke: "#FF5722",
                 width: 2,
                 scale: "temperature"
+            },
+            {
+                label: "Field %",
+                stroke: "#9E9E9E",
+                width: 2,
+                scale: "pct",
+                dash: [4, 2]
             }
         ],
         scales: useTimestamps ? {
             x: { time: true },
-            temperature: { auto: false, range: [Ymin4, Ymax4] }
+            temperature: { auto: false, range: [Ymin4, Ymax4] },
+            pct: { auto: false, range: [0, 100] }
         } : {
             x: {
                 time: false,
                 auto: false,
                 range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
             },
-            temperature: { auto: false, range: [Ymin4, Ymax4] }
+            temperature: { auto: false, range: [Ymin4, Ymax4] },
+            pct: { auto: false, range: [0, 100] }
         },
         axes: useTimestamps ? [
             { grid: { show: true } },
             {
-                scale: "temperature", // Use appropriate scale name for each plot
-                label: "F", // Use appropriate label for each plot
+                scale: "temperature",
+                label: "F",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ] : [
             {
@@ -4861,10 +5156,17 @@ function initTemperaturePlot() {
                 grid: { show: true }
             },
             {
-                scale: "temperature", // Use appropriate scale name for each plot
-                label: "F", // Use appropriate label for each plot
+                scale: "temperature",
+                label: "F",
                 grid: { show: true },
                 side: 3
+            },
+            {
+                scale: "pct",
+                label: "Field %",
+                grid: { show: false },
+                side: 1,
+                values: (u, ticks) => ticks.map(v => Math.round(v) + '%')
             }
         ],
         legend: {
@@ -4875,7 +5177,8 @@ function initTemperaturePlot() {
                 init: [
                     (u) => {
                         createCustomLegend('temperature-plot', [
-                            { label: "Alt. Temp (°F)", color: "#FF5722" }
+                            { label: "Alt. Temp (°F)", color: "#FF5722" },
+                            { label: "Field %", color: "#9E9E9E" }
                         ]);
 
                         const resizePlot = debounce(() => {
@@ -4898,6 +5201,39 @@ function initTemperaturePlot() {
 
     temperaturePlot = new uPlot(opts, temperatureData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(temperaturePlot);
+
+    plotEl.style.position = 'relative';
+    const existingAsT = plotEl.querySelector('.autoscale-ctrl');
+    if (existingAsT) existingAsT.remove();
+    autoScaleTempLocked = false;
+    const asDivT = document.createElement('div');
+    asDivT.className = 'autoscale-ctrl';
+    asDivT.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    asDivT.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-temp-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-temp-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="lock-temp-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(asDivT);
+    const asCbT = document.getElementById('autoscale-temp-cb');
+    const lockBtnT = document.getElementById('lock-temp-btn');
+    asCbT.checked = autoScaleTemp;
+    if (autoScaleTemp) lockBtnT.style.display = 'block';
+    lockBtnT.addEventListener('click', () => {
+        autoScaleTempLocked = !autoScaleTempLocked;
+        lockBtnT.textContent = autoScaleTempLocked ? 'unlock' : 'lock';
+        lockBtnT.style.opacity = autoScaleTempLocked ? '1' : '0.6';
+    });
+    asCbT.addEventListener('change', e => {
+        autoScaleTemp = e.target.checked;
+        localStorage.setItem('autoScaleTemp', autoScaleTemp);
+        lockBtnT.style.display = autoScaleTemp ? 'block' : 'none';
+        if (!autoScaleTemp) {
+            autoScaleTempLocked = false;
+            lockBtnT.textContent = 'lock';
+            lockBtnT.style.opacity = '0.6';
+            _autoScaleTempLeft = null;
+            _autoScaleTempRight = null;
+            temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
+            temperaturePlot.setScale('pct', { min: 0, max: 100 });
+        }
+    });
 }
 
 //Staleness stuff
@@ -7906,6 +8242,11 @@ function showSubTab(parentTab, subTabName, evt = null) {
         });
     }
 
+    // Refresh matrix stats whenever the Alternator live data tab is opened
+    if (parentTab === 'livedata' && subTabName === 'alternator') {
+        fetchMatrixStats();
+    }
+
     // Initialize profile tab when switching to My Profile
     if (parentTab === 'cloudfeatures' && subTabName === 'myprofile') {
         if (typeof initializeProfileTab === 'function') {
@@ -9125,6 +9466,119 @@ function getLogTimestamp() {
     return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
 }
 
+// ── Matrix stats summary (Live Data → Alternator card) ────────────────────
+
+// Returns a human-readable reason string if the fetch should be blocked,
+// or null if it is safe to proceed.
+// Whitelist: only Off/None (0), Idle, Bulk (not near target), and Manual are safe.
+function matrixStatsFetchBlockReason() {
+    const stage = gLastChargeStage;
+
+    // Off/None and Idle are always safe
+    if (stage === 0 || stage === CS_IDLE) return null;
+
+    // Manual: user accepts responsibility in this mode
+    if (stage === CS_MANUAL) return null;
+
+    // Bulk is safe unless battery is close to the bulk target
+    if (stage === CS_BULK) {
+        const battV = getLiveBatteryV();
+        const bulkV = getEchoNumber('BulkVoltage_echo');
+        const proxV = getEchoNumber('ProtectionProxGateV_echo') || 0.5;
+        if (!isNaN(bulkV) && battV >= bulkV - proxV) {
+            return `Battery voltage (${battV.toFixed(2)} V) is within ${proxV.toFixed(2)} V of `
+                 + `the bulk voltage target (${bulkV.toFixed(2)} V). Refresh blocked when near bulk.`;
+        }
+        return null; // Bulk but not near target — safe
+    }
+
+    // Everything else: Absorption, Float, Maintain, Target V
+    const names = {
+        [CS_ABSORPTION]: 'Absorption', [CS_FLOAT]: 'Float',
+        [CS_MAINTAIN]: 'Maintain',     [CS_TARGET_V]: 'Target Voltage'
+    };
+    return `System is in ${names[stage] || 'stage ' + stage} mode. `
+         + 'Matrix stats refresh is only allowed when Off, Idle, Manual, or in early Bulk charge.';
+}
+
+function renderMatrixBars(containerId, labels, values, color) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const maxVal = Math.max(...values, 1);
+    container.innerHTML = labels.map((lbl, i) => {
+        const pct    = Math.round((values[i] / maxVal) * 100);
+        const hrs    = (values[i] / 3600).toFixed(1);
+        const dimmed = values[i] === 0 ? 'opacity:0.35;' : '';
+        return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;${dimmed}">` +
+               `<div style="width:82px;font-size:10px;color:var(--text-muted);text-align:right;flex-shrink:0;white-space:nowrap;">${lbl}</div>` +
+               `<div style="flex:1;background:rgba(128,128,128,0.15);border-radius:3px;height:13px;overflow:hidden;">` +
+               `<div style="width:${pct}%;background:${color};height:100%;border-radius:3px;transition:width 0.4s ease;"></div></div>` +
+               `<div style="width:34px;font-size:10px;color:var(--text-muted);text-align:right;flex-shrink:0;">${hrs}h</div>` +
+               `</div>`;
+    }).join('');
+}
+
+// explicit=true  → called by the user clicking Refresh; shows alert on block.
+// explicit=false → called automatically (tab switch, page load); silently skips.
+function fetchMatrixStats(explicit = false) {
+    const blockReason = matrixStatsFetchBlockReason();
+    if (blockReason) {
+        if (explicit) {
+            alert('Matrix stats refresh blocked:\n\n' + blockReason
+                + '\n\nTry again when the system is in Float, Idle, or off.');
+        } else {
+            const el = document.getElementById('matrix-stats-age');
+            if (el) el.textContent = 'Skipped — charging active';
+        }
+        return;
+    }
+
+    fetch('/effmatrixstats')
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) return;
+            const ss     = d.total_ss;
+            const ssStr  = `${Math.floor(ss / 3600)}h ${Math.floor((ss % 3600) / 60)}m`;
+            const popPct = d.total_cells > 0
+                ? ((d.pop_cells / d.total_cells) * 100).toFixed(1) : '0.0';
+
+            const el = id => document.getElementById(id);
+            if (el('matrix-stat-cells')) el('matrix-stat-cells').textContent = d.total_cells;
+            if (el('matrix-stat-pop'))   el('matrix-stat-pop').textContent   = `${d.pop_cells} (${popPct}%)`;
+            if (el('matrix-stat-ref'))   el('matrix-stat-ref').textContent   = d.ref_bins;
+            if (el('matrix-stat-ss'))    el('matrix-stat-ss').textContent    = ssStr;
+
+            renderMatrixBars('matrix-bar-rpm',   d.rpm_labels,   d.rpm_ss,   '#4a90d9');
+            renderMatrixBars('matrix-bar-temp',  d.temp_labels,  d.temp_ss,  '#e07b39');
+            const fieldCurrentLabels = d.field_min_amps
+                ? d.field_min_amps.map((minA, i) => {
+                    const maxA = d.field_max_amps[i];
+                    return (maxA < 0) ? '—' : `${Math.round(minA)}–${Math.round(maxA)}A`;
+                  })
+                : d.field_labels;
+            renderMatrixBars('matrix-bar-field', fieldCurrentLabels, d.field_ss, '#5aab61');
+
+            const now = new Date();
+            const ts  = now.getHours().toString().padStart(2, '0') + ':' +
+                        now.getMinutes().toString().padStart(2, '0');
+            if (el('matrix-stats-age')) el('matrix-stats-age').textContent = `Updated ${ts}`;
+        })
+        .catch(() => {
+            const el = document.getElementById('matrix-stats-age');
+            if (el) el.textContent = 'Load failed';
+        });
+}
+
+function downloadEffMatrix() {
+    const ts = getLogTimestamp();
+    const a = document.createElement('a');
+    a.href = '/effmatrix.csv';
+    a.download = `AltHealthMatrix_${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
 function downloadLogs() {
     const ts = getLogTimestamp();
     const files = [
@@ -9735,6 +10189,7 @@ let thermalLogAutoRefreshTimer = null;
 let thermalLogPlots = [null, null, null];
 let thermalLogResizeObservers = [null, null, null];
 let thermalWindowMin = 30;
+let thermalFetchInProgress = false;
 
 // Default visibility — hide the four requested series
 let thermalSeriesVisible = {
@@ -9796,6 +10251,8 @@ function drawThermalWatermark(u) {
 // Fetch
 // ---------------------------------------------------------------------------
 async function fetchAndRenderThermalLog() {
+    if (thermalFetchInProgress) return;
+    thermalFetchInProgress = true;
     const statusEl = document.getElementById('thermallog-status');
     if (statusEl) statusEl.textContent = 'Fetching…';
     try {
@@ -9815,6 +10272,8 @@ async function fetchAndRenderThermalLog() {
     } catch (err) {
         if (statusEl) statusEl.textContent = `Fetch error: ${err.message}`;
         console.error('thermallog fetch:', err);
+    } finally {
+        thermalFetchInProgress = false;
     }
 }
 
@@ -10354,7 +10813,7 @@ function applyThermalRanges() {
         det.addEventListener('toggle', () => {
             if (det.open) {
                 setTimeout(() => { fetchAndRenderThermalLog(); }, 50);
-                thermalLogAutoRefreshTimer = setInterval(fetchAndRenderThermalLog, 5000);
+                thermalLogAutoRefreshTimer = setInterval(fetchAndRenderThermalLog, 15000);
             } else {
                 clearInterval(thermalLogAutoRefreshTimer);
                 thermalLogAutoRefreshTimer = null;
@@ -11193,19 +11652,23 @@ function sysidUpdatePreflight() {
     const voltOK  = battV > 11.0 && battV < (bulkV - 0.3);
 
     const stage   = gLastChargeStage;
-    const modeOK  = (stage === CS_BULK || stage === CS_MANUAL);
-    const stageName = {
+    const modeOK  = (stage === CS_BULK || stage === CS_ABSORPTION || stage === CS_FLOAT || stage === CS_TARGET_V);
+    const stageLabel = {
+        [CS_BULK]:       'Bulk',
         [CS_ABSORPTION]: 'Absorption',
         [CS_FLOAT]:      'Float',
-        [CS_MAINTAIN]:   'Maintain',
         [CS_TARGET_V]:   'Target Voltage',
+        [CS_MAINTAIN]:   'Maintain',
         [CS_IDLE]:       'Idle',
+        [CS_MANUAL]:     'Manual',
     }[stage] ?? null;
     const modeMsg = modeOK
-        ? (stage === CS_MANUAL ? '✅ Mode: Manual' : '✅ Mode: Bulk charging')
-        : (stageName
-            ? '❌ Mode: ' + stageName + ' — must be in bulk or manual to run this test'
-            : '❌ Mode: Charging not active — must be in bulk or manual to run this test');
+        ? '✅ Mode: ' + stageLabel + ' — OK to run (no limits enforced during test)'
+        : (stage === CS_MANUAL
+            ? '❌ Mode: Manual — not available in manual mode (duty is fixed; test cannot drive the field)'
+            : (stageLabel
+                ? '❌ Mode: ' + stageLabel + ' — charging must be active (not idle or maintain)'
+                : '❌ Mode: Charging not active'));
 
     const allOK   = rpmOK && ampsOK && voltOK && modeOK;
 
@@ -11425,6 +11888,9 @@ function applySystemIDResults() {
         .catch(err => console.error("Filter TC update failed:", err));
 }
 
+
+// Fetch matrix stats once on page load (also refreshes whenever Alternator tab is opened)
+document.addEventListener('DOMContentLoaded', () => fetchMatrixStats());
 
 // Auto-login via URL parameter for local automation (e.g. SwiftBar shortcut)
 window.addEventListener('load', function () {

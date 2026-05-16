@@ -3667,7 +3667,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Voltage control loop filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant applied ONLY to the D-term slope buffer (cvDSlope). The PI error terms and the fastOV protection voltage comparisons all use raw INA228 voltage directly — this setting does not affect them. Note: fastOV uses a separate EMA on the voltage rate-of-change (dvdt) signal — that filter is controlled by DvdtAlpha (adjustable in Voltage → Voltage Loop Parameters). Increasing VoltageFilterTC smooths the D-slope signal at the cost of slower D-term response. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant applied to the voltage sensor signal used by the D-term slope buffer (cvDSlope) and the charging stage machine (Bulk → Absorption transitions). The PI error terms and the fastOV protection voltage comparisons use raw INA228 voltage directly — this setting does not affect them. Note: fastOV uses a separate EMA on the voltage rate-of-change (dvdt) signal — that filter is controlled by DvdtAlpha (adjustable in Voltage → Voltage Loop Parameters). Increasing VoltageFilterTC smooths the D-slope signal and makes stage transitions less sensitive to voltage transients. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4178,6 +4178,25 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Startup Rise Rate (A/s) (<span id="StartupRiseRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Setpoint
+                        slew rate applied only when the field is first turned on (OFF to AUTO). A slow value (e.g. 3
+                        A/s) lets the alternator build field current gradually, preventing integrator windup and the
+                        FastOV crash-to-zero that can follow. Has no effect on tuning steps, CV load-connect recovery,
+                        or RPM step-ups — those use Setpoint Rise Rate.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="StartupRiseRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Duty Ramp Rate (%/s) (<span id="DutyRampRate_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
                         rate of duty cycle change in ALL cases including on/off transitions. Lower values prevent rapid
@@ -4431,7 +4450,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="cvWavePeriodSec" type="number" step="5" min="10" max="600" />
+                      <input name="cvWavePeriodSec" type="number" step="5" min="30" max="600" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -4444,7 +4463,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Overshoot Penalty (K) (<span id="cvKOvershoot_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Stored with each record for reference but no longer used in the score formula. Scoring now uses fixed ×4 overshoot weighting baked into the ISE accumulator.</span>
+                      <span class="tooltip-box">Multiplier applied to overvoltage (positive voltage error) in the ISE scoring formula. When filtered voltage is above target, squared error is weighted by this value; when below target, weight is fixed at 1.0. Higher values penalize overshoot more harshly relative to undershoot. Also stored with each tuning record for reference. Default: 10.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4517,8 +4536,9 @@
                         <th style="padding:3px 4px;" title="Step-up: avg weighted ISE per scored cycle (V²·s). Overshoot weighted ×4.">↑ISE</th>
                         <th style="padding:3px 4px;" title="Step-down share of combined score ×1000: low ISE ÷ total active time">↓Score</th>
                         <th style="padding:3px 4px;" title="Step-down: seconds to settle within ±0.1V of low target">↓Settle</th>
-                        <th style="padding:3px 4px;" title="Step-down: worst peak above low target (V)">↓OvV</th>
-                        <th style="padding:3px 4px;" title="Step-down: avg one-sided ISE per scored cycle (V²·s, normal weight)">↓ISE</th>
+                        <th style="padding:3px 4px;" title="Step-down: worst peak above low target after zero crossing (V)">↓OvV</th>
+                        <th style="padding:3px 4px;" title="Step-down: avg ISE of re-overshoot above low target per scored cycle (V²·s)">↓ISE</th>
+                        <th style="padding:3px 4px;" title="Step-down: worst peak below low target (V). Scored with 1s grace then 10s ramp, ×0.15 weight.">↓US</th>
                         <th style="padding:3px 4px;">VKp</th>
                         <th style="padding:3px 4px;">VKi</th>
                         <th style="padding:3px 4px;">VKd</th>
@@ -4552,15 +4572,16 @@
                       </tr>
                     </thead>
                     <tbody id="cvTuningLogBody">
-                      <tr><td colspan="39" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
+                      <tr><td colspan="40" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
                     </tbody>
                   </table>
                 </div>
 
                 <p style="font-size:0.74em; color:var(--text-muted); margin-top:6px;">
-                  Score = (weighted HIGH ISE + LOW ISE) ÷ total active time, ×1000.
-                  HIGH phase: squared error, overshoot (above target) weighted ×4 vs undershoot.
-                  LOW phase: one-sided squared error, normal weight.
+                  Score = (HIGH ISE + LOW re-overshoot ISE + LOW undershoot ISE) ÷ total active time, ×1000.
+                  HIGH phase: squared error; overshoot above 25mV dead-band weighted ×4, approach weighted ×1.
+                  LOW phase overshoot: squared ISE, only after voltage crosses below target (no descent-from-HIGH penalty).
+                  LOW phase undershoot (↓US): squared ISE ×0.15, 1s grace from phase start then ramps to full weight over 10s.
                   Both lower is better.
                   <span style="color:#22c55e;">&#9632;</span> &lt;2 &nbsp;
                   <span style="color:#eab308;">&#9632;</span> &lt;10 &nbsp;
@@ -4703,7 +4724,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo_cv">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied ONLY to the D-term slope buffer. PI error terms and fastOV voltage comparisons use raw INA228 voltage — this setting does not affect them. FastOV's dvdt signal uses a separate EMA controlled by DvdtAlpha (adjustable in this tab, see Layer 1 group). Set in Tuning → Plant Delay.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied to the D-term slope buffer and the charging stage machine (Bulk → Absorption transitions). PI error terms and fastOV voltage comparisons use raw INA228 voltage — this setting does not affect them. FastOV's dvdt signal uses a separate EMA controlled by DvdtAlpha (adjustable in this tab, see Layer 1 group). Set in Tuning → Plant Delay.</span></span>
                   </div>
                   <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
                     Read-only — set in Tuning → Plant Delay
@@ -5880,7 +5901,10 @@
         </span> -->
 
         <span class="metric-value"
-          style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;">
+          style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
+          <input type="button" value="Export Matrix CSV" class="btn-secondary"
+            onclick="downloadEffMatrix()"
+            title="Download the complete efficiency matrix (all bins, all fields) as a CSV file" />
           <input type="button" id="eff-reset-btn" value="Reset All Matrix Data" class="btn-danger"
             title="Delete all learned efficiency matrix data and reference bins" />
         </span>
@@ -5888,10 +5912,56 @@
 
       </div>
 
+      <!-- Performance Matrix Summary -->
+      <div class="settings-card" style="margin-top:16px;" id="matrix-stats-card">
+        <p class="card-group-title">Performance Matrix — Coverage Summary</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">
+          Total SS time accumulated across all operating condition bins.
+          Gray = no data collected yet in that bucket.
+        </p>
+
+        <!-- Stats summary line -->
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.8;">
+          <span id="matrix-stat-cells" style="font-weight:600;color:var(--text-primary);">—</span> cells &nbsp;·&nbsp;
+          <span id="matrix-stat-pop" style="font-weight:600;color:var(--text-primary);">—</span> populated &nbsp;·&nbsp;
+          <span id="matrix-stat-ref" style="font-weight:600;color:var(--text-primary);">—</span> reference bins &nbsp;·&nbsp;
+          Total SS: <span id="matrix-stat-ss" style="font-weight:600;color:var(--text-primary);">—</span>
+        </div>
+
+        <!-- Three bar charts -->
+        <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;">
+
+          <div style="flex:1;min-width:160px;">
+            <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">By RPM</div>
+            <div id="matrix-bar-rpm"></div>
+          </div>
+
+          <div style="flex:1;min-width:160px;">
+            <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">By Temperature</div>
+            <div id="matrix-bar-temp"></div>
+          </div>
+
+          <div style="flex:1;min-width:160px;">
+            <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.04em;">By Alternator Current</div>
+            <div id="matrix-bar-field"></div>
+          </div>
+
+        </div>
+
+        <!-- Footer: last-updated + refresh -->
+        <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px;">
+          <span id="matrix-stats-age" style="font-size:10px;color:var(--text-muted);opacity:0.7;">Not loaded</span>
+          <button type="button" onclick="fetchMatrixStats(true)"
+                  class="btn-secondary"
+                  style="font-size:11px;padding:3px 10px;">↺ Refresh</button>
+        </div>
+      </div>
+
       <!-- DS18B20 Sensor Health -->
       <div class="settings-card" style="margin-top:16px;">
         <p class="card-group-title">DS18B20 Temperature Sensor Health</p>
         <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
+        <div class="sensor-health-grid">
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">Read Failures</span>
           <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
@@ -5939,6 +6009,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">Enumerate Failures</span>
           <span class="metric-value telemetry-value"><span id="tempEnumerateFailCountID">?</span></span>
+        </div>
         </div>
         <div style="margin-top:10px;">
           <button onclick="resetTempTaskCounters()" class="btn-secondary">Reset Sensor Health Counters</button>

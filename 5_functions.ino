@@ -1280,7 +1280,6 @@ float getFiltI() {
   return MeasuredAmps_filtered;
 }
 float getFiltV() {
-  // Filtered INA228 bus voltage for control loops only.
   // Never use for safety checks — use IBV directly.
   return IBV_filtered;
 }
@@ -2141,7 +2140,7 @@ void _ReadAnalogInputs_inner() {
                          static uint32_t bcurPrevMs = 0;
                          if (bcurPrevMs > 0) {
                            uint32_t dtBcur = nowIna - bcurPrevMs;
-                           if (dtBcur > 0 && dtBcur < 2000) {
+                           if (dtBcur >= 4 && dtBcur < 2000) {
                              g_dBcur_dt = (Bcur - bcurPrev) / ((float)dtBcur * 0.001f);
                            }
                          }

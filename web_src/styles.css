@@ -3022,4 +3022,22 @@ input:checked+.slider:before {
   color: #c62828;
 }
 
+/* DS18B20 sensor health 2-column grid */
+.sensor-health-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 500px) {
+  .sensor-health-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .sensor-health-grid .metric-row:nth-child(even) {
+    border-left: 1px solid var(--border);
+  }
+  .sensor-health-grid .metric-row:nth-last-child(-n+2) {
+    border-bottom: none;
+  }
+}
+
 /* XREG_END */

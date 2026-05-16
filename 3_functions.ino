@@ -748,8 +748,9 @@ enum Csv3Index {
   CSV3_SlopeBleedK,                     // 285
   CSV3_DvdtAlpha,                       // 286
   CSV3_SlopeBleedProxV,                 // 287
+  CSV3_StartupRiseRate,                 // 288 — ×100, 2 decimals
 
-  CSV3_FIELD_COUNT  // = 288
+  CSV3_FIELD_COUNT  // = 289
 };
 
 
@@ -1678,6 +1679,151 @@ void setupServer() {
     request->send(response);
   });
 
+  // ── Efficiency matrix export ──────────────────────────────────────────────
+  server.on("/effmatrix.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!effMatrix) {
+      request->send(200, "text/plain", "Efficiency matrix not initialized.");
+      return;
+    }
+
+    struct EffMatExportState {
+      int r, t, f;
+      bool header;
+      bool done;
+      char line[256];
+      int lineLen;
+      int linePos;
+    };
+
+    EffMatExportState state;
+    state.r = 0; state.t = 0; state.f = 0;
+    state.header = true;
+    state.done = false;
+    state.lineLen = 0; state.linePos = 0;
+
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "text/csv",
+      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (state.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state.linePos >= state.lineLen) {
+            if (state.header) {
+              state.lineLen = snprintf(state.line, sizeof(state.line),
+                "rpm_bucket,rpm_label,temp_bucket,temp_label,field_bucket,field_label,"
+                "ss_seconds,avg_amps,min_amps,max_amps,"
+                "ref_avg_amps,ref_min_amps,ref_max_amps,is_reference_bin\n");
+              state.header = false;
+            } else {
+              if (state.r >= NUM_RPM_BUCKETS) {
+                state.done = true;
+                return written;
+              }
+              MatrixCell &cell = MATRIX_CELL(state.r, state.t, state.f);
+              state.lineLen = snprintf(state.line, sizeof(state.line),
+                "%d,%s,%d,%s,%d,%s,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d\n",
+                state.r, RPM_LABELS[state.r],
+                state.t, TEMP_LABELS[state.t],
+                state.f, FIELD_LABELS[state.f],
+                (unsigned long)cell.ss_seconds,
+                cell.avg_amps, cell.min_amps, cell.max_amps,
+                cell.ref_avg_amps, cell.ref_min_amps, cell.ref_max_amps,
+                (int)cell.is_reference_bin);
+              // Advance indices: field → temp → rpm
+              state.f++;
+              if (state.f >= NUM_FIELD_BUCKETS) { state.f = 0; state.t++; }
+              if (state.t >= NUM_TEMP_BUCKETS)  { state.t = 0; state.r++; }
+            }
+            state.linePos = 0;
+          }
+          size_t toWrite = min((size_t)(state.lineLen - state.linePos), maxLen - written);
+          memcpy(buf + written, state.line + state.linePos, toWrite);
+          written += toWrite;
+          state.linePos += (int)toWrite;
+        }
+        return written;
+      });
+
+    response->addHeader("Content-Disposition", "attachment; filename=\"effmatrix.csv\"");
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // ── Efficiency matrix bucket summary (JSON) ───────────────────────────────
+  // Aggregates SS time per RPM / temp / field bucket. Small payload (~600 B).
+  // Used by the Live Data → Alternator card summary bars.
+  server.on("/effmatrixstats", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!effMatrix) {
+      request->send(200, "application/json", "{\"error\":\"not_ready\"}");
+      return;
+    }
+
+    uint32_t rpm_ss[NUM_RPM_BUCKETS]    = {0};
+    uint32_t temp_ss[NUM_TEMP_BUCKETS]  = {0};
+    uint32_t field_ss[NUM_FIELD_BUCKETS]= {0};
+    float field_min_amps[NUM_FIELD_BUCKETS];
+    float field_max_amps[NUM_FIELD_BUCKETS];
+    for (int f = 0; f < NUM_FIELD_BUCKETS; f++) { field_min_amps[f] = 9999.0f; field_max_amps[f] = -1.0f; }
+    uint32_t total_ss = 0;
+    int pop_cells = 0, ref_bins = 0;
+
+    for (int r = 0; r < NUM_RPM_BUCKETS; r++)
+      for (int t = 0; t < NUM_TEMP_BUCKETS; t++)
+        for (int f = 0; f < NUM_FIELD_BUCKETS; f++) {
+          MatrixCell &c = MATRIX_CELL(r, t, f);
+          rpm_ss[r]   += c.ss_seconds;
+          temp_ss[t]  += c.ss_seconds;
+          field_ss[f] += c.ss_seconds;
+          total_ss    += c.ss_seconds;
+          if (c.ss_seconds > 0) {
+            pop_cells++;
+            if (c.min_amps < field_min_amps[f]) field_min_amps[f] = c.min_amps;
+            if (c.max_amps > field_max_amps[f]) field_max_amps[f] = c.max_amps;
+          }
+          if (c.is_reference_bin)  ref_bins++;
+        }
+
+    char *buf = (char *)ps_malloc(2048);
+    if (!buf) { request->send(500, "application/json", "{\"error\":\"oom\"}"); return; }
+
+    int off = 0;
+    off += snprintf(buf + off, 2048 - off,
+      "{\"total_cells\":%d,\"pop_cells\":%d,\"ref_bins\":%d,\"total_ss\":%lu",
+      NUM_MATRIX_CELLS, pop_cells, ref_bins, (unsigned long)total_ss);
+
+    off += snprintf(buf + off, 2048 - off, ",\"rpm_ss\":[");
+    for (int r = 0; r < NUM_RPM_BUCKETS; r++)
+      off += snprintf(buf + off, 2048 - off, "%s%lu", r ? "," : "", (unsigned long)rpm_ss[r]);
+    off += snprintf(buf + off, 2048 - off, "],\"rpm_labels\":[");
+    for (int r = 0; r < NUM_RPM_BUCKETS; r++)
+      off += snprintf(buf + off, 2048 - off, "%s\"%s\"", r ? "," : "", RPM_LABELS[r]);
+
+    off += snprintf(buf + off, 2048 - off, "],\"temp_ss\":[");
+    for (int t = 0; t < NUM_TEMP_BUCKETS; t++)
+      off += snprintf(buf + off, 2048 - off, "%s%lu", t ? "," : "", (unsigned long)temp_ss[t]);
+    off += snprintf(buf + off, 2048 - off, "],\"temp_labels\":[");
+    for (int t = 0; t < NUM_TEMP_BUCKETS; t++)
+      off += snprintf(buf + off, 2048 - off, "%s\"%s\"", t ? "," : "", TEMP_LABELS[t]);
+
+    off += snprintf(buf + off, 2048 - off, "],\"field_ss\":[");
+    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
+      off += snprintf(buf + off, 2048 - off, "%s%lu", f ? "," : "", (unsigned long)field_ss[f]);
+    off += snprintf(buf + off, 2048 - off, "],\"field_labels\":[");
+    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
+      off += snprintf(buf + off, 2048 - off, "%s\"%s\"", f ? "," : "", FIELD_LABELS[f]);
+
+    off += snprintf(buf + off, 2048 - off, "],\"field_min_amps\":[");
+    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
+      off += snprintf(buf + off, 2048 - off, "%s%.1f", f ? "," : "", field_max_amps[f] < 0 ? -1.0f : field_min_amps[f]);
+    off += snprintf(buf + off, 2048 - off, "],\"field_max_amps\":[");
+    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
+      off += snprintf(buf + off, 2048 - off, "%s%.1f", f ? "," : "", field_max_amps[f]);
+
+    off += snprintf(buf + off, 2048 - off, "]}");
+
+    request->send(200, "application/json", buf);
+    free(buf);
+  });
 
   server.on("/cvlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!cvLogReady || !cvLog || cvLogCount == 0) {
@@ -2027,10 +2173,11 @@ void setupServer() {
 
     else if (request->hasParam("startSystemID")) {
       foundParameter = true;
-      bool sysidModeOK = (sysMode == SYS_MODE_MANUAL) ||
-                         (sysMode == SYS_MODE_AUTO && !voltageControlActive);
-      if (!sysidModeOK) {
-        queueConsoleMessage("SystemID: start blocked — only allowed in bulk or manual mode (CV / absorption / float not permitted)");
+      bool sysidModeOK = (sysMode == SYS_MODE_AUTO);
+      if (sysMode == SYS_MODE_MANUAL) {
+        queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
+      } else if (!sysidModeOK) {
+        queueConsoleMessage("SystemID: start blocked — only allowed in AUTO mode (bulk, absorption, float, or target voltage)");
       } else if (systemIDActive == 0 && (millis() - systemIDLastEndMs) > 2000UL) {
         systemIDRequested = true;
         systemIDResultsReady = false;
@@ -3158,6 +3305,13 @@ void setupServer() {
       SetpointFallRate = inputMessage.toFloat();
       if (TuningMode) tuningParamChanged = true;
       if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("StartupRiseRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("StartupRiseRate")->value();
+      writeFile(LittleFS, "/StartupRiseRate.txt", inputMessage.c_str());
+      StartupRiseRate = inputMessage.toFloat();
+      queueConsoleMessageF("Startup rise rate set to: %.2f A/sec", StartupRiseRate);
     }
     if (request->hasParam("PIDTrackingGain")) {
       foundParameter = true;
@@ -4396,7 +4550,7 @@ void setupServer() {
       CVTuningRecord &r = cvTuningLog[sortIdx[i]];
       pos += snprintf(buf + pos, 16384 - pos,
         "%s{\"n\":%d,\"s\":%.2f,\"st\":%.1f,\"wo\":%.3f,\"io\":%.4f,\"t\":%.1f,"
-        "\"ls\":%.2f,\"lst\":%.1f,\"lwo\":%.3f,\"lio\":%.4f,"
+        "\"ls\":%.2f,\"lst\":%.1f,\"lwo\":%.3f,\"lio\":%.4f,\"lus\":%.3f,"
         "\"fov\":%d,\"iex\":%d,\"ld\":%d,\"hoc\":%d,"
         "\"vkp\":%.3f,\"vki\":%.3f,\"vkd\":%.2f,"
         "\"srr\":%.1f,\"sfr\":%.1f,"
@@ -4409,7 +4563,7 @@ void setupServer() {
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
         r.avgIntegratedOvershootVs, r.activeTimeSec,
-        r.lowScore, r.avgLowSettlingTimeSec, r.worstLowOvV, r.avgLowIntOvVs,
+        r.lowScore, r.avgLowSettlingTimeSec, r.worstLowOvV, r.avgLowIntOvVs, r.worstLowUndershootV,
         (int)r.fastOvFires, (int)r.iExcessFires, (int)r.loadDumpFires, (int)r.hardOcFires,
         r.voltageKp, r.voltageKi, r.voltageKd,
         r.setpointRiseRate, r.setpointFallRate,
@@ -4424,7 +4578,9 @@ void setupServer() {
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
     float cvts = 0.0f;
     if (cvTestActive && cvTuningScore.activeTimeSec > 0.0f) {
-      cvts = 1000.0f * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs)
+      cvts = 1000.0f * (cvTuningScore.totalIntegratedOvershootVs
+                        + cvTuningScore.totalLowIntOvVs
+                        + cvTuningScore.totalLowUndershootVs)
              / cvTuningScore.activeTimeSec;
     }
     pos += snprintf(buf + pos, 16384 - pos,
@@ -5383,7 +5539,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,                                       // prepended count
                                SafeInt(TemperatureLimitF),                             // 0
@@ -5673,7 +5829,8 @@ void SendWifiData() {
                                SafeInt(SlopeBleedThresh, 100),                         // 284
                                (int)SlopeBleedK,                                       // 285
                                SafeInt(DvdtAlpha, 1000),                               // 286 — ×1000, 3 decimals
-                               SafeInt(SlopeBleedProxV, 100)                           // 287 — ×100, 2 decimals
+                               SafeInt(SlopeBleedProxV, 100),                          // 287 — ×100, 2 decimals
+                               SafeInt(StartupRiseRate, 100)                           // 288 — ×100, 2 decimals
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

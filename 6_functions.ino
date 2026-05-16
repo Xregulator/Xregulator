@@ -587,10 +587,12 @@ void commitCVTuningRecord() {
   rec.avgIntegratedOvershootVs   = cvTuningScore.totalIntegratedOvershootVs / n;
   rec.worstOvershootV            = cvTuningScore.worstOvershootV;
   rec.activeTimeSec              = cvTuningScore.activeTimeSec;
-  // ISE/T: (weighted HIGH ISE + one-sided LOW ISE) ÷ total active time, ×1000 for readability.
-  // Mirrors current waveform test formula (errorAccum / activeTimeSec).
+  // ISE/T: (HIGH ISE + LOW re-overshoot ISE + LOW undershoot ISE) ÷ total active time, ×1000.
+  // HIGH overshoot above 25mV dead-band weighted ×4; LOW undershoot weighted ×0.15 with time ramp.
   rec.score = (rec.activeTimeSec > 0.0f)
-              ? (1000.0f * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs)
+              ? (1000.0f * (cvTuningScore.totalIntegratedOvershootVs
+                            + cvTuningScore.totalLowIntOvVs
+                            + cvTuningScore.totalLowUndershootVs)
                  / rec.activeTimeSec)
               : 0.0f;
   rec.fastOvFires                = cvTuningScore.fastOvFires;
@@ -631,9 +633,11 @@ void commitCVTuningRecord() {
     rec.avgLowSettlingTimeSec = 0.0f;
     rec.avgLowIntOvVs         = 0.0f;
   }
-  rec.worstLowOvV = cvTuningScore.worstLowOvV;
+  rec.worstLowOvV         = cvTuningScore.worstLowOvV;
+  rec.worstLowUndershootV = cvTuningScore.worstLowUndershootV;
   rec.lowScore    = (rec.activeTimeSec > 0.0f)
-                    ? (1000.0f * cvTuningScore.totalLowIntOvVs / rec.activeTimeSec)
+                    ? (1000.0f * (cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
+                       / rec.activeTimeSec)
                     : 0.0f;
 
   cvTuningLog[cvTuningLogHead] = rec;
@@ -974,9 +978,8 @@ void AdjustFieldLearnMode() {
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
   // pidLog_tick() runs at the END of the normal control path, after all state is final.
 
-  // thermalLog_tick() is called after tempPID_tick() in the normal-mode path so that
-  // outerAntiWindupFired and outerTermI reflect the current tick's state rather than
-  // the previous tick's.
+  // thermalLog_tick() runs at the end of the tick (after tempPID_tick in AUTO mode),
+  // outside the AUTO-only block, so temperature history accumulates in all modes.
 
   isTempSustainedWarning(tick.nowMs, tick.tempToUseF, tick.tempLimitF,
                          tick.tempWarnExcessF, tick.ignoreTemperature);
@@ -1341,6 +1344,7 @@ void AdjustFieldLearnMode() {
           shutdownPhase2EntryMs = 0;
           settledAtZeroDutyMs = 0;
           warmupCeiling = 0.0f;
+          inStartupRamp = (StartupRiseRate > 0.0f);  // slow-ramp setpoint on field turn-on; cleared once setpointLimited catches command
           queueConsoleMessage("Charging enabled (AUTO)");
           Serial.println("Charging enabled (AUTO)");
         }
@@ -1611,10 +1615,6 @@ void AdjustFieldLearnMode() {
         // Temperature loop PID. Library timer governs Compute() cadence.
         tempPID_tick(currentMillis, actualDtSec);
 
-        // Thermal log runs after tempPID_tick() so outerAntiWindupFired and
-        // outerTermI reflect this tick's state, not the previous tick's.
-        thermalLog_tick(currentMillis);
-
         // --- Command architecture ---
         //
         //   I_cap        RPM-dependent mechanical/electrical ceiling (table lookup).
@@ -1789,6 +1789,8 @@ void AdjustFieldLearnMode() {
           if (ldNow) {
             float ldCap = fmaxf(0.0f, setpointLimited - LoadDumpCurrentDrop);
             fastOvCurrentCap = fminf(fastOvCurrentCap, ldCap);
+            setpointLimited = fminf(setpointLimited, ldCap);  // direct collapse — don't wait for 100ms CV loop
+            fastOvClampActive = true;  // triggers 1e9 fall rate + cv_I bleed, same as fastOV layers
             if (!ldWasActive) g_loadDumpCount++;
           }
           g_loadDumpActive = ldNow;
@@ -1818,8 +1820,8 @@ void AdjustFieldLearnMode() {
           }
         }
 
-        // voltageControlActive: true in absorption, float, and TargetVoltageMode.
-        // False in idle and MaintainMode. PID runs continuously while true.
+        // voltageControlActive: true in bulk, absorption, float, and TargetVoltageMode (= !inIdleStage).
+        // False only in idle (UseFloat=0 post-absorption) and MaintainMode.
         voltageControlActive = !inIdleStage;
         if (TargetVoltageMode == 1) voltageControlActive = true;  // force CV active even from idle
         if (MaintainMode == 1) {
@@ -1925,9 +1927,10 @@ void AdjustFieldLearnMode() {
                 cvTuningScore.loadDumpFires += (uint16_t)(g_loadDumpCount    - cvTuningScore.loadDumpSnap);
                 cvTuningScore.hardOcFires   += (uint16_t)(g_hardOCCount      - cvTuningScore.hardOcSnap);
                 // Start of scored LOW phase (step-down response)
-                cvTuningScore.lowPhaseStartMs = currentMillis;
-                cvTuningScore.lowPhaseSettled = false;
-                cvTuningScore.lowConsecInBand = 0;
+                cvTuningScore.lowPhaseStartMs  = currentMillis;
+                cvTuningScore.lowPhaseSettled  = false;
+                cvTuningScore.lowConsecInBand  = 0;
+                cvTuningScore.lowCrossedBelow  = false;
                 cvTuningScore.lowFastOvSnap   = g_fastOvClampCount;
                 cvTuningScore.lowIExSnap      = g_iExcessCount;
                 cvTuningScore.lowLdSnap       = g_loadDumpCount;
@@ -2143,9 +2146,16 @@ void AdjustFieldLearnMode() {
         if (CVTuningMode && voltageControlActive && cvTuningScore.waveHigh && cvTuningScore.ringInDone) {
           float highTarget = cvBaseTarget + cvWaveAmplitudeV;
           float e_high = IBV - highTarget;  // raw INA228 — no filter lag on tuning score
-          float w_high = (e_high > 0.0f) ? 4.0f : 1.0f;  // overshoot costs 4× more than undershoot
-          cvTuningScore.totalIntegratedOvershootVs += e_high * e_high * w_high * actualDtSec;
-          float peakOv = fmaxf(0.0f, IBV - highTarget);
+          float e_scored, w_high;
+          if (e_high > 0.0f) {
+            e_scored = fmaxf(0.0f, e_high - CV_HIGH_DEADBAND_V);  // dead-band: first 25mV of overshoot is free
+            w_high   = 4.0f;
+          } else {
+            e_scored = e_high;  // approach (undershoot during rise) scored normally, no dead-band
+            w_high   = 1.0f;
+          }
+          cvTuningScore.totalIntegratedOvershootVs += e_scored * e_scored * w_high * actualDtSec;
+          float peakOv = fmaxf(0.0f, e_high);
           if (peakOv > cvTuningScore.worstOvershootV) cvTuningScore.worstOvershootV = peakOv;
 
           if (!cvTuningScore.phaseSettled) {
@@ -2171,9 +2181,24 @@ void AdjustFieldLearnMode() {
         // ===== CV TUNING SCORE ACCUMULATION — LOW phase (return to normal setpoint after step-up) =====
         if (CVTuningMode && voltageControlActive && !cvTuningScore.waveHigh && cvTuningScore.ringInDone) {
           float lowTarget = cvBaseTarget;  // LOW phase is the normal setpoint; track voltage return from high step
-          float e_low = fmaxf(0.0f, IBV - lowTarget);  // raw INA228 — one-sided: only penalise above target
-          cvTuningScore.totalLowIntOvVs += e_low * e_low * actualDtSec;  // squared, normal weight
-          if (e_low > cvTuningScore.worstLowOvV) cvTuningScore.worstLowOvV = e_low;
+          // Zero-crossing: voltage descending from HIGH must cross below lowTarget before re-overshoot counts
+          if (!cvTuningScore.lowCrossedBelow && IBV < lowTarget) cvTuningScore.lowCrossedBelow = true;
+          // Overshoot (above target): only after zero crossing — avoids penalising the natural descent from HIGH
+          if (cvTuningScore.lowCrossedBelow) {
+            float e_low = fmaxf(0.0f, IBV - lowTarget);
+            cvTuningScore.totalLowIntOvVs += e_low * e_low * actualDtSec;
+            if (e_low > cvTuningScore.worstLowOvV) cvTuningScore.worstLowOvV = e_low;
+          }
+          // Undershoot (below target): 1s grace from phase start, then weight ramps 0→1 over 10s, capped at 1
+          float undershootErr = fmaxf(0.0f, lowTarget - IBV);
+          if (undershootErr > cvTuningScore.worstLowUndershootV) cvTuningScore.worstLowUndershootV = undershootErr;
+          if (undershootErr > 0.0f) {
+            float tPhaseSec = (currentMillis - cvTuningScore.lastToggleMs) / 1000.0f;
+            if (tPhaseSec > CV_LOW_GRACE_SEC) {
+              float w_under = fminf(1.0f, (tPhaseSec - CV_LOW_GRACE_SEC) / CV_LOW_RAMP_SEC);
+              cvTuningScore.totalLowUndershootVs += w_under * undershootErr * undershootErr * CV_UNDERSHOOT_SCALE * actualDtSec;
+            }
+          }
           cvTuningScore.activeTimeSec += actualDtSec;  // LOW time counts toward the shared denominator
 
           if (!cvTuningScore.lowPhaseSettled) {
@@ -2194,8 +2219,13 @@ void AdjustFieldLearnMode() {
         liveScore_thisCmd = setpointCommand;
 
         float effectiveFallRate = fastOvClampActive ? 1.0e9f : SetpointFallRate;
+        float effectiveRiseRate = inStartupRamp ? StartupRiseRate : SetpointRiseRate;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       SetpointRiseRate, effectiveFallRate, actualDtSec);
+                                       effectiveRiseRate, effectiveFallRate, actualDtSec);
+        // Clear startup ramp once setpointLimited has caught up to command
+        if (inStartupRamp && setpointLimited >= setpointCommand - 0.5f) {
+          inStartupRamp = false;
+        }
 
         // Output current PID compute.
         // MaintainMode uses getBatteryCurrent() (net battery amps — no filtered
@@ -2217,6 +2247,11 @@ void AdjustFieldLearnMode() {
       setpointLimited = 0.0f;
       pidInput = (double)((OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N : g_pidI_filtered);
     }  // end of MANUAL mode else
+
+    // Thermal log runs at the end of the control tick so tempPID_tick() has
+    // already run (when in AUTO). Called here — outside the AUTO-only block —
+    // so temperature history accumulates in every mode, not just NORMAL AUTO.
+    thermalLog_tick(currentMillis);
   }    // end if (!sysIDRunning)
 
 
@@ -2343,7 +2378,7 @@ void setDutyPercent(float percent) {
 
 void updateChargingStage() {
   const uint32_t now = millis();
-  const float v = getBatteryVoltage();
+  const float v = getFiltV();
   const int soc = SOC_percent;
 
   const float BULK_V_BAND = 0.05f;
@@ -2353,20 +2388,8 @@ void updateChargingStage() {
     ChargingVoltageTarget = BulkVoltage;
 
     const bool v_at_bulk = (v >= (BulkVoltage - BULK_V_BAND));
-    const bool v_overshot = (v >= (BulkVoltage + 0.1f));
 
-    if (v_overshot) {
-      inAbsorptionStage = true;
-      ChargingVoltageTarget = AbsorptionVoltage;
-      absorptionStartTime = now;
-      absorptionTailTimer = 0;
-      bulkVoltageHoldTimer = 0;
-      queueConsoleMessageF(
-        "Stage: BULK→ABSORPTION (overshoot) | battV=%.2fV bulkTarget=%.2fV absTarget=%.2fV tailCurrent=%.1fA timeout=%.0fmin",
-        v, BulkVoltage, AbsorptionVoltage, TailCurrent_A,
-        (float)AbsorptionTimeoutMs / 60000.0f);
-
-    } else if (v_at_bulk) {
+    if (v_at_bulk) {
       if (bulkVoltageHoldTimer == 0) {
         bulkVoltageHoldTimer = now;
       } else if ((uint32_t)(now - bulkVoltageHoldTimer) >= bulkVoltageHoldMs) {
@@ -2393,15 +2416,20 @@ void updateChargingStage() {
     const bool timedOut = ((uint32_t)(now - absorptionStartTime) >= AbsorptionTimeoutMs);
 
     static bool lastThermallyConstrained = false;
-    if (thermallyConstrained && !lastThermallyConstrained) {
-      queueConsoleMessageF(
-        "Absorption: tail detection suppressed (thermal) | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
-        thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
-    }
-    if (!thermallyConstrained && lastThermallyConstrained) {
-      queueConsoleMessageF(
-        "Absorption: tail detection resumed | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
-        thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
+    static uint32_t lastTailConstraintLogMs = 0;
+    // Throttle to once per 10s — thermal constraint can flap rapidly under oscillating penalty
+    if (thermallyConstrained != lastThermallyConstrained &&
+        (uint32_t)(now - lastTailConstraintLogMs) >= 10000) {
+      if (thermallyConstrained) {
+        queueConsoleMessageF(
+          "Absorption: tail detection suppressed (thermal) | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
+          thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
+      } else {
+        queueConsoleMessageF(
+          "Absorption: tail detection resumed | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
+          thermalPenaltyAmps, uTargetAmps, TailCurrent_A);
+      }
+      lastTailConstraintLogMs = now;
     }
     lastThermallyConstrained = thermallyConstrained;
 

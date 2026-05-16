@@ -1570,6 +1570,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     SetpointFallRate = readFile(LittleFS, "/SetpointFallRate.txt").toFloat();
   }
+  if (!fsExists("/StartupRiseRate.txt")) {
+    writeFile(LittleFS, "/StartupRiseRate.txt", String(StartupRiseRate, 2).c_str());
+  } else {
+    StartupRiseRate = readFile(LittleFS, "/StartupRiseRate.txt").toFloat();
+  }
   if (!fsExists("/PIDTrackingGain.txt")) {
     writeFile(LittleFS, "/PIDTrackingGain.txt", String(PIDTrackingGain, 2).c_str());
   } else {

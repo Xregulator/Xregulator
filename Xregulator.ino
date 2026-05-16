@@ -864,7 +864,9 @@ float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 // Step test: baseline → 3× (duty up / duty down) → post-process.
 // Samples stored in PSRAM. Buffer allocated on first test run, never freed.
 // Results populate the JS popup and optionally update InputFilterTC in flash.
-// Only legal in bulk (SYS_MODE_AUTO + !voltageControlActive) or SYS_MODE_MANUAL.
+// Legal in any SYS_MODE_AUTO state (bulk, absorption, float, target voltage).
+// Manual mode is banned: duty is locked to ManualDutyTarget so the test's duty commands are silently ignored.
+// Note: voltageControlActive = !inIdleStage, so it is true even in bulk — do NOT gate on !voltageControlActive.
 // Enforced in the /get startSystemID handler and in the JS preflight check.
 float SystemIDStepAmplitude = 15.0f;  // % duty step — web-configurable; 15% is a good default
 
@@ -1993,7 +1995,11 @@ uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to
 int CVTuningMode = 0;             // 0=off, 1=on
 float cvBaseTarget = 0.0f;        // real ChargingVoltageTarget captured at test start; global so wave gen + scorer share it
 
-const float CV_SETTLE_V_THRESH = 0.10f;  // V — settling threshold
+const float CV_SETTLE_V_THRESH    = 0.10f;   // V — settling threshold
+const float CV_HIGH_DEADBAND_V   = 0.025f;  // V — HIGH phase overshoot dead-band; below this is free
+const float CV_LOW_GRACE_SEC     = 1.0f;    // s — grace period from LOW phase start before undershoot scoring begins
+const float CV_LOW_RAMP_SEC      = 10.0f;   // s — undershoot weight ramps 0→1 over this window after grace
+const float CV_UNDERSHOOT_SCALE  = 0.15f;   // undershoot ISE weight relative to overshoot ISE
 
 struct CVTuningRecord {
   uint16_t runNumber;
@@ -2035,7 +2041,8 @@ struct CVTuningRecord {
   float lowScore;
   float avgLowSettlingTimeSec;
   float avgLowIntOvVs;  // avg integrated overvoltage above lowTarget (V·s)
-  float worstLowOvV;    // peak above lowTarget during any scored LOW phase
+  float worstLowOvV;          // peak above lowTarget during any scored LOW phase (after zero crossing)
+  float worstLowUndershootV;  // peak below lowTarget during any scored LOW phase
 };
 
 struct CVTuningScoreState {
@@ -2063,8 +2070,11 @@ struct CVTuningScoreState {
   // Accumulators across scored LOW phases
   uint8_t scoredLowCount;
   float totalLowSettlingTimeSec;
-  float totalLowIntOvVs;  // integral of max(0, filtV - lowTarget) × dt
-  float worstLowOvV;      // peak above lowTarget during any scored LOW phase
+  float totalLowIntOvVs;       // ISE of re-overshoot above lowTarget (only after zero crossing) × dt
+  float worstLowOvV;           // peak above lowTarget during any scored LOW phase (after zero crossing)
+  float totalLowUndershootVs;  // weighted ISE of voltage below lowTarget (time-ramped, ×CV_UNDERSHOOT_SCALE)
+  float worstLowUndershootV;   // peak below lowTarget (V, absolute) during any scored LOW phase
+  bool lowCrossedBelow;        // true once IBV has crossed below lowTarget in current LOW phase
   // Protection snaps for LOW phases
   uint32_t lowFastOvSnap, lowIExSnap, lowLdSnap, lowHocSnap;
   // Operating conditions
@@ -2345,6 +2355,8 @@ float DutyRampRate = 50.0f;  // %/sec - max rate of duty cycle change (protects 
 // Asymmetric setpoint slew
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
+float StartupRiseRate  = 3.0f;   // A/sec — setpoint slew rate applied only on field turn-on (OFF/FAULT→AUTO); user-adjustable
+bool  inStartupRamp    = false;  // true from field turn-on until setpointLimited catches up to command
 float SetpointRampRate = 0.0f;   // THIS IS OBSOLETE AND NEEDS DELETING SOMEDAY LATER
 
 // --- Settle Time Before GPIO4 Cut ---
