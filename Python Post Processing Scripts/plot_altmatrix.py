@@ -66,10 +66,12 @@ def pick_file():
     pattern = os.path.join(DOWNLOADS, f"{FILE_KEYWORD}_*.csv")
     files   = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     if not files:
+        _r = tk.Tk(); _r.withdraw()
         messagebox.showerror(
             "No files",
             f"No {FILE_KEYWORD}_*.csv found in {DOWNLOADS}\n\n"
             "Export one from the Live Data tab on the regulator UI.")
+        _r.destroy()
         return None
 
     selected = []
@@ -483,9 +485,7 @@ class MatrixViewer:
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    root = tk.Tk();  root.withdraw()
     path = pick_file()
-    root.destroy()
     if not path:
         raise SystemExit
 

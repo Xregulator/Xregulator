@@ -425,6 +425,7 @@ constexpr uint16_t ACCEL_RING_SIZE = (sizeof(IMUSample) == 10) ? 2000 : 1666;  /
 constexpr uint16_t GYRO_RING_SIZE = (sizeof(IMUSample) == 10) ? 666 : 555;     // ~8 KB
 
 volatile bool otaInProgress = false;
+volatile bool settingsDirty = false;  // set by /get handler; triggers immediate CSV3 send
 unsigned long lastEventSourceSend = 0;
 
 
@@ -886,6 +887,8 @@ float systemIDRiseDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // rising-step delays, ms
 float systemIDFallDelay_ms[3] = { 0.0f, 0.0f, 0.0f };  // falling-step delays, ms
 float systemIDRiseAvg_ms = 0.0f;
 float systemIDFallAvg_ms = 0.0f;
+float systemIDStepAmp_A[3] = { 0.0f, 0.0f, 0.0f };    // rise step amplitude per trial (upMean - quietMean), A
+float systemIDQuietPP_A[3] = { 0.0f, 0.0f, 0.0f };    // quiet-phase peak-to-peak noise per trial (quietMax - quietMin), A
 
 struct SystemIDSample {
   uint32_t ts;     // millis() at sample time
@@ -2894,8 +2897,9 @@ bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
 
 // Load dump detection via dBcur/dt
-float LoadDumpDtThresh = 500.0f;    // A/s — threshold to declare a load dump event
+float LoadDumpDtThresh = 1500.0f;   // A/s — per-sample threshold; 1500 = 7.5A change per 5ms INA window; noise ceiling ~354 A/s consecutive
 float LoadDumpCurrentDrop = 30.0f;  // A   — how much to reduce fastOvCurrentCap on event
+int   LoadDumpN = 2;                // consecutive samples above threshold required; INA228 noise is alternating-sign so two consecutive highs cannot be noise
 bool g_loadDumpActive = false;
 uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
 uint32_t g_loadDumpCount = 0;
@@ -3084,7 +3088,7 @@ unsigned long wifiWakeStart = 0;                  // millis() when wake was trig
 
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
 AsyncEventSource events("/events");         // Create an Event Source on /events
-unsigned long webgaugesinterval = 200;      // delay in ms between sensor updates on webpage
+unsigned long webgaugesinterval = 100;      // delay in ms between sensor updates on webpage
 int plotTimeWindow = 60;                    // Plot time window in seconds
 unsigned long healthystuffinterval = 5000;  // check hardware health parameters only every 5 seconds, not that they consume much   THIS IS DEAD CODE, REMOVE LATER
 

@@ -1211,11 +1211,15 @@ void AdjustFieldLearnMode() {
   lastTargetVoltageMode = (TargetVoltageMode == 1);
 
   // ========== CHARGING STAGE (bulk/absorption/float) ==========
-  // Suppressed while either override is active — letting it run would fire
+  // Suppressed while any override is active — letting it run would fire
   // spurious re-bulk transitions and absorption timeouts.
   // Stage tracking only meaningful in AUTO. In MANUAL, voltageControlActive=false
   // and no CV loop runs, so stage state is meaningless.
-  if (MaintainMode != 1 && TargetVoltageMode != 1 && !tick.manualMode) {
+  // CVTuningMode suppressed for same reason as TargetVoltageMode: the step test
+  // temporarily raises ChargingVoltageTarget above the real stage target, which
+  // can trigger bulk→absorption transitions and cause the absorption tail timer
+  // to expire mid-test, killing voltageControlActive.
+  if (MaintainMode != 1 && TargetVoltageMode != 1 && !CVTuningMode && !tick.manualMode) {
     updateChargingStage();
   }
 
@@ -1780,12 +1784,20 @@ void AdjustFieldLearnMode() {
 
         // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
         // Positive g_dBcur_dt means battery is suddenly absorbing more current (loads dropped).
-        // Voltage will rise; act before it crosses the fastOV threshold.
+        // Current-based; does not rely on voltage rise — works on stiff lithium banks where
+        // voltage may not respond meaningfully to a load dump.
         // Gate: CV mode only, fast INA228 reads active (5ms cadence).
-        // No risk of false trigger on commanded reductions — those cause dBcur_dt ≤ 0.
+        // LoadDumpN consecutive samples above threshold required — INA228 noise is alternating-sign
+        // (high/low/high/low), so two consecutive positive spikes cannot be measurement noise.
         if (voltageControlActive && nearBulk && inaFastModeActive) {
           static bool ldWasActive = false;
-          bool ldNow = (g_dBcur_dt > LoadDumpDtThresh);
+          static int ldConsecutive = 0;
+          if (g_dBcur_dt > LoadDumpDtThresh) {
+            ldConsecutive++;
+          } else {
+            ldConsecutive = 0;
+          }
+          bool ldNow = (ldConsecutive >= LoadDumpN);
           if (ldNow) {
             float ldCap = fmaxf(0.0f, setpointLimited - LoadDumpCurrentDrop);
             fastOvCurrentCap = fminf(fastOvCurrentCap, ldCap);

@@ -7206,6 +7206,22 @@
                 </div>
               </div>
 
+              <!-- ↳ NVS Cycle Duration -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ Last Full NVS Cycle
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Total elapsed time for one complete NVS drain cycle — all phases through final commit and close. Updated once per cycle. Commit phase alone can take 50–150 ms; values above ~200 ms indicate flash pressure.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
+                    id="nvsCycleMs_ID">0</span> ms</div>
+                <div
+                  style="padding: 6px 8px; font-size: 13px; text-align: right; border-left: 1px solid var(--border); color: #888;">
+                  —
+                </div>
+              </div>
+
               <!-- Flush File Write Queue -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Flush File Write Queue
@@ -9235,6 +9251,12 @@
     <input id="BatteryCurrentSource" style="display:none;" value="0" />
     <span id="systemIDActive_ID" style="display:none;">0</span>
     <span id="systemIDResultsReady_ID" style="display:none;">0</span>
+    <span id="systemIDStepAmp_0_ID" style="display:none;">0</span>
+    <span id="systemIDStepAmp_1_ID" style="display:none;">0</span>
+    <span id="systemIDStepAmp_2_ID" style="display:none;">0</span>
+    <span id="systemIDQuietPP_0_ID" style="display:none;">0</span>
+    <span id="systemIDQuietPP_1_ID" style="display:none;">0</span>
+    <span id="systemIDQuietPP_2_ID" style="display:none;">0</span>
     <input id="timeAxisModeChanging" name="timeAxisModeChanging" type="number" value style="display:none;" />
     <input id="webgaugesinterval" style="display:none;" value="0" />
     <input id="plotTimeWindow" style="display:none;" value="0" />
@@ -9408,10 +9430,56 @@
       <!-- SCREEN 3: Results -->
       <div id="sysid-screen-results" style="display:none;">
         <h3 style="margin-top:0; color:#fff;">Results</h3>
+
+        <!-- Signal quality hint -->
+        <p style="font-size:0.82em; color:#999; margin:0 0 12px; line-height:1.45;">
+          Check the output current plot (behind this panel) for a clean square-wave shape.
+          Ideal signals have sharp step edges with no more than ±1–2 A of ripple.
+          Engines can resonate at certain RPMs — if noise is high, re-run at a slightly different speed.
+        </p>
+
+        <!-- Signal quality table -->
+        <div id="sysid-quality-section" style="margin-bottom:14px;">
+          <div style="font-size:0.82em; color:#aaa; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+            Signal Quality
+            <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer;">ℹ️
+              <span class="tooltip-box">These metrics are measured from the quiet phase immediately before each step-up. Green = good, yellow = marginal, red = poor. High noise inflates the measured time constant and makes results unreliable.</span>
+            </span>
+          </div>
+          <table style="width:100%; border-collapse:collapse; font-size:0.88em;">
+            <thead>
+              <tr style="color:#666; text-align:left; border-bottom:1px solid #333;">
+                <th style="padding:4px 4px; font-weight:normal;"></th>
+                <th style="padding:4px 4px; font-weight:normal;">
+                  Step size
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer; font-size:0.85em;">ℹ️
+                    <span class="tooltip-box">How many amps the step command added. Larger steps produce a cleaner signal. Should be &gt;10 A for reliable results.</span>
+                  </span>
+                </th>
+                <th style="padding:4px 4px; font-weight:normal;">
+                  Noise (p-p)
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer; font-size:0.85em;">ℹ️
+                    <span class="tooltip-box">Peak-to-peak current swing in the quiet phase before the step. Caused by belt or alternator resonance. &lt;1 A is ideal, &lt;2 A is acceptable. High noise pushes the detection threshold up and inflates the measured time constant.</span>
+                  </span>
+                </th>
+              </tr>
+            </thead>
+            <tbody id="sysid-quality-body"></tbody>
+          </table>
+          <div id="sysid-quality-note" style="font-size:0.82em; color:#f0a500; margin-top:8px; line-height:1.45; display:none;"></div>
+        </div>
+
+        <!-- Timing results table -->
+        <div style="font-size:0.82em; color:#aaa; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+          Timing Results
+          <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer;">ℹ️
+            <span class="tooltip-box">Time from the duty step command until output current crossed the detection threshold. Rise = step-up response, Fall = step-down response. The recommended filter time constant (TC) is the worst single trial.</span>
+          </span>
+        </div>
         <table id="sysid-results-table" style="width:100%; border-collapse:collapse; font-size:0.9em; margin-bottom:12px;">
           <thead>
             <tr style="color:#aaa; text-align:left; border-bottom:1px solid #444;">
-              <th style="padding:6px 4px;">Trial</th>
+              <th style="padding:6px 4px;"></th>
               <th style="padding:6px 4px;">Rise (ms)</th>
               <th style="padding:6px 4px;">Fall (ms)</th>
             </tr>

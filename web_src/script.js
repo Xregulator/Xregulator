@@ -158,425 +158,441 @@ const CSV1_FIELDS = [
     "Bcur",                       // 7
     "VictronVoltage",             // 8
     "LoopTime",                   // 9
-    "WifiStrength",               // 10
-    "WifiHeartBeat",              // 11
-    "SendWifiTime",               // 12
-    "AnalogReadTime",             // 13
-    "VeTime",                     // 14
-    "MaximumLoopTime",            // 15
-    "HeadingNMEA",                // 16
-    "vvout",                      // 17
-    "iiout",                      // 18
-    "FreeHeap",                   // 19
-    "EngineCycles",               // 20
-    "Alarm_Status",               // 21
-    "fieldActiveStatus",          // 22
-    "CurrentSessionDuration",     // 23
-    "timeAxisModeChanging",       // 24
-    "webgaugesinterval",          // 25
-    "plotTimeWindow",             // 26
-    "Ymin1",                      // 27
-    "Ymax1",                      // 28
-    "Ymin2",                      // 29
-    "Ymax2",                      // 30
-    "Ymin3",                      // 31
-    "Ymax3",                      // 32
-    "Ymin4",                      // 33
-    "Ymax4",                      // 34
-    "currentMode",                // 35
-    "currentPartitionType",       // 36
-    "stateRevision",              // 37
-    "setpointLimited",            // 38
-    "uTargetAmps",                // 39
-    "pidInput",                   // 40
-    "pidOutput",                  // 41
-    "pidError",                   // 42
-    "imu_heel_deg",               // 43
-    "imu_pitch_deg",              // 44
-    "imu_vertical_accel_g",       // 45
-    "imu_yaw_rate_dps",           // 46
-    "imu_total_accel_g",          // 47
-    "imu_hf_vibration_energy",    // 48
-    "shutdownPhase",              // 49
-    "fastOvCurrentCap",           // 50  ← no g_ prefix, matches downstream usage
-    "fastOvClampCount",           // 51
-    "fastOvSoftCount",            // 52
-    "fastOvHardCount",            // 53
-    "ch1_last_ms",                // 54
-    "ch1_avg_10s",                // 55
-    "ch1_worst_10s",              // 56
-    "ch1_over2x_10s",             // 57
-    "ch1_n_10s",                  // 58
-    "ch1_avg_2m",                 // 59
-    "ch1_worst_2m",               // 60
-    "ch1_over2x_2m",              // 61
-    "ch1_n_2m",                   // 62
-    "ch1_avg_at",                 // 63
-    "ch1_worst_at",               // 64
-    "ch1_over2x_at",              // 65
-    "ch1_n_at",                   // 66
-    "BatteryV_raw",               // 67
-    "MeasuredAmps_filtered",      // 68
-    "iExcessCount",               // 69
-    "inaOVCount",                 // 70
-    "hardOCCount",                // 71
-    "voltSpikeCount",             // 72
-    "voltDisagreeCritCount",      // 73
-    "voltDisagreeWarnCount",      // 74
-    "voltImplausibleCount",       // 75
-    "tempCritCount",              // 76
-    "tempSustainedCount",         // 77
-    "tempStaleCount",             // 78
-    "currentStaleCount",          // 79
-    "imu_msi_score",              // 80
-    "imu_vomit_pct",              // 81
-    "imu_anchorage_comfort",      // 82
-    "ina_last_ms",                // 83
-    "ina_avg_10s",                // 84
-    "ina_worst_10s",              // 85
-    "ina_over2x_10s",             // 86
-    "ina_avg_2m",                 // 87
-    "ina_worst_2m",               // 88
-    "ina_over2x_2m",              // 89
-    "ina_avg_at",                 // 90
-    "ina_worst_at",               // 91
-    "ina_over2x_at",              // 92
-    "loopTime5sWindow_ms",        // 93
-    "MaximumLoopTime_ms",         // 94
-    "ft_SendWifiData_win",        // 95
-    "ft_SendWifiData_ses",        // 96
-    "ft_CheckAlarms_win",                      // 97
-    "ft_CheckAlarms_ses",                      // 98
-    "ft_calculateDerivedMetrics_win",          // 99
-    "ft_calculateDerivedMetrics_ses",          // 100
-    "ft_logDashboardValues_win",               // 101
-    "ft_logDashboardValues_ses",               // 102
-    "ft_updateSystemHealthStats_win",          // 103
-    "ft_updateSystemHealthStats_ses",          // 104
-    "ft_checkWiFiConnection_win",              // 105
-    "ft_checkWiFiConnection_ses",              // 106
-    "ft_ch1_compute_stats_win",               // 107
-    "ft_ch1_compute_stats_ses",               // 108
-    "ft_UpdateEngineRuntime_win",              // 109
-    "ft_UpdateEngineRuntime_ses",              // 110
-    "ft_UpdateEngineFuel_win",                 // 111
-    "ft_UpdateEngineFuel_ses",                 // 112
-    "ft_UpdateBatterySOC_win",                 // 113
-    "ft_UpdateBatterySOC_ses",                 // 114
-    "ft_UpdateTravelStatistics_win",           // 115
-    "ft_UpdateTravelStatistics_ses",           // 116
-    "ft_UpdateDistanceThisInterval_win",       // 117
-    "ft_UpdateDistanceThisInterval_ses",       // 118
-    "ft_UpdateBoardTempPressureMaximums_win",  // 119
-    "ft_UpdateBoardTempPressureMaximums_ses",  // 120
-    "ft_handleSocGainReset_win",               // 121
-    "ft_handleSocGainReset_ses",               // 122
-    "ft_handleAltZeroReset_win",               // 123
-    "ft_handleAltZeroReset_ses",               // 124
-    "ft_calculateChargeTimes_win",             // 125
-    "ft_calculateChargeTimes_ses",             // 126
-    "ft_UpdateSailingMetrics_win",             // 127
-    "ft_UpdateSailingMetrics_ses",             // 128
-    "ft_updateWeatherMode_win",                // 129
-    "ft_updateWeatherMode_ses",                // 130
-    "ft_updateSensorWindow_win",               // 131
-    "ft_updateSensorWindow_ses",               // 132
-    "ft_checkTimeSync_win",                    // 133
-    "ft_checkTimeSync_ses",                    // 134
-    "voltageTarget",                           // 135
-    "Icv",                                     // 136
+    "WifiHeartBeat",              // 10
+    "vvout",                      // 11
+    "iiout",                      // 12
+    "FreeHeap",                   // 13
+    "Alarm_Status",               // 14
+    "fieldActiveStatus",          // 15
+    "currentMode",                // 16
+    "stateRevision",              // 17
+    "setpointLimited",            // 18
+    "uTargetAmps",                // 19
+    "pidInput",                   // 20
+    "pidOutput",                  // 21
+    "pidError",                   // 22
+    "imu_heel_deg",               // 23
+    "imu_pitch_deg",              // 24
+    "imu_vertical_accel_g",       // 25
+    "imu_yaw_rate_dps",           // 26
+    "imu_total_accel_g",          // 27
+    "imu_hf_vibration_energy",    // 28
+    "shutdownPhase",              // 29
+    "BatteryV_raw",               // 30
+    "MeasuredAmps_filtered",      // 31
+    "voltageTarget",              // 32
+    "Icv",                        // 33
 ];
 const CSV2_FIELDS = [
-    "IBVMax",                           // 0
-    "MeasuredAmpsMax",                  // 1
-    "RPMMax",                           // 2
-    "SOC_percent",                      // 3
-    "EngineRunTime",                    // 4
-    "AlternatorOnTime",                 // 5
-    "AlternatorFuelUsed",               // 6
-    "ChargedEnergy",                    // 7
-    "DischargedEnergy",                 // 8
-    "AlternatorChargedEnergy",          // 9
-    "MaxAlternatorTemperatureF",        // 10
-    "temperatureThermistor",            // 11
-    "MaxTemperatureThermistor",         // 12
-    "VictronCurrent",                   // 13
-    "timeToFullChargeMin",              // 14
-    "timeToFullDischargeMin",           // 15
-    "LatitudeNMEA",                     // 16
-    "LongitudeNMEA",                    // 17
-    "SatelliteCountNMEA",               // 18
-    "absorptionCompleteTime",           // 19
-    "LastSessionDuration",              // 20
-    "LastSessionMaxLoopTime",           // 21
-    "lastSessionMinHeap",               // 22
-    "wifiReconnectsTotal",              // 23
-    "LastResetReason",                  // 24
-    "ancientResetReason",               // 25
-    "totalPowerCycles",                 // 26
-    "MinFreeHeap",                      // 27
-    "currentWeatherMode",               // 28
-    "UVToday",                          // 29
-    "UVTomorrow",                       // 30
-    "UVDay2",                           // 31
-    "weatherDataValid",                 // 32
-    "SolarWatts",                       // 33
-    "performanceRatio",                 // 34
-    "OnOff",                            // 35
-    "ManualFieldToggle",                // 36
-    "HiLow",                            // 37
-    "LimpHome",                         // 38
-    "VeData",                           // 39
-    "NMEA0183Data",                     // 40
-    "NMEA2KData",                       // 41
-    "AlarmActivate",                    // 42
-    "TempAlarm",                        // 43
-    "VoltageAlarmHigh",                 // 44
-    "VoltageAlarmLow",                  // 45
-    "CurrentAlarmHigh",                 // 46
-    "AlarmTest",                        // 47
-    "AlarmLatchEnabled",                // 48
-    "AlarmLatchState",                  // 49
-    "ResetAlarmLatch",                  // 50
-    "MaintainMode",                     // 51
-    "ManualSOCPoint",                   // 52
-    "LearningMode",                     // 53
-    "LearningPaused",                   // 54
-    "IgnoreLearningDuringPenalty",      // 55
-    "ShowLearningDebugMessages",        // 56
-    "LogAllLearningEvents",             // 57
-    "CloudFeatures",                    // 58
-    "LearningDryRunMode",               // 59
-    "ResetLearningTable",               // 60
-    "ClearOverheatHistory",             // 61
-    "AutoShuntGainCorrection",          // 62
-    "DynamicShuntGainFactor",           // 63
-    "AutoAltCurrentZero",               // 64
-    "DynamicAltCurrentZero",            // 65
-    "InsulationLifePercent",            // 66
-    "GreaseLifePercent",                // 67
-    "BrushLifePercent",                 // 68
-    "PredictedLifeHours",               // 69
-    "LifeIndicatorColor",               // 70
-    "WindingTempOffset",                // 71
-    "ManualLifePercentage",             // 72
-    "UVThresholdHigh",                  // 73
-    "weatherModeEnabled",               // 74
-    "pKwHrToday",                       // 75
-    "pKwHrTomorrow",                    // 76
-    "pKwHr2days",                       // 77
-    "ambientTemp",                      // 78
-    "baroPressure",                     // 79
-    "firmwareVersionInt",               // 80
-    "deviceIdUpper",                    // 81
-    "deviceIdLower",                    // 82
-    "ChargedEnergy_AllTime",            // 83
-    "AlternatorFuelUsed_AllTime",       // 84
-    "PeakVoltage_AllTime",              // 85
-    "EngineRunTime_AllTime",            // 86
-    "MinVoltage",                       // 87
-    "MinVoltage_AllTime",               // 88
-    "ChargeCycles",                     // 89
-    "ChargeCycles_AllTime",             // 90
-    "EngineFuelUsed",                   // 91
-    "EngineFuelUsed_AllTime",           // 92
-    "TotalDistance",                    // 93
-    "TotalDistance_AllTime",            // 94
-    "MaxSpeed",                         // 95
-    "MaxSpeed_AllTime",                 // 96
-    "SolarChargedEnergy",               // 97
-    "SolarChargedEnergy_AllTime",       // 98
-    "AlternatorChargedEnergy_AllTime",  // 99
-    "DischargedEnergy_AllTime",         // 100
-    "AvgSOC_AllTime",                   // 101
-    "AvgSpeed_AllTime",                 // 102
-    "AvgSpeed",                         // 103
-    "AlternatorOnTime_AllTime",         // 104
-    "EngineCycles_AllTime",             // 105
-    "MaxAlternatorTemperatureF_AllTime",// 106
-    "MaxTemperatureThermistor_AllTime", // 107
-    "MeasuredAmpsMax_AllTime",          // 108
-    "RPMMax_AllTime",                   // 109
-    "Ignition",                         // 110
-    "BulkStage",                        // 111
-    "WifiWakeSecondsRemaining",         // 112
-    "BufferedRecordCount",              // 113
-    "BufferedRecordPercent",            // 114
-    "MAX_BUFFERED_RECORDS",             // 115
-    "COGNMEA",                          // 116
-    "SOGNMEA",                          // 117
-    "ApparentWindSpeedNMEA",            // 118
-    "ApparentWindAngleNMEA",            // 119
-    "TrueWindSpeedNMEA",                // 120
-    "TrueWindAngleNMEA",                // 121
-    "LeewayNMEA",                       // 122
-    "VMGNMEA",                          // 123
-    "VMGTargetBearing",                 // 124
-    "VMGUseTrueWind",                   // 125
-    "SENSOR_UPLOAD_INTERVAL",           // 126
-    "cpuLoadCore0",                     // 127
-    "cpuLoadCore0Max",                  // 128
-    "cpuLoadCore1",                     // 129
-    "cpuLoadCore1Max",                  // 130
-    "hasForcedUpdate",                  // 131
-    "forcedFwVersionInt",               // 132
-    "forcedUpdateDeadline",             // 133
-    "stateRevision",                    // 134
-    "hardwarePresent",                  // 135
-    "imu_accel_x_raw",                  // 136
-    "imu_accel_y_raw",                  // 137
-    "imu_accel_z_raw",                  // 138
-    "imu_gyro_x_raw",                   // 139
-    "imu_gyro_y_raw",                   // 140
-    "imu_gyro_z_raw",                   // 141
-    "accel_x_min",                      // 142
-    "accel_x_max",                      // 143
-    "accel_x_avg",                      // 144
-    "accel_y_min",                      // 145
-    "accel_y_max",                      // 146
-    "accel_y_avg",                      // 147
-    "accel_z_min",                      // 148
-    "accel_z_max",                      // 149
-    "accel_z_avg",                      // 150
-    "gyro_x_min",                       // 151
-    "gyro_x_max",                       // 152
-    "gyro_x_avg",                       // 153
-    "gyro_y_min",                       // 154
-    "gyro_y_max",                       // 155
-    "gyro_y_avg",                       // 156
-    "gyro_z_min",                       // 157
-    "gyro_z_max",                       // 158
-    "gyro_z_avg",                       // 159
-    "heel_min",                         // 160
-    "heel_max",                         // 161
-    "heel_avg",                         // 162
-    "pitch_min",                        // 163
-    "pitch_max",                        // 164
-    "pitch_avg",                        // 165
-    "vertical_accel_min",               // 166
-    "vertical_accel_max",               // 167
-    "vertical_accel_avg",               // 168
-    "total_accel_min",                  // 169
-    "total_accel_max",                  // 170
-    "total_accel_avg",                  // 171
-    "imu_slam_count",                   // 172
-    "imu_slam_peak_max",                // 173
-    "imu_slam_count_lifetime",          // 174
-    "imu_capsize_count",                // 175
-    "imu_pitchpole_count",              // 176
-    "imu_heel_change_60s",              // 177
-    "imu_heel_deviation_60s",           // 178
-    "imu_pitch_change_60s",             // 179
-    "imu_pitch_deviation_60s",          // 180
-    "imu_wave_period_sec",              // 181
-    "imu_heel_max_lifetime",            // 182
-    "imu_pitch_max_lifetime",           // 183
-    "imu_slam_peak_lifetime",           // 184
-    "imuEnabled",                       // 185
-    "imuMountOrientation",              // 186
-    "imu_fifo_overrun_count",           // 187
-    "imu_i2c_error_count",              // 188
-    "imu_unknown_tag_count",            // 189
-    "imu_accel_dropped",                // 190
-    "imu_gyro_dropped",                 // 191
-    "imu_total_samples_accel",          // 192
-    "imu_total_samples_gyro",           // 193
-    "IMUReadTime2",                     // 194
-    "IMUReadTime",                      // 195
-    "adsI2CErrorCount",                 // 196
-    "tempPIDActive",                    // 197
-    "tempPIDInput_d",                   // 198
-    "tempPIDSetpoint_d",                // 199
-    "thermalPenaltyAmps",               // 200
-    "innerTermP",                       // 201
-    "innerTermI",                       // 202
-    "innerTermD",                       // 203
-    "outerTermP",                       // 204
-    "outerTermI",                       // 205
-    "outerTermD",                       // 206
-    "thermalSlopeFPerSec",              // 207
-    "AbsorptionVoltage",                // 208
-    "AbsorptionTimeoutMs",              // 209
-    "bulkVoltageHoldMs",                // 210
-    "chargeStageDisplay",               // 211
-    "voltageControlActive",             // 212
-    "voltageTarget",                    // 213
-    "voltageError",                     // 214
-    "Icv",                              // 215
-    "cv_I",                             // 216
-    "capLimitMode",                     // 217
-    "TargetVoltageMode",                // 218
-    "TargetVoltageSetpoint",            // 219
-    "RebulkCurrent_A",                  // 220
-    "UseFloat",                         // 221
-    "inIdleStage",                      // 222
-    "referenceFinalized",               // 223
-    "sessionErrorCount",                // 224
-    "anomalyMarginAmps",                // 225
-    "anomalyAlarmThreshold",            // 226
-    "anomalyAlarmEnable",               // 227
-    "degradationThreshold",             // 228
-    "ft_rai_total_win",                 // 229
-    "ft_rai_total_ses",                 // 230
-    "ft_rai_ina228_win",                // 231
-    "ft_rai_ina228_ses",                // 232
-    "ft_rai_ads_state_win",             // 233
-    "ft_rai_ads_state_ses",             // 234
-    "ft_rai_bmp_state_win",             // 235
-    "ft_rai_bmp_state_ses",             // 236
-    "ft_rai_imu_win",                   // 237
-    "ft_rai_imu_ses",                   // 238
-    "fsWriteQueueDrops",                // 239
-    "TempAlarmLow",                     // 240
-    "cv_D",                             // 241
-    "tempReadFailCount",                // 242
-    "tempCrcFailCount",                 // 243
-    "tempCrcRecoveredCount",            // 244
-    "tempAllFFCount",                   // 245
-    "tempPowerOn85Count",               // 246
-    "tempOutOfRangeCount",              // 247
-    "tempRequestFailCount",             // 248
-    "tempConnectedFailCount",           // 249
-    "tempResolutionFixCount",           // 250
-    "tempRereadFailCount",              // 251
-    "tempResolutionFixCrcFailCount",    // 252
-    "tempEnumerateFailCount",           // 253
-    "warmupCeiling",                    // 254
-    "imu_min_moving_gentle",            // 255
-    "imu_min_moving_moderate",          // 256
-    "imu_min_moving_rough",             // 257
-    "imu_min_moving_extreme",           // 258
-    "imu_min_stat_gentle",              // 259
-    "imu_min_stat_moderate",            // 260
-    "imu_min_stat_rough",               // 261
-    "imu_min_stat_extreme",             // 262
-    "imu_heel_deviation_120s",          // 263
-    "imu_pitch_deviation_120s",         // 264
-    "imu_heading_swing_120s",           // 265
-    "LoadDumpDtThresh",                 // 266
-    "LoadDumpCurrentDrop",              // 267
-    "dBcur_dt",                         // 268
-    "loadDumpActive",                   // 269
-    "CVTuningMode",                     // 270
-    "cvWaveAmplitudeV",                 // 271 — ×100
-    "cvWavePeriodSec",                  // 272
-    "cvKOvershoot",                     // 273 — ×10
-    "cvConsecutiveReads",               // 274
-    "ThermalTuningMode",                // 275
-    "thermalWaveLowF",                  // 276 — ×10
-    "thermalWaveHighF",                 // 277 — ×10
-    "thermalWaveHalfPeriodMin",         // 278 — ×10
-    "thermalKOvershoot",                // 279 — ×100
-    "thermalKUndershoot",               // 280 — ×100
-    "thermalSettleThreshF",             // 281 — ×10
-    "thermalConsecutiveReads",          // 282
-    "thermalLiveScore0",                // 283 — ×10000
-    "thermalLiveScore1",                // 284 — ×10000
-    "thermalLiveScore2",                // 285 — ×10000
-    "thermalLiveScore3",                // 286 — ×10000
-    "thermalTuningTestPhase",           // 287
-    "ft_updateAccelMetrics_win",        // 288 — µs
-    "ft_updateAccelMetrics_ses",        // 289 — µs
+    "IBVMax",                              // 0
+    "MeasuredAmpsMax",                     // 1
+    "RPMMax",                              // 2
+    "SOC_percent",                         // 3
+    "EngineRunTime",                       // 4
+    "AlternatorOnTime",                    // 5
+    "AlternatorFuelUsed",                  // 6
+    "ChargedEnergy",                       // 7
+    "DischargedEnergy",                    // 8
+    "AlternatorChargedEnergy",             // 9
+    "MaxAlternatorTemperatureF",           // 10
+    "temperatureThermistor",               // 11
+    "MaxTemperatureThermistor",            // 12
+    "VictronCurrent",                      // 13
+    "timeToFullChargeMin",                 // 14
+    "timeToFullDischargeMin",              // 15
+    "LatitudeNMEA",                        // 16
+    "LongitudeNMEA",                       // 17
+    "SatelliteCountNMEA",                  // 18
+    "LastSessionDuration",                 // 19
+    "LastSessionMaxLoopTime",              // 20
+    "lastSessionMinHeap",                  // 21
+    "wifiReconnectsTotal",                 // 22
+    "LastResetReason",                     // 23
+    "ancientResetReason",                  // 24
+    "totalPowerCycles",                    // 25
+    "MinFreeHeap",                         // 26
+    "currentWeatherMode",                  // 27
+    "UVToday",                             // 28
+    "UVTomorrow",                          // 29
+    "UVDay2",                              // 30
+    "weatherDataValid",                    // 31
+    "SolarWatts",                          // 32
+    "performanceRatio",                    // 33
+    "VeData",                              // 34
+    "NMEA0183Data",                        // 35
+    "NMEA2KData",                          // 36
+    "alarmLatch",                          // 37
+    "ResetAlarmLatch",                     // 38
+    "ResetLearningTable",                  // 39
+    "ClearOverheatHistory",                // 40
+    "DynamicShuntGainFactor",              // 41
+    "DynamicAltCurrentZero",               // 42
+    "InsulationLifePercent",               // 43
+    "GreaseLifePercent",                   // 44
+    "BrushLifePercent",                    // 45
+    "PredictedLifeHours",                  // 46
+    "LifeIndicatorColor",                  // 47
+    "pKwHrToday",                          // 48
+    "pKwHrTomorrow",                       // 49
+    "pKwHr2days",                          // 50
+    "ambientTemp",                         // 51
+    "baroPressure",                        // 52
+    "firmwareVersionInt",                  // 53
+    "deviceIdUpper",                       // 54
+    "deviceIdLower",                       // 55
+    "ChargedEnergy_AllTime",               // 56
+    "AlternatorFuelUsed_AllTime",          // 57
+    "PeakVoltage_AllTime",                 // 58
+    "EngineRunTime_AllTime",               // 59
+    "MinVoltage",                          // 60
+    "MinVoltage_AllTime",                  // 61
+    "ChargeCycles",                        // 62
+    "ChargeCycles_AllTime",                // 63
+    "EngineFuelUsed",                      // 64
+    "EngineFuelUsed_AllTime",              // 65
+    "TotalDistance",                       // 66
+    "TotalDistance_AllTime",               // 67
+    "MaxSpeed",                            // 68
+    "MaxSpeed_AllTime",                    // 69
+    "SolarChargedEnergy",                  // 70
+    "SolarChargedEnergy_AllTime",          // 71
+    "AlternatorChargedEnergy_AllTime",     // 72
+    "DischargedEnergy_AllTime",            // 73
+    "AvgSOC_AllTime",                      // 74
+    "AvgSpeed_AllTime",                    // 75
+    "AvgSpeed",                            // 76
+    "AlternatorOnTime_AllTime",            // 77
+    "EngineCycles_AllTime",                // 78
+    "MaxAlternatorTemperatureF_AllTime",   // 79
+    "MaxTemperatureThermistor_AllTime",    // 80
+    "MeasuredAmpsMax_AllTime",             // 81
+    "RPMMax_AllTime",                      // 82
+    "Ignition",                            // 83
+    "BulkStage",                           // 84
+    "WifiWakeSecondsRemaining",            // 85
+    "BufferedRecordCount",                 // 86
+    "BufferedRecordPercent",               // 87
+    "MAX_BUFFERED_RECORDS",                // 88
+    "COGNMEA",                             // 89
+    "SOGNMEA",                             // 90
+    "ApparentWindSpeedNMEA",               // 91
+    "ApparentWindAngleNMEA",               // 92
+    "TrueWindSpeedNMEA",                   // 93
+    "TrueWindAngleNMEA",                   // 94
+    "LeewayNMEA",                          // 95
+    "VMGNMEA",                             // 96
+    "VMGTargetBearing",                    // 97
+    "VMGUseTrueWind",                      // 98
+    "cpuLoadCore0",                        // 99
+    "cpuLoadCore0Max",                     // 100
+    "cpuLoadCore1",                        // 101
+    "cpuLoadCore1Max",                     // 102
+    "hasForcedUpdate",                     // 103
+    "forcedFwVersionInt",                  // 104
+    "forcedUpdateDeadline",                // 105
+    "stateRevision",                       // 106
+    "hardwarePresent",                     // 107
+    "imu_accel_x_raw",                     // 108
+    "imu_accel_y_raw",                     // 109
+    "imu_accel_z_raw",                     // 110
+    "imu_gyro_x_raw",                      // 111
+    "imu_gyro_y_raw",                      // 112
+    "imu_gyro_z_raw",                      // 113
+    "accel_x_min",                         // 114
+    "accel_x_max",                         // 115
+    "accel_x_avg",                         // 116
+    "accel_y_min",                         // 117
+    "accel_y_max",                         // 118
+    "accel_y_avg",                         // 119
+    "accel_z_min",                         // 120
+    "accel_z_max",                         // 121
+    "accel_z_avg",                         // 122
+    "gyro_x_min",                          // 123
+    "gyro_x_max",                          // 124
+    "gyro_x_avg",                          // 125
+    "gyro_y_min",                          // 126
+    "gyro_y_max",                          // 127
+    "gyro_y_avg",                          // 128
+    "gyro_z_min",                          // 129
+    "gyro_z_max",                          // 130
+    "gyro_z_avg",                          // 131
+    "heel_min",                            // 132
+    "heel_max",                            // 133
+    "heel_avg",                            // 134
+    "pitch_min",                           // 135
+    "pitch_max",                           // 136
+    "pitch_avg",                           // 137
+    "vertical_accel_min",                  // 138
+    "vertical_accel_max",                  // 139
+    "vertical_accel_avg",                  // 140
+    "total_accel_min",                     // 141
+    "total_accel_max",                     // 142
+    "total_accel_avg",                     // 143
+    "imu_slam_count",                      // 144
+    "imu_slam_peak_max",                   // 145
+    "imu_slam_count_lifetime",             // 146
+    "imu_capsize_count",                   // 147
+    "imu_pitchpole_count",                 // 148
+    "imu_heel_change_60s",                 // 149
+    "imu_heel_deviation_60s",              // 150
+    "imu_pitch_change_60s",                // 151
+    "imu_pitch_deviation_60s",             // 152
+    "imu_wave_period_sec",                 // 153
+    "imu_heel_max_lifetime",               // 154
+    "imu_pitch_max_lifetime",              // 155
+    "imu_slam_peak_lifetime",              // 156
+    "imu_fifo_overrun_count",              // 157
+    "imu_i2c_error_count",                 // 158
+    "imu_unknown_tag_count",               // 159
+    "imu_accel_dropped",                   // 160
+    "imu_gyro_dropped",                    // 161
+    "imu_total_samples_accel",             // 162
+    "imu_total_samples_gyro",              // 163
+    "IMUReadTime2",                        // 164
+    "IMUReadTime",                         // 165
+    "adsI2CErrorCount",                    // 166
+    "tempPIDActive",                       // 167
+    "tempPIDInput_d",                      // 168
+    "tempPIDSetpoint_d",                   // 169
+    "thermalPenaltyAmps",                  // 170
+    "innerTermP",                          // 171
+    "innerTermI",                          // 172
+    "innerTermD",                          // 173
+    "outerTermP",                          // 174
+    "outerTermI",                          // 175
+    "outerTermD",                          // 176
+    "thermalSlopeFPerSec",                 // 177
+    "chargeStageDisplay",                  // 178
+    "voltageControlActive",                // 179
+    "voltageError",                        // 180
+    "cv_I",                                // 181
+    "inIdleStage",                         // 182
+    "referenceFinalized",                  // 183
+    "sessionErrorCount",                   // 184
+    "ft_rai_total_win",                    // 185
+    "ft_rai_total_ses",                    // 186
+    "ft_rai_ina228_win",                   // 187
+    "ft_rai_ina228_ses",                   // 188
+    "ft_rai_ads_state_win",                // 189
+    "ft_rai_ads_state_ses",                // 190
+    "ft_rai_bmp_state_win",                // 191
+    "ft_rai_bmp_state_ses",                // 192
+    "ft_rai_imu_win",                      // 193
+    "ft_rai_imu_ses",                      // 194
+    "fsWriteQueueDrops",                   // 195
+    "cv_D",                                // 196
+    "tempReadFailCount",                   // 197
+    "tempCrcFailCount",                    // 198
+    "tempCrcRecoveredCount",               // 199
+    "tempAllFFCount",                      // 200
+    "tempPowerOn85Count",                  // 201
+    "tempOutOfRangeCount",                 // 202
+    "tempRequestFailCount",                // 203
+    "tempConnectedFailCount",              // 204
+    "tempResolutionFixCount",              // 205
+    "tempRereadFailCount",                 // 206
+    "tempResolutionFixCrcFailCount",       // 207
+    "tempEnumerateFailCount",              // 208
+    "warmupCeiling",                       // 209
+    "imu_min_moving_gentle",               // 210
+    "imu_min_moving_moderate",             // 211
+    "imu_min_moving_rough",                // 212
+    "imu_min_moving_extreme",              // 213
+    "imu_min_stat_gentle",                 // 214
+    "imu_min_stat_moderate",               // 215
+    "imu_min_stat_rough",                  // 216
+    "imu_min_stat_extreme",                // 217
+    "imu_heel_deviation_120s",             // 218
+    "imu_pitch_deviation_120s",            // 219
+    "imu_heading_swing_120s",              // 220
+    "dBcur_dt",                            // 221
+    "loadDumpActive",                      // 222
+    "thermalLiveScore0",                   // 223
+    "thermalLiveScore1",                   // 224
+    "thermalLiveScore2",                   // 225
+    "thermalLiveScore3",                   // 226
+    "thermalTuningTestPhase",              // 227
+    "ft_updateAccelMetrics_win",           // 228
+    "ft_updateAccelMetrics_ses",           // 229
+    "WifiStrength",                        // 230
+    "SendWifiTime",                        // 231
+    "AnalogReadTime",                      // 232
+    "VeTime",                              // 233
+    "MaximumLoopTime",                     // 234
+    "HeadingNMEA",                         // 235
+    "EngineCycles",                        // 236
+    "CurrentSessionDuration",              // 237
+    "timeAxisModeChanging",                // 238
+    "currentPartitionType",                // 239
+    "fastOvCurrentCap",                    // 240
+    "fastOvClampCount",                    // 241
+    "fastOvSoftCount",                     // 242
+    "fastOvHardCount",                     // 243
+    "ch1_last_ms",                         // 244
+    "ch1_avg_10s",                         // 245
+    "ch1_worst_10s",                       // 246
+    "ch1_over2x_10s",                      // 247
+    "ch1_n_10s",                           // 248
+    "ch1_avg_2m",                          // 249
+    "ch1_worst_2m",                        // 250
+    "ch1_over2x_2m",                       // 251
+    "ch1_n_2m",                            // 252
+    "ch1_avg_at",                          // 253
+    "ch1_worst_at",                        // 254
+    "ch1_over2x_at",                       // 255
+    "ch1_n_at",                            // 256
+    "iExcessCount",                        // 257
+    "inaOVCount",                          // 258
+    "hardOCCount",                         // 259
+    "voltSpikeCount",                      // 260
+    "voltDisagreeCritCount",               // 261
+    "voltDisagreeWarnCount",               // 262
+    "voltImplausibleCount",                // 263
+    "tempCritCount",                       // 264
+    "tempSustainedCount",                  // 265
+    "tempStaleCount",                      // 266
+    "currentStaleCount",                   // 267
+    "imu_msi_score",                       // 268
+    "imu_vomit_pct",                       // 269
+    "imu_anchorage_comfort",               // 270
+    "ina_last_ms",                         // 271
+    "ina_avg_10s",                         // 272
+    "ina_worst_10s",                       // 273
+    "ina_over2x_10s",                      // 274
+    "ina_avg_2m",                          // 275
+    "ina_worst_2m",                        // 276
+    "ina_over2x_2m",                       // 277
+    "ina_avg_at",                          // 278
+    "ina_worst_at",                        // 279
+    "ina_over2x_at",                       // 280
+    "loopTime5sWindow_ms",                 // 281
+    "MaximumLoopTime_ms",                  // 282
+    "ft_SendWifiData_win",                 // 283
+    "ft_SendWifiData_ses",                 // 284
+    "ft_CheckAlarms_win",                  // 285
+    "ft_CheckAlarms_ses",                  // 286
+    "ft_calculateDerivedMetrics_win",      // 287
+    "ft_calculateDerivedMetrics_ses",      // 288
+    "ft_logDashboardValues_win",           // 289
+    "ft_logDashboardValues_ses",           // 290
+    "ft_updateSystemHealthStats_win",      // 291
+    "ft_updateSystemHealthStats_ses",      // 292
+    "ft_checkWiFiConnection_win",          // 293
+    "ft_checkWiFiConnection_ses",          // 294
+    "ft_ch1_compute_stats_win",            // 295
+    "ft_ch1_compute_stats_ses",            // 296
+    "ft_UpdateEngineRuntime_win",          // 297
+    "ft_UpdateEngineRuntime_ses",          // 298
+    "ft_UpdateEngineFuel_win",             // 299
+    "ft_UpdateEngineFuel_ses",             // 300
+    "ft_UpdateBatterySOC_win",             // 301
+    "ft_UpdateBatterySOC_ses",             // 302
+    "ft_UpdateTravelStatistics_win",       // 303
+    "ft_UpdateTravelStatistics_ses",       // 304
+    "ft_UpdateDistanceThisInterval_win",   // 305
+    "ft_UpdateDistanceThisInterval_ses",   // 306
+    "ft_UpdateBoardTempPressureMaximums_win", // 307
+    "ft_UpdateBoardTempPressureMaximums_ses", // 308
+    "ft_handleSocGainReset_win",           // 309
+    "ft_handleSocGainReset_ses",           // 310
+    "ft_handleAltZeroReset_win",           // 311
+    "ft_handleAltZeroReset_ses",           // 312
+    "ft_calculateChargeTimes_win",         // 313
+    "ft_calculateChargeTimes_ses",         // 314
+    "ft_UpdateSailingMetrics_win",         // 315
+    "ft_UpdateSailingMetrics_ses",         // 316
+    "ft_updateWeatherMode_win",            // 317
+    "ft_updateWeatherMode_ses",            // 318
+    "ft_updateSensorWindow_win",           // 319
+    "ft_updateSensorWindow_ses",           // 320
+    "ft_checkTimeSync_win",                // 321
+    "ft_checkTimeSync_ses",                // 322
+    "currentRPMTableIndex",                // 323
+    "pidInitialized",                      // 324
+    "pidSetpoint",                         // 325
+    "TempToUse",                           // 326
+    "learningTargetFromRPM",               // 327
+    "ambientTempCorrection",               // 328
+    "finalLearningTarget",                 // 329
+    "overheatingPenaltyTimer",             // 330
+    "overheatingPenaltyAmps",              // 331
+    "averageTableValue",                   // 332
+    "timeSinceLastOverheat",               // 333
+    "socInfoAvailable",                    // 334
+    "overheatCount0",                      // 335
+    "overheatCount1",                      // 336
+    "overheatCount2",                      // 337
+    "overheatCount3",                      // 338
+    "overheatCount4",                      // 339
+    "overheatCount5",                      // 340
+    "overheatCount6",                      // 341
+    "overheatCount7",                      // 342
+    "overheatCount8",                      // 343
+    "overheatCount9",                      // 344
+    "cumulativeNoOverheatTime0",           // 345
+    "cumulativeNoOverheatTime1",           // 346
+    "cumulativeNoOverheatTime2",           // 347
+    "cumulativeNoOverheatTime3",           // 348
+    "cumulativeNoOverheatTime4",           // 349
+    "cumulativeNoOverheatTime5",           // 350
+    "cumulativeNoOverheatTime6",           // 351
+    "cumulativeNoOverheatTime7",           // 352
+    "cumulativeNoOverheatTime8",           // 353
+    "cumulativeNoOverheatTime9",           // 354
+    "learningUpCount0",                    // 355
+    "learningUpCount1",                    // 356
+    "learningUpCount2",                    // 357
+    "learningUpCount3",                    // 358
+    "learningUpCount4",                    // 359
+    "learningUpCount5",                    // 360
+    "learningUpCount6",                    // 361
+    "learningUpCount7",                    // 362
+    "learningUpCount8",                    // 363
+    "learningUpCount9",                    // 364
+    "totalLearningEvents",                 // 365
+    "totalOverheats",                      // 366
+    "totalSafeHours",                      // 367
+    "FreeInternalRam",                     // 368
+    "TotalInternalRam",                    // 369
+    "LargestInternalBlock",                // 370
+    "FreePSRAM",                           // 371
+    "TotalPSRAM",                          // 372
+    "Heapfrag",                            // 373
+    "ft_ReadAnalogInputs_win",             // 374
+    "ft_ReadAnalogInputs_ses",             // 375
+    "ft_AdjustFieldLearnMode_win",         // 376
+    "ft_AdjustFieldLearnMode_ses",         // 377
+    "ft_uploadSensorHistory_win",          // 378
+    "ft_uploadSensorHistory_ses",          // 379
+    "ft_uploadBufferedRecords_win",        // 380
+    "ft_uploadBufferedRecords_ses",        // 381
+    "ft_buildConfigPayload_win",           // 382
+    "ft_buildConfigPayload_ses",           // 383
+    "VeTime2",                             // 384
+    "systemIDRiseDelay_0",                 // 385
+    "systemIDRiseDelay_1",                 // 386
+    "systemIDRiseDelay_2",                 // 387
+    "systemIDFallDelay_0",                 // 388
+    "systemIDFallDelay_1",                 // 389
+    "systemIDFallDelay_2",                 // 390
+    "systemIDRiseAvg",                     // 391
+    "systemIDFallAvg",                     // 392
+    "nvsPhase",                            // 393
+    "ft_saveNVSData_win",                  // 394
+    "ft_saveNVSData_ses",                  // 395
+    "ft_FlushFileWriteQueue_win",          // 396
+    "ft_FlushFileWriteQueue_ses",          // 397
+    "ft_efficiencyTracker_win",            // 398
+    "ft_efficiencyTracker_ses",            // 399
+    "systemIDActive",                      // 400
+    "systemIDResultsReady",                // 401
+    "systemIDStepAmp_0",                   // 402
+    "systemIDStepAmp_1",                   // 403
+    "systemIDStepAmp_2",                   // 404
+    "systemIDQuietPP_0",                   // 405
+    "systemIDQuietPP_1",                   // 406
+    "systemIDQuietPP_2",                   // 407
+    "nvsCycleMs",                          // 408 — ms elapsed for last complete NVS drain cycle
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -633,241 +649,228 @@ const CSV3_FIELDS = [
     "rpmCurrentTable7",                // 51
     "rpmCurrentTable8",                // 52
     "rpmCurrentTable9",                // 53
-    "currentRPMTableIndex",            // 54
-    "pidInitialized",                  // 55
-    "ShuntResistanceMicroOhm",         // 56
-    "InvertAltAmps",                   // 57
-    "InvertBattAmps",                  // 58
-    "MaxDuty",                         // 59
-    "MinDuty",                         // 60
-    "FieldResistance",                 // 61
-    "maxPoints",                       // 62
-    "AlternatorCOffset",               // 63
-    "BatteryCOffset",                  // 64
-    "BatteryCapacity_Ah",              // 65
-    "AmpSensorRange",                  // 66
-    "R_fixed",                         // 67
-    "Beta",                            // 68
-    "T0_C",                            // 69
-    "TempSource",                      // 70
-    "IgnitionOverride",                // 71
-    "FLOAT_DURATION",                  // 72
-    "PulleyRatio",                     // 73
-    "BatteryCurrentSource",            // 74
-    "overheatCount0",                  // 75
-    "overheatCount1",                  // 76
-    "overheatCount2",                  // 77
-    "overheatCount3",                  // 78
-    "overheatCount4",                  // 79
-    "overheatCount5",                  // 80
-    "overheatCount6",                  // 81
-    "overheatCount7",                  // 82
-    "overheatCount8",                  // 83
-    "overheatCount9",                  // 84
-    "cumulativeNoOverheatTime0",       // 85
-    "cumulativeNoOverheatTime1",       // 86
-    "cumulativeNoOverheatTime2",       // 87
-    "cumulativeNoOverheatTime3",       // 88
-    "cumulativeNoOverheatTime4",       // 89
-    "cumulativeNoOverheatTime5",       // 90
-    "cumulativeNoOverheatTime6",       // 91
-    "cumulativeNoOverheatTime7",       // 92
-    "cumulativeNoOverheatTime8",       // 93
-    "cumulativeNoOverheatTime9",       // 94
-    "totalLearningEvents",             // 95
-    "totalOverheats",                  // 96
-    "totalSafeHours",                  // 97
-    "averageTableValue",               // 98
-    "timeSinceLastOverheat",           // 99
-    "learningTargetFromRPM",           // 100
-    "ambientTempCorrection",           // 101
-    "finalLearningTarget",             // 102
-    "overheatingPenaltyTimer",         // 103
-    "overheatingPenaltyAmps",          // 104
-    "pidSetpoint",                     // 105
-    "TempToUse",                       // 106
-    "rpmTableRPMPoints0",              // 107
-    "rpmTableRPMPoints1",              // 108
-    "rpmTableRPMPoints2",              // 109
-    "rpmTableRPMPoints3",              // 110
-    "rpmTableRPMPoints4",              // 111
-    "rpmTableRPMPoints5",              // 112
-    "rpmTableRPMPoints6",              // 113
-    "rpmTableRPMPoints7",              // 114
-    "rpmTableRPMPoints8",              // 115
-    "rpmTableRPMPoints9",              // 116
-    "LearningSettlingPeriod",          // 117
-    "LearningRPMChangeThreshold",      // 118
-    "LearningTempHysteresis",          // 119
-    "fuelTableRPM0",                   // 120
-    "fuelTableRPM1",                   // 121
-    "fuelTableRPM2",                   // 122
-    "fuelTableRPM3",                   // 123
-    "fuelTableRPM4",                   // 124
-    "fuelTableRPM5",                   // 125
-    "fuelTableRPM6",                   // 126
-    "fuelTableRPM7",                   // 127
-    "fuelTableRPM8",                   // 128
-    "fuelTableRPM9",                   // 129
-    "fuelTableGPH0",                   // 130
-    "fuelTableGPH1",                   // 131
-    "fuelTableGPH2",                   // 132
-    "fuelTableGPH3",                   // 133
-    "fuelTableGPH4",                   // 134
-    "fuelTableGPH5",                   // 135
-    "fuelTableGPH6",                   // 136
-    "fuelTableGPH7",                   // 137
-    "fuelTableGPH8",                   // 138
-    "fuelTableGPH9",                   // 139
-    "stateRevision",                   // 140
-    "SetpointRampRate",                // 141
-    "DutyRampRate",                    // 142
-    "SettleTimeBeforeCut",             // 143
-    "TempWarnExcess",                  // 144
-    "TempCritExcess",                  // 145
-    "TempSustainedTimeout",            // 146
-    "VoltageSpikeMargin",              // 147
-    "VoltageDisagreeThreshold",        // 148
-    "VoltageDisagreeTimeout",          // 149
-    "rpmMinDutyTable0",                // 150
-    "rpmMinDutyTable1",                // 151
-    "rpmMinDutyTable2",                // 152
-    "rpmMinDutyTable3",                // 153
-    "rpmMinDutyTable4",                // 154
-    "rpmMinDutyTable5",                // 155
-    "rpmMinDutyTable6",                // 156
-    "rpmMinDutyTable7",                // 157
-    "rpmMinDutyTable8",                // 158
-    "rpmMinDutyTable9",                // 159
-    "rpmCapCurrentTable0",             // 160
-    "rpmCapCurrentTable1",             // 161
-    "rpmCapCurrentTable2",             // 162
-    "rpmCapCurrentTable3",             // 163
-    "rpmCapCurrentTable4",             // 164
-    "rpmCapCurrentTable5",             // 165
-    "rpmCapCurrentTable6",             // 166
-    "rpmCapCurrentTable7",             // 167
-    "rpmCapCurrentTable8",             // 168
-    "rpmCapCurrentTable9",             // 169
-    "VoltageKp",                       // 170
-    "VoltageLoopInterval",             // 171
-    "FIELD_COLLAPSE_DELAY",            // 172
-    "SetpointRiseRate",                // 173
-    "SetpointFallRate",                // 174
-    "PIDTrackingGain",                 // 175
-    "CAPSIZE_THRESHOLD_DEG",           // 176
-    "PITCHPOLE_THRESHOLD_DEG",         // 177
-    "SLAM_THRESHOLD_G",                // 178
-    "imuMountOrientation",             // 179
-    "socInfoAvailable",                // 180
-    "TailCurrent_A",                   // 181
-    "RebulkVoltage",                   // 182
-    "rebulkDebounceTime",              // 183
-    "MinFloatTime",                    // 184
-    "SOC_BlockRebulk_percent",         // 185
-    "SOC_AllowRebulk_percent",         // 186
-    "accelEnabled",                    // 187
-    "DutySlowRampRate",                // 188
-    "ShutdownPhase2HoldMs",            // 189
-    "learningUpCount0",                // 190
-    "learningUpCount1",                // 191
-    "learningUpCount2",                // 192
-    "learningUpCount3",                // 193
-    "learningUpCount4",                // 194
-    "learningUpCount5",                // 195
-    "learningUpCount6",                // 196
-    "learningUpCount7",                // 197
-    "learningUpCount8",                // 198
-    "learningUpCount9",                // 199
-    "TempPIDKp",                       // 200
-    "TempPIDKi",                       // 201
-    "ThermalLookaheadSec",             // 202
-    "TempPIDIntervalMs",               // 203
-    "TempPIDFilterAlpha",              // 204
-    "FreeInternalRam",                 // 205
-    "TotalInternalRam",                // 206
-    "LargestInternalBlock",            // 207
-    "FreePSRAM",                       // 208
-    "TotalPSRAM",                      // 209
-    "Heapfrag",                        // 210
-    "VoltageKi",                       // 211
-    "rpmCapPowerTable0",               // 212
-    "rpmCapPowerTable1",               // 213
-    "rpmCapPowerTable2",               // 214
-    "rpmCapPowerTable3",               // 215
-    "rpmCapPowerTable4",               // 216
-    "rpmCapPowerTable5",               // 217
-    "rpmCapPowerTable6",               // 218
-    "rpmCapPowerTable7",               // 219
-    "rpmCapPowerTable8",               // 220
-    "rpmCapPowerTable9",               // 221
-    "VoltageTrimLimit",                // 222
-    "ft_ReadAnalogInputs_win",         // 223
-    "ft_ReadAnalogInputs_ses",         // 224
-    "ft_AdjustFieldLearnMode_win",     // 225
-    "ft_AdjustFieldLearnMode_ses",     // 226
-    "ft_uploadSensorHistory_win",      // 227
-    "ft_uploadSensorHistory_ses",      // 228
-    "ft_uploadBufferedRecords_win",    // 229
-    "ft_uploadBufferedRecords_ses",    // 230
-    "ft_buildConfigPayload_win",       // 231
-    "ft_buildConfigPayload_ses",       // 232
-    "VeTime2",                         // 233
-    "systemIDRiseDelay_0",      // 234
-    "systemIDRiseDelay_1",      // 235
-    "systemIDRiseDelay_2",      // 236
-    "systemIDFallDelay_0",      // 237
-    "systemIDFallDelay_1",      // 238
-    "systemIDFallDelay_2",      // 239
-    "systemIDRiseAvg",          // 240
-    "systemIDFallAvg",          // 241
-    "InputFilterTC",            // 242
-    "SystemIDStepAmplitude",    // 243
-    "HardOCTripAmps",           // 244
-    "HardOCDebounceMs",         // 245
-    "IExcessK",                 // 246
-    "IExcessN",                 // 247
-    "IExcessKBleed",            // 248
-    "IgnoreRPM",                // 249
-    "MinRPMForField",           // 250
-    "AwBleedRate",              // 251
-    "AwRecoverRate",            // 252
-    "KSoft",                    // 253
-    "KHard",                    // 254
-    "IExcessReseedFrac",        // 255
-    "AwSeedProtectMs",          // 256
-    "VoltageKd",                // 257
-    "displayTempUnit",          // 258
-    "WarmupRampRate",           // 259
-    "nvsPhase",                 // 260 — NVS drain phase (0=idle, 1-8=writing, 9=commit)
-    "ft_saveNVSData_win",               // 261 — saveNVSData worst 5s window (µs)
-    "ft_saveNVSData_ses",               // 262 — saveNVSData worst session (µs)
-    "nvsCycleMs",                       // 263 — last full NVS drain duration (ms)
-    "ft_FlushFileWriteQueue_win",       // 264 — FlushFileWriteQueue worst 5s window (µs)
-    "ft_FlushFileWriteQueue_ses",       // 265 — FlushFileWriteQueue worst session (µs)
-    "ft_efficiencyTracker_win",         // 266 — efficiencyTracker_tick() worst 5s window (µs)
-    "ft_efficiencyTracker_ses",         // 267 — efficiencyTracker_tick() worst session (µs)
-    "systemIDActive",                   // 268 — 0=idle, 1-9=current phase
-    "systemIDResultsReady",             // 269 — 1=results available
-    "OvLayer1Enable",                   // 270
-    "OvLayer2Enable",                   // 271
-    "OvLayer3Enable",                   // 272
-    "IExcessSigSrc",                    // 273
-    "IExcessMA_N",                      // 274
-    "OutputPIDSigSrc",                  // 275
-    "TdPred",                           // 276
-    "VSoftMarginV",                     // 277
-    "VHardMarginV",                     // 278
-    "OutputPIDMA_N",                    // 279
-    "OutputPIDFilterTC",                // 280
-    "VoltageFilterTC",                  // 281
-    "VoltageDWindowMs",                 // 282
-    "ProtectionProxGateV",             // 283
-    "SlopeBleedThresh",                // 284
-    "SlopeBleedK",                     // 285
-    "DvdtAlpha",                       // 286
-    "SlopeBleedProxV",                 // 287
-    "StartupRiseRate",                 // 288 — ×100, 2 decimals
+    "ShuntResistanceMicroOhm",         // 54
+    "InvertAltAmps",                   // 55
+    "InvertBattAmps",                  // 56
+    "MaxDuty",                         // 57
+    "MinDuty",                         // 58
+    "FieldResistance",                 // 59
+    "maxPoints",                       // 60
+    "AlternatorCOffset",               // 61
+    "BatteryCOffset",                  // 62
+    "BatteryCapacity_Ah",              // 63
+    "AmpSensorRange",                  // 64
+    "R_fixed",                         // 65
+    "Beta",                            // 66
+    "T0_C",                            // 67
+    "TempSource",                      // 68
+    "IgnitionOverride",                // 69
+    "FLOAT_DURATION",                  // 70
+    "PulleyRatio",                     // 71
+    "BatteryCurrentSource",            // 72
+    "rpmTableRPMPoints0",              // 73
+    "rpmTableRPMPoints1",              // 74
+    "rpmTableRPMPoints2",              // 75
+    "rpmTableRPMPoints3",              // 76
+    "rpmTableRPMPoints4",              // 77
+    "rpmTableRPMPoints5",              // 78
+    "rpmTableRPMPoints6",              // 79
+    "rpmTableRPMPoints7",              // 80
+    "rpmTableRPMPoints8",              // 81
+    "rpmTableRPMPoints9",              // 82
+    "LearningSettlingPeriod",          // 83
+    "LearningRPMChangeThreshold",      // 84
+    "LearningTempHysteresis",          // 85
+    "fuelTableRPM0",                   // 86
+    "fuelTableRPM1",                   // 87
+    "fuelTableRPM2",                   // 88
+    "fuelTableRPM3",                   // 89
+    "fuelTableRPM4",                   // 90
+    "fuelTableRPM5",                   // 91
+    "fuelTableRPM6",                   // 92
+    "fuelTableRPM7",                   // 93
+    "fuelTableRPM8",                   // 94
+    "fuelTableRPM9",                   // 95
+    "fuelTableGPH0",                   // 96
+    "fuelTableGPH1",                   // 97
+    "fuelTableGPH2",                   // 98
+    "fuelTableGPH3",                   // 99
+    "fuelTableGPH4",                   // 100
+    "fuelTableGPH5",                   // 101
+    "fuelTableGPH6",                   // 102
+    "fuelTableGPH7",                   // 103
+    "fuelTableGPH8",                   // 104
+    "fuelTableGPH9",                   // 105
+    "stateRevision",                   // 106
+    "SetpointRampRate",                // 107
+    "DutyRampRate",                    // 108
+    "SettleTimeBeforeCut",             // 109
+    "TempWarnExcess",                  // 110
+    "TempCritExcess",                  // 111
+    "TempSustainedTimeout",            // 112
+    "VoltageSpikeMargin",              // 113
+    "VoltageDisagreeThreshold",        // 114
+    "VoltageDisagreeTimeout",          // 115
+    "rpmMinDutyTable0",                // 116
+    "rpmMinDutyTable1",                // 117
+    "rpmMinDutyTable2",                // 118
+    "rpmMinDutyTable3",                // 119
+    "rpmMinDutyTable4",                // 120
+    "rpmMinDutyTable5",                // 121
+    "rpmMinDutyTable6",                // 122
+    "rpmMinDutyTable7",                // 123
+    "rpmMinDutyTable8",                // 124
+    "rpmMinDutyTable9",                // 125
+    "rpmCapCurrentTable0",             // 126
+    "rpmCapCurrentTable1",             // 127
+    "rpmCapCurrentTable2",             // 128
+    "rpmCapCurrentTable3",             // 129
+    "rpmCapCurrentTable4",             // 130
+    "rpmCapCurrentTable5",             // 131
+    "rpmCapCurrentTable6",             // 132
+    "rpmCapCurrentTable7",             // 133
+    "rpmCapCurrentTable8",             // 134
+    "rpmCapCurrentTable9",             // 135
+    "VoltageKp",                       // 136
+    "VoltageLoopInterval",             // 137
+    "FIELD_COLLAPSE_DELAY",            // 138
+    "SetpointRiseRate",                // 139
+    "SetpointFallRate",                // 140
+    "PIDTrackingGain",                 // 141
+    "CAPSIZE_THRESHOLD_DEG",           // 142
+    "PITCHPOLE_THRESHOLD_DEG",         // 143
+    "SLAM_THRESHOLD_G",                // 144
+    "imuMountOrientation",             // 145
+    "TailCurrent_A",                   // 146
+    "RebulkVoltage",                   // 147
+    "rebulkDebounceTime",              // 148
+    "MinFloatTime",                    // 149
+    "SOC_BlockRebulk_percent",         // 150
+    "SOC_AllowRebulk_percent",         // 151
+    "accelEnabled",                    // 152
+    "DutySlowRampRate",                // 153
+    "ShutdownPhase2HoldMs",            // 154
+    "TempPIDKp",                       // 155
+    "TempPIDKi",                       // 156
+    "ThermalLookaheadSec",             // 157
+    "TempPIDIntervalMs",               // 158
+    "TempPIDFilterAlpha",              // 159
+    "VoltageKi",                       // 160
+    "rpmCapPowerTable0",               // 161
+    "rpmCapPowerTable1",               // 162
+    "rpmCapPowerTable2",               // 163
+    "rpmCapPowerTable3",               // 164
+    "rpmCapPowerTable4",               // 165
+    "rpmCapPowerTable5",               // 166
+    "rpmCapPowerTable6",               // 167
+    "rpmCapPowerTable7",               // 168
+    "rpmCapPowerTable8",               // 169
+    "rpmCapPowerTable9",               // 170
+    "VoltageTrimLimit",                // 171
+    "InputFilterTC",                   // 172
+    "SystemIDStepAmplitude",           // 173
+    "HardOCTripAmps",                  // 174
+    "HardOCDebounceMs",                // 175
+    "IExcessK",                        // 176
+    "IExcessN",                        // 177
+    "IExcessKBleed",                   // 178
+    "IgnoreRPM",                       // 179
+    "MinRPMForField",                  // 180
+    "AwBleedRate",                     // 181
+    "AwRecoverRate",                   // 182
+    "KSoft",                           // 183
+    "KHard",                           // 184
+    "IExcessReseedFrac",               // 185
+    "AwSeedProtectMs",                 // 186
+    "VoltageKd",                       // 187
+    "displayTempUnit",                 // 188
+    "WarmupRampRate",                  // 189
+    "OvLayer1Enable",                  // 190
+    "OvLayer2Enable",                  // 191
+    "OvLayer3Enable",                  // 192
+    "IExcessSigSrc",                   // 193
+    "IExcessMA_N",                     // 194
+    "OutputPIDSigSrc",                 // 195
+    "TdPred",                          // 196 — raw float (%.3f)
+    "VSoftMarginV",                    // 197 — raw float (%.3f)
+    "VHardMarginV",                    // 198 — raw float (%.3f)
+    "OutputPIDMA_N",                   // 199
+    "OutputPIDFilterTC",               // 200
+    "VoltageFilterTC",                 // 201
+    "VoltageDWindowMs",                // 202
+    "ProtectionProxGateV",             // 203
+    "SlopeBleedThresh",                // 204
+    "SlopeBleedK",                     // 205
+    "DvdtAlpha",                       // 206
+    "SlopeBleedProxV",                 // 207
+    "StartupRiseRate",                 // 208
+    "absorptionCompleteTime",          // 209
+    "OnOff",                           // 210
+    "ManualFieldToggle",               // 211
+    "HiLow",                           // 212
+    "LimpHome",                        // 213
+    "AlarmActivate",                   // 214
+    "TempAlarm",                       // 215
+    "VoltageAlarmHigh",                // 216
+    "VoltageAlarmLow",                 // 217
+    "CurrentAlarmHigh",                // 218
+    "AlarmTest",                       // 219
+    "AlarmLatchEnabled",               // 220
+    "MaintainMode",                    // 221
+    "ManualSOCPoint",                  // 222
+    "LearningMode",                    // 223
+    "LearningPaused",                  // 224
+    "IgnoreLearningDuringPenalty",     // 225
+    "ShowLearningDebugMessages",       // 226
+    "LogAllLearningEvents",            // 227
+    "CloudFeatures",                   // 228
+    "LearningDryRunMode",              // 229
+    "AutoShuntGainCorrection",         // 230
+    "AutoAltCurrentZero",              // 231
+    "WindingTempOffset",               // 232
+    "ManualLifePercentage",            // 233
+    "UVThresholdHigh",                 // 234
+    "weatherModeEnabled",              // 235
+    "SENSOR_UPLOAD_INTERVAL",          // 236
+    "imuEnabled",                      // 237
+    "AbsorptionVoltage",               // 238
+    "AbsorptionTimeoutMs",             // 239
+    "bulkVoltageHoldMs",               // 240
+    "capLimitMode",                    // 241
+    "TargetVoltageMode",               // 242
+    "TargetVoltageSetpoint",           // 243
+    "RebulkCurrent_A",                 // 244
+    "UseFloat",                        // 245
+    "anomalyMarginAmps",               // 246
+    "anomalyAlarmThreshold",           // 247
+    "anomalyAlarmEnable",              // 248
+    "degradationThreshold",            // 249
+    "TempAlarmLow",                    // 250
+    "LoadDumpDtThresh",                // 251
+    "LoadDumpCurrentDrop",             // 252
+    "CVTuningMode",                    // 253
+    "cvWaveAmplitudeV",                // 254
+    "cvWavePeriodSec",                 // 255
+    "cvKOvershoot",                    // 256
+    "cvConsecutiveReads",              // 257
+    "ThermalTuningMode",               // 258
+    "thermalWaveLowF",                 // 259
+    "thermalWaveHighF",                // 260
+    "thermalWaveHalfPeriodMin",        // 261
+    "thermalKOvershoot",               // 262
+    "thermalKUndershoot",              // 263
+    "thermalSettleThreshF",            // 264
+    "thermalConsecutiveReads",         // 265
+    "webgaugesinterval",               // 266
+    "plotTimeWindow",                  // 267
+    "Ymin1",                           // 268
+    "Ymax1",                           // 269
+    "Ymin2",                           // 270
+    "Ymax2",                           // 271
+    "Ymin3",                           // 272
+    "Ymax3",                           // 273
+    "Ymin4",                           // 274
+    "Ymax4",                           // 275
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -5823,7 +5826,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("SwitchControlOverride_checkbox", data.SwitchControlOverride, "SwitchControlOverride");
         updateCheckbox("header-alternator-enable", data.OnOff, "OnOff");
         updateCheckbox("LimpHome_checkbox", data.LimpHome, "LimpHome");
-        // HiLow / charge rate mode handled via pendingToggles in CSVData2 handler
+        // HiLow / charge rate mode handled via pendingToggles in CSVData3 handler
         updateCheckbox("VeData_checkbox", data.VeData, "VeData");
         updateCheckbox("NMEA0183Data_checkbox", data.NMEA0183Data, "NMEA0183Data");
         updateCheckbox("NMEA2KData_checkbox", data.NMEA2KData, "NMEA2KData");
@@ -6443,22 +6446,14 @@ window.addEventListener("load", function () {
                 lastSeenRev = data.stateRevision;
             }
 
-            // Track the interval for toggle functionality
-            if (data.webgaugesinterval) {
-                window._lastKnownInterval = data.webgaugesinterval;
-            }
-            if (data.plotTimeWindow) {
-                window._lastKnownTimeWindow = data.plotTimeWindow;
-            }
-            //i'm in the CSV handler here
-            // Configuration check logic 
-            configCheckCounter++;
-            const checkInterval = getConfigCheckInterval(data.webgaugesinterval);
+            //i'm in the CSV handler here (webgaugesinterval/plotTimeWindow now come from CSVData3)
 
-            if (configCheckCounter >= checkInterval) {
-                configCheckCounter = 0; // Reset counter
-                updatePlotConfiguration(data);
+            // Feed CV tuning plot cache — voltageTarget and Icv are now in CSV1 (fast stream)
+            if (data.voltageTarget !== undefined) {
+                cvPlotCache.voltageTarget = parseFloat(data.voltageTarget);
+                if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
             }
+            if (data.Icv !== undefined) cvPlotCache.Icv = parseFloat(data.Icv);
 
             // Cache mode for other functions to use
             if (data.currentMode !== undefined) {
@@ -6547,7 +6542,14 @@ window.addEventListener("load", function () {
                         const partitionNames = ["Factory Golden", "User Updateable"];
                         newTextContent = partitionNames[value] || `Unknown (${value})`;
                     }
-                    // Default: display as integer 
+                    // CV loop fields (voltageTarget/Icv moved from CSV2 → CSV1)
+                    else if (key === "voltageTarget" || key === "voltageError") {
+                        newTextContent = (value / 100).toFixed(3);
+                    }
+                    else if (key === "Icv") {
+                        newTextContent = (value / 100).toFixed(2);
+                    }
+                    // Default: display as integer
                     else {
                         newTextContent = Math.round(value);
                     }
@@ -6595,112 +6597,28 @@ window.addEventListener("load", function () {
                 ["imu_yaw_rate_dps_ID", "imu_yaw_rate_dps"],
                 ["imu_total_accel_g_ID", "imu_total_accel_g"],
                 ["imu_hf_vibration_energy_ID", "imu_hf_vibration_energy"],
-                ["imu_msi_score_ID", "imu_msi_score"],
-                ["imu_vomit_pct_ID", "imu_vomit_pct"],
-                ["imu_anchorage_comfort_ID", "imu_anchorage_comfort"],
+                // imu_msi_score, imu_vomit_pct, imu_anchorage_comfort moved to CSV2 otherFields — those fields are in CSV2
             ];
 
             // Update alarm status, this is GPIO21 buzzer/alarm
             updateAlarmStatus(data);
 
-            // Other fields - update every 4th cycle - ALL remaining payload1 variables (were non-critical OR new)
+            // Other fields - update every 4th cycle - fields that are in CSV1_FIELDS
+            // (fields that moved to CSV2 were relocated to CSV2 otherFields)
             const otherFields = [
                 ["AltTempID", "AlternatorTemperatureF"],
                 ["VictronVoltageID", "VictronVoltage"],
-                ["VeTimeID", "VeTime"],
-                ["MaximumLoopTimeID", "MaximumLoopTime"],
-                ["ft_loop_win_ID", "loopTime5sWindow_ms"],
-                ["ft_loop_ses_ID", "MaximumLoopTime_ms"],
-                ["ft_SendWifiData_win_ID", "ft_SendWifiData_win"],
-                ["ft_SendWifiData_ses_ID", "ft_SendWifiData_ses"],
-                ["ft_CheckAlarms_win_ID", "ft_CheckAlarms_win"],
-                ["ft_CheckAlarms_ses_ID", "ft_CheckAlarms_ses"],
-                ["ft_calculateDerivedMetrics_win_ID", "ft_calculateDerivedMetrics_win"],
-                ["ft_calculateDerivedMetrics_ses_ID", "ft_calculateDerivedMetrics_ses"],
-                ["ft_logDashboardValues_win_ID", "ft_logDashboardValues_win"],
-                ["ft_logDashboardValues_ses_ID", "ft_logDashboardValues_ses"],
-                ["ft_updateSystemHealthStats_win_ID", "ft_updateSystemHealthStats_win"],
-                ["ft_updateSystemHealthStats_ses_ID", "ft_updateSystemHealthStats_ses"],
-                ["ft_checkWiFiConnection_win_ID", "ft_checkWiFiConnection_win"],
-                ["ft_checkWiFiConnection_ses_ID", "ft_checkWiFiConnection_ses"],
-                ["ft_ch1_compute_stats_win_ID", "ft_ch1_compute_stats_win"],
-                ["ft_ch1_compute_stats_ses_ID", "ft_ch1_compute_stats_ses"],
-                ["ft_UpdateEngineRuntime_win_ID", "ft_UpdateEngineRuntime_win"],
-                ["ft_UpdateEngineRuntime_ses_ID", "ft_UpdateEngineRuntime_ses"],
-                ["ft_UpdateEngineFuel_win_ID", "ft_UpdateEngineFuel_win"],
-                ["ft_UpdateEngineFuel_ses_ID", "ft_UpdateEngineFuel_ses"],
-                ["ft_UpdateBatterySOC_win_ID", "ft_UpdateBatterySOC_win"],
-                ["ft_UpdateBatterySOC_ses_ID", "ft_UpdateBatterySOC_ses"],
-                ["ft_UpdateTravelStatistics_win_ID", "ft_UpdateTravelStatistics_win"],
-                ["ft_UpdateTravelStatistics_ses_ID", "ft_UpdateTravelStatistics_ses"],
-                ["ft_UpdateDistanceThisInterval_win_ID", "ft_UpdateDistanceThisInterval_win"],
-                ["ft_UpdateDistanceThisInterval_ses_ID", "ft_UpdateDistanceThisInterval_ses"],
-                ["ft_UpdateBoardTempPressureMaximums_win_ID", "ft_UpdateBoardTempPressureMaximums_win"],
-                ["ft_UpdateBoardTempPressureMaximums_ses_ID", "ft_UpdateBoardTempPressureMaximums_ses"],
-                ["ft_handleSocGainReset_win_ID", "ft_handleSocGainReset_win"],
-                ["ft_handleSocGainReset_ses_ID", "ft_handleSocGainReset_ses"],
-                ["ft_handleAltZeroReset_win_ID", "ft_handleAltZeroReset_win"],
-                ["ft_handleAltZeroReset_ses_ID", "ft_handleAltZeroReset_ses"],
-                ["ft_calculateChargeTimes_win_ID", "ft_calculateChargeTimes_win"],
-                ["ft_calculateChargeTimes_ses_ID", "ft_calculateChargeTimes_ses"],
-                ["ft_UpdateSailingMetrics_win_ID", "ft_UpdateSailingMetrics_win"],
-                ["ft_UpdateSailingMetrics_ses_ID", "ft_UpdateSailingMetrics_ses"],
-                ["ft_updateWeatherMode_win_ID", "ft_updateWeatherMode_win"],
-                ["ft_updateWeatherMode_ses_ID", "ft_updateWeatherMode_ses"],
-                ["ft_updateSensorWindow_win_ID", "ft_updateSensorWindow_win"],
-                ["ft_updateSensorWindow_ses_ID", "ft_updateSensorWindow_ses"],
-                ["ft_checkTimeSync_win_ID", "ft_checkTimeSync_win"],
-                ["ft_checkTimeSync_ses_ID", "ft_checkTimeSync_ses"],
-                ["HeadingNMEAID", "HeadingNMEA"],
-                ["EngineCyclesID", "EngineCycles"],
                 ["header-voltage", "IBV"],
                 ["header-alt-current", "MeasuredAmps"],
                 ["header-batt-current", "Bcur"],
                 ["header-alt-temp", "AlternatorTemperatureF"],
                 ["header-rpm", "RPM"],
-                ["WifiStrengthID", "WifiStrength"],
-                ["CurrentSessionDurationID", "CurrentSessionDuration"],
                 ["currentModeID", "currentMode"],
-                ["currentPartitionTypeID", "currentPartitionType"],
-                ["fastOvCurrentCapID", "fastOvCurrentCap"],
-                ["fastOvClampCountID", "fastOvClampCount"],
-                ["fastOvSoftCountID", "fastOvSoftCount"],
-                ["fastOvHardCountID", "fastOvHardCount"],
-                ["iExcessCountID", "iExcessCount"],
-                ["dBcur_dt_ID", "dBcur_dt"],
-                ["loadDumpActive_ID", "loadDumpActive"],
-                ["inaOVCountID", "inaOVCount"],
-                ["hardOCCountID", "hardOCCount"],
-                ["voltSpikeCountID", "voltSpikeCount"],
-                ["voltDisagreeCritCountID", "voltDisagreeCritCount"],
-                ["voltDisagreeWarnCountID", "voltDisagreeWarnCount"],
-                ["voltImplausibleCountID", "voltImplausibleCount"],
-                ["tempCritCountID", "tempCritCount"],
-                ["tempSustainedCountID", "tempSustainedCount"],
-                ["tempStaleCountID", "tempStaleCount"],
-                ["currentStaleCountID", "currentStaleCount"],
-                ["ch1_last_ms_ID", "ch1_last_ms"],
-                ["ch1_avg_10s_ID", "ch1_avg_10s"],
-                ["ch1_worst_10s_ID", "ch1_worst_10s"],
-                ["ch1_over2x_10s_ID", "ch1_over2x_10s"],
-                ["ch1_avg_2m_ID", "ch1_avg_2m"],
-                ["ch1_worst_2m_ID", "ch1_worst_2m"],
-                ["ch1_over2x_2m_ID", "ch1_over2x_2m"],
-                ["ch1_avg_at_ID", "ch1_avg_at"],
-                ["ch1_worst_at_ID", "ch1_worst_at"],
-                ["ch1_over2x_at_ID", "ch1_over2x_at"],
-                ["ina_last_ms_ID", "ina_last_ms"],
-                ["ina_avg_10s_ID", "ina_avg_10s"],
-                ["ina_worst_10s_ID", "ina_worst_10s"],
-                ["ina_over2x_10s_ID", "ina_over2x_10s"],
-                ["ina_avg_2m_ID", "ina_avg_2m"],
-                ["ina_worst_2m_ID", "ina_worst_2m"],
-                ["ina_over2x_2m_ID", "ina_over2x_2m"],
-                ["ina_avg_at_ID", "ina_avg_at"],
-                ["ina_worst_at_ID", "ina_worst_at"],
-                ["ina_over2x_at_ID", "ina_over2x_at"],
                 ["BatteryV_rawID", "BatteryV_raw"],
-                ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"]
+                ["MeasuredAmps_filtered_ID", "MeasuredAmps_filtered"],
+                // CV loop (voltageTarget/Icv moved from CSV2 → CSV1 at indices 32, 33)
+                ["voltageTarget_display", "voltageTarget"],
+                ["Icv_display", "Icv"],
             ];
 
             // Update critical fields every cycle
@@ -6785,13 +6703,7 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
 
-            // Feed CV tuning plot cache — voltageTarget and Icv are CSV2-only;
-            // BatteryV_raw is CSV1 and is read directly in processCSVDataOptimized.
-            if (data.voltageTarget !== undefined) {
-                cvPlotCache.voltageTarget = parseFloat(data.voltageTarget);
-                if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
-            }
-            if (data.Icv !== undefined)              cvPlotCache.Icv              = parseFloat(data.Icv);
+            // voltageTarget and Icv moved to CSV1 (fast stream) — cvPlotCache is updated in handleCSVData
 
             if (data.stateRevision !== undefined) {
                 lastSeenRev = data.stateRevision;
@@ -6889,7 +6801,9 @@ window.addEventListener("load", function () {
                     // Values scaled by 100 on server (existing)
                     else if (["IBVMax", "ChargeCycles", "ChargeCycles_AllTime", "thermalPenaltyAmps", "MeasuredAmpsMax", "SOC_percent", "VictronCurrent", "performanceRatio", "UVThresholdHigh",
                         "PeakVoltage_AllTime", "MinVoltage", "MinVoltage_AllTime", "AvgSOC_AllTime", "AvgSpeed_AllTime", "InsulationLifePercent", "GreaseLifePercent",
-                        "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA"].includes(key)) {
+                        "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA",
+                        "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at",
+                        "ch1_worst_10s", "ch1_worst_2m", "ch1_worst_at", "ina_worst_10s", "ina_worst_2m", "ina_worst_at"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     // GPS coordinates scaled by 1,000,000 on server
@@ -6897,7 +6811,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 1000000).toFixed(6);
                     }
                     // Value scaled by 1000000 on server  
-                    else if (["LastSessionMaxLoopTime"].includes(key)) {
+                    else if (["LastSessionMaxLoopTime", "MaximumLoopTime"].includes(key)) {
                         newTextContent = (value / 1000000).toFixed(3);
                     }
                     // absorptionCompleteTime: stored/sent as ms -> display seconds
@@ -6930,6 +6844,10 @@ window.addEventListener("load", function () {
                     else if (key === "voltageControlActive" || key === "loadDumpActive") {
                         newTextContent = value === 1 ? "YES" : "NO";
                     }
+                    else if (key === "currentPartitionType") {
+                        const partitionNames = ["Factory Golden", "User Updateable"];
+                        newTextContent = partitionNames[value] || `Unknown (${value})`;
+                    }
                     else if (key === "dBcur_dt") {
                         newTextContent = (value / 10).toFixed(1);  // ×10 -> A/s, 1dp
                     }
@@ -6947,7 +6865,7 @@ window.addEventListener("load", function () {
                     else if (key === "EngineFuelUsed" || key === "EngineFuelUsed_AllTime") {
                         newTextContent = (value / 100).toFixed(2);
                     }
-                    else if (key.startsWith("ft_rai_")) {
+                    else if (key.startsWith("ft_") || key === "VeTime2") {
                         newTextContent = (value / 1000).toFixed(1);
                     }
                     else if (key === "AlternatorFuelUsed" || key === "AlternatorFuelUsed_AllTime") {
@@ -6980,6 +6898,22 @@ window.addEventListener("load", function () {
                     }
                     else if (["deviceIdUpper", "deviceIdLower"].includes(key)) {
                         newTextContent = value;
+                    }
+                    // timeSinceLastOverheat: pre-divided by 1000 in C++ (seconds) — convert to hours for display
+                    else if (key === "timeSinceLastOverheat") {
+                        newTextContent = (value / 3600).toFixed(2);
+                    }
+                    // overheatingPenaltyTimer: pre-divided by 1000 in C++ — display raw seconds
+                    else if (key === "overheatingPenaltyTimer") {
+                        newTextContent = (value).toFixed(0);
+                    }
+                    // Values scaled by 100 on server (pid and learning fields)
+                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp", "VoltageKd"].includes(key)) {
+                        newTextContent = (value / 100).toFixed(2);
+                    }
+                    // safeHours: stored as seconds — display as hours
+                    else if (key.startsWith("safeHours")) {
+                        newTextContent = (value / 3600).toFixed(2);
                     }
                     // Default: display as integer
                     else {
@@ -7211,9 +7145,7 @@ window.addEventListener("load", function () {
                 ["imu_min_stat_rough_ID",      "imu_min_stat_rough"],
                 ["imu_min_stat_extreme_ID",    "imu_min_stat_extreme"],
 
-                // IMU Diagnostics
-                ["imuEnabled_ID", "imuEnabled"],
-                ["imuMountOrientation_ID", "imuMountOrientation"],
+                // IMU Diagnostics (imuEnabled/imuMountOrientation moved to CSV3 handler — those fields are in CSV3)
                 ["imu_fifo_overrun_count_ID", "imu_fifo_overrun_count"],
                 ["imu_i2c_error_count_ID", "imu_i2c_error_count"],
                 ["imu_unknown_tag_count_ID", "imu_unknown_tag_count"],
@@ -7238,11 +7170,14 @@ window.addEventListener("load", function () {
                 ["innerTermD_display", "innerTermD"],
 
                 ["voltageCtrlActive_display", "voltageControlActive"],
-                ["voltageTarget_display", "voltageTarget"],
+                // voltageTarget and Icv moved to CSV1 otherFields (those fields are in CSV1 at indices 32, 33)
                 ["voltageError_display", "voltageError"],
-                ["Icv_display", "Icv"],
                 ["cv_I_display", "cv_I"],
                 ["cv_D_display", "cv_D"],
+                // IMU comfort/comfort metrics (in CSV2)
+                ["imu_msi_score_ID", "imu_msi_score"],
+                ["imu_vomit_pct_ID", "imu_vomit_pct"],
+                ["imu_anchorage_comfort_ID", "imu_anchorage_comfort"],
                 ["ft_rai_total_win_ID", "ft_rai_total_win"],
                 ["ft_rai_total_ses_ID", "ft_rai_total_ses"],
                 ["ft_rai_ina228_win_ID", "ft_rai_ina228_win"],
@@ -7267,6 +7202,153 @@ window.addEventListener("load", function () {
                 ["tempRereadFailCountID", "tempRereadFailCount"],
                 ["tempResolutionFixCrcFailCountID", "tempResolutionFixCrcFailCount"],
                 ["tempEnumerateFailCountID", "tempEnumerateFailCount"],
+
+                // Firmware diagnostics (moved from CSV3 otherFields — all in CSV2_FIELDS)
+                ["currentRPMTableIndex_display", "currentRPMTableIndex"],
+                ["pidInitialized_display", "pidInitialized"],
+                ["overheatCount0_display", "overheatCount0"],
+                ["overheatCount1_display", "overheatCount1"],
+                ["overheatCount2_display", "overheatCount2"],
+                ["overheatCount3_display", "overheatCount3"],
+                ["overheatCount4_display", "overheatCount4"],
+                ["overheatCount5_display", "overheatCount5"],
+                ["overheatCount6_display", "overheatCount6"],
+                ["overheatCount7_display", "overheatCount7"],
+                ["overheatCount8_display", "overheatCount8"],
+                ["overheatCount9_display", "overheatCount9"],
+                // safeHours0-9 removed — not in any CSV field array (stale references)
+                ["pidSetpoint_display", "pidSetpoint"],
+                ["timeSinceLastOverheat_display", "timeSinceLastOverheat"],
+                ["FreeInternalRamID", "FreeInternalRam"],
+                ["TotalInternalRamID", "TotalInternalRam"],
+                ["LargestInternalBlockID", "LargestInternalBlock"],
+                ["FreePSRAMID", "FreePSRAM"],
+                ["TotalPSRAMID", "TotalPSRAM"],
+                ["HeapfragID", "Heapfrag"],
+                ["ft_ReadAnalogInputs_win_ID", "ft_ReadAnalogInputs_win"],
+                ["ft_ReadAnalogInputs_ses_ID", "ft_ReadAnalogInputs_ses"],
+                ["ft_AdjustFieldLearnMode_win_ID", "ft_AdjustFieldLearnMode_win"],
+                ["ft_AdjustFieldLearnMode_ses_ID", "ft_AdjustFieldLearnMode_ses"],
+                ["ft_uploadSensorHistory_win_ID", "ft_uploadSensorHistory_win"],
+                ["ft_uploadSensorHistory_ses_ID", "ft_uploadSensorHistory_ses"],
+                ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
+                ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
+                ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
+                ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
+                ["ft_saveNVSData_win_ID", "ft_saveNVSData_win"],
+                ["ft_saveNVSData_ses_ID", "ft_saveNVSData_ses"],
+                ["nvsCycleMs_ID", "nvsCycleMs"],             // last full NVS drain cycle (ms)
+                ["ft_FlushFileWriteQueue_win_ID", "ft_FlushFileWriteQueue_win"],
+                ["ft_FlushFileWriteQueue_ses_ID", "ft_FlushFileWriteQueue_ses"],
+                ["ft_efficiencyTracker_win_ID", "ft_efficiencyTracker_win"],
+                ["ft_efficiencyTracker_ses_ID", "ft_efficiencyTracker_ses"],
+                ["VeTime2_ID", "VeTime2"],
+                ["systemIDActive_ID", "systemIDActive"],
+                ["systemIDResultsReady_ID", "systemIDResultsReady"],
+                ["systemIDStepAmp_0_ID", "systemIDStepAmp_0"],
+                ["systemIDStepAmp_1_ID", "systemIDStepAmp_1"],
+                ["systemIDStepAmp_2_ID", "systemIDStepAmp_2"],
+                ["systemIDQuietPP_0_ID", "systemIDQuietPP_0"],
+                ["systemIDQuietPP_1_ID", "systemIDQuietPP_1"],
+                ["systemIDQuietPP_2_ID", "systemIDQuietPP_2"],
+                ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
+                ["systemIDRiseDelay_1_ID", "systemIDRiseDelay_1"],
+                ["systemIDRiseDelay_2_ID", "systemIDRiseDelay_2"],
+                ["systemIDFallDelay_0_ID", "systemIDFallDelay_0"],
+                ["systemIDFallDelay_1_ID", "systemIDFallDelay_1"],
+                ["systemIDFallDelay_2_ID", "systemIDFallDelay_2"],
+                ["systemIDRiseAvg_ID", "systemIDRiseAvg"],
+                ["systemIDFallAvg_ID", "systemIDFallAvg"],
+
+                // Fields moved from CSV1 otherFields (were in old 137-field CSV1; now in CSV2)
+                ["VeTimeID", "VeTime"],
+                ["MaximumLoopTimeID", "MaximumLoopTime"],
+                ["ft_loop_win_ID", "loopTime5sWindow_ms"],
+                ["ft_loop_ses_ID", "MaximumLoopTime_ms"],
+                ["ft_SendWifiData_win_ID", "ft_SendWifiData_win"],
+                ["ft_SendWifiData_ses_ID", "ft_SendWifiData_ses"],
+                ["ft_CheckAlarms_win_ID", "ft_CheckAlarms_win"],
+                ["ft_CheckAlarms_ses_ID", "ft_CheckAlarms_ses"],
+                ["ft_calculateDerivedMetrics_win_ID", "ft_calculateDerivedMetrics_win"],
+                ["ft_calculateDerivedMetrics_ses_ID", "ft_calculateDerivedMetrics_ses"],
+                ["ft_logDashboardValues_win_ID", "ft_logDashboardValues_win"],
+                ["ft_logDashboardValues_ses_ID", "ft_logDashboardValues_ses"],
+                ["ft_updateSystemHealthStats_win_ID", "ft_updateSystemHealthStats_win"],
+                ["ft_updateSystemHealthStats_ses_ID", "ft_updateSystemHealthStats_ses"],
+                ["ft_checkWiFiConnection_win_ID", "ft_checkWiFiConnection_win"],
+                ["ft_checkWiFiConnection_ses_ID", "ft_checkWiFiConnection_ses"],
+                ["ft_ch1_compute_stats_win_ID", "ft_ch1_compute_stats_win"],
+                ["ft_ch1_compute_stats_ses_ID", "ft_ch1_compute_stats_ses"],
+                ["ft_UpdateEngineRuntime_win_ID", "ft_UpdateEngineRuntime_win"],
+                ["ft_UpdateEngineRuntime_ses_ID", "ft_UpdateEngineRuntime_ses"],
+                ["ft_UpdateEngineFuel_win_ID", "ft_UpdateEngineFuel_win"],
+                ["ft_UpdateEngineFuel_ses_ID", "ft_UpdateEngineFuel_ses"],
+                ["ft_UpdateBatterySOC_win_ID", "ft_UpdateBatterySOC_win"],
+                ["ft_UpdateBatterySOC_ses_ID", "ft_UpdateBatterySOC_ses"],
+                ["ft_UpdateTravelStatistics_win_ID", "ft_UpdateTravelStatistics_win"],
+                ["ft_UpdateTravelStatistics_ses_ID", "ft_UpdateTravelStatistics_ses"],
+                ["ft_UpdateDistanceThisInterval_win_ID", "ft_UpdateDistanceThisInterval_win"],
+                ["ft_UpdateDistanceThisInterval_ses_ID", "ft_UpdateDistanceThisInterval_ses"],
+                ["ft_UpdateBoardTempPressureMaximums_win_ID", "ft_UpdateBoardTempPressureMaximums_win"],
+                ["ft_UpdateBoardTempPressureMaximums_ses_ID", "ft_UpdateBoardTempPressureMaximums_ses"],
+                ["ft_handleSocGainReset_win_ID", "ft_handleSocGainReset_win"],
+                ["ft_handleSocGainReset_ses_ID", "ft_handleSocGainReset_ses"],
+                ["ft_handleAltZeroReset_win_ID", "ft_handleAltZeroReset_win"],
+                ["ft_handleAltZeroReset_ses_ID", "ft_handleAltZeroReset_ses"],
+                ["ft_calculateChargeTimes_win_ID", "ft_calculateChargeTimes_win"],
+                ["ft_calculateChargeTimes_ses_ID", "ft_calculateChargeTimes_ses"],
+                ["ft_UpdateSailingMetrics_win_ID", "ft_UpdateSailingMetrics_win"],
+                ["ft_UpdateSailingMetrics_ses_ID", "ft_UpdateSailingMetrics_ses"],
+                ["ft_updateWeatherMode_win_ID", "ft_updateWeatherMode_win"],
+                ["ft_updateWeatherMode_ses_ID", "ft_updateWeatherMode_ses"],
+                ["ft_updateSensorWindow_win_ID", "ft_updateSensorWindow_win"],
+                ["ft_updateSensorWindow_ses_ID", "ft_updateSensorWindow_ses"],
+                ["ft_checkTimeSync_win_ID", "ft_checkTimeSync_win"],
+                ["ft_checkTimeSync_ses_ID", "ft_checkTimeSync_ses"],
+                ["HeadingNMEAID", "HeadingNMEA"],
+                ["EngineCyclesID", "EngineCycles"],
+                ["WifiStrengthID", "WifiStrength"],
+                ["CurrentSessionDurationID", "CurrentSessionDuration"],
+                ["currentPartitionTypeID", "currentPartitionType"],
+                // Voltage & Current Protection events
+                ["fastOvCurrentCapID", "fastOvCurrentCap"],
+                ["fastOvClampCountID", "fastOvClampCount"],
+                ["fastOvSoftCountID", "fastOvSoftCount"],
+                ["fastOvHardCountID", "fastOvHardCount"],
+                ["iExcessCountID", "iExcessCount"],
+                ["dBcur_dt_ID", "dBcur_dt"],
+                ["loadDumpActive_ID", "loadDumpActive"],
+                ["inaOVCountID", "inaOVCount"],
+                ["hardOCCountID", "hardOCCount"],
+                ["voltSpikeCountID", "voltSpikeCount"],
+                ["voltDisagreeCritCountID", "voltDisagreeCritCount"],
+                ["voltDisagreeWarnCountID", "voltDisagreeWarnCount"],
+                ["voltImplausibleCountID", "voltImplausibleCount"],
+                ["tempCritCountID", "tempCritCount"],
+                ["tempSustainedCountID", "tempSustainedCount"],
+                ["tempStaleCountID", "tempStaleCount"],
+                ["currentStaleCountID", "currentStaleCount"],
+                // CH1 / INA timing stats
+                ["ch1_last_ms_ID", "ch1_last_ms"],
+                ["ch1_avg_10s_ID", "ch1_avg_10s"],
+                ["ch1_worst_10s_ID", "ch1_worst_10s"],
+                ["ch1_over2x_10s_ID", "ch1_over2x_10s"],
+                ["ch1_avg_2m_ID", "ch1_avg_2m"],
+                ["ch1_worst_2m_ID", "ch1_worst_2m"],
+                ["ch1_over2x_2m_ID", "ch1_over2x_2m"],
+                ["ch1_avg_at_ID", "ch1_avg_at"],
+                ["ch1_worst_at_ID", "ch1_worst_at"],
+                ["ch1_over2x_at_ID", "ch1_over2x_at"],
+                ["ina_last_ms_ID", "ina_last_ms"],
+                ["ina_avg_10s_ID", "ina_avg_10s"],
+                ["ina_worst_10s_ID", "ina_worst_10s"],
+                ["ina_over2x_10s_ID", "ina_over2x_10s"],
+                ["ina_avg_2m_ID", "ina_avg_2m"],
+                ["ina_worst_2m_ID", "ina_worst_2m"],
+                ["ina_over2x_2m_ID", "ina_over2x_2m"],
+                ["ina_avg_at_ID", "ina_avg_at"],
+                ["ina_worst_at_ID", "ina_worst_at"],
+                ["ina_over2x_at_ID", "ina_over2x_at"],
 
             ];
 
@@ -7321,53 +7403,9 @@ window.addEventListener("load", function () {
             // Update echos every cycle
             updateAllEchosOptimized(data);
 
-            // Update toggle states 
+            // Update toggle states
             updateTogglesFromData(data);
-            if (data.capLimitMode !== undefined) {
-                const pending = pendingToggles.get('capLimitMode');
-                if (pending) {
-                    if (data.capLimitMode === pending.desiredValue) {
-                        // ESP32 confirmed our change
-                        pendingToggles.delete('capLimitMode');
-                        setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
-                    } else if (
-                        (data.stateRevision !== undefined && data.stateRevision > pending.baseRev) ||
-                        (pending.deadlineMs !== undefined && Date.now() > pending.deadlineMs)
-                    ) {
-                        // Newer revision arrived and still disagrees, or deadline expired — revert
-                        pendingToggles.delete('capLimitMode');
-                        setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
-                    } else {
-                        // Still waiting — set deadline if not set, keep optimistic UI
-                        if (pending.deadlineMs === undefined) {
-                            pending.deadlineMs = Date.now() + 2500;
-                        }
-                    }
-                } else {
-                    setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
-                }
-            }
-            if (data.HiLow !== undefined) {
-                const pending = pendingToggles.get('HiLow');
-                if (pending) {
-                    if (data.HiLow === pending.desiredValue) {
-                        pendingToggles.delete('HiLow');
-                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
-                    } else if (
-                        (data.stateRevision !== undefined && data.stateRevision > pending.baseRev) ||
-                        (pending.deadlineMs !== undefined && Date.now() > pending.deadlineMs)
-                    ) {
-                        pendingToggles.delete('HiLow');
-                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
-                    } else {
-                        if (pending.deadlineMs === undefined) {
-                            pending.deadlineMs = Date.now() + 2500;
-                        }
-                    }
-                } else {
-                    setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
-                }
-            }
+            // capLimitMode / HiLow pending toggle confirmation handled in CSVData3 handler
 
             // Update life indicators
             updateLifeIndicators(data);
@@ -7480,6 +7518,62 @@ window.addEventListener("load", function () {
                 displayTempUnit = data.displayTempUnit;
                 updateAllTempUnitLabels();
             }
+            // Cache interval/window from CSV3 (settings stream) for gap detection and plot sizing
+            if (data.webgaugesinterval) {
+                window._lastKnownInterval = data.webgaugesinterval;
+            }
+            if (data.plotTimeWindow) {
+                window._lastKnownTimeWindow = data.plotTimeWindow;
+            }
+            // Update plot axes/configuration whenever settings arrive
+            updatePlotConfiguration(data);
+            // Update all setting echo labels and toggles from CSV3 data
+            updateAllEchosOptimized(data);
+            updateTogglesFromData(data);
+            // capLimitMode pending toggle confirmation (moved from CSV2 handler — capLimitMode is now in CSV3)
+            if (data.capLimitMode !== undefined) {
+                const pending = pendingToggles.get('capLimitMode');
+                if (pending) {
+                    if (data.capLimitMode === pending.desiredValue) {
+                        pendingToggles.delete('capLimitMode');
+                        setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
+                    } else if (
+                        (data.stateRevision !== undefined && data.stateRevision > pending.baseRev) ||
+                        (pending.deadlineMs !== undefined && Date.now() > pending.deadlineMs)
+                    ) {
+                        pendingToggles.delete('capLimitMode');
+                        setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
+                    } else {
+                        if (pending.deadlineMs === undefined) {
+                            pending.deadlineMs = Date.now() + 2500;
+                        }
+                    }
+                } else {
+                    setCapMode(data.capLimitMode === 1 ? 'kw' : 'amps');
+                }
+            }
+            // HiLow pending toggle confirmation (moved from CSV2 handler — HiLow is now in CSV3)
+            if (data.HiLow !== undefined) {
+                const pending = pendingToggles.get('HiLow');
+                if (pending) {
+                    if (data.HiLow === pending.desiredValue) {
+                        pendingToggles.delete('HiLow');
+                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
+                    } else if (
+                        (data.stateRevision !== undefined && data.stateRevision > pending.baseRev) ||
+                        (pending.deadlineMs !== undefined && Date.now() > pending.deadlineMs)
+                    ) {
+                        pendingToggles.delete('HiLow');
+                        setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
+                    } else {
+                        if (pending.deadlineMs === undefined) {
+                            pending.deadlineMs = Date.now() + 2500;
+                        }
+                    }
+                } else {
+                    setChargeRateMode(data.HiLow === 0 ? 'low' : 'high');
+                }
+            }
             // updateFields for CSVData3     the only time a user setting needs to be displayed via updateFields() is if its shown somewhere other than an Echo (like a status indicator, for example).  Echos are updated elsewhere (updateAllEchosOptimized).
             const updateFields = (fieldArray) => {
                 for (const [elementId, key] of fieldArray) {
@@ -7499,6 +7593,15 @@ window.addEventListener("load", function () {
                     // overheatingPenaltyTimer is pre-divided by 1000 in C++ — display raw seconds
                     else if (key === "overheatingPenaltyTimer") {
                         newTextContent = (value).toFixed(0);
+                    }
+                    // Special handling for imuEnabled (in CSV3)
+                    else if (key === "imuEnabled") {
+                        newTextContent = value === 1 ? "Enabled" : "Disabled";
+                    }
+                    // Special handling for imuMountOrientation (in CSV3)
+                    else if (key === "imuMountOrientation") {
+                        const orientations = ["Fwd Bulkhead", "Aft Bulkhead", "Port Wall", "Stbd Wall"];
+                        newTextContent = orientations[value] || `Unknown (${value})`;
                     }
                     // Values sent as raw milliseconds — divide by 1000 to display in seconds
                     else if (["LearningSettlingPeriod", "rebulkDebounceTime", "MinFloatTime"].includes(key)) {
@@ -7535,63 +7638,9 @@ window.addEventListener("load", function () {
                 // Step 2: This array is a whitelist - it says "only update these specific HTML elements with these specific data values".
                 // Note: Many of these might not have corresponding HTML elements yet
                 // This list includes potential element IDs that might exist
-                ["currentRPMTableIndex_display", "currentRPMTableIndex"],
-                ["pidInitialized_display", "pidInitialized"],
-                ["overheatCount0_display", "overheatCount0"],
-                ["overheatCount1_display", "overheatCount1"],
-                ["overheatCount2_display", "overheatCount2"],
-                ["overheatCount3_display", "overheatCount3"],
-                ["overheatCount4_display", "overheatCount4"],
-                ["overheatCount5_display", "overheatCount5"],
-                ["overheatCount6_display", "overheatCount6"],
-                ["overheatCount7_display", "overheatCount7"],
-                ["overheatCount8_display", "overheatCount8"],
-                ["overheatCount9_display", "overheatCount9"],
-                ["safeHours0_display", "safeHours0"],
-                ["safeHours1_display", "safeHours1"],
-                ["safeHours2_display", "safeHours2"],
-                ["safeHours3_display", "safeHours3"],
-                ["safeHours4_display", "safeHours4"],
-                ["safeHours5_display", "safeHours5"],
-                ["safeHours6_display", "safeHours6"],
-                ["safeHours7_display", "safeHours7"],
-                ["safeHours8_display", "safeHours8"],
-                ["safeHours9_display", "safeHours9"],
-                ["pidSetpoint_display", "pidSetpoint"],
-                ["timeSinceLastOverheat_display", "timeSinceLastOverheat"],
-                ["FreeInternalRamID", "FreeInternalRam"],
-                ["TotalInternalRamID", "TotalInternalRam"],
-                ["LargestInternalBlockID", "LargestInternalBlock"],
-                ["FreePSRAMID", "FreePSRAM"],
-                ["TotalPSRAMID", "TotalPSRAM"],
-                ["HeapfragID", "Heapfrag"],
-                ["ft_ReadAnalogInputs_win_ID", "ft_ReadAnalogInputs_win"],
-                ["ft_ReadAnalogInputs_ses_ID", "ft_ReadAnalogInputs_ses"],
-                ["ft_AdjustFieldLearnMode_win_ID", "ft_AdjustFieldLearnMode_win"],
-                ["ft_AdjustFieldLearnMode_ses_ID", "ft_AdjustFieldLearnMode_ses"],
-                ["ft_uploadSensorHistory_win_ID", "ft_uploadSensorHistory_win"],
-                ["ft_uploadSensorHistory_ses_ID", "ft_uploadSensorHistory_ses"],
-                ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
-                ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
-                ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
-                ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
-                ["ft_saveNVSData_win_ID", "ft_saveNVSData_win"],
-                ["ft_saveNVSData_ses_ID", "ft_saveNVSData_ses"],
-                ["ft_FlushFileWriteQueue_win_ID", "ft_FlushFileWriteQueue_win"],
-                ["ft_FlushFileWriteQueue_ses_ID", "ft_FlushFileWriteQueue_ses"],
-                ["ft_efficiencyTracker_win_ID", "ft_efficiencyTracker_win"],
-                ["ft_efficiencyTracker_ses_ID", "ft_efficiencyTracker_ses"],
-                ["VeTime2_ID", "VeTime2"],
-                ["systemIDActive_ID", "systemIDActive"],
-                ["systemIDResultsReady_ID", "systemIDResultsReady"],
-                ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
-                ["systemIDRiseDelay_1_ID", "systemIDRiseDelay_1"],
-                ["systemIDRiseDelay_2_ID", "systemIDRiseDelay_2"],
-                ["systemIDFallDelay_0_ID", "systemIDFallDelay_0"],
-                ["systemIDFallDelay_1_ID", "systemIDFallDelay_1"],
-                ["systemIDFallDelay_2_ID", "systemIDFallDelay_2"],
-                ["systemIDRiseAvg_ID", "systemIDRiseAvg"],
-                ["systemIDFallAvg_ID", "systemIDFallAvg"]
+                // IMU settings (these fields live in CSV3)
+                ["imuEnabled_ID", "imuEnabled"],
+                ["imuMountOrientation_ID", "imuMountOrientation"],
 
             ];
 
@@ -7599,10 +7648,12 @@ window.addEventListener("load", function () {
             updateFields(otherFields);   // Step 3: Process the whitelist
             updatePidTuningConfiguration(data);  // ADD THIS LINE - Update PID plot config
 
-            // Update test-active panel with sysid phase from CSV3
-            _testActiveCSV3 = (parseInt(data.systemIDActive ?? 0) > 0) ? 'sysid' : null;
+            // Update test-active panel with sysid phase.
+            // systemIDActive is in CSV2_FIELDS (index 400), not CSV3 — read from DOM,
+            // which CSV2 otherFields already keeps current via ["systemIDActive_ID", "systemIDActive"].
+            const sysidPhaseNum = parseInt(getField("systemIDActive_ID") ?? 0);
+            _testActiveCSV3 = sysidPhaseNum > 0 ? 'sysid' : null;
             if (_testPanelCurrentTest === 'sysid') {
-                const sysidPhaseNum = parseInt(data.systemIDActive ?? 0);
                 updateTestPanelScore(undefined, undefined, SYSID_PHASE_NAMES[sysidPhaseNum] ?? ('Phase ' + sysidPhaseNum));
             }
             updateTestActivePanel();
@@ -10888,14 +10939,16 @@ function validateBatterySettings(proposedChanges) {
         return { valid: false, error: 'Absorption Voltage cannot be higher than Bulk Voltage.' };
     }
 
-    if (changedAny('FloatVoltage', 'AbsorptionVoltage') &&
+    if (changedAny('UseFloat', 'FloatVoltage', 'AbsorptionVoltage') &&
+        state.UseFloat == 1 &&
         Number.isFinite(state.FloatVoltage) &&
         Number.isFinite(state.AbsorptionVoltage) &&
         state.FloatVoltage > state.AbsorptionVoltage) {
         return { valid: false, error: 'Float Voltage cannot be higher than Absorption Voltage.' };
     }
 
-    if (changedAny('RebulkVoltage', 'FloatVoltage') &&
+    if (changedAny('UseFloat', 'RebulkVoltage', 'FloatVoltage') &&
+        state.UseFloat == 1 &&
         Number.isFinite(state.RebulkVoltage) &&
         Number.isFinite(state.FloatVoltage) &&
         state.RebulkVoltage >= state.FloatVoltage) {
@@ -11508,6 +11561,31 @@ function checkCVTestGate(checkbox) {
         alert('CV Step Test requires voltage-controlled mode.\n\nThe CV loop is only active in ABSORPTION, FLOAT, MAINTAIN, or TARGET V. In BULK the voltage loop has no authority and the test produces no useful data.\n\nEnter a voltage-controlled stage, then enable the test.');
         return false;
     }
+
+    // Guard: HIGH-phase target must not exceed BulkVoltage.
+    // updateChargingStage() is NOT suppressed during CVTuningMode. If battV rises
+    // above BulkVoltage+0.1V while the system is in the BULK branch, a BULK→ABSORPTION
+    // transition fires, which resets the absorption tail timer. If Bcur is reading 0
+    // (shunt not active), tailReached is immediately true and the absorption stage will
+    // time out and kill the output mid-test.
+    if (gLastChargeStage === CS_ABSORPTION || gLastChargeStage === CS_FLOAT) {
+        const amplitude = getEchoNumber('cvWaveAmplitudeV_echo');
+        const bulkV     = getEchoNumber('BulkVoltage_echo');
+        const absV      = getEchoNumber('AbsorptionVoltage_echo');
+        if (Number.isFinite(amplitude) && Number.isFinite(bulkV) && Number.isFinite(absV)) {
+            const stepTarget = absV + amplitude;
+            if (stepTarget > bulkV) {
+                checkbox.checked = false;
+                alert(
+                    `CV Step Test blocked: the HIGH-phase target (${stepTarget.toFixed(2)} V) exceeds BulkVoltage (${bulkV.toFixed(2)} V).\n\n` +
+                    `The charging stage machine runs continuously during this test. Stepping the voltage target above BulkVoltage can cause a stage transition that cuts the output mid-test.\n\n` +
+                    `Reduce Wave Amplitude, raise BulkVoltage, or use TARGET V mode (which suppresses the stage machine) to run this step test safely.`
+                );
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -11701,6 +11779,8 @@ function confirmSystemIDStart() {
             sysidLastPhase = -1;
             sysidPhaseStartWall = Date.now();
             sysidStartProgressPoll();
+            // Switch to Plots tab so user can watch the current waveform during the test.
+            if (vesselInfoComplete) showMainTab('plots');
         })
         .catch(err => {
             alert("Failed to send start command: " + err);
@@ -11738,6 +11818,31 @@ function sysidStartProgressPoll() {
     }
     document.getElementById('sysid-phase-bar').style.width = '0%';
 
+    // Wall-clock phase advancement: once we know a phase started, we advance the bar
+    // and labels by timer without waiting for the next CSV2 packet.
+    // CSV2 is the authoritative sync signal — if it shows a higher phase we jump ahead.
+    let wallPhase = 0;       // phase we're currently displaying (may be ahead of last CSV2)
+    let wallPhaseStart = 0;  // Date.now() when wallPhase was last set
+
+    function sysidSetWallPhase(p) {
+        if (p > wallPhase) {
+            wallPhase = p;
+            wallPhaseStart = Date.now();
+            for (const [pStr, name] of Object.entries(SYSID_PHASE_NAMES)) {
+                const pNum = parseInt(pStr);
+                const el = document.getElementById('sysid-p' + pNum);
+                if (!el) continue;
+                if (wallPhase > pNum) {
+                    el.textContent = '✅ ' + name; el.style.color = '#4caf50';
+                } else if (wallPhase === pNum) {
+                    el.textContent = '▶ ' + name + '…'; el.style.color = '#4a9eff';
+                } else {
+                    el.textContent = '⬜ ' + name; el.style.color = '';
+                }
+            }
+        }
+    }
+
     sysidPollInterval = setInterval(() => {
         elapsed += pollMs;
 
@@ -11746,30 +11851,21 @@ function sysidStartProgressPoll() {
 
         if (phase > 0) sysidEverActive = true;
 
-        // Mark completed phases
-        for (const [p, name] of Object.entries(SYSID_PHASE_NAMES)) {
-            const pNum = parseInt(p);
-            const el = document.getElementById('sysid-p' + pNum);
-            if (!el) continue;
-            if (phase > pNum) {
-                el.textContent = '✅ ' + name;
-                el.style.color = '#4caf50';
-            } else if (phase === pNum) {
-                el.textContent = '▶ ' + name + '…';
-                el.style.color = '#4a9eff';
-            } else {
-                el.textContent = '⬜ ' + name;
-                el.style.color = '';
+        // Sync to firmware phase if it's ahead of our wall-clock estimate
+        if (phase > wallPhase) sysidSetWallPhase(phase);
+
+        // Once a non-stabilise phase is active, advance by holdMs wall time.
+        // This means the UI advances immediately even if the next CSV2 is delayed.
+        if (wallPhase >= 2 && wallPhase <= 8) {
+            const elapsed_in_phase = Date.now() - wallPhaseStart;
+            if (elapsed_in_phase >= holdMs && wallPhase < 9) {
+                sysidSetWallPhase(wallPhase + 1);
             }
         }
 
-        // Phase bar: for stabilize use 30s window, for measured phases use holdMs
-        if (phase !== sysidLastPhase) {
-            sysidPhaseStartWall = Date.now();
-            sysidLastPhase = phase;
-        }
-        const phaseMs = (phase === 1) ? 30000 : holdMs;
-        const phasePct = Math.min(100, ((Date.now() - sysidPhaseStartWall) / phaseMs) * 100);
+        // Phase bar: for stabilize use 30s estimate, for measured phases use holdMs
+        const phaseMs = (wallPhase === 1) ? 30000 : holdMs;
+        const phasePct = Math.min(100, ((Date.now() - wallPhaseStart) / phaseMs) * 100);
         document.getElementById('sysid-phase-bar').style.width = phasePct.toFixed(0) + '%';
 
         document.getElementById('sysid-elapsed').textContent = 'Elapsed: ' + (elapsed / 1000).toFixed(0) + 's';
@@ -11818,6 +11914,17 @@ function showSystemIDResults() {
         parseFloat(getField("systemIDFallDelay_1_ID") ?? -1),
         parseFloat(getField("systemIDFallDelay_2_ID") ?? -1)
     ];
+    // Step amplitude and noise: firmware sends ×10 integers, divide to get amps with 0.1A res
+    const stepAmp = [
+        parseFloat(getField("systemIDStepAmp_0_ID") ?? 0) / 10,
+        parseFloat(getField("systemIDStepAmp_1_ID") ?? 0) / 10,
+        parseFloat(getField("systemIDStepAmp_2_ID") ?? 0) / 10,
+    ];
+    const quietPP = [
+        parseFloat(getField("systemIDQuietPP_0_ID") ?? 0) / 10,
+        parseFloat(getField("systemIDQuietPP_1_ID") ?? 0) / 10,
+        parseFloat(getField("systemIDQuietPP_2_ID") ?? 0) / 10,
+    ];
     const ra = parseFloat(getField("systemIDRiseAvg_ID") ?? -1);
     const fa = parseFloat(getField("systemIDFallAvg_ID") ?? -1);
 
@@ -11827,7 +11934,48 @@ function showSystemIDResults() {
     const allValid = [...r, ...f].filter(v => v >= 0);
     sysidSuggestedTC = allValid.length > 0 ? Math.max(...allValid) : 0;
 
-    // Build results table
+    // ── Quality table ────────────────────────────────────────────────────────────
+    // Step amplitude: pass > 10A. Noise peak-to-peak: green < 1A, yellow 1–2A, red ≥ 2A.
+    const hasQuality = stepAmp.some(v => v > 0);
+    const qTbody = document.getElementById('sysid-quality-body');
+    if (qTbody) {
+        qTbody.innerHTML = '';
+        for (let i = 0; i < 3; i++) {
+            const ampOk    = stepAmp[i] > 10;
+            const noiseOk  = quietPP[i] < 1.0;
+            const noiseMed = quietPP[i] < 2.0;
+            const ampColor   = ampOk  ? '#4caf50' : '#ef4444';
+            const noiseColor = noiseOk ? '#4caf50' : (noiseMed ? '#f0a500' : '#ef4444');
+            const ampLabel   = hasQuality ? stepAmp[i].toFixed(1) + ' A' : '—';
+            const noiseLabel = hasQuality ? quietPP[i].toFixed(1) + ' A' : '—';
+            const tr = document.createElement('tr');
+            tr.style.borderBottom = '1px solid #2a2a2a';
+            tr.innerHTML =
+                '<td style="padding:5px 4px; color:#aaa;">Trial ' + (i + 1) + '</td>' +
+                '<td style="padding:5px 4px; color:' + ampColor   + '; font-weight:600;">' + ampLabel   + '</td>' +
+                '<td style="padding:5px 4px; color:' + noiseColor + '; font-weight:600;">' + noiseLabel + '</td>';
+            qTbody.appendChild(tr);
+        }
+
+        // Quality advisory
+        const qNote = document.getElementById('sysid-quality-note');
+        if (qNote && hasQuality) {
+            const noiseHigh  = quietPP.some(v => v >= 2.0);
+            const noiseMedAny = quietPP.some(v => v >= 1.0 && v < 2.0);
+            const ampLow     = stepAmp.some(v => v > 0 && v <= 10);
+            const msgs = [];
+            if (noiseHigh)   msgs.push('⚠ High noise on one or more trials — belt or alternator resonance at this RPM is inflating the measured time constant. Re-run the test at a slightly different engine speed for a cleaner result.');
+            else if (noiseMedAny) msgs.push('⚠ Moderate noise detected. Results are usable but try a different RPM if you want a tighter reading.');
+            if (ampLow)      msgs.push('⚠ Step amplitude is small (≤10 A) — consider increasing SystemIDStepAmplitude for a stronger signal.');
+            qNote.innerHTML = msgs.length ? msgs.join('<br>') : '✅ Signal quality is good.';
+            qNote.style.display = '';
+        } else if (qNote) {
+            qNote.style.display = 'none';
+        }
+        document.getElementById('sysid-quality-section').style.display = hasQuality ? '' : 'none';
+    }
+
+    // ── Timing results table ─────────────────────────────────────────────────────
     const tbody = document.getElementById('sysid-results-body');
     tbody.innerHTML = '';
     for (let i = 0; i < 3; i++) {

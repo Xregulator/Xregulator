@@ -1679,12 +1679,14 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
                                  : t_quiet_start;
       float quietSum = 0.0f;
       float quietMax = -1.0e9f;
+      float quietMin =  1.0e9f;
       int quietSamples = 0;
       for (int s = 0; s < sysIDSampleCount; s++) {
         if (sysIDBuffer[s].ts < quietRefStart) continue;
         if (sysIDBuffer[s].ts >= t_up_start) break;
         quietSum += sysIDBuffer[s].amps;
         if (sysIDBuffer[s].amps > quietMax) quietMax = sysIDBuffer[s].amps;
+        if (sysIDBuffer[s].amps < quietMin) quietMin = sysIDBuffer[s].amps;
         quietSamples++;
       }
 
@@ -1717,6 +1719,10 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       float upMean = (upSamples > 0) ? (upSum / upSamples) : quietMean;
       upMeanArr[i] = upMean;
       upMinArr[i]  = upMin;
+
+      // Signal quality metrics sent to UI for noise / amplitude quality check.
+      systemIDStepAmp_A[i] = fmaxf(0.0f, upMean - quietMean);
+      systemIDQuietPP_A[i] = (quietSamples > 0) ? fmaxf(0.0f, quietMax - quietMin) : 0.0f;
 
       // Rise threshold: quiet mean + 2× noise half-amplitude (floored at 0.5A).
       // This sits just above the noise ceiling while the mean anchor keeps it stable
