@@ -1155,15 +1155,20 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     MaximumAllowedBatteryAmps = readFile(LittleFS, "/MaximumAllowedBatteryAmps.txt").toInt();
   }
+  if (!fsExists("/LoadDumpDtThresh1.txt")) {
+    writeFile(LittleFS, "/LoadDumpDtThresh1.txt", String(LoadDumpDtThresh1).c_str());
+  } else {
+    LoadDumpDtThresh1 = readFile(LittleFS, "/LoadDumpDtThresh1.txt").toFloat();
+  }
   if (!fsExists("/LoadDumpDtThresh.txt")) {
     writeFile(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
   } else {
     LoadDumpDtThresh = readFile(LittleFS, "/LoadDumpDtThresh.txt").toFloat();
   }
-  if (!fsExists("/LoadDumpCurrentDrop.txt")) {
-    writeFile(LittleFS, "/LoadDumpCurrentDrop.txt", String(LoadDumpCurrentDrop).c_str());
+  if (!fsExists("/LoadDumpDtThresh3.txt")) {
+    writeFile(LittleFS, "/LoadDumpDtThresh3.txt", String(LoadDumpDtThresh3).c_str());
   } else {
-    LoadDumpCurrentDrop = readFile(LittleFS, "/LoadDumpCurrentDrop.txt").toFloat();
+    LoadDumpDtThresh3 = readFile(LittleFS, "/LoadDumpDtThresh3.txt").toFloat();
   }
   if (!fsExists("/CVTuningMode.txt")) {
     writeFile(LittleFS, "/CVTuningMode.txt", String(CVTuningMode).c_str());
@@ -1607,16 +1612,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     VoltageKi = readFile(LittleFS, "/VoltageKi.txt").toFloat();
   }
-  if (!fsExists("/VoltageKd.txt")) {
-    writeFile(LittleFS, "/VoltageKd.txt", String(VoltageKd).c_str());
-  } else {
-    VoltageKd = readFile(LittleFS, "/VoltageKd.txt").toFloat();
-  }
-  if (!fsExists("/VoltageDWindowMs.txt")) {
-    writeFile(LittleFS, "/VoltageDWindowMs.txt", String(VoltageDWindowMs).c_str());
-  } else {
-    VoltageDWindowMs = (uint16_t)readFile(LittleFS, "/VoltageDWindowMs.txt").toInt();
-  }
+  // VoltageKd (D term) removed — LittleFS file /VoltageKd.txt no longer loaded.
   if (!fsExists("/ProtectionProxGateV.txt")) {
     writeFile(LittleFS, "/ProtectionProxGateV.txt", String(ProtectionProxGateV, 2).c_str());
   } else {
@@ -1777,10 +1773,23 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     TempSustainedTimeout = readFile(LittleFS, "/TempSustainedTimeout.txt").toInt();
   }
-  if (!fsExists("/VoltageSpikeMargin.txt")) {
-    writeFile(LittleFS, "/VoltageSpikeMargin.txt", String(VoltageSpikeMargin, 2).c_str());
+  // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
+  // First-boot default auto-scales as BulkVoltage + 0.3 V so 24V and 48V systems get
+  // sensible defaults (29.1 V / 57.9 V) instead of the 12V-only static 14.8 V seed.
+  // Once written to LittleFS the value is treated as user-set and never auto-overwritten —
+  // a system-class change later requires manually re-setting it from the UI.
+  // Migration: if the old /VoltageSpikeMargin.txt exists and the new file does not, convert
+  // the stored margin to an absolute value (BulkVoltage was loaded earlier in this function).
+  if (!fsExists("/AlternatorHardShutdownV.txt")) {
+    if (fsExists("/VoltageSpikeMargin.txt")) {
+      float oldMargin = readFile(LittleFS, "/VoltageSpikeMargin.txt").toFloat();
+      AlternatorHardShutdownV = BulkVoltage + oldMargin;
+    } else {
+      AlternatorHardShutdownV = BulkVoltage + 0.3f;  // first-boot auto-scale default
+    }
+    writeFile(LittleFS, "/AlternatorHardShutdownV.txt", String(AlternatorHardShutdownV, 2).c_str());
   } else {
-    VoltageSpikeMargin = readFile(LittleFS, "/VoltageSpikeMargin.txt").toFloat();
+    AlternatorHardShutdownV = readFile(LittleFS, "/AlternatorHardShutdownV.txt").toFloat();
   }
   if (!fsExists("/HardOCDebounceMs.txt")) {
     writeFile(LittleFS, "/HardOCDebounceMs.txt", String(HardOCDebounceMs).c_str());
@@ -1822,11 +1831,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     AwSeedProtectMs = (uint16_t)readFile(LittleFS, "/AwSeedProtectMs.txt").toInt();
   }
-  if (!fsExists("/KSoft.txt")) {
-    writeFile(LittleFS, "/KSoft.txt", String(KSoft, 1).c_str());
-  } else {
-    KSoft = readFile(LittleFS, "/KSoft.txt").toFloat();
-  }
   if (!fsExists("/KHard.txt")) {
     writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
   } else {
@@ -1837,20 +1841,23 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     IExcessReseedFrac = readFile(LittleFS, "/IExcessReseedFrac.txt").toFloat();
   }
-  if (!fsExists("/OvLayer1Enable.txt")) {
-    writeFile(LittleFS, "/OvLayer1Enable.txt", String((int)OvLayer1Enable).c_str());
+  // OvGroup1Enable — migrates from old /OvLayer2Enable.txt if found
+  if (fsExists("/OvGroup1Enable.txt")) {
+    OvGroup1Enable = readFile(LittleFS, "/OvGroup1Enable.txt").toInt() != 0;
+  } else if (fsExists("/OvLayer2Enable.txt")) {
+    OvGroup1Enable = readFile(LittleFS, "/OvLayer2Enable.txt").toInt() != 0;
+    writeFile(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
   } else {
-    OvLayer1Enable = readFile(LittleFS, "/OvLayer1Enable.txt").toInt() != 0;
+    writeFile(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
   }
-  if (!fsExists("/OvLayer2Enable.txt")) {
-    writeFile(LittleFS, "/OvLayer2Enable.txt", String((int)OvLayer2Enable).c_str());
+  // OvGroup2Enable — migrates from old /OvLayer3Enable.txt if found
+  if (fsExists("/OvGroup2Enable.txt")) {
+    OvGroup2Enable = readFile(LittleFS, "/OvGroup2Enable.txt").toInt() != 0;
+  } else if (fsExists("/OvLayer3Enable.txt")) {
+    OvGroup2Enable = readFile(LittleFS, "/OvLayer3Enable.txt").toInt() != 0;
+    writeFile(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
   } else {
-    OvLayer2Enable = readFile(LittleFS, "/OvLayer2Enable.txt").toInt() != 0;
-  }
-  if (!fsExists("/OvLayer3Enable.txt")) {
-    writeFile(LittleFS, "/OvLayer3Enable.txt", String((int)OvLayer3Enable).c_str());
-  } else {
-    OvLayer3Enable = readFile(LittleFS, "/OvLayer3Enable.txt").toInt() != 0;
+    writeFile(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
   }
   if (!fsExists("/IExcessSigSrc.txt")) {
     writeFile(LittleFS, "/IExcessSigSrc.txt", String(IExcessSigSrc).c_str());
@@ -1887,15 +1894,17 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     TdPred = readFile(LittleFS, "/TdPred.txt").toFloat();
   }
-  if (!fsExists("/VSoftMarginV.txt")) {
-    writeFile(LittleFS, "/VSoftMarginV.txt", String(VSoftMarginV, 3).c_str());
+  if (!fsExists("/OvMeasMarginV.txt")) {
+    if (fsExists("/VSoftMarginV.txt")) { OvMeasMarginV = readFile(LittleFS, "/VSoftMarginV.txt").toFloat(); }
+    writeFile(LittleFS, "/OvMeasMarginV.txt", String(OvMeasMarginV, 3).c_str());
   } else {
-    VSoftMarginV = readFile(LittleFS, "/VSoftMarginV.txt").toFloat();
+    OvMeasMarginV = readFile(LittleFS, "/OvMeasMarginV.txt").toFloat();
   }
-  if (!fsExists("/VHardMarginV.txt")) {
-    writeFile(LittleFS, "/VHardMarginV.txt", String(VHardMarginV, 3).c_str());
+  if (!fsExists("/OvPredMarginV.txt")) {
+    if (fsExists("/VHardMarginV.txt")) { OvPredMarginV = readFile(LittleFS, "/VHardMarginV.txt").toFloat(); }
+    writeFile(LittleFS, "/OvPredMarginV.txt", String(OvPredMarginV, 3).c_str());
   } else {
-    VHardMarginV = readFile(LittleFS, "/VHardMarginV.txt").toFloat();
+    OvPredMarginV = readFile(LittleFS, "/OvPredMarginV.txt").toFloat();
   }
   if (!fsExists("/DvdtAlpha.txt")) {
     writeFile(LittleFS, "/DvdtAlpha.txt", String(DvdtAlpha, 3).c_str());

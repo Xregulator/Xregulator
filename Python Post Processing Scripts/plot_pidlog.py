@@ -234,10 +234,11 @@ numeric_cols = [
     "rpm", "measAmps",
     "gainKp", "gainKi", "gainKd",   # old log format — inner current-loop gains
     "innerKp", "innerKi", "innerKd",  # new log format — inner current-loop gains
-    "voltageKp", "voltageKi", "voltageKd",  # new log format — outer voltage loop gains
+    "voltageKp", "voltageKi", "voltageKd",  # new log format — outer voltage loop gains; voltageKd tombstoned (always 0, D term removed)
     "flags",
     "battV_filt", "iMeas_filt",
     "ovFlags", "dBcur_dt", "battI",
+    "ch1IntervalMs", "voltLoopIntervalMs", "inaIntervalMs",
 ]
 
 for col in numeric_cols:
@@ -286,7 +287,7 @@ df["f_govBypass"] = (_flags_num // 16 % 2).astype(int)
 
 _ov_num = pd.to_numeric(df["ovFlags"] if "ovFlags" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
 df["f_fastOvActive"]  = (_ov_num       % 2).astype(int)   # bit 0
-df["f_softClamp"]     = (_ov_num // 2  % 2).astype(int)   # bit 1
+# bit 1 reserved (was softClamp — Layer 1 removed)
 df["f_hardClamp"]     = (_ov_num // 4  % 2).astype(int)   # bit 2
 df["f_iExcess"]       = (_ov_num // 8  % 2).astype(int)   # bit 3
 df["f_loadDump"]      = (_ov_num // 16 % 2).astype(int)   # bit 4
@@ -681,8 +682,7 @@ _flag_h6  = 0.18
 _spacing6 = 0.26
 for _i6, (_col, _color, _lbl) in enumerate([
     ("f_fastOvActive", "#c62828", "fastOvActive  (FastOV or iExcess)"),
-    ("f_softClamp",    "#0277bd", "softClamp     (layer 1 — gentle ceiling)"),
-    ("f_hardClamp",    "#6a1b9a", "hardClamp     (layer 2 — hard ceiling)"),
+    ("f_hardClamp",    "#6a1b9a", "hardClamp     (layer 2/3 — hard ceiling)"),
     ("f_iExcess",      "#00838f", "iExcess       (current excess protection)"),
     ("f_loadDump",     "#f57c00", "loadDumpActive (sudden load drop detected)"),
 ]):
@@ -716,12 +716,57 @@ draw_state_strip(ax6s, df, state_changes)
 # save_fig(fig6, "plot6_protection")
 
 # ---------------------------------------------------------------------------
+# PLOT 7 — Loop timing diagnostics (ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs)
+# Only rendered when the new timing columns are present (firmware post-May2026).
+# ---------------------------------------------------------------------------
+_timing_cols = [c for c in ("ch1IntervalMs", "voltLoopIntervalMs", "inaIntervalMs") if c in df.columns]
+
+if _timing_cols:
+    fig7, (ax7, ax7s) = plt.subplots(2, 1, figsize=(16, 6),
+                                     gridspec_kw={"height_ratios": [5, 1]},
+                                     sharex=True)
+    fig7.canvas.manager.set_window_title("Plot 7 — Loop Timing")
+    fig7.suptitle("Loop Timing Diagnostics", fontsize=14, fontweight="bold")
+    plt.subplots_adjust(hspace=0.05)
+
+    if "ch1IntervalMs" in df.columns:
+        ax7.plot(df["t_plot"], df["ch1IntervalMs"],
+                 color="#00838f", lw=1.5, label="ch1IntervalMs (CH1 inter-sample, ms)", zorder=2)
+        ax7.axhline(5,  color="#2e7d32", lw=0.8, ls=":", alpha=0.7, label="5 ms (CH1 nominal)")
+        ax7.axhline(15, color="#c62828", lw=0.8, ls=":", alpha=0.7, label="15 ms (CH1 3× — stale risk)")
+
+    if "voltLoopIntervalMs" in df.columns:
+        vl_rows = df[df["voltageLoopRanThisTick"] == 1].copy()
+        if not vl_rows.empty:
+            ax7.scatter(vl_rows["t_plot"], vl_rows["voltLoopIntervalMs"],
+                        s=20, color="#ef5350", zorder=4, label="voltLoop actual interval (fired ticks only, ms)")
+        ax7.axhline(100, color="#ef5350", lw=0.8, ls=":",  alpha=0.7, label="100 ms (vLoop target)")
+        ax7.axhline(200, color="#b71c1c", lw=0.8, ls="--", alpha=0.7, label="200 ms (vLoop 2×)")
+
+    if "inaIntervalMs" in df.columns:
+        ax7.plot(df["t_plot"], df["inaIntervalMs"],
+                 color="#42a5f5", lw=1.0, alpha=0.8, label="inaIntervalMs (INA228 read gap, ms)", zorder=1)
+        ax7.axhline(10, color="#1565c0", lw=0.8, ls=":", alpha=0.7, label="10 ms (INA228 2×)")
+
+    ax7.set_ylabel("Interval (ms)")
+    ax7.grid(True, linestyle=":", alpha=0.4)
+    _leg7 = ax7.legend(loc="upper right", fontsize=10)
+    _leg7.set_draggable(True)
+    for t in df.loc[df["voltageLoopRanThisTick"] == 1, "t_plot"]:
+        ax7s.axvline(x=t, color="#aeea00", linewidth=0.8, alpha=0.6)
+    draw_state_strip(ax7s, df, state_changes)
+    ax7.set_xlabel(time_label)
+
+# ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # Registers xlim_changed on the primary (top) axes of each figure; sub-axes
 # within a figure already share x via sharex so only one per figure is needed.
 # ---------------------------------------------------------------------------
 _all_primary_axes = [ax1, ax2, ax3a, ax4, ax5, ax6a]
 _all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
+if _timing_cols:
+    _all_primary_axes.append(ax7)
+    _all_figs.append(fig7)
 _syncing = [False]   # mutable container so the closure can write to it
 
 def _on_xlim_changed(changed_ax):

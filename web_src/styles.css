@@ -2284,7 +2284,7 @@ input:checked+.slider:before {
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
-  overflow: hidden;
+  overflow: visible;        /* was: hidden — clipped the tooltip-box which renders below the title (top:125%) */
   text-overflow: ellipsis;
 }
 

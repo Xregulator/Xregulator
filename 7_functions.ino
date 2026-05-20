@@ -155,8 +155,11 @@ static bool checkPointValid(float amps, float battV, float &fieldVolts,
 // ============================================================
 
 static void saveEfficiencyMatrix() {
-  if (!effMatrix || hardwarePresent != 1 || inCriticalZone()) return;
-
+  if (!effMatrix || hardwarePresent != 1) return;
+  if (inCriticalZone()) {
+    effMatrixNeedsSave = true;
+    return;
+  }
   nvs_handle_t handle;
   if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) {
     queueConsoleMessage("EffMatrix: NVS open failed (save)");
@@ -175,6 +178,7 @@ static void saveEfficiencyMatrix() {
 
   nvs_commit(handle);
   nvs_close(handle);
+  effMatrixNeedsSave = false;
 }
 
 
@@ -445,21 +449,21 @@ static void mergeWindowIntoMatrix() {
 }
 
 // ============================================================
-// ANOMALY DETECTION — TWO LAYERS
+// ANOMALY DETECTION — TWO TIERS
 //
-// Layer 1: Instantaneous — fires if current amps is outside
+// Tier 1: Instantaneous — fires if current amps is outside
 //   (ref_min - margin) to (ref_max + margin).
 //   Catches sudden failures in both directions.
 //   Fires every qualifying tick.
 //
-// Layer 2: Thermal average — fires once per bin per session
+// Tier 2: Thermal average — fires once per bin per session
 //   after count >= EFF_THERMAL_MIN_SAMPLES samples accumulated.
 //   Compares session average to reference average.
 //   Catches gradual degradation masked by thermal lag.
 //   Only fires once per bin per session to avoid flooding.
 //
-// Both layers require referenceFinalized and is_reference_bin.
-// sessionErrorCount = layer1 + layer2 combined.
+// Both tiers require referenceFinalized and is_reference_bin.
+// sessionErrorCount = tier1 + tier2 combined.
 // PLACEHOLDER: EFF_THERMAL_MIN_SAMPLES = 90 — tune if thermal
 //   time constant differs from expected 1-2 minutes.
 // ============================================================
@@ -476,34 +480,34 @@ static void checkAnomaly(int r, int t, int f, float amps) {
   if (!cell.is_reference_bin) return;
   if (cell.ref_avg_amps <= 0) return;  // Reference not yet valid
 
-  // ── Accumulate session stats for this bin (both layers use this) ──
+  // ── Accumulate session stats for this bin (both tiers use this) ──
   ss.sum_amps += amps;
   ss.count++;
   // Accumulate session health ratio for sparkline history
   sessionHealthSum += amps / cell.ref_avg_amps;
   sessionHealthCount++;
 
-  // ── Layer 1: Instantaneous min/max check (both directions) ──
+  // ── Tier 1: Instantaneous min/max check (both directions) ──
   float effectiveMin = cell.ref_min_amps - anomalyMarginAmps;
   float effectiveMax = cell.ref_max_amps + anomalyMarginAmps;
 
   if (amps < effectiveMin || amps > effectiveMax) {
-    sessionLayer1Errors++;
+    sessionTier1Errors++;
     float delta = (amps < effectiveMin)
                     ? (effectiveMin - amps)
                     : (amps - effectiveMax);
     const char *dir = (amps < effectiveMin) ? "LOW" : "HIGH";
 
     queueConsoleMessageF(
-      "EffAnomaly L1: bin[%d,%d,%d] %s amps=%.1fA ref=[%.1f,%.1f] "
-      "margin=%.1f delta=%.1fA L1=%d L2=%d",
+      "EffAnomaly T1: bin[%d,%d,%d] %s amps=%.1fA ref=[%.1f,%.1f] "
+      "margin=%.1f delta=%.1fA T1=%d T2=%d",
       r, t, f, dir, amps,
       cell.ref_min_amps, cell.ref_max_amps,
       anomalyMarginAmps, delta,
-      sessionLayer1Errors, sessionLayer2Errors);
+      sessionTier1Errors, sessionTier2Errors);
   }
 
-  // ── Layer 2: Thermal average check — only after enough samples ──
+  // ── Tier 2: Thermal average check — only after enough samples ──
   if (!ss.trend_fired && ss.count >= EFF_THERMAL_MIN_SAMPLES) {
     float sessionAvg = ss.sum_amps / (float)ss.count;
     float refAvg = cell.ref_avg_amps;
@@ -513,29 +517,29 @@ static void checkAnomaly(int r, int t, int f, float amps) {
 
     if (sessionAvg < lowerLimit || sessionAvg > upperLimit) {
       ss.trend_fired = true;
-      sessionLayer2Errors++;
+      sessionTier2Errors++;
 
       float pctDelta = ((sessionAvg - refAvg) / refAvg) * 100.0f;
       const char *dir = (sessionAvg < lowerLimit) ? "LOW" : "HIGH";
 
       queueConsoleMessageF(
-        "EffAnomaly L2: bin[%d,%d,%d] thermal avg %s "
+        "EffAnomaly T2: bin[%d,%d,%d] thermal avg %s "
         "session=%.1fA ref=%.1fA delta=%.1f%% threshold=%.0f%% "
-        "L1=%d L2=%d",
+        "T1=%d T2=%d",
         r, t, f, dir,
         sessionAvg, refAvg, pctDelta,
         degradationThreshold * 100.0f,
-        sessionLayer1Errors, sessionLayer2Errors);
+        sessionTier1Errors, sessionTier2Errors);
     }
   }
 
   // ── Combined alarm check ──
-  int totalErrors = sessionLayer1Errors + sessionLayer2Errors;
+  int totalErrors = sessionTier1Errors + sessionTier2Errors;
   if (anomalyAlarmEnable && totalErrors >= anomalyAlarmThreshold) {
     effAnomalyAlarmActive = true;
     queueConsoleMessageF(
-      "EffAnomaly: ALARM — %d total errors (L1=%d L2=%d) threshold=%d",
-      totalErrors, sessionLayer1Errors, sessionLayer2Errors,
+      "EffAnomaly: ALARM — %d total errors (T1=%d T2=%d) threshold=%d",
+      totalErrors, sessionTier1Errors, sessionTier2Errors,
       anomalyAlarmThreshold);
   }
 }
@@ -704,8 +708,8 @@ void resetEfficiencyMatrix() {
   effHistoryDirty = true;
 
   referenceFinalized = false;
-  sessionLayer1Errors = 0;
-  sessionLayer2Errors = 0;
+  sessionTier1Errors = 0;
+  sessionTier2Errors = 0;
   effAnomalyAlarmActive = false;
 
   // Remove legacy sessionErrorCount if still present — replaced by L1+L2 counters
@@ -740,7 +744,7 @@ void sendEfficiencyData() {
 
   MatrixCell &cell = MATRIX_CELL(activeRPMBucket, activeTempBucket, activeFieldBucket);
 
-  int currentErrors = sessionLayer1Errors + sessionLayer2Errors;
+  int currentErrors = sessionTier1Errors + sessionTier2Errors;
   bool changed = (activeRPMBucket != lastR || activeTempBucket != lastT || activeFieldBucket != lastF || cell.ss_seconds != lastSS || currentErrors != lastErr);
   if (!changed) return;
 
@@ -764,7 +768,7 @@ void sendEfficiencyData() {
            (unsigned long)cell.ss_seconds,
            cell.avg_amps, cell.min_amps, cell.max_amps,
            (int)cell.is_reference_bin,
-           sessionLayer1Errors + sessionLayer2Errors);
+           sessionTier1Errors + sessionTier2Errors);
 
   events.send(buf, "EffMatrix");
 
@@ -856,6 +860,7 @@ static void printEffDiagnostics() {
 void efficiencyTracker_tick() {
   static uint32_t last1Hz = 0;
   static uint32_t last5s = 0;
+  static uint32_t last20s = 0;
   static uint32_t last2min = 0;
   static uint32_t last30s = 0;
   uint32_t now = millis();
@@ -864,6 +869,14 @@ void efficiencyTracker_tick() {
     last1Hz = now;
     updateEfficiencyRedDot();
     updateEfficiencyMatrix();
+  }
+
+  if (now - last20s >= 20000) {
+    last20s = now;
+    if (!inCriticalZone()) {
+      if (effMatrixNeedsSave)     saveEfficiencyMatrix();
+      if (sessionHealthNeedsSave) saveCurrentSessionHealth();
+    }
   }
 
   if (now - last5s >= 5000) {
@@ -906,7 +919,11 @@ static void saveEffHistory() {
 }
 
 static void saveCurrentSessionHealth() {
-  if (sessionHealthCount == 0 || hardwarePresent != 1 || inCriticalZone()) return;
+  if (sessionHealthCount == 0 || hardwarePresent != 1) return;
+  if (inCriticalZone()) {
+    sessionHealthNeedsSave = true;
+    return;
+  }
   float ratio = sessionHealthSum / (float)sessionHealthCount;
 
   nvs_handle_t handle;
@@ -914,6 +931,7 @@ static void saveCurrentSessionHealth() {
   nvs_set_blob(handle, "eff_cs", &ratio, sizeof(float));
   nvs_commit(handle);
   nvs_close(handle);
+  sessionHealthNeedsSave = false;
 }
 
 static void loadEffHistory() {
@@ -1063,17 +1081,21 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_fastOvClampActive) e.flags |= (1 << 0);
   if (pidLog_voltageLoopRanThisTick) e.flags |= (1 << 1);
   if (voltageControlActive) e.flags |= (1 << 2);
-  if (g_fastOvSoftActive) e.flags |= (1 << 3);
+  // bit 3 reserved (was softClamp — old soft-cap removed)
   if (g_fastOvHardActive) e.flags |= (1 << 4);
 
   e.awState = g_awState;
   e.rpm = (int16_t)constrain((int)RPM, -32768, 32767);
-  e.battV_filt_x100 = (int16_t)clamp_f(IBV_filtered * 100.0f, -32767.0f, 32767.0f);
+  e.battV_filt_x100 = (int16_t)clamp_f(IBV * 100.0f, -32767.0f, 32767.0f);
   e.iMeas_filt_x10 = (int16_t)clamp_f(MeasuredAmps_filtered * 10.0f, -32767.0f, 32767.0f);
   e.cvDSlope_x10000 = (int16_t)clamp_f(cvDSlope * 10000.0f, -32767.0f, 32767.0f);
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;
   e.battI_x10 = (int16_t)clamp_f(getBatteryCurrent() * 10.0f, -32767.0f, 32767.0f);
   e.dBcur_dt_Aps = (int16_t)clamp_f(g_dBcur_dt, -32767.0f, 32767.0f);
+  e.voltLoopIntervalMs = pidLog_voltageLoopRanThisTick ? (int16_t)g_voltLoopActualIntervalMs : 0;
+  e.inaIntervalMs = (int16_t)ina_last_ms;
+  e.slopeBleedAmps_x1000 = (int16_t)clamp_f(g_slopeBleedAmpsThisTick * 1000.0f, 0.0f, 32767.0f);
+  g_slopeBleedAmpsThisTick = 0.0f;  // clear after logging so non-VL ticks show 0
 
   if (g_iExcessActive)   e.flags |= (1 << 5);
   if (g_loadDumpActive)  e.flags |= (1 << 6);

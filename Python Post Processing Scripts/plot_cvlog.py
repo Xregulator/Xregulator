@@ -10,7 +10,7 @@ Diagnostic plotter for CVlog data from the ESP32 alternator regulator.
 State strip (below each plot):
   - cvActive bar (green when CV active, grey otherwise)
   - fastOvActive overlay (red when FastOV or iExcess active; load dump has its own track)
-  - Tick marks: voltLoopFired (pink), softClamp (yellow), hardClamp (purple),
+  - Tick marks: voltLoopFired (pink), hardClamp (purple),
                 iExcess (teal), loadDumpActive (orange)
 
 File picker searches ~/Downloads for *.csv, newest first.
@@ -228,7 +228,7 @@ elif "t_s" not in df.columns:
 if "ovFlags" in df.columns:
     _ov = pd.to_numeric(df["ovFlags"], errors="coerce").fillna(0).astype("int64")
     df["fastOvActive"]   = (_ov & 1)
-    df["softClamp"]      = ((_ov & 2) > 0).astype("int64")
+    # bit 1 reserved (was softClamp — Layer 1 removed)
     df["hardClamp"]      = ((_ov & 4) > 0).astype("int64")
     df["iExcess"]        = ((_ov & 8) > 0).astype("int64")
     df["loadDumpActive"] = ((_ov & 16) > 0).astype("int64")
@@ -249,12 +249,14 @@ numeric_cols = [
     "fastOvCap_A", "cv_I_A", "Icv_A", "uTarget_A", "spLimited_A",
     "iMeas_A", "duty_pct",
     "fastOvActive", "voltLoopFired", "cvActive",
-    "softClamp", "hardClamp",
+    "hardClamp",
     "rpm",
     "battV_filt_V", "iMeas_filt_A",
     "ch1_last_ms", "iExcess",
     "battI_A", "dBcur_dt_Aps", "loadDumpActive",
     "cvDSlope_Vps", "awState",
+    "voltLoopInterval_ms", "inaInterval_ms",
+    "slopeBleedAmps_A",
 ]
 
 for col in numeric_cols:
@@ -288,19 +290,17 @@ def _to_int(col):
 df["fastOvActive"]   = _to_int("fastOvActive")
 df["voltLoopFired"]  = _to_int("voltLoopFired")
 df["cvActive"]       = _to_int("cvActive")
-df["softClamp"]      = _to_int("softClamp")
 df["hardClamp"]      = _to_int("hardClamp")
 df["iExcess"]        = _to_int("iExcess")
 df["loadDumpActive"] = _to_int("loadDumpActive")
 
-# Extract voltage loop Kp/Ki/Kd.
-# New log format: per-row voltageKp/Ki/Kd columns hold the actual outer voltage loop gains.
+# Extract voltage loop Kp/Ki (D term removed — VoltageKd was always 0, tombstoned in log).
+# New log format: per-row voltageKp/Ki columns hold the actual outer voltage loop gains.
 # Old log format: only gainKp/Ki/Kd existed — those are INNER current-loop gains (PidKp/Ki/Kd),
 #   NOT the voltage loop gains. Do not use them as voltage loop gains.
 import re
 _kp = float("nan")
 _ki = float("nan")
-_kd = float("nan")
 # Primary: new per-row voltage loop columns
 if "voltageKp" in df.columns:
     _v = pd.to_numeric(df["voltageKp"], errors="coerce").dropna()
@@ -308,9 +308,6 @@ if "voltageKp" in df.columns:
 if "voltageKi" in df.columns:
     _v = pd.to_numeric(df["voltageKi"], errors="coerce").dropna()
     if len(_v): _ki = float(_v.iloc[0])
-if "voltageKd" in df.columns:
-    _v = pd.to_numeric(df["voltageKd"], errors="coerce").dropna()
-    if len(_v): _kd = float(_v.iloc[0])
 # Legacy: header comment with VoltageKp= (never produced by firmware, kept for future use)
 if np.isnan(_kp):
     for _raw in _lines[:_header_idx]:
@@ -319,16 +316,36 @@ if np.isnan(_kp):
             if m: _kp = float(m.group(1))
             m = re.search(r"VoltageKi=([\d.]+)", _raw)
             if m: _ki = float(m.group(1))
-            m = re.search(r"VoltageKd=([\d.]+)", _raw)
-            if m: _kd = float(m.group(1))
             break
 # Old-format log warning: gainKp/Ki/Kd = inner current-loop gains, not voltage loop gains
 if np.isnan(_kp) and ("gainKp" in df.columns or "innerKp" in df.columns):
     print("WARNING: old log format — voltage loop gains unavailable. "
           "gainKp/Ki/Kd (if present) are inner current-loop gains, not VoltageKp/Ki/Kd.")
 
-outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}  VoltageKd={_kd:.4g}"
+outer_label = f"VoltageKp={_kp:.4g}  VoltageKi={_ki:.4g}"
 print(f"Voltage loop gains: {outer_label}")
+
+# Extract SlopeBleed constants from the header comment line emitted by cvBinToCsv.
+# Format: "# SlopeBleed: SlopeBleedThresh=0.100V/s SlopeBleedK=50.0A/(V/s) SlopeBleedProxV=0.150V"
+_sb_thresh = float("nan")
+_sb_k      = float("nan")
+_sb_proxv  = float("nan")
+for _raw in _lines[:_header_idx]:
+    if "SlopeBleed" in _raw and "SlopeBleedThresh" in _raw:
+        m = re.search(r"SlopeBleedThresh=([\d.]+)", _raw)
+        if m: _sb_thresh = float(m.group(1))
+        m = re.search(r"SlopeBleedK=([\d.]+)", _raw)
+        if m: _sb_k = float(m.group(1))
+        m = re.search(r"SlopeBleedProxV=([\d.]+)", _raw)
+        if m: _sb_proxv = float(m.group(1))
+        break
+_sb_label = (
+    f"SlopeBleedThresh={_sb_thresh:.3g}V/s  "
+    f"SlopeBleedK={_sb_k:.4g}A/(V/s)  "
+    f"SlopeBleedProxV={_sb_proxv:.3g}V"
+    if not np.isnan(_sb_thresh) else "SlopeBleed params not in header (older log)"
+)
+print(f"Slope bleed params: {_sb_label}")
 
 # ---------------------------------------------------------------------------
 # 3. Shared drawing helpers
@@ -337,7 +354,6 @@ GRID_KW    = dict(alpha=0.4, linewidth=0.7)
 DUTY_COLOR = "#78909c"   # field duty % line — neutral grey-blue on all plots
 
 EV_COLOR_VLOOP = "#aeea00"   # voltLoopFired ticks  (lime)
-EV_COLOR_SOFT  = "#00e5ff"   # softClamp ticks      (bright cyan)
 EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks      (purple)
 EV_COLOR_FAST  = "#00838f"   # iExcess ticks        (teal)
 EV_COLOR_LDUMP = "#f57c00"   # loadDumpActive ticks (orange)
@@ -458,13 +474,13 @@ def draw_flag_bars(ax, df):
     """Mode bar + duration bars + VLoop ticks — replaces state strip on all plots."""
     flag_h  = 0.18
     spacing = 0.26
-    n_rows  = 7   # cvActive + voltLoopFired + 5 protection flags
+    n_rows  = 6   # cvActive + voltLoopFired + 4 protection flags
     top     = (n_rows - 1) * spacing + flag_h + 0.06
 
     span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
 
-    # --- Row 6 (top): cvActive mode bar — green/grey segments ---
-    cv_offset = 6 * spacing
+    # --- Row 5 (top): cvActive mode bar — green/grey segments ---
+    cv_offset = 5 * spacing
     prev_t   = df["t_plot"].iloc[0]
     prev_val = df["cvActive"].iloc[0]
     for i in range(1, len(df)):
@@ -480,19 +496,18 @@ def draw_flag_bars(ax, df):
     ax.text(df["t_plot"].iloc[0], cv_offset + flag_h / 2, "  cvActive (mode)",
             va="center", fontsize=7, color="#ffffff", fontweight="bold")
 
-    # --- Row 5: voltLoopFired — tick marks (fires every loop tick) ---
-    vl_offset = 5 * spacing
+    # --- Row 4: voltLoopFired — tick marks (fires every loop tick) ---
+    vl_offset = 4 * spacing
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
         ax.axvline(x=t, ymin=vl_offset / top, ymax=(vl_offset + flag_h) / top,
                    color=EV_COLOR_VLOOP, linewidth=0.8, alpha=0.7)
     ax.text(df["t_plot"].iloc[0], vl_offset + flag_h / 2, "  voltLoopFired (voltage loop tick)",
             va="center", fontsize=7, color="#212121", fontweight="bold")
 
-    # --- Rows 4–0: protection duration bars ---
+    # --- Rows 3–0: protection duration bars ---
     bar_rows = [
-        (4 * spacing, "fastOvActive",   "#c62828", "fastOvActive  (FastOV or iExcess; load dump separate)"),
-        (3 * spacing, "softClamp",      "#0277bd", "softClamp     (layer 1 — gentle ceiling)"),
-        (2 * spacing, "hardClamp",      "#6a1b9a", "hardClamp     (layer 2 — hard ceiling)"),
+        (3 * spacing, "fastOvActive",   "#c62828", "fastOvActive  (FastOV or iExcess; load dump separate)"),
+        (2 * spacing, "hardClamp",      "#6a1b9a", "hardClamp     (layer 2/3 — hard ceiling)"),
         (1 * spacing, "iExcess",        "#00838f", "iExcess       (current excess protection)"),
         (0 * spacing, "loadDumpActive", "#f57c00", "loadDumpActive (sudden load drop detected)"),
     ]
@@ -711,15 +726,29 @@ add_voltloop_vlines(ax3, df)
 
 if "ch1_last_ms" in df.columns:
     ax3b.plot(df["t_plot"], df["ch1_last_ms"],
-              color="#00838f", lw=1.8, label="ch1_last_ms")
-    ax3b.axhline(5,  color="#2e7d32", linewidth=0.8, linestyle=":", alpha=0.70, label="5 ms nominal")
+              color="#00838f", lw=1.8, label="ch1_last_ms (CH1)", zorder=2)
+    ax3b.axhline(5,  color="#2e7d32", linewidth=0.8, linestyle=":", alpha=0.70, label="5 ms (CH1 nominal)")
     ax3b.axhline(15, color="#c62828", linewidth=0.8, linestyle=":", alpha=0.70,
-                 label="15 ms (3× — stale reading risk)")
+                 label="15 ms (CH1 3× — stale reading risk)")
 else:
     ax3b.text(0.5, 0.5, "ch1_last_ms not present in this log (older firmware)",
               ha="center", va="center", transform=ax3b.transAxes,
               color="#888888", fontsize=12)
-ax3b.set_ylabel("CH1 interval (ms)")
+
+if "voltLoopInterval_ms" in df.columns:
+    vl_rows = df[df["voltLoopFired"] == 1].copy()
+    if not vl_rows.empty:
+        ax3b.scatter(vl_rows["t_plot"], vl_rows["voltLoopInterval_ms"],
+                     s=18, color="#ef5350", zorder=4, label="voltLoop actual interval (fired ticks only)")
+    ax3b.axhline(100, color="#ef5350", linewidth=0.8, linestyle=":",  alpha=0.70, label="100 ms (vLoop target)")
+    ax3b.axhline(200, color="#b71c1c", linewidth=0.8, linestyle="--", alpha=0.70, label="200 ms (vLoop 2×)")
+
+if "inaInterval_ms" in df.columns:
+    ax3b.plot(df["t_plot"], df["inaInterval_ms"],
+              color="#42a5f5", lw=1.0, alpha=0.8, label="inaInterval_ms (INA228)", zorder=1)
+    ax3b.axhline(10, color="#1565c0", linewidth=0.8, linestyle=":", alpha=0.70, label="10 ms (INA228 2×)")
+
+ax3b.set_ylabel("Intervals (ms)")
 ax3b.grid(**GRID_KW)
 _h3b = [l for l in ax3b.get_lines() if not l.get_label().startswith("_")]
 _leg3b = ax3b.legend(loc="upper right", fontsize=10)
@@ -750,53 +779,56 @@ fig4.suptitle(f"Plot 4 — CV PID Term Decomposition  |  {outer_label}", fontsiz
 add_subtitle(fig4,
     "What is the voltage loop actually doing? P reacts to filtered voltage error (targV − battV_filt_V), "
     "I holds the running correction, D backs off current as voltage rises. "
-    "Sum of P + I − D should closely match Icv_A (slew target not logged — minor discrepancy on CV entry).")
+    "Sum of P + I − D should closely match Icv_A. "
+    "SlopeBleed (orange scatter) shows per-tick cv_I drain on voltage loop ticks where slope exceeded threshold.")
 fig4.subplots_adjust(top=0.90, right=0.80)
 
-# Compute P and D terms from header gains + logged signals.
-# P term uses (targV - battV_filt_V): the firmware always uses IBV_filtered (getFiltV())
-# for the voltage error, so this matches the actual signal fed to Kp.
+# Compute P term from header gains + logged signals.
+# D term removed — VoltageKd was always 0 and is tombstoned in the log format.
+# P term uses (targV - battV_filt_V): the firmware always uses raw IBV for the voltage error.
 # voltageTargetSlewed (the slewed target) is not logged; targV is used as the target
 # approximation — differs only briefly on CV entry or setpoint change.
-if not (np.isnan(_kp) or np.isnan(_kd)):
+if not np.isnan(_kp):
     df["pid_P"] = _kp * (df["targV"] - df["battV_filt_V"])
     _have_gains = True
 else:
     _have_gains = False
-    print("WARNING: VoltageKp/Kd not found in log header — P and D terms cannot be computed")
-
-if "cvDSlope_Vps" in df.columns and not np.isnan(_kd):
-    df["pid_D"] = _kd * df["cvDSlope_Vps"]   # D contribution (positive = suppressing)
-else:
-    df["pid_D"] = pd.Series(0.0, index=df.index)
-    print("WARNING: cvDSlope_Vps not in log — D term set to zero (re-download log from updated firmware)")
+    print("WARNING: VoltageKp not found in log header — P term cannot be computed")
 
 # I term is cv_I_A directly (already Ki-scaled, in amps)
 # Reconstructed total for sanity check
 if _have_gains and "cv_I_A" in df.columns:
-    df["pid_reconstructed"] = df["pid_P"] + df["cv_I_A"] - df["pid_D"]
+    df["pid_reconstructed"] = df["pid_P"] + df["cv_I_A"]
 
-# --- Plot P, I, D, and total ---
+# --- Plot P, I, and total ---
 if _have_gains:
     ax4.plot(df["t_plot"], df["pid_P"],
              color="#1565c0", lw=2.0, label=f"P term  =  Kp({_kp:.4g}) × (targV − battV_filt_V)  (A)")
 if "cv_I_A" in df.columns:
     ax4.plot(df["t_plot"], df["cv_I_A"],
              color="#2e7d32", lw=2.0, label="I term  =  cv_I_A  (running integral, A)")
-if "pid_D" in df.columns:
-    ax4.plot(df["t_plot"], -df["pid_D"],
-             color="#e65100", lw=2.0, linestyle="--",
-             label=f"−D term  =  −Kd({_kd:.4g}) × cvDSlope  (A, negative = suppressing)", alpha=0.85)
 if "Icv_A" in df.columns:
     ax4.plot(df["t_plot"], df["Icv_A"],
              color="#c62828", lw=2.2, linestyle="-.",
-             label="Icv_A  (total CV output — P + I − D, clamped)", alpha=0.90)
+             label="Icv_A  (total CV output — P + I, clamped)", alpha=0.90)
 if "pid_reconstructed" in df.columns:
     ax4.plot(df["t_plot"], df["pid_reconstructed"],
              color="#888888", lw=1.2, linestyle=":",
-             label="P + I − D  (reconstructed — should match Icv_A)", alpha=0.70)
+             label="P + I  (reconstructed — should match Icv_A)", alpha=0.70)
 
-ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+# Slope bleed drain: scatter on voltage-loop ticks where bleed was non-zero.
+# Units: A drained from cv_I that tick. Only meaningful on voltLoopFired rows.
+if "slopeBleedAmps_A" in df.columns:
+    _sb = df[(df["voltLoopFired"] == 1) & (df["slopeBleedAmps_A"] > 0)].copy()
+    if not _sb.empty:
+        ax4.scatter(_sb["t_plot"], _sb["slopeBleedAmps_A"],
+                    s=28, color="#f57c00", zorder=5,
+                    label="SlopeBleed drain (A per VL tick — actual cv_I drain)")
+        ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+    else:
+        ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
+else:
+    ax4.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4.set_ylabel("Current contribution (A)")
 ax4.grid(**GRID_KW)
 ax4_d = add_duty_axis(ax4)
@@ -816,13 +848,31 @@ ax4b.plot(df["t_plot"], df["vError_V"],
           color="#90caf9", lw=1.2, linestyle="--", alpha=0.65, label="vError_V  (raw IBV, logged reference)")
 ax4b.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4b.set_ylabel("vError (V)")
+
+# cvDSlope on a right twin axis — V/s scale is very different from V error scale
+if "cvDSlope_Vps" in df.columns:
+    _ax4b_slope = ax4b.twinx()
+    _ax4b_slope.plot(df["t_plot"], df["cvDSlope_Vps"],
+                     color="#f57c00", lw=1.4, alpha=0.75, linestyle="-.",
+                     label="cvDSlope  (V/s — slope bleed input)")
+    if not np.isnan(_sb_thresh):
+        _ax4b_slope.axhline(_sb_thresh, color="#f57c00", linewidth=0.8, linestyle=":",
+                            alpha=0.65, label=f"SlopeBleedThresh ({_sb_thresh:.3g} V/s)")
+    _ax4b_slope.set_ylabel("cvDSlope (V/s)", color="#f57c00", fontsize=11)
+    _ax4b_slope.tick_params(axis="y", colors="#f57c00", labelsize=10)
+    _h4b_slope = [l for l in _ax4b_slope.get_lines() if not l.get_label().startswith("_")]
+else:
+    _h4b_slope = []
+
 ax4b.grid(**GRID_KW)
 _h4b = [l for l in ax4b.get_lines() if not l.get_label().startswith("_")]
-_leg4b = ax4b.legend(loc="upper left", fontsize=10)
+_leg4b = ax4b.legend(_h4b + _h4b_slope,
+                     [l.get_label() for l in _h4b + _h4b_slope],
+                     loc="upper left", fontsize=10)
 _leg4b.set_draggable(True)
 
-# One checkbox panel for both ax4 and ax4b lines
-_cb4 = _make_checkbox_panel(fig4, _h4 + _h4_duty + _h4b)
+# One checkbox panel for ax4, ax4b, and slope twin lines
+_cb4 = _make_checkbox_panel(fig4, _h4 + _h4_duty + _h4b + _h4b_slope)
 
 draw_flag_bars(ax4s, df)
 # save_fig(fig4, "plot4_pid_decomposition")

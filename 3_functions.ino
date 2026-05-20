@@ -254,7 +254,7 @@ enum Csv2Index {
   CSV2_ft_rai_imu_win,
   CSV2_ft_rai_imu_ses,
   CSV2_fsWriteQueueDrops,
-  CSV2_cv_D,
+  CSV2_reserved_cv_D,  // 196 reserved — was cv_D (D term removed)
   CSV2_tempReadFailCount,
   CSV2_tempCrcFailCount,
   CSV2_tempCrcRecoveredCount,
@@ -301,7 +301,6 @@ enum Csv2Index {
   CSV2_currentPartitionType,
   CSV2_fastOvCurrentCap,
   CSV2_fastOvClampCount,
-  CSV2_fastOvSoftCount,
   CSV2_fastOvHardCount,
   CSV2_ch1_last_ms,
   CSV2_ch1_avg_10s,
@@ -468,9 +467,12 @@ enum Csv2Index {
   CSV2_systemIDQuietPP_0,    // 405
   CSV2_systemIDQuietPP_1,    // 406
   CSV2_systemIDQuietPP_2,    // 407
-  CSV2_nvsCycleMs,           // 408 — ms elapsed for last complete NVS drain cycle
+  CSV2_nvsCycleMs,                // 408 — ms elapsed for last complete NVS drain cycle
+  CSV2_voltLoopWorstInterval_5s,  // 409 — worst voltage loop actual interval in 5s window (ms)
+  CSV2_voltLoopWorstInterval_ses, // 410 — worst voltage loop actual interval since boot (ms)
+  CSV2_fsFlushDeferred,           // 411 — times FlushFileWriteQueue skipped due to co-fire guard
 
-  CSV2_FIELD_COUNT  // = 409
+  CSV2_FIELD_COUNT  // = 411
 };
 
 enum Csv3Index {
@@ -589,7 +591,7 @@ enum Csv3Index {
   CSV3_TempWarnExcess,
   CSV3_TempCritExcess,
   CSV3_TempSustainedTimeout,
-  CSV3_VoltageSpikeMargin,
+  CSV3_AlternatorHardShutdownV,
   CSV3_VoltageDisagreeThreshold,
   CSV3_VoltageDisagreeTimeout,
   CSV3_rpmMinDutyTable_0,
@@ -659,26 +661,23 @@ enum Csv3Index {
   CSV3_MinRPMForField,
   CSV3_AwBleedRate,
   CSV3_AwRecoverRate,
-  CSV3_KSoft,
   CSV3_KHard,
   CSV3_IExcessReseedFrac,
   CSV3_AwSeedProtectMs,
-  CSV3_VoltageKd,
+  CSV3_reserved_VoltageKd,  // 187 reserved — was VoltageKd; D term removed
   CSV3_displayTempUnit,
   CSV3_WarmupRampRate,
-  CSV3_OvLayer1Enable,
-  CSV3_OvLayer2Enable,
-  CSV3_OvLayer3Enable,
+  CSV3_OvGroup1Enable,
+  CSV3_OvGroup2Enable,
   CSV3_IExcessSigSrc,
   CSV3_IExcessMA_N,
   CSV3_OutputPIDSigSrc,
   CSV3_TdPred,          // %.3f
-  CSV3_VSoftMarginV,    // %.3f
-  CSV3_VHardMarginV,    // %.3f
+  CSV3_OvMeasMarginV,   // %.3f
+  CSV3_OvPredMarginV,   // %.3f
   CSV3_OutputPIDMA_N,
   CSV3_OutputPIDFilterTC,
   CSV3_VoltageFilterTC,
-  CSV3_VoltageDWindowMs,
   CSV3_ProtectionProxGateV,
   CSV3_SlopeBleedThresh,
   CSV3_SlopeBleedK,
@@ -729,7 +728,7 @@ enum Csv3Index {
   CSV3_degradationThreshold,
   CSV3_TempAlarmLow,
   CSV3_LoadDumpDtThresh,
-  CSV3_LoadDumpCurrentDrop,
+  CSV3_LoadDumpDtThresh1,
   CSV3_CVTuningMode,
   CSV3_cvWaveAmplitudeV,
   CSV3_cvWavePeriodSec,
@@ -754,8 +753,9 @@ enum Csv3Index {
   CSV3_Ymax3,
   CSV3_Ymin4,
   CSV3_Ymax4,
+  CSV3_LoadDumpDtThresh3,
 
-  CSV3_FIELD_COUNT  // = 276
+  CSV3_FIELD_COUNT  // = 274
 };
 
 
@@ -1541,7 +1541,7 @@ void setupServer() {
                 state.line, sizeof(state.line),
                 "# PID diagnostic log — CV loop / output current PID / duty pipeline\n"
                 "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass\n"
-                "# ovFlags: bit0=fastOvActive bit1=softClamp bit2=hardClamp bit3=iExcess bit4=loadDumpActive\n"
+                "# ovFlags: bit0=fastOvActive bit1=reserved(wasSoftClamp) bit2=hardClamp bit3=iExcess bit4=loadDumpActive\n"
                 "# voltageLoopRanThisTick=1 means Icv/cv_I updated this row\n"
                 "# vError: always fresh every tick regardless of loop interval\n"
                 "# Icv: CV position-form PI output — the direct current setpoint in CV modes\n"
@@ -1590,7 +1590,10 @@ void setupServer() {
                 "flags,"
                 "ovFlags,"
                 "dBcur_dt,"
-                "battI\n");
+                "battI,"
+                "ch1IntervalMs,"
+                "voltLoopIntervalMs,"
+                "inaIntervalMs\n");
 
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
@@ -1623,8 +1626,9 @@ void setupServer() {
                 "%.4f,%.4f,%.4f,"   // innerKp, innerKi, innerKd
                 "%.4f,%.4f,%.4f,"   // voltageKp, voltageKi, voltageKd
                 "%.3f,%.3f,"  // battV_filt, iMeas_filt
-                "%u,%u,"      // flags, ovFlags
-                "%.2f,%.3f\n",  // dBcur_dt, battI
+                "%u,%u,"          // flags, ovFlags
+                "%.2f,%.3f,"      // dBcur_dt, battI
+                "%d,%d,%d\n",     // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
                 (unsigned long)e.ts,
                 (unsigned)e.chargeStageDisplay,
                 (unsigned)e.TargetVoltageMode,
@@ -1660,7 +1664,10 @@ void setupServer() {
                 (unsigned)e.flags,
                 (unsigned)e.ovFlags,
                 e.dBcur_dt,
-                e.battI);
+                e.battI,
+                (int)e.ch1IntervalMs,
+                (int)e.voltLoopIntervalMs,
+                (int)e.inaIntervalMs);
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
             }
 
@@ -1852,15 +1859,22 @@ void setupServer() {
     uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
     float kp = (float)VoltageKp;
     float ki = (float)VoltageKi;
-    float kd = (float)VoltageKd;
+    float kd = 0.0f;  // reserved — was VoltageKd; D term removed; 0 preserves binary header layout
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
-    memcpy(state.header + 0, &cnt, 4);
-    memcpy(state.header + 4, &entrySize, 4);
-    memcpy(state.header + 8, &kp, 4);
-    memcpy(state.header + 12, &ki, 4);
+    float sbThresh = SlopeBleedThresh;
+    float sbK      = SlopeBleedK;
+    float sbProxV  = SlopeBleedProxV;
+
+    memcpy(state.header + 0,  &cnt,      4);
+    memcpy(state.header + 4,  &entrySize, 4);
+    memcpy(state.header + 8,  &kp,       4);
+    memcpy(state.header + 12, &ki,       4);
     memcpy(state.header + 16, &interval, 4);
-    memcpy(state.header + 20, &kd, 4);
+    memcpy(state.header + 20, &kd,       4);
+    memcpy(state.header + 24, &sbThresh, 4);  // SlopeBleedThresh (V/s)
+    memcpy(state.header + 28, &sbK,      4);  // SlopeBleedK (A/(V/s))
+    memcpy(state.header + 32, &sbProxV,  4);  // SlopeBleedProxV (V)
 
     state.count = cvLogCount;
     state.oldest = (cvLogHead - cvLogCount + CV_LOG_SIZE) % CV_LOG_SIZE;
@@ -2820,11 +2834,17 @@ void setupServer() {
       LoadDumpDtThresh = inputMessage.toFloat();
       writeFile(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
     }
-    if (request->hasParam("LoadDumpCurrentDrop")) {
+    if (request->hasParam("LoadDumpDtThresh1")) {
       foundParameter = true;
-      inputMessage = request->getParam("LoadDumpCurrentDrop")->value();
-      LoadDumpCurrentDrop = inputMessage.toFloat();
-      writeFile(LittleFS, "/LoadDumpCurrentDrop.txt", String(LoadDumpCurrentDrop).c_str());
+      inputMessage = request->getParam("LoadDumpDtThresh1")->value();
+      LoadDumpDtThresh1 = inputMessage.toFloat();
+      writeFile(LittleFS, "/LoadDumpDtThresh1.txt", String(LoadDumpDtThresh1).c_str());
+    }
+    if (request->hasParam("LoadDumpDtThresh3")) {
+      foundParameter = true;
+      inputMessage = request->getParam("LoadDumpDtThresh3")->value();
+      LoadDumpDtThresh3 = inputMessage.toFloat();
+      writeFile(LittleFS, "/LoadDumpDtThresh3.txt", String(LoadDumpDtThresh3).c_str());
     }
     if (request->hasParam("ManualSOCPoint")) {
       foundParameter = true;
@@ -3387,20 +3407,7 @@ void setupServer() {
       writeFile(LittleFS, "/VoltageKi.txt", String(VoltageKi).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    if (request->hasParam("VoltageKd")) {
-      foundParameter = true;
-      inputMessage = request->getParam("VoltageKd")->value();
-      VoltageKd = inputMessage.toFloat();
-      writeFile(LittleFS, "/VoltageKd.txt", String(VoltageKd).c_str());
-      if (CVTuningMode) cvTuningParamChanged = true;
-    }
-    if (request->hasParam("VoltageDWindowMs")) {
-      foundParameter = true;
-      inputMessage = request->getParam("VoltageDWindowMs")->value();
-      VoltageDWindowMs = (uint16_t)inputMessage.toInt();
-      writeFile(LittleFS, "/VoltageDWindowMs.txt", String(VoltageDWindowMs).c_str());
-      queueConsoleMessageF("Voltage D slope window: %d ms", VoltageDWindowMs);
-    }
+    // VoltageKd server handler removed — D term removed.
     if (request->hasParam("ProtectionProxGateV")) {
       foundParameter = true;
       inputMessage = request->getParam("ProtectionProxGateV")->value();
@@ -3619,12 +3626,12 @@ void setupServer() {
       TempSustainedTimeout = temp;
       queueConsoleMessageF("Temp sustained timeout set to: %d seconds", inputMessage.toInt());
     }
-    if (request->hasParam("VoltageSpikeMargin")) {
+    if (request->hasParam("AlternatorHardShutdownV")) {
       foundParameter = true;
-      inputMessage = request->getParam("VoltageSpikeMargin")->value();
-      writeFile(LittleFS, "/VoltageSpikeMargin.txt", inputMessage.c_str());
-      VoltageSpikeMargin = inputMessage.toFloat();
-      queueConsoleMessageF("Voltage spike margin set to: %.2fV above bulk", VoltageSpikeMargin);
+      inputMessage = request->getParam("AlternatorHardShutdownV")->value();
+      writeFile(LittleFS, "/AlternatorHardShutdownV.txt", inputMessage.c_str());
+      AlternatorHardShutdownV = inputMessage.toFloat();
+      queueConsoleMessageF("Alternator hard-shutdown voltage set to: %.2fV (absolute)", AlternatorHardShutdownV);
     }
     if (request->hasParam("HardOCDebounceMs")) {
       foundParameter = true;
@@ -3688,14 +3695,6 @@ void setupServer() {
       queueConsoleMessageF("AW seed protect window set to: %u ms", (unsigned)AwSeedProtectMs);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    if (request->hasParam("KSoft")) {
-      foundParameter = true;
-      inputMessage = request->getParam("KSoft")->value();
-      KSoft = inputMessage.toFloat();
-      writeFile(LittleFS, "/KSoft.txt", String(KSoft, 1).c_str());
-      queueConsoleMessageF("KSoft set to: %.1f A/V", KSoft);
-      if (CVTuningMode) cvTuningParamChanged = true;
-    }
     if (request->hasParam("KHard")) {
       foundParameter = true;
       inputMessage = request->getParam("KHard")->value();
@@ -3704,26 +3703,19 @@ void setupServer() {
       queueConsoleMessageF("KHard set to: %.1f A/V", KHard);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    if (request->hasParam("OvLayer1Enable")) {
+    if (request->hasParam("OvGroup1Enable")) {
       foundParameter = true;
-      inputMessage = request->getParam("OvLayer1Enable")->value();
-      OvLayer1Enable = inputMessage.toInt() != 0;
-      writeFile(LittleFS, "/OvLayer1Enable.txt", String((int)OvLayer1Enable).c_str());
-      queueConsoleMessageF("OV Layer 1 (soft cap prediction): %s", OvLayer1Enable ? "ENABLED" : "DISABLED");
+      inputMessage = request->getParam("OvGroup1Enable")->value();
+      OvGroup1Enable = inputMessage.toInt() != 0;
+      writeFile(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
+      queueConsoleMessageF("OV Group 1 (prediction-based cap): %s", OvGroup1Enable ? "ENABLED" : "DISABLED");
     }
-    if (request->hasParam("OvLayer2Enable")) {
+    if (request->hasParam("OvGroup2Enable")) {
       foundParameter = true;
-      inputMessage = request->getParam("OvLayer2Enable")->value();
-      OvLayer2Enable = inputMessage.toInt() != 0;
-      writeFile(LittleFS, "/OvLayer2Enable.txt", String((int)OvLayer2Enable).c_str());
-      queueConsoleMessageF("OV Layer 2 (hard cap prediction): %s", OvLayer2Enable ? "ENABLED" : "DISABLED");
-    }
-    if (request->hasParam("OvLayer3Enable")) {
-      foundParameter = true;
-      inputMessage = request->getParam("OvLayer3Enable")->value();
-      OvLayer3Enable = inputMessage.toInt() != 0;
-      writeFile(LittleFS, "/OvLayer3Enable.txt", String((int)OvLayer3Enable).c_str());
-      queueConsoleMessageF("OV Layer 3 (hysteresis clamp): %s", OvLayer3Enable ? "ENABLED" : "DISABLED");
+      inputMessage = request->getParam("OvGroup2Enable")->value();
+      OvGroup2Enable = inputMessage.toInt() != 0;
+      writeFile(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
+      queueConsoleMessageF("OV Group 2 (measured-voltage threshold): %s", OvGroup2Enable ? "ENABLED" : "DISABLED");
     }
     if (request->hasParam("IExcessSigSrc")) {
       foundParameter = true;
@@ -3776,19 +3768,19 @@ void setupServer() {
       writeFile(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());
       queueConsoleMessageF("OV prediction horizon set to: %.3f s", TdPred);
     }
-    if (request->hasParam("VSoftMarginV")) {
+    if (request->hasParam("OvMeasMarginV")) {
       foundParameter = true;
-      inputMessage = request->getParam("VSoftMarginV")->value();
-      VSoftMarginV = constrain(inputMessage.toFloat(), 0.020f, 0.500f);
-      writeFile(LittleFS, "/VSoftMarginV.txt", String(VSoftMarginV, 3).c_str());
-      queueConsoleMessageF("Layer 1/3 soft margin set to: %.0f mV", VSoftMarginV * 1000.0f);
+      inputMessage = request->getParam("OvMeasMarginV")->value();
+      OvMeasMarginV = constrain(inputMessage.toFloat(), 0.020f, 0.500f);
+      writeFile(LittleFS, "/OvMeasMarginV.txt", String(OvMeasMarginV, 3).c_str());
+      queueConsoleMessageF("Group 2 measured-voltage trigger margin set to: %.0f mV", OvMeasMarginV * 1000.0f);
     }
-    if (request->hasParam("VHardMarginV")) {
+    if (request->hasParam("OvPredMarginV")) {
       foundParameter = true;
-      inputMessage = request->getParam("VHardMarginV")->value();
-      VHardMarginV = constrain(inputMessage.toFloat(), 0.050f, 1.000f);
-      writeFile(LittleFS, "/VHardMarginV.txt", String(VHardMarginV, 3).c_str());
-      queueConsoleMessageF("Layer 2 hard margin set to: %.0f mV", VHardMarginV * 1000.0f);
+      inputMessage = request->getParam("OvPredMarginV")->value();
+      OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f, 1.000f);
+      writeFile(LittleFS, "/OvPredMarginV.txt", String(OvPredMarginV, 3).c_str());
+      queueConsoleMessageF("Group 1 prediction trigger margin set to: %.0f mV", OvPredMarginV * 1000.0f);
     }
     if (request->hasParam("DvdtAlpha")) {
       foundParameter = true;
@@ -4571,9 +4563,9 @@ void setupServer() {
         "\"vkp\":%.3f,\"vki\":%.3f,\"vkd\":%.2f,"
         "\"srr\":%.1f,\"sfr\":%.1f,"
         "\"abl\":%.2f,\"arl\":%.3f,\"asp\":%d,\"irf\":%.2f,"
-        "\"ks\":%.1f,\"kh\":%.1f,"
+        "\"kh\":%.1f,"
         "\"iek\":%.1f,\"ien\":%d,\"iekb\":%.2f,"
-        "\"lddt\":%.0f,\"ldcd\":%.0f,"
+        "\"lddt\":%.0f,\"ldt1\":%.0f,\"ldt3\":%.0f,"
         "\"tc\":%.0f,\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
         "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f}",
         i > 0 ? "," : "",
@@ -4584,9 +4576,9 @@ void setupServer() {
         r.voltageKp, r.voltageKi, r.voltageKd,
         r.setpointRiseRate, r.setpointFallRate,
         r.awBleedRate, r.awRecoverRate, (int)r.awSeedProtectMs, r.iExcessReseedFrac,
-        r.kSoft, r.kHard,
+        r.kHard,
         r.iExcessK, (int)r.iExcessN, r.iExcessKBleed,
-        r.loadDumpDtThresh, r.loadDumpCurrentDrop,
+        r.loadDumpDtThresh, r.loadDumpDtThresh1, r.loadDumpDtThresh3,
         r.inputFilterTC, r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
         r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget);
     }
@@ -4733,7 +4725,6 @@ void setupServer() {
 
   server.on("/resetVoltageProtectionCounters", HTTP_POST, [](AsyncWebServerRequest *request) {
     g_fastOvClampCount = 0;
-    g_fastOvSoftCount = 0;
     g_fastOvHardCount = 0;
     g_iExcessCount = 0;
     g_inaOVCount = 0;
@@ -5110,7 +5101,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),                             // 0
@@ -5315,7 +5306,7 @@ void SendWifiData() {
                                SafeInt(ft_rai_imu.worstWindow),                  // 193
                                SafeInt(ft_rai_imu.worstSession),                 // 194
                                SafeInt(fsWriteQueueDrops),                       // 195
-                               SafeInt(VoltageKd * g_fastOvDvdt, 100),           // 196
+                               0,                                                 // 196 reserved — was cv_D (D term removed)
                                SafeInt(tempReadFailCount),                       // 197
                                SafeInt(tempCrcFailCount),                        // 198
                                SafeInt(tempCrcRecoveredCount),                   // 199
@@ -5362,8 +5353,7 @@ void SendWifiData() {
                                SafeInt(currentPartitionType),                    // 239
                                SafeInt(g_fastOvCurrentCap, 100),                 // 240
                                SafeInt(g_fastOvClampCount),                      // 241
-                               SafeInt(g_fastOvSoftCount),                       // 242
-                               SafeInt(g_fastOvHardCount),                       // 243
+                               SafeInt(g_fastOvHardCount),                       // 242
                                SafeInt(ch1_last_ms),                             // 244
                                SafeInt(ch1_avg_10s, 100),                        // 245
                                SafeInt(ch1_worst_10s),                           // 246
@@ -5529,7 +5519,10 @@ void SendWifiData() {
                                (int)(systemIDQuietPP_A[0] * 10),                // 405
                                (int)(systemIDQuietPP_A[1] * 10),                // 406
                                (int)(systemIDQuietPP_A[2] * 10),                // 407
-                               SafeInt(nvsCycleMs)                               // 408 — ms elapsed for last complete NVS drain cycle
+                               SafeInt(nvsCycleMs),                              // 408 — ms elapsed for last complete NVS drain cycle
+                               SafeInt(voltLoopWorstInterval_5s),                // 409
+                               SafeInt(voltLoopWorstInterval_ses),               // 410
+                               SafeInt(fsFlushDeferred)                          // 411
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -5577,8 +5570,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -5701,7 +5694,7 @@ void SendWifiData() {
                                SafeInt(TempWarnExcess, 100),                     // 110
                                SafeInt(TempCritExcess, 100),                     // 111
                                SafeInt(TempSustainedTimeout / 1000),             // 112
-                               SafeInt(VoltageSpikeMargin, 100),                 // 113
+                               SafeInt(AlternatorHardShutdownV, 100),            // 113
                                SafeInt(VoltageDisagreeThreshold, 100),           // 114
                                SafeInt(VoltageDisagreeTimeout / 1000),           // 115
                                SafeInt(rpmMinDutyTable[0], 100),                 // 116
@@ -5771,101 +5764,99 @@ void SendWifiData() {
                                SafeInt(MinRPMForField),                          // 180
                                SafeInt(AwBleedRate, 10),                         // 181 — ×10, 1 decimal
                                SafeInt(AwRecoverRate, 10),                       // 182 — ×10, 1 decimal
-                               SafeInt(KSoft, 10),                               // 183 — ×10, 1 decimal
-                               SafeInt(KHard, 10),                               // 184 — ×10, 1 decimal
+                               SafeInt(KHard, 10),                               // 183 — ×10, 1 decimal
                                SafeInt(IExcessReseedFrac, 100),                  // 185 — ×100, 2 decimal
                                (int)AwSeedProtectMs,                             // 186
-                               SafeInt(VoltageKd, 100),                          // 187
+                               0,                                                 // 187 reserved — was VoltageKd (D term removed)
                                SafeInt(displayTempUnit),                         // 188
                                SafeInt(WarmupRampRate, 10),                      // 189 — ×10, 1 decimal
-                               (int)OvLayer1Enable,                              // 190
-                               (int)OvLayer2Enable,                              // 191
-                               (int)OvLayer3Enable,                              // 192
+                               (int)OvGroup1Enable,                              // 188
+                               (int)OvGroup2Enable,                              // 192
                                IExcessSigSrc,                                    // 193
                                IExcessMA_N,                                      // 194
                                OutputPIDSigSrc,                                  // 195
                                TdPred,                                           // 196 (%.3f)
-                               VSoftMarginV,                                     // 197 (%.3f)
-                               VHardMarginV,                                     // 198 (%.3f)
+                               OvMeasMarginV,                                    // 197 (%.3f)
+                               OvPredMarginV,                                    // 198 (%.3f)
                                OutputPIDMA_N,                                    // 199
                                (int)OutputPIDFilterTC,                           // 200
                                (int)VoltageFilterTC,                             // 201
-                               (int)VoltageDWindowMs,                            // 202
-                               SafeInt(ProtectionProxGateV, 100),                // 203
-                               SafeInt(SlopeBleedThresh, 100),                   // 204
-                               (int)SlopeBleedK,                                 // 205
-                               SafeInt(DvdtAlpha, 1000),                         // 206 — ×1000, 3 decimals
-                               SafeInt(SlopeBleedProxV, 100),                    // 207 — ×100, 2 decimals
-                               SafeInt(StartupRiseRate, 100),                    // 208 — ×100, 2 decimals
+                               SafeInt(ProtectionProxGateV, 100),                // 202
+                               SafeInt(SlopeBleedThresh, 100),                   // 203
+                               (int)SlopeBleedK,                                 // 204
+                               SafeInt(DvdtAlpha, 1000),                         // 205 — ×1000, 3 decimals
+                               SafeInt(SlopeBleedProxV, 100),                    // 206 — ×100, 2 decimals
+                               SafeInt(StartupRiseRate, 100),                    // 207 — ×100, 2 decimals
                                // from CSV2 (settings)
-                               SafeInt(absorptionCompleteTime),                  // 209
-                               SafeInt(OnOff),                                   // 210
-                               SafeInt(ManualFieldToggle),                       // 211
-                               SafeInt(HiLow),                                   // 212
-                               SafeInt(LimpHome),                                // 213
-                               SafeInt(AlarmActivate),                           // 214
-                               SafeInt(TempAlarm),                               // 215
-                               SafeInt(VoltageAlarmHigh),                        // 216
-                               SafeInt(VoltageAlarmLow),                         // 217
-                               SafeInt(CurrentAlarmHigh),                        // 218
-                               SafeInt(AlarmTest),                               // 219
-                               SafeInt(AlarmLatchEnabled),                       // 220
-                               SafeInt(MaintainMode),                            // 221
-                               SafeInt(ManualSOCPoint),                          // 222
-                               SafeInt(LearningMode),                            // 223
-                               SafeInt(LearningPaused),                          // 224
-                               SafeInt(IgnoreLearningDuringPenalty),             // 225
-                               SafeInt(ShowLearningDebugMessages),               // 226
-                               SafeInt(LogAllLearningEvents),                    // 227
-                               SafeInt(CloudFeatures),                           // 228
-                               SafeInt(LearningDryRunMode),                      // 229
-                               SafeInt(AutoShuntGainCorrection),                 // 230
-                               SafeInt(AutoAltCurrentZero),                      // 231
-                               SafeInt(WindingTempOffset),                       // 232
-                               SafeInt(ManualLifePercentage),                    // 233
-                               SafeInt(UVThresholdHigh, 100),                    // 234
-                               SafeInt(weatherModeEnabled),                      // 235
-                               SafeInt(SENSOR_UPLOAD_INTERVAL),                  // 236
-                               SafeInt(imuEnabled ? 1 : 0),                      // 237
-                               SafeInt(AbsorptionVoltage * 100),                 // 238
-                               SafeInt(AbsorptionTimeoutMs),                     // 239
-                               SafeInt(bulkVoltageHoldMs),                       // 240
-                               SafeInt(capLimitMode),                            // 241
-                               SafeInt(TargetVoltageMode),                       // 242
-                               SafeInt(TargetVoltageSetpoint, 100),              // 243
-                               SafeInt(RebulkCurrent_A, 100),                    // 244
-                               SafeInt(UseFloat),                                // 245
-                               SafeInt(anomalyMarginAmps, 10),                   // 246 — 1 decimal, divide by 10 in JS
-                               SafeInt(anomalyAlarmThreshold),                   // 247
-                               SafeInt(anomalyAlarmEnable),                      // 248
-                               SafeInt(degradationThreshold, 100),               // 249
-                               SafeInt(TempAlarmLow),                            // 250
-                               SafeInt(LoadDumpDtThresh),                        // 251 — A/s threshold for load dump detection
-                               SafeInt(LoadDumpCurrentDrop),                     // 252 — A current drop cap on load dump
-                               (int)CVTuningMode,                                // 253
-                               SafeInt(cvWaveAmplitudeV, 100),                   // 254 — ×100, 2dp V
-                               (int)cvWavePeriodSec,                             // 255
-                               SafeInt(cvKOvershoot, 10),                        // 256 — ×10, 1dp
-                               (int)cvConsecutiveReads,                          // 257
-                               (int)ThermalTuningMode,                           // 258
-                               SafeInt(thermalWaveLowF, 10),                     // 259 — ×10, 1dp °F
-                               SafeInt(thermalWaveHighF, 10),                    // 260 — ×10, 1dp °F
-                               SafeInt(thermalWaveHalfPeriodMin, 10),            // 261 — ×10, 1dp min
-                               SafeInt(thermalKOvershoot, 100),                  // 262 — ×100, 2dp
-                               SafeInt(thermalKUndershoot, 100),                 // 263 — ×100, 2dp
-                               SafeInt(thermalSettleThreshF, 10),                // 264 — ×10, 1dp °F
-                               (int)thermalConsecutiveReads,                     // 265
+                               SafeInt(absorptionCompleteTime),                  // 208
+                               SafeInt(OnOff),                                   // 209
+                               SafeInt(ManualFieldToggle),                       // 210
+                               SafeInt(HiLow),                                   // 211
+                               SafeInt(LimpHome),                                // 212
+                               SafeInt(AlarmActivate),                           // 213
+                               SafeInt(TempAlarm),                               // 214
+                               SafeInt(VoltageAlarmHigh),                        // 215
+                               SafeInt(VoltageAlarmLow),                         // 216
+                               SafeInt(CurrentAlarmHigh),                        // 217
+                               SafeInt(AlarmTest),                               // 218
+                               SafeInt(AlarmLatchEnabled),                       // 219
+                               SafeInt(MaintainMode),                            // 220
+                               SafeInt(ManualSOCPoint),                          // 221
+                               SafeInt(LearningMode),                            // 222
+                               SafeInt(LearningPaused),                          // 223
+                               SafeInt(IgnoreLearningDuringPenalty),             // 224
+                               SafeInt(ShowLearningDebugMessages),               // 225
+                               SafeInt(LogAllLearningEvents),                    // 226
+                               SafeInt(CloudFeatures),                           // 227
+                               SafeInt(LearningDryRunMode),                      // 228
+                               SafeInt(AutoShuntGainCorrection),                 // 229
+                               SafeInt(AutoAltCurrentZero),                      // 230
+                               SafeInt(WindingTempOffset),                       // 231
+                               SafeInt(ManualLifePercentage),                    // 232
+                               SafeInt(UVThresholdHigh, 100),                    // 233
+                               SafeInt(weatherModeEnabled),                      // 234
+                               SafeInt(SENSOR_UPLOAD_INTERVAL),                  // 235
+                               SafeInt(imuEnabled ? 1 : 0),                      // 236
+                               SafeInt(AbsorptionVoltage * 100),                 // 237
+                               SafeInt(AbsorptionTimeoutMs),                     // 238
+                               SafeInt(bulkVoltageHoldMs),                       // 239
+                               SafeInt(capLimitMode),                            // 240
+                               SafeInt(TargetVoltageMode),                       // 241
+                               SafeInt(TargetVoltageSetpoint, 100),              // 242
+                               SafeInt(RebulkCurrent_A, 100),                    // 243
+                               SafeInt(UseFloat),                                // 244
+                               SafeInt(anomalyMarginAmps, 10),                   // 245 — 1 decimal, divide by 10 in JS
+                               SafeInt(anomalyAlarmThreshold),                   // 246
+                               SafeInt(anomalyAlarmEnable),                      // 247
+                               SafeInt(degradationThreshold, 100),               // 248
+                               SafeInt(TempAlarmLow),                            // 249
+                               SafeInt(LoadDumpDtThresh),                        // 250 — A/s tier-2 threshold (2 consecutive)
+                               SafeInt(LoadDumpDtThresh1),                       // 251 — A/s tier-1 threshold (1 sample)
+                               (int)CVTuningMode,                                // 252
+                               SafeInt(cvWaveAmplitudeV, 100),                   // 253 — ×100, 2dp V
+                               (int)cvWavePeriodSec,                             // 254
+                               SafeInt(cvKOvershoot, 10),                        // 255 — ×10, 1dp
+                               (int)cvConsecutiveReads,                          // 256
+                               (int)ThermalTuningMode,                           // 257
+                               SafeInt(thermalWaveLowF, 10),                     // 258 — ×10, 1dp °F
+                               SafeInt(thermalWaveHighF, 10),                    // 259 — ×10, 1dp °F
+                               SafeInt(thermalWaveHalfPeriodMin, 10),            // 260 — ×10, 1dp min
+                               SafeInt(thermalKOvershoot, 100),                  // 261 — ×100, 2dp
+                               SafeInt(thermalKUndershoot, 100),                 // 262 — ×100, 2dp
+                               SafeInt(thermalSettleThreshF, 10),                // 263 — ×10, 1dp °F
+                               (int)thermalConsecutiveReads,                     // 264
                                // from CSV1 (settings)
-                               SafeInt(webgaugesinterval),                       // 266
-                               SafeInt(plotTimeWindow),                          // 267
-                               SafeInt(Ymin1),                                   // 268
-                               SafeInt(Ymax1),                                   // 269
-                               SafeInt(Ymin2, 100),                              // 270
-                               SafeInt(Ymax2, 100),                              // 271
-                               SafeInt(Ymin3),                                   // 272
-                               SafeInt(Ymax3),                                   // 273
-                               SafeInt(Ymin4),                                   // 274
-                               SafeInt(Ymax4)                                    // 275
+                               SafeInt(webgaugesinterval),                       // 265
+                               SafeInt(plotTimeWindow),                          // 266
+                               SafeInt(Ymin1),                                   // 267
+                               SafeInt(Ymax1),                                   // 268
+                               SafeInt(Ymin2, 100),                              // 269
+                               SafeInt(Ymax2, 100),                              // 270
+                               SafeInt(Ymin3),                                   // 271
+                               SafeInt(Ymax3),                                   // 272
+                               SafeInt(Ymin4),                                   // 273
+                               SafeInt(Ymax4),                                   // 274
+                               SafeInt(LoadDumpDtThresh3)                        // 275 — A/s tier-3 threshold (3 consecutive)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

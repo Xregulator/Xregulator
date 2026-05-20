@@ -218,6 +218,10 @@ static uint32_t sessionHealthCount = 0;
 // Set when history changes — triggers SSE resend
 static bool effHistoryDirty = false;
 
+// Set when a save was blocked by inCriticalZone() — retried every 30s when safe
+static bool effMatrixNeedsSave = false;
+static bool sessionHealthNeedsSave = false;
+
 #define FUNC_TIMING_WINDOW_MS 10000  // rolling window for per-function worst-case timing (ms)
 
 
@@ -312,22 +316,22 @@ struct WindowSlot {
 static WindowSlot *effWindow = nullptr;
 
 // Per-bin session stats — PSRAM, resets each power cycle.
-// Accumulates current session's readings for Layer 2 thermal-average comparison.
-// count >= 90 required before Layer 2 fires (matches ~90s thermal time constant).
+// Accumulates current session's readings for Tier 2 thermal-average comparison.
+// count >= 90 required before Tier 2 fires (matches ~90s thermal time constant).
 struct SessionBinStats {
   float sum_amps;    // Running sum of qualifying amps this session
   uint16_t count;    // Number of qualifying samples this session
-  bool trend_fired;  // True once Layer 2 has already fired for this bin this session
+  bool trend_fired;  // True once Tier 2 has already fired for this bin this session
 };
 static SessionBinStats *sessionStats = nullptr;  // Allocated in PSRAM at init
 
-// Layer 2 thermal average comparison threshold — user adjustable via LittleFS
+// Tier 2 thermal average comparison threshold — user adjustable via LittleFS
 // 0.15 = alert if session average is more than 15% above or below reference average
 float degradationThreshold = 0.15f;
 
-// Separate error counters for each layer — summed for alarm threshold comparison
-static int sessionLayer1Errors = 0;  // Instantaneous min/max violations
-static int sessionLayer2Errors = 0;  // Thermal average drift violations
+// Separate error counters for each tier — summed for alarm threshold comparison
+static int sessionTier1Errors = 0;  // Instantaneous min/max violations
+static int sessionTier2Errors = 0;  // Thermal average drift violations
 
 // Matrix in PSRAM — allocated in initEfficiencyTracker()
 static MatrixCell *effMatrix = nullptr;
@@ -764,9 +768,9 @@ int cpuLoadCore1Max = 0;
 //More health monitoring
 // Session and health tracking
 unsigned long sessionStartTime = 0;
-// Duration of last WiFi session (minutes, persistent)
-unsigned long LastSessionDuration = 0;     // minutes, persistent
-unsigned long CurrentSessionDuration = 0;  //minutes
+// Duration of last WiFi session (seconds, persistent)
+unsigned long LastSessionDuration = 0;     // seconds, persistent
+unsigned long CurrentSessionDuration = 0;  // seconds
 int LastSessionMaxLoopTime = 0;            // milliseconds, persistent
 int MaxLoopTime = 0;                       // not displayed on client, but available here
 int lastSessionMinHeap = 999999;           // KB, persistent
@@ -854,12 +858,12 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Safeties continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC = 140.0f;      // ms — iExcess EMA TC, LittleFS-backed
-float OutputPIDFilterTC = 140.0f;  // ms — Output Current PID EMA TC, LittleFS-backed
+float InputFilterTC = 100.0f;      // ms — iExcess EMA TC, LittleFS-backed
+float OutputPIDFilterTC = 100.0f;  // ms — Output Current PID EMA TC, LittleFS-backed
 float VoltageFilterTC = 100.0f;    // ms — IBV EMA TC for CV voltage loop, LittleFS-backed
-float IBV_filtered = 0.0f;  // EMA of INA228 bus voltage — used by getFiltV() and CV loop
 float MeasuredAmps_filtered = 0.0f;  // iExcess EMA signal
 float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
+float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by getFiltV()
 
 // ── SystemID — plant delay measurement ───────────────────────────────────
 // Step test: baseline → 3× (duty up / duty down) → post-process.
@@ -1991,8 +1995,8 @@ uint32_t cvLiveScore_lastDtMs = 0;  // last time |g_dBcur_dt| crossed the gate t
 bool cvLiveScore_inWindow = false;
 
 // === CV Loop Tuning Score System ===
-float cvWaveAmplitudeV = 0.30f;   // V — target dips by this during LOW phase
-int cvWavePeriodSec = 20;         // s — half-period of CV test wave
+float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
+int cvWavePeriodSec = 30;         // s — full period of CV test wave (one LOW + one HIGH); each half-period = this / 2. Default matches the UI input minimum.
 float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
 uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
 int CVTuningMode = 0;             // 0=off, 1=on
@@ -2013,7 +2017,7 @@ struct CVTuningRecord {
   float avgIntegratedOvershootVs;
   float activeTimeSec;
   uint16_t fastOvFires, iExcessFires, loadDumpFires, hardOcFires;
-  // CV PID
+  // CV PI (voltageKd reserved — was D term, now always 0.0)
   float voltageKp, voltageKi, voltageKd;
   // Setpoint shaping
   float setpointRiseRate, setpointFallRate;
@@ -2022,13 +2026,13 @@ struct CVTuningRecord {
   uint16_t awSeedProtectMs;
   float iExcessReseedFrac;
   // FastOV supervisor
-  float kSoft, kHard;
+  float kHard;
   // iExcess
   float iExcessK;
   int iExcessN;
   float iExcessKBleed;
   // Load dump
-  float loadDumpDtThresh, loadDumpCurrentDrop;
+  float loadDumpDtThresh, loadDumpDtThresh1, loadDumpDtThresh3;
   // Filter
   float inputFilterTC;
   // Test setup
@@ -2197,30 +2201,27 @@ float PidKi = 2.0f;   // integral gain
 float PidKd = 0.01f;  // derivative gain
 // --- Voltage (CV) PID ---
 float VoltageKp = 25.0f;             // A/V — proportional gain
-float VoltageKi = 2.5f;              // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
-float VoltageKd = 40.0f;             // A/(V/s) — derivative gain; at dvdt=0.5V/s subtracts 20A from Icv
-uint16_t VoltageDWindowMs = 200;     // ms — D slope window; must be >= VoltageLoopInterval, <= CV_DSLOPE_BUF × VoltageLoopInterval
-float SlopeBleedThresh = 0.10f;      // V/s — integrator bleed activates when cvDSlope exceeds this (intended max rise rate)
+float VoltageKi = 1.25f;             // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
+// VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
+float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
-float SlopeBleedProxV = 0.15f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0)
+float SlopeBleedProxV = 0.50f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0)
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
-float KSoft = 12.0f;  // A/V — soft OV cap slope (fires when Vpred > target+0.08V)
-float KHard = 35.0f;  // A/V — hard OV cap slope (fires when Vpred > target+0.15V)
-bool  OvLayer1Enable = false;   // Layer 1 — soft-cap prediction (off by default — false fires at idle from belt resonance dvdt spikes; see CV_Loop_Dev_Summary.md)
-bool  OvLayer2Enable = true;    // Layer 2 — hard-cap prediction enable
-bool  OvLayer3Enable = true;    // Layer 3 — hysteresis clamp enable
-int   IExcessSigSrc   = 0;      // Layer 4 — 0=MA(N), 1=EMA(TC), 2=Raw
-int   IExcessMA_N     = 2;      // Layer 4 — MA window size (1–10 samples)
+float KHard = 35.0f;  // A/V — OV cap slope (Group 1: Vpred > target+OvPredMarginV; Group 2: IBV > target+OvMeasMarginV)
+bool  OvGroup1Enable  = true;   // Group 1 — prediction-based cap enable (Vpred > target + OvPredMarginV)
+bool  OvGroup2Enable  = true;   // Group 2 — measured-voltage threshold enable (IBV > target + OvMeasMarginV)
+int   IExcessSigSrc   = 0;      // Group 3 — 0=MA(N), 1=EMA(TC), 2=Raw
+int   IExcessMA_N     = 2;      // Group 3 — MA window size (1–10 samples)
 int   OutputPIDSigSrc = 0;      // Output current PID — 0=EMA(TC), 1=MA(N), 2=Raw
 int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10 samples)
-float TdPred         = 0.045f;  // Layers 1+2 lookahead horizon (s)
-float VSoftMarginV   = 0.100f;  // Layer 1/3 voltage margin above target (V)
-float VHardMarginV   = 0.150f;  // Layer 2 voltage margin above target (V)
+float TdPred         = 0.045f;  // Group 1 lookahead horizon (s)
+float OvMeasMarginV  = 0.100f;  // Group 2 measured-voltage trigger margin above target (V)
+float OvPredMarginV  = 0.150f;  // Group 1 prediction trigger margin above target (V)
 float DvdtAlpha      = 0.08f;   // EMA alpha for dvdt (rate-of-rise) signal fed into Vpred (lower = smoother, more lag)
 // --- Protection proximity gate ---
-float ProtectionProxGateV = 0.3f; // V — protections only arm when ChargingVoltageTarget >= BulkVoltage - this
+float ProtectionProxGateV = 0.5f; // V — protections only arm when ChargingVoltageTarget >= BulkVoltage - this
 // --- iExcess current supervisor ---
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
@@ -2233,6 +2234,10 @@ uint16_t AwSeedProtectMs = 150;  // ms to suppress AwBleed + CC-tracker after an
 // --- CV loop runtime state ---
 float VoltageTrimLimit = 5.0f;            // OBSOLETE DELETE LATER
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
+uint16_t g_voltLoopActualIntervalMs = 0;  // actual interval of last voltage loop fire (ms); 0 until second fire
+uint16_t voltLoopWorstInterval_5s = 0;    // worst voltage loop interval in rolling 5s window (ms)
+uint16_t voltLoopWorstInterval_ses = 0;   // worst voltage loop interval since boot (ms)
+float g_slopeBleedAmpsThisTick = 0.0f;   // slope bleed drain applied this voltage loop tick (A); cleared by cvLog_tick after logging
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
 bool voltageControlActive = false;        // true when voltage PID is active (non-idle stages)
@@ -2335,7 +2340,7 @@ struct TickSnapshot {
   bool inLockout;
 
   float bulkVoltage;
-  float voltageSpikeMargin;
+  float alternatorHardShutdownV;
 
   float tempToUseF;
   float tempLimitF;
@@ -2371,7 +2376,13 @@ float TempCritExcess = 10.0f;            // °F above limit triggers IMMEDIATE G
 uint32_t TempSustainedTimeout = 120000;  // ms - WARNING temp sustained this long triggers GPIO4 cut (2 min default)
 
 // --- Voltage Thresholds ---
-float VoltageSpikeMargin = 0.3f;          // V above BulkVoltage triggers voltage spike warning
+// AlternatorHardShutdownV: absolute battery voltage above which the alternator field is cut
+// and a cooldown lockout starts. Should be set just below the battery BMS shutdown voltage.
+// This is the only software-layer hard OV shutdown; below it sit the Group 1/2/3 throttling
+// protections, alongside it sits the INA228 hardware ALERT pin (same default threshold of
+// BulkVoltage + 0.3 V but using the chip's slow-averaged value, so it acts as a hardware
+// backup that fires after the software on slow ramps and slightly after on fast transients).
+float AlternatorHardShutdownV = 14.8f;    // V — absolute hard-shutdown threshold; this 14.8 is only the in-RAM seed for first boot on a 12V system. First-boot init in 4_functions.ino overwrites it with BulkVoltage + 0.3 V so 24V/48V systems get sensible defaults (29.1 V / 57.9 V).
 float VoltageDisagreeThreshold = 0.15f;   // V difference between BatteryV and IBV for disagreement detection
 uint32_t VoltageDisagreeTimeout = 10000;  // ms - sustained disagreement this long triggers warning
 uint32_t VoltageDisagreeCriticalTimeoutMs = 3000;
@@ -2502,12 +2513,7 @@ bool thermalSlopeBufFull = false;
 float projectedTempF = NAN;           // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
 uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDIntervalMs cadence
 
-// CV D-term slope ring buffer: stores up to CV_DSLOPE_BUF voltage readings; active window
-// controlled at runtime by VoltageDWindowMs (user-adjustable, LittleFS-backed).
-#define CV_DSLOPE_BUF 10             // max 10 × 100ms = 900ms window at default loop rate
-float cvDSlopeBuffer[CV_DSLOPE_BUF];
-uint8_t cvDSlopeBufIdx = 0;
-float cvDSlope = 0.0f;              // V/s — backward diff on filtered voltage over VoltageDWindowMs
+float cvDSlope = 0.0f;              // V/s — mirrors g_fastOvDvdt; used by slope-aware integrator bleed (SlopeBleedK)
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
@@ -2672,8 +2678,8 @@ uint32_t thermalLogBurstUntilMs = 0;
 
 #define PID_LOG_SIZE 2400
 #define CV_LOG_SIZE 6000
-#define CV_LOG_HEADER_SIZE 24
-#define CV_LOG_ENTRY_SIZE 44
+#define CV_LOG_HEADER_SIZE 36
+#define CV_LOG_ENTRY_SIZE 50
 
 volatile bool pidLogPaused = false;
 volatile uint32_t pidLogPausedAtMs = 0;
@@ -2686,7 +2692,7 @@ struct PidLogEntry {
   uint8_t chargeStageDisplay;  // getChargeStageDisplayCode() enum value
   uint8_t TargetVoltageMode;   // runtime TargetVoltageMode flag (0 or 1)
   uint8_t flags;               // bit0=AUTO bit1=voltCtrl bit4=govBypass
-  uint8_t ovFlags;             // bit0=fastOvActive bit1=softClamp bit2=hardClamp bit3=iExcess bit4=loadDumpActive
+  uint8_t ovFlags;             // bit0=fastOvActive bit1=reserved(was softClamp) bit2=hardClamp bit3=iExcess bit4=loadDumpActive
 
   // ── CV loop ──────────────────────────────────────────────────────
   float battV;                  // tick.currentBatteryVoltage
@@ -2724,14 +2730,19 @@ struct PidLogEntry {
   float innerKd;    // PidKd  — inner output-current PID gain (NOT voltage loop Kd)
   float voltageKp;  // VoltageKp — outer voltage loop proportional gain (A/V)
   float voltageKi;  // VoltageKi — outer voltage loop integral gain (A/(V·s))
-  float voltageKd;  // VoltageKd — outer voltage loop derivative gain (A/(V/s))
+  float voltageKd;  // reserved — was VoltageKd (D term removed); always 0.0
   // ── Filtered signals ─────────────────────────────────────────────
-  float battV_filt;  // IBV_filtered
+  float battV_filt;  // IBV
   float iMeas_filt;  // MeasuredAmps_filtered
   // ── Protection flags & signals ───────────────────────────────────────────
   float dBcur_dt;    // g_dBcur_dt (A/s) — battery current derivative for load dump
   float battI;       // getBatteryCurrent() (A) — INA228 or Victron
-};                   // 124 bytes — naturally aligned, no implicit holes
+  // ── Timing diagnostics ───────────────────────────────────────────────────
+  int16_t ch1IntervalMs;       // g_ch1LastIntervalMs — CH1 inter-sample gap this tick (ms)
+  int16_t voltLoopIntervalMs;  // actual voltage loop interval when fired this tick (ms); 0 if not fired
+  int16_t inaIntervalMs;       // ina_last_ms — INA228 read freshness (ms)
+  int16_t pad2;                // alignment pad
+};                   // 132 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
@@ -2793,26 +2804,29 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //  28      flags            —          see bit definitions below
 //  29      pad              —          zero
 //  30      rpm              raw        RPM, clamped to int16 range
-//  32      battV_filt_x100  ×100       IBV_filtered (EMA)
+//  32      battV_filt_x100  ×100       IBV (raw battery voltage)
 //  34      iMeas_filt_x10   ×10        MeasuredAmps_filtered (EMA)
 //  36      ch1IntervalMs    raw ms     last CH1 inter-sample gap
 //  38      cvDSlope_x10000  ×10000     cvDSlope (500ms backward diff on filtered V)
 //  40      battI_x10        ×10        getBatteryCurrent() — INA228 or Victron
 //  42      dBcur_dt_Aps     raw A/s    g_dBcur_dt clamped to int16
+//  44      voltLoopIntervalMs  raw ms  actual voltage loop interval when fired this tick; 0 if not fired
+//  46      inaIntervalMs       raw ms  ina_last_ms at log time — INA228 read freshness
+//  48      slopeBleedAmps_x1000 ×1000  cv_I drain applied this voltage loop tick (A×1000); 0 on non-VL ticks
 //
 //  flags bits:
 //    b0  fastOvActive    any OV clamp fired this tick
 //    b1  voltLoopFired   voltage PI ran this tick (100ms cadence)
 //    b2  cvActive        voltageControlActive
-//    b3  softClamp       Layer 1 (soft cap prediction) applied
-//    b4  hardClamp       Layer 2 (hard cap prediction) applied
-//    b5  iExcess         Layer 4 (iExcess supervisor) fired this tick
+//    b3  reserved        (was softClamp — old soft-cap removed)
+//    b4  hardClamp       Group 1 (prediction cap) or Group 2 (voltage threshold) applied
+//    b5  iExcess         Group 3 (iExcess supervisor) fired this tick
 //    b6  loadDumpActive  load dump feedforward active this tick
 
 
 
 
-struct CvLogEntry {
+struct __attribute__((packed)) CvLogEntry {
   uint32_t ts;
   int16_t battV;
   int16_t targV;
@@ -2826,17 +2840,20 @@ struct CvLogEntry {
   int16_t spLimited;
   int16_t iMeas;
   int16_t duty;
-  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=softClamp b4=hardClamp b5=iExcess b6=loadDumpActive
+  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=reserved(was softClamp) b4=hardClamp b5=iExcess b6=loadDumpActive
   uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
-  int16_t battV_filt_x100;  // IBV_filtered × 100    (V)
+  int16_t battV_filt_x100;  // IBV × 100    (V)
   int16_t iMeas_filt_x10;   // MeasuredAmps_filtered × 10 (A)
   int16_t ch1IntervalMs;    // last CH1 inter-sample gap   (ms)
   int16_t cvDSlope_x10000;  // cvDSlope × 10000 (V/s × 10000 → ~0.0001 V/s per count)
   int16_t battI_x10;        // getBatteryCurrent() × 10 (A) — INA228 or Victron
-  int16_t dBcur_dt_Aps;    // g_dBcur_dt clamped to int16 (A/s) — load dump derivative
+  int16_t dBcur_dt_Aps;       // g_dBcur_dt clamped to int16 (A/s) — load dump derivative
+  int16_t voltLoopIntervalMs;      // actual voltage loop interval when fired this tick (ms); 0 if not fired
+  int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
+  int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
 };
-static_assert(sizeof(CvLogEntry) == 44, "CvLogEntry must be 44 bytes");
+static_assert(sizeof(CvLogEntry) == 50, "CvLogEntry must be 50 bytes");
 
 
 struct CvBinDLState {
@@ -2852,14 +2869,17 @@ struct CvBinDLState {
 };
 
 // ---------------------------------------------------------------------------
-// BINARY HEADER  (24 bytes)
+// BINARY HEADER  (36 bytes)
 // offset  field           type      notes
 //   0     count           uint32    number of valid entries
-//   4     entrySize       uint32    = 32 (future-proof)
+//   4     entrySize       uint32    = 50
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
-//  20     voltageKd       float     VoltageKd at download time
+//  20     reserved        float     (was VoltageKd — D term removed; always 0.0)
+//  24     sbThresh        float     SlopeBleedThresh (V/s)
+//  28     sbK             float     SlopeBleedK (A/(V/s))
+//  32     sbProxV         float     SlopeBleedProxV (V)
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
@@ -2873,9 +2893,7 @@ static uint32_t cvLogPausedAtMs = 0;
 float g_fastOvDvdt = 0.0f;        // filtered dV/dt (V/s), updated every IBV fresh tick
 float g_dBcur_dt = 0.0f;          // dBcur/dt (A/s), updated every INA228 read; positive = load dump
 float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageControlActive
-bool g_fastOvSoftActive = false;  // K_SOFT correction fired this tick
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
-uint32_t g_fastOvSoftCount = 0;
 uint32_t g_fastOvHardCount = 0;
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────
@@ -2896,10 +2914,10 @@ uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 bool g_iExcessActive = false;
 float g_iExcessDutyCap = 100.0f;
 
-// Load dump detection via dBcur/dt
-float LoadDumpDtThresh = 1500.0f;   // A/s — per-sample threshold; 1500 = 7.5A change per 5ms INA window; noise ceiling ~354 A/s consecutive
-float LoadDumpCurrentDrop = 30.0f;  // A   — how much to reduce fastOvCurrentCap on event
-int   LoadDumpN = 2;                // consecutive samples above threshold required; INA228 noise is alternating-sign so two consecutive highs cannot be noise
+// Load dump detection via dBcur/dt — three-tier cascade
+float LoadDumpDtThresh1 = 4000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
+float LoadDumpDtThresh  = 1500.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
+float LoadDumpDtThresh3 = 1000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
 bool g_loadDumpActive = false;
 uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
 uint32_t g_loadDumpCount = 0;
@@ -3670,7 +3688,7 @@ void loop() {
 
   // SOC and runtime update every 2 seconds (runs regardless of hardwarePresent)
   if (currentTime - lastSOCUpdateTime >= SOCUpdateInterval) {
-    CurrentSessionDuration = (millis() - sessionStartTime) / 1000 / 60;  //minutes
+    CurrentSessionDuration = (millis() - sessionStartTime) / 1000;  // seconds
     elapsedMillis = currentTime - lastSOCUpdateTime;
     lastSOCUpdateTime = currentTime;
     TIMED_CALL(ft_UpdateEngineRuntime, UpdateEngineRuntime(elapsedMillis));
@@ -4088,6 +4106,7 @@ void loop() {
     ft_ReadVEData.worstWindow = 0;
     ft_FlushFileWriteQueue.worstWindow = 0;
     ft_efficiencyTracker.worstWindow = 0;
+    voltLoopWorstInterval_5s = 0;
 
     prev_millis7888 = millis();
   }

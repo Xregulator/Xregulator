@@ -51,9 +51,9 @@ void reportFieldModeEvent(uint32_t nowMs, FieldControlMode mode, FieldEventReaso
 const char *modeToString(FieldControlMode mode);
 const char *reasonToString(FieldEventReason r);
 // Control loop sub-path helpers
-void handleLimpHome(uint32_t currentMillis, const TickSnapshot& tick);
-void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEventReason reason,
-                    float actualDtSec, bool exitingNormal);
+void handleLimpHome(uint32_t currentMillis, const TickSnapshot &tick);
+void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEventReason reason,
+                     float actualDtSec, bool exitingNormal);
 
 // ====================================================================================
 // FIELD CONTROL MODULE - Refactored with Unified Actuator Governor
@@ -324,7 +324,7 @@ void enter_sys_auto() {
 
 // handleLimpHome — Emergency limp-home path. Bypasses all safeties except INA228.
 // Call only when LimpHome==1. Caller returns immediately after.
-void handleLimpHome(uint32_t currentMillis, const TickSnapshot& tick) {
+void handleLimpHome(uint32_t currentMillis, const TickSnapshot &tick) {
   if (OnOff == 0) {
     digitalWrite(4, LOW);
     gpio4IsLow = true;
@@ -364,7 +364,7 @@ void handleLimpHome(uint32_t currentMillis, const TickSnapshot& tick) {
 // runShutdownPath — Fault / non-normal mode state machine.
 // Runs the full shutdown ramp (phases 1→3→4→GPIO4 cut) and returns.
 // Never reaches the CV control path. prevMode and return are handled by caller.
-void runShutdownPath(const TickSnapshot& tick, FieldControlMode mode, FieldEventReason reason,
+void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEventReason reason,
                      float actualDtSec, bool exitingNormal) {
   voltageControlActive = false;
 
@@ -498,8 +498,8 @@ void saveTuningLog() {
   if (!tuningLog) return;
   File f = LittleFS.open("/tuninglog.bin", "w");
   if (!f) return;
-  f.write((uint8_t *)&tuningLogCount,   sizeof(tuningLogCount));
-  f.write((uint8_t *)&tuningLogHead,    sizeof(tuningLogHead));
+  f.write((uint8_t *)&tuningLogCount, sizeof(tuningLogCount));
+  f.write((uint8_t *)&tuningLogHead, sizeof(tuningLogHead));
   f.write((uint8_t *)&tuningRunCounter, sizeof(tuningRunCounter));
   f.write((uint8_t *)tuningLog, 50 * sizeof(TuningRecord));
   f.close();
@@ -509,8 +509,8 @@ void loadTuningLog() {
   if (!tuningLog) return;
   File f = LittleFS.open("/tuninglog.bin", "r");
   if (!f) return;
-  f.read((uint8_t *)&tuningLogCount,   sizeof(tuningLogCount));
-  f.read((uint8_t *)&tuningLogHead,    sizeof(tuningLogHead));
+  f.read((uint8_t *)&tuningLogCount, sizeof(tuningLogCount));
+  f.read((uint8_t *)&tuningLogHead, sizeof(tuningLogHead));
   f.read((uint8_t *)&tuningRunCounter, sizeof(tuningRunCounter));
   f.read((uint8_t *)tuningLog, 50 * sizeof(TuningRecord));
   f.close();
@@ -524,22 +524,24 @@ void commitTuningRecord() {
     return;
   }
   TuningRecord rec = {};
-  rec.runNumber    = ++tuningRunCounter;
-  rec.score        = tuningScore.errorAccum / tuningScore.activeTimeSec;
+  rec.runNumber = ++tuningRunCounter;
+  rec.score = tuningScore.errorAccum / tuningScore.activeTimeSec;
   rec.activeTimeSec = tuningScore.activeTimeSec;
-  rec.kp           = PidKp;
-  rec.ki           = PidKi;
-  rec.kd           = PidKd;
+  rec.kp = PidKp;
+  rec.ki = PidKi;
+  rec.kd = PidKd;
   rec.sampleDivisor = PidSampleDivisor;
-  rec.trackingGain  = PIDTrackingGain;
-  rec.dutyRampRate  = DutyRampRate;
+  rec.trackingGain = PIDTrackingGain;
+  rec.dutyRampRate = DutyRampRate;
   rec.waveAmplitude = (int16_t)waveAmplitude;
-  rec.wavePeriod    = (int16_t)wavePeriod;
-  rec.avgRPM        = (tuningScore.avgSampleCount > 0)
-                        ? (tuningScore.rpmSum / tuningScore.avgSampleCount) : 0.0f;
-  rec.avgAltTempF   = (tuningScore.avgSampleCount > 0)
-                        ? (tuningScore.tempSum / tuningScore.avgSampleCount) : 0.0f;
-  rec.worstErrorA   = tuningScore.worstErrorA;
+  rec.wavePeriod = (int16_t)wavePeriod;
+  rec.avgRPM = (tuningScore.avgSampleCount > 0)
+                 ? (tuningScore.rpmSum / tuningScore.avgSampleCount)
+                 : 0.0f;
+  rec.avgAltTempF = (tuningScore.avgSampleCount > 0)
+                      ? (tuningScore.tempSum / tuningScore.avgSampleCount)
+                      : 0.0f;
+  rec.worstErrorA = tuningScore.worstErrorA;
 
   tuningLog[tuningLogHead] = rec;
   tuningLogHead = (tuningLogHead + 1) % 50;
@@ -547,7 +549,7 @@ void commitTuningRecord() {
 
   saveTuningLog();
   queueConsoleMessageF("TuningScore: run#%d score=%.2f kp=%.3f ki=%.3f kd=%.4f t=%.1fs",
-    rec.runNumber, rec.score, rec.kp, rec.ki, rec.kd, rec.activeTimeSec);
+                       rec.runNumber, rec.score, rec.kp, rec.ki, rec.kd, rec.activeTimeSec);
 
   tuningScore = {};  // reset for next test
 }
@@ -556,8 +558,8 @@ void saveCVTuningLog() {
   if (!cvTuningLog) return;
   File f = LittleFS.open("/cvtuninglog.bin", "w");
   if (!f) return;
-  f.write((uint8_t *)&cvTuningLogCount,   sizeof(cvTuningLogCount));
-  f.write((uint8_t *)&cvTuningLogHead,    sizeof(cvTuningLogHead));
+  f.write((uint8_t *)&cvTuningLogCount, sizeof(cvTuningLogCount));
+  f.write((uint8_t *)&cvTuningLogHead, sizeof(cvTuningLogHead));
   f.write((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
   f.write((uint8_t *)cvTuningLog, 50 * sizeof(CVTuningRecord));
   f.close();
@@ -567,8 +569,8 @@ void loadCVTuningLog() {
   if (!cvTuningLog) return;
   File f = LittleFS.open("/cvtuninglog.bin", "r");
   if (!f) return;
-  f.read((uint8_t *)&cvTuningLogCount,   sizeof(cvTuningLogCount));
-  f.read((uint8_t *)&cvTuningLogHead,    sizeof(cvTuningLogHead));
+  f.read((uint8_t *)&cvTuningLogCount, sizeof(cvTuningLogCount));
+  f.read((uint8_t *)&cvTuningLogHead, sizeof(cvTuningLogHead));
   f.read((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
   f.read((uint8_t *)cvTuningLog, 50 * sizeof(CVTuningRecord));
   f.close();
@@ -581,64 +583,62 @@ void commitCVTuningRecord() {
     return;
   }
   CVTuningRecord rec = {};
-  float n                        = (float)cvTuningScore.scoredHighCount;
-  rec.runNumber                  = ++cvTuningRunCounter;
-  rec.avgSettlingTimeSec         = cvTuningScore.totalSettlingTimeSec / n;
-  rec.avgIntegratedOvershootVs   = cvTuningScore.totalIntegratedOvershootVs / n;
-  rec.worstOvershootV            = cvTuningScore.worstOvershootV;
-  rec.activeTimeSec              = cvTuningScore.activeTimeSec;
+  float n = (float)cvTuningScore.scoredHighCount;
+  rec.runNumber = ++cvTuningRunCounter;
+  rec.avgSettlingTimeSec = cvTuningScore.totalSettlingTimeSec / n;
+  rec.avgIntegratedOvershootVs = cvTuningScore.totalIntegratedOvershootVs / n;
+  rec.worstOvershootV = cvTuningScore.worstOvershootV;
+  rec.activeTimeSec = cvTuningScore.activeTimeSec;
   // ISE/T: (HIGH ISE + LOW re-overshoot ISE + LOW undershoot ISE) ÷ total active time, ×1000.
   // HIGH overshoot above 25mV dead-band weighted ×4; LOW undershoot weighted ×0.15 with time ramp.
   rec.score = (rec.activeTimeSec > 0.0f)
-              ? (1000.0f * (cvTuningScore.totalIntegratedOvershootVs
-                            + cvTuningScore.totalLowIntOvVs
-                            + cvTuningScore.totalLowUndershootVs)
-                 / rec.activeTimeSec)
-              : 0.0f;
-  rec.fastOvFires                = cvTuningScore.fastOvFires;
-  rec.iExcessFires               = cvTuningScore.iExcessFires;
-  rec.loadDumpFires              = cvTuningScore.loadDumpFires;
-  rec.hardOcFires                = cvTuningScore.hardOcFires;
-  rec.voltageKp                  = VoltageKp;
-  rec.voltageKi                  = VoltageKi;
-  rec.voltageKd                  = VoltageKd;
-  rec.setpointRiseRate           = SetpointRiseRate;
-  rec.setpointFallRate           = SetpointFallRate;
-  rec.awBleedRate                = AwBleedRate;
-  rec.awRecoverRate              = AwRecoverRate;
-  rec.awSeedProtectMs            = AwSeedProtectMs;
-  rec.iExcessReseedFrac          = IExcessReseedFrac;
-  rec.kSoft                      = KSoft;
-  rec.kHard                      = KHard;
-  rec.iExcessK                   = IExcessK;
-  rec.iExcessN                   = IExcessN;
-  rec.iExcessKBleed              = IExcessKBleed;
-  rec.loadDumpDtThresh           = LoadDumpDtThresh;
-  rec.loadDumpCurrentDrop        = LoadDumpCurrentDrop;
-  rec.inputFilterTC              = InputFilterTC;
-  rec.waveAmplitudeV             = cvWaveAmplitudeV;
-  rec.wavePeriodSec              = (uint16_t)cvWavePeriodSec;
-  rec.kOvershoot                 = cvKOvershoot;
-  rec.consecutiveReads           = cvConsecutiveReads;
-  rec.avgRPM                     = (cvTuningScore.avgSampleCount > 0) ? (cvTuningScore.rpmSum  / cvTuningScore.avgSampleCount) : 0.0f;
-  rec.avgAltTempF                = (cvTuningScore.avgSampleCount > 0) ? (cvTuningScore.tempSum / cvTuningScore.avgSampleCount) : 0.0f;
-  rec.battVAtStart               = cvTuningScore.battVAtStart;
-  rec.socAtStart                 = cvTuningScore.socAtStart;
-  rec.chargingVoltageTarget      = cvBaseTarget;
+                ? (1000.0f * (cvTuningScore.totalIntegratedOvershootVs + cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
+                   / rec.activeTimeSec)
+                : 0.0f;
+  rec.fastOvFires = cvTuningScore.fastOvFires;
+  rec.iExcessFires = cvTuningScore.iExcessFires;
+  rec.loadDumpFires = cvTuningScore.loadDumpFires;
+  rec.hardOcFires = cvTuningScore.hardOcFires;
+  rec.voltageKp = VoltageKp;
+  rec.voltageKi = VoltageKi;
+  rec.voltageKd = 0.0f;  // D term removed; field kept for struct layout compatibility
+  rec.setpointRiseRate = SetpointRiseRate;
+  rec.setpointFallRate = SetpointFallRate;
+  rec.awBleedRate = AwBleedRate;
+  rec.awRecoverRate = AwRecoverRate;
+  rec.awSeedProtectMs = AwSeedProtectMs;
+  rec.iExcessReseedFrac = IExcessReseedFrac;
+  rec.kHard = KHard;
+  rec.iExcessK = IExcessK;
+  rec.iExcessN = IExcessN;
+  rec.iExcessKBleed = IExcessKBleed;
+  rec.loadDumpDtThresh = LoadDumpDtThresh;
+  rec.loadDumpDtThresh1 = LoadDumpDtThresh1;
+  rec.loadDumpDtThresh3 = LoadDumpDtThresh3;
+  rec.inputFilterTC = InputFilterTC;
+  rec.waveAmplitudeV = cvWaveAmplitudeV;
+  rec.wavePeriodSec = (uint16_t)cvWavePeriodSec;
+  rec.kOvershoot = cvKOvershoot;
+  rec.consecutiveReads = cvConsecutiveReads;
+  rec.avgRPM = (cvTuningScore.avgSampleCount > 0) ? (cvTuningScore.rpmSum / cvTuningScore.avgSampleCount) : 0.0f;
+  rec.avgAltTempF = (cvTuningScore.avgSampleCount > 0) ? (cvTuningScore.tempSum / cvTuningScore.avgSampleCount) : 0.0f;
+  rec.battVAtStart = cvTuningScore.battVAtStart;
+  rec.socAtStart = cvTuningScore.socAtStart;
+  rec.chargingVoltageTarget = cvBaseTarget;
   float nl = (float)cvTuningScore.scoredLowCount;
   if (nl > 0.0f) {
     rec.avgLowSettlingTimeSec = cvTuningScore.totalLowSettlingTimeSec / nl;
-    rec.avgLowIntOvVs         = cvTuningScore.totalLowIntOvVs / nl;
+    rec.avgLowIntOvVs = cvTuningScore.totalLowIntOvVs / nl;
   } else {
     rec.avgLowSettlingTimeSec = 0.0f;
-    rec.avgLowIntOvVs         = 0.0f;
+    rec.avgLowIntOvVs = 0.0f;
   }
-  rec.worstLowOvV         = cvTuningScore.worstLowOvV;
+  rec.worstLowOvV = cvTuningScore.worstLowOvV;
   rec.worstLowUndershootV = cvTuningScore.worstLowUndershootV;
-  rec.lowScore    = (rec.activeTimeSec > 0.0f)
-                    ? (1000.0f * (cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
-                       / rec.activeTimeSec)
-                    : 0.0f;
+  rec.lowScore = (rec.activeTimeSec > 0.0f)
+                   ? (1000.0f * (cvTuningScore.totalLowIntOvVs + cvTuningScore.totalLowUndershootVs)
+                      / rec.activeTimeSec)
+                   : 0.0f;
 
   cvTuningLog[cvTuningLogHead] = rec;
   cvTuningLogHead = (cvTuningLogHead + 1) % 50;
@@ -646,7 +646,7 @@ void commitCVTuningRecord() {
 
   saveCVTuningLog();
   queueConsoleMessageF("CVTuningScore: run#%d score=%.2f settle=%.1fs overshoot=%.3fV n=%d",
-    rec.runNumber, rec.score, rec.avgSettlingTimeSec, rec.worstOvershootV, (int)n);
+                       rec.runNumber, rec.score, rec.avgSettlingTimeSec, rec.worstOvershootV, (int)n);
   cvTuningScore = {};
 }
 
@@ -669,9 +669,9 @@ static void accumulateLiveScore(float e, float dtSec, uint32_t nowMs) {
     if ((nowMs - liveBucketStartMs[w]) >= LIVE_BUCKET_MS[w]) {
       liveScoreHead[w] = (liveScoreHead[w] + 1) % LIVE_BUCKET_N;
       liveBucketStartMs[w] = nowMs;
-      liveScoreBuckets[w][liveScoreHead[w]] = {0.0f, 0.0f};
+      liveScoreBuckets[w][liveScoreHead[w]] = { 0.0f, 0.0f };
     }
-    liveScoreBuckets[w][liveScoreHead[w]].errorAccum    += contribution;
+    liveScoreBuckets[w][liveScoreHead[w]].errorAccum += contribution;
     liveScoreBuckets[w][liveScoreHead[w]].activeTimeSec += dtSec;
     liveScoreVal[w] = computeLiveScore(w);
   }
@@ -697,9 +697,9 @@ static void accumulateCVLiveScore(float vErr, float dtSec, uint32_t nowMs) {
     if ((nowMs - cvLiveBucketStartMs[w]) >= LIVE_BUCKET_MS[w]) {
       cvLiveScoreHead[w] = (cvLiveScoreHead[w] + 1) % LIVE_BUCKET_N;
       cvLiveBucketStartMs[w] = nowMs;
-      cvLiveScoreBuckets[w][cvLiveScoreHead[w]] = {0.0f, 0.0f};
+      cvLiveScoreBuckets[w][cvLiveScoreHead[w]] = { 0.0f, 0.0f };
     }
-    cvLiveScoreBuckets[w][cvLiveScoreHead[w]].errorAccum    += contribution;
+    cvLiveScoreBuckets[w][cvLiveScoreHead[w]].errorAccum += contribution;
     cvLiveScoreBuckets[w][cvLiveScoreHead[w]].activeTimeSec += dtSec;
     cvLiveScoreVal[w] = computeCVLiveScore(w);
   }
@@ -711,8 +711,8 @@ void saveThermalTuningLog() {
   if (!thermalTuningLog) return;
   File f = LittleFS.open("/thermaltuninglog.bin", "w");
   if (!f) return;
-  f.write((uint8_t *)&thermalTuningLogCount,   sizeof(thermalTuningLogCount));
-  f.write((uint8_t *)&thermalTuningLogHead,    sizeof(thermalTuningLogHead));
+  f.write((uint8_t *)&thermalTuningLogCount, sizeof(thermalTuningLogCount));
+  f.write((uint8_t *)&thermalTuningLogHead, sizeof(thermalTuningLogHead));
   f.write((uint8_t *)&thermalTuningRunCounter, sizeof(thermalTuningRunCounter));
   f.write((uint8_t *)thermalTuningLog, 50 * sizeof(ThermalTuningRecord));
   f.close();
@@ -722,8 +722,8 @@ void loadThermalTuningLog() {
   if (!thermalTuningLog) return;
   File f = LittleFS.open("/thermaltuninglog.bin", "r");
   if (!f) return;
-  f.read((uint8_t *)&thermalTuningLogCount,   sizeof(thermalTuningLogCount));
-  f.read((uint8_t *)&thermalTuningLogHead,    sizeof(thermalTuningLogHead));
+  f.read((uint8_t *)&thermalTuningLogCount, sizeof(thermalTuningLogCount));
+  f.read((uint8_t *)&thermalTuningLogHead, sizeof(thermalTuningLogHead));
   f.read((uint8_t *)&thermalTuningRunCounter, sizeof(thermalTuningRunCounter));
   f.read((uint8_t *)thermalTuningLog, 50 * sizeof(ThermalTuningRecord));
   f.close();
@@ -737,30 +737,30 @@ void commitThermalTuningRecord() {
   }
   float n = (float)thermalTuningScore.scoredStepCount;
   float avgSettle = thermalTuningScore.totalSettlingTimeSec / n;
-  float avgOver   = thermalTuningScore.totalIntOverFs / n;
-  float avgUnder  = thermalTuningScore.totalIntUnderFs / n;
+  float avgOver = thermalTuningScore.totalIntOverFs / n;
+  float avgUnder = thermalTuningScore.totalIntUnderFs / n;
 
   ThermalTuningRecord rec = {};
-  rec.runNumber          = ++thermalTuningRunCounter;
+  rec.runNumber = ++thermalTuningRunCounter;
   rec.avgSettlingTimeSec = avgSettle;
-  rec.avgIntOverFs       = avgOver;
-  rec.avgIntUnderFs      = avgUnder;
-  rec.worstOvershootF    = thermalTuningScore.worstOvAll;
-  rec.scoredStepCount    = thermalTuningScore.scoredStepCount;
-  rec.activeTimeSec      = thermalTuningScore.activeTimeSec;
-  rec.score              = thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;  // settling time is informational only
-  rec.kp                 = TempPIDKp;
-  rec.ki                 = TempPIDKi;
-  rec.lookaheadSec       = ThermalLookaheadSec;
-  rec.filterAlpha        = TempPIDFilterAlpha;
-  rec.intervalMs         = (uint16_t)TempPIDIntervalMs;
-  rec.waveLowF           = thermalWaveLowF;
-  rec.waveHighF          = thermalWaveHighF;
-  rec.waveHalfPeriodMin  = thermalWaveHalfPeriodMin;
-  rec.avgRPM    = (thermalTuningScore.avgSampleCount > 0) ? (thermalTuningScore.rpmSum / thermalTuningScore.avgSampleCount) : 0.0f;
+  rec.avgIntOverFs = avgOver;
+  rec.avgIntUnderFs = avgUnder;
+  rec.worstOvershootF = thermalTuningScore.worstOvAll;
+  rec.scoredStepCount = thermalTuningScore.scoredStepCount;
+  rec.activeTimeSec = thermalTuningScore.activeTimeSec;
+  rec.score = thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;  // settling time is informational only
+  rec.kp = TempPIDKp;
+  rec.ki = TempPIDKi;
+  rec.lookaheadSec = ThermalLookaheadSec;
+  rec.filterAlpha = TempPIDFilterAlpha;
+  rec.intervalMs = (uint16_t)TempPIDIntervalMs;
+  rec.waveLowF = thermalWaveLowF;
+  rec.waveHighF = thermalWaveHighF;
+  rec.waveHalfPeriodMin = thermalWaveHalfPeriodMin;
+  rec.avgRPM = (thermalTuningScore.avgSampleCount > 0) ? (thermalTuningScore.rpmSum / thermalTuningScore.avgSampleCount) : 0.0f;
   rec.avgAmbientF = (thermalTuningScore.avgSampleCount > 0) ? (thermalTuningScore.ambientSum / thermalTuningScore.avgSampleCount) : 0.0f;
-  rec.riseRate  = ThermalPenaltyRiseRate;
-  rec.fallRate  = ThermalPenaltyFallRate;
+  rec.riseRate = ThermalPenaltyRiseRate;
+  rec.fallRate = ThermalPenaltyFallRate;
 
   thermalTuningLog[thermalTuningLogHead] = rec;
   thermalTuningLogHead = (thermalTuningLogHead + 1) % 50;
@@ -791,9 +791,9 @@ static void accumulateThermalLiveScore(float err, float dtSec, uint32_t nowMs) {
     if ((nowMs - thermalLiveBucketStartMs[w]) >= THERMAL_LIVE_BUCKET_MS[w]) {
       thermalLiveScoreHead[w] = (thermalLiveScoreHead[w] + 1) % LIVE_BUCKET_N;
       thermalLiveBucketStartMs[w] = nowMs;
-      thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]] = {0.0f, 0.0f};
+      thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]] = { 0.0f, 0.0f };
     }
-    thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]].errorAccum    += contribution;
+    thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]].errorAccum += contribution;
     thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]].activeTimeSec += dtSec;
     thermalLiveScoreVal[w] = computeThermalLiveScore(w);
   }
@@ -817,11 +817,11 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
   if (ThermalTuningMode) {
     // Initialize test on first tick
     if (!thermalTuningScore.testStarted) {
-      thermalWaveCurrentSetpointF        = thermalWaveLowF;
-      thermalTuningScore.waveHigh        = false;
-      thermalTuningScore.lowPhaseStable  = false;
+      thermalWaveCurrentSetpointF = thermalWaveLowF;
+      thermalTuningScore.waveHigh = false;
+      thermalTuningScore.lowPhaseStable = false;
       thermalTuningScore.lowConsecInBand = 0;
-      thermalTuningScore.testStarted     = true;
+      thermalTuningScore.testStarted = true;
       queueConsoleMessageF("ThermalTuning: started — low=%.0f°F high=%.0f°F halfPeriod=%.1fmin — waiting for LOW stability",
                            thermalWaveLowF, thermalWaveHighF, thermalWaveHalfPeriodMin);
     }
@@ -830,10 +830,10 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
     if (thermalTuningParamChanged) {
       if (thermalTuningScore.scoredStepCount >= 1) commitThermalTuningRecord();
       else thermalTuningScore = {};
-      thermalTuningParamChanged          = false;
-      thermalWaveCurrentSetpointF        = thermalWaveLowF;
-      thermalTuningScore.waveHigh        = false;
-      thermalTuningScore.lowPhaseStable  = false;
+      thermalTuningParamChanged = false;
+      thermalWaveCurrentSetpointF = thermalWaveLowF;
+      thermalTuningScore.waveHigh = false;
+      thermalTuningScore.lowPhaseStable = false;
       thermalTuningScore.lowConsecInBand = 0;
     }
 
@@ -847,16 +847,16 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
           queueConsoleMessageF("ThermalTuning: LOW stable at %.1f°F — stepping up to %.0f°F now",
                                tempFiltered, thermalWaveHighF);
           // Step up immediately once stable — scored HIGH phase starts now
-          thermalTuningScore.waveHigh          = true;
-          thermalTuningScore.lastToggleMs       = nowMs;
-          thermalWaveCurrentSetpointF           = thermalWaveHighF;  // controller targets this - 5°F internally
-          thermalTuningScore.phaseStartMs       = nowMs;
-          thermalTuningScore.phaseSettled       = false;
-          thermalTuningScore.phaseSettledMs     = 0;
-          thermalTuningScore.consecutiveInBand  = 0;
-          thermalTuningScore.intOverFs          = 0.0f;
-          thermalTuningScore.intUnderFs         = 0.0f;
-          thermalTuningScore.worstOvershootF    = 0.0f;
+          thermalTuningScore.waveHigh = true;
+          thermalTuningScore.lastToggleMs = nowMs;
+          thermalWaveCurrentSetpointF = thermalWaveHighF;  // controller targets this - 5°F internally
+          thermalTuningScore.phaseStartMs = nowMs;
+          thermalTuningScore.phaseSettled = false;
+          thermalTuningScore.phaseSettledMs = 0;
+          thermalTuningScore.consecutiveInBand = 0;
+          thermalTuningScore.intOverFs = 0.0f;
+          thermalTuningScore.intUnderFs = 0.0f;
+          thermalTuningScore.worstOvershootF = 0.0f;
         }
       } else {
         thermalTuningScore.lowConsecInBand = 0;
@@ -866,11 +866,11 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
       if ((uint32_t)(nowMs - thermalTuningScore.lastToggleMs) >= halfPeriodMs) {
         // Finalize scored HIGH phase
         float settleTime = thermalTuningScore.phaseSettled
-                           ? ((float)(thermalTuningScore.phaseSettledMs - thermalTuningScore.phaseStartMs) / 1000.0f)
-                           : ((float)halfPeriodMs / 1000.0f);  // informational — not in score formula
+                             ? ((float)(thermalTuningScore.phaseSettledMs - thermalTuningScore.phaseStartMs) / 1000.0f)
+                             : ((float)halfPeriodMs / 1000.0f);  // informational — not in score formula
         thermalTuningScore.totalSettlingTimeSec += settleTime;
-        thermalTuningScore.totalIntOverFs       += thermalTuningScore.intOverFs;
-        thermalTuningScore.totalIntUnderFs      += thermalTuningScore.intUnderFs;
+        thermalTuningScore.totalIntOverFs += thermalTuningScore.intOverFs;
+        thermalTuningScore.totalIntUnderFs += thermalTuningScore.intUnderFs;
         thermalTuningScore.worstOvAll = fmaxf(thermalTuningScore.worstOvAll, thermalTuningScore.worstOvershootF);
         thermalTuningScore.scoredStepCount++;
         thermalTuningScore.activeTimeSec += (float)halfPeriodMs / 1000.0f;
@@ -878,11 +878,11 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
                              (int)thermalTuningScore.scoredStepCount,
                              thermalTuningScore.intOverFs, thermalTuningScore.intUnderFs, settleTime);
         // Step down and wait for LOW stability before next step
-        thermalTuningScore.waveHigh        = false;
-        thermalTuningScore.lastToggleMs    = nowMs;
-        thermalTuningScore.lowPhaseStable  = false;
+        thermalTuningScore.waveHigh = false;
+        thermalTuningScore.lastToggleMs = nowMs;
+        thermalTuningScore.lowPhaseStable = false;
         thermalTuningScore.lowConsecInBand = 0;
-        thermalWaveCurrentSetpointF        = thermalWaveLowF;
+        thermalWaveCurrentSetpointF = thermalWaveLowF;
       }
     }
 
@@ -905,7 +905,7 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
       if (fabsf(e) <= thermalSettleThreshF) {
         thermalTuningScore.consecutiveInBand++;
         if (thermalTuningScore.consecutiveInBand >= thermalConsecutiveReads && !thermalTuningScore.phaseSettled) {
-          thermalTuningScore.phaseSettled   = true;
+          thermalTuningScore.phaseSettled = true;
           thermalTuningScore.phaseSettledMs = nowMs;
           queueConsoleMessageF("ThermalTuning: SETTLED at %.1f°F in %.0fs",
                                tempNow, (float)(nowMs - thermalTuningScore.phaseStartMs) / 1000.0f);
@@ -915,7 +915,7 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
       }
 
       // Conditions snapshot
-      thermalTuningScore.rpmSum     += RPM;
+      thermalTuningScore.rpmSum += RPM;
       thermalTuningScore.ambientSum += isnan(ambientTemp) ? 0.0f : ambientTemp;
       thermalTuningScore.avgSampleCount++;
     }
@@ -931,15 +931,7 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
   //   g_I_cap               — RPM table ceiling must be > 10A; below that we're at near-idle
   //                           RPM and thermal management is irrelevant
   if (voltageControlActive) thermalScoreLastExternalMs = nowMs;
-  bool liveScoreActive = tempPIDActive &&
-                         thermalSlopeBufFull &&
-                         !isnan(tempFiltered) &&
-                         !ThermalTuningMode &&
-                         !g_fastOvClampActive &&
-                         (MaintainMode == 0) &&
-                         thermalPenaltyAmps > 2.0f &&
-                         g_I_cap > 10.0f &&
-                         (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
+  bool liveScoreActive = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered) && !ThermalTuningMode && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f && g_I_cap > 10.0f && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
   if (liveScoreActive) {
     float liveErr = tempFiltered - TemperatureLimitF;
     accumulateThermalLiveScore(liveErr, dtSec, nowMs);
@@ -991,6 +983,14 @@ void AdjustFieldLearnMode() {
     currentPID.ResetIntegratorTo(0.0);
     lastAppliedDuty = 0.0f;
     setpointInitialized = false;
+    // Restore AUTOMATIC so Compute() resumes; otherwise the UI "Reset Inner PID"
+    // button leaves the PID stuck in MANUAL until charging is cycled off/on.
+    // Only restore if sysMode is AUTO — MANUAL/FAULT/OFF should keep PID in MANUAL.
+    // SetMode(AUTOMATIC) triggers library Initialize() which re-confirms a clean state
+    // (outputSum=pidOutput=0, lastUnsatOutput=0) consistent with the reset above.
+    if (sysMode == SYS_MODE_AUTO) {
+      currentPID.SetMode(AUTOMATIC);
+    }
     queueConsoleMessage("InnerPID: manual reset requested - integrator cleared");
   }
 
@@ -1023,7 +1023,9 @@ void AdjustFieldLearnMode() {
   // nearBulk: all software protections only arm when the voltage target is within
   // ProtectionProxGateV of BulkVoltage. At float or tuning targets well below bulk,
   // small overshoots carry no battery damage risk and protections interfere with results.
-  bool nearBulk = (ChargingVoltageTarget >= BulkVoltage - ProtectionProxGateV);
+  // ProtectionProxGateV <= 0 disables the gate entirely — all protections always armed.
+  bool nearBulk = (ProtectionProxGateV <= 0.0f)
+                  || (ChargingVoltageTarget >= BulkVoltage - ProtectionProxGateV);
 
   {
     static float vPrev = 0.0f;
@@ -1032,7 +1034,6 @@ void AdjustFieldLearnMode() {
     static bool ovActive = false;
     static float preEventIcv = 0.0f;
 
-    g_fastOvSoftActive = false;
     g_fastOvHardActive = false;
     g_fastOvVpred = IBV;
 
@@ -1051,9 +1052,8 @@ void AdjustFieldLearnMode() {
     g_fastOvDvdt = dvdt;
 
     if (voltageControlActive && nearBulk) {
-      const float TD_PRED    = TdPred;
-      const float V_SOFT     = ChargingVoltageTarget + VSoftMarginV;
-      const float V_HARD     = ChargingVoltageTarget + VHardMarginV;
+      const float TD_PRED = TdPred;
+      const float V_HARD = ChargingVoltageTarget + OvPredMarginV;
       const float PRED_GUARD = 0.06f;
 
       float Vpred = IBV + TD_PRED * fmaxf(0.0f, dvdt);
@@ -1064,14 +1064,7 @@ void AdjustFieldLearnMode() {
       }
 
       if (IBV > ChargingVoltageTarget - PRED_GUARD) {
-        if (OvLayer1Enable && Vpred > V_SOFT) {
-          float softCap = fmaxf(0.0f, setpointLimited - KSoft * (Vpred - V_SOFT));
-          fastOvCurrentCap = fminf(fastOvCurrentCap, softCap);
-          fastOvClampActive = true;
-          ovActive = true;
-          g_fastOvSoftActive = true;
-        }
-        if (OvLayer2Enable && Vpred > V_HARD) {
+        if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
           fastOvCurrentCap = fminf(fastOvCurrentCap, hardCap);
           fastOvClampActive = true;
@@ -1079,8 +1072,8 @@ void AdjustFieldLearnMode() {
         }
       }
 
-      if (OvLayer3Enable && IBV > ChargingVoltageTarget + VSoftMarginV) {
-        float ovExcess = IBV - (ChargingVoltageTarget + VSoftMarginV);
+      if (OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
+        float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
         fastOvClampActive = true;
@@ -1091,7 +1084,7 @@ void AdjustFieldLearnMode() {
       // Recovery seed: fires once when clamp de-asserts.
       if (ovActive
           && (IBV <= ChargingVoltageTarget)
-          && (Vpred <= V_SOFT)) {
+          && (Vpred <= V_HARD)) {
 
         float e = ChargingVoltageTarget - IBV;
         float icvHi = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
@@ -1123,16 +1116,12 @@ void AdjustFieldLearnMode() {
   }
 
   // ── Fast OV telemetry export ──────────────────────────────────────────────
-  static bool g_fastOvSoftActive_prev = false;
   static bool g_fastOvHardActive_prev = false;
 
   g_fastOvCurrentCap = fastOvCurrentCap;
 
   if (fastOvClampActive && !g_fastOvClampActive) {
     g_fastOvClampCount++;  // rising-edge only — count each new FastOV activation
-  }
-  if (g_fastOvSoftActive && !g_fastOvSoftActive_prev) {
-    g_fastOvSoftCount++;  // rising-edge only — count each new soft FastOV activation
   }
   if (g_fastOvHardActive && !g_fastOvHardActive_prev) {
     g_fastOvHardCount++;  // rising-edge only — count each new hard FastOV activation
@@ -1146,7 +1135,6 @@ void AdjustFieldLearnMode() {
   }
 
   g_fastOvClampActive = fastOvClampActive;
-  g_fastOvSoftActive_prev = g_fastOvSoftActive;
   g_fastOvHardActive_prev = g_fastOvHardActive;
 
   // ========== EMERGENCY LIMP HOME MODE (runs every loop) ==========
@@ -1203,10 +1191,10 @@ void AdjustFieldLearnMode() {
   // Edge detection so one-shot actions fire exactly once on each transition.
   static bool lastMaintainMode = false;
   static bool lastTargetVoltageMode = false;
-  bool enteringMaintainMode      = (MaintainMode == 1)      && !lastMaintainMode;
-  bool exitingMaintainMode       = (MaintainMode == 0)      &&  lastMaintainMode;
+  bool enteringMaintainMode = (MaintainMode == 1) && !lastMaintainMode;
+  bool exitingMaintainMode = (MaintainMode == 0) && lastMaintainMode;
   bool enteringTargetVoltageMode = (TargetVoltageMode == 1) && !lastTargetVoltageMode;
-  bool exitingTargetVoltageMode  = (TargetVoltageMode == 0) &&  lastTargetVoltageMode;
+  bool exitingTargetVoltageMode = (TargetVoltageMode == 0) && lastTargetVoltageMode;
   lastMaintainMode = (MaintainMode == 1);
   lastTargetVoltageMode = (TargetVoltageMode == 1);
 
@@ -1229,8 +1217,8 @@ void AdjustFieldLearnMode() {
   // battery is already charged.
   if ((exitingMaintainMode || exitingTargetVoltageMode) && sysMode == SYS_MODE_AUTO) {
     enter_sys_auto();
-    if (exitingMaintainMode)       queueConsoleMessage("MaintainMode exit: resuming charge from bulk");
-    if (exitingTargetVoltageMode)  queueConsoleMessage("TargetVoltageMode exit: resuming charge from bulk");
+    if (exitingMaintainMode) queueConsoleMessage("MaintainMode exit: resuming charge from bulk");
+    if (exitingTargetVoltageMode) queueConsoleMessage("TargetVoltageMode exit: resuming charge from bulk");
   }
 
   // Report mode changes
@@ -1259,8 +1247,10 @@ void AdjustFieldLearnMode() {
   // ========== DETERMINE GOVERNOR MODE ==========
   govMode = GOV_NORMAL_SLEW;
 
-  // Major overvoltage: bypass slew for fast field collapse
-  if (tick.currentBatteryVoltage > (tick.bulkVoltage + tick.voltageSpikeMargin + 0.5f)) {
+  // Major overvoltage: bypass slew for fast field collapse.
+  // Triggers when battery is 0.5V above the hard-shutdown threshold — by this point the
+  // fault path is already ramping; this just removes the slew limit so the ramp is instant.
+  if (tick.currentBatteryVoltage > (tick.alternatorHardShutdownV + 0.5f)) {
     govMode = GOV_BYPASS_SLEW;
   }
   // Voltage sensor failure: bypass slew
@@ -1271,8 +1261,8 @@ void AdjustFieldLearnMode() {
   // CV overshoot: bypass duty slew so the output current PID can reduce field current without
   // the 80%/s governor rate limit holding it back.
   //
-  // Trigger: fastOvClampActive (fast OV supervisor in soft zone, Vpred > V_SOFT).
-  // This inherits the dvdt EMA (alpha=0.08) + PRED_GUARD noise filtering already
+  // Trigger: fastOvClampActive (fast OV supervisor — Group 2 prediction or Group 3 measured threshold).
+  // This inherits the rate-of-rise EMA (DvdtAlpha=0.08) + prediction arm zone filtering already
   // present in the fast OV supervisor, so it does not fire on measurement noise
   // near target — addressing the original nuisance-trigger concern that led to the
   // old +0.12 V raw-voltage threshold.
@@ -1339,7 +1329,7 @@ void AdjustFieldLearnMode() {
         break;
       case SYS_MODE_AUTO:
         enter_sys_auto();
-        tuningScore        = {};   // discard partial data — cannot score across a non-AUTO gap
+        tuningScore = {};  // discard partial data — cannot score across a non-AUTO gap
         tuningParamChanged = false;
         pidInitialized = true;
         if (enteringNormal) {
@@ -1505,6 +1495,11 @@ void AdjustFieldLearnMode() {
     // ========== SETPOINT COMPUTATION (AUTO mode only) ==========
     float setpointCommand = 0.0f;
 
+    // Tracks voltageControlActive across both AUTO and MANUAL branches so AUTO
+    // re-entry from MANUAL correctly fires the bumpless CV seed. Declared here
+    // (outside the AUTO branch) so the MANUAL branch can also update it.
+    static bool lastVoltageControlActive = false;
+
     if (sysMode == SYS_MODE_AUTO) {
 
       static bool lastTuningMode = false;
@@ -1542,7 +1537,7 @@ void AdjustFieldLearnMode() {
           }
           if (tuningScore.ringInDone) {
             tuningScore.pendingWindowOpen = true;  // open window once slew settles, not at toggle time
-            tuningScore.inScoringWindow   = false;
+            tuningScore.inScoringWindow = false;
             tuningScore.scoredToggleCount++;
           }
         }
@@ -1563,23 +1558,24 @@ void AdjustFieldLearnMode() {
         // lastToggleMs is set here so the 5s timeout starts from when scoring actually begins.
         {
           static float tuning_prevSlewed = 0.0f;
-          static bool  tuning_slewInit   = false;
+          static bool tuning_slewInit = false;
           float tuning_slewRate = 0.0f;
           if (tuning_slewInit) {
             tuning_slewRate = fabsf(setpointLimited - tuning_prevSlewed) / actualDtSec;
           }
           tuning_prevSlewed = setpointLimited;
-          tuning_slewInit   = true;
+          tuning_slewInit = true;
           if (tuningScore.pendingWindowOpen && tuning_slewRate < 1.0f) {
-            tuningScore.inScoringWindow   = true;
+            tuningScore.inScoringWindow = true;
             tuningScore.pendingWindowOpen = false;
-            tuningScore.lastToggleMs      = tick.nowMs;
+            tuningScore.lastToggleMs = tick.nowMs;
           }
         }
 
         voltageControlActive = false;
 
-        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N : g_pidI_filtered;
+        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                       : g_pidI_filtered;
         pidInput = (double)targetCurrent;
         pidSetpoint = (double)setpointLimited;
         pidError = setpointLimited - targetCurrent;
@@ -1588,10 +1584,10 @@ void AdjustFieldLearnMode() {
         // Accumulate test score while inside a scoring window
         if (tuningScore.inScoringWindow) {
           float e = pidError;
-          tuningScore.errorAccum    += e * e * actualDtSec;
+          tuningScore.errorAccum += e * e * actualDtSec;
           tuningScore.activeTimeSec += actualDtSec;
           if (fabsf(e) > tuningScore.worstErrorA) tuningScore.worstErrorA = fabsf(e);
-          tuningScore.rpmSum  += RPM;
+          tuningScore.rpmSum += RPM;
           float tempSample = isnan(AlternatorTemperatureF) ? TempToUse : AlternatorTemperatureF;
           if (!isnan(tempSample)) tuningScore.tempSum += tempSample;
           tuningScore.avgSampleCount++;
@@ -1636,8 +1632,7 @@ void AdjustFieldLearnMode() {
         //   1. Subtract thermal penalty from I_cap; clamp to [0, MaxTableValue].
         //   2. Apply user overrides (MaintainMode). HiLow mode is handled at
         //      table-load time via loadCapTablesForMode() — no runtime halving.
-        //   In CV modes: position-form PID (P+I+D) produces Icv; setpointCommand = Icv.
-        //      D term = VoltageKd * dvdt, subtracted to preemptively reduce current as voltage rises.
+        //   In CV modes: position-form PI (P+I) produces Icv; setpointCommand = Icv.
         //      Integrator anti-windup: upward integration frozen when P+I saturates at uTargetAmps ceiling;
         //      slope-aware bleed (SlopeBleedK) also drains cv_I when voltage rises fast, scaled by
         //      proximity to setpoint (SlopeBleedProxV) so it is inactive far below target.
@@ -1677,8 +1672,19 @@ void AdjustFieldLearnMode() {
         // IExcessK and IExcessN are user-adjustable globals (LittleFS-persisted).
         // N consecutive ticks above threshold required before response fires —
         // separates brief resonance peaks (~3-4 ticks) from sustained RPM-step excess.
+        //
+        // VOLTAGE GATE — iExcess is only allowed to fire when the battery voltage is
+        // already close to the charging target. The gate distance is intentionally
+        // tied to OvMeasMarginV (the Group 2 measured-voltage trigger margin) so the
+        // user has ONE knob that controls "how close to target before I start treating
+        // overshoots seriously":
+        //   • Group 2 fires when IBV >  target + OvMeasMarginV (overshoot is happening)
+        //   • iExcess arms when  IBV >  target − OvMeasMarginV (overshoot is imminent)
+        // Symmetric around target, scales with the user's tuning, no separate knob.
+        // The gate exists because during ramp-up the alternator is *supposed* to be at
+        // ceiling current and the CV loop has not engaged — firing iExcess there would
+        // be a false positive that kills the integrator and slows charging for nothing.
         {
-          const float IEXCESS_GATE = 0.10f;
           const float IEXCESS_HYST = 2.0f;
           const float K_IE = 1.0f;
 
@@ -1686,10 +1692,11 @@ void AdjustFieldLearnMode() {
           static int iExcessPersistCount = 0;
           static float preEventCvI = 0.0f;  // cv_I captured just before snap, used to seed recovery
 
-          if (voltageControlActive && nearBulk && (IBV > ChargingVoltageTarget - IEXCESS_GATE)) {
-            float iSigEx = (IExcessSigSrc == 2) ? MeasuredAmps
-                         : (IExcessSigSrc == 1) ? getFiltI()
-                         : g_iMA_N;
+          // Gate: within OvMeasMarginV of target (see big comment above for why).
+          if (voltageControlActive && nearBulk && (IBV > ChargingVoltageTarget - OvMeasMarginV)) {
+            float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
+                           : (IExcessSigSrc == 1) ? getFiltI()
+                                                  : g_iMA_N;
             float excess = iSigEx - setpointLimited - IExcessK;  // setpointLimited = previous tick — acceptable
             bool aboveThreshold = (excess > 0.0f);
             bool belowHysteresis = (iSigEx < setpointLimited + IExcessK - IEXCESS_HYST);
@@ -1770,7 +1777,7 @@ void AdjustFieldLearnMode() {
               iExcessActive = false;
             }
           } else {
-            // Gate closed (battV dropped below targV - IEXCESS_GATE, or !nearBulk) — still seed recovery
+            // Gate closed (battV dropped below targV - OvMeasMarginV, or !nearBulk) — still seed recovery
             // if an event was active, otherwise cv_I stays at zero and the trap persists.
             if (iExcessActive) {
               cv_I = preEventCvI * IExcessReseedFrac;
@@ -1783,32 +1790,70 @@ void AdjustFieldLearnMode() {
         }
 
         // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
-        // Positive g_dBcur_dt means battery is suddenly absorbing more current (loads dropped).
-        // Current-based; does not rely on voltage rise — works on stiff lithium banks where
-        // voltage may not respond meaningfully to a load dump.
+        // Three-tier cascade: N=1 above LoadDumpDtThresh1, N=2 above LoadDumpDtThresh, N=3 above LoadDumpDtThresh3.
+        // INA228 noise is alternating-sign (high/low/high/low) — two consecutive same-direction crossings
+        // cannot be measurement noise. Tier 1 catches hard-switched FET disconnects; tiers 2/3 catch
+        // relay-contact events spread over multiple samples.
         // Gate: CV mode only, fast INA228 reads active (5ms cadence).
-        // LoadDumpN consecutive samples above threshold required — INA228 noise is alternating-sign
-        // (high/low/high/low), so two consecutive positive spikes cannot be measurement noise.
-        if (voltageControlActive && nearBulk && inaFastModeActive) {
+        // On detection: snaps cv_I = 0 on rising edge and collapses setpointLimited + fastOvCurrentCap to 0.
+        // Recovery: AW bleed drives recovery naturally — same path as fastOV.
+        {
+          // Statics moved one scope up so the gate-closed else can clear them.
+          // Without this, a load dump active at the moment CV exits leaves
+          // ldWasActive=true; on CV re-entry the rising-edge cv_I=0 snap and
+          // g_loadDumpCount increment are skipped for the next event.
           static bool ldWasActive = false;
-          static int ldConsecutive = 0;
-          if (g_dBcur_dt > LoadDumpDtThresh) {
-            ldConsecutive++;
+          static int ldCount1 = 0;  // consecutive samples above LoadDumpDtThresh1
+          static int ldCount2 = 0;  // consecutive samples above LoadDumpDtThresh
+          static int ldCount3 = 0;  // consecutive samples above LoadDumpDtThresh3
+          if (voltageControlActive && nearBulk && inaFastModeActive) {
+            if (g_dBcur_dt > LoadDumpDtThresh1) {
+              ldCount1++;
+            } else {
+              ldCount1 = 0;
+            }
+            if (g_dBcur_dt > LoadDumpDtThresh) {
+              ldCount2++;
+            } else {
+              ldCount2 = 0;
+            }
+            if (g_dBcur_dt > LoadDumpDtThresh3) {
+              ldCount3++;
+            } else {
+              ldCount3 = 0;
+            }
+            bool ldNow = (ldCount1 >= 1) || (ldCount2 >= 2) || (ldCount3 >= 3);
+            if (ldNow) {
+              fastOvCurrentCap = 0.0f;
+              setpointLimited = 0.0f;
+              fastOvClampActive = true;
+              if (!ldWasActive) {
+                cv_I = 0.0f;  // snap integrator on rising edge only; AW bleed drives recovery
+                g_loadDumpCount++;
+              }
+            }
+            g_loadDumpActive = ldNow;
+            ldWasActive = ldNow;
           } else {
-            ldConsecutive = 0;
+            // Gate closed — clean state so next gate-open starts fresh.
+            ldCount1 = 0;
+            ldCount2 = 0;
+            ldCount3 = 0;
+            ldWasActive = false;
+            g_loadDumpActive = false;
           }
-          bool ldNow = (ldConsecutive >= LoadDumpN);
-          if (ldNow) {
-            float ldCap = fmaxf(0.0f, setpointLimited - LoadDumpCurrentDrop);
-            fastOvCurrentCap = fminf(fastOvCurrentCap, ldCap);
-            setpointLimited = fminf(setpointLimited, ldCap);  // direct collapse — don't wait for 100ms CV loop
-            fastOvClampActive = true;  // triggers 1e9 fall rate + cv_I bleed, same as fastOV layers
-            if (!ldWasActive) g_loadDumpCount++;
-          }
-          g_loadDumpActive = ldNow;
-          ldWasActive = ldNow;
-        } else {
-          g_loadDumpActive = false;
+        }
+
+        // ── Re-evaluate govMode now that iExcess + load-dump have had a chance to
+        // set fastOvClampActive. The initial govMode decision (above) only saw the
+        // fastOV supervisor's contribution; without this, a pure iExcess or load-dump
+        // event collapses setpointLimited instantly (via the fall-rate override at
+        // effectiveFallRate=1e9) but the governor still slews duty at DutyRampRate
+        // (80%/s) instead of snapping to the rpmMinDuty/MinDuty floor in one tick.
+        // BYPASS still respects rpmMinDuty and MinDuty via governor_apply's pre-clamp,
+        // so the tach floor is preserved — only the descent speed changes.
+        if (fastOvClampActive && voltageControlActive) {
+          govMode = GOV_BYPASS_SLEW;
         }
 
         // ── Apply fastOvCurrentCap to uTargetAmps (fastOV + iExcess + load dump) ──
@@ -1843,7 +1888,8 @@ void AdjustFieldLearnMode() {
           }
         }
         // Detect CV entry so the voltage loop fires immediately on the first CV tick.
-        static bool lastVoltageControlActive = false;
+        // (lastVoltageControlActive is declared above the AUTO/MANUAL branches so the
+        // MANUAL branch also resets it — see voltageControlActive=false in MANUAL below.)
         bool enteringCV = (!lastVoltageControlActive && voltageControlActive);
         lastVoltageControlActive = voltageControlActive;
 
@@ -1873,13 +1919,13 @@ void AdjustFieldLearnMode() {
           if (CVTuningMode && voltageControlActive) {
             // Capture base target and initial conditions once per test
             if (!cvTuningScore.testStarted) {
-              cvBaseTarget                = ChargingVoltageTarget;
-              cvTuningScore.battVAtStart  = IBV;
-              cvTuningScore.socAtStart    = (float)SOC_percent / 100.0f;
-              cvTuningScore.lastToggleMs  = currentMillis;
-              cvTuningScore.waveHigh      = false;  // start in LOW phase (at normal setpoint); test steps UP
-              cvTuningScore.phaseStartMs  = currentMillis;
-              cvTuningScore.testStarted   = true;
+              cvBaseTarget = ChargingVoltageTarget;
+              cvTuningScore.battVAtStart = IBV;
+              cvTuningScore.socAtStart = (float)SOC_percent / 100.0f;
+              cvTuningScore.lastToggleMs = currentMillis;
+              cvTuningScore.waveHigh = false;  // start in LOW phase (at normal setpoint); test steps UP
+              cvTuningScore.phaseStartMs = currentMillis;
+              cvTuningScore.testStarted = true;
             }
 
             // Commit on parameter change if enough cycles have scored.
@@ -1890,9 +1936,9 @@ void AdjustFieldLearnMode() {
               bool wasHigh = cvTuningScore.waveHigh;
               if (cvTuningScore.scoredHighCount >= 1) commitCVTuningRecord();
               else cvTuningScore = {};
-              cvTuningScore.waveHigh     = wasHigh;
+              cvTuningScore.waveHigh = wasHigh;
               cvTuningScore.lastToggleMs = currentMillis;
-              cvTuningScore.testStarted  = true;
+              cvTuningScore.testStarted = true;
               cvTuningParamChanged = false;
             }
 
@@ -1900,7 +1946,7 @@ void AdjustFieldLearnMode() {
             uint32_t halfPeriodMs = (uint32_t)cvWavePeriodSec * 500UL;
             if (currentMillis - cvTuningScore.lastToggleMs >= halfPeriodMs) {
               bool goingHigh = !cvTuningScore.waveHigh;
-              cvTuningScore.waveHigh     = goingHigh;
+              cvTuningScore.waveHigh = goingHigh;
               cvTuningScore.lastToggleMs = currentMillis;
               cvTuningScore.halfPeriodCount++;
               // 1 half-period ring-in: initial LOW (resting at normal setpoint) is unscored.
@@ -1919,14 +1965,14 @@ void AdjustFieldLearnMode() {
               }
               if (goingHigh && cvTuningScore.ringInDone) {
                 // Start of a new scored HIGH phase
-                cvBaseTarget                    = ChargingVoltageTarget;  // refresh real target
-                cvTuningScore.phaseStartMs      = currentMillis;
-                cvTuningScore.phaseSettled      = false;
+                cvBaseTarget = ChargingVoltageTarget;  // refresh real target
+                cvTuningScore.phaseStartMs = currentMillis;
+                cvTuningScore.phaseSettled = false;
                 cvTuningScore.consecutiveInBand = 0;
-                cvTuningScore.fastOvSnap        = g_fastOvClampCount;
-                cvTuningScore.iExcessSnap       = g_iExcessCount;
-                cvTuningScore.loadDumpSnap      = g_loadDumpCount;
-                cvTuningScore.hardOcSnap        = g_hardOCCount;
+                cvTuningScore.fastOvSnap = g_fastOvClampCount;
+                cvTuningScore.iExcessSnap = g_iExcessCount;
+                cvTuningScore.loadDumpSnap = g_loadDumpCount;
+                cvTuningScore.hardOcSnap = g_hardOCCount;
               }
               if (!goingHigh && cvTuningScore.ringInDone && cvTuningScore.phaseStartMs > 0) {
                 // End of a scored HIGH phase — finalize settling time
@@ -1934,19 +1980,19 @@ void AdjustFieldLearnMode() {
                   cvTuningScore.totalSettlingTimeSec += (float)cvWavePeriodSec / 2.0f;  // half-period penalty
                 }
                 cvTuningScore.scoredHighCount++;
-                cvTuningScore.fastOvFires   += (uint16_t)(g_fastOvClampCount - cvTuningScore.fastOvSnap);
-                cvTuningScore.iExcessFires  += (uint16_t)(g_iExcessCount     - cvTuningScore.iExcessSnap);
-                cvTuningScore.loadDumpFires += (uint16_t)(g_loadDumpCount    - cvTuningScore.loadDumpSnap);
-                cvTuningScore.hardOcFires   += (uint16_t)(g_hardOCCount      - cvTuningScore.hardOcSnap);
+                cvTuningScore.fastOvFires += (uint16_t)(g_fastOvClampCount - cvTuningScore.fastOvSnap);
+                cvTuningScore.iExcessFires += (uint16_t)(g_iExcessCount - cvTuningScore.iExcessSnap);
+                cvTuningScore.loadDumpFires += (uint16_t)(g_loadDumpCount - cvTuningScore.loadDumpSnap);
+                cvTuningScore.hardOcFires += (uint16_t)(g_hardOCCount - cvTuningScore.hardOcSnap);
                 // Start of scored LOW phase (step-down response)
-                cvTuningScore.lowPhaseStartMs  = currentMillis;
-                cvTuningScore.lowPhaseSettled  = false;
-                cvTuningScore.lowConsecInBand  = 0;
-                cvTuningScore.lowCrossedBelow  = false;
-                cvTuningScore.lowFastOvSnap   = g_fastOvClampCount;
-                cvTuningScore.lowIExSnap      = g_iExcessCount;
-                cvTuningScore.lowLdSnap       = g_loadDumpCount;
-                cvTuningScore.lowHocSnap      = g_hardOCCount;
+                cvTuningScore.lowPhaseStartMs = currentMillis;
+                cvTuningScore.lowPhaseSettled = false;
+                cvTuningScore.lowConsecInBand = 0;
+                cvTuningScore.lowCrossedBelow = false;
+                cvTuningScore.lowFastOvSnap = g_fastOvClampCount;
+                cvTuningScore.lowIExSnap = g_iExcessCount;
+                cvTuningScore.lowLdSnap = g_loadDumpCount;
+                cvTuningScore.lowHocSnap = g_hardOCCount;
               }
             }
 
@@ -1983,7 +2029,7 @@ void AdjustFieldLearnMode() {
         // While CV is active, cv_I_track stays in sync for seamless re-entry.
         {
           static float cv_I_track = 0.0f;
-          static uint32_t awSeedProtectStartMs = 0; // timestamp when last bumpless seed fired
+          static uint32_t awSeedProtectStartMs = 0;  // timestamp when last bumpless seed fired
 
           // ── CV entry bumpless seed ─────────────────────────────────────────────────
           // Seeds cv_I at voltageControlActive entry so that Icv = Kp*e + cv_I ≈ g_pidI_filtered,
@@ -1995,8 +2041,8 @@ void AdjustFieldLearnMode() {
             float seed = clamp_f(g_pidI_filtered - VoltageKp * e_cv, 0.0f, (float)uTargetAmps);
             cv_I = seed;
             cv_I_track = seed;
-            cv_I_aw_cap = (float)MaxTableValue;  // clear AW cap — stale values constrain CV entry
-            awSeedProtectStartMs = currentMillis; // start seed-protection window
+            cv_I_aw_cap = (float)MaxTableValue;    // clear AW cap — stale values constrain CV entry
+            awSeedProtectStartMs = currentMillis;  // start seed-protection window
           }
           bool seedProtected = (AwSeedProtectMs > 0) && ((currentMillis - awSeedProtectStartMs) < (uint32_t)AwSeedProtectMs);
 
@@ -2051,6 +2097,14 @@ void AdjustFieldLearnMode() {
           if (cvLoopFired) {
             uint32_t prevVoltageLoopMs = lastVoltageLoopMs;
             lastVoltageLoopMs = currentMillis;
+            if (prevVoltageLoopMs != 0) {
+              uint32_t actualIv = currentMillis - prevVoltageLoopMs;
+              g_voltLoopActualIntervalMs = (uint16_t)(actualIv < 65535u ? actualIv : 65535u);
+              if (g_voltLoopActualIntervalMs > voltLoopWorstInterval_5s) voltLoopWorstInterval_5s = g_voltLoopActualIntervalMs;
+              if (g_voltLoopActualIntervalMs > voltLoopWorstInterval_ses) voltLoopWorstInterval_ses = g_voltLoopActualIntervalMs;
+            } else {
+              g_voltLoopActualIntervalMs = 0;
+            }
             pidLog_voltageLoopRanThisTick = 1;
             pidLog_enteringCV = enteringCV ? 1 : 0;
 
@@ -2063,33 +2117,18 @@ void AdjustFieldLearnMode() {
             float icvHi = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
             float icvLo = 0.0f;
 
-            // CV D-term: backward difference of filtered voltage over a user-configurable window.
-            // VoltageDWindowMs controls how far back the slope looks. Shorter = faster response
-            // to rising voltage; longer = smoother but slower. Reset on CV entry so stale
-            // bulk-phase samples don't corrupt first estimate.
+            // cvDSlope: backward diff of getFiltV() over one voltage loop interval (V/s).
+            // Uses filtered IBV so slope bleed does not react to measurement noise.
+            // D term removed — this signal now feeds SlopeBleedK only.
             {
-              float vNow = getFiltV();
-              static uint8_t cvDSlopeCount = 0;
+              static float vPrevCV = 0.0f;
               if (enteringCV) {
-                cvDSlopeBufIdx = 0;
-                cvDSlopeCount = 0;
                 cvDSlope = 0.0f;
+                vPrevCV = getFiltV();
               } else {
-                cvDSlopeBuffer[cvDSlopeBufIdx] = vNow;
-                cvDSlopeBufIdx = (cvDSlopeBufIdx + 1) % CV_DSLOPE_BUF;
-                if (cvDSlopeCount < CV_DSLOPE_BUF) cvDSlopeCount++;
-                int dTaps = max(2, min((int)CV_DSLOPE_BUF,
-                  (int)roundf((float)VoltageDWindowMs / (float)VoltageLoopInterval) + 1));
-                if (cvDSlopeCount >= dTaps) {
-                  int oldestIdx = (cvDSlopeBufIdx + CV_DSLOPE_BUF - dTaps) % CV_DSLOPE_BUF;
-                  float oldest = cvDSlopeBuffer[oldestIdx];
-                  float windowSec = (float)(dTaps - 1) * dtSec;
-                  if (windowSec > 0.001f) {
-                    cvDSlope = constrain((vNow - oldest) / windowSec, -2.0f, 2.0f);
-                  }
-                } else {
-                  cvDSlope = 0.0f;
-                }
+                float vNow = getFiltV();
+                if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -2.0f, 2.0f);
+                vPrevCV = vNow;
               }
             }
 
@@ -2123,12 +2162,11 @@ void AdjustFieldLearnMode() {
                 float proxGain = clamp_f(1.0f - e / SlopeBleedProxV, 0.0f, 1.0f);
                 float slopeBleedAmps = SlopeBleedK * (cvDSlope - SlopeBleedThresh) * dtSec * proxGain;
                 cv_I = fmaxf(0.0f, cv_I - slopeBleedAmps);
+                g_slopeBleedAmpsThisTick = slopeBleedAmps;  // captured for cvLog; cleared by cvLog_tick after logging
                 // cv_I_track synced on next tick by bumpless tracker (out of scope here)
               }
 
-              // D term: subtract Kd × cvDSlope so rising voltage preemptively reduces current setpoint.
-              // cvDSlope = long-window (~500ms) backward diff of getFiltV(); cleaner than g_fastOvDvdt.
-              Icv = clamp_f(VoltageKp * e + cv_I - VoltageKd * cvDSlope, icvLo, icvHi);
+              Icv = clamp_f(VoltageKp * e + cv_I, icvLo, icvHi);
             }
           }
 
@@ -2146,13 +2184,14 @@ void AdjustFieldLearnMode() {
           float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional
           float icvHi_tick = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
           if (!enteringCV) {
-            Icv = clamp_f(VoltageKp * e_now + cv_I - VoltageKd * cvDSlope, 0.0f, icvHi_tick);
+            Icv = clamp_f(VoltageKp * e_now + cv_I, 0.0f, icvHi_tick);
           }
         }
 
         // ===== CV TUNING SCORE ACCUMULATION =====
         // ISE/T scoring — same shape as current waveform test (errorAccum / activeTimeSec).
-        // HIGH phase: asymmetric squared error — overshoot (above target) weighted ×4 vs undershoot.
+        // HIGH phase: asymmetric squared error — overshoot (above target) weighted by cvKOvershoot
+        // ("Overshoot Penalty (K)" on the Voltage tab) vs undershoot weighted ×1.
         // LOW phase: one-sided squared error, normal weight (battery decay is physics-limited).
         // HIGH target = cvBaseTarget + cvWaveAmplitudeV (the step-up we're testing).
         if (CVTuningMode && voltageControlActive && cvTuningScore.waveHigh && cvTuningScore.ringInDone) {
@@ -2161,10 +2200,10 @@ void AdjustFieldLearnMode() {
           float e_scored, w_high;
           if (e_high > 0.0f) {
             e_scored = fmaxf(0.0f, e_high - CV_HIGH_DEADBAND_V);  // dead-band: first 25mV of overshoot is free
-            w_high   = 4.0f;
+            w_high = cvKOvershoot;
           } else {
             e_scored = e_high;  // approach (undershoot during rise) scored normally, no dead-band
-            w_high   = 1.0f;
+            w_high = 1.0f;
           }
           cvTuningScore.totalIntegratedOvershootVs += e_scored * e_scored * w_high * actualDtSec;
           float peakOv = fmaxf(0.0f, e_high);
@@ -2184,7 +2223,7 @@ void AdjustFieldLearnMode() {
           }
 
           cvTuningScore.activeTimeSec += actualDtSec;
-          cvTuningScore.rpmSum        += RPM;
+          cvTuningScore.rpmSum += RPM;
           float tempSample = isnan(AlternatorTemperatureF) ? TempToUse : AlternatorTemperatureF;
           if (!isnan(tempSample)) cvTuningScore.tempSum += tempSample;
           cvTuningScore.avgSampleCount++;
@@ -2243,7 +2282,8 @@ void AdjustFieldLearnMode() {
         // MaintainMode uses getBatteryCurrent() (net battery amps — no filtered
         // equivalent yet). Normal AUTO uses signal selected by OutputPIDSigSrc.
         {
-          float pidSig = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N : g_pidI_filtered;
+          float pidSig = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                        : g_pidI_filtered;
           targetCurrent = (MaintainMode == 1) ? getBatteryCurrent() : pidSig;
         }
         pidInput = (double)targetCurrent;
@@ -2255,16 +2295,18 @@ void AdjustFieldLearnMode() {
     } else {
       // ===== MANUAL mode: no setpoint management =====
       voltageControlActive = false;
+      lastVoltageControlActive = false;  // keep tracker in sync so AUTO re-entry from MANUAL fires the bumpless CV seed
       uTargetAmps = 0;
       setpointLimited = 0.0f;
-      pidInput = (double)((OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N : g_pidI_filtered);
+      pidInput = (double)((OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                         : g_pidI_filtered);
     }  // end of MANUAL mode else
 
     // Thermal log runs at the end of the control tick so tempPID_tick() has
     // already run (when in AUTO). Called here — outside the AUTO-only block —
     // so temperature history accumulates in every mode, not just NORMAL AUTO.
     thermalLog_tick(currentMillis);
-  }    // end if (!sysIDRunning)
+  }  // end if (!sysIDRunning)
 
 
   // ========== BUILD DUTY REQUEST ==========
@@ -2279,8 +2321,8 @@ void AdjustFieldLearnMode() {
 
   // ========== APPLY THROUGH GOVERNOR ==========
   float dutyNewFloat = governor_apply(lastAppliedDuty, dutyRequest, govMode,
-                                     sysIDRunning ? 0.0f : tick.rpmMinDuty,
-                                     true, actualDtSec);
+                                      sysIDRunning ? 0.0f : tick.rpmMinDuty,
+                                      true, actualDtSec);
   pidLog_dutyApplied = dutyNewFloat;
 
   // ========== TELL PID WHAT ACTUALLY HAPPENED ==========
@@ -2305,16 +2347,16 @@ void AdjustFieldLearnMode() {
     // Window extends 3s beyond last tick where slewed rate >= 5 A/s.
     {
       static float liveScore_prevSlewed = 0.0f;
-      static bool  liveScore_slewInit   = false;
+      static bool liveScore_slewInit = false;
       float slewedRate = 0.0f;
       if (liveScore_slewInit) {
         slewedRate = fabsf(setpointLimited - liveScore_prevSlewed) / actualDtSec;
       }
       liveScore_prevSlewed = setpointLimited;
-      liveScore_slewInit   = true;
+      liveScore_slewInit = true;
       if (slewedRate >= 5.0f) {
         liveScore_lastStepMs = tick.nowMs;
-        liveScore_inWindow   = true;
+        liveScore_inWindow = true;
       }
       if (liveScore_inWindow && (tick.nowMs - liveScore_lastStepMs > 3000)) {
         liveScore_inWindow = false;
@@ -2430,8 +2472,7 @@ void updateChargingStage() {
     static bool lastThermallyConstrained = false;
     static uint32_t lastTailConstraintLogMs = 0;
     // Throttle to once per 10s — thermal constraint can flap rapidly under oscillating penalty
-    if (thermallyConstrained != lastThermallyConstrained &&
-        (uint32_t)(now - lastTailConstraintLogMs) >= 10000) {
+    if (thermallyConstrained != lastThermallyConstrained && (uint32_t)(now - lastTailConstraintLogMs) >= 10000) {
       if (thermallyConstrained) {
         queueConsoleMessageF(
           "Absorption: tail detection suppressed (thermal) | penalty=%.1fA uTarget=%.1fA tailThresh=%.1fA",
@@ -2485,7 +2526,7 @@ void updateChargingStage() {
     if ((uint32_t)(now - lastIdleDebugMs) >= 30000) {
       lastIdleDebugMs = now;
       queueConsoleMessageF("Idle status | battV=%.2fV Bcur=%.1fA tIdle=%lus rebulkV=%.2fV rebulkI=%.1fA",
-        v, Bcur, (unsigned long)(tIdle / 1000), RebulkVoltage, RebulkCurrent_A);
+                           v, Bcur, (unsigned long)(tIdle / 1000), RebulkVoltage, RebulkCurrent_A);
     }
 
     const bool rebulkCondition = (v < RebulkVoltage) || (RebulkCurrent_A > 0.0f && Bcur < -RebulkCurrent_A);
@@ -2544,10 +2585,10 @@ void updateChargingStage() {
       lastFloatDebugMs = now;
       float vErr = FloatVoltage - v;
       queueConsoleMessageF("Float status | battV=%.2fV floatTarget=%.2fV vErr=%.3fV Bcur=%.1fA tFloat=%lus rebulkV=%.2fV minFloatTime=%lus",
-        v, FloatVoltage, vErr, Bcur,
-        (unsigned long)(tFloat / 1000),
-        RebulkVoltage,
-        (unsigned long)(MinFloatTime / 1000));
+                           v, FloatVoltage, vErr, Bcur,
+                           (unsigned long)(tFloat / 1000),
+                           RebulkVoltage,
+                           (unsigned long)(MinFloatTime / 1000));
     }
 
     const bool rebulkCondition = (v < RebulkVoltage) || (RebulkCurrent_A > 0.0f && Bcur < -RebulkCurrent_A);
@@ -2796,7 +2837,8 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
   }
 
   // PRIORITY 5: WARNING CONDITIONS (all start lockout)
-  if (tick.currentBatteryVoltage > (tick.bulkVoltage + tick.voltageSpikeMargin)) {
+  // AlternatorHardShutdownV is an absolute voltage — should be set just below BMS shutdown.
+  if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
   if (tick.voltageDisagreementWarning) {
@@ -2856,7 +2898,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   }
 
   // Priority 5: Warning
-  if (tick.currentBatteryVoltage > (tick.bulkVoltage + tick.voltageSpikeMargin)) return REASON_VOLTAGE_SPIKE;
+  if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) return REASON_VOLTAGE_SPIKE;
   if (tick.voltageDisagreementWarning) return REASON_VOLTAGE_DISAGREE_WARNING;
   if (!tick.ignoreTemperature && tick.tempToUseF > (tick.tempLimitF + tick.tempWarnExcessF)) {
     if (tempWarningStartMs > 0 && (tick.nowMs - tempWarningStartMs > TempSustainedTimeout)) {
@@ -2880,16 +2922,16 @@ void updateProtectionCounters(FieldEventReason reason) {
   static FieldEventReason prevReason = REASON_NONE;
   if (reason != prevReason) {
     switch (reason) {
-      case REASON_INA_OVERVOLTAGE:           g_inaOVCount++;             break;
-      case REASON_HARD_OVERCURRENT:          g_hardOCCount++;            break;
-      case REASON_VOLTAGE_SPIKE:             g_voltSpikeCount++;         break;
-      case REASON_VOLTAGE_DISAGREE_CRITICAL: g_voltDisagreeCritCount++;  break;
-      case REASON_VOLTAGE_DISAGREE_WARNING:  g_voltDisagreeWarnCount++;  break;
-      case REASON_VOLTAGE_IMPLAUSIBLE:       g_voltImplausibleCount++;   break;
-      case REASON_TEMP_CRITICAL:             g_tempCritCount++;          break;
-      case REASON_TEMP_SUSTAINED:            g_tempSustainedCount++;     break;
-      case REASON_TEMP_STALE:                g_tempStaleCount++;         break;
-      case REASON_CURRENT_STALE:             g_currentStaleCount++;      break;
+      case REASON_INA_OVERVOLTAGE: g_inaOVCount++; break;
+      case REASON_HARD_OVERCURRENT: g_hardOCCount++; break;
+      case REASON_VOLTAGE_SPIKE: g_voltSpikeCount++; break;
+      case REASON_VOLTAGE_DISAGREE_CRITICAL: g_voltDisagreeCritCount++; break;
+      case REASON_VOLTAGE_DISAGREE_WARNING: g_voltDisagreeWarnCount++; break;
+      case REASON_VOLTAGE_IMPLAUSIBLE: g_voltImplausibleCount++; break;
+      case REASON_TEMP_CRITICAL: g_tempCritCount++; break;
+      case REASON_TEMP_SUSTAINED: g_tempSustainedCount++; break;
+      case REASON_TEMP_STALE: g_tempStaleCount++; break;
+      case REASON_CURRENT_STALE: g_currentStaleCount++; break;
       default: break;
     }
     prevReason = reason;
@@ -3194,7 +3236,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
 
   // Thresholds
   tick.bulkVoltage = BulkVoltage;
-  tick.voltageSpikeMargin = VoltageSpikeMargin;
+  tick.alternatorHardShutdownV = AlternatorHardShutdownV;
   tick.inAbsorptionStage = inAbsorptionStage;
 
   return tick;
@@ -3777,7 +3819,8 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // thermalTuning_tick() runs at the END of this function and updates
   // thermalWaveCurrentSetpointF for the NEXT tick (one-tick lag is fine at 5s PID intervals).
   const float activeTempLimit = (ThermalTuningMode && thermalTuningScore.testStarted)
-                                ? thermalWaveCurrentSetpointF : TemperatureLimitF;
+                                  ? thermalWaveCurrentSetpointF
+                                  : TemperatureLimitF;
 
   if (!tempPIDActive) {
     tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);
@@ -3988,10 +4031,10 @@ void pidLog_tick(uint32_t nowMs) {
   if (govMode != GOV_NORMAL_SLEW) e.flags |= (1 << 4);
   e.ovFlags = 0;
   if (g_fastOvClampActive) e.ovFlags |= (1 << 0);
-  if (g_fastOvSoftActive)  e.ovFlags |= (1 << 1);
-  if (g_fastOvHardActive)  e.ovFlags |= (1 << 2);
-  if (g_iExcessActive)     e.ovFlags |= (1 << 3);
-  if (g_loadDumpActive)    e.ovFlags |= (1 << 4);
+  // bit 1 reserved (was softClamp — old soft-cap removed)
+  if (g_fastOvHardActive) e.ovFlags |= (1 << 2);
+  if (g_iExcessActive) e.ovFlags |= (1 << 3);
+  if (g_loadDumpActive) e.ovFlags |= (1 << 4);
 
   // ── Voltage loop ─────────────────────────────────────────────────────────
   e.battV = IBV;
@@ -4026,17 +4069,21 @@ void pidLog_tick(uint32_t nowMs) {
   // ── Context ───────────────────────────────────────────────────────────────
   e.rpm = RPM;
   e.measAmps = MeasuredAmps;
-  e.innerKp = (float)PidKp;    // inner output-current PID
+  e.innerKp = (float)PidKp;  // inner output-current PID
   e.innerKi = (float)PidKi;
   e.innerKd = (float)PidKd;
   e.voltageKp = (float)VoltageKp;  // outer voltage loop
   e.voltageKi = (float)VoltageKi;
-  e.voltageKd = (float)VoltageKd;
+  e.voltageKd = 0.0f;  // D term removed; field kept for struct layout compatibility
 
   e.battV_filt = IBV_filtered;
   e.iMeas_filt = MeasuredAmps_filtered;
   e.dBcur_dt = g_dBcur_dt;
   e.battI = getBatteryCurrent();
+  e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;
+  e.voltLoopIntervalMs = pidLog_voltageLoopRanThisTick ? (int16_t)g_voltLoopActualIntervalMs : 0;
+  e.inaIntervalMs = (int16_t)ina_last_ms;
+  e.pad2 = 0;
 
   pidLogHead = (pidLogHead + 1) % PID_LOG_SIZE;
   if (pidLogCount < PID_LOG_SIZE) pidLogCount++;
@@ -4091,12 +4138,13 @@ void thermalLog_tick(uint32_t nowMs) {
   ThermalLogEntry &e = thermalLog[thermalLogHead];
 
   e.ts = nowMs;
-  e.tempFiltered  = thermalLogScale10(tempFiltered);
+  e.tempFiltered = thermalLogScale10(tempFiltered);
   e.tempProjected = thermalLogScale10(projectedTempF);
   // effective setpoint: mirrors the logic in tempPID_tick (slopeBufFull = 5°F margin, else 20°F warmup margin)
   {
     float logLimit = (ThermalTuningMode && thermalTuningScore.testStarted)
-                     ? thermalWaveCurrentSetpointF : TemperatureLimitF;
+                       ? thermalWaveCurrentSetpointF
+                       : TemperatureLimitF;
     float logSetpoint = thermalSlopeBufFull ? (logLimit - 5.0f) : (logLimit - 20.0f);
     e.nominalTarget = thermalLogScale10(logSetpoint);
   }

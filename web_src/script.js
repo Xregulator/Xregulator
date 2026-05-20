@@ -56,6 +56,12 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 const STALE_THRESHOLD_DEFAULT_MS = 6000;   // All sensors except temperature
 const STALE_THRESHOLD_TEMP_MS = 12000;  // Temp sensors read every 5s — allows one failed read
 
+// Numerical-gauge render throttle. CSV1 LiveStream arrives every webgaugesinterval (~100ms)
+// for smooth plots, but rendering noisy gauges that fast makes the last digit unreadable.
+// Plots, setting echoes, alignment indicators, and field-status banner are NOT affected —
+// only the criticalFields DOM writes (battery V/A, alt amps, RPM, dutyCycle, PID, IMU live).
+const GAUGE_RENDER_INTERVAL_MS = 500;
+
 
 // PID Tuning Plot 
 let yyMin = -5;    // Default until CSVData3 updates it
@@ -380,7 +386,7 @@ const CSV2_FIELDS = [
     "ft_rai_imu_win",                      // 193
     "ft_rai_imu_ses",                      // 194
     "fsWriteQueueDrops",                   // 195
-    "cv_D",                                // 196
+    "reserved196",                         // 196 reserved — was cv_D (D term removed)
     "tempReadFailCount",                   // 197
     "tempCrcFailCount",                    // 198
     "tempCrcRecoveredCount",               // 199
@@ -426,8 +432,7 @@ const CSV2_FIELDS = [
     "currentPartitionType",                // 239
     "fastOvCurrentCap",                    // 240
     "fastOvClampCount",                    // 241
-    "fastOvSoftCount",                     // 242
-    "fastOvHardCount",                     // 243
+    "fastOvHardCount",                     // 242 (was 243; 242 reserved — was fastOvSoftCount)
     "ch1_last_ms",                         // 244
     "ch1_avg_10s",                         // 245
     "ch1_worst_10s",                       // 246
@@ -593,6 +598,9 @@ const CSV2_FIELDS = [
     "systemIDQuietPP_1",                   // 406
     "systemIDQuietPP_2",                   // 407
     "nvsCycleMs",                          // 408 — ms elapsed for last complete NVS drain cycle
+    "voltLoopWorstInterval_5s",            // 409 — worst voltage loop actual interval 5s window (ms)
+    "voltLoopWorstInterval_ses",           // 410 — worst voltage loop actual interval since boot (ms)
+    "fsFlushDeferred",                     // 411 — times FS flush skipped by co-fire guard (count)
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -708,7 +716,7 @@ const CSV3_FIELDS = [
     "TempWarnExcess",                  // 110
     "TempCritExcess",                  // 111
     "TempSustainedTimeout",            // 112
-    "VoltageSpikeMargin",              // 113
+    "AlternatorHardShutdownV",         // 113
     "VoltageDisagreeThreshold",        // 114
     "VoltageDisagreeTimeout",          // 115
     "rpmMinDutyTable0",                // 116
@@ -778,99 +786,97 @@ const CSV3_FIELDS = [
     "MinRPMForField",                  // 180
     "AwBleedRate",                     // 181
     "AwRecoverRate",                   // 182
-    "KSoft",                           // 183
-    "KHard",                           // 184
+    "KHard",                           // 183 (was 184; 183 reserved — was KSoft)
     "IExcessReseedFrac",               // 185
     "AwSeedProtectMs",                 // 186
-    "VoltageKd",                       // 187
+    "reserved187",                     // 187 reserved — was VoltageKd (D term removed)
     "displayTempUnit",                 // 188
-    "WarmupRampRate",                  // 189
-    "OvLayer1Enable",                  // 190
-    "OvLayer2Enable",                  // 191
-    "OvLayer3Enable",                  // 192
+    "WarmupRampRate",                  // 189 (shifted -1 from prev)
+    "OvGroup1Enable",                  // 190 (was 191; 190 reserved — was OvLayer1Enable)
+    "OvGroup2Enable",                  // 192
     "IExcessSigSrc",                   // 193
     "IExcessMA_N",                     // 194
     "OutputPIDSigSrc",                 // 195
     "TdPred",                          // 196 — raw float (%.3f)
-    "VSoftMarginV",                    // 197 — raw float (%.3f)
-    "VHardMarginV",                    // 198 — raw float (%.3f)
+    "OvMeasMarginV",                   // 197 — raw float (%.3f)
+    "OvPredMarginV",                   // 198 — raw float (%.3f)
     "OutputPIDMA_N",                   // 199
     "OutputPIDFilterTC",               // 200
     "VoltageFilterTC",                 // 201
-    "VoltageDWindowMs",                // 202
-    "ProtectionProxGateV",             // 203
-    "SlopeBleedThresh",                // 204
-    "SlopeBleedK",                     // 205
-    "DvdtAlpha",                       // 206
-    "SlopeBleedProxV",                 // 207
-    "StartupRiseRate",                 // 208
-    "absorptionCompleteTime",          // 209
-    "OnOff",                           // 210
-    "ManualFieldToggle",               // 211
-    "HiLow",                           // 212
-    "LimpHome",                        // 213
-    "AlarmActivate",                   // 214
-    "TempAlarm",                       // 215
-    "VoltageAlarmHigh",                // 216
-    "VoltageAlarmLow",                 // 217
-    "CurrentAlarmHigh",                // 218
-    "AlarmTest",                       // 219
-    "AlarmLatchEnabled",               // 220
-    "MaintainMode",                    // 221
-    "ManualSOCPoint",                  // 222
-    "LearningMode",                    // 223
-    "LearningPaused",                  // 224
-    "IgnoreLearningDuringPenalty",     // 225
-    "ShowLearningDebugMessages",       // 226
-    "LogAllLearningEvents",            // 227
-    "CloudFeatures",                   // 228
-    "LearningDryRunMode",              // 229
-    "AutoShuntGainCorrection",         // 230
-    "AutoAltCurrentZero",              // 231
-    "WindingTempOffset",               // 232
-    "ManualLifePercentage",            // 233
-    "UVThresholdHigh",                 // 234
-    "weatherModeEnabled",              // 235
-    "SENSOR_UPLOAD_INTERVAL",          // 236
-    "imuEnabled",                      // 237
-    "AbsorptionVoltage",               // 238
-    "AbsorptionTimeoutMs",             // 239
-    "bulkVoltageHoldMs",               // 240
-    "capLimitMode",                    // 241
-    "TargetVoltageMode",               // 242
-    "TargetVoltageSetpoint",           // 243
-    "RebulkCurrent_A",                 // 244
-    "UseFloat",                        // 245
-    "anomalyMarginAmps",               // 246
-    "anomalyAlarmThreshold",           // 247
-    "anomalyAlarmEnable",              // 248
-    "degradationThreshold",            // 249
-    "TempAlarmLow",                    // 250
-    "LoadDumpDtThresh",                // 251
-    "LoadDumpCurrentDrop",             // 252
-    "CVTuningMode",                    // 253
-    "cvWaveAmplitudeV",                // 254
-    "cvWavePeriodSec",                 // 255
-    "cvKOvershoot",                    // 256
-    "cvConsecutiveReads",              // 257
-    "ThermalTuningMode",               // 258
-    "thermalWaveLowF",                 // 259
-    "thermalWaveHighF",                // 260
-    "thermalWaveHalfPeriodMin",        // 261
-    "thermalKOvershoot",               // 262
-    "thermalKUndershoot",              // 263
-    "thermalSettleThreshF",            // 264
-    "thermalConsecutiveReads",         // 265
-    "webgaugesinterval",               // 266
-    "plotTimeWindow",                  // 267
-    "Ymin1",                           // 268
-    "Ymax1",                           // 269
-    "Ymin2",                           // 270
-    "Ymax2",                           // 271
-    "Ymin3",                           // 272
-    "Ymax3",                           // 273
-    "Ymin4",                           // 274
-    "Ymax4",                           // 275
+    "ProtectionProxGateV",             // 202
+    "SlopeBleedThresh",                // 203
+    "SlopeBleedK",                     // 204
+    "DvdtAlpha",                       // 205
+    "SlopeBleedProxV",                 // 206
+    "StartupRiseRate",                 // 207
+    "absorptionCompleteTime",          // 208
+    "OnOff",                           // 209
+    "ManualFieldToggle",               // 210
+    "HiLow",                           // 211
+    "LimpHome",                        // 212
+    "AlarmActivate",                   // 213
+    "TempAlarm",                       // 214
+    "VoltageAlarmHigh",                // 215
+    "VoltageAlarmLow",                 // 216
+    "CurrentAlarmHigh",                // 217
+    "AlarmTest",                       // 218
+    "AlarmLatchEnabled",               // 219
+    "MaintainMode",                    // 220
+    "ManualSOCPoint",                  // 221
+    "LearningMode",                    // 222
+    "LearningPaused",                  // 223
+    "IgnoreLearningDuringPenalty",     // 224
+    "ShowLearningDebugMessages",       // 225
+    "LogAllLearningEvents",            // 226
+    "CloudFeatures",                   // 227
+    "LearningDryRunMode",              // 228
+    "AutoShuntGainCorrection",         // 229
+    "AutoAltCurrentZero",              // 230
+    "WindingTempOffset",               // 231
+    "ManualLifePercentage",            // 232
+    "UVThresholdHigh",                 // 233
+    "weatherModeEnabled",              // 234
+    "SENSOR_UPLOAD_INTERVAL",          // 235
+    "imuEnabled",                      // 236
+    "AbsorptionVoltage",               // 237
+    "AbsorptionTimeoutMs",             // 238
+    "bulkVoltageHoldMs",               // 239
+    "capLimitMode",                    // 240
+    "TargetVoltageMode",               // 241
+    "TargetVoltageSetpoint",           // 242
+    "RebulkCurrent_A",                 // 243
+    "UseFloat",                        // 244
+    "anomalyMarginAmps",               // 245
+    "anomalyAlarmThreshold",           // 246
+    "anomalyAlarmEnable",              // 247
+    "degradationThreshold",            // 248
+    "TempAlarmLow",                    // 249
+    "LoadDumpDtThresh",                // 250
+    "LoadDumpDtThresh1",               // 251
+    "CVTuningMode",                    // 252
+    "cvWaveAmplitudeV",                // 253
+    "cvWavePeriodSec",                 // 254
+    "cvKOvershoot",                    // 255
+    "cvConsecutiveReads",              // 256
+    "ThermalTuningMode",               // 257
+    "thermalWaveLowF",                 // 258
+    "thermalWaveHighF",                // 259
+    "thermalWaveHalfPeriodMin",        // 260
+    "thermalKOvershoot",               // 261
+    "thermalKUndershoot",              // 262
+    "thermalSettleThreshF",            // 263
+    "thermalConsecutiveReads",         // 264
+    "webgaugesinterval",               // 265
+    "plotTimeWindow",                  // 266
+    "Ymin1",                           // 267
+    "Ymax1",                           // 268
+    "Ymin2",                           // 269
+    "Ymax2",                           // 270
+    "Ymin3",                           // 271
+    "Ymax3",                           // 272
+    "Ymin4",                           // 273
+    "Ymax4",                           // 274
+    "LoadDumpDtThresh3",               // 275
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",      // 0
@@ -2932,8 +2938,9 @@ function updateAllEchosOptimized(data) {
         { key: 'CurrentAlarmHigh', id: 'CurrentAlarmHigh_echo', transform: v => v },
         { key: 'RPMScalingFactor', id: 'RPMScalingFactor_echo', transform: v => v },
         { key: 'MaximumAllowedBatteryAmps', id: 'MaximumAllowedBatteryAmps_echo', transform: v => v },
+        { key: 'LoadDumpDtThresh1',   id: 'LoadDumpDtThresh1_echo',   transform: v => v },
         { key: 'LoadDumpDtThresh',    id: 'LoadDumpDtThresh_echo',    transform: v => v },
-        { key: 'LoadDumpCurrentDrop', id: 'LoadDumpCurrentDrop_echo', transform: v => v },
+        { key: 'LoadDumpDtThresh3',   id: 'LoadDumpDtThresh3_echo',   transform: v => v },
         { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
         { key: 'BatteryVoltageSource', id: 'BatteryVoltageSource_echo', transform: v => v },
         { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
@@ -3000,7 +3007,7 @@ function updateAllEchosOptimized(data) {
         { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v) },
-        { key: 'VoltageSpikeMargin', id: 'VoltageSpikeMargin_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'AlternatorHardShutdownV', id: 'AlternatorHardShutdownV_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
         { key: 'IExcessK', id: 'IExcessK_echo', transform: v => (v / 10).toFixed(1) },
@@ -3013,7 +3020,7 @@ function updateAllEchosOptimized(data) {
         { key: 'FIELD_COLLAPSE_DELAY', id: 'FIELD_COLLAPSE_DELAY_echo', transform: v => Math.round(v / 1000) },
         { key: 'hardwarePresent', id: 'HardwarePresent_echo', transform: v => v },
         { key: 'VoltageKi', id: 'VoltageKi_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'VoltageKd', id: 'VoltageKd_echo', transform: v => (v / 100).toFixed(1) },
+        // VoltageKd echo removed — D term removed
         { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
@@ -3034,23 +3041,22 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'AwBleedRate',       id: 'AwBleedRate_echo',       transform: v => (v / 10).toFixed(1) },
         { key: 'AwRecoverRate',     id: 'AwRecoverRate_echo',     transform: v => (v / 10).toFixed(2) },
-        { key: 'KSoft',             id: 'KSoft_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'KHard',             id: 'KHard_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'IExcessReseedFrac', id: 'IExcessReseedFrac_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AwSeedProtectMs',   id: 'AwSeedProtectMs_echo',   transform: v => v },
-        { key: 'OvLayer1Enable',    id: 'OvLayer1Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
-        { key: 'OvLayer2Enable',    id: 'OvLayer2Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
-        { key: 'OvLayer3Enable',    id: 'OvLayer3Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'OvGroup1Enable',    id: 'OvGroup1Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
+        { key: 'OvGroup2Enable',    id: 'OvGroup2Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'TdPred',            id: 'TdPred_echo',            transform: v => v.toFixed(3) },
-        { key: 'VSoftMarginV',      id: 'VSoftMarginV_echo',      transform: v => v.toFixed(3) },
-        { key: 'VSoftMarginV',      id: 'VSoftMarginV_echo2',     transform: v => v.toFixed(3) },
-        { key: 'VHardMarginV',      id: 'VHardMarginV_echo',      transform: v => v.toFixed(3) },
+        { key: 'OvMeasMarginV',     id: 'OvMeasMarginV_echo',     transform: v => v.toFixed(3) },
+        { key: 'OvPredMarginV',     id: 'OvPredMarginV_echo',     transform: v => v.toFixed(3) },
         { key: 'KHard',             id: 'KHard_echo2',            transform: v => v.toFixed(1) },
         { key: 'IExcessSigSrc',       id: 'IExcessSigSrc_echo',       transform: v => (['MA(N)', 'EMA(TC)', 'Raw'][v] ?? v) },
         { key: 'IExcessMA_N',         id: 'IExcessMA_N_echo',         transform: v => Math.round(v) },
         { key: 'OutputPIDSigSrc',     id: 'OutputPIDSigSrc_echo',     transform: v => (['EMA(TC)', 'MA(N)', 'Raw'][v] ?? v) },
         { key: 'OutputPIDMA_N',       id: 'OutputPIDMA_N_echo',       transform: v => Math.round(v) },
         { key: 'OutputPIDFilterTC',   id: 'OutputPIDFilterTC_echo',   transform: v => v },
+        { key: 'VoltageFilterTC',     id: 'VoltageFilterTC_echo',     transform: v => v },
+        { key: 'VoltageFilterTC',     id: 'VoltageFilterTC_echo_cv',  transform: v => v },
         { key: 'AbsorptionVoltage', id: 'AbsorptionVoltage_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TargetVoltageSetpoint', id: 'TargetVoltageSetpoint_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
@@ -3065,9 +3071,6 @@ function updateAllEchosOptimized(data) {
         { key: 'InputFilterTC', id: 'InputFilterTC_ID',        transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_echo_grp3', transform: v => v },
         { key: 'OutputPIDFilterTC', id: 'OutputPIDFilterTC_echo_pid', transform: v => v },
-        { key: 'VoltageFilterTC',   id: 'VoltageFilterTC_echo',       transform: v => v },
-        { key: 'VoltageFilterTC',   id: 'VoltageFilterTC_echo_cv',    transform: v => v },
-        { key: 'VoltageDWindowMs',      id: 'VoltageDWindowMs_echo',          transform: v => v },
         { key: 'ProtectionProxGateV',   id: 'ProtectionProxGateV_echo',       transform: v => (v / 100).toFixed(2) },
         { key: 'SlopeBleedThresh',      id: 'SlopeBleedThresh_echo',          transform: v => (v / 100).toFixed(2) },
         { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
@@ -3838,7 +3841,7 @@ function renderCVTuningLog(data) {
     // Current settings for row highlighting — read from echo spans
     const curVkp = parseFloat(document.getElementById('VoltageKp_echo')?.textContent);
     const curVki = parseFloat(document.getElementById('VoltageKi_echo')?.textContent);
-    const curVkd = parseFloat(document.getElementById('VoltageKd_echo')?.textContent);
+    // curVkd removed — D term removed
     const curWa  = parseFloat(document.getElementById('cvWaveAmplitudeV_echo')?.textContent);
     const curWp  = parseInt(document.getElementById('cvWavePeriodSec_echo')?.textContent);
     const curCr  = parseInt(document.getElementById('cvConsecutiveReads_echo')?.textContent);
@@ -3852,7 +3855,6 @@ function renderCVTuningLog(data) {
         const isMatch = !isNaN(curVkp) &&
             Math.abs(r.vkp - curVkp) < 0.001 &&
             Math.abs(r.vki - curVki) < 0.001 &&
-            Math.abs(r.vkd - curVkd) < 0.01  &&
             Math.abs(r.wa  - curWa)  < 0.005 &&
             r.wp === curWp && r.cr === curCr;
         const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
@@ -3871,7 +3873,6 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${(r.lus || 0).toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vkp.toFixed(3)}</td>
             <td style="padding:2px 4px;">${r.vki.toFixed(3)}</td>
-            <td style="padding:2px 4px;">${r.vkd.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.srr.toFixed(1)}</td>
             <td style="padding:2px 4px;">${r.sfr.toFixed(1)}</td>
             <td style="padding:2px 4px;">${r.abl.toFixed(2)}</td>
@@ -3884,7 +3885,8 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${r.ien}</td>
             <td style="padding:2px 4px;">${r.iekb.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.lddt.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${r.ldcd.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.ldt1.toFixed(0)}</td>
+            <td style="padding:2px 4px;">${r.ldt3.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.tc.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.wa.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.wp}</td>
@@ -5861,9 +5863,8 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("VMGUseTrueWind_checkbox", data.VMGUseTrueWind, "VMGUseTrueWind");
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
-        updateCheckbox("OvLayer1Enable_checkbox", data.OvLayer1Enable, "OvLayer1Enable");
-        updateCheckbox("OvLayer2Enable_checkbox", data.OvLayer2Enable, "OvLayer2Enable");
-        updateCheckbox("OvLayer3Enable_checkbox", data.OvLayer3Enable, "OvLayer3Enable");
+        updateCheckbox("OvGroup1Enable_checkbox", data.OvGroup1Enable, "OvGroup1Enable");
+        updateCheckbox("OvGroup2Enable_checkbox", data.OvGroup2Enable, "OvGroup2Enable");
         if (data.IExcessSigSrc !== undefined)   updateTripleBtn('iExcessSigSrc_',   data.IExcessSigSrc);
         if (data.OutputPIDSigSrc !== undefined)  updateTripleBtn('outputPIDSigSrc_', data.OutputPIDSigSrc);
         // // Apply the ESP32 state to the plot system
@@ -6514,7 +6515,15 @@ window.addEventListener("load", function () {
                     else if (key === "AlternatorTemperatureF") {
                         newTextContent = toDisplayTemp(value / 100).toFixed(1);
                     }
-                    else if (["BatteryV", "uTargetAmps", "MeasuredAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Bcur", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "BatteryV_raw", "MeasuredAmps_filtered"].includes(key)) {
+                    // Currents (Alt + Batt) — 3 sig figs: integer at ≥100, 1 dec at ≥10, 2 dec below.
+                    else if (key === "MeasuredAmps" || key === "Bcur") {
+                        const amps = value / 100;
+                        const abs = Math.abs(amps);
+                        if (abs >= 100)      newTextContent = amps.toFixed(0);
+                        else if (abs >= 10)  newTextContent = amps.toFixed(1);
+                        else                 newTextContent = amps.toFixed(2);
+                    }
+                    else if (["BatteryV", "uTargetAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "BatteryV_raw", "MeasuredAmps_filtered"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -6621,8 +6630,13 @@ window.addEventListener("load", function () {
                 ["Icv_display", "Icv"],
             ];
 
-            // Update critical fields every cycle
-            updateFields(criticalFields);
+            // Throttle noisy gauge DOM writes to GAUGE_RENDER_INTERVAL_MS so the last digit
+            // is readable. Plots, IMU alignment, and echoes still update every cycle below.
+            const _gaugeNow = performance.now();
+            if (!window._lastGaugeRender || (_gaugeNow - window._lastGaugeRender) >= GAUGE_RENDER_INTERVAL_MS) {
+                updateFields(criticalFields);
+                window._lastGaugeRender = _gaugeNow;
+            }
             processCSVDataOptimized(data); // this is for plotting
             updateIMUAlignmentDisplayFromData(data);
             if (data.BatteryV_raw !== undefined) {
@@ -6802,8 +6816,9 @@ window.addEventListener("load", function () {
                     else if (["IBVMax", "ChargeCycles", "ChargeCycles_AllTime", "thermalPenaltyAmps", "MeasuredAmpsMax", "SOC_percent", "VictronCurrent", "performanceRatio", "UVThresholdHigh",
                         "PeakVoltage_AllTime", "MinVoltage", "MinVoltage_AllTime", "AvgSOC_AllTime", "AvgSpeed_AllTime", "InsulationLifePercent", "GreaseLifePercent",
                         "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA",
-                        "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at",
-                        "ch1_worst_10s", "ch1_worst_2m", "ch1_worst_at", "ina_worst_10s", "ina_worst_2m", "ina_worst_at"].includes(key)) {
+                        "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at"].includes(key)) {
+                        // NOTE: ch1_worst_* and ina_worst_* are NOT in this list — firmware sends them as raw integer ms
+                        // (only the matching *_avg_* values are scaled ×100). They fall through to the default integer render below.
                         newTextContent = (value / 100).toFixed(2);
                     }
                     // GPS coordinates scaled by 1,000,000 on server
@@ -6838,7 +6853,7 @@ window.addEventListener("load", function () {
                     else if (["voltageTarget", "voltageError"].includes(key)) {
                         newTextContent = (value / 100).toFixed(3);    // *100 int -> volts, 3dp for error
                     }
-                    else if (["Icv", "cv_I", "cv_D"].includes(key)) {
+                    else if (["Icv", "cv_I"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);    // *100 int -> amps
                     }
                     else if (key === "voltageControlActive" || key === "loadDumpActive") {
@@ -6884,9 +6899,9 @@ window.addEventListener("load", function () {
                     else if (key === "thermalSlopeFPerSec") {
                         newTextContent = toDisplayTempDelta(value / 1000).toFixed(3);
                     }
-                    // Session duration in minutes
-                    else if (["LastSessionDuration"].includes(key)) {
-                        newTextContent = formatMinutesToDHM(value);
+                    // Session duration in seconds (firmware sends raw seconds; formatter auto-scales)
+                    else if (key === "LastSessionDuration" || key === "CurrentSessionDuration") {
+                        newTextContent = formatSecondsAuto(value);
                     }
                     // Distance values scaled by 10 on server
                     else if (["TotalDistance", "TotalDistance_AllTime"].includes(key)) {
@@ -6908,7 +6923,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value).toFixed(0);
                     }
                     // Values scaled by 100 on server (pid and learning fields)
-                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp", "VoltageKd"].includes(key)) {
+                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     // safeHours: stored as seconds — display as hours
@@ -7173,7 +7188,7 @@ window.addEventListener("load", function () {
                 // voltageTarget and Icv moved to CSV1 otherFields (those fields are in CSV1 at indices 32, 33)
                 ["voltageError_display", "voltageError"],
                 ["cv_I_display", "cv_I"],
-                ["cv_D_display", "cv_D"],
+                // cv_D_display removed — D term removed
                 // IMU comfort/comfort metrics (in CSV2)
                 ["imu_msi_score_ID", "imu_msi_score"],
                 ["imu_vomit_pct_ID", "imu_vomit_pct"],
@@ -7313,11 +7328,8 @@ window.addEventListener("load", function () {
                 // Voltage & Current Protection events
                 ["fastOvCurrentCapID", "fastOvCurrentCap"],
                 ["fastOvClampCountID", "fastOvClampCount"],
-                ["fastOvSoftCountID", "fastOvSoftCount"],
                 ["fastOvHardCountID", "fastOvHardCount"],
                 ["iExcessCountID", "iExcessCount"],
-                ["dBcur_dt_ID", "dBcur_dt"],
-                ["loadDumpActive_ID", "loadDumpActive"],
                 ["inaOVCountID", "inaOVCount"],
                 ["hardOCCountID", "hardOCCount"],
                 ["voltSpikeCountID", "voltSpikeCount"],
@@ -7349,6 +7361,9 @@ window.addEventListener("load", function () {
                 ["ina_avg_at_ID", "ina_avg_at"],
                 ["ina_worst_at_ID", "ina_worst_at"],
                 ["ina_over2x_at_ID", "ina_over2x_at"],
+                ["voltLoopWorstInterval_5s_ID", "voltLoopWorstInterval_5s"],
+                ["voltLoopWorstInterval_ses_ID", "voltLoopWorstInterval_ses"],
+                ["fsFlushDeferred_ID", "fsFlushDeferred"],
 
             ];
 
@@ -7608,7 +7623,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 1000).toFixed(0);
                     }
                     // Values scaled by 100 
-                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp", "VoltageKd"].includes(key)) {
+                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
 
@@ -8059,7 +8074,8 @@ function handleResetPerfCounters() {
                 'ch1_worst_at_ID', 'ch1_over2x_at_ID', 'ch1_avg_at_ID',
                 'ina_last_ms_ID', 'ina_avg_10s_ID', 'ina_worst_10s_ID', 'ina_over2x_10s_ID',
                 'ina_avg_2m_ID', 'ina_worst_2m_ID', 'ina_over2x_2m_ID',
-                'ina_avg_at_ID', 'ina_worst_at_ID', 'ina_over2x_at_ID'
+                'ina_avg_at_ID', 'ina_worst_at_ID', 'ina_over2x_at_ID',
+                'voltLoopWorstInterval_5s_ID', 'voltLoopWorstInterval_ses_ID'
             ];
             ids.forEach(id => {
                 const el = document.getElementById(id);
@@ -9508,6 +9524,17 @@ function formatMinutesToDHM(minutes) {
     if (mins > 0 || parts.length === 0) parts.push(`${mins}m`);
 
     return parts.join(' ');
+}
+
+// Auto-scale a seconds count into the most readable two-unit form.
+// < 60s → "45s", < 60m → "12m 34s", < 24h → "3h 45m", otherwise → "2d 3h".
+function formatSecondsAuto(seconds) {
+    if (isNaN(seconds) || seconds === null || seconds === undefined || seconds < 0) return '-';
+    const s = Math.floor(seconds);
+    if (s < 60)    return `${s}s`;
+    if (s < 3600)  return `${Math.floor(s / 60)}m ${s % 60}s`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 
 
@@ -11098,17 +11125,20 @@ function updateFloatVisibility() {
 // CV / Voltage Tuner Log — JavaScript
 //
 // Decodes /cvlog.bin and downloads as CSV.
-// Binary layout: 24-byte header + N × 44-byte CvLogEntry structs (little-endian).
+// Binary layout: 36-byte header + N × 50-byte CvLogEntry structs (little-endian).
 //
-// Header (24 bytes):
+// Header (36 bytes):
 //   offset  0  uint32  count
-//   offset  4  uint32  entrySize (= 44)
+//   offset  4  uint32  entrySize (= 50)
 //   offset  8  float32 VoltageKp
 //   offset 12  float32 VoltageKi
 //   offset 16  uint32  VoltageLoopInterval (ms)
-//   offset 20  float32 VoltageKd
+//   offset 20  float32 reserved (was VoltageKd — D term removed; always 0.0)
+//   offset 24  float32 SlopeBleedThresh (V/s)
+//   offset 28  float32 SlopeBleedK (A/(V/s))
+//   offset 32  float32 SlopeBleedProxV (V)
 //
-// Entry (44 bytes):
+// Entry (50 bytes):
 //   offset  0  uint32   ts
 //   offset  4  int16    battV       / 100  → V
 //   offset  6  int16    targV       / 100  → V
@@ -11123,20 +11153,22 @@ function updateFloatVisibility() {
 //   offset 24  int16    iMeas       / 10   → A
 //   offset 26  int16    duty        / 10   → %
 //   offset 28  uint8    flags       (b0=fastOvActive b1=voltLoopFired b2=cvActive
-//                                    b3=soft b4=hard b5=iExcess)
+//                                    b3=soft b4=hard b5=iExcess b6=loadDumpActive)
 //   offset 29  uint8    awState     (0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless)
 //   offset 30  int16    rpm
-//   offset 32  int16    battV_filt_x100 / 100 → V  (IBV_filtered, EMA)
+//   offset 32  int16    battV_filt_x100 / 100 → V  (IBV, raw battery voltage)
 //   offset 34  int16    iMeas_filt_x10  / 10  → A  (MeasuredAmps_filtered, EMA)
 //   offset 36  int16    ch1IntervalMs        → ms  (last CH1 inter-sample gap)
-//   offset 38  int16    cvDSlope_x10000 / 10000 → V/s (500ms backward diff on filtered V)
+//   offset 38  int16    cvDSlope_x10000 / 10000 → V/s (g_fastOvDvdt — fastOV EMA signal)
 //   offset 40  int16    battI_x10       / 10  → A  (getBatteryCurrent — INA228 or Victron)
 //   offset 42  int16    dBcur_dt_Aps    raw A/s   (g_dBcur_dt clamped to int16)
-//   flags bit 6: loadDumpActive
+//   offset 44  int16    voltLoopIntervalMs  ms    actual voltage loop interval when fired (0 if not)
+//   offset 46  int16    inaIntervalMs       ms    ina_last_ms at log time — INA228 read freshness
+//   offset 48  int16    slopeBleedAmps_x1000 / 1000 → A  cv_I drain this VL tick (0 on non-VL ticks)
 // ===========================================================================
 
-const CV_LOG_HEADER_SIZE = 24;
-const CV_LOG_ENTRY_SIZE = 44;
+const CV_LOG_HEADER_SIZE = 36;
+const CV_LOG_ENTRY_SIZE = 50;
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -11157,6 +11189,9 @@ function parseCvBin(buf) {
     const voltKi = view.getFloat32(12, true);
     const voltInterval = view.getUint32(16, true);
     const voltKd = view.getFloat32(20, true);
+    const sbThresh = view.getFloat32(24, true);   // SlopeBleedThresh (V/s)
+    const sbK      = view.getFloat32(28, true);   // SlopeBleedK (A/(V/s))
+    const sbProxV  = view.getFloat32(32, true);   // SlopeBleedProxV (V)
 
     if (count === 0) return null;
 
@@ -11184,7 +11219,6 @@ function parseCvBin(buf) {
     const fastOvActive = new Array(count);
     const voltLoopFired = new Array(count);
     const cvActive = new Array(count);
-    const softClamp = new Array(count);
     const hardClamp = new Array(count);
     const rpm = new Array(count);
     const battV_filt = new Array(count);
@@ -11196,6 +11230,9 @@ function parseCvBin(buf) {
     const dBcur_dt = new Array(count);
     const loadDumpActive = new Array(count);
     const awState = new Array(count);
+    const voltLoopInterval = new Array(count);
+    const inaInterval = new Array(count);
+    const slopeBleedAmps = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
@@ -11220,7 +11257,7 @@ function parseCvBin(buf) {
         fastOvActive[i] = (f >> 0) & 1;
         voltLoopFired[i] = (f >> 1) & 1;
         cvActive[i] = (f >> 2) & 1;
-        softClamp[i] = (f >> 3) & 1;
+        // bit 3 reserved (was softClamp — old soft-cap removed)
         hardClamp[i] = (f >> 4) & 1;
         awState[i] = view.getUint8(b + 29);
         rpm[i] = view.getInt16(b + 30, true);
@@ -11230,18 +11267,23 @@ function parseCvBin(buf) {
         cvDSlope[i] = view.getInt16(b + 38, true) / 10000.0;
         battI[i] = view.getInt16(b + 40, true) / 10.0;
         dBcur_dt[i] = view.getInt16(b + 42, true);
+        voltLoopInterval[i] = view.getInt16(b + 44, true);
+        inaInterval[i] = view.getInt16(b + 46, true);
+        slopeBleedAmps[i] = view.getInt16(b + 48, true) / 1000.0;
         iExcess[i] = (f >> 5) & 1;
         loadDumpActive[i] = (f >> 6) & 1;
     }
 
     return {
         count, voltKp, voltKi, voltKd, voltInterval,
+        sbThresh, sbK, sbProxV,
         ts, battV, targV, vError, dvdt, vPred,
         fastOvCap, cv_I, Icv, uTarget, spLimited,
         iMeas, duty, flags,
-        fastOvActive, voltLoopFired, cvActive, softClamp, hardClamp,
+        fastOvActive, voltLoopFired, cvActive, hardClamp,
         rpm, battV_filt, iMeas_filt, ch1Interval, cvDSlope, iExcess, battI,
-        dBcur_dt, loadDumpActive, awState,
+        dBcur_dt, loadDumpActive, awState, voltLoopInterval, inaInterval,
+        slopeBleedAmps,
     };
 }
 
@@ -11260,17 +11302,16 @@ function cvBinToCsv(d, csv3) {
     const fmtRaw = (v, dec) => (v !== undefined && !isNaN(v)) ? Number(v).toFixed(dec) : 'N/A';
     const fmtDiv = (v, div, dec) => (v !== undefined && !isNaN(v)) ? (Number(v) / div).toFixed(dec) : 'N/A';
     lines.push(
-        `# VoltageKp=${d.voltKp.toFixed(2)} VoltageKi=${d.voltKi.toFixed(3)} VoltageKd=${d.voltKd.toFixed(1)}` +
-        ` VoltageLoopInterval=${d.voltInterval}ms VoltageFilterTC=${fmtRaw(c.VoltageFilterTC, 0)}ms`
+        `# VoltageKp=${d.voltKp.toFixed(2)} VoltageKi=${d.voltKi.toFixed(3)} VoltageLoopInterval=${d.voltInterval}ms VoltageFilterTC=${fmtRaw(c.VoltageFilterTC, 0)}ms`
     );
     lines.push(
-        `# FastOV: VSoftMarginV=${fmtRaw(c.VSoftMarginV, 3)}V VHardMarginV=${fmtRaw(c.VHardMarginV, 3)}V` +
+        `# FastOV: OvMeasMarginV=${fmtRaw(c.OvMeasMarginV, 3)}V OvPredMarginV=${fmtRaw(c.OvPredMarginV, 3)}V` +
         ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtAlpha=${fmtDiv(c.DvdtAlpha, 1000, 3)}` +
-        ` KSoft=${fmtDiv(c.KSoft, 10, 1)}A/V KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
+        ` KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
         ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s AwRecoverRate=${fmtDiv(c.AwRecoverRate, 10, 2)}A/s`
     );
     lines.push(
-        `# SlopeBleed: SlopeBleedThresh=${fmtDiv(c.SlopeBleedThresh, 100, 3)}V/s SlopeBleedK=${fmtRaw(c.SlopeBleedK, 1)}A/(V/s)`
+        `# SlopeBleed: SlopeBleedThresh=${d.sbThresh.toFixed(3)}V/s SlopeBleedK=${d.sbK.toFixed(1)}A/(V/s) SlopeBleedProxV=${d.sbProxV.toFixed(3)}V`
     );
 
     // Column headers
@@ -11279,11 +11320,13 @@ function cvBinToCsv(d, csv3) {
         'battV', 'targV', 'vError_V', 'dvdt_Vs', 'vPred',
         'fastOvCap_A', 'cv_I_A', 'Icv_A', 'uTarget_A', 'spLimited_A',
         'iMeas_A', 'duty_pct',
-        'fastOvActive', 'voltLoopFired', 'cvActive', 'softClamp', 'hardClamp',
+        'fastOvActive', 'voltLoopFired', 'cvActive', 'hardClamp',
         'rpm',
         'battV_filt_V', 'iMeas_filt_A', 'ch1_last_ms', 'iExcess',
         'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
         'cvDSlope_Vps', 'awState',
+        'voltLoopInterval_ms', 'inaInterval_ms',
+        'slopeBleedAmps_A',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -11297,12 +11340,14 @@ function cvBinToCsv(d, csv3) {
             d.spLimited[i].toFixed(1),
             d.iMeas[i].toFixed(1), d.duty[i].toFixed(1),
             d.fastOvActive[i], d.voltLoopFired[i], d.cvActive[i],
-            d.softClamp[i], d.hardClamp[i],
+            d.hardClamp[i],
             d.rpm[i],
             d.battV_filt[i].toFixed(2), d.iMeas_filt[i].toFixed(1),
             d.ch1Interval[i], d.iExcess[i],
             d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
             d.cvDSlope[i].toFixed(4), d.awState[i],
+            d.voltLoopInterval[i], d.inaInterval[i],
+            d.slopeBleedAmps[i].toFixed(4),
         ].join(','));
     }
 

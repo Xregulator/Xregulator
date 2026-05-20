@@ -573,7 +573,7 @@
               <button class="alt-tab-btn alt-tab-btn-primary"
                       onclick="showAltTab('primary', 'alt-panel-vt-mode')">CV Mode</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
-                      onclick="showAltTab('primary', 'alt-panel-advanced')">Advanced</button>
+                      onclick="showAltTab('primary', 'alt-panel-health')">Health Monitor</button>
             </div>
 
             <div id="alt-panel-quick-view" class="alt-panel alt-panel-primary active">
@@ -1418,86 +1418,7 @@
             </div>
 
 
-            <div id="alt-panel-advanced" class="alt-panel alt-panel-primary">
-
-              <!-- Safety -->
-              <details class="alt-nested-section">
-                <summary class="alt-summary-nested">Safety</summary>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Settle Time Before Cut (ms) (<span id="SettleTimeBeforeCut_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      duty must be at 0% before GPIO4 field enable goes LOW. Prevents relay chatter during brief dips.
-                      Typical: 500ms.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="SettleTimeBeforeCut" type="number" step="1" min="0" max="999999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-
-
-
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Voltage Disagree Threshold (V) (<span id="VoltageDisagreeThreshold_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
-                      difference between BatteryV and IBV that indicates sensor disagreement. Helps detect wiring or
-                      sensor issues. Typical: 0.15V.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageDisagreeThreshold" type="number" step="0.01" min="0" max="999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Voltage Disagree Timeout (s) (<span id="VoltageDisagreeTimeout_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      voltage disagreement must persist before triggering warning. Filters transient differences.
-                      Default: 10s.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageDisagreeTimeout" type="number" step="1" min="0" max="999999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Field Collapse Delay (s) (<span id="FIELD_COLLAPSE_DELAY_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                      class="tooltip-box">Lockout/cooldown duration after WARNING or CRITICAL fault. System will not
-                      restart charging until this time elapses, even if fault clears. Default: 30s.</span></span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="FIELD_COLLAPSE_DELAY" type="number" step="1" min="0" max="999999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-
-              </details>
+            <div id="alt-panel-health" class="alt-panel alt-panel-primary">
 
 
               <!-- Anomaly Detection (settings) -->
@@ -1561,7 +1482,7 @@
                     <span class="tooltip-box">How far the thermally-settled session average must drift
                       from the reference average before a degradation alert fires. 15% means the
                       alternator must be producing 15% more or less than its reference average,
-                      sustained over ~90 seconds, before Layer 2 triggers. Lower values are more
+                      sustained over ~90 seconds, before Tier 2 triggers. Lower values are more
                       sensitive. Recommended starting point: 15%. Reduce to 10% once you have
                       confidence in the reference data quality.</span>
                   </span>
@@ -1639,16 +1560,16 @@
                     data at reduced opacity with a "Low Confidence" label.
                   </p>
                   <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                    <strong>Two-Layer Anomaly Detection:</strong> Once reference bins are finalized,
+                    <strong>Two-Tier Anomaly Detection:</strong> Once reference bins are finalized,
                     every qualifying operating point is checked against the reference for its current
-                    bin. <em>Layer 1</em> is instantaneous — if the current output falls outside the
+                    bin. <em>Tier 1</em> is instantaneous — if the current output falls outside the
                     stored reference min/max range (plus your configured tolerance), an error is
                     counted immediately. This catches sudden failures like a broken belt or failed
-                    diode. <em>Layer 2</em> is thermal — it accumulates a running average over
+                    diode. <em>Tier 2</em> is thermal — it accumulates a running average over
                     approximately 90 seconds of operation in the same bin, then compares that settled
                     average against the reference average. This catches gradual degradation that stays
                     within the historical range on any individual reading but represents a sustained
-                    downward trend. Both layers check in both directions — unexpectedly high output
+                    downward trend. Both tiers check in both directions — unexpectedly high output
                     is also flagged, as it can indicate a regulator fault or measurement error.
                   </p>
                   <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
@@ -1665,7 +1586,7 @@
                   </p>
                   <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
                     <strong>Alarms and Reset:</strong> The session error count resets each power
-                    cycle. If the combined Layer 1 and Layer 2 error count exceeds the configured
+                    cycle. If the combined Tier 1 and Tier 2 error count exceeds the configured
                     threshold in a single session, a warning banner appears on screen and optionally
                     triggers the physical alarm output. The warning banner gives specific detail
                     about which operating conditions triggered the anomaly, what the reference
@@ -1797,77 +1718,6 @@
         <div id="settings-battery" class="sub-tab-content">
           <div class="settings-card">
 
-            <!-- Charge Start / Rebulk Criteria -->
-            <details open>
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Charge Start / Rebulk Criteria
-              </summary>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Rebulk Voltage (V) (<span id="RebulkVoltage_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">If battery voltage drops below this threshold during Float or Idle, and
-                      stays there for Rebulk Debounce Time, the system returns to Bulk. 13V typical. </span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'RebulkVoltage')">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="RebulkVoltage" type="number" step="0.01" min="1" max="99" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Rebulk Current Threshold (A) (<span id="RebulkCurrent_A_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">If net battery current is more negative than this value (i.e. the battery
-                      is discharging at this rate or faster), the system returns to Bulk. Provides more reliable rebulk
-                      detection than voltage alone under load. Typical ~0.02–0.05C discharge 2 to 5 amps per 100Ah of
-                      battery bank.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'RebulkCurrent_A')">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="RebulkCurrent_A" type="number" step="0.1" min="0" max="999" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Rebulk Debounce Time (sec) (<span id="rebulkDebounceTime_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">How long the rebulk condition (voltage sag or discharge current) must
-                      persist continuously before a return to Bulk is triggered. Prevents nuisance rebulk from transient
-                      loads. 10-60s typical.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form"
-                    onsubmit="return validateAndSubmitBatteryNumber(this, 'rebulkDebounceTime')">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="rebulkDebounceTime" type="number" step="1" min="0" max="9999999" />
-                    <input type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-            </details>
-
             <!-- Bulk Phase -->
             <details open style="margin-top: 20px;">
               <summary
@@ -1895,11 +1745,12 @@
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Bulk Voltage Debounce Time (sec) (<span id="bulkVoltageHoldMs_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">How long battery voltage must remain continuously at or above Bulk voltage
-                      before Absorption begins. Prevents transient voltage spikes from triggering an early Absorption
-                      entry. 0.25s typical. Note that there isn't any controls difference between Bulk and Absorb other
-                      than the limiting voltage, if those are set differently, so this is more a question of display
-                      nomenclature.</span>
+                    <span class="tooltip-box">How long battery voltage must remain continuously within 50&nbsp;mV below Bulk voltage (or higher)
+                      before Absorption begins. The 50&nbsp;mV arming band is hard-coded — it lets the timer start as the
+                      battery approaches Bulk, rather than waiting for the exact crossing. Prevents transient voltage
+                      spikes from triggering an early Absorption entry. 0.25s typical. Note that there isn't any
+                      controls difference between Bulk and Absorb other than the limiting voltage, if those are set
+                      differently, so this is more a question of display nomenclature.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -2120,6 +1971,237 @@
                     <span class="toggle-label">On</span>
                     <input id="MaintainMode" name="MaintainMode" type="number" value="" style="display:none;" />
                   </form>
+                </div>
+              </div>
+
+            </details>
+
+
+            <!-- Charge Start / Rebulk Criteria -->
+            <details open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Charge Start / Rebulk Criteria
+              </summary>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Rebulk Voltage (V) (<span id="RebulkVoltage_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">If battery voltage drops below this threshold during Float or Idle, and
+                      stays there for Rebulk Debounce Time, the system returns to Bulk. 13V typical. </span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'RebulkVoltage')">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="RebulkVoltage" type="number" step="0.01" min="1" max="99" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Rebulk Current Threshold (A) (<span id="RebulkCurrent_A_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">If net battery current is more negative than this value (i.e. the battery
+                      is discharging at this rate or faster), the system returns to Bulk. Provides more reliable rebulk
+                      detection than voltage alone under load. Typical ~0.02–0.05C discharge 2 to 5 amps per 100Ah of
+                      battery bank.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'RebulkCurrent_A')">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="RebulkCurrent_A" type="number" step="0.1" min="0" max="999" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Rebulk Debounce Time (sec) (<span id="rebulkDebounceTime_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">How long the rebulk condition (voltage sag or discharge current) must
+                      persist continuously before a return to Bulk is triggered. Prevents nuisance rebulk from transient
+                      loads. 10-60s typical.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'rebulkDebounceTime')">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="rebulkDebounceTime" type="number" step="1" min="0" max="9999999" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+            </details>
+
+            <!-- Safety -->
+            <details open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Safety
+              </summary>
+
+              <p style="font-size: 12px; color: var(--text-muted); margin: 8px 0 12px 0; line-height: 1.5;">
+                Protections that ramp the field down or cut it entirely when a battery-safety limit is exceeded.
+                These thresholds are the user-facing layer above the Group 1/2/3 throttling protections (which
+                are tuned alongside the CV PI gains on the Tuning tab) and the INA228 hardware ALERT pin (a
+                hardware backup that needs no configuration).
+              </p>
+
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Alternator Hard Shutdown Voltage (V) (<span id="AlternatorHardShutdownV_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current; alongside it sits the INA228 hardware ALERT pin (a separate hardware backup at the same default threshold of BulkVoltage + 0.3 V, but using the chip's slow-averaged value — see console log on boot for the exact programmed threshold). Should be set just below your battery BMS shutdown voltage so the alternator stops before the BMS opens the contactor. <strong>First-boot default auto-scales to BulkVoltage + 0.3 V</strong> (so 14.8 V on a 12V system, 29.1 V on a 24V system, 57.9 V on a 48V system). Once you save your own value it stays absolute — re-set it manually if you later change BulkVoltage to a different system class.</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="AlternatorHardShutdownV" type="number" step="0.01" min="1" max="99" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Voltage Disagree Threshold (V) (<span id="VoltageDisagreeThreshold_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
+                      difference between BatteryV and IBV that indicates sensor disagreement. Helps detect wiring or
+                      sensor issues. Typical: 0.15V.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="VoltageDisagreeThreshold" type="number" step="0.01" min="0" max="999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Voltage Disagree Timeout (s) (<span id="VoltageDisagreeTimeout_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                      voltage disagreement must persist before triggering warning. Filters transient differences.
+                      Default: 10s.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="VoltageDisagreeTimeout" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Field Collapse Delay (s) (<span id="FIELD_COLLAPSE_DELAY_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                      class="tooltip-box">Lockout/cooldown duration after a fault that triggered the slow ramp-down
+                      path. Once a qualifying fault fires, charging will not restart until this time elapses, even if
+                      the fault clears. <strong>Triggered by:</strong> alternator hard-shutdown (AlternatorHardShutdownV
+                      exceeded), voltage sensor disagreement (warning or critical), both voltage sensors implausible,
+                      temperature warning/sustained, temperature data stale, alternator current data stale.
+                      <strong>NOT triggered by</strong> immediate-cut faults (INA228 hardware overvoltage, hard
+                      overcurrent, temperature critical, RPM below minimum) — those just cut the field and re-enable
+                      as soon as the condition clears, no cooldown. Default: 30s.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="FIELD_COLLAPSE_DELAY" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Settle Time Before Cut (ms) (<span id="SettleTimeBeforeCut_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                      duty must be at 0% before GPIO4 field enable goes LOW. Prevents relay chatter during brief dips.
+                      Typical: 500ms.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="SettleTimeBeforeCut" type="number" step="1" min="0" max="999999" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <!-- Load Dump Protection (dBcur/dt 3-tier cascade) -->
+              <div style="border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 16px 0; background: rgba(0,0,0,0.02);">
+                <div style="font-weight: bold; font-size: 14px; margin-bottom: 6px;">Load Dump Protection</div>
+                <p style="font-size: 12px; color: var(--text-muted); margin: 0 0 12px 0; line-height: 1.5;">
+                  Detects sudden battery-current rate-of-change events (dBcur/dt) caused by loads dropping while the alternator is still outputting current. Signal is the <strong>raw INA228 Bcur derivative — no EMA, no smoothing, no user-tunable filter</strong>. That is intentional: an EMA would smear the very transient you're trying to catch, so noise rejection is built into the cascade instead — Tier 1 catches single-sample FET disconnects, Tier 2 (the default workhorse) catches typical load drops where two same-sign samples in a row cannot be measurement noise (INA228 noise alternates sign), and Tier 3 catches slow relay-contact disconnects where the current ramp spans several samples. On detection: cv_I snaps to 0, current setpoint collapses to 0, recovery via the AW bleed.
+                </p>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Load Dump Tier 1 — Single-sample Threshold (A/s) (<span id="LoadDumpDtThresh1_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Load dump protection detects sudden spikes in the battery current rate-of-change (dBcur/dt — raw INA228 Bcur derivative, no EMA, no user-tunable filter — by design, so transients aren't smeared), caused by loads dropping off while the alternator is still outputting full current. Three-tier cascade: Tier 1 fires on a SINGLE sample above this threshold (fastest — catches hard-switched FET disconnects). Tier 2 fires when TWO consecutive samples exceed the Tier 2 threshold. Tier 3 fires when THREE consecutive samples exceed the Tier 3 threshold. On detection: the CV integrator (cv_I) is immediately snapped to 0 and the current setpoint collapses to 0. Recovery is driven by the AW bleed — same path as fastOV. Default 4000 A/s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="LoadDumpDtThresh1" type="number" step="100" min="1000" max="20000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Load Dump Tier 2 — Two-consecutive Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 2: fires when TWO consecutive INA228 samples both exceed this threshold. INA228 noise is alternating-sign — two consecutive same-direction spikes cannot be measurement noise. Noise ceiling from field measurements: ~354 A/s consecutive. Default 1500 A/s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="LoadDumpDtThresh" type="number" step="100" min="500" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Load Dump Tier 3 — Three-consecutive Threshold (A/s) (<span id="LoadDumpDtThresh3_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 3: fires when THREE consecutive INA228 samples all exceed this threshold. Lowest threshold — targets slow relay-contact disconnects where the current ramp spans several INA228 samples (~15 ms). Default 1000 A/s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="LoadDumpDtThresh3" type="number" step="100" min="300" max="5000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
                 </div>
               </div>
 
@@ -2764,47 +2846,6 @@
                 </div>
               </div>
 
-              <hr />
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Load Dump Detection Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Rate of battery current increase (A/s) that triggers load dump feedforward. Only active in CV mode with INA228 in fast mode. Default 500 A/s.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LoadDumpDtThresh" type="number" step="1" min="1" max="9999" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Load Dump Current Cap Drop (A) (<span id="LoadDumpCurrentDrop_echo">?</span>):</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">On load dump detection, the output current cap is set to (CV setpoint − this value). Reduces alternator output immediately to prevent overvoltage. Default 30 A.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="LoadDumpCurrentDrop" type="number" step="1" min="0" max="500" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <div class="form-row">
-                <div class="form-label">Battery Current Rate of Change (A/s):</div>
-                <div class="form-input"><span id="dBcur_dt_ID">—</span></div>
-              </div>
-              <div class="form-row">
-                <div class="form-label">Load Dump Feedforward Active:</div>
-                <div class="form-input"><span id="loadDumpActive_ID">—</span></div>
-              </div>
             </details>
 
             <!-- Alarm Controls Section -->
@@ -3549,8 +3590,8 @@
 
         <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:0 0 16px 0;font-size:13px;line-height:1.55;">
           <strong>Plant Delay</strong> — the measured electrical lag between a field duty command and the resulting current response.
-          The PID works best when the Input Filter Time Constant matches this delay, so the control loop reacts to current that has already fully responded to the previous command.
-          Run the test at a steady speed somewhere within your normal operating range, then update the Input Filter Time Constant at the bottom of this page.
+          The control loops work best when their input filter time constants match this delay, so each loop reacts to a current (or voltage) signal that has already fully responded to the previous command.
+          Run the test at a steady speed somewhere within your normal operating range. When the test finishes, the modal that pops up shows a recommended value and a "Set All Filters" button that writes it to all three filter settings at the bottom of this page at once. You can also set the three filters individually.
         </div>
 
         <p class="card-group-title" style="margin:0 0 10px 0;">Test Parameters</p>
@@ -3627,13 +3668,13 @@
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Apply Results</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measured the field coil's electrical lag — how long a PWM change takes to produce a measurable change in alternator current. Set the filters below to match. The "Set All" button applies the recommended value to all three simultaneously.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measured the field coil's electrical lag — how long a PWM change takes to produce a measurable change in alternator current. Each filter below can be set independently to that delay (or whatever value works best for its specific role). The "Set All Filters" button inside the Plant Delay Test modal writes the recommended value to all three at once after a successful test.</p>
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal used by the excess current (overcurrent trip) detector. A faster value lets the detector react sooner to real overcurrent events. Echoed read-only in Current tab → OV Protection Group 3. Default: 140 ms.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal used by the excess current (overcurrent trip) detector in Group 3. A faster value lets the detector react sooner to real overcurrent events; a slower value reduces false trips from brief spikes. <strong>Only active when Group 3 signal source is set to EMA(TC) — has no effect in MA(N) (default) or Raw modes.</strong> Echoed read-only in Current tab → OV Protection Group 3. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3650,7 +3691,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID controller. Independent from the excess current detector filter. Echoed read-only in Current tab → Output Current Controller. Default: 140 ms.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID controller. Independent from the excess current detector filter (Group 3). <strong>Only active when Output PID signal source is set to EMA(TC) (the default) — has no effect in MA(N) or Raw modes.</strong> Echoed read-only in Current tab → Output Current Controller. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3667,7 +3708,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Voltage control loop filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant applied to the voltage sensor signal used by the D-term slope buffer (cvDSlope) and the charging stage machine (Bulk → Absorption transitions). The PI error terms and the fastOV protection voltage comparisons use raw INA228 voltage directly — this setting does not affect them. Note: fastOV uses a separate EMA on the voltage rate-of-change (dvdt) signal — that filter is controlled by DvdtAlpha (adjustable in Voltage → Voltage Loop Parameters). Increasing VoltageFilterTC smooths the D-slope signal and makes stage transitions less sensitive to voltage transients. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant applied to the voltage sensor signal (IBV_filtered) used by the slope bleed signal (cvDSlope) and the charging stage machine (Bulk → Absorption transitions). The PI error terms and the fastOV voltage comparisons use raw INA228 voltage directly — this setting does not affect them. FastOV uses a separate EMA on the voltage rate-of-change (dvdt) signal — that is controlled by DvdtAlpha in Voltage → Voltage Loop Parameters. Increasing VoltageFilterTC smooths the slope bleed signal and makes stage transitions less sensitive to voltage transients. Echoed read-only in Voltage tab → Voltage Loop Parameters. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3678,6 +3719,7 @@
             </form>
           </div>
         </div>
+
 
       </div>
 
@@ -4135,6 +4177,8 @@
                   </div>
                 </div>
 
+                <!-- Load Dump tiered thresholds moved to Battery → Safety → Load Dump Protection -->
+
               </details> <!-- END Output Current Controller Parameters -->
 
               <!-- Rate Limiting (collapsed) -->
@@ -4312,23 +4356,9 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">CV D Term
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">cv_D — derivative contribution to Icv: VoltageKd × dV/dt.
-                            Positive means voltage is rising and the D term is pulling Icv down.
-                            Icv ≈ Kp×error + cv_I − cv_D. Zero when VoltageKd=0 or voltage is not changing.</span>
-                        </span>
-                      </span>
-                      <span class="metric-value telemetry-value"><span id="cv_D_display">?</span> A</span>
-                    </div>
-
-                    <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Voltage Ctrl Active
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">voltageControlActive — whether the CV loop is running this
-                            tick. True in absorption and float. False in bulk, idle (UseFloat=0 post-absorption
-                            rest), and when MaintainMode=1 (MaintainMode targets 0 net battery amps directly
-                            without a voltage reference).</span>
+                          <span class="tooltip-box">voltageControlActive — whether the CV loop is running this tick. True in bulk, absorption, float, and TargetVoltageMode. False only in idle (UseFloat=0 post-absorption rest) and when MaintainMode=1 (MaintainMode targets 0 net battery amps directly without a voltage reference).</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="voltageCtrlActive_display">?</span></span>
@@ -4400,7 +4430,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>CV Tuning Mode (<span id="CVTuningMode_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Enables the square-wave voltage dithering test. The regulator briefly lowers the target by the wave amplitude for half a period, then returns to the real target and scores settling time and overshoot. At least 2 scored high-phase cycles are required before a log entry is committed. Disable to commit the current run.</span>
+                      <span class="tooltip-box">Enables the square-wave voltage dithering test. The regulator briefly raises the target by the wave amplitude for half a period (HIGH phase), then drops back to the real target (LOW phase), repeating to score step-up settling time and overshoot. At least 1 scored HIGH-phase cycle is required before a log entry can be committed. Disable to commit the current run.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4444,7 +4474,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Wave Period (sec) (<span id="cvWavePeriodSec_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Total period of one low+high cycle in seconds. Each half-period is this value ÷ 2. Use longer periods (60–120s) at higher time constants; shorter (20–30s) for faster loops. Must be long enough for the voltage to fully settle in the high phase.</span>
+                      <span class="tooltip-box">Total period of one low+high cycle in seconds. Each half-period is this value ÷ 2. Use longer periods (60–120s) at higher time constants; shorter (30–45s) for faster loops. Minimum is 30s. Must be long enough for the voltage to fully settle in the high phase.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4463,7 +4493,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Overshoot Penalty (K) (<span id="cvKOvershoot_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Multiplier applied to overvoltage (positive voltage error) in the ISE scoring formula. When filtered voltage is above target, squared error is weighted by this value; when below target, weight is fixed at 1.0. Higher values penalize overshoot more harshly relative to undershoot. Also stored with each tuning record for reference. Default: 10.</span>
+                      <span class="tooltip-box">Multiplier applied to overshoot (battery voltage above target) in the HIGH-phase ISE scoring formula used by both the live spans at the top of the CV Tuning Score Log and each committed log entry. Approach below target is weighted ×1. Higher values penalize overshoot more harshly relative to undershoot — useful for batteries that are very sensitive to overvoltage. Each committed record stores the K it was scored with, so comparing entries across different K values requires reading that column. Default: 10.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4482,7 +4512,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Settling Consecutive Reads (<span id="cvConsecutiveReads_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">How many consecutive control ticks the filtered voltage must stay within ±0.10V of the target before settling is declared. Higher = stricter settling criterion. 3–5 is a reasonable starting point.</span>
+                      <span class="tooltip-box">How many readings in a row the battery voltage must stay within ±0.10V of the test target before the system calls it "settled" and stops the settling-time timer. Each reading happens about every 100ms (the voltage loop rate), so 10 readings ≈ 1 second of being on-target. Higher = stricter, more honest settling-time numbers, but tests take longer. Lower = looser, could be fooled by a brief lucky moment. Default 10 (~1 second); 8–12 is a reasonable starting range.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4541,7 +4571,6 @@
                         <th style="padding:3px 4px;" title="Step-down: worst peak below low target (V). Scored with 1s grace then 10s ramp, ×0.15 weight.">↓US</th>
                         <th style="padding:3px 4px;">VKp</th>
                         <th style="padding:3px 4px;">VKi</th>
-                        <th style="padding:3px 4px;">VKd</th>
                         <th style="padding:3px 4px;">SRR</th>
                         <th style="padding:3px 4px;">SFR</th>
                         <th style="padding:3px 4px;">AwBl</th>
@@ -4553,8 +4582,9 @@
                         <th style="padding:3px 4px;">IExK</th>
                         <th style="padding:3px 4px;">IExN</th>
                         <th style="padding:3px 4px;">IKB</th>
-                        <th style="padding:3px 4px;">LDDt</th>
-                        <th style="padding:3px 4px;">LDCd</th>
+                        <th style="padding:3px 4px;">LDT2</th>
+                        <th style="padding:3px 4px;">LDT1</th>
+                        <th style="padding:3px 4px;">LDT3</th>
                         <th style="padding:3px 4px;">TC</th>
                         <th style="padding:3px 4px;">WA</th>
                         <th style="padding:3px 4px;">WP</th>
@@ -4572,21 +4602,21 @@
                       </tr>
                     </thead>
                     <tbody id="cvTuningLogBody">
-                      <tr><td colspan="40" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
+                      <tr><td colspan="41" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
                     </tbody>
                   </table>
                 </div>
 
                 <p style="font-size:0.74em; color:var(--text-muted); margin-top:6px;">
                   Score = (HIGH ISE + LOW re-overshoot ISE + LOW undershoot ISE) ÷ total active time, ×1000.
-                  HIGH phase: squared error; overshoot above 25mV dead-band weighted ×4, approach weighted ×1.
+                  HIGH phase: squared error; overshoot above 25mV dead-band weighted by Overshoot Penalty (K), approach weighted ×1.
                   LOW phase overshoot: squared ISE, only after voltage crosses below target (no descent-from-HIGH penalty).
                   LOW phase undershoot (↓US): squared ISE ×0.15, 1s grace from phase start then ramps to full weight over 10s.
                   Both lower is better.
                   <span style="color:#22c55e;">&#9632;</span> &lt;2 &nbsp;
                   <span style="color:#eab308;">&#9632;</span> &lt;10 &nbsp;
                   <span style="color:#ef4444;">&#9632;</span> &ge;10.
-                  Highlighted rows match current VKp/VKi/VKd + wave settings.
+                  Highlighted rows match current VKp/VKi + wave settings.
                   OVf/IEf/LDf/HOCf = protection fire counts during scored phases.
                 </p>
 
@@ -4610,9 +4640,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage
-                        Voltage loop gain. Active in absorption and float only — caps current setpoint based on voltage
-                        error.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage loop proportional gain. Active in all CV stages (bulk, absorption, float, and TargetVoltageMode). Sets the fast-response term of the CV PI: Icv = Kp × voltage_error + cv_I (where cv_I is the integrator). Icv becomes the current setpoint sent to the output current loop, then clamped to the RPM/thermal ceiling (uTargetAmps).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4627,10 +4655,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral
-                        Integral gain for the voltage loop. Accumulates over time to eliminate steady-state voltage error.
-                        Active in absorption and float only. Integrator is reset to zero on CV entry. Start small —
-                        try 0.1. Set to 0 to disable.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in all CV stages (bulk, absorption, float, TargetVoltageMode). <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× multiplier is hard-coded — only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Start small — try 0.1.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4644,39 +4669,9 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Voltage Loop Kd (A per V/s) (<span id="VoltageKd_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Derivative gain for the voltage loop. Subtracts Kd × (voltage rise rate) from the current setpoint, preemptively reducing current as voltage rises toward target. Higher values reduce overshoot on target step-ups. Default: 40.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageKd" type="number" step="1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>D slope window (ms) (<span id="VoltageDWindowMs_echo">?</span>) — D term only:</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far back in time the D term looks when measuring the voltage rise rate. Shorter = reacts faster to transients (try 200 ms). Longer = smoother but slower to see a fast approach. Each step is one voltage loop interval. Default: 200 ms.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageDWindowMs" type="number" step="100" min="100" max="900" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Slope bleed threshold (V/s) (<span id="SlopeBleedThresh_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Integrator bleed activates when voltage is rising faster than this rate. Set to your intended max approach speed — 0.10 V/s means no faster than 1V per 10 seconds. Below this rate the integrator is unaffected. Default: 0.10 V/s.</span>
+                      <span class="tooltip-box">Voltage rise rate above which the integrator (cv_I) begins to drain. The rise rate is computed from the smoothed voltage signal (set by "Voltage sensor smoothing filter" in Tuning → Plant Delay), not from the dvdt EMA used by Group 1 prediction. Below this threshold the integrator is unaffected. Setting too low causes false drains during normal charging; too high and it never fires in time. Default: 0.50 V/s.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4704,11 +4699,12 @@
                     </form>
                   </div>
                 </div>
+                <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Slope bleed proximity gate (V) (<span id="SlopeBleedProxV_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Proximity gate for slope bleed. Bleed scales linearly from zero (when voltage error &ge; this value) to full strength (when at or above setpoint). Prevents bleed from firing during a legitimate fast rise toward a distant target. Default: 0.15.</span>
+                      <span class="tooltip-box">Controls how close to the setpoint the bleed is allowed to operate. When voltage error (target minus actual) exceeds this value, the bleed is fully suppressed. As voltage approaches within this window, bleed strength ramps from zero up to full. Set to at least your expected maximum voltage undershoot during a fast approach — 0.50V means bleed is active starting 0.50V below target. Default: 0.50V.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4724,7 +4720,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo_cv">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied to the D-term slope buffer and the charging stage machine (Bulk → Absorption transitions). PI error terms and fastOV voltage comparisons use raw INA228 voltage — this setting does not affect them. FastOV's dvdt signal uses a separate EMA controlled by DvdtAlpha (adjustable in this tab, see Layer 1 group). Set in Tuning → Plant Delay.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA filter applied to the slope bleed signal (cvDSlope) and the charging stage machine (Bulk → Absorption transitions). PI error terms and fastOV voltage comparisons use raw INA228 voltage — this setting does not affect them. FastOV's dvdt signal uses a separate EMA controlled by DvdtAlpha (see Group 1 settings). Set in Tuning → Plant Delay.</span></span>
                   </div>
                   <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
                     Read-only — set in Tuning → Plant Delay
@@ -4735,9 +4731,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                        often the voltage loop recalculates. Active in absorption and float only. Typical:
-                        500ms.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the voltage loop's <strong>integrator</strong> (the slow-correction term) updates. Active in all CV stages (bulk, absorption, float, TargetVoltageMode). The <strong>proportional response</strong> (the fast-correction term — Voltage Loop Kp × voltage error) runs every output PID tick (~5ms) regardless of this setting, so the loop reacts to voltage changes immediately; only the integral build-up cadence is controlled here. Default: 100 ms. Shorter values make the integrator more responsive but can amplify noise; longer values make it smoother but slower to correct steady-state error.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4753,13 +4747,13 @@
                      ═══════════════════════════════════════════════════ -->
                 <hr />
                 <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:10px 0 4px 0;">OV Protections</p>
-                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Four independent protection groups act in CV mode. Groups 1 &amp; 2 use predicted future voltage to get ahead of transients. Group 3 acts on the present voltage. Group 4 acts on alternator current.</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Three independent protection groups act in CV mode. Group 1 uses predicted future voltage to get ahead of transients. Group 2 acts on present measured voltage. Group 3 acts on alternator current.</p>
 
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Protection proximity gate (V) (<span id="ProtectionProxGateV_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">All OV protections (Groups 1–4) only arm when the active voltage target is within this many volts below BulkVoltage. When tuning at float or a lower test target, small overshoots carry no battery risk and protections would interfere with results. Set to 0 to disable the gate (always armed). Default: 0.30 V.</span>
+                      <span class="tooltip-box">All OV protections (Groups 1–3) and load dump detection only arm when the active voltage target is within this many volts below BulkVoltage. When tuning at float or a lower test target, small overshoots carry no battery risk and protections would interfere with results. Setting to 0 disables the gate entirely — all protections always armed, including load dump. Default: 0.50 V.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4771,19 +4765,90 @@
                   </div>
                 </div>
 
-                <!-- ─── GROUP 1: Prediction-Based (Layers 1 & 2) ─── -->
+                <!-- ─── Shared Response Tuning ─── -->
+                <p style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.07em;opacity:0.6;margin:14px 0 4px 0;">Shared Response Tuning</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 8px 0;line-height:1.5;">Controls what happens to the CV integrator (cv_I) when any protection group fires. When a protection event occurs, cv_I is bled down to reduce current demand — these settings control how aggressively it bleeds and how quickly it recovers afterward. Applies to Groups 1, 2, and 3.</p>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup bleed rate as a fraction of the RPM table ceiling per second. Scales with alternator size. Default 2.0: at 150A table gives 300 A/s. A 100 ms fastOV event at default bleeds ~30A from cv_I.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Recovery Rate (×Table/s) (<span id="AwRecoverRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup ceiling recovery rate as a fraction of the RPM table ceiling per second. Default 0.1. Lower = more inter-event damping; higher = faster current restoration after transients.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after a bumpless seed fires during which AwBleed and the CC-tracker are suppressed. Prevents the seeded cv_I from being immediately destroyed by a brief fastOV at that transition. 0 = disabled. Default 150.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- ─── GROUP 1: Prediction-Based ─── -->
                 <div class="layer-box">
-                  <div class="layer-box-header">Group 1 — Prediction-Based (Layers 1 &amp; 2)</div>
+                  <div class="layer-box-header">Group 1 — Prediction-Based Cap</div>
                   <div class="layer-box-desc" style="margin-bottom:8px;">
-                    <strong>Signal:</strong> INA228 battery voltage (raw) + predicted rise.<br>
-                    <strong>Formula:</strong> Vpred = measured voltage + (TdPred × rate of voltage rise). 
+                    <strong>Signal:</strong> INA228 raw battery voltage + predicted rise.<br>
+                    <strong>Formula:</strong> Vpred = measured voltage + (TdPred × rate of voltage rise).<br>
+                    <strong>Arm condition:</strong> Group 1 only activates when measured voltage is already within 60 mV of the current target (hard-coded dead-band). Below that window the prediction is suppressed even if Vpred would exceed the margin — prevents false fires during the voltage ramp-up phase.
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Group 1 Enable (<span id="OvGroup1Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable Group 1 (prediction-based cap). Note: the "Hard Events" counter is shared between Group 1 and Group 2 — disabling Group 1 alone will not stop hard events if Group 2 is still on.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvGroup1Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvGroup1Enable_checkbox', 'OvGroup1Enable', 'OvGroup1Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvGroup1Enable" name="OvGroup1Enable" type="number" value="" style="display:none;" />
+                      </form>
+                    </div>
                   </div>
 
                   <!-- Shared: TdPred -->
+                  <hr />
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>) — used by both layers:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (in seconds) is projected: Vpred = IBV + TdPred × dvdt⁺. Used by both Layer 1 and Layer 2. </span></span>
+                      <span>TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (in seconds) the predicted voltage (Vpred) is projected: Vpred = IBV + TdPred × dvdt⁺. Used by Group 1 (prediction-based cap). Only the rising component of dvdt enters the prediction — falling voltage is ignored.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4795,11 +4860,12 @@
                   </div>
 
                   <!-- Shared: DvdtAlpha -->
+                  <hr />
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>dvdt EMA Alpha (<span id="DvdtAlpha_echo">?</span>) — smoothing for rate-of-rise signal:</span>
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                        <span class="tooltip-box">EMA alpha applied to the raw voltage rate-of-rise (dvdt) signal before it enters Vpred. Lower alpha = more smoothing, more lag, fewer false fires. Higher alpha = faster response, noisier. Effective TC ≈ (1−alpha)/alpha × poll interval. Default: 0.08 (~190 ms TC at 15 ms cadence). Constraint: do not exceed ~0.15 without retesting false-fire rate at idle — the 16 mV noise margin is thin.</span>
+                        <span class="tooltip-box">EMA alpha applied to the raw voltage rate-of-rise (dvdt) signal before it enters Vpred. Lower alpha = more smoothing, more lag, fewer false fires. Higher alpha = faster response, noisier. Effective TC ≈ (1−alpha)/alpha × INA228 sample interval — the sample interval depends on the INA228 operating mode, not a user setting. Example: alpha=0.08 at 5 ms samples gives TC ≈ 58 ms. <strong>Sample window:</strong> dvdt updates only when the time between INA samples is between 1 ms and 100 ms. INA fast mode (field on, ~4.3 ms cycle) is well inside the window. INA slow mode (field off, ~1054 ms cycle) is rejected — dvdt holds its last value. This is safe because Group 1 only arms while the field is on. Constraint: do not exceed ~0.15 without retesting false-fire rate at idle — the 16 mV noise margin is thin.</span>
                       </span>
                     </div>
                     <div class="form-input">
@@ -4812,90 +4878,15 @@
                   </div>
 
                   <hr />
-                  <p style="font-size:11px;font-weight:600;margin:8px 0 4px 0;opacity:0.7;">Layer 1 — Soft Cap</p>
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Layer 1 Enable (<span id="OvLayer1Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable the soft-cap prediction layer. The "Soft Events" counter only increments when Layer 1 fires — it is the exclusive source of soft events.</span></span>
+                      <span>OvPredMargin — Group 1 Trigger Margin (V) (<span id="OvPredMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the predicted voltage (Vpred) must exceed the charging target before Group 1 engages. Default 0.150 V (150 mV). Set higher than OvMeasMarginV so prediction-based response leads the measured-voltage response. Rarely needs adjustment.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
                         <input type="hidden" name="password" class="password_field">
-                        <span class="toggle-label">Off</span>
-                        <label class="switch">
-                          <input id="OvLayer1Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvLayer1Enable_checkbox', 'OvLayer1Enable', 'OvLayer1Enable')) { this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">On</span>
-                        <input id="OvLayer1Enable" name="OvLayer1Enable" type="number" value="" style="display:none;" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>VSoftMargin — Trigger Margin (V) (<span id="VSoftMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Predicted voltage above ChargingTarget at which Layer 1 engages. Default 0.080 V (80 mV). Also used by Group 2 (Layer 3) as its measured-voltage trigger threshold. Raising this reduces false fires — 0.100–0.120 V is a good starting point for idle testing.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="VSoftMarginV" type="number" step="0.005" min="0.02" max="0.5" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>KSoft — Response Slope (A/V) (<span id="KSoft_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">For every volt of predicted overshoot above VSoftMargin, the current ceiling drops by this many amps below the current operating point. Default 12. Higher = sharper initial current ramp-down.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="KSoft" type="number" step="0.5" min="1" max="100" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <p style="font-size:11px;font-weight:600;margin:8px 0 4px 0;opacity:0.7;">Layer 2 — Hard Cap</p>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Layer 2 Enable (<span id="OvLayer2Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable the hard-cap prediction layer. Note: the "Hard Events" counter is shared between Layer 2 and Layer 3 — disabling Layer 2 alone will not stop hard events if Layer 3 is still on.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <span class="toggle-label">Off</span>
-                        <label class="switch">
-                          <input id="OvLayer2Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvLayer2Enable_checkbox', 'OvLayer2Enable', 'OvLayer2Enable')) { this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">On</span>
-                        <input id="OvLayer2Enable" name="OvLayer2Enable" type="number" value="" style="display:none;" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>VHardMargin — Trigger Margin (V) (<span id="VHardMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Predicted voltage above ChargingTarget at which Layer 2 engages. Default 0.150 V (150 mV). Higher than VSoftMargin by design — separates real transients from noise. Rarely needs adjustment.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="VHardMarginV" type="number" step="0.01" min="0.05" max="1.0" />
+                        <input name="OvPredMarginV" type="number" step="0.01" min="0.05" max="1.0" />
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </form>
                     </div>
@@ -4905,7 +4896,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>KHard — Response Slope (A/V) (<span id="KHard_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Steeper current ceiling slope used by Layer 2. Default 35. Also used by Group 2 (Layer 3) as its response slope. Higher = faster field reduction on severe transients.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Current ceiling slope used by Group 1 and Group 2. Default 35. Higher = faster field reduction on severe transients.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4917,50 +4908,66 @@
                   </div>
                 </div><!-- end Group 1 box -->
 
-                <!-- ─── GROUP 2: Voltage Threshold (Layer 3) ─── -->
+                <!-- ─── GROUP 2: Measured Voltage Threshold ─── -->
                 <div class="layer-box">
-                  <div class="layer-box-header">Group 2 — Voltage Threshold (Layer 3)</div>
+                  <div class="layer-box-header">Group 2 — Measured Voltage Threshold</div>
                   <div class="layer-box-desc" style="margin-bottom:8px;">
-                    <strong>Signal:</strong> INA228 battery voltage, measured directly.<br>
+                    <strong>Signal:</strong> INA228 raw battery voltage, compared directly to target + OvMeasMarginV.<br>
                   </div>
 
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Layer 3 Enable (<span id="OvLayer3Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable the actual-voltage hysteresis clamp. This is the cleanest discriminator between idle noise and real events — keep enabled during normal operation. Only disable to test pure current-based (Group 4) protection. Note: Layer 3 increments the "Hard Events" counter — disabling Layer 2 but leaving Layer 3 on will still show hard event counts.</span></span>
+                      <span>Group 2 Enable (<span id="OvGroup2Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable Group 2 (measured-voltage threshold). This is the cleanest discriminator between idle noise and real events — keep enabled during normal operation. Only disable to test Group 1 or Group 3 in isolation. Note: Group 2 increments the "Hard Events" counter — disabling Group 1 but leaving Group 2 on will still show hard event counts.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
                         <input type="hidden" name="password" class="password_field">
                         <span class="toggle-label">Off</span>
                         <label class="switch">
-                          <input id="OvLayer3Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvLayer3Enable_checkbox', 'OvLayer3Enable', 'OvLayer3Enable')) { this.form.submit(); submitMessage(); }" />
+                          <input id="OvGroup2Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvGroup2Enable_checkbox', 'OvGroup2Enable', 'OvGroup2Enable')) { this.form.submit(); submitMessage(); }" />
                           <span class="slider round"></span>
                         </label>
                         <span class="toggle-label">On</span>
-                        <input id="OvLayer3Enable" name="OvLayer3Enable" type="number" value="" style="display:none;" />
+                        <input id="OvGroup2Enable" name="OvGroup2Enable" type="number" value="" style="display:none;" />
                       </form>
                     </div>
                   </div>
 
-                  <p style="font-size:11px;opacity:0.65;margin:6px 0 2px 0;">Fires when measured voltage &gt; target + <span id="VSoftMarginV_echo2">?</span> V (VSoftMargin — set in Group 1)</p>
-                  <p style="font-size:11px;opacity:0.65;margin:2px 0 4px 0;">Response slope: KHard = <span id="KHard_echo2">?</span> A/V (KHard — set in Group 1)</p>
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Raw INA228 battery voltage above ChargingVoltageTarget at which Group 2 activates. Default 0.100 V (100 mV). Raising this reduces false fires at idle. Independent of OvPredMarginV (Group 1) — these are different mechanisms on different signals. <strong>Note:</strong> this setting also controls the Group 3 (iExcess) voltage arming gate — iExcess only fires when battery voltage is within OvMeasMarginV <em>below</em> target. Tied on purpose: one knob expresses "how close to target before overshoots become serious."</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="0.5" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <p style="font-size:11px;opacity:0.65;margin:6px 0 2px 0;">Response slope: KHard = <span id="KHard_echo2">?</span> A/V (KHard — set in Group 1)</p>
                 </div><!-- end Group 2 box -->
 
-                <!-- ─── GROUP 3: Current-Based (Layer 4 — iExcess) ─── -->
+                <!-- ─── GROUP 3: Current-Based (iExcess supervisor) ─── -->
                 <div class="layer-box">
-                  <div class="layer-box-header">Group 3 — Current-Based (Layer 4 — iExcess)</div>
+                  <div class="layer-box-header">Group 3 — Current-Based (iExcess supervisor)</div>
                   <div class="layer-box-desc" style="margin-bottom:8px;">
                     <strong>Signal:</strong> Alternator output current (ADS1115, Channel 1).<br>
-                    Fires when measured alternator current exceeds the commanded setpoint by K_excess for N consecutive ticks (~5 ms each). Gated out briefly after any Group 1/2 trigger.
+                    Fires when measured alternator current exceeds the commanded setpoint by K_excess for N consecutive ticks (~5 ms each). After any Group 1, Group 2, or load dump trigger, Group 3 is locked out until alternator current actually settles back down to within K_excess of the commanded setpoint — this prevents Group 3 from firing on field-coil wind-down current that's already being handled by the other protections. Duration depends on the alternator's electrical time constant: typically tens of ms on fast-TC alternators, several hundred ms on slow ones.<br>
+                    <strong>Voltage proximity sub-gate:</strong> also requires measured battery voltage to be within <strong>OvMeasMarginV</strong> of the current target (same setting as Group 2's trigger margin — tied on purpose). Prevents iExcess from firing during the ramp-up phase when the alternator is genuinely commanding more current than the CV loop has yet trimmed back. The two move together as one concept — "how close to target before I start treating overshoots seriously": Group 2 fires <em>above</em> target by OvMeasMarginV, iExcess arms when within OvMeasMarginV <em>below</em> target. Symmetric around target, one knob.<br>
+                    <strong>Hard-coded internals:</strong> once Group 3 fires, it stays latched until alternator current falls back to <em>setpoint + K_excess − 2.0 A</em> (2 A hysteresis prevents on/off chatter at the trip boundary). The current cap follows <em>cap = max(0, base_cap − 1.0 × excess)</em>, so every 1 A above the trip threshold pulls the cap down by 1 A.
                   </div>
 
                   <!-- Signal source selector -->
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>Signal Filter (<span id="IExcessSigSrc_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator current is filtered before comparison. MA(N): moving average of N samples — default, smooth, few false trips. EMA(TC): exponential moving average with time constant TC. Raw: instantaneous ADC reading — fastest response, most noise-sensitive. N and TC are set below and are independent from the Output Current PID filter.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator current is filtered before comparison. MA(N): moving average of N samples — default, smooth, few false trips. EMA(TC): exponential moving average using InputFilterTC as its time constant — the same TC set in Tuning → Plant Delay, shown read-only in the row directly below. Raw: instantaneous ADC reading — fastest response, most noise-sensitive. MA window (N) is adjustable below; EMA time constant is shared with Plant Delay and not independently adjustable here.</span></span>
                     </div>
                     <div class="form-input">
                       <div class="cap-mode-toggle">
@@ -4975,7 +4982,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>MA Window — N samples (<span id="IExcessMA_N_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal. Default 2. Each sample is ~7 ms apart (CH1 cadence), so N=2 ≈ 14 ms window, N=10 ≈ 70 ms. Larger N = smoother signal, more lag. Independent from the Output Current PID MA window.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal. Default 2. Each sample is ~5 ms apart (CH1 is read 3 times per ADS1115 cycle of ~14 ms), so N=2 ≈ 10 ms window, N=10 ≈ 50 ms. Larger N = smoother signal, more lag. Independent from the Output Current PID MA window.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -5031,7 +5038,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how cv_I (the CV integrator) is driven down when iExcess fires. 0 = snap to zero immediately (maximum response, default). Any value above 0 = proportional bleed at that rate in A/s per amp of excess — gentler, less undershoot risk. Try 2–5 if snap causes unacceptable voltage dip.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how cv_I (the CV integrator — the slow-correction term of the voltage loop) is driven down while an iExcess event is active. Both modes run continuously every tick, not once at the start of the event:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response, default). The integrator stays at 0 for the full duration of the event.<br>• <strong>&gt; 0</strong> = each tick, subtract (K_bleed × amps-of-excess × tick-duration) from the integrator. Walks the integrator down gradually instead of pinning it.<br><br>The proportional mode is gentler and lowers undershoot risk after the event clears. Try 2–5 if snap causes an unacceptable voltage dip below target.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -5057,70 +5064,6 @@
                     </div>
                   </div>
                 </div><!-- end Group 3 box -->
-
-                <!-- ─── Shared Response Tuning ─── -->
-                <p style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.07em;opacity:0.6;margin:14px 0 4px 0;">Shared Response Tuning</p>
-                <p style="font-size:11px;opacity:0.65;margin:0 0 8px 0;line-height:1.5;">Controls what happens to the CV integrator (cv_I) when any protection group fires. When a protection event occurs, cv_I is bled down to reduce current demand — these settings control how aggressively it bleeds and how quickly it recovers afterward. Applies to Groups 1, 2, and 3.</p>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup bleed rate as a fraction of the RPM table ceiling per second. Scales with alternator size. Default 2.0: at 150A table gives 300 A/s. A 100 ms fastOV event at default bleeds ~30A from cv_I.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Recovery Rate (×Table/s) (<span id="AwRecoverRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup ceiling recovery rate as a fraction of the RPM table ceiling per second. Default 0.1. Lower = more inter-event damping; higher = faster current restoration after transients.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after a bumpless seed fires during which AwBleed and the CC-tracker are suppressed. Prevents the seeded cv_I from being immediately destroyed by a brief fastOV at that transition. 0 = disabled. Default 150.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Voltage Spike Margin (V) (<span id="VoltageSpikeMargin_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts above BulkVoltage that triggers fast-response mode (bypasses slew limiting). Allows aggressive duty reduction during voltage spikes or load dump events. Typical: 0.2 V.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="VoltageSpikeMargin" type="number" step="0.01" min="0" max="999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
 
               </details> <!-- END VTM Controller Parameters -->
 
@@ -6848,10 +6791,10 @@
                 <div style="padding: 6px 8px;"></div>
                 <div
                   style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02);">
-                  5s Worst</div>
+                  5s Worst (ms)</div>
                 <div
                   style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
-                  Session Worst</div>
+                  Session Worst (ms)</div>
               </div>
 
               <!-- Loop Time -->
@@ -7252,6 +7195,17 @@
                 </div>
               </div>
 
+              <!-- FS Write Deferred Count -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">FS Write Deferred
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Times FlushFileWriteQueue was skipped because NVS committed the same tick — the heavyIO co-fire guard. Cumulative count since boot.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span id="fsFlushDeferred_ID">0</span></div>
+                <div style="padding: 6px 8px; font-size: 13px; text-align: right; border-left: 1px solid var(--border); color: #888;">—</div>
+              </div>
+
               <!-- SOC / Update Block sub-header -->
               <div
                 style="grid-column: 1 / -1; background: rgba(0,0,0,0.03); padding: 4px 8px; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); border-top: 1px solid var(--border);">
@@ -7430,7 +7384,7 @@
           <div class="card-group">
             <p class="card-group-title">CH1 Sample Interval (ms)</p>
             <div class="metric-row">
-              <span class="metric-label">Last Interval
+              <span class="metric-label">Last Interval (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Most recent time between CH1 reads, ms</span>
                 </span>
@@ -7438,7 +7392,7 @@
               <span class="metric-value"><span id="ch1_last_ms_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Avg 10s
+              <span class="metric-label">Avg 10s (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean CH1 interval over last 10 seconds</span>
                 </span>
@@ -7446,7 +7400,7 @@
               <span class="metric-value"><span id="ch1_avg_10s_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Worst 10s
+              <span class="metric-label">Worst 10s (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Maximum CH1 interval seen in last 10 seconds, ms</span>
                 </span>
@@ -7454,7 +7408,7 @@
               <span class="metric-value"><span id="ch1_worst_10s_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Over 2× 10s
+              <span class="metric-label">Over 2× 10s (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of CH1 intervals exceeding 2× average in last 10 seconds</span>
                 </span>
@@ -7462,7 +7416,7 @@
               <span class="metric-value"><span id="ch1_over2x_10s_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Avg 2m
+              <span class="metric-label">Avg 2m (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean CH1 interval over last 2 minutes (closed 10s buckets only)</span>
                 </span>
@@ -7470,7 +7424,7 @@
               <span class="metric-value"><span id="ch1_avg_2m_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Worst 2m
+              <span class="metric-label">Worst 2m (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Maximum CH1 interval seen in last 2 minutes, ms</span>
                 </span>
@@ -7478,7 +7432,7 @@
               <span class="metric-value"><span id="ch1_worst_2m_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Over 2× 2m
+              <span class="metric-label">Over 2× 2m (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of CH1 intervals exceeding 2× average in last 2 minutes</span>
                 </span>
@@ -7486,7 +7440,7 @@
               <span class="metric-value"><span id="ch1_over2x_2m_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Avg All-Time
+              <span class="metric-label">Avg All-Time (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean CH1 interval since power-on</span>
                 </span>
@@ -7494,7 +7448,7 @@
               <span class="metric-value"><span id="ch1_avg_at_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Worst All-Time
+              <span class="metric-label">Worst All-Time (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Maximum CH1 interval seen since power-on, ms</span>
                 </span>
@@ -7502,7 +7456,7 @@
               <span class="metric-value"><span id="ch1_worst_at_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Over 2× All-Time
+              <span class="metric-label">Over 2× All-Time (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of CH1 intervals exceeding 2× running mean since power-on</span>
                 </span>
@@ -7517,11 +7471,11 @@
               <span>INA228 Read Interval (ms)</span>
               <span class="tooltip" onclick="this.classList.toggle('active')">
                 ℹ️
-                <span class="tooltip-box">Inter-sample timing for INA228 voltage/current reads. Only updated when the field is active (fast mode, ~5ms target). Values freeze when field is off.</span>
+                <span class="tooltip-box">Inter-sample timing for INA228 voltage/current reads. Stats are gated to "field on" only. With the field on the INA228 runs in fast mode (~5 ms cycle target) and these values update. With the field off the INA228 drops to low-speed mode (~1054 ms cycle) and these values are intentionally frozen at their last reading — zero / dashes here means the field has not been on yet this session.</span>
               </span>
             </p>
             <div class="metric-row">
-              <span class="metric-label">Last Interval
+              <span class="metric-label">Last Interval (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Most recent time between INA228 reads, ms</span>
                 </span>
@@ -7529,7 +7483,7 @@
               <span class="metric-value"><span id="ina_last_ms_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Avg 10s
+              <span class="metric-label">Avg 10s (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean INA228 read interval over last 10 seconds of field-active time</span>
                 </span>
@@ -7537,7 +7491,7 @@
               <span class="metric-value"><span id="ina_avg_10s_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Worst 10s
+              <span class="metric-label">Worst 10s (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Maximum INA228 read interval in last 10 seconds of field-active time, ms</span>
                 </span>
@@ -7545,7 +7499,7 @@
               <span class="metric-value"><span id="ina_worst_10s_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Over 2× 10s
+              <span class="metric-label">Over 2× 10s (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of INA228 intervals exceeding 2× average in last 10 seconds</span>
                 </span>
@@ -7553,7 +7507,7 @@
               <span class="metric-value"><span id="ina_over2x_10s_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Avg 2m
+              <span class="metric-label">Avg 2m (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean INA228 read interval over last 2 minutes of field-active time</span>
                 </span>
@@ -7561,7 +7515,7 @@
               <span class="metric-value"><span id="ina_avg_2m_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Worst 2m
+              <span class="metric-label">Worst 2m (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Maximum INA228 read interval in last 2 minutes of field-active time, ms</span>
                 </span>
@@ -7569,7 +7523,7 @@
               <span class="metric-value"><span id="ina_worst_2m_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Over 2× 2m
+              <span class="metric-label">Over 2× 2m (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of INA228 intervals exceeding 2× average in last 2 minutes</span>
                 </span>
@@ -7577,7 +7531,7 @@
               <span class="metric-value"><span id="ina_over2x_2m_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Avg All-Time
+              <span class="metric-label">Avg All-Time (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Mean INA228 read interval since last field-on event</span>
                 </span>
@@ -7585,7 +7539,7 @@
               <span class="metric-value"><span id="ina_avg_at_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Worst All-Time
+              <span class="metric-label">Worst All-Time (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Maximum INA228 read interval since last field-on event, ms</span>
                 </span>
@@ -7593,12 +7547,39 @@
               <span class="metric-value"><span id="ina_worst_at_ID">—</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Over 2× All-Time
+              <span class="metric-label">Over 2× All-Time (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of INA228 intervals exceeding 2× running mean since last field-on event</span>
                 </span>
               </span>
               <span class="metric-value"><span id="ina_over2x_at_ID">—</span></span>
+            </div>
+          </div>
+
+          <!-- VOLTAGE LOOP ACTUAL INTERVAL -->
+          <div class="card-group">
+            <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
+              <span>Voltage Loop Actual Interval (ms)</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">Measured time between consecutive voltage loop PI fires in CV mode. Target is VoltageLoopInterval (100ms). Values significantly above target indicate a stalled loop tick during CV operation. Zero until CV mode has fired at least twice.</span>
+              </span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Worst 5s Window (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Worst actual voltage loop fire-to-fire interval in the rolling 5-second window, ms. Reset every 5s.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="voltLoopWorstInterval_5s_ID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Worst Session (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Worst actual voltage loop fire-to-fire interval since boot, ms.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="voltLoopWorstInterval_ses_ID">—</span></span>
             </div>
           </div>
 
@@ -7660,7 +7641,7 @@
               <span class="metric-value"><span id="WifiStrengthID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Client Disconnects
+              <span class="metric-label">Client Disconnects (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
                     network
@@ -7670,7 +7651,7 @@
               <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Heartbeat
+              <span class="metric-label">Heartbeat (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Increments with each packet sent</span>
                 </span>
@@ -7721,10 +7702,10 @@
                     </span>
                   </span>
                 </div>
-                <div style="padding: 6px 8px; text-align: right; overflow: hidden;"><span class="metric-value-compact"
-                    id="LastResetReasonID">Unknown</span></div>
-                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border); overflow: hidden;"><span
-                    class="metric-value-compact" id="ancientResetReasonID">Unknown</span></div>
+                <div style="padding: 6px 8px; text-align: right; white-space: normal; word-break: break-word;"><span class="metric-value-compact"
+                    id="LastResetReasonID" style="white-space: normal;">Unknown</span></div>
+                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border); white-space: normal; word-break: break-word;"><span
+                    class="metric-value-compact" id="ancientResetReasonID" style="white-space: normal;">Unknown</span></div>
               </div>
             </div>
           </div>
@@ -7755,7 +7736,7 @@
               <span class="metric-value" style="font-size: 13px;"><span id="currentPartitionTypeID">?</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Buffered Records
+              <span class="metric-label">Buffered Records (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Data buffered when WiFi disconnected. Will upload to Cloud at next
                     opportunity. Resetting might take a few tries, brute force works.</span>
@@ -7772,7 +7753,7 @@
               </span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Power Cycles
+              <span class="metric-label">Power Cycles (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Lifetime, or since re-flashing</span>
                 </span>
@@ -7791,7 +7772,7 @@
             </div>
 
             <div class="metric-row">
-              <span class="metric-label">FS Write Queue Drops
+              <span class="metric-label">FS Write Queue Drops (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Count of LittleFS writes dropped because the async write queue was full.
                     Non-zero means queue depth needs increasing.</span>
@@ -7832,17 +7813,9 @@
           <span class="metric-value telemetry-value"><span id="fastOvClampCountID">?</span></span>
         </div>
         <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">FastOV Soft Events
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: Layer 1 (soft-cap prediction) only. Layer 1 is the exclusive source — this counter stays at zero if Layer 1 is disabled. Normal early-warning action. Frequent events at stable RPM suggest V_SOFT is too tight or dv/dt is noisy.</span>
-            </span>
-          </span>
-          <span class="metric-value telemetry-value"><span id="fastOvSoftCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">FastOV Hard Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: Layer 2 (hard-cap prediction) OR Layer 3 (hysteresis clamp) — both contribute to this single counter. Disabling Layer 2 alone will not stop this counter if Layer 3 is still active. Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
+              <span class="tooltip-box">Rising-edge count: Group 1 (prediction-based cap) OR Group 2 (measured-voltage threshold) — both contribute to this single counter. Disabling Group 1 alone will not stop this counter if Group 2 is still active. Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="fastOvHardCountID">?</span></span>
@@ -9069,8 +9042,9 @@
     <span id="ResetRPMMax_echo" style="display:none;">0</span>
     <span id="FuelUsedID" style="display:none;">0</span>
     <span id="MaximumAllowedBatteryAmps_echo" style="display:none;">0</span>
+    <span id="LoadDumpDtThresh1_echo" style="display:none;">0</span>
     <span id="LoadDumpDtThresh_echo" style="display:none;">0</span>
-    <span id="LoadDumpCurrentDrop_echo" style="display:none;">0</span>
+    <span id="LoadDumpDtThresh3_echo" style="display:none;">0</span>
     <span id="CVTuningMode_echo" style="display:none;">0</span>
     <span id="cvWaveAmplitudeV_echo" style="display:none;">0</span>
     <span id="cvWavePeriodSec_echo" style="display:none;">0</span>

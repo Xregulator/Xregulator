@@ -2140,7 +2140,7 @@ void _ReadAnalogInputs_inner() {
                          static uint32_t bcurPrevMs = 0;
                          if (bcurPrevMs > 0) {
                            uint32_t dtBcur = nowIna - bcurPrevMs;
-                           if (dtBcur >= 4 && dtBcur < 2000) {
+                           if (dtBcur >= 3 && dtBcur < 2000) {
                              g_dBcur_dt = (Bcur - bcurPrev) / ((float)dtBcur * 0.001f);
                            }
                          }
