@@ -518,11 +518,12 @@ void imuInit() {
     return;
   }
 
-  // Set ODRs (ST library uses 417 Hz, not 416).
-  // 417 Hz is kept for future high-frequency engine diagnostics (vibration signature analysis).
-  // If that feature is not implemented, drop to 208 Hz to reduce I2C load and free ~5% Core 1 CPU.
-  // Also update Set_FIFO_X_BDR and ACCEL_INTERVAL_US (2398 → 4808 µs) if changed.
-  if (imu.Set_X_ODR(417.0f) != LSM6DSOX_OK) {
+  // Set ODRs.
+  // Accel at 104 Hz is plenty for slam peak capture (~9.6 ms sample spacing vs 20–50 ms
+  // typical slam pulse), pitch/heel max, wave-period decimation (10 Hz output), and MSI
+  // frequency-weighted Z (peaks 0.5–5 Hz). Engine-vibration diagnostics are out of scope
+  // (board is not engine-mounted). ACCEL_INTERVAL_US in drainIMUFifo() must match: 9615 µs.
+  if (imu.Set_X_ODR(104.0f) != LSM6DSOX_OK) {
     Serial.println("ERROR: Failed to set accel ODR");
     queueConsoleMessageF("IMU: failed to set accel ODR");
     imuEnabled = false;
@@ -537,7 +538,7 @@ void imuInit() {
   }
 
   // Set FIFO batching rates (BDR) - must match ODRs for continuous sampling
-  if (imu.Set_FIFO_X_BDR(417.0f) != LSM6DSOX_OK) {
+  if (imu.Set_FIFO_X_BDR(104.0f) != LSM6DSOX_OK) {
     Serial.println("ERROR: Failed to set FIFO accel BDR");
     queueConsoleMessageF("IMU: failed to set FIFO accel BDR");
     imuEnabled = false;
@@ -603,7 +604,7 @@ void imuInit() {
 
   // Only print success if we actually got here with hardware verified
   Serial.println("LSM6DSOX initialized successfully");
-  Serial.println("  Accel ODR: 417 Hz, FIFO BDR: 417 Hz");
+  Serial.println("  Accel ODR: 104 Hz, FIFO BDR: 104 Hz");
   Serial.println("  Gyro ODR: 52 Hz, FIFO BDR: 52 Hz");
   Serial.println("  FIFO mode: Continuous");
   Serial.print("  Poll interval: ");
@@ -617,7 +618,7 @@ void imuInit() {
   Serial.print(GYRO_RING_SIZE);
   Serial.println(" samples");
 
-  queueConsoleMessageF("IMU initialized: 417Hz accel, 52Hz gyro");
+  queueConsoleMessageF("IMU initialized: 104Hz accel, 52Hz gyro");
 
   imuEnabled = true;
   lastIMUPoll = millis();
@@ -2199,12 +2200,6 @@ void updateAccelMetrics() {
   uint32_t samples_processed = 0;
   unsigned long now = millis();
 
-  // HP filter state for HF vibration energy (1st-order IIR, fc = 20 Hz)
-  static float hp_ax = 0, hp_ay = 0, hp_az = 0;
-  static float hp_prev_ax = 0, hp_prev_ay = 0, hp_prev_az = 0;
-  static float hf_rms2_accum = 0;
-  static uint32_t hf_sample_count = 0;
-
   // Wave period decimation state (10 Hz output, real-time gated)
   static float wave_decim_sum = 0;
   static uint16_t wave_decim_count = 0;
@@ -2300,33 +2295,9 @@ void updateAccelMetrics() {
 
     // TODO: Wave period decimation and processing
 
-    // 1st-order IIR HP filter at 20 Hz — strips gravity + slow motion, leaves vibration
-    if (dt_us > 0 && dt_us < 50000) {
-      const float RC_HP = 0.007958f;  // 1 / (2π × 20 Hz)
-      float dt_s = dt_us / 1000000.0f;
-      float alpha = RC_HP / (RC_HP + dt_s);
-      hp_ax = alpha * (hp_ax + ax - hp_prev_ax);
-      hp_ay = alpha * (hp_ay + ay - hp_prev_ay);
-      hp_az = alpha * (hp_az + az - hp_prev_az);
-      hf_rms2_accum += hp_ax * hp_ax + hp_ay * hp_ay + hp_az * hp_az;
-      hf_sample_count++;
-    }
-    hp_prev_ax = ax;
-    hp_prev_ay = ay;
-    hp_prev_az = az;
-
     imuWindow->lastUpdateTime_us = now_us;
     imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
     samples_processed++;
-  }
-
-  // EWMA update for HF vibration energy from this batch of accel samples
-  if (hf_sample_count > 0) {
-    float new_rms2 = hf_rms2_accum / hf_sample_count;
-    // alpha = exp(-dt/tau): dt≈10ms (FIFO drain rate), tau=1s → alpha≈0.99
-    imu_hf_vibration_energy = 0.01f * new_rms2 + 0.99f * imu_hf_vibration_energy;
-    hf_rms2_accum = 0.0f;
-    hf_sample_count = 0;
   }
 
   // GPS speed gate — ON above 1.7 kt, OFF below 1.3 kt (hysteresis prevents threshold chatter)

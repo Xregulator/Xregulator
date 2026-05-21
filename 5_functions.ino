@@ -2696,7 +2696,7 @@ void drainIMUFifo() {
                // batch_timestamp=same_value problem which caused dt_us=0 for all but the first
                // sample, effectively stalling the complementary filter.
                uint32_t batch_end_us = micros();
-               constexpr uint32_t ACCEL_INTERVAL_US = 2398;  // 1,000,000 / 417 Hz
+               constexpr uint32_t ACCEL_INTERVAL_US = 9615;  // 1,000,000 / 104 Hz
                constexpr uint32_t GYRO_INTERVAL_US = 19231;  // 1,000,000 / 52 Hz
 
                uint16_t accel_in_batch = 0, gyro_in_batch = 0;
@@ -3109,19 +3109,19 @@ void ReadAnalogInputs_Fake() {
     int16_t raw_gz = (int16_t)(gz_dps / GYRO_SCALE);
 
     // Engine + sea-state vibration noise scaled with RPM
-    // At 1500 RPM: ±2500 LSB ≈ ±150 mg per axis (≈90 mg RMS) → HF energy ≈ 0.02 g²
+    // At 1500 RPM: ±2500 LSB ≈ ±150 mg per axis (≈90 mg RMS)
     // At idle/stopped: minimum 200 LSB keeps background sea-state noise present
     int engineNoise = (int)constrain(RPM / 0.6f, 200.0f, 6000.0f);
 
-    // Push samples to ring buffers — simulates a batch from the real 417 Hz FIFO
+    // Push samples to ring buffers — simulates a batch from the real 104 Hz FIFO
     uint32_t timestamp_us = micros();
 
-    // 5 accel samples at ~2.4ms spacing = 417Hz claimed rate
+    // 5 accel samples at ~9.6ms spacing = 104Hz claimed rate
     for (int i = 0; i < 5; i++) {
       int16_t jitter_ax = (int16_t)constrain((int32_t)raw_ax + random(-engineNoise, engineNoise), -32767, 32767);
       int16_t jitter_ay = (int16_t)constrain((int32_t)raw_ay + random(-engineNoise, engineNoise), -32767, 32767);
       int16_t jitter_az = (int16_t)constrain((int32_t)raw_az + random(-engineNoise, engineNoise), -32767, 32767);
-      pushAccelSample(jitter_ax, jitter_ay, jitter_az, timestamp_us + i * 2400);
+      pushAccelSample(jitter_ax, jitter_ay, jitter_az, timestamp_us + i * 9615);
     }
 
     // Gyro at 52 Hz (one sample per ~20ms)

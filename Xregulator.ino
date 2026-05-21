@@ -519,7 +519,6 @@ float imu_pitch_deg = 0;             // Current pitch angle
 float imu_yaw_rate_dps = 0;          // Current yaw rate (direct from gyro_z)
 float imu_vertical_accel_g = 0;      // Vertical acceleration
 float imu_total_accel_g = 0;         // Total acceleration magnitude
-float imu_hf_vibration_energy = 0;   // High-freq vibration energy (RMS²)
 float imu_msi_score = 0;             // Motion Sickness Index (L&G 1987, freq-weighted vertical accel RMS; 100 = severe)
 float imu_vomit_pct = 0;             // Estimated % of population vomiting after 2hrs (L&G 1987, power-law approx)
 float imu_anchorage_comfort = 0;     // Heuristic comfort score 0-100 (100=calm); roll+MSI+slam weighted
@@ -1446,7 +1445,32 @@ ImuWindow *imuWindow = nullptr;
 unsigned long lastSensorUploadTime = 0;
 bool sensorUploadInProgress = false;
 
-volatile bool core0Busy = false;  // Guards Core 0 CPU intensive ops
+// core0Busy — "hold the field off while a long Core 0 op is in flight."
+//
+// What it actually does: AdjustFieldLearnMode() early-returns when this is set,
+// which prevents digitalWrite(4, HIGH) from re-enabling the field AND freezes the
+// voltage PI + inner current PID. The early-return is the whole control loop, not
+// just the field-enable line.
+//
+// What should set it:
+//   - Long-running Core 0 operations that are themselves only allowed to start
+//     while the field has been off for ≥ 60 s (gated by fieldOffSettled()).
+//     Currently: httpsTask (HTTPS uploads/fetches), syncTimeFromNTP, and the OTA
+//     update path. Field is already off when they start, and the gate keeps it off
+//     until they finish so the WiFi/HTTPS subsystem isn't fighting a field
+//     re-enable mid-transaction.
+//
+// What must NOT set it:
+//   - Anything that can fire during active charging. Setting this flag while RPM
+//     could change blinds the protection logic and PID for the full duration of
+//     the op. TempTask used to set it during a 190–750 ms DS18B20 conversion every
+//     5 s; that caused +1.5 V voltage overshoots when RPM ramped during the freeze
+//     (see fuckingdisaster.csv, 2026-05). TempTask now only READS it (to defer its
+//     own work during HTTPS), and never sets it.
+//
+// Readers: TempTask (defer own work), testInternetSpeed (skip), scheduled restart
+// (wait up to 30 s), OTA orchestration, and the AFLM gate at 6_functions.ino:1388.
+volatile bool core0Busy = false;
 
 // Local buffer config
 const char *SENSOR_BUFFER_DIR = "/sensor_buffer";

@@ -45,7 +45,7 @@ enum Csv1Index {
   CSV1_imu_vertical_accel_g,
   CSV1_imu_yaw_rate_dps,
   CSV1_imu_total_accel_g,
-  CSV1_imu_hf_vibration_energy,
+  CSV1_RESERVED_28,  // was imu_hf_vibration_energy — feature removed; slot kept to preserve indices
   CSV1_shutdownPhase,
   CSV1_BatteryV_raw,
   CSV1_MeasuredAmps_filtered,
@@ -3029,9 +3029,7 @@ void setupServer() {
       CumulativeInsulationDamage = 1.0 - life_fraction;
       CumulativeGreaseDamage = 1.0 - life_fraction;
       CumulativeBrushDamage = 1.0 - life_fraction;
-      writeFile(LittleFS, "/CumulativeInsulationDamage.txt", String(CumulativeInsulationDamage, 6).c_str());
-      writeFile(LittleFS, "/CumulativeGreaseDamage.txt", String(CumulativeGreaseDamage, 6).c_str());
-      writeFile(LittleFS, "/CumulativeBrushDamage.txt", String(CumulativeBrushDamage, 6).c_str());
+      // Persistence handled by saveNVSData() phase 7 (InsulDamage/GreaseDamage/BrushDamage).
       queueConsoleMessageF("Alternator life manually set to %d%%", ManualLifePercentage);
     }
     if (request->hasParam("webgaugesinterval")) {
@@ -5067,7 +5065,7 @@ void SendWifiData() {
                                SafeInt(imu_vertical_accel_g, 1000),     // 25
                                SafeInt(imu_yaw_rate_dps, 100),          // 26
                                SafeInt(imu_total_accel_g, 1000),        // 27
-                               SafeInt(imu_hf_vibration_energy, 1000),  // 28
+                               0,  // 28 — was imu_hf_vibration_energy (removed)
                                SafeInt(shutdownPhase),                  // 29
                                SafeInt(BatteryV, 100),                  // 30 — raw ADS1115
                                SafeInt(MeasuredAmps_filtered, 100),     // 31

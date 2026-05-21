@@ -229,9 +229,11 @@ void performDeepFactoryReset() {
 // - Applies sanity range (-50..300°F).
 // - Auto-corrects resolution if EEPROM or sensor reset changed it from 12-bit.
 // - Re-enumerates sensor after disconnect detection.
-// - Uses a single cleanup path to guarantee core0Busy is always released.
 // - tempTaskHealthy is owned by checkTempTaskHealth(); TempTask only sets it true on a clean read.
-// - File writes happen after core0Busy is released; fsMutex serializes filesystem access independently.
+// - File writes use fsMutex for filesystem serialization.
+// - Reads core0Busy as a courtesy (defers if HTTPS/NTP/OTA is mid-flight) but does NOT
+//   set it — TempTask runs during active charging, and core0Busy gates AdjustFieldLearnMode,
+//   so setting it would freeze the voltage/current control loops for ~190–750 ms every 5 s.
 void TempTask(void *parameter) {
   // NO watchdog registration - keep it separate from main loop watchdog
 
@@ -291,8 +293,6 @@ void TempTask(void *parameter) {
     bool writeMaxTempAllTime = false;
     float pendingMaxTemp = 0.0f;
     float pendingMaxTempAllTime = 0.0f;
-
-    core0Busy = true;
 
     if (!sensors.isConnected(tempDeviceAddress)) {
       tempConnectedFailCount++;
@@ -441,7 +441,6 @@ void TempTask(void *parameter) {
 
 cleanup:
     lastReadWasSuccess = thisReadSucceeded;
-    core0Busy = false;
     lastTempRead = millis();
     lastTempTaskHeartbeat = millis();
 

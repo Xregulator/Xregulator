@@ -182,7 +182,7 @@ const CSV1_FIELDS = [
     "imu_vertical_accel_g",       // 25
     "imu_yaw_rate_dps",           // 26
     "imu_total_accel_g",          // 27
-    "imu_hf_vibration_energy",    // 28
+    "_reserved28",                // 28 — was imu_hf_vibration_energy (firmware sends 0)
     "shutdownPhase",              // 29
     "BatteryV_raw",               // 30
     "MeasuredAmps_filtered",      // 31
@@ -5519,7 +5519,6 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("imu_total_accel_g_ID", sa.imu);
     applyStaleStyleByAge("imu_yaw_rate_dps_ID", sa.imu);
     applyStaleStyleByAge("imu_wave_period_sec_ID", sa.imu);
-    applyStaleStyleByAge("imu_hf_vibration_energy_ID", sa.imu);
     applyStaleStyleByAge("imu_msi_score_ID", sa.imu);
     applyStaleStyleByAge("imu_vomit_pct_ID", sa.imu);
     applyStaleStyleByAge("imu_anchorage_comfort_ID", sa.imu);
@@ -6570,7 +6569,7 @@ window.addEventListener("load", function () {
                         newTextContent = "—";
                     }
                     // Values scaled by 1000 on server
-                    else if (["imu_vertical_accel_g", "imu_total_accel_g", "imu_hf_vibration_energy"].includes(key)) {
+                    else if (["imu_vertical_accel_g", "imu_total_accel_g"].includes(key)) {
                         newTextContent = (value / 1000).toFixed(3);
                     }
                     // Values scaled by 100 on server
@@ -6675,7 +6674,6 @@ window.addEventListener("load", function () {
                 ["imu_vertical_accel_g_ID", "imu_vertical_accel_g"],
                 ["imu_yaw_rate_dps_ID", "imu_yaw_rate_dps"],
                 ["imu_total_accel_g_ID", "imu_total_accel_g"],
-                ["imu_hf_vibration_energy_ID", "imu_hf_vibration_energy"],
                 // imu_msi_score, imu_vomit_pct, imu_anchorage_comfort moved to CSV2 otherFields — those fields are in CSV2
             ];
 
@@ -11202,6 +11200,18 @@ function validateAndSubmitBatteryToggle(checkbox, fieldName) {
         }
     }
 
+    return true;
+}
+
+function validateAndSubmitFieldCollapseDelay(form) {
+    const input = form.querySelector('[name="FIELD_COLLAPSE_DELAY"]');
+    if (!input) return true;
+    const seconds = parseFloat(input.value);
+    if (!Number.isFinite(seconds) || seconds < 2) {
+        showValidationError('Field Collapse Delay must be at least 2 seconds. Values lower than this allow rapid field re-engagement after a fault, which can damage the alternator, field driver, and battery.');
+        return false;
+    }
+    submitMessage();
     return true;
 }
 
