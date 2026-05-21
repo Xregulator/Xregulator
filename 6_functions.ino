@@ -1020,12 +1020,16 @@ void AdjustFieldLearnMode() {
   // Direct cv_I clamp kept here because the CV loop only runs every 100ms;
   // without it cv_I builds positive for up to 100ms while battV is above target.
   //
-  // nearBulk: all software protections only arm when the voltage target is within
-  // ProtectionProxGateV of BulkVoltage. At float or tuning targets well below bulk,
-  // small overshoots carry no battery damage risk and protections interfere with results.
+  // nearBulk: software protections arm when EITHER the target OR the actual measured
+  // voltage is within ProtectionProxGateV of BulkVoltage. The target check keeps
+  // protections armed during normal bulk/absorption charging. The actual-voltage check
+  // catches the case where an external disturbance (RPM ramp, load drop, etc.) drives
+  // real voltage up to dangerous territory while target is set low (e.g., float or
+  // tuning at 13.4V) — without it, a 12V→15V overshoot would see zero protection.
   // ProtectionProxGateV <= 0 disables the gate entirely — all protections always armed.
   bool nearBulk = (ProtectionProxGateV <= 0.0f)
-                  || (ChargingVoltageTarget >= BulkVoltage - ProtectionProxGateV);
+                  || (ChargingVoltageTarget >= BulkVoltage - ProtectionProxGateV)
+                  || (IBV >= BulkVoltage - ProtectionProxGateV);
 
   {
     static float vPrev = 0.0f;
@@ -2127,7 +2131,7 @@ void AdjustFieldLearnMode() {
                 vPrevCV = getFiltV();
               } else {
                 float vNow = getFiltV();
-                if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -2.0f, 2.0f);
+                if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -4.0f, 4.0f);
                 vPrevCV = vNow;
               }
             }
@@ -2279,12 +2283,14 @@ void AdjustFieldLearnMode() {
         }
 
         // Output current PID compute.
-        // MaintainMode uses getBatteryCurrent() (net battery amps — no filtered
-        // equivalent yet). Normal AUTO uses signal selected by OutputPIDSigSrc.
+        // MaintainMode regulates to 0 net battery amps. Feedback is always INA228 (Bcur),
+        // never getBatteryCurrent() — picking Victron as Battery Current Source would add
+        // ~1–2 s of lag that destabilizes this loop. The dropdown only governs SoC display.
+        // Normal AUTO uses signal selected by OutputPIDSigSrc.
         {
           float pidSig = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                         : g_pidI_filtered;
-          targetCurrent = (MaintainMode == 1) ? getBatteryCurrent() : pidSig;
+          targetCurrent = (MaintainMode == 1) ? Bcur : pidSig;
         }
         pidInput = (double)targetCurrent;
         pidSetpoint = (double)setpointLimited;

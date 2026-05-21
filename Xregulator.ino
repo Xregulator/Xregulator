@@ -149,6 +149,42 @@ uint32_t fsWriteQueueDrops = 0;           // wire into telemetry
 uint32_t fsFlushDeferred = 0;             // times FlushFileWriteQueue skipped because NVS committed same tick
 bool heavyIOThisTick = false;             // set by NVS commit or FS write; prevents co-fire in same tick
 
+// Flash write diagnostics — quantify LittleFS write-time tail to prove/disprove
+// wear-leveling / GC stalls. Each writeFile() call inside FlushFileWriteQueue()
+// is bracketed with micros(). Histogram buckets (ms, inclusive-lower):
+//   [0] <25  [1] 25-50  [2] 50-100  [3] 100-200  [4] 200-500  [5] >=500
+// A bimodal distribution (tall bar in fast bucket, small bar in 200-500/500+)
+// is the fingerprint of LittleFS rebalancing/wear-leveling. A smooth slope
+// would indicate queueing or contention instead.
+uint32_t fsWriteCount = 0;                // total writes serviced since boot
+uint32_t fsWriteLongCount = 0;            // writes that took >= 100 ms
+uint32_t fsWriteHist[6] = {0};            // duration histogram (see bucket map above)
+uint16_t fsWriteWorstMs = 0;              // worst single writeFile duration since boot (ms)
+
+// Slow-write ring of 8 — captures the most recent writes that crossed the
+// long-write threshold (100 ms). Lets us see whether slow writes hit the
+// SAME file (caller pattern) or RANDOM files (true LittleFS GC/rebalance).
+#define FS_SLOW_RING_SIZE 8
+#define FS_SLOW_PATH_MAX 32
+struct FsSlowWrite {
+  uint32_t whenMs;      // millis() at write completion
+  uint16_t durationMs;  // measured write duration
+  uint16_t dataLen;     // length of data written (bytes)
+  char     path[FS_SLOW_PATH_MAX];
+};
+static FsSlowWrite fsSlowRing[FS_SLOW_RING_SIZE];
+static uint8_t fsSlowRingHead = 0;    // next slot to overwrite
+static uint8_t fsSlowRingCount = 0;   // total slow writes captured (saturates at ring size)
+
+// NVS commit timing — nvs_commit() is the flush of all staged NVS writes
+// to flash. It can stall hundreds of ms on its own (independent of the
+// phased nvs_set_*() calls). Bracketed with micros() in saveNVSData()
+// to separate commit cost from the 9-phase cycle cost (nvsCycleMs).
+uint32_t nvsCommitCount = 0;          // total nvs_commit() calls since boot
+uint32_t nvsCommitLongCount = 0;      // commits that took >= 100 ms
+uint16_t nvsCommitWorstMs = 0;        // worst single commit duration since boot (ms)
+uint16_t nvsCommitLastMs  = 0;        // most recent commit duration (ms)
+
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
 QueueHandle_t httpsQueue;
@@ -263,15 +299,16 @@ static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
 // 8 × 3 × 7 = 168 cells
 
 // --- Reference bin selection criteria ---
-// DEV: ALL thresholds relaxed to near-zero for sparkline testing. PRODUCTION: restore all values below.
+// DEV-INTERMEDIATE: relaxed from production so reference finalizes in ~10 min of runtime,
+// but tight enough that a 3-cell / 3-minute matrix CAN'T finalize (which caused false anomalies).
 // PRODUCTION values: NUM_REFERENCE_BINS=10, REF_MIN_SS_SECONDS=30, REF_FREEZE_TOTAL_SS=6000,
 //                    REF_SPREAD_TEMP_DEG=50.0f, REF_SPREAD_FIELD_VOLTS=3.75f, REF_SPREAD_RPM=1000.0f
-#define NUM_REFERENCE_BINS 1         // DEV ONLY — production value: 10
-#define REF_MIN_SS_SECONDS 5         // DEV ONLY — production value: 30
-#define REF_FREEZE_TOTAL_SS 10       // DEV ONLY — production value: 6000
-#define REF_SPREAD_TEMP_DEG 1.0f     // DEV ONLY — production value: 50.0f
-#define REF_SPREAD_FIELD_VOLTS 0.1f  // DEV ONLY — production value: 3.75f
-#define REF_SPREAD_RPM 1.0f          // DEV ONLY — production value: 1000.0f
+#define NUM_REFERENCE_BINS 3         // DEV-INTERMEDIATE — production value: 10
+#define REF_MIN_SS_SECONDS 15        // DEV-INTERMEDIATE — production value: 30
+#define REF_FREEZE_TOTAL_SS 180      // DEV-INTERMEDIATE (3 min) — production value: 6000 (100 min)
+#define REF_SPREAD_TEMP_DEG 10.0f    // DEV-INTERMEDIATE — production value: 50.0f
+#define REF_SPREAD_FIELD_VOLTS 1.0f  // DEV-INTERMEDIATE — production value: 3.75f
+#define REF_SPREAD_RPM 200.0f        // DEV-INTERMEDIATE — production value: 1000.0f
 
 // --- Anomaly detection — runtime, user-configurable via LittleFS ---
 float anomalyMarginAmps = 5.0f;   // Extra amps of tolerance beyond ref min/max (default: none)
@@ -355,9 +392,6 @@ static int activeFieldBucket = -1;
 static float redDot_fieldVolts = 0.0f;
 static float redDot_amps = 0.0f;
 static bool redDotValid = false;
-
-// Session anomaly counter — resets on power cycle
-static int sessionErrorCount = 0;
 
 // Plot axis limits sent to JS
 float EffXMin = EFF_FIELD_MIN;
@@ -873,7 +907,7 @@ float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by ge
 // Manual mode is banned: duty is locked to ManualDutyTarget so the test's duty commands are silently ignored.
 // Note: voltageControlActive = !inIdleStage, so it is true even in bulk — do NOT gate on !voltageControlActive.
 // Enforced in the /get startSystemID handler and in the JS preflight check.
-float SystemIDStepAmplitude = 15.0f;  // % duty step — web-configurable; 15% is a good default
+float SystemIDStepAmplitude = 6.0f;  // % duty step — web-configurable; 6% is a good default
 
 volatile bool systemIDRequested = false;       // set true by UI handler to trigger a test run
 volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
@@ -1640,7 +1674,7 @@ int Alarm_Status;                                // for alarm mirror light on Cl
 float CurrentThreshold = 0.01f;       // Ignore currents below this (amps)
 int PeukertExponent_scaled = 105;     // Peukert exponent × 100 (112 = 1.12)
 int ChargeEfficiency_scaled = 990;    // Charging efficiency % × 10 (990 = 99.0%)
-int ChargedVoltage_Scaled = 1380;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
+int ChargedVoltage_Scaled = 1400;     // Voltage threshold for "charged" (V × 100) (a Battery Monitor setup parameter, nothing to do with alternator)
 float TailCurrent = 2.0f;             // % of battery Ah capacity (1 decimal place)
 int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
 int ChargedDetectionTime = 180;       // Time at charged state to consider 100% (seconds) (3 mins, industry standard for lithium)
@@ -2200,8 +2234,8 @@ float PidKp = 0.5f;   // A/% duty — proportional gain
 float PidKi = 2.0f;   // integral gain
 float PidKd = 0.01f;  // derivative gain
 // --- Voltage (CV) PID ---
-float VoltageKp = 25.0f;             // A/V — proportional gain
-float VoltageKi = 1.25f;             // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
+float VoltageKp = 30.0f;             // A/V — proportional gain
+float VoltageKi = 6.00f;             // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I

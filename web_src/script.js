@@ -374,233 +374,247 @@ const CSV2_FIELDS = [
     "cv_I",                                // 181
     "inIdleStage",                         // 182
     "referenceFinalized",                  // 183
-    "sessionErrorCount",                   // 184
-    "ft_rai_total_win",                    // 185
-    "ft_rai_total_ses",                    // 186
-    "ft_rai_ina228_win",                   // 187
-    "ft_rai_ina228_ses",                   // 188
-    "ft_rai_ads_state_win",                // 189
-    "ft_rai_ads_state_ses",                // 190
-    "ft_rai_bmp_state_win",                // 191
-    "ft_rai_bmp_state_ses",                // 192
-    "ft_rai_imu_win",                      // 193
-    "ft_rai_imu_ses",                      // 194
-    "fsWriteQueueDrops",                   // 195
-    "reserved196",                         // 196 reserved — was cv_D (D term removed)
-    "tempReadFailCount",                   // 197
-    "tempCrcFailCount",                    // 198
-    "tempCrcRecoveredCount",               // 199
-    "tempAllFFCount",                      // 200
-    "tempPowerOn85Count",                  // 201
-    "tempOutOfRangeCount",                 // 202
-    "tempRequestFailCount",                // 203
-    "tempConnectedFailCount",              // 204
-    "tempResolutionFixCount",              // 205
-    "tempRereadFailCount",                 // 206
-    "tempResolutionFixCrcFailCount",       // 207
-    "tempEnumerateFailCount",              // 208
-    "warmupCeiling",                       // 209
-    "imu_min_moving_gentle",               // 210
-    "imu_min_moving_moderate",             // 211
-    "imu_min_moving_rough",                // 212
-    "imu_min_moving_extreme",              // 213
-    "imu_min_stat_gentle",                 // 214
-    "imu_min_stat_moderate",               // 215
-    "imu_min_stat_rough",                  // 216
-    "imu_min_stat_extreme",                // 217
-    "imu_heel_deviation_120s",             // 218
-    "imu_pitch_deviation_120s",            // 219
-    "imu_heading_swing_120s",              // 220
-    "dBcur_dt",                            // 221
-    "loadDumpActive",                      // 222
-    "thermalLiveScore0",                   // 223
-    "thermalLiveScore1",                   // 224
-    "thermalLiveScore2",                   // 225
-    "thermalLiveScore3",                   // 226
-    "thermalTuningTestPhase",              // 227
-    "ft_updateAccelMetrics_win",           // 228
-    "ft_updateAccelMetrics_ses",           // 229
-    "WifiStrength",                        // 230
-    "SendWifiTime",                        // 231
-    "AnalogReadTime",                      // 232
-    "VeTime",                              // 233
-    "MaximumLoopTime",                     // 234
-    "HeadingNMEA",                         // 235
-    "EngineCycles",                        // 236
-    "CurrentSessionDuration",              // 237
-    "timeAxisModeChanging",                // 238
-    "currentPartitionType",                // 239
-    "fastOvCurrentCap",                    // 240
-    "fastOvClampCount",                    // 241
-    "fastOvHardCount",                     // 242 (was 243; 242 reserved — was fastOvSoftCount)
-    "ch1_last_ms",                         // 244
-    "ch1_avg_10s",                         // 245
-    "ch1_worst_10s",                       // 246
-    "ch1_over2x_10s",                      // 247
-    "ch1_n_10s",                           // 248
-    "ch1_avg_2m",                          // 249
-    "ch1_worst_2m",                        // 250
-    "ch1_over2x_2m",                       // 251
-    "ch1_n_2m",                            // 252
-    "ch1_avg_at",                          // 253
-    "ch1_worst_at",                        // 254
-    "ch1_over2x_at",                       // 255
-    "ch1_n_at",                            // 256
-    "iExcessCount",                        // 257
-    "inaOVCount",                          // 258
-    "hardOCCount",                         // 259
-    "voltSpikeCount",                      // 260
-    "voltDisagreeCritCount",               // 261
-    "voltDisagreeWarnCount",               // 262
-    "voltImplausibleCount",                // 263
-    "tempCritCount",                       // 264
-    "tempSustainedCount",                  // 265
-    "tempStaleCount",                      // 266
-    "currentStaleCount",                   // 267
-    "imu_msi_score",                       // 268
-    "imu_vomit_pct",                       // 269
-    "imu_anchorage_comfort",               // 270
-    "ina_last_ms",                         // 271
-    "ina_avg_10s",                         // 272
-    "ina_worst_10s",                       // 273
-    "ina_over2x_10s",                      // 274
-    "ina_avg_2m",                          // 275
-    "ina_worst_2m",                        // 276
-    "ina_over2x_2m",                       // 277
-    "ina_avg_at",                          // 278
-    "ina_worst_at",                        // 279
-    "ina_over2x_at",                       // 280
-    "loopTime5sWindow_ms",                 // 281
-    "MaximumLoopTime_ms",                  // 282
-    "ft_SendWifiData_win",                 // 283
-    "ft_SendWifiData_ses",                 // 284
-    "ft_CheckAlarms_win",                  // 285
-    "ft_CheckAlarms_ses",                  // 286
-    "ft_calculateDerivedMetrics_win",      // 287
-    "ft_calculateDerivedMetrics_ses",      // 288
-    "ft_logDashboardValues_win",           // 289
-    "ft_logDashboardValues_ses",           // 290
-    "ft_updateSystemHealthStats_win",      // 291
-    "ft_updateSystemHealthStats_ses",      // 292
-    "ft_checkWiFiConnection_win",          // 293
-    "ft_checkWiFiConnection_ses",          // 294
-    "ft_ch1_compute_stats_win",            // 295
-    "ft_ch1_compute_stats_ses",            // 296
-    "ft_UpdateEngineRuntime_win",          // 297
-    "ft_UpdateEngineRuntime_ses",          // 298
-    "ft_UpdateEngineFuel_win",             // 299
-    "ft_UpdateEngineFuel_ses",             // 300
-    "ft_UpdateBatterySOC_win",             // 301
-    "ft_UpdateBatterySOC_ses",             // 302
-    "ft_UpdateTravelStatistics_win",       // 303
-    "ft_UpdateTravelStatistics_ses",       // 304
-    "ft_UpdateDistanceThisInterval_win",   // 305
-    "ft_UpdateDistanceThisInterval_ses",   // 306
-    "ft_UpdateBoardTempPressureMaximums_win", // 307
-    "ft_UpdateBoardTempPressureMaximums_ses", // 308
-    "ft_handleSocGainReset_win",           // 309
-    "ft_handleSocGainReset_ses",           // 310
-    "ft_handleAltZeroReset_win",           // 311
-    "ft_handleAltZeroReset_ses",           // 312
-    "ft_calculateChargeTimes_win",         // 313
-    "ft_calculateChargeTimes_ses",         // 314
-    "ft_UpdateSailingMetrics_win",         // 315
-    "ft_UpdateSailingMetrics_ses",         // 316
-    "ft_updateWeatherMode_win",            // 317
-    "ft_updateWeatherMode_ses",            // 318
-    "ft_updateSensorWindow_win",           // 319
-    "ft_updateSensorWindow_ses",           // 320
-    "ft_checkTimeSync_win",                // 321
-    "ft_checkTimeSync_ses",                // 322
-    "currentRPMTableIndex",                // 323
-    "pidInitialized",                      // 324
-    "pidSetpoint",                         // 325
-    "TempToUse",                           // 326
-    "learningTargetFromRPM",               // 327
-    "ambientTempCorrection",               // 328
-    "finalLearningTarget",                 // 329
-    "overheatingPenaltyTimer",             // 330
-    "overheatingPenaltyAmps",              // 331
-    "averageTableValue",                   // 332
-    "timeSinceLastOverheat",               // 333
-    "socInfoAvailable",                    // 334
-    "overheatCount0",                      // 335
-    "overheatCount1",                      // 336
-    "overheatCount2",                      // 337
-    "overheatCount3",                      // 338
-    "overheatCount4",                      // 339
-    "overheatCount5",                      // 340
-    "overheatCount6",                      // 341
-    "overheatCount7",                      // 342
-    "overheatCount8",                      // 343
-    "overheatCount9",                      // 344
-    "cumulativeNoOverheatTime0",           // 345
-    "cumulativeNoOverheatTime1",           // 346
-    "cumulativeNoOverheatTime2",           // 347
-    "cumulativeNoOverheatTime3",           // 348
-    "cumulativeNoOverheatTime4",           // 349
-    "cumulativeNoOverheatTime5",           // 350
-    "cumulativeNoOverheatTime6",           // 351
-    "cumulativeNoOverheatTime7",           // 352
-    "cumulativeNoOverheatTime8",           // 353
-    "cumulativeNoOverheatTime9",           // 354
-    "learningUpCount0",                    // 355
-    "learningUpCount1",                    // 356
-    "learningUpCount2",                    // 357
-    "learningUpCount3",                    // 358
-    "learningUpCount4",                    // 359
-    "learningUpCount5",                    // 360
-    "learningUpCount6",                    // 361
-    "learningUpCount7",                    // 362
-    "learningUpCount8",                    // 363
-    "learningUpCount9",                    // 364
-    "totalLearningEvents",                 // 365
-    "totalOverheats",                      // 366
-    "totalSafeHours",                      // 367
-    "FreeInternalRam",                     // 368
-    "TotalInternalRam",                    // 369
-    "LargestInternalBlock",                // 370
-    "FreePSRAM",                           // 371
-    "TotalPSRAM",                          // 372
-    "Heapfrag",                            // 373
-    "ft_ReadAnalogInputs_win",             // 374
-    "ft_ReadAnalogInputs_ses",             // 375
-    "ft_AdjustFieldLearnMode_win",         // 376
-    "ft_AdjustFieldLearnMode_ses",         // 377
-    "ft_uploadSensorHistory_win",          // 378
-    "ft_uploadSensorHistory_ses",          // 379
-    "ft_uploadBufferedRecords_win",        // 380
-    "ft_uploadBufferedRecords_ses",        // 381
-    "ft_buildConfigPayload_win",           // 382
-    "ft_buildConfigPayload_ses",           // 383
-    "VeTime2",                             // 384
-    "systemIDRiseDelay_0",                 // 385
-    "systemIDRiseDelay_1",                 // 386
-    "systemIDRiseDelay_2",                 // 387
-    "systemIDFallDelay_0",                 // 388
-    "systemIDFallDelay_1",                 // 389
-    "systemIDFallDelay_2",                 // 390
-    "systemIDRiseAvg",                     // 391
-    "systemIDFallAvg",                     // 392
-    "nvsPhase",                            // 393
-    "ft_saveNVSData_win",                  // 394
-    "ft_saveNVSData_ses",                  // 395
-    "ft_FlushFileWriteQueue_win",          // 396
-    "ft_FlushFileWriteQueue_ses",          // 397
-    "ft_efficiencyTracker_win",            // 398
-    "ft_efficiencyTracker_ses",            // 399
-    "systemIDActive",                      // 400
-    "systemIDResultsReady",                // 401
-    "systemIDStepAmp_0",                   // 402
-    "systemIDStepAmp_1",                   // 403
-    "systemIDStepAmp_2",                   // 404
-    "systemIDQuietPP_0",                   // 405
-    "systemIDQuietPP_1",                   // 406
-    "systemIDQuietPP_2",                   // 407
-    "nvsCycleMs",                          // 408 — ms elapsed for last complete NVS drain cycle
-    "voltLoopWorstInterval_5s",            // 409 — worst voltage loop actual interval 5s window (ms)
-    "voltLoopWorstInterval_ses",           // 410 — worst voltage loop actual interval since boot (ms)
-    "fsFlushDeferred",                     // 411 — times FS flush skipped by co-fire guard (count)
+    "ft_rai_total_win",                    // 184
+    "ft_rai_total_ses",                    // 185
+    "ft_rai_ina228_win",                   // 186
+    "ft_rai_ina228_ses",                   // 187
+    "ft_rai_ads_state_win",                // 188
+    "ft_rai_ads_state_ses",                // 189
+    "ft_rai_bmp_state_win",                // 190
+    "ft_rai_bmp_state_ses",                // 191
+    "ft_rai_imu_win",                      // 192
+    "ft_rai_imu_ses",                      // 193
+    "fsWriteQueueDrops",                   // 194
+    "reserved196",                         // 195 reserved — was cv_D (D term removed)
+    "tempReadFailCount",                   // 196
+    "tempCrcFailCount",                    // 197
+    "tempCrcRecoveredCount",               // 198
+    "tempAllFFCount",                      // 199
+    "tempPowerOn85Count",                  // 200
+    "tempOutOfRangeCount",                 // 201
+    "tempRequestFailCount",                // 202
+    "tempConnectedFailCount",              // 203
+    "tempResolutionFixCount",              // 204
+    "tempRereadFailCount",                 // 205
+    "tempResolutionFixCrcFailCount",       // 206
+    "tempEnumerateFailCount",              // 207
+    "warmupCeiling",                       // 208
+    "imu_min_moving_gentle",               // 209
+    "imu_min_moving_moderate",             // 210
+    "imu_min_moving_rough",                // 211
+    "imu_min_moving_extreme",              // 212
+    "imu_min_stat_gentle",                 // 213
+    "imu_min_stat_moderate",               // 214
+    "imu_min_stat_rough",                  // 215
+    "imu_min_stat_extreme",                // 216
+    "imu_heel_deviation_120s",             // 217
+    "imu_pitch_deviation_120s",            // 218
+    "imu_heading_swing_120s",              // 219
+    "dBcur_dt",                            // 220
+    "loadDumpActive",                      // 221
+    "thermalLiveScore0",                   // 222
+    "thermalLiveScore1",                   // 223
+    "thermalLiveScore2",                   // 224
+    "thermalLiveScore3",                   // 225
+    "thermalTuningTestPhase",              // 226
+    "ft_updateAccelMetrics_win",           // 227
+    "ft_updateAccelMetrics_ses",           // 228
+    "WifiStrength",                        // 229
+    "SendWifiTime",                        // 230
+    "AnalogReadTime",                      // 231
+    "VeTime",                              // 232
+    "MaximumLoopTime",                     // 233
+    "HeadingNMEA",                         // 234
+    "EngineCycles",                        // 235
+    "CurrentSessionDuration",              // 236
+    "timeAxisModeChanging",                // 237
+    "currentPartitionType",                // 238
+    "fastOvCurrentCap",                    // 239
+    "fastOvClampCount",                    // 240
+    "fastOvHardCount",                     // 241 (was 243 before fastOvSoftCount removal)
+    "ch1_last_ms",                         // 242
+    "ch1_avg_10s",                         // 243
+    "ch1_worst_10s",                       // 244
+    "ch1_over2x_10s",                      // 245
+    "ch1_n_10s",                           // 246
+    "ch1_avg_2m",                          // 247
+    "ch1_worst_2m",                        // 248
+    "ch1_over2x_2m",                       // 249
+    "ch1_n_2m",                            // 250
+    "ch1_avg_at",                          // 251
+    "ch1_worst_at",                        // 252
+    "ch1_over2x_at",                       // 253
+    "ch1_n_at",                            // 254
+    "iExcessCount",                        // 255
+    "inaOVCount",                          // 256
+    "hardOCCount",                         // 257
+    "voltSpikeCount",                      // 258
+    "voltDisagreeCritCount",               // 259
+    "voltDisagreeWarnCount",               // 260
+    "voltImplausibleCount",                // 261
+    "tempCritCount",                       // 262
+    "tempSustainedCount",                  // 263
+    "tempStaleCount",                      // 264
+    "currentStaleCount",                   // 265
+    "imu_msi_score",                       // 266
+    "imu_vomit_pct",                       // 267
+    "imu_anchorage_comfort",               // 268
+    "ina_last_ms",                         // 269
+    "ina_avg_10s",                         // 270
+    "ina_worst_10s",                       // 271
+    "ina_over2x_10s",                      // 272
+    "ina_avg_2m",                          // 273
+    "ina_worst_2m",                        // 274
+    "ina_over2x_2m",                       // 275
+    "ina_avg_at",                          // 276
+    "ina_worst_at",                        // 277
+    "ina_over2x_at",                       // 278
+    "loopTime5sWindow_ms",                 // 279
+    "MaximumLoopTime_ms",                  // 280
+    "ft_SendWifiData_win",                 // 281
+    "ft_SendWifiData_ses",                 // 282
+    "ft_CheckAlarms_win",                  // 283
+    "ft_CheckAlarms_ses",                  // 284
+    "ft_calculateDerivedMetrics_win",      // 285
+    "ft_calculateDerivedMetrics_ses",      // 286
+    "ft_logDashboardValues_win",           // 287
+    "ft_logDashboardValues_ses",           // 288
+    "ft_updateSystemHealthStats_win",      // 289
+    "ft_updateSystemHealthStats_ses",      // 290
+    "ft_checkWiFiConnection_win",          // 291
+    "ft_checkWiFiConnection_ses",          // 292
+    "ft_ch1_compute_stats_win",            // 293
+    "ft_ch1_compute_stats_ses",            // 294
+    "ft_UpdateEngineRuntime_win",          // 295
+    "ft_UpdateEngineRuntime_ses",          // 296
+    "ft_UpdateEngineFuel_win",             // 297
+    "ft_UpdateEngineFuel_ses",             // 298
+    "ft_UpdateBatterySOC_win",             // 299
+    "ft_UpdateBatterySOC_ses",             // 300
+    "ft_UpdateTravelStatistics_win",       // 301
+    "ft_UpdateTravelStatistics_ses",       // 302
+    "ft_UpdateDistanceThisInterval_win",   // 303
+    "ft_UpdateDistanceThisInterval_ses",   // 304
+    "ft_UpdateBoardTempPressureMaximums_win", // 305
+    "ft_UpdateBoardTempPressureMaximums_ses", // 306
+    "ft_handleSocGainReset_win",           // 307
+    "ft_handleSocGainReset_ses",           // 308
+    "ft_handleAltZeroReset_win",           // 309
+    "ft_handleAltZeroReset_ses",           // 310
+    "ft_calculateChargeTimes_win",         // 311
+    "ft_calculateChargeTimes_ses",         // 312
+    "ft_UpdateSailingMetrics_win",         // 313
+    "ft_UpdateSailingMetrics_ses",         // 314
+    "ft_updateWeatherMode_win",            // 315
+    "ft_updateWeatherMode_ses",            // 316
+    "ft_updateSensorWindow_win",           // 317
+    "ft_updateSensorWindow_ses",           // 318
+    "ft_checkTimeSync_win",                // 319
+    "ft_checkTimeSync_ses",                // 320
+    "currentRPMTableIndex",                // 321
+    "pidInitialized",                      // 322
+    "pidSetpoint",                         // 323
+    "TempToUse",                           // 324
+    "learningTargetFromRPM",               // 325
+    "ambientTempCorrection",               // 326
+    "finalLearningTarget",                 // 327
+    "overheatingPenaltyTimer",             // 328
+    "overheatingPenaltyAmps",              // 329
+    "averageTableValue",                   // 330
+    "timeSinceLastOverheat",               // 331
+    "socInfoAvailable",                    // 332
+    "overheatCount0",                      // 333
+    "overheatCount1",                      // 334
+    "overheatCount2",                      // 335
+    "overheatCount3",                      // 336
+    "overheatCount4",                      // 337
+    "overheatCount5",                      // 338
+    "overheatCount6",                      // 339
+    "overheatCount7",                      // 340
+    "overheatCount8",                      // 341
+    "overheatCount9",                      // 342
+    "cumulativeNoOverheatTime0",           // 343
+    "cumulativeNoOverheatTime1",           // 344
+    "cumulativeNoOverheatTime2",           // 345
+    "cumulativeNoOverheatTime3",           // 346
+    "cumulativeNoOverheatTime4",           // 347
+    "cumulativeNoOverheatTime5",           // 348
+    "cumulativeNoOverheatTime6",           // 349
+    "cumulativeNoOverheatTime7",           // 350
+    "cumulativeNoOverheatTime8",           // 351
+    "cumulativeNoOverheatTime9",           // 352
+    "learningUpCount0",                    // 353
+    "learningUpCount1",                    // 354
+    "learningUpCount2",                    // 355
+    "learningUpCount3",                    // 356
+    "learningUpCount4",                    // 357
+    "learningUpCount5",                    // 358
+    "learningUpCount6",                    // 359
+    "learningUpCount7",                    // 360
+    "learningUpCount8",                    // 361
+    "learningUpCount9",                    // 362
+    "totalLearningEvents",                 // 363
+    "totalOverheats",                      // 364
+    "totalSafeHours",                      // 365
+    "FreeInternalRam",                     // 366
+    "TotalInternalRam",                    // 367
+    "LargestInternalBlock",                // 368
+    "FreePSRAM",                           // 369
+    "TotalPSRAM",                          // 370
+    "Heapfrag",                            // 371
+    "ft_ReadAnalogInputs_win",             // 372
+    "ft_ReadAnalogInputs_ses",             // 373
+    "ft_AdjustFieldLearnMode_win",         // 374
+    "ft_AdjustFieldLearnMode_ses",         // 375
+    "ft_uploadSensorHistory_win",          // 376
+    "ft_uploadSensorHistory_ses",          // 377
+    "ft_uploadBufferedRecords_win",        // 378
+    "ft_uploadBufferedRecords_ses",        // 379
+    "ft_buildConfigPayload_win",           // 380
+    "ft_buildConfigPayload_ses",           // 381
+    "VeTime2",                             // 382
+    "systemIDRiseDelay_0",                 // 383
+    "systemIDRiseDelay_1",                 // 384
+    "systemIDRiseDelay_2",                 // 385
+    "systemIDFallDelay_0",                 // 386
+    "systemIDFallDelay_1",                 // 387
+    "systemIDFallDelay_2",                 // 388
+    "systemIDRiseAvg",                     // 389
+    "systemIDFallAvg",                     // 390
+    "nvsPhase",                            // 391
+    "ft_saveNVSData_win",                  // 392
+    "ft_saveNVSData_ses",                  // 393
+    "ft_FlushFileWriteQueue_win",          // 394
+    "ft_FlushFileWriteQueue_ses",          // 395
+    "ft_efficiencyTracker_win",            // 396
+    "ft_efficiencyTracker_ses",            // 397
+    "systemIDActive",                      // 398
+    "systemIDResultsReady",                // 399
+    "systemIDStepAmp_0",                   // 400
+    "systemIDStepAmp_1",                   // 401
+    "systemIDStepAmp_2",                   // 402
+    "systemIDQuietPP_0",                   // 403
+    "systemIDQuietPP_1",                   // 404
+    "systemIDQuietPP_2",                   // 405
+    "nvsCycleMs",                          // 406 — ms elapsed for last complete NVS drain cycle
+    "voltLoopWorstInterval_5s",            // 407 — worst voltage loop actual interval 5s window (ms)
+    "voltLoopWorstInterval_ses",           // 408 — worst voltage loop actual interval since boot (ms)
+    "fsFlushDeferred",                     // 409 — times FS flush skipped by co-fire guard (count)
+    // Flash write diagnostics — wear-leveling / GC stall fingerprint
+    "fsWriteCount",                        // 410 — total writeFile calls serviced
+    "fsWriteLongCount",                    // 411 — writes that took >= 100 ms
+    "fsWriteWorstMs",                      // 412 — worst single write duration (ms)
+    "fsWriteHist_0",                       // 413 — <25 ms
+    "fsWriteHist_1",                       // 414 — 25-50 ms
+    "fsWriteHist_2",                       // 415 — 50-100 ms
+    "fsWriteHist_3",                       // 416 — 100-200 ms
+    "fsWriteHist_4",                       // 417 — 200-500 ms
+    "fsWriteHist_5",                       // 418 — >=500 ms
+    // NVS commit timing — separates commit cost from 9-phase cycle cost
+    "nvsCommitCount",                      // 419 — total nvs_commit() calls
+    "nvsCommitLongCount",                  // 420 — commits >= 100 ms
+    "nvsCommitWorstMs",                    // 421 — worst single commit (ms)
+    "nvsCommitLastMs",                     // 422 — most recent commit (ms)
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",               // 0
@@ -3927,6 +3941,55 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+// ── Flash Write Slow-Write Ring ───────────────────────────────────────────
+// Polls /fs_slow_writes only while the FS Write Diagnostics <details> is open.
+// Renders the 8-deep ring as a small table. Used to see whether slow writes
+// hit the SAME file (caller pattern) or RANDOM files (true LittleFS GC).
+let _fsSlowWritesPollTimer = null;
+
+function fetchFsSlowWrites() {
+    fetch('/fs_slow_writes')
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) renderFsSlowWrites(data); })
+        .catch(() => {});
+}
+
+function renderFsSlowWrites(data) {
+    const body = document.getElementById('fsSlowWritesBody');
+    if (!body) return;
+    const items = data.items || [];
+    if (items.length === 0) {
+        body.innerHTML = '<tr><td colspan="3" style="padding:6px 8px; font-size:12px; color:#888; text-align:center;">No writes ≥ 100 ms recorded yet</td></tr>';
+        return;
+    }
+    // Newest first. Age is shown relative to now so the user doesn't need
+    // to know the device's boot time. Duration shown to the millisecond.
+    let html = '';
+    for (const it of items) {
+        const ageSec = (it.age_ms / 1000).toFixed(1);
+        html += '<tr>'
+              + '<td style="padding:4px 8px; font-size:12px; font-family:monospace;">' + (it.path || '?') + '</td>'
+              + '<td style="padding:4px 8px; font-size:12px; text-align:right;">' + it.dur_ms + ' ms</td>'
+              + '<td style="padding:4px 8px; font-size:12px; text-align:right; color:#666;">' + ageSec + 's ago</td>'
+              + '</tr>';
+    }
+    body.innerHTML = html;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const section = document.getElementById('fsWriteDiagSection');
+    if (!section) return;
+    section.addEventListener('toggle', e => {
+        if (e.target.open) {
+            fetchFsSlowWrites();
+            _fsSlowWritesPollTimer = setInterval(fetchFsSlowWrites, 3000);
+        } else {
+            clearInterval(_fsSlowWritesPollTimer);
+            _fsSlowWritesPollTimer = null;
+        }
+    });
+});
+
 // ── Thermal Step Test Tuning Log ──────────────────────────────────────────
 let _thermalTuningLogPollTimer = null;
 
@@ -4831,7 +4894,7 @@ function initVoltagePlot() {
             },
             {
                 label: "INA Battery (V)",
-                stroke: "#607D8B",
+                stroke: "#4CAF50",
                 width: 2,
                 scale: "voltage"
             },
@@ -5444,7 +5507,9 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("TrueWindAngleNMEA_ID", sa.trueWindAngle);
 
     // --- Baro / ambient — dedicated timestamps ---
-    applyStaleStyleByAge("baroPressureID", sa.baroPressure);
+    // Both come from the BMP388 on an 8s read cycle. Use the 12s threshold for
+    // both so a single missed read does not flip the UI stale.
+    applyStaleStyleByAge("baroPressureID", sa.baroPressure, STALE_THRESHOLD_TEMP_MS);
     applyStaleStyleByAge("ambientTempID", sa.ambientTemp, STALE_THRESHOLD_TEMP_MS);
 
     // --- IMU — all displays share one timestamp ---
@@ -6466,24 +6531,29 @@ window.addEventListener("load", function () {
             const fieldIndicator = document.getElementById('field-status');
             const fieldWrapper = fieldIndicator ? fieldIndicator.closest('.reading-value') : null;
             const dutyCycleDisplay = document.getElementById('dutyCycleID3');
+            const dutyPercentSign  = document.getElementById('dutyCyclePercentSign');
 
             if (fieldIndicator) {
                 if (data.fieldActiveStatus === 1) {
                     fieldIndicator.textContent = 'ACTIVE';
                     if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-active';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'inline';
+                    if (dutyPercentSign)  dutyPercentSign.style.display  = 'inline';
                 } else if (data.fieldActiveStatus === 2) {
                     fieldIndicator.textContent = 'RAMP DOWN';
                     if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-rampdown';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'inline';
+                    if (dutyPercentSign)  dutyPercentSign.style.display  = 'inline';
                 } else if (data.fieldActiveStatus === 3) {
                     fieldIndicator.textContent = 'MANUAL';
                     if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-manual';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'inline';
+                    if (dutyPercentSign)  dutyPercentSign.style.display  = 'inline';
                 } else {
                     fieldIndicator.textContent = 'OFF';
                     if (fieldWrapper) fieldWrapper.className = 'reading-value header-field-cluster field-status-inactive';
                     if (dutyCycleDisplay) dutyCycleDisplay.style.display = 'none';
+                    if (dutyPercentSign)  dutyPercentSign.style.display  = 'none';
                 }
             }
 
@@ -6527,7 +6597,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
-                        newTextContent = (value / 100).toFixed(2);
+                        newTextContent = (value / 100).toFixed(1);
                     }
 
                     // Values scaled by 100 on server
@@ -7364,11 +7434,40 @@ window.addEventListener("load", function () {
                 ["voltLoopWorstInterval_5s_ID", "voltLoopWorstInterval_5s"],
                 ["voltLoopWorstInterval_ses_ID", "voltLoopWorstInterval_ses"],
                 ["fsFlushDeferred_ID", "fsFlushDeferred"],
+                // Flash write diagnostics — raw counters + histogram buckets.
+                // Percent-long and refresh of the /fs_slow_writes ring are
+                // computed in a dedicated render path below (see fsDiag block).
+                ["fsWriteCount_ID", "fsWriteCount"],
+                ["fsWriteLongCount_ID", "fsWriteLongCount"],
+                ["fsWriteWorstMs_ID", "fsWriteWorstMs"],
+                ["fsWriteHist_0_ID", "fsWriteHist_0"],
+                ["fsWriteHist_1_ID", "fsWriteHist_1"],
+                ["fsWriteHist_2_ID", "fsWriteHist_2"],
+                ["fsWriteHist_3_ID", "fsWriteHist_3"],
+                ["fsWriteHist_4_ID", "fsWriteHist_4"],
+                ["fsWriteHist_5_ID", "fsWriteHist_5"],
 
             ];
 
             // Update other fields every cycle
             updateFields(otherFields);
+
+            // Flash write diagnostics — derived display values.
+            // Long-write percentage: long writes / total writes. Tells us at a
+            // glance how often a flush stalls Core 1 for >= 100 ms.
+            {
+                const total = data.fsWriteCount;
+                const long  = data.fsWriteLongCount;
+                if (total !== undefined && long !== undefined) {
+                    const pct = (total > 0) ? (100 * long / total) : 0;
+                    const txt = total > 0 ? pct.toFixed(3) + '%' : '—';
+                    const cacheKey = 'fsWriteLongPct';
+                    if (lastValues.get(cacheKey) !== txt) {
+                        lastValues.set(cacheKey, txt);
+                        scheduleDOMUpdateOptimized('fsWriteLongPct_ID', txt);
+                    }
+                }
+            }
 
             // Temperature PID terms displayed as current contributions (sign-flipped:
             // positive = adding amps, negative = removing amps)

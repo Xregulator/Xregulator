@@ -463,7 +463,7 @@ static void mergeWindowIntoMatrix() {
 //   Only fires once per bin per session to avoid flooding.
 //
 // Both tiers require referenceFinalized and is_reference_bin.
-// sessionErrorCount = tier1 + tier2 combined.
+// Total errors reported to UI = sessionTier1Errors + sessionTier2Errors combined.
 // PLACEHOLDER: EFF_THERMAL_MIN_SAMPLES = 90 — tune if thermal
 //   time constant differs from expected 1-2 minutes.
 // ============================================================
@@ -712,7 +712,7 @@ void resetEfficiencyMatrix() {
   sessionTier2Errors = 0;
   effAnomalyAlarmActive = false;
 
-  // Remove legacy sessionErrorCount if still present — replaced by L1+L2 counters
+  // Note: only L1+L2 counters exist now — legacy sessionErrorCount was removed
   queueConsoleMessage("EffMatrix: Full reset — all matrix, reference, and history data cleared");
 }
 
@@ -725,7 +725,7 @@ void resetEfficiencyMatrix() {
 //   state, rBucket, tBucket, fBucket,
 //   rLabel, tLabel, fLabel,
 //   ss_seconds, avg_amps, min_amps, max_amps,
-//   is_reference_bin, sessionErrorCount
+//   is_reference_bin, totalErrors (= sessionTier1Errors + sessionTier2Errors)
 //
 // state: 0 = weak/empty (no reference data)
 //        1 = populated but not a reference bin (low confidence)
@@ -776,7 +776,7 @@ void sendEfficiencyData() {
   lastT = activeTempBucket;
   lastF = activeFieldBucket;
   lastSS = cell.ss_seconds;
-  lastErr = sessionErrorCount;
+  lastErr = currentErrors;
 }
 
 void sendEfficiencyRedDot() {
@@ -1251,7 +1251,12 @@ static uint32_t  ina2mStart = 0;
 
 static uint64_t  inaAtSum   = 0;
 static uint32_t  inaAtCount = 0;
-static uint16_t  inaAtWorst = 0;
+// inaAtWorst removed — write directly to the public ina_worst_at instead.
+// Live dashboard was showing ina_worst_at=0 while ina_over2x_at=420 and
+// ina_avg_at=5.19 — logically impossible if both updates run through the
+// same code path. Cold reading of the function shows no obvious cause,
+// so the intermediate is eliminated and the published variable becomes
+// the single source of truth. Same treatment applied to ina_worst_2m.
 static uint32_t  inaAtOver2x = 0;
 static uint32_t  inaPrevRead = 0;
 
@@ -1277,10 +1282,16 @@ void recordINA228Interval(uint32_t now) {
   uint16_t iv = (diff > 65535u) ? 65535u : (uint16_t)diff;
   ina_last_ms = iv;
 
-  // All-time accumulators
+  // All-time accumulators (avg + over2x via running mean as before).
+  // Worst is written DIRECTLY to the published variable — no intermediate.
   inaAtCount++;
   inaAtSum += iv;
-  if (iv > inaAtWorst) inaAtWorst = iv;
+  if (iv > ina_worst_at) ina_worst_at = iv;
+  // Also write the "2m" worst directly. With this in place ina_worst_2m
+  // becomes "max iv since last field-on event" rather than a strict 2m
+  // rolling window. The bucket-based avg + over2x for 2m still work
+  // and remain rolling. Tooltips already say "since field-on" for these.
+  if (iv > ina_worst_2m) ina_worst_2m = iv;
   if (inaAtCount > 1) {
     float runMean = (float)((double)inaAtSum / inaAtCount);
     if ((float)iv > runMean * 2.0f) inaAtOver2x++;
@@ -1336,23 +1347,23 @@ void recordINA228Interval(uint32_t now) {
   ina_avg_10s    = (n10 > 0) ? (float)sum10 / (float)n10 : 0.0f;
   ina_over2x_10s = 0;  // not tracked at 1s granularity
 
-  // Publish 2m stats
+  // Publish 2m stats. ina_worst_2m is now updated DIRECTLY on every sample
+  // (above), so this block does NOT touch it — only avg + over2x come from
+  // the bucket ring.
   uint32_t n2m = 0;
   uint64_t sum2m = 0;
-  ina_worst_2m   = 0;
   ina_over2x_2m  = 0;
   for (uint8_t i = 0; i < ina2mCount; i++) {
     uint8_t idx = (ina2mHead + INA_BUCKETS - 1 - i) % INA_BUCKETS;
     n2m          += ina2mB[idx].count;
     sum2m        += ina2mB[idx].sum;
     ina_over2x_2m += ina2mB[idx].over2x;
-    if (ina2mB[idx].worst > ina_worst_2m) ina_worst_2m = ina2mB[idx].worst;
   }
   ina_avg_2m = (n2m > 0) ? (float)sum2m / (float)n2m : 0.0f;
 
-  // Publish all-time stats
+  // Publish all-time stats. ina_worst_at is also updated directly above,
+  // so the publish only handles avg + over2x.
   ina_avg_at    = (inaAtCount > 0) ? (float)((double)inaAtSum / inaAtCount) : 0.0f;
-  ina_worst_at  = inaAtWorst;
   ina_over2x_at = inaAtOver2x;
 }
 

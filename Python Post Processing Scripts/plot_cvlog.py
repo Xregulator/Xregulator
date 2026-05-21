@@ -843,23 +843,25 @@ add_voltloop_vlines(ax4, df)
 # Uses (targV - battV_filt_V) to match what the firmware feeds to Kp.
 df["filt_error_V"] = df["targV"] - df["battV_filt_V"]
 ax4b.plot(df["t_plot"], df["filt_error_V"],
-          color="#1565c0", lw=1.8, alpha=0.85, label="targV − battV_filt_V  (filtered error fed to P term)")
+          color="#212121", lw=1.8, alpha=0.90, label="targV − battV_filt_V  (filtered error fed to P term)")
 ax4b.plot(df["t_plot"], df["vError_V"],
-          color="#90caf9", lw=1.2, linestyle="--", alpha=0.65, label="vError_V  (raw IBV, logged reference)")
+          color="#9e9e9e", lw=1.2, linestyle="--", alpha=0.70, label="vError_V  (raw IBV, logged reference)")
 ax4b.axhline(0, color="#999999", linewidth=0.7, linestyle=":", alpha=0.5)
 ax4b.set_ylabel("vError (V)")
 
-# cvDSlope on a right twin axis — V/s scale is very different from V error scale
+# cvDSlope on a right twin axis — V/s scale is very different from V error scale.
+# cvDSlope = the input signal (purple); SlopeBleedThresh = threshold reference line
+# kept in the slope-bleed orange family to visually link it to slopeBleedAmps_A scatter above.
 if "cvDSlope_Vps" in df.columns:
     _ax4b_slope = ax4b.twinx()
     _ax4b_slope.plot(df["t_plot"], df["cvDSlope_Vps"],
-                     color="#f57c00", lw=1.4, alpha=0.75, linestyle="-.",
+                     color="#7b1fa2", lw=1.4, alpha=0.80, linestyle="-.",
                      label="cvDSlope  (V/s — slope bleed input)")
     if not np.isnan(_sb_thresh):
-        _ax4b_slope.axhline(_sb_thresh, color="#f57c00", linewidth=0.8, linestyle=":",
-                            alpha=0.65, label=f"SlopeBleedThresh ({_sb_thresh:.3g} V/s)")
-    _ax4b_slope.set_ylabel("cvDSlope (V/s)", color="#f57c00", fontsize=11)
-    _ax4b_slope.tick_params(axis="y", colors="#f57c00", labelsize=10)
+        _ax4b_slope.axhline(_sb_thresh, color="#f57c00", linewidth=1.0, linestyle="--",
+                            alpha=0.75, label=f"SlopeBleedThresh ({_sb_thresh:.3g} V/s)")
+    _ax4b_slope.set_ylabel("cvDSlope (V/s)", color="#7b1fa2", fontsize=11)
+    _ax4b_slope.tick_params(axis="y", colors="#7b1fa2", labelsize=10)
     _h4b_slope = [l for l in _ax4b_slope.get_lines() if not l.get_label().startswith("_")]
 else:
     _h4b_slope = []
@@ -879,10 +881,104 @@ draw_flag_bars(ax4s, df)
 
 
 # ---------------------------------------------------------------------------
+# PLOT 5 — Voltage Loop Firing Health (diagnostic for stalls)
+# Shows "ms since previous voltage loop fire" as a sawtooth. Long flat ramps
+# = the 100ms CV PI loop did NOT fire when it should have, leaving setpoint
+# and integrator stale. Most protections sit downstream of this loop, so any
+# stall here is a stall of every overvoltage protection too.
+# ---------------------------------------------------------------------------
+fig5 = plt.figure(figsize=(18, 8), num="Plot 5 — Voltage Loop Health")
+gs5  = gridspec.GridSpec(2, 1, height_ratios=[3, 1.6], hspace=0.12)
+ax5  = fig5.add_subplot(gs5[0])
+ax5b = fig5.add_subplot(gs5[1], sharex=ax5)
+plt.setp(ax5.get_xticklabels(), visible=False)
+fig5.suptitle(f"Plot 5 — Voltage Loop Firing Health  |  {outer_label}", fontsize=14, y=0.99)
+add_subtitle(fig5,
+    "Top: ms since previous voltage loop fire. Should reset to ~0 every 100 ms. "
+    "Long flat ramps = the loop stalled — setpoint and integrator stayed frozen. "
+    "Bottom: battV during the same window. Stall + rising RPM = uncontrolled overshoot.")
+fig5.subplots_adjust(top=0.90, right=0.80)
+
+# Compute "ms since last voltage loop fire" for every row.
+# Resets to 0 on each fire; grows linearly between fires.
+_last_fire_t = None
+_t_since = []
+for _i, _row in df.iterrows():
+    if _row["voltLoopFired"] == 1:
+        _last_fire_t = _row["t_plot"]
+    if _last_fire_t is None:
+        _t_since.append(float("nan"))
+    else:
+        _t_since.append((_row["t_plot"] - _last_fire_t) * 1000.0)
+df["t_since_vloop_ms"] = _t_since
+
+# Trailing silence: from last fire to end of file (no further fire = silent)
+_fires = df.loc[df["voltLoopFired"] == 1]
+_last_fire_t_global = _fires["t_plot"].iloc[-1] if len(_fires) > 0 else None
+_file_end_t = df["t_plot"].iloc[-1]
+
+ax5.plot(df["t_plot"], df["t_since_vloop_ms"],
+         color="#1565c0", lw=1.6, label="ms since previous voltage loop fire")
+
+# Markers at each actual fire (interval value from log column)
+if len(_fires) > 0 and "voltLoopInterval_ms" in df.columns:
+    _intervals = _fires["voltLoopInterval_ms"].astype(float)
+    ax5.scatter(_fires["t_plot"], _intervals,
+                s=30, color="#0d47a1", zorder=5, marker="o",
+                label="Fire events (interval since previous fire)")
+
+# Threshold reference lines
+ax5.axhline(y=100, color="#2e7d32", linestyle="--", lw=1.0, alpha=0.65,
+            label="Expected (100 ms)")
+ax5.axhline(y=200, color="#f57c00", linestyle=":",  lw=1.0, alpha=0.65,
+            label="2× expected (200 ms)")
+ax5.axhline(y=300, color="#c62828", linestyle=":",  lw=1.0, alpha=0.65,
+            label="3× expected (300 ms)")
+
+# Highlight "silent" trailing region (last fire to file end, if > 200 ms)
+if _last_fire_t_global is not None:
+    _silence_ms = (_file_end_t - _last_fire_t_global) * 1000.0
+    if _silence_ms > 200:
+        ax5.axvspan(_last_fire_t_global, _file_end_t,
+                    color="#c62828", alpha=0.12,
+                    label=f"Silent zone — no fire for {_silence_ms:.0f} ms")
+
+ax5.set_ylabel("ms since last voltage loop fire", fontsize=12)
+ax5.grid(**GRID_KW)
+_leg5 = ax5.legend(loc="upper left", fontsize=10)
+_leg5.set_draggable(True)
+
+# Bottom panel — battV in same window for visual correlation
+ax5b.plot(df["t_plot"], df["battV"],
+          color="#1565c0", lw=2.0, label="battV (measured)")
+ax5b.plot(df["t_plot"], df["targV"],
+          color="#e91e63", lw=1.6, linestyle="--", label="targV (setpoint)")
+ax5b.set_xlabel(time_label, fontsize=13)
+ax5b.set_ylabel("Voltage (V)", fontsize=12)
+ax5b.grid(**GRID_KW)
+ax5b.legend(loc="upper left", fontsize=10)
+add_ov_shading(ax5b, df)
+
+# Print summary to console
+if len(_fires) > 1 and "voltLoopInterval_ms" in df.columns:
+    _ivals = _fires["voltLoopInterval_ms"].astype(float)
+    _worst = _ivals.max()
+    _over_200 = int((_ivals > 200).sum())
+    _over_300 = int((_ivals > 300).sum())
+    print(f"Voltage loop: {len(_fires)} fires | worst interval = {_worst:.0f} ms | "
+          f"{_over_200} fires with >200 ms gap | {_over_300} with >300 ms gap")
+    if _last_fire_t_global is not None:
+        _silence_ms = (_file_end_t - _last_fire_t_global) * 1000.0
+        if _silence_ms > 200:
+            print(f"  TRAILING SILENCE: last fire at t={_last_fire_t_global:.3f}s, "
+                  f"no further fires for {_silence_ms:.0f} ms before end of file")
+
+
+# ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # ---------------------------------------------------------------------------
-_all_primary_axes = [ax1, ax2a, ax3, ax4]
-_all_figs         = [fig1, fig2, fig3, fig4]
+_all_primary_axes = [ax1, ax2a, ax3, ax4, ax5]
+_all_figs         = [fig1, fig2, fig3, fig4, fig5]
 _syncing = [False]
 
 def _on_xlim_changed(changed_ax):

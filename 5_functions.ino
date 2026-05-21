@@ -63,8 +63,44 @@ void FlushFileWriteQueue() {
   unsigned long now = millis();
   if (now - lastFlush < 25) return;  // spread writes — each LittleFS write blocks ~40-50ms; prevents 700ms stall
   lastFlush = now;
-  writeFile(LittleFS, fsWriteQueue[fsWriteHead].path,
-            fsWriteQueue[fsWriteHead].data);
+
+  // Bracket the actual flash write with micros() so we measure ONLY the
+  // LittleFS write cost, not the wrapper overhead. Used to build the
+  // duration histogram and detect wear-leveling stalls.
+  const char *path = fsWriteQueue[fsWriteHead].path;
+  const char *data = fsWriteQueue[fsWriteHead].data;
+  uint16_t dataLen = (uint16_t)strnlen(data, FS_WRITE_DATA_MAX);
+  uint32_t tStart = micros();
+  writeFile(LittleFS, path, data);
+  uint32_t durUs = micros() - tStart;
+  uint32_t durMs = durUs / 1000UL;
+
+  // Histogram bucketing — boundaries match the user-facing labels:
+  //   [0] <25  [1] 25-50  [2] 50-100  [3] 100-200  [4] 200-500  [5] >=500
+  uint8_t bkt;
+  if      (durMs <  25) bkt = 0;
+  else if (durMs <  50) bkt = 1;
+  else if (durMs < 100) bkt = 2;
+  else if (durMs < 200) bkt = 3;
+  else if (durMs < 500) bkt = 4;
+  else                  bkt = 5;
+  fsWriteHist[bkt]++;
+  fsWriteCount++;
+  if (durMs > fsWriteWorstMs) fsWriteWorstMs = (durMs > 65535UL) ? 65535 : (uint16_t)durMs;
+
+  // Slow-write capture: any write >= 100 ms gets pushed to the ring.
+  // Ring is overwrite-oldest so we always have the 8 MOST RECENT slow events.
+  if (durMs >= 100) {
+    fsWriteLongCount++;
+    FsSlowWrite &slot = fsSlowRing[fsSlowRingHead];
+    slot.whenMs     = now;
+    slot.durationMs = (durMs > 65535UL) ? 65535 : (uint16_t)durMs;
+    slot.dataLen    = dataLen;
+    strlcpy(slot.path, path, FS_SLOW_PATH_MAX);
+    fsSlowRingHead = (fsSlowRingHead + 1) % FS_SLOW_RING_SIZE;
+    if (fsSlowRingCount < FS_SLOW_RING_SIZE) fsSlowRingCount++;
+  }
+
   fsWriteHead = (fsWriteHead + 1) % FS_WRITE_QUEUE_DEPTH;
   heavyIOThisTick = true;  // signal that a flash write happened this tick
 }
@@ -3995,7 +4031,16 @@ void saveNVSData() {
         nvsPhase = 0;
         break;
       }
-      if (nvsChg) { nvs_commit(nvsH); heavyIOThisTick = true; }  // flag so FlushFileWriteQueue defers this tick
+      if (nvsChg) {
+        uint32_t _cmt0 = micros();
+        nvs_commit(nvsH);
+        uint32_t _cmtMs = (micros() - _cmt0) / 1000UL;
+        nvsCommitCount++;
+        nvsCommitLastMs = (_cmtMs > 65535UL) ? 65535 : (uint16_t)_cmtMs;
+        if (_cmtMs > nvsCommitWorstMs) nvsCommitWorstMs = nvsCommitLastMs;
+        if (_cmtMs >= 100) nvsCommitLongCount++;
+        heavyIOThisTick = true;  // flag so FlushFileWriteQueue defers this tick
+      }
       nvs_close(nvsH);
       nvsH = 0;
       nvsCycleMs = millis() - nvsCycleStart;
