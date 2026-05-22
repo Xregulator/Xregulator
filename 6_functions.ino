@@ -607,7 +607,7 @@ void commitCVTuningRecord() {
   rec.awBleedRate = AwBleedRate;
   rec.awRecoverRate = AwRecoverRate;
   rec.awSeedProtectMs = AwSeedProtectMs;
-  rec.iExcessReseedFrac = IExcessReseedFrac;
+  rec.reseedFrac = ReseedFrac;
   rec.kHard = KHard;
   rec.iExcessK = IExcessK;
   rec.iExcessN = IExcessN;
@@ -1019,17 +1019,6 @@ void AdjustFieldLearnMode() {
   // Applied to uTargetAmps after RPM/thermal/user overrides in the AUTO path.
   // Direct cv_I clamp kept here because the CV loop only runs every 100ms;
   // without it cv_I builds positive for up to 100ms while battV is above target.
-  //
-  // nearBulk: software protections arm when EITHER the target OR the actual measured
-  // voltage is within ProtectionProxGateV of BulkVoltage. The target check keeps
-  // protections armed during normal bulk/absorption charging. The actual-voltage check
-  // catches the case where an external disturbance (RPM ramp, load drop, etc.) drives
-  // real voltage up to dangerous territory while target is set low (e.g., float or
-  // tuning at 13.4V) — without it, a 12V→15V overshoot would see zero protection.
-  // ProtectionProxGateV <= 0 disables the gate entirely — all protections always armed.
-  bool nearBulk = (ProtectionProxGateV <= 0.0f)
-                  || (ChargingVoltageTarget >= BulkVoltage - ProtectionProxGateV)
-                  || (IBV >= BulkVoltage - ProtectionProxGateV);
 
   {
     static float vPrev = 0.0f;
@@ -1037,6 +1026,7 @@ void AdjustFieldLearnMode() {
     static float dvdt = 0.0f;
     static bool ovActive = false;
     static float preEventIcv = 0.0f;
+    static float preEventCvI_g12 = 0.0f;  // cv_I snapshot before any Group 1/2 bleed (for explicit recovery seed)
 
     g_fastOvHardActive = false;
     g_fastOvVpred = IBV;
@@ -1044,10 +1034,11 @@ void AdjustFieldLearnMode() {
     if (ibvFreshFlag) {
       ibvFreshFlag = false;
       if (vPrevMs > 0) {
-        float dtV = (currentMillis - vPrevMs) / 1000.0f;
-        if (dtV > 0.001f && dtV < 0.1f) {
-          float raw = (IBV - vPrev) / dtV;
-          dvdt = DvdtAlpha * raw + (1.0f - DvdtAlpha) * dvdt;
+        uint32_t dtMs = currentMillis - vPrevMs;
+        if (dtMs >= 1 && dtMs <= 100) {
+          float raw = (IBV - vPrev) / ((float)dtMs * 0.001f);  // V/s
+          float alpha = (float)dtMs / (DvdtTC + (float)dtMs);   // dt-aware EMA: TC stays constant across sample-rate jitter
+          dvdt = alpha * raw + (1.0f - alpha) * dvdt;
         }
       }
       vPrev = IBV;
@@ -1055,7 +1046,7 @@ void AdjustFieldLearnMode() {
     }
     g_fastOvDvdt = dvdt;
 
-    if (voltageControlActive && nearBulk) {
+    if (voltageControlActive) {  // Groups 1/2 target-relative; gated only on voltageControlActive
       const float TD_PRED = TdPred;
       const float V_HARD = ChargingVoltageTarget + OvPredMarginV;
       const float PRED_GUARD = 0.06f;
@@ -1065,6 +1056,7 @@ void AdjustFieldLearnMode() {
 
       if (!ovActive) {
         preEventIcv = Icv;
+        preEventCvI_g12 = cv_I;  // captured before AwBleed touches it during this event
       }
 
       if (IBV > ChargingVoltageTarget - PRED_GUARD) {
@@ -1085,7 +1077,7 @@ void AdjustFieldLearnMode() {
         g_fastOvHardActive = true;
       }
 
-      // Recovery seed: fires once when clamp de-asserts.
+      // Recovery seed on clamp de-assert: cv_I = preEventCvI_g12 × ReseedFrac (independent of event duration; see CV_Loop_Dev_Summary.md).
       if (ovActive
           && (IBV <= ChargingVoltageTarget)
           && (Vpred <= V_HARD)) {
@@ -1093,29 +1085,14 @@ void AdjustFieldLearnMode() {
         float e = ChargingVoltageTarget - IBV;
         float icvHi = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
 
-        // cv_I = clamp_f(preEventIcv - VoltageKp * e, 0.0f, icvHi);  // likely to remove permanently
-        // cv_I here is already bled down by AwBleed during the fastOV period.
-        // That makes this seed conservative (below pre-event level), which is intentional —
-        // current rebuilds via the bumpless tracker rather than jumping straight back.
-        // If recovery looks sluggish, tune AwRecoverRate rather than changing this seed.
+        cv_I = clamp_f(preEventCvI_g12 * ReseedFrac, 0.0f, icvHi);
         Icv = clamp_f(VoltageKp * e + cv_I, 0.0f, icvHi);
         setpointLimited = Icv;
 
         ovActive = false;
-
-        // queueConsoleMessageF(
-        //   "FastOV release | BattV=%.3fV e=%.3fV preEventIcv=%.2fA "
-        //   "cv_I_seed=%.2fA Icv=%.2fA spLim=%.2fA",
-        //   BatteryV, e, preEventIcv, cv_I, Icv, setpointLimited);
-        // Serial.printf(
-        //   "FastOV release | BattV=%.3fV e=%.3fV preEventIcv=%.2fA "
-        //   "cv_I_seed=%.2fA Icv=%.2fA spLim=%.2fA\n",
-        //   BatteryV, e, preEventIcv, cv_I, Icv, setpointLimited);
       }
     } else {
-      ovActive = false;
-      // fastOvCurrentCap stays at MaxTableValue (per-tick default)
-      // Covers: !voltageControlActive OR !nearBulk (target below BulkVoltage - ProtectionProxGateV)
+      ovActive = false;  // !voltageControlActive (idle only — MaintainMode now sets voltageControlActive=true)
     }
   }
 
@@ -1266,7 +1243,7 @@ void AdjustFieldLearnMode() {
   // the 80%/s governor rate limit holding it back.
   //
   // Trigger: fastOvClampActive (fast OV supervisor — Group 2 prediction or Group 3 measured threshold).
-  // This inherits the rate-of-rise EMA (DvdtAlpha=0.08) + prediction arm zone filtering already
+  // This inherits the rate-of-rise EMA (DvdtTC=58 ms) + prediction arm zone filtering already
   // present in the fast OV supervisor, so it does not fire on measurement noise
   // near target — addressing the original nuisance-trigger concern that led to the
   // old +0.12 V raw-voltage threshold.
@@ -1790,18 +1767,18 @@ void AdjustFieldLearnMode() {
               fastOvClampActive = true;  // hold govBypass during hysteresis
             } else {
               if (iExcessActive) {
-                // Seed recovery to IExcessReseedFrac of the pre-event level so the PI
+                // Seed recovery to ReseedFrac of the pre-event level so the PI
                 // rebuilds from below target rather than bouncing straight back through
                 // the setpoint and re-triggering.
-                cv_I = preEventCvI * IExcessReseedFrac;
+                cv_I = preEventCvI * ReseedFrac;
               }
               iExcessActive = false;
             }
           } else {
-            // Gate closed (battV dropped below targV - OvMeasMarginV, or !nearBulk) — still seed recovery
+            // Gate closed (battV dropped below targV - OvMeasMarginV) — still seed recovery
             // if an event was active, otherwise cv_I stays at zero and the trap persists.
             if (iExcessActive) {
-              cv_I = preEventCvI * IExcessReseedFrac;
+              cv_I = preEventCvI * ReseedFrac;
             }
             iExcessPersistCount = 0;
             iExcessActive = false;
@@ -1815,7 +1792,7 @@ void AdjustFieldLearnMode() {
         // INA228 noise is alternating-sign (high/low/high/low) — two consecutive same-direction crossings
         // cannot be measurement noise. Tier 1 catches hard-switched FET disconnects; tiers 2/3 catch
         // relay-contact events spread over multiple samples.
-        // Gate: CV mode only, fast INA228 reads active (5ms cadence).
+        // Gate: voltageControlActive (= !inIdleStage; bulk/absorption/float/TVMode/MaintainMode) and fast INA228 reads active (5ms cadence).
         // On detection: snaps cv_I = 0 on rising edge and collapses setpointLimited + fastOvCurrentCap to 0.
         // Recovery: AW bleed drives recovery naturally — same path as fastOV.
         {
@@ -1827,7 +1804,8 @@ void AdjustFieldLearnMode() {
           static int ldCount1 = 0;  // consecutive samples above LoadDumpDtThresh1
           static int ldCount2 = 0;  // consecutive samples above LoadDumpDtThresh
           static int ldCount3 = 0;  // consecutive samples above LoadDumpDtThresh3
-          if (voltageControlActive && nearBulk && inaFastModeActive) {
+          static float preEventCvI_ld = 0.0f;  // cv_I snapshot before LD snap (for explicit recovery seed on release)
+          if (voltageControlActive && inaFastModeActive) {
             if (g_dBcur_dt > LoadDumpDtThresh1) {
               ldCount1++;
             } else {
@@ -1849,9 +1827,13 @@ void AdjustFieldLearnMode() {
               setpointLimited = 0.0f;
               fastOvClampActive = true;
               if (!ldWasActive) {
-                cv_I = 0.0f;  // snap integrator on rising edge only; AW bleed drives recovery
+                preEventCvI_ld = cv_I;  // capture before snap so we can seed recovery from it
+                cv_I = 0.0f;            // snap integrator on rising edge
                 g_loadDumpCount++;
               }
+            } else if (ldWasActive) {
+              // Falling edge — explicit recovery seed (matches Group 3 / Groups 1-2 pattern).
+              cv_I = preEventCvI_ld * ReseedFrac;
             }
             g_loadDumpActive = ldNow;
             ldWasActive = ldNow;
@@ -1903,7 +1885,9 @@ void AdjustFieldLearnMode() {
         voltageControlActive = !inIdleStage;
         if (TargetVoltageMode == 1) voltageControlActive = true;  // force CV active even from idle
         if (MaintainMode == 1) {
-          voltageControlActive = false;
+          // Ceiling enforcer: PI runs at BulkVoltage but uTargetAmps=0 caps Icv→0, so setpoint stays 0; Groups 1/2 arm.
+          voltageControlActive = true;
+          ChargingVoltageTarget = BulkVoltage;
           if (enteringMaintainMode) {
             queueConsoleMessage("MaintainMode: active, targeting 0 net battery amps");
           }
@@ -2458,30 +2442,28 @@ void updateChargingStage() {
   const float v = getFiltV();
   const int soc = SOC_percent;
 
-  const float BULK_V_BAND = 0.05f;
+  // Two-sided hysteresis: timer arms when V reaches BulkVoltage − ENTER, resets only when V falls below BulkVoltage − EXIT. Prevents 30–50 mV idle noise from constantly resetting the hold timer.
+  const float BULK_V_BAND_ENTER = 0.05f;
+  const float BULK_V_BAND_EXIT  = 0.10f;
 
   if (inBulkStage && !inAbsorptionStage) {
     // ===== BULK (CC) =====
     ChargingVoltageTarget = BulkVoltage;
 
-    const bool v_at_bulk = (v >= (BulkVoltage - BULK_V_BAND));
-
-    if (v_at_bulk) {
-      if (bulkVoltageHoldTimer == 0) {
-        bulkVoltageHoldTimer = now;
-      } else if ((uint32_t)(now - bulkVoltageHoldTimer) >= bulkVoltageHoldMs) {
-        inAbsorptionStage = true;
-        ChargingVoltageTarget = AbsorptionVoltage;
-        absorptionStartTime = now;
-        absorptionTailTimer = 0;
-        bulkVoltageHoldTimer = 0;
-        queueConsoleMessageF(
-          "Stage: BULK→ABSORPTION (hold timer) | battV=%.2fV bulkTarget=%.2fV absTarget=%.2fV tailCurrent=%.1fA timeout=%.0fmin",
-          v, BulkVoltage, AbsorptionVoltage, TailCurrent_A,
-          (float)AbsorptionTimeoutMs / 60000.0f);
-      }
-    } else {
+    if (bulkVoltageHoldTimer == 0) {
+      if (v >= (BulkVoltage - BULK_V_BAND_ENTER)) bulkVoltageHoldTimer = now;
+    } else if (v < (BulkVoltage - BULK_V_BAND_EXIT)) {
       bulkVoltageHoldTimer = 0;
+    } else if ((uint32_t)(now - bulkVoltageHoldTimer) >= bulkVoltageHoldMs) {
+      inAbsorptionStage = true;
+      ChargingVoltageTarget = AbsorptionVoltage;
+      absorptionStartTime = now;
+      absorptionTailTimer = 0;
+      bulkVoltageHoldTimer = 0;
+      queueConsoleMessageF(
+        "Stage: BULK→ABSORPTION (hold timer) | battV=%.2fV bulkTarget=%.2fV absTarget=%.2fV tailCurrent=%.1fA timeout=%.0fmin",
+        v, BulkVoltage, AbsorptionVoltage, TailCurrent_A,
+        (float)AbsorptionTimeoutMs / 60000.0f);
     }
 
   } else if (inBulkStage && inAbsorptionStage) {

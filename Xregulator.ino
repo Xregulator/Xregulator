@@ -1439,10 +1439,7 @@ bool sensorUploadInProgress = false;
 // (wait up to 30 s), OTA orchestration, and the AFLM gate at 6_functions.ino:1388.
 volatile bool core0Busy = false;
 
-// Local buffer config
-const char *SENSOR_BUFFER_DIR = "/sensor_buffer";
-const int MAX_BUFFERED_RECORDS = 900;  // ~1.75 MB in 3.8 MB userdata partition that also has at least 0.5mb of web files (as of Nov 2025)
-//The above translates to
+// Dashboard mirror of sensorRingCount. Real cap is SENSOR_RING_SIZE (1000).
 int bufferedRecordCount = 0;
 unsigned long lastBufferUploadAttempt = 0;
 
@@ -2073,7 +2070,7 @@ struct CVTuningRecord {
   // Integrator management
   float awBleedRate, awRecoverRate;
   uint16_t awSeedProtectMs;
-  float iExcessReseedFrac;
+  float reseedFrac;
   // FastOV supervisor
   float kHard;
   // iExcess
@@ -2249,8 +2246,8 @@ float PidKp = 0.5f;   // A/% duty — proportional gain
 float PidKi = 2.0f;   // integral gain
 float PidKd = 0.01f;  // derivative gain
 // --- Voltage (CV) PID ---
-float VoltageKp = 30.0f;             // A/V — proportional gain
-float VoltageKi = 6.00f;             // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
+volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)
+volatile float VoltageKi = 6.00f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
@@ -2268,14 +2265,12 @@ int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10
 float TdPred         = 0.045f;  // Group 1 lookahead horizon (s)
 float OvMeasMarginV  = 0.100f;  // Group 2 measured-voltage trigger margin above target (V)
 float OvPredMarginV  = 0.150f;  // Group 1 prediction trigger margin above target (V)
-float DvdtAlpha      = 0.08f;   // EMA alpha for dvdt (rate-of-rise) signal fed into Vpred (lower = smoother, more lag)
-// --- Protection proximity gate ---
-float ProtectionProxGateV = 0.5f; // V — protections only arm when ChargingVoltageTarget >= BulkVoltage - this
+float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed into Vpred. dt-aware: alpha = dt/(TC+dt). Was DvdtAlpha (constant alpha); renamed 2026-05-22.
 // --- iExcess current supervisor ---
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
-float IExcessReseedFrac = 0.5f;  // fraction of pre-event cv_I to seed on iExcess recovery
+float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
 float AwRecoverRate = 0.1f;      // fraction of MaxTableValue/s — cv_I_aw_cap recovery after fastOV clears
@@ -3028,16 +3023,16 @@ bool first_distance_calc = true;
 // Streamlined DataIndex enum - only tracks real-time sensor data that might go stale if a sensor is disconnected
 // Excludes peak/cumulative values that should persist even when source fails
 enum DataIndex {
-  IDX_HEADING_NMEA = 0,          // 0
-  IDX_LATITUDE_NMEA,             // 1
-  IDX_LONGITUDE_NMEA,            // 2
-  IDX_SATELLITE_COUNT,           // 3
-  IDX_VICTRON_VOLTAGE,           // 4
-  IDX_VICTRON_CURRENT,           // 5
-  IDX_ALTERNATOR_TEMP,           // 6
-  IDX_THERMISTOR_TEMP,           // 7
-  IDX_RPM,                       // 8
-  IDX_MEASURED_AMPS,             // 9
+  IDX_HEADING_NMEA = 0,
+  IDX_LATITUDE_NMEA,
+  IDX_LONGITUDE_NMEA,
+  IDX_SATELLITE_COUNT,
+  IDX_VICTRON_VOLTAGE,
+  IDX_VICTRON_CURRENT,
+  IDX_ALTERNATOR_TEMP,
+  IDX_THERMISTOR_TEMP,
+  IDX_RPM,
+  IDX_MEASURED_AMPS,
   IDX_BATTERY_V,                 // 10 - ADS1115 battery voltage
   IDX_IBV,                       // 11 - INA228 battery voltage
   IDX_BCUR,                      // 12 - Battery current from INA228
@@ -3045,23 +3040,23 @@ enum DataIndex {
   IDX_DUTY_CYCLE,                // 14 - Field duty cycle percentage
   IDX_FIELD_VOLTS,               // 15 - vvout (calculated field voltage)
   IDX_FIELD_AMPS,                // 16 - iiout (calculated field current)
-  IDX_COG_NMEA,                  // 17
-  IDX_SOG_NMEA,                  // 18
-  IDX_APPARENT_WIND_SPEED,       // 19
-  IDX_APPARENT_WIND_ANGLE,       // 20
-  IDX_TRUE_WIND_SPEED,           // 21
-  IDX_TRUE_WIND_ANGLE,           // 22
-  IDX_LEEWAY,                    // 23
-  IDX_VMG,                       // 24
-  IDX_BARO_PRESSURE,             // 25
-  IDX_AMBIENT_TEMP,              // 26
-  IDX_SOC_PERCENT,               // 27
-  IDX_WIFI_STRENGTH,             // 28
-  IDX_DYNAMIC_ALT_CURRENT_ZERO,  // 29
-  IDX_CHARGING_MODE,             // 30
-  IDX_TIME_TO_FULL_CHARGE,       // 31
-  IDX_TIME_TO_FULL_DISCHARGE,    // 32
-  IDX_DYNAMIC_SHUNT_GAIN,        // 33
+  IDX_COG_NMEA,
+  IDX_SOG_NMEA,
+  IDX_APPARENT_WIND_SPEED,
+  IDX_APPARENT_WIND_ANGLE,
+  IDX_TRUE_WIND_SPEED,
+  IDX_TRUE_WIND_ANGLE,
+  IDX_LEEWAY,
+  IDX_VMG,
+  IDX_BARO_PRESSURE,
+  IDX_AMBIENT_TEMP,
+  IDX_SOC_PERCENT,
+  IDX_WIFI_STRENGTH,
+  IDX_DYNAMIC_ALT_CURRENT_ZERO,
+  IDX_CHARGING_MODE,
+  IDX_TIME_TO_FULL_CHARGE,
+  IDX_TIME_TO_FULL_DISCHARGE,
+  IDX_DYNAMIC_SHUNT_GAIN,
   IDX_IMU,                       // 34 - IMU (accel/gyro/derived angles)
   // Keep this last and increment when new added
   MAX_DATA_INDICES = 35

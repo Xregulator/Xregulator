@@ -585,34 +585,35 @@ void httpsTask(void *param) {
   }
 }
 // SENSOR AGGREGATION FUNCTIONS
+// Init at boot: reset the in-progress accumulator windows. The PSRAM ring
+// itself is restored by restoreSensorRingFromLittleFS() right after this.
+// Also one-shot scrub of the legacy /sensor_buffer/ dir from pre-May2026
+// firmware — no-op on fresh devices.
 void initSensorBuffer() {
-  if (!fsExists(SENSOR_BUFFER_DIR)) {
-    fsMkdir(SENSOR_BUFFER_DIR);
-  }
-
-  // Count existing buffered files
-  fsTakeLock();
-  File root = LittleFS.open(SENSOR_BUFFER_DIR);
-  if (root && root.isDirectory()) {
-    bufferedRecordCount = 0;
-    File file = root.openNextFile();
-    while (file) {
-      esp_task_wdt_reset();
-      if (!file.isDirectory()) {
-        bufferedRecordCount++;
-      }
-      file = root.openNextFile();
-    }
-  }
-  fsReleaseLock();
-
-  if (bufferedRecordCount > 0) {
-    snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Found %d buffered", bufferedRecordCount);
-    queueConsoleMessage(messageBuffer);
-  }
-
   resetSensorWindow();
   resetAccelWindow();
+
+  const char *legacyDir = "/sensor_buffer";
+  if (fsExists(legacyDir)) {
+    fsTakeLock();
+    File root = LittleFS.open(legacyDir);
+    if (root && root.isDirectory()) {
+      File f = root.openNextFile();
+      while (f) {
+        esp_task_wdt_reset();
+        if (!f.isDirectory()) {
+          String p = f.path();
+          f.close();
+          LittleFS.remove(p.c_str());
+        }
+        f = root.openNextFile();
+      }
+      root.close();
+      LittleFS.rmdir(legacyDir);
+    }
+    fsReleaseLock();
+    Serial.println("Scrubbed legacy /sensor_buffer/ dir");
+  }
 }
 
 void resetSensorWindow() {
@@ -1096,9 +1097,7 @@ void updateSensorWindow() {
 
 // Build the cloud upload JSON for one sensor snapshot into the global
 // payloadBuffer. Returns bytes written (excluding null terminator), 0 on
-// overflow. Shared by the PSRAM-ring upload path (uploadBufferedRecords) and
-// the legacy LittleFS-buffer path (saveToLocalBuffer, still used for the
-// scheduled-restart bridge).
+// overflow. Used by the PSRAM-ring upload path (uploadBufferedRecords).
 //
 // All-time globals (AvgVoltage_AllTime, EngineRunTime_AllTime, totalOverheats,
 // etc.) are read LIVE — they represent cumulative state as of upload time,
@@ -1332,114 +1331,6 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
   return (size_t)written;
 }
 
-// FILE BUFFERING
-void saveToLocalBuffer(time_t collectionTime) {
-  if (otaInProgress) {
-    return;  // Skip during OTA
-  }
-  // Don't buffer if not registered or token is empty
-if (!isRegistered || authToken.isEmpty()) {
-    static unsigned long lastNotRegisteredMsgMs = 0;
-    if (millis() - lastNotRegisteredMsgMs >= 30000) {
-      lastNotRegisteredMsgMs = millis();
-      Serial.println("Skipping buffer save - not registered or no token");
-      queueConsoleMessage("Skipped buffer save: not registered");
-    }
-    return;
-  }
-  esp_task_wdt_reset();
-  fsTakeLock();  //- must be before any LittleFS call or fsReleaseLock()
-  // Enforce max buffered records (delete oldest to make room for newest)
-  if (bufferedRecordCount >= MAX_BUFFERED_RECORDS) {
-    File root = LittleFS.open(SENSOR_BUFFER_DIR);
-    if (root && root.isDirectory()) {
-      char oldestFile[FILENAME_BUFFER_SIZE] = "";
-      unsigned long oldestTimestamp = ULONG_MAX;
-      File file = root.openNextFile();
-      while (file) {
-        esp_task_wdt_reset();
-        if (!file.isDirectory()) {
-          const char *name = file.name();  // e.g. "1739051234.json" or with path
-          if (name) {
-            // Find last '.' in name
-            const char *dot = strrchr(name, '.');
-            if (dot && dot > name) {
-              // Parse leading unsigned long from start of name up to dot
-              unsigned long ts = 0;
-              const char *p = name;
-
-              // If name includes directories, advance to basename
-              const char *slash = strrchr(name, '/');
-              if (slash) p = slash + 1;
-
-              while (p < dot && (*p >= '0' && *p <= '9')) {
-                ts = (ts * 10UL) + (unsigned long)(*p - '0');
-                p++;
-              }
-
-              // Accept only if we parsed at least one digit and consumed all chars up to dot
-              if (p > (slash ? slash + 1 : name) && p == dot) {
-                if (ts < oldestTimestamp) {
-                  oldestTimestamp = ts;
-                  strncpy(oldestFile, file.path(), FILENAME_BUFFER_SIZE - 1);
-                  oldestFile[FILENAME_BUFFER_SIZE - 1] = '\0';
-                }
-              }
-            }
-          }
-        }
-        file = root.openNextFile();
-      }
-      root.close();
-
-      if (oldestFile[0] != '\0') {
-        LittleFS.remove(oldestFile);
-        if (bufferedRecordCount > 0) {
-          bufferedRecordCount--;
-        }
-      }
-    }
-  }
-
-  // Build a temp snapshot from current state and let the shared helper produce
-  // the JSON. Same byte-for-byte format as the PSRAM-ring upload path.
-  SensorSnapshot tmpSnap;
-  tmpSnap.collectionTime = (int32_t)collectionTime;
-  tmpSnap.window = *currentWindow;
-  size_t written = buildSnapshotJson(tmpSnap);
-
-  if (written == 0) {
-    fsReleaseLock();
-    Serial.println("Failed to build buffered JSON (overflow)");
-    return;
-  }
-
-  unsigned long filenameTime = (collectionTime < 0) ? (unsigned long)(-collectionTime) : (unsigned long)collectionTime;
-  snprintf(filenameBuffer, FILENAME_BUFFER_SIZE, "%s/%010lu.json", SENSOR_BUFFER_DIR, filenameTime);
-  filenameBuffer[FILENAME_BUFFER_SIZE - 1] = '\0';
-
-  File file = LittleFS.open(filenameBuffer, "w");
-  if (!file) {
-    fsReleaseLock();
-    Serial.println("Failed to open file for buffering");
-    return;
-  }
-  size_t bytesWritten = file.write((const uint8_t *)payloadBuffer, written);
-
-  if (bytesWritten != written) {
-    queueConsoleMessage("Buffer save failed: incomplete write");
-    fsReleaseLock();
-    return;
-  }
-
-  file.close();
-  // NOTE: bufferedRecordCount is no longer incremented here. It now mirrors
-  // sensorRingCount (the PSRAM ring). LittleFS files written by this
-  // restart-bridge path are dormant until Phase 3 boot-restore loads them
-  // back into the ring, at which point push will bump bufferedRecordCount.
-  fsReleaseLock();
-  esp_task_wdt_reset();
-}
 void uploadBufferedRecords() {
   if (otaInProgress) return;
   if (ringIsEmpty()) return;
@@ -1684,8 +1575,7 @@ done_headers:
 // One slot per completed SENSOR_UPLOAD_INTERVAL window. Push is microseconds;
 // no flash I/O, no Core 1 stall. Drain to Supabase happens from the cloud-
 // feature block in loop() under the same field-off gate as uploadBufferedRecords.
-// On overflow, the oldest unread slot is dropped — matches the prior 900-file
-// LittleFS cap behavior.
+// On overflow, the oldest unread slot is dropped.
 // ─────────────────────────────────────────────────────────────────────────────
 inline bool ringIsFull()  { return sensorRingCount >= SENSOR_RING_SIZE; }
 inline bool ringIsEmpty() { return sensorRingCount == 0; }
@@ -1871,40 +1761,23 @@ void uploadSensorHistory() {
   resetSensorWindow();
   resetAccelWindow();
 }
-// Below is NOT REALLY NEEDED.  I only need to run it once to clear bad tokens from buffer leftover from old strategies
+// Dashboard "Clear" button handler. Empties the PSRAM ring and removes the
+// LittleFS shutdown-dump file so nothing comes back on next boot.
 void clearSensorBuffer() {
-  //Serial.println("Clearing sensor buffer...");
+  sensorRingHead = 0;
+  sensorRingTail = 0;
+  sensorRingCount = 0;
+  sensorRingInFlightIndex = -1;
+  sensorRingAnnouncedEmpty = false;
+  bufferedRecordCount = 0;
 
   fsTakeLock();
-
-  File root = LittleFS.open(SENSOR_BUFFER_DIR);
-  if (!root || !root.isDirectory()) {
-    fsReleaseLock();
-    Serial.println("No sensor buffer directory found");
-    return;
+  if (fsExists(SENSOR_RING_BACKUP_PATH)) {
+    LittleFS.remove(SENSOR_RING_BACKUP_PATH);
   }
-
-  int removed = 0;
-  File file = root.openNextFile();
-
-  while (file) {
-    esp_task_wdt_reset();
-
-    if (!file.isDirectory()) {
-      String path = file.path();
-      file.close();
-      if (LittleFS.remove(path.c_str())) {  // Already inside lock
-        removed++;
-      } else {
-        Serial.printf("Failed to remove %s\n", path.c_str());
-      }
-    }
-    file = root.openNextFile();
-  }
-
-  bufferedRecordCount = 0;
   fsReleaseLock();
-  Serial.printf("Cleared %d buffered records\n", removed);
+
+  Serial.println("Cleared sensor ring + shutdown backup");
 }
 
 // ============================================

@@ -965,6 +965,21 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     IgnitionOverride = readFile(LittleFS, "/IgnitionOverride.txt").toInt();
   }
+  if (!fsExists("/hardwarePresent.txt")) {
+    writeFile(LittleFS, "/hardwarePresent.txt", String(hardwarePresent).c_str());
+  } else {
+    hardwarePresent = readFile(LittleFS, "/hardwarePresent.txt").toInt();
+  }
+  if (!fsExists("/SENSOR_UPLOAD_INTERVAL.txt")) {
+    writeFile(LittleFS, "/SENSOR_UPLOAD_INTERVAL.txt", String(SENSOR_UPLOAD_INTERVAL).c_str());
+  } else {
+    SENSOR_UPLOAD_INTERVAL = (unsigned long)readFile(LittleFS, "/SENSOR_UPLOAD_INTERVAL.txt").toInt();
+  }
+  if (!fsExists("/VMGUseTrueWind.txt")) {
+    writeFile(LittleFS, "/VMGUseTrueWind.txt", String(VMGUseTrueWind).c_str());
+  } else {
+    VMGUseTrueWind = readFile(LittleFS, "/VMGUseTrueWind.txt").toInt();
+  }
   if (!fsExists("/MaintainMode.txt")) {
     writeFile(LittleFS, "/MaintainMode.txt", String(MaintainMode).c_str());
   } else {
@@ -1540,11 +1555,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     VoltageKi = readFile(LittleFS, "/VoltageKi.txt").toFloat();
   }
   // VoltageKd (D term) removed — LittleFS file /VoltageKd.txt no longer loaded.
-  if (!fsExists("/ProtectionProxGateV.txt")) {
-    writeFile(LittleFS, "/ProtectionProxGateV.txt", String(ProtectionProxGateV, 2).c_str());
-  } else {
-    ProtectionProxGateV = readFile(LittleFS, "/ProtectionProxGateV.txt").toFloat();
-  }
+  // ProtectionProxGateV removed 2026-05-22 — no longer used by any protection. See CV_Loop_Dev_Summary.md.
   if (!fsExists("/SlopeBleedThresh.txt")) {
     writeFile(LittleFS, "/SlopeBleedThresh.txt", String(SlopeBleedThresh, 3).c_str());
   } else {
@@ -1763,10 +1774,14 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     KHard = readFile(LittleFS, "/KHard.txt").toFloat();
   }
-  if (!fsExists("/IExcessReseedFrac.txt")) {
-    writeFile(LittleFS, "/IExcessReseedFrac.txt", String(IExcessReseedFrac, 2).c_str());
+  // ReseedFrac (was IExcessReseedFrac) — migrates from old filename if present
+  if (fsExists("/ReseedFrac.txt")) {
+    ReseedFrac = readFile(LittleFS, "/ReseedFrac.txt").toFloat();
+  } else if (fsExists("/IExcessReseedFrac.txt")) {
+    ReseedFrac = readFile(LittleFS, "/IExcessReseedFrac.txt").toFloat();
+    writeFile(LittleFS, "/ReseedFrac.txt", String(ReseedFrac, 2).c_str());
   } else {
-    IExcessReseedFrac = readFile(LittleFS, "/IExcessReseedFrac.txt").toFloat();
+    writeFile(LittleFS, "/ReseedFrac.txt", String(ReseedFrac, 2).c_str());
   }
   // OvGroup1Enable — migrates from old /OvLayer2Enable.txt if found
   if (fsExists("/OvGroup1Enable.txt")) {
@@ -1833,10 +1848,16 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     OvPredMarginV = readFile(LittleFS, "/OvPredMarginV.txt").toFloat();
   }
-  if (!fsExists("/DvdtAlpha.txt")) {
-    writeFile(LittleFS, "/DvdtAlpha.txt", String(DvdtAlpha, 3).c_str());
+  // DvdtTC (was DvdtAlpha) — migrates from old alpha-based file if present.
+  // Conversion: TC = 5ms × (1 − α) / α  (preserves behavior at 5ms nominal cadence).
+  if (fsExists("/DvdtTC.txt")) {
+    DvdtTC = constrain(readFile(LittleFS, "/DvdtTC.txt").toFloat(), 5.0f, 500.0f);
+  } else if (fsExists("/DvdtAlpha.txt")) {
+    float oldAlpha = constrain(readFile(LittleFS, "/DvdtAlpha.txt").toFloat(), 0.01f, 0.50f);
+    DvdtTC = constrain(5.0f * (1.0f - oldAlpha) / oldAlpha, 5.0f, 500.0f);
+    writeFile(LittleFS, "/DvdtTC.txt", String(DvdtTC, 1).c_str());
   } else {
-    DvdtAlpha = constrain(readFile(LittleFS, "/DvdtAlpha.txt").toFloat(), 0.01f, 0.50f);
+    writeFile(LittleFS, "/DvdtTC.txt", String(DvdtTC, 1).c_str());
   }
   if (!fsExists("/VoltageDisagreeThreshold.txt")) {
     writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());
@@ -2596,9 +2617,13 @@ void checkDeviceUIDChange() {
   esp_err_t err = nvs_get_str(handle, "lastUID", NULL, &len);
   if (err == ESP_OK && len > 0) {
     char *buf = (char *)malloc(len);
-    nvs_get_str(handle, "lastUID", buf, &len);
-    lastUID = String(buf);
-    free(buf);
+    if (!buf) {
+      Serial.println("checkDeviceUIDChange: malloc failed for lastUID buffer - skipping read");
+    } else {
+      nvs_get_str(handle, "lastUID", buf, &len);
+      lastUID = String(buf);
+      free(buf);
+    }
   }
 
   Serial.println("=== checkDeviceUIDChange ===");

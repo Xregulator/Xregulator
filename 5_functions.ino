@@ -491,12 +491,12 @@ void checkAndRestart() {
       saveTimeSyncState();
     }
 
-    // Save final sensor window if it has data
-    // CHANGED - Check if any valid time accumulated instead of sampleCount
+    // Save final sensor window if it has data — push into PSRAM ring so the
+    // shutdown Phase 4 dump (or next-tick cloud upload) preserves it.
     if (currentWindow->battVolt_valid_us > 0) {
-      Serial.println("Buffering final sensor window before restart");
+      Serial.println("Pushing final sensor window into ring before restart");
       time_t collectionTime = computeCollectionTime();
-      saveToLocalBuffer(collectionTime);
+      pushSensorSnapshot(collectionTime);
       resetSensorWindow();
     }
 
