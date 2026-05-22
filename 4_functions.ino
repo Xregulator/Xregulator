@@ -129,12 +129,21 @@ void updateSystemHealthStats() {
 
     // TLS handshake needs ~32-40 KB contiguous internal RAM. Warn early so there is
     // time to investigate before HTTPS starts silently failing.
+    // Every HTTPS handshake briefly fragments largest-block under 34 KB and recovers
+    // above 38 KB, so without throttling this would fire on every upload. Cap at
+    // one console message per 5 minutes — the underlying dip/recover cycle is still
+    // tracked by heapWarnSent so we re-fire promptly on the next dip after the throttle expires.
     static bool heapWarnSent = false;
+    static unsigned long lastHeapWarnMs = 0;
+    const unsigned long HEAP_WARN_THROTTLE_MS = 300000UL;
     if (LargestInternalBlock < 34 && !heapWarnSent) {
       heapWarnSent = true;
-      queueConsoleMessage("WARNING: Internal RAM fragmented — HTTPS may fail. Check ESP32 Stats panel.");
+      if (millis() - lastHeapWarnMs >= HEAP_WARN_THROTTLE_MS) {
+        lastHeapWarnMs = millis();
+        queueConsoleMessage("WARNING: Internal RAM fragmented — HTTPS may fail. Check ESP32 Stats panel.");
+      }
     } else if (LargestInternalBlock >= 38) {
-      heapWarnSent = false;  // Re-arm once conditions improve
+      heapWarnSent = false;  // Re-arm dip detector; throttle still applies on next fire
     }
   }
 }
@@ -320,21 +329,6 @@ void initWeatherModeSettings() {
     writeFile(LittleFS, "/SolarWatts.txt", String(SolarWatts).c_str());
   } else {
     SolarWatts = readFile(LittleFS, "/SolarWatts.txt").toInt();
-  }
-  if (!fsExists("/UVToday.txt")) {
-    writeFile(LittleFS, "/UVToday.txt", "0.0");
-  } else {
-    UVToday = readFile(LittleFS, "/UVToday.txt").toFloat();
-  }
-  if (!fsExists("/UVTomorrow.txt")) {
-    writeFile(LittleFS, "/UVTomorrow.txt", "0.0");
-  } else {
-    UVTomorrow = readFile(LittleFS, "/UVTomorrow.txt").toFloat();
-  }
-  if (!fsExists("/UVDay2.txt")) {
-    writeFile(LittleFS, "/UVDay2.txt", "0.0");
-  } else {
-    UVDay2 = readFile(LittleFS, "/UVDay2.txt").toFloat();
   }
   if (!fsExists("/weatherDataValid.txt")) {
     writeFile(LittleFS, "/weatherDataValid.txt", "0");
@@ -652,7 +646,7 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   // Force I2C initialization with correct pins
   Wire.end();  // End any existing I2C
   Wire.begin(9, 10);
-  Wire.setClock(400000);  // 400 kHz (Fast-mode)
+  Wire.setClock(800000);  // 800 kHz — current default. Out of spec for LSM6DSOX IMU (400 kHz max) and ADS1115 in Fast-mode, but verified stable: zero I²C errors / FIFO overruns / Unknown Tags across multiple sessions, ~15% faster IMU reads vs 400 kHz. Revert to 400000 if any of imu_i2c_error_count / imu_unknown_tag_count / adsI2CErrorCount ever go non-zero.
   Wire.setTimeOut(15);   // Added as safety April 2026
   delay(100);
   Serial.println("I2C initialized on SDA=9, SCL=10");
@@ -730,29 +724,8 @@ Serial.println("BMP388 found");
   } else {
     ADS1115Disconnected = 0;
   }
-  //Gain parameter.
-  adc.setGain(ADS1115_REG_CONFIG_PGA_6_144V);
-  // ADS1115_REG_CONFIG_PGA_6_144V(0x0000)  // +/-6.144V range = Gain 2/3
-  //Sample rate parameter
-  // adc.setSampleRate(ADS1115_REG_CONFIG_DR_8SPS);  //Set the slowest and most accurate sample rate, 8 THIS WAS PRIOR SETTING
-  // ADS1115_REG_CONFIG_DR_8SPS(0x0000)              // 8 SPS(Sample per Second), or a sample every 125ms
-  // ADS1115_REG_CONFIG_DR_16SPS(0x0020)             // 16 SPS, or every 62.5ms
-  // ADS1115_REG_CONFIG_DR_32SPS(0x0040)             // 32 SPS, or every 31.3ms
-  //adc.setSampleRate(ADS1115_REG_CONFIG_DR_64SPS);  // (0x0060)             // 64 SPS, or every 15.6ms
-  //The ADS1115 hardware does internal averaging - slower conversion times = more internal averaging = less noise. So we want the slowest rate that still meets your 10 readings/second requirement.
-  //State machine reality:
-  //Triggers conversion on current channel
-  //Waits ADSConversionDelay
-  //Reads result, moves to next channel
-  //Cycles through 4 channels before returning to MeasuredAmps
-  //Hardware timing constraints:
-  //8 SPS = 125ms actual conversion time
-  //16 SPS = 62.5ms actual conversion time
-  //32 SPS = 31.3ms actual conversion time
-  //You can't set ADSConversionDelay shorter than the actual hardware conversion time - the chip won't be done yet.
-  // ADS1115_REG_CONFIG_DR_475SPS(0x00C0)            // 475 SPS, or every 2.1ms, note that noise free resolution is reduced to ~14.3-15.5bits, see table 2 in datasheet
-  adc.setSampleRate(ADS1115_REG_CONFIG_DR_860SPS);
-  //ADS1115_REG_CONFIG_DR_860SPS(0x00E0);  // 860 SPS, or every 1.16ms, note that noise free resolution is reduced to ~13.8-15bits, see table 2 in datasheet
+  adc.setGain(ADS1115_REG_CONFIG_PGA_6_144V);       // ±6.144V range
+  adc.setSampleRate(ADS1115_REG_CONFIG_DR_860SPS);  // 860 SPS, 1.16ms per conversion
 
   delay(100);  // Give chip time to configure
   if (!adc.testConnection()) {
@@ -1341,53 +1314,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     BatteryCOffset = readFile(LittleFS, "/BatteryCOffset.txt").toFloat();
   }
-  if (!fsExists("/MaxTemperatureThermistor.txt")) {
-    writeFile(LittleFS, "/MaxTemperatureThermistor.txt", String(MaxTemperatureThermistor).c_str());
-  } else {
-    MaxTemperatureThermistor = readFile(LittleFS, "/MaxTemperatureThermistor.txt").toFloat();  //
-  }
-  // Load session max/min values from LittleFS
-  if (fsExists("/RPMMax.txt")) {
-    RPMMax = readFile(LittleFS, "/RPMMax.txt").toInt();
-  }
-  if (fsExists("/MeasuredAmpsMax.txt")) {
-    MeasuredAmpsMax = readFile(LittleFS, "/MeasuredAmpsMax.txt").toFloat();
-  }
-  if (fsExists("/MaxAlternatorTemperatureF.txt")) {
-    MaxAlternatorTemperatureF = readFile(LittleFS, "/MaxAlternatorTemperatureF.txt").toFloat();
-  }
-  if (fsExists("/IBVMax.txt")) {
-    IBVMax = readFile(LittleFS, "/IBVMax.txt").toFloat();
-  }
-  if (fsExists("/MinVoltage.txt")) {
-    MinVoltage = readFile(LittleFS, "/MinVoltage.txt").toFloat();
-  } else {
-    MinVoltage = 999.0;  // Initialize to high value if file doesn't exist
-  }
-  if (fsExists("/MaxSpeed.txt")) {
-    MaxSpeed = readFile(LittleFS, "/MaxSpeed.txt").toFloat();
-  }
-  if (fsExists("/RPMMax_AllTime.txt")) {
-    RPMMax_AllTime = readFile(LittleFS, "/RPMMax_AllTime.txt").toFloat();
-  }
-  if (fsExists("/MeasuredAmpsMax_AllTime.txt")) {
-    MeasuredAmpsMax_AllTime = readFile(LittleFS, "/MeasuredAmpsMax_AllTime.txt").toFloat();
-  }
-  if (fsExists("/PeakVoltage_AllTime.txt")) {
-    PeakVoltage_AllTime = readFile(LittleFS, "/PeakVoltage_AllTime.txt").toFloat();
-  }
-  if (fsExists("/MinVoltage_AllTime.txt")) {
-    MinVoltage_AllTime = readFile(LittleFS, "/MinVoltage_AllTime.txt").toFloat();
-  }
-  if (fsExists("/MaxAlternatorTemperatureF_AllTime.txt")) {
-    MaxAlternatorTemperatureF_AllTime = readFile(LittleFS, "/MaxAlternatorTemperatureF_AllTime.txt").toFloat();
-  }
-  if (fsExists("/MaxTemperatureThermistor_AllTime.txt")) {
-    MaxTemperatureThermistor_AllTime = readFile(LittleFS, "/MaxTemperatureThermistor_AllTime.txt").toFloat();
-  }
-  if (fsExists("/MaxSpeed_AllTime.txt")) {
-    MaxSpeed_AllTime = readFile(LittleFS, "/MaxSpeed_AllTime.txt").toFloat();
-  }
   if (!fsExists("/AlarmLatchEnabled.txt")) {
     writeFile(LittleFS, "/AlarmLatchEnabled.txt", String(AlarmLatchEnabled).c_str());
   } else {
@@ -1922,17 +1848,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     VoltageDisagreeTimeout = readFile(LittleFS, "/VoltageDisagreeTimeout.txt").toInt();
   }
-  if (!fsExists("/max_wind_apparent_alltime.txt")) {
-    writeFile(LittleFS, "/max_wind_apparent_alltime.txt", String(max_wind_speed_apparent_alltime, 2).c_str());
-  } else {
-    max_wind_speed_apparent_alltime = readFile(LittleFS, "/max_wind_apparent_alltime.txt").toFloat();
-  }
-  if (!fsExists("/max_wind_true_alltime.txt")) {
-    writeFile(LittleFS, "/max_wind_true_alltime.txt", String(max_wind_speed_true_alltime, 2).c_str());
-  } else {
-    max_wind_speed_true_alltime = readFile(LittleFS, "/max_wind_true_alltime.txt").toFloat();
-  }
-
   // Anomaly margin amps
   if (!fsExists("/anomalyMarginAmps.txt")) {
     writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps).c_str());
@@ -1962,26 +1877,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     anomalyAlarmEnable = (readFile(LittleFS, "/anomalyAlarmEnable.txt").toInt() != 0);
   }
 
-  if (!fsExists("/board_temp_max_alltime.txt")) {
-    writeFile(LittleFS, "/board_temp_max_alltime.txt", String(board_temp_max_alltime, 2).c_str());
-  } else {
-    board_temp_max_alltime = readFile(LittleFS, "/board_temp_max_alltime.txt").toFloat();
-  }
-  if (!fsExists("/board_temp_min_alltime.txt")) {
-    writeFile(LittleFS, "/board_temp_min_alltime.txt", String(board_temp_min_alltime, 2).c_str());
-  } else {
-    board_temp_min_alltime = readFile(LittleFS, "/board_temp_min_alltime.txt").toFloat();
-  }
-  if (!fsExists("/baro_pressure_max_alltime.txt")) {
-    writeFile(LittleFS, "/baro_pressure_max_alltime.txt", String(baro_pressure_max_alltime, 2).c_str());
-  } else {
-    baro_pressure_max_alltime = readFile(LittleFS, "/baro_pressure_max_alltime.txt").toFloat();
-  }
-  if (!fsExists("/baro_pressure_min_alltime.txt")) {
-    writeFile(LittleFS, "/baro_pressure_min_alltime.txt", String(baro_pressure_min_alltime, 2).c_str());
-  } else {
-    baro_pressure_min_alltime = readFile(LittleFS, "/baro_pressure_min_alltime.txt").toFloat();
-  }
   if (!fsExists("/VoltageKp.txt")) {
     writeFile(LittleFS, "/VoltageKp.txt", String(VoltageKp, 1).c_str());
   } else {
@@ -2192,7 +2087,10 @@ void complementaryFilter(float ax, float ay, float az, float gx, float gy, float
 }
 void updateAccelMetrics() {
   // Process all available ring buffer samples
-  // Called from main loop at ~1Hz
+  // Called from main loop every iteration (~300 Hz at 3ms loop time, NOT 1 Hz).
+  // Most calls find 0 new samples (arrival rate is 104 Hz post-ODR-drop) and exit quickly;
+  // accel_cap=50 limits per-call work when a backlog exists. Timer reports sub-ms worst,
+  // which integer-divides to 0 on the dashboard — function IS running (Ring Usage stays 0%).
 
   if (!imuEnabled) return;
   if (!imuRingBuffer || !imuWindow) { imuEnabled = false; return; }

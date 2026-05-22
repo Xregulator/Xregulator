@@ -1274,6 +1274,20 @@ void resetINA228IntervalWindows() {
   ina_avg_2m  = 0.0f; ina_worst_2m  = 0; ina_over2x_2m  = 0;
 }
 
+// Full reset including all-time accumulators — called by the web-side
+// Reset Peaks button. resetINA228IntervalWindows() above only clears the
+// 10s/2m windows; this also wipes ina_worst_at / ina_avg_at / ina_over2x_at
+// and the static counters that feed them.
+void resetINA228AllStats() {
+  resetINA228IntervalWindows();
+  inaAtSum     = 0;
+  inaAtCount   = 0;
+  inaAtOver2x  = 0;
+  ina_avg_at   = 0.0f;
+  ina_worst_at = 0;
+  ina_over2x_at = 0;
+}
+
 void recordINA228Interval(uint32_t now) {
   if (inaPrevRead == 0) { inaPrevRead = now; return; }
 
@@ -1288,12 +1302,14 @@ void recordINA228Interval(uint32_t now) {
   inaAtSum += iv;
   if (iv > ina_worst_at) ina_worst_at = iv;
   // Also write the "2m" worst directly. With this in place ina_worst_2m
-  // becomes "max iv since last field-on event" rather than a strict 2m
-  // rolling window. The bucket-based avg + over2x for 2m still work
-  // and remain rolling. Tooltips already say "since field-on" for these.
+  // becomes "max iv since last fast-mode rising edge" rather than a strict
+  // 2m rolling window. The bucket-based avg + over2x for 2m still work
+  // and remain rolling. Tooltips should say "since fast-mode start" for these.
   if (iv > ina_worst_2m) ina_worst_2m = iv;
   if (inaAtCount > 1) {
-    float runMean = (float)((double)inaAtSum / inaAtCount);
+    // Bias correction: compute mean of prior samples only, otherwise a huge
+    // outlier inflates its own mean and fails the > 2× test against itself.
+    float runMean = (float)((double)(inaAtSum - iv) / (inaAtCount - 1));
     if ((float)iv > runMean * 2.0f) inaAtOver2x++;
   }
 

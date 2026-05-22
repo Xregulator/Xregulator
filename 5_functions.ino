@@ -15,96 +15,6 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 
-bool writeFileThrottled(fs::FS &fs, const char *path, const char *value,
-                        unsigned long &lastWriteTime, unsigned long intervalMs = 1000) {
-  unsigned long now = millis();
-  if ((unsigned long)(now - lastWriteTime) >= intervalMs) {
-    lastWriteTime = now;
-    queueFSWrite(path, value);  // was: writeFile(fs, path, value)
-    return true;
-  }
-  return false;
-}
-static bool queueFSWrite(const char *path, const char *data) {
-  // Deduplication: if this path is already queued, update its data in-place.
-  // This means 100 consecutive writes to the same file (e.g. board_temp_max
-  // firing every loop while temp rises) consume only one queue slot and always
-  // hold the latest value.
-  uint8_t i = fsWriteHead;
-  while (i != fsWriteTail) {
-    if (strcmp(fsWriteQueue[i].path, path) == 0) {
-      strlcpy(fsWriteQueue[i].data, data, FS_WRITE_DATA_MAX);
-      return true;
-    }
-    i = (i + 1) % FS_WRITE_QUEUE_DEPTH;
-  }
-  // Not already queued — add new entry
-  uint8_t nextTail = (fsWriteTail + 1) % FS_WRITE_QUEUE_DEPTH;
-  if (nextTail == fsWriteHead) {
-    // Queue full — too many DIFFERENT paths pending simultaneously
-    fsWriteQueueDrops++;
-    Serial.printf("FS queue full (%d unique paths), dropping write to %s\n",
-                  FS_WRITE_QUEUE_DEPTH - 1, path);
-    return false;
-  }
-  strlcpy(fsWriteQueue[fsWriteTail].path, path, FS_WRITE_PATH_MAX);
-  strlcpy(fsWriteQueue[fsWriteTail].data, data, FS_WRITE_DATA_MAX);
-  fsWriteTail = nextTail;
-  return true;
-}
-
-// Call once per loop() - drains one entry per call, rate-limited to prevent burst blocking
-// when many writes queue at once (e.g. all fake-mode maxima updating simultaneously)
-void FlushFileWriteQueue() {
-  if (fsWriteHead == fsWriteTail) return;  // queue empty
-  if (!safeToFlushIO()) return;            // hold writes until 5s stable out of critical zone
-  if (heavyIOThisTick) { fsFlushDeferred++; return; }  // NVS committed this tick — defer FS write to prevent co-fire
-  static unsigned long lastFlush = 0;
-  unsigned long now = millis();
-  if (now - lastFlush < 25) return;  // spread writes — each LittleFS write blocks ~40-50ms; prevents 700ms stall
-  lastFlush = now;
-
-  // Bracket the actual flash write with micros() so we measure ONLY the
-  // LittleFS write cost, not the wrapper overhead. Used to build the
-  // duration histogram and detect wear-leveling stalls.
-  const char *path = fsWriteQueue[fsWriteHead].path;
-  const char *data = fsWriteQueue[fsWriteHead].data;
-  uint16_t dataLen = (uint16_t)strnlen(data, FS_WRITE_DATA_MAX);
-  uint32_t tStart = micros();
-  writeFile(LittleFS, path, data);
-  uint32_t durUs = micros() - tStart;
-  uint32_t durMs = durUs / 1000UL;
-
-  // Histogram bucketing — boundaries match the user-facing labels:
-  //   [0] <25  [1] 25-50  [2] 50-100  [3] 100-200  [4] 200-500  [5] >=500
-  uint8_t bkt;
-  if      (durMs <  25) bkt = 0;
-  else if (durMs <  50) bkt = 1;
-  else if (durMs < 100) bkt = 2;
-  else if (durMs < 200) bkt = 3;
-  else if (durMs < 500) bkt = 4;
-  else                  bkt = 5;
-  fsWriteHist[bkt]++;
-  fsWriteCount++;
-  if (durMs > fsWriteWorstMs) fsWriteWorstMs = (durMs > 65535UL) ? 65535 : (uint16_t)durMs;
-
-  // Slow-write capture: any write >= 100 ms gets pushed to the ring.
-  // Ring is overwrite-oldest so we always have the 8 MOST RECENT slow events.
-  if (durMs >= 100) {
-    fsWriteLongCount++;
-    FsSlowWrite &slot = fsSlowRing[fsSlowRingHead];
-    slot.whenMs     = now;
-    slot.durationMs = (durMs > 65535UL) ? 65535 : (uint16_t)durMs;
-    slot.dataLen    = dataLen;
-    strlcpy(slot.path, path, FS_SLOW_PATH_MAX);
-    fsSlowRingHead = (fsSlowRingHead + 1) % FS_SLOW_RING_SIZE;
-    if (fsSlowRingCount < FS_SLOW_RING_SIZE) fsSlowRingCount++;
-  }
-
-  fsWriteHead = (fsWriteHead + 1) % FS_WRITE_QUEUE_DEPTH;
-  heavyIOThisTick = true;  // signal that a flash write happened this tick
-}
-
 void SystemTime(const tN2kMsg &N2kMsg) {
   unsigned char SID;
   uint16_t SystemDate;
@@ -199,16 +109,9 @@ void COGSOG(const tN2kMsg &N2kMsg) {
 
     if (SOGNMEA > MaxSpeed) {
       MaxSpeed = SOGNMEA;
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%.2f", (float)MaxSpeed);
-      writeFile(LittleFS, "/MaxSpeed.txt", buf);
     }
-
     if (SOGNMEA > MaxSpeed_AllTime) {
       MaxSpeed_AllTime = SOGNMEA;
-      char buf2[32];
-      snprintf(buf2, sizeof(buf2), "%.2f", (float)MaxSpeed_AllTime);
-      writeFile(LittleFS, "/MaxSpeed_AllTime.txt", buf2);
     }
 
   } else {
@@ -1034,19 +937,10 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
         if (distanceAccumulator >= 0.01f) {
           TotalDistance += distanceAccumulator;
           distanceAccumulator = 0.0f;
-
-          char buf[32];
-          snprintf(buf, sizeof(buf), "%.2f", TotalDistance);
-          writeFile(LittleFS, "/TotalDistance.txt", buf);
         }
-
         if (distanceAccumulator_AllTime >= 0.01f) {
           TotalDistance_AllTime += distanceAccumulator_AllTime;
           distanceAccumulator_AllTime = 0.0f;
-
-          char buf2[32];
-          snprintf(buf2, sizeof(buf2), "%.2f", TotalDistance_AllTime);
-          writeFile(LittleFS, "/TotalDistance_AllTime.txt", buf2);
         }
       }
 
@@ -1243,51 +1137,17 @@ void UpdateDistanceThisInterval() {
 void UpdateWindMaximums() {
   if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && ApparentWindSpeedNMEA > max_wind_speed_apparent_alltime) {
     max_wind_speed_apparent_alltime = ApparentWindSpeedNMEA;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.2f", max_wind_speed_apparent_alltime);
-    writeFile(LittleFS, "/max_wind_apparent_alltime.txt", buf);
   }
-
   if (!isnan(TrueWindSpeedNMEA) && TrueWindSpeedNMEA > max_wind_speed_true_alltime) {
     max_wind_speed_true_alltime = TrueWindSpeedNMEA;
-    char buf2[32];
-    snprintf(buf2, sizeof(buf2), "%.2f", max_wind_speed_true_alltime);
-    writeFile(LittleFS, "/max_wind_true_alltime.txt", buf2);
   }
 }
 
 void UpdateBoardTempPressureMaximums() {
-  if (ambientTemp > board_temp_max_alltime) {
-    board_temp_max_alltime = ambientTemp;
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.2f", board_temp_max_alltime);
-    static unsigned long lastWrite_board_temp_max = 0;
-    writeFileThrottled(LittleFS, "/board_temp_max_alltime.txt", buf, lastWrite_board_temp_max);
-  }
-
-  if (ambientTemp < board_temp_min_alltime) {
-    board_temp_min_alltime = ambientTemp;
-    char buf2[32];
-    snprintf(buf2, sizeof(buf2), "%.2f", board_temp_min_alltime);
-    static unsigned long lastWrite_board_temp_min = 0;
-    writeFileThrottled(LittleFS, "/board_temp_min_alltime.txt", buf2, lastWrite_board_temp_min);
-  }
-
-  if (baroPressure > baro_pressure_max_alltime) {
-    baro_pressure_max_alltime = baroPressure;
-    char buf3[32];
-    snprintf(buf3, sizeof(buf3), "%.2f", baro_pressure_max_alltime);
-    static unsigned long lastWrite_baro_max = 0;
-    writeFileThrottled(LittleFS, "/baro_pressure_max_alltime.txt", buf3, lastWrite_baro_max);
-  }
-
-  if (baroPressure < baro_pressure_min_alltime) {
-    baro_pressure_min_alltime = baroPressure;
-    char buf4[32];
-    snprintf(buf4, sizeof(buf4), "%.2f", baro_pressure_min_alltime);
-    static unsigned long lastWrite_baro_min = 0;
-    writeFileThrottled(LittleFS, "/baro_pressure_min_alltime.txt", buf4, lastWrite_baro_min);
-  }
+  if (ambientTemp > board_temp_max_alltime)        board_temp_max_alltime    = ambientTemp;
+  if (ambientTemp < board_temp_min_alltime)        board_temp_min_alltime    = ambientTemp;
+  if (baroPressure > baro_pressure_max_alltime)    baro_pressure_max_alltime = baroPressure;
+  if (baroPressure < baro_pressure_min_alltime)    baro_pressure_min_alltime = baroPressure;
 }
 
 void resetDistanceThisInterval() {
@@ -2090,9 +1950,9 @@ void checkWebFilesExist() {
 }
 void ReadAnalogInputs() {
   // Outer wrapper — ft_rai_total captures the true worst-case duration including
-  // any flash writes (writeFileThrottled) and I2C timeouts that the old
-  // INA228-only timer missed entirely. Individual section timers triangulate which
-  // sub-block is responsible when ft_rai_total spikes.
+  // I2C timeouts that the old INA228-only timer missed entirely. Individual
+  // section timers triangulate which sub-block is responsible when ft_rai_total
+  // spikes.
   TIMED_CALL(ft_rai_total, _ReadAnalogInputs_inner());
 }
 
@@ -2124,13 +1984,15 @@ void _ReadAnalogInputs_inner() {
   if (millis() - lastINARead_local >= inaReadInterval) {
     if (INADisconnected == 0) {
       lastINARead_local = millis();
-      // Track intervals only when field is actually driven — fieldActiveStatus > 0
-      // Reset windowed stats on each field-on rising edge
-      static bool lastFieldActive = false;
-      bool nowFieldActive = (fieldActiveStatus > 0);
-      if (nowFieldActive && !lastFieldActive) resetINA228IntervalWindows();
-      lastFieldActive = nowFieldActive;
-      if (nowFieldActive) recordINA228Interval(lastINARead_local);
+      // Track intervals only while INA228 is in fast mode (~5ms cadence).
+      // Gating on inaFastModeActive (not fieldActiveStatus) avoids logging a
+      // slow-mode ~1054ms read as a false outlier during gate transitions.
+      // Reset windowed stats on each fast-mode rising edge.
+      static bool lastFastMode = false;
+      bool nowFastMode = inaFastModeActive;
+      if (nowFastMode && !lastFastMode) resetINA228IntervalWindows();
+      lastFastMode = nowFastMode;
+      if (nowFastMode) recordINA228Interval(lastINARead_local);
 
       // ft_rai_ina228 / AnalogReadTime aliases: worstWindow + lastCall updated by macro
       TIMED_CALL(ft_rai_ina228, ([&]() {
@@ -2184,37 +2046,12 @@ void _ReadAnalogInputs_inner() {
                          bcurPrevMs = nowIna;
                        }
 
-                       if (IBV > IBVMax) {
-                         IBVMax = IBV;
-                         static unsigned long lastWrite_IBVMax = 0;
-                         char buf[32];
-                         snprintf(buf, sizeof(buf), "%.2f", IBVMax);
-                         writeFileThrottled(LittleFS, "/IBVMax.txt", buf, lastWrite_IBVMax);
-                       }
-
-                       if (IBV > PeakVoltage_AllTime) {
-                         PeakVoltage_AllTime = IBV;
-                         static unsigned long lastWrite_PeakVoltage = 0;
-                         char buf2[32];
-                         snprintf(buf2, sizeof(buf2), "%.2f", PeakVoltage_AllTime);
-                         writeFileThrottled(LittleFS, "/PeakVoltage_AllTime.txt", buf2, lastWrite_PeakVoltage);
-                       }
-
-                       if (IBV < MinVoltage) {
-                         MinVoltage = IBV;
-                         static unsigned long lastWrite_MinVoltage = 0;
-                         char buf3[32];
-                         snprintf(buf3, sizeof(buf3), "%.2f", MinVoltage);
-                         writeFileThrottled(LittleFS, "/MinVoltage.txt", buf3, lastWrite_MinVoltage);
-                       }
-
-                       if (IBV < MinVoltage_AllTime) {
-                         MinVoltage_AllTime = IBV;
-                         static unsigned long lastWrite_MinVoltageAllTime = 0;
-                         char buf4[32];
-                         snprintf(buf4, sizeof(buf4), "%.2f", MinVoltage_AllTime);
-                         writeFileThrottled(LittleFS, "/MinVoltage_AllTime.txt", buf4, lastWrite_MinVoltageAllTime);
-                       }
+                       // lastElectricalRecordMs bump: blocks NVS commits for 5s via inCriticalZone() —
+                       // a record being set means we're at an electrically stressed moment.
+                       if (IBV > IBVMax)              { IBVMax              = IBV; lastElectricalRecordMs = millis(); }
+                       if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
+                       if (IBV < MinVoltage)          { MinVoltage          = IBV; lastElectricalRecordMs = millis(); }
+                       if (IBV < MinVoltage_AllTime)  { MinVoltage_AllTime  = IBV; lastElectricalRecordMs = millis(); }
                      }
 
                    } catch (...) {
@@ -2435,41 +2272,18 @@ void _ReadAnalogInputs_inner() {
                            // reflect the previous control tick — one-tick lag is acceptable for analysis.
                            cvLog_tick(millis());
 
-                           // Track max values
-                           if (MeasuredAmps > MeasuredAmpsMax) {
-                             MeasuredAmpsMax = MeasuredAmps;
-                             static unsigned long lastWrite_MeasuredAmpsMax = 0;
-                             char bufA[32];
-                             snprintf(bufA, sizeof(bufA), "%.2f", MeasuredAmpsMax);
-                             writeFileThrottled(LittleFS, "/MeasuredAmpsMax.txt", bufA, lastWrite_MeasuredAmpsMax);
-                           }
-                           if (MeasuredAmps > MeasuredAmpsMax_AllTime) {
-                             MeasuredAmpsMax_AllTime = MeasuredAmps;
-                             static unsigned long lastWrite_MeasuredAmpsMaxAllTime = 0;
-                             char bufA2[32];
-                             snprintf(bufA2, sizeof(bufA2), "%.2f", MeasuredAmpsMax_AllTime);
-                             writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", bufA2, lastWrite_MeasuredAmpsMaxAllTime);
-                           }
+                           // Track max values. lastElectricalRecordMs bump: see IBV block above.
+                           if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; lastElectricalRecordMs = millis(); }
+                           if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; lastElectricalRecordMs = millis(); }
                            }  // end AmpSensorRange scale block
                            break;
 
                          case 2:
                            Channel2V = Raw / 32768.0 * 2 * 6.144 * RPMScalingFactor;
                            RPM = Channel2V;
-                           if (RPM > RPMMax) {
-                             RPMMax = RPM;
-                             static unsigned long lastWrite_RPMMax = 0;
-                             char bufR[32];
-                             snprintf(bufR, sizeof(bufR), "%.0f", RPMMax);
-                             writeFileThrottled(LittleFS, "/RPMMax.txt", bufR, lastWrite_RPMMax);
-                           }
-                           if (RPM > RPMMax_AllTime) {
-                             RPMMax_AllTime = RPM;
-                             static unsigned long lastWrite_RPMMaxAllTime = 0;
-                             char bufR2[32];
-                             snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
-                             writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
-                           }
+                           // lastElectricalRecordMs bump: see IBV block above.
+                           if (RPM > RPMMax)         { RPMMax         = RPM; lastElectricalRecordMs = millis(); }
+                           if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; lastElectricalRecordMs = millis(); }
                            if (RPM < 100) {
                              RPM = 0;
                            }
@@ -2494,23 +2308,9 @@ void _ReadAnalogInputs_inner() {
                            if (temperatureThermistor > -58 && temperatureThermistor < 392) {  // Sanity check for temp (°F bounds)
                              MARK_FRESH(IDX_THERMISTOR_TEMP);
 
-                             // Track max thermistor temperature (session)
-                             if (temperatureThermistor > MaxTemperatureThermistor) {
-                               MaxTemperatureThermistor = temperatureThermistor;
-                               static unsigned long lastWrite_MaxTempTherm = 0;
-                               char bufT[32];
-                               snprintf(bufT, sizeof(bufT), "%.1f", MaxTemperatureThermistor);
-                               writeFileThrottled(LittleFS, "/MaxTemperatureThermistor.txt", bufT, lastWrite_MaxTempTherm);
-                             }
-
-                             // Track max thermistor temperature (lifetime)
-                             if (temperatureThermistor > MaxTemperatureThermistor_AllTime) {
-                               MaxTemperatureThermistor_AllTime = temperatureThermistor;
-                               static unsigned long lastWrite_MaxTempThermAllTime = 0;
-                               char bufT2[32];
-                               snprintf(bufT2, sizeof(bufT2), "%.1f", MaxTemperatureThermistor_AllTime);
-                               writeFileThrottled(LittleFS, "/MaxTemperatureThermistor_AllTime.txt", bufT2, lastWrite_MaxTempThermAllTime);
-                             }
+                             // Track max thermistor temperature
+                             if (temperatureThermistor > MaxTemperatureThermistor)         MaxTemperatureThermistor         = temperatureThermistor;
+                             if (temperatureThermistor > MaxTemperatureThermistor_AllTime) MaxTemperatureThermistor_AllTime = temperatureThermistor;
                            }
                            break;
                        }
@@ -2789,20 +2589,8 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_SOG_NMEA);
 
     // Track max speed (session and lifetime)
-    if (fakeSOG > MaxSpeed) {
-      MaxSpeed = fakeSOG;
-      static unsigned long lastWrite_MaxSpeed = 0;
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%.2f", MaxSpeed);
-      writeFileThrottled(LittleFS, "/MaxSpeed.txt", buf, lastWrite_MaxSpeed);
-    }
-    if (fakeSOG > MaxSpeed_AllTime) {
-      MaxSpeed_AllTime = fakeSOG;
-      static unsigned long lastWrite_MaxSpeedAllTime = 0;
-      char buf2[32];
-      snprintf(buf2, sizeof(buf2), "%.2f", MaxSpeed_AllTime);
-      writeFileThrottled(LittleFS, "/MaxSpeed_AllTime.txt", buf2, lastWrite_MaxSpeedAllTime);
-    }
+    if (fakeSOG > MaxSpeed)         MaxSpeed         = fakeSOG;
+    if (fakeSOG > MaxSpeed_AllTime) MaxSpeed_AllTime = fakeSOG;
 
 
     // Course Over Ground - wander more
@@ -2844,38 +2632,11 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_VICTRON_VOLTAGE);
 
 
-    // Track peak voltage (lifetime)
-    if (IBV > PeakVoltage_AllTime) {
-      PeakVoltage_AllTime = IBV;
-      static unsigned long lastWrite_PeakVoltage = 0;
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%.2f", PeakVoltage_AllTime);
-      writeFileThrottled(LittleFS, "/PeakVoltage_AllTime.txt", buf, lastWrite_PeakVoltage);
-    }
-
-    if (IBV > IBVMax) {
-      IBVMax = IBV;
-      static unsigned long lastWrite_IBVMax = 0;
-      char buf2[32];
-      snprintf(buf2, sizeof(buf2), "%.2f", IBVMax);
-      writeFileThrottled(LittleFS, "/IBVMax.txt", buf2, lastWrite_IBVMax);
-    }
-
-    if (IBV < MinVoltage) {
-      MinVoltage = IBV;
-      static unsigned long lastWrite_MinVoltage = 0;
-      char buf3[32];
-      snprintf(buf3, sizeof(buf3), "%.2f", MinVoltage);
-      writeFileThrottled(LittleFS, "/MinVoltage.txt", buf3, lastWrite_MinVoltage);
-    }
-
-    if (MinVoltage_AllTime == 0.0 || IBV < MinVoltage_AllTime) {
-      MinVoltage_AllTime = IBV;
-      static unsigned long lastWrite_MinVoltageAllTime = 0;
-      char buf4[32];
-      snprintf(buf4, sizeof(buf4), "%.2f", MinVoltage_AllTime);
-      writeFileThrottled(LittleFS, "/MinVoltage_AllTime.txt", buf4, lastWrite_MinVoltageAllTime);
-    }
+    // lastElectricalRecordMs bump: blocks NVS commits for 5s via inCriticalZone().
+    if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
+    if (IBV > IBVMax)              { IBVMax              = IBV; lastElectricalRecordMs = millis(); }
+    if (IBV < MinVoltage)          { MinVoltage          = IBV; lastElectricalRecordMs = millis(); }
+    if (MinVoltage_AllTime == 0.0 || IBV < MinVoltage_AllTime) { MinVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
 
 
     // Generate fake alternator current: wander heavily in a broad band
@@ -2887,21 +2648,9 @@ void ReadAnalogInputs_Fake() {
     ch1FreshFlag = true;                                    // Signal PID that fresh current data is available
     MARK_FRESH(IDX_MEASURED_AMPS);
 
-    // Track max alternator current (session and lifetime)
-    if (MeasuredAmps > MeasuredAmpsMax) {
-      MeasuredAmpsMax = MeasuredAmps;
-      static unsigned long lastWrite_MeasuredAmpsMax = 0;
-      char buf[32];
-      snprintf(buf, sizeof(buf), "%.2f", MeasuredAmpsMax);
-      writeFileThrottled(LittleFS, "/MeasuredAmpsMax.txt", buf, lastWrite_MeasuredAmpsMax);
-    }
-    if (MeasuredAmps > MeasuredAmpsMax_AllTime) {
-      MeasuredAmpsMax_AllTime = MeasuredAmps;
-      static unsigned long lastWrite_MeasuredAmpsMaxAllTime = 0;
-      char buf2[32];
-      snprintf(buf2, sizeof(buf2), "%.2f", MeasuredAmpsMax_AllTime);
-      writeFileThrottled(LittleFS, "/MeasuredAmpsMax_AllTime.txt", buf2, lastWrite_MeasuredAmpsMaxAllTime);
-    }
+    // Track max alternator current. lastElectricalRecordMs bump: see IBV block above.
+    if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; lastElectricalRecordMs = millis(); }
+    if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; lastElectricalRecordMs = millis(); }
 
 
     // Generate fake battery current - broad noisy range
@@ -2930,21 +2679,9 @@ void ReadAnalogInputs_Fake() {
     RPM = fakeRPM;
     MARK_FRESH(IDX_RPM);
 
-    // Track RPM max
-    if (RPM > RPMMax) {
-      RPMMax = RPM;
-      static unsigned long lastWrite_RPMMax = 0;
-      char bufR[32];
-      snprintf(bufR, sizeof(bufR), "%.0f", RPMMax);
-      writeFileThrottled(LittleFS, "/RPMMax.txt", bufR, lastWrite_RPMMax);
-    }
-    if (RPM > RPMMax_AllTime) {
-      RPMMax_AllTime = RPM;
-      static unsigned long lastWrite_RPMMaxAllTime = 0;
-      char bufR2[32];
-      snprintf(bufR2, sizeof(bufR2), "%.0f", RPMMax_AllTime);
-      writeFileThrottled(LittleFS, "/RPMMax_AllTime.txt", bufR2, lastWrite_RPMMaxAllTime);
-    }
+    // Track RPM max. lastElectricalRecordMs bump: see IBV block above.
+    if (RPM > RPMMax)         { RPMMax         = RPM; lastElectricalRecordMs = millis(); }
+    if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; lastElectricalRecordMs = millis(); }
 
     // Generate fake temperatures (10–110°C, looser swings)
     fakeTemp += (random(-30, 30) / 10.0);
@@ -2959,34 +2696,10 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_ALTERNATOR_TEMP);
 
     // Track temperature maxes
-    if (temperatureThermistor > MaxTemperatureThermistor) {
-      MaxTemperatureThermistor = temperatureThermistor;
-      static unsigned long lastWrite_MaxTempTherm = 0;
-      char bufT[32];
-      snprintf(bufT, sizeof(bufT), "%.1f", MaxTemperatureThermistor);
-      writeFileThrottled(LittleFS, "/MaxTemperatureThermistor.txt", bufT, lastWrite_MaxTempTherm);
-    }
-    if (temperatureThermistor > MaxTemperatureThermistor_AllTime) {
-      MaxTemperatureThermistor_AllTime = temperatureThermistor;
-      static unsigned long lastWrite_MaxTempThermAllTime = 0;
-      char bufT2[32];
-      snprintf(bufT2, sizeof(bufT2), "%.1f", MaxTemperatureThermistor_AllTime);
-      writeFileThrottled(LittleFS, "/MaxTemperatureThermistor_AllTime.txt", bufT2, lastWrite_MaxTempThermAllTime);
-    }
-    if (AlternatorTemperatureF > MaxAlternatorTemperatureF) {
-      MaxAlternatorTemperatureF = AlternatorTemperatureF;
-      static unsigned long lastWrite_MaxAltTempF = 0;
-      char bufA[32];
-      snprintf(bufA, sizeof(bufA), "%.2f", MaxAlternatorTemperatureF);
-      writeFileThrottled(LittleFS, "/MaxAlternatorTemperatureF.txt", bufA, lastWrite_MaxAltTempF);
-    }
-    if (AlternatorTemperatureF > MaxAlternatorTemperatureF_AllTime) {
-      MaxAlternatorTemperatureF_AllTime = AlternatorTemperatureF;
-      static unsigned long lastWrite_MaxAltTempFAllTime = 0;
-      char bufA2[32];
-      snprintf(bufA2, sizeof(bufA2), "%.2f", MaxAlternatorTemperatureF_AllTime);
-      writeFileThrottled(LittleFS, "/MaxAlternatorTemperatureF_AllTime.txt", bufA2, lastWrite_MaxAltTempFAllTime);
-    }
+    if (temperatureThermistor > MaxTemperatureThermistor)             MaxTemperatureThermistor             = temperatureThermistor;
+    if (temperatureThermistor > MaxTemperatureThermistor_AllTime)     MaxTemperatureThermistor_AllTime     = temperatureThermistor;
+    if (AlternatorTemperatureF > MaxAlternatorTemperatureF)           MaxAlternatorTemperatureF            = AlternatorTemperatureF;
+    if (AlternatorTemperatureF > MaxAlternatorTemperatureF_AllTime)   MaxAlternatorTemperatureF_AllTime    = AlternatorTemperatureF;
 
 
     // Solar energy simulation (fake Victron data)
@@ -3869,8 +3582,14 @@ void saveNVSDataFull() {
 
 // Returns true when battery is high AND field is on — the window where a 50ms stall
 // could mask a load-dump voltage spike. No NVS commits happen in this window.
+// Also returns true for 5s after any V/I/RPM record-high update — setting a new max
+// means we're at an electrically stressed moment, so defer the periodic commit.
+// 1.0V band (was 0.5V) for extra safety: deferred data always drains 5s after the
+// field-off edge via saveNVSDataFull() in the main loop, so widening costs nothing.
 bool inCriticalZone() {
-  return (BatteryV > (BulkVoltage - 0.5f) && fieldActiveStatus > 0);
+  if (BatteryV > (BulkVoltage - 1.0f) && fieldActiveStatus > 0) return true;
+  if (lastElectricalRecordMs > 0 && (millis() - lastElectricalRecordMs) < 5000UL) return true;
+  return false;
 }
 
 // Returns true once we've been continuously out of critical zone for 5 seconds.
@@ -3968,7 +3687,7 @@ void saveNVSData() {
       if (prev_ChargeCycles_AllTime  != (int32_t)ChargeCycles_AllTime) { nvs_set_i32(nvsH, "ChrgCyc_AT",  (int32_t)ChargeCycles_AllTime); prev_ChargeCycles_AllTime  = (int32_t)ChargeCycles_AllTime; nvsChg = true; }
       nvsPhase = 4; break;
 
-    case 4:  // Travel + session average SOC + speed AllTime accumulators
+    case 4:  // Travel + session average SOC + speed AllTime accumulators + speed/RPM/current extrema
       if (prev_TotalDist       != (int32_t)TotalDistance)             { nvs_set_i32(nvsH, "TotalDist",  (int32_t)TotalDistance);              prev_TotalDist       = (int32_t)TotalDistance;             nvsChg = true; }
       if (prev_AvgSpeed        != (int32_t)(AvgSpeed * 100))          { nvs_set_i32(nvsH, "AvgSpeed",   (int32_t)(AvgSpeed * 100));           prev_AvgSpeed        = (int32_t)(AvgSpeed * 100);          nvsChg = true; }
       if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)   { nvs_set_i32(nvsH, "TotDist_AT", (int32_t)TotalDistance_AllTime);      prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;   nvsChg = true; }
@@ -3976,9 +3695,15 @@ void saveNVSData() {
       if (prev_spdAccum_AllTime  != speedAccumulator_AllTime)          { nvs_set_blob(nvsH, "SpdAccum_AT", &speedAccumulator_AllTime, sizeof(float));    prev_spdAccum_AllTime  = speedAccumulator_AllTime;          nvsChg = true; }
       if (prev_spdTime_AllTime   != (uint32_t)totalSpeedSampleTime_AllTime) { nvs_set_u32(nvsH, "SpdTime_AT", (uint32_t)totalSpeedSampleTime_AllTime); prev_spdTime_AllTime = (uint32_t)totalSpeedSampleTime_AllTime; nvsChg = true; }
       if (prev_AvgSOC          != (int32_t)(AvgSOC * 100))            { nvs_set_i32(nvsH, "AvgSOC",     (int32_t)(AvgSOC * 100));             prev_AvgSOC          = (int32_t)(AvgSOC * 100);            nvsChg = true; }
+      if (prev_MaxSpeed             != MaxSpeed)                 { nvs_set_blob(nvsH, "MaxSpd",      &MaxSpeed,                 sizeof(float)); prev_MaxSpeed             = MaxSpeed;                 nvsChg = true; }
+      if (prev_MaxSpeed_AllTime     != MaxSpeed_AllTime)         { nvs_set_blob(nvsH, "MaxSpd_AT",   &MaxSpeed_AllTime,         sizeof(float)); prev_MaxSpeed_AllTime     = MaxSpeed_AllTime;         nvsChg = true; }
+      if (prev_MeasAmpsMax          != MeasuredAmpsMax)          { nvs_set_blob(nvsH, "MAmpsMax",    &MeasuredAmpsMax,          sizeof(float)); prev_MeasAmpsMax          = MeasuredAmpsMax;          nvsChg = true; }
+      if (prev_MeasAmpsMax_AllTime  != MeasuredAmpsMax_AllTime)  { nvs_set_blob(nvsH, "MAmpsMax_AT", &MeasuredAmpsMax_AllTime,  sizeof(float)); prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;  nvsChg = true; }
+      if (prev_RPMMax               != RPMMax)                   { nvs_set_blob(nvsH, "RPMMax",      &RPMMax,                   sizeof(float)); prev_RPMMax               = RPMMax;                   nvsChg = true; }
+      if (prev_RPMMax_AllTime       != RPMMax_AllTime)           { nvs_set_blob(nvsH, "RPMMax_AT",   &RPMMax_AllTime,           sizeof(float)); prev_RPMMax_AllTime       = RPMMax_AllTime;           nvsChg = true; }
       nvsPhase = 5; break;
 
-    case 5: {  // SOC alltime accumulators + voltage AllTime accumulators + battery state
+    case 5: {  // SOC alltime accumulators + voltage AllTime accumulators + battery state + voltage extrema
       uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
       if (prev_socAccum_AllTime != sc)                                       { nvs_set_u64(nvsH, "SocAccum_AT",  sc);                                    prev_socAccum_AllTime = sc;                                    nvsChg = true; }
       if (prev_socTime_AllTime  != (uint32_t)totalSocSampleTime_AllTime)    { nvs_set_u32(nvsH, "SocTime_AT",   (uint32_t)totalSocSampleTime_AllTime);  prev_socTime_AllTime  = (uint32_t)totalSocSampleTime_AllTime;  nvsChg = true; }
@@ -3986,6 +3711,10 @@ void saveNVSData() {
       if (prev_vltTime_AllTime   != (uint32_t)totalVoltageSampleTime_AllTime) { nvs_set_u32(nvsH, "VltTime_AT", (uint32_t)totalVoltageSampleTime_AllTime); prev_vltTime_AllTime = (uint32_t)totalVoltageSampleTime_AllTime; nvsChg = true; }
       if (prev_SOC_percent      != (int32_t)SOC_percent)                    { nvs_set_i32(nvsH, "SOC_percent",  (int32_t)SOC_percent);                  prev_SOC_percent      = (int32_t)SOC_percent;                  nvsChg = true; }
       if (prev_CoulombCount     != (int32_t)CoulombCount_Ah_scaled)         { nvs_set_i32(nvsH, "CoulombCount", (int32_t)CoulombCount_Ah_scaled);       prev_CoulombCount     = (int32_t)CoulombCount_Ah_scaled;       nvsChg = true; }
+      if (prev_IBVMax              != IBVMax)              { nvs_set_blob(nvsH, "IBVMax",   &IBVMax,              sizeof(float)); prev_IBVMax              = IBVMax;              nvsChg = true; }
+      if (prev_PeakV_AllTime       != PeakVoltage_AllTime) { nvs_set_blob(nvsH, "PeakV_AT", &PeakVoltage_AllTime, sizeof(float)); prev_PeakV_AllTime       = PeakVoltage_AllTime; nvsChg = true; }
+      if (prev_MinVoltage          != MinVoltage)          { nvs_set_blob(nvsH, "MinV",     &MinVoltage,          sizeof(float)); prev_MinVoltage          = MinVoltage;          nvsChg = true; }
+      if (prev_MinVoltage_AllTime  != MinVoltage_AllTime)  { nvs_set_blob(nvsH, "MinV_AT",  &MinVoltage_AllTime,  sizeof(float)); prev_MinVoltage_AllTime  = MinVoltage_AllTime;  nvsChg = true; }
       nvsPhase = 6; break;
     }
 
@@ -3996,7 +3725,7 @@ void saveNVSData() {
       if (prev_PowerCycles != (int32_t)totalPowerCycles)         { nvs_set_i32(nvsH, "PowerCycles", (int32_t)totalPowerCycles);        prev_PowerCycles = (int32_t)totalPowerCycles;        nvsChg = true; }
       nvsPhase = 7; break;
 
-    case 7:  // Thermal stress + dynamic learning calibration
+    case 7:  // Thermal stress + dynamic learning calibration + environment/UV extrema
       if (prev_InsulDamage != CumulativeInsulationDamage)   { nvs_set_blob(nvsH, "InsulDamage",  &CumulativeInsulationDamage, sizeof(float)); prev_InsulDamage  = CumulativeInsulationDamage;   nvsChg = true; }
       if (prev_GreaseDamage != CumulativeGreaseDamage)       { nvs_set_blob(nvsH, "GreaseDamage", &CumulativeGreaseDamage,     sizeof(float)); prev_GreaseDamage = CumulativeGreaseDamage;       nvsChg = true; }
       if (prev_BrushDamage  != CumulativeBrushDamage)        { nvs_set_blob(nvsH, "BrushDamage",  &CumulativeBrushDamage,      sizeof(float)); prev_BrushDamage  = CumulativeBrushDamage;        nvsChg = true; }
@@ -4006,6 +3735,19 @@ void saveNVSData() {
       if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime)    { nvs_set_u32(nvsH, "LastZeroTime",  (uint32_t)lastAutoZeroTime);         prev_LastZeroTime = (uint32_t)lastAutoZeroTime;    nvsChg = true; }
       if (prev_LastZeroTemp != lastAutoZeroTemp)               { nvs_set_blob(nvsH, "LastZeroTemp", &lastAutoZeroTemp,           sizeof(float)); prev_LastZeroTemp = lastAutoZeroTemp;             nvsChg = true; }
       if (prev_sailing_days_alltime != sailing_days_alltime)  { nvs_set_blob(nvsH, "SailDays_AT",  &sailing_days_alltime,       sizeof(float)); prev_sailing_days_alltime = sailing_days_alltime; nvsChg = true; }
+      if (prev_board_temp_max        != board_temp_max_alltime)             { nvs_set_blob(nvsH, "BdTmpMaxAt",  &board_temp_max_alltime,             sizeof(float)); prev_board_temp_max        = board_temp_max_alltime;             nvsChg = true; }
+      if (prev_board_temp_min        != board_temp_min_alltime)             { nvs_set_blob(nvsH, "BdTmpMinAt",  &board_temp_min_alltime,             sizeof(float)); prev_board_temp_min        = board_temp_min_alltime;             nvsChg = true; }
+      if (prev_baro_max              != baro_pressure_max_alltime)          { nvs_set_blob(nvsH, "BaroMaxAt",   &baro_pressure_max_alltime,          sizeof(float)); prev_baro_max              = baro_pressure_max_alltime;          nvsChg = true; }
+      if (prev_baro_min              != baro_pressure_min_alltime)          { nvs_set_blob(nvsH, "BaroMinAt",   &baro_pressure_min_alltime,          sizeof(float)); prev_baro_min              = baro_pressure_min_alltime;          nvsChg = true; }
+      if (prev_MaxTempTherm          != MaxTemperatureThermistor)           { nvs_set_blob(nvsH, "MaxTherm",    &MaxTemperatureThermistor,           sizeof(float)); prev_MaxTempTherm          = MaxTemperatureThermistor;           nvsChg = true; }
+      if (prev_MaxTempTherm_AllTime  != MaxTemperatureThermistor_AllTime)   { nvs_set_blob(nvsH, "MaxTherm_AT", &MaxTemperatureThermistor_AllTime,   sizeof(float)); prev_MaxTempTherm_AllTime  = MaxTemperatureThermistor_AllTime;   nvsChg = true; }
+      if (prev_MaxAltTempF           != MaxAlternatorTemperatureF)          { nvs_set_blob(nvsH, "MaxAltTempF", &MaxAlternatorTemperatureF,          sizeof(float)); prev_MaxAltTempF           = MaxAlternatorTemperatureF;          nvsChg = true; }
+      if (prev_MaxAltTempF_AllTime   != MaxAlternatorTemperatureF_AllTime)  { nvs_set_blob(nvsH, "MAltTempF_AT", &MaxAlternatorTemperatureF_AllTime, sizeof(float)); prev_MaxAltTempF_AllTime   = MaxAlternatorTemperatureF_AllTime;  nvsChg = true; }
+      if (prev_MaxWindApp            != max_wind_speed_apparent_alltime)    { nvs_set_blob(nvsH, "MaxWApp_AT",  &max_wind_speed_apparent_alltime,    sizeof(float)); prev_MaxWindApp            = max_wind_speed_apparent_alltime;    nvsChg = true; }
+      if (prev_MaxWindTrue           != max_wind_speed_true_alltime)        { nvs_set_blob(nvsH, "MaxWTr_AT",   &max_wind_speed_true_alltime,        sizeof(float)); prev_MaxWindTrue           = max_wind_speed_true_alltime;        nvsChg = true; }
+      if (prev_UVToday               != UVToday)                            { nvs_set_blob(nvsH, "UVToday",     &UVToday,                            sizeof(float)); prev_UVToday               = UVToday;                            nvsChg = true; }
+      if (prev_UVTomorrow            != UVTomorrow)                         { nvs_set_blob(nvsH, "UVTomorrow",  &UVTomorrow,                         sizeof(float)); prev_UVTomorrow            = UVTomorrow;                         nvsChg = true; }
+      if (prev_UVDay2                != UVDay2)                             { nvs_set_blob(nvsH, "UVDay2",      &UVDay2,                             sizeof(float)); prev_UVDay2                = UVDay2;                             nvsChg = true; }
       nvsPhase = 8; break;
 
     case 8:  // IMU lifetime counters, maxima, and settings
@@ -4023,7 +3765,7 @@ void saveNVSData() {
       nvsPhase = 9; break;
 
     case 9:  // Commit + close — skip commit if in critical zone, restart cycle immediately
-      if (heavyIOThisTick) { nvsTick = NVS_TICK_SPACING; return; }  // ADS or FS stall this tick — retry next tick
+      if (heavyIOThisTick) { nvsTick = NVS_TICK_SPACING; return; }  // ADS stall this tick — retry next tick
       if (inCriticalZone()) {
         nvs_close(nvsH);   // discard staged values
         nvsH = 0;
@@ -4039,7 +3781,7 @@ void saveNVSData() {
         nvsCommitLastMs = (_cmtMs > 65535UL) ? 65535 : (uint16_t)_cmtMs;
         if (_cmtMs > nvsCommitWorstMs) nvsCommitWorstMs = nvsCommitLastMs;
         if (_cmtMs >= 100) nvsCommitLongCount++;
-        heavyIOThisTick = true;  // flag so FlushFileWriteQueue defers this tick
+        heavyIOThisTick = true;  // co-fire guard for ADS1115 read on same tick
       }
       nvs_close(nvsH);
       nvsH = 0;
@@ -4234,6 +3976,30 @@ void loadNVSData() {
   nvs_get_blob(nvs_handle, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, &required_size);
   nvs_get_blob(nvs_handle, "IMU_SlamThrs", &SLAM_THRESHOLD_G, &required_size);
 
+  // Extrema, environment maxima, and UV forecast
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxSpd",      &MaxSpeed,                         &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxSpd_AT",   &MaxSpeed_AllTime,                 &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MAmpsMax",    &MeasuredAmpsMax,                  &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MAmpsMax_AT", &MeasuredAmpsMax_AllTime,          &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "RPMMax",      &RPMMax,                           &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "RPMMax_AT",   &RPMMax_AllTime,                   &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "IBVMax",      &IBVMax,                           &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "PeakV_AT",    &PeakVoltage_AllTime,              &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MinV",        &MinVoltage,                       &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MinV_AT",     &MinVoltage_AllTime,               &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "BdTmpMaxAt",  &board_temp_max_alltime,           &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "BdTmpMinAt",  &board_temp_min_alltime,           &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "BaroMaxAt",   &baro_pressure_max_alltime,        &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "BaroMinAt",   &baro_pressure_min_alltime,        &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxTherm",    &MaxTemperatureThermistor,         &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxTherm_AT", &MaxTemperatureThermistor_AllTime, &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxAltTempF", &MaxAlternatorTemperatureF,        &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MAltTempF_AT", &MaxAlternatorTemperatureF_AllTime, &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxWApp_AT",  &max_wind_speed_apparent_alltime,  &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxWTr_AT",   &max_wind_speed_true_alltime,      &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "UVToday",     &UVToday,                          &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "UVTomorrow",  &UVTomorrow,                       &required_size);
+  required_size = sizeof(float); nvs_get_blob(nvs_handle, "UVDay2",      &UVDay2,                           &required_size);
 
   nvs_close(nvs_handle);
   //queueConsoleMessage("NVS: Persistent data loaded successfully");
@@ -4320,6 +4086,30 @@ void initNVSCache() {
   prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;
   prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;
   prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;
+
+  prev_MaxSpeed             = MaxSpeed;
+  prev_MaxSpeed_AllTime     = MaxSpeed_AllTime;
+  prev_MeasAmpsMax          = MeasuredAmpsMax;
+  prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;
+  prev_RPMMax               = RPMMax;
+  prev_RPMMax_AllTime       = RPMMax_AllTime;
+  prev_IBVMax               = IBVMax;
+  prev_PeakV_AllTime        = PeakVoltage_AllTime;
+  prev_MinVoltage           = MinVoltage;
+  prev_MinVoltage_AllTime   = MinVoltage_AllTime;
+  prev_board_temp_max       = board_temp_max_alltime;
+  prev_board_temp_min       = board_temp_min_alltime;
+  prev_baro_max             = baro_pressure_max_alltime;
+  prev_baro_min             = baro_pressure_min_alltime;
+  prev_MaxTempTherm         = MaxTemperatureThermistor;
+  prev_MaxTempTherm_AllTime = MaxTemperatureThermistor_AllTime;
+  prev_MaxAltTempF          = MaxAlternatorTemperatureF;
+  prev_MaxAltTempF_AllTime  = MaxAlternatorTemperatureF_AllTime;
+  prev_MaxWindApp           = max_wind_speed_apparent_alltime;
+  prev_MaxWindTrue          = max_wind_speed_true_alltime;
+  prev_UVToday              = UVToday;
+  prev_UVTomorrow           = UVTomorrow;
+  prev_UVDay2               = UVDay2;
 }
 // Helper function to get human-readable subtype names
 String getSubtypeString(esp_partition_type_t type, esp_partition_subtype_t subtype) {

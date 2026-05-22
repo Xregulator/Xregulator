@@ -1271,13 +1271,6 @@ void AdjustFieldLearnMode() {
   // near target — addressing the original nuisance-trigger concern that led to the
   // old +0.12 V raw-voltage threshold.
   //
-  // Why fastOvClampActive beats a raw voltage threshold:
-  // Log analysis (pidlog__27__0_5s_5s.csv, 2026-04-15) showed the old +0.12 V
-  // threshold triggered at the exact voltage peak (first tick above +0.12 V = peak
-  // itself), providing zero benefit on the ascent. fastOvClampActive triggered 90 ms
-  // earlier at +0.05–0.09 V over target — the window where the output current PID was being
-  // held 8–9% duty below its desired output by the slew limiter.
-  //
   // Hysteresis: latch stays set until battV falls back to within 0.02 V of target.
   // Without this, bypass would toggle on/off rapidly as battV oscillates through the
   // V_SOFT boundary during descent, causing duty chatter.
@@ -1382,10 +1375,34 @@ void AdjustFieldLearnMode() {
     applyImmediateCut(tick, reason);
     return;
   }
-  // Hold field off while Core 0 internet operation or NTP sync is in progress.
-  // Field was off for ≥60s before any internet activity fires, so this only
-  // prevents the field from turning back on mid-transaction.
-  if (core0Busy) return;
+  // Hold field off while Core 0 internet operation is in progress OR while
+  // there are still pending HTTPS uploads in the queue (so the field can't
+  // "blip" through between consecutive queued uploads). Sets fieldActiveStatus
+  // to 4 (WAITING_CLOUD) so the header banner shows why the field isn't
+  // engaging despite charging being enabled.
+  //
+  // 10-second safety timeout: if WiFi is hosed or an upload hangs, flush the
+  // queue and proceed with field-on so charging isn't blocked indefinitely.
+  // The in-flight Core 0 upload finishes naturally; sensorRingInFlightIndex=-1
+  // means its success won't pop the ring slot (record stays for retry).
+  {
+    static unsigned long fieldHoldStartMs = 0;
+    bool cloudBusy = (core0Busy || uxQueueMessagesWaiting(httpsQueue) > 0);
+    if (cloudBusy) {
+      if (fieldHoldStartMs == 0) fieldHoldStartMs = millis();
+      if (millis() - fieldHoldStartMs < 10000UL) {
+        fieldActiveStatus = 4;  // WAITING_CLOUD
+        return;
+      }
+      // Timeout: drop queued requests and let charging proceed.
+      xQueueReset(httpsQueue);
+      sensorRingInFlightIndex = -1;
+      queueConsoleMessage("Field-on wait timeout (10s) — flushed cloud queue, proceeding");
+      fieldHoldStartMs = 0;
+    } else {
+      fieldHoldStartMs = 0;
+    }
+  }
   digitalWrite(4, HIGH);
   gpio4IsLow = false;
   // GPIO38 driven solely by CheckAlarms — do not write here
@@ -1696,8 +1713,8 @@ void AdjustFieldLearnMode() {
           static int iExcessPersistCount = 0;
           static float preEventCvI = 0.0f;  // cv_I captured just before snap, used to seed recovery
 
-          // Gate: within OvMeasMarginV of target (see big comment above for why).
-          if (voltageControlActive && nearBulk && (IBV > ChargingVoltageTarget - OvMeasMarginV)) {
+          // Gate: CV active AND battV within OvMeasMarginV of target.
+          if (voltageControlActive && (IBV > ChargingVoltageTarget - OvMeasMarginV)) {
             float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
                            : (IExcessSigSrc == 1) ? getFiltI()
                                                   : g_iMA_N;
@@ -3544,7 +3561,6 @@ void updateRPMBucketHistory(uint32_t nowMs) {
       totalSafeMs += (uint64_t)dtMs;
       totalSafeHours = (float)(totalSafeMs / 3600000ULL);
       timeSinceLastOverheat += dtMs;
-      // periodic 5-min save removed — was OBSOLETE, caused 65-70ms nvs_commit stall in AdjustFieldLearnMode every 5 min
     }
   } else {
     if (TempToUse < (TemperatureLimitF - 2.0f)) {
@@ -3706,34 +3722,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     return;
   }
 
-  // ---------------------------------------------------------------------------
-  //  Stage-aware penalty bounds — computed ONCE, referenced everywhere below.
-  //
-  //  Derived from inBulkStage / inAbsorptionStage directly, NOT from
-  //  voltageControlActive. Reason: in AdjustFieldLearnMode(), the assignment
-  //
-  //      voltageControlActive = (!inBulkStage || inAbsorptionStage);
-  //
-  //  executes AFTER tempPID_tick() returns. On a stage-transition tick,
-  //  voltageControlActive still carries the previous stage's value when we
-  //  arrive here. inBulkStage and inAbsorptionStage are written by
-  //  updateChargingStage(), which runs before tempPID_tick(), so they are
-  //  always current. Stage policy must come from stage variables, not from a
-  //  derived flag that may be one tick behind.
-  //
-  //  Policy:
-  //    Pure bulk (CC):    cold boost allowed — penaltyMin may be negative.
-  //    Absorption / float (CV): cold boost forbidden — penaltyMin = 0.
-  //
-  //  inPureBulk and penaltyMin are used in:
-  //    - SetOutputLimits() at re-enable
-  //    - SetOutputLimits() every tick
-  //    - clamp after external D
-  //    - clamp after slew limiter
-  //    - CV integrator bleed gate
-  //    - outerImpliedPenalty telemetry condition
-  //  No other lower-bound formula exists in this function.
-  // ---------------------------------------------------------------------------
+  // Stage-aware penalty bounds — computed ONCE, referenced everywhere below.
+  // Derived from inBulkStage / inAbsorptionStage directly, NOT voltageControlActive:
+  // the assignment `voltageControlActive = (!inBulkStage || inAbsorptionStage)` runs
+  // AFTER tempPID_tick() returns, so voltageControlActive still carries the previous
+  // stage's value on a transition tick. Stage variables are written before this fn.
   const float capCurrent = getCapCurrentForRPM(RPM);
   const float penaltyMax = (float)MaxTableValue;
 
@@ -3805,22 +3798,12 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     projectedTempF = isnan(tempNow) ? tempFiltered : (tempNow + thermalSlopeFPerSec * ThermalLookaheadSec);
   }
 
-  // ---------------------------------------------------------------------------
-  //  Re-enable after stale period — bumpless transfer
-  //
-  //  resumePenalty is clamped to current stage bounds before seeding the
-  //  integrator. If we enter CV carrying negative bulk bias, the integrator
-  //  starts at 0, not at a cold-boost value that is illegal in this stage.
-  //
-  //  All three penalty state variables are written to resumePenalty here so
-  //  that the command chain, slew limiter, and stale-hold path all start from
-  //  the same consistent value on the first post-resume tick:
-  //    thermalPenaltyAmps    — what the command chain reads this tick
-  //    prevThermalPenalty    — what the slew limiter uses as its prev on the
-  //                            next pidComputed tick (avoids spurious first step)
-  //    thermalPenaltyLastValid — what the stale-hold path returns if temp goes
-  //                              stale immediately after re-enable
-  // ---------------------------------------------------------------------------
+  // Re-enable after stale period — bumpless transfer. All three penalty state
+  // vars are seeded to resumePenalty (clamped to current stage bounds) so the
+  // command chain, slew limiter, and stale-hold path agree on the first tick:
+  //   thermalPenaltyAmps      — read by command chain this tick
+  //   prevThermalPenalty      — slew limiter's "prev" on next pidComputed tick
+  //   thermalPenaltyLastValid — returned by stale-hold path if temp goes stale
   // ===== THERMAL TUNING MODE: use wave setpoint if test is active =====
   // thermalTuning_tick() runs at the END of this function and updates
   // thermalWaveCurrentSetpointF for the NEXT tick (one-tick lag is fine at 5s PID intervals).
@@ -3917,28 +3900,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // so they remain inside the pidComputed block above.
   outerTermI = (float)tempPID.GetIterm();
 
-  // ---------------------------------------------------------------------------
-  //  CV integrator bleed
-  //
-  //  New behavior: in CV modes only, if the integrator is negative (stale
-  //  cold-boost bias carried in from bulk), TrackAppliedOutput(0) gently
-  //  nudges it toward zero. The decay rate is governed by the library's
-  //  back-calculation mechanism (TrackingGain * ki * dt), which is slow by
-  //  design — the goal is smooth erasure of illegal state, not a hard snap.
-  //
-  //  Asymmetric: positive thermal derate (genuinely hot alternator) is never
-  //  touched by this block. It only fires when iterm < 0, which in CV is
-  //  always stale state rather than valid thermal information.
-  //
-  //  Cadence: runs every tempPID_tick() call (~16 Hz output current loop rate), not
-  //  only on Compute() ticks (5-second interval). TrackAppliedOutput() is
-  //  dt-scaled so the per-call movement is tiny and rate-correct regardless
-  //  of call frequency. This is intentional — we want the bleed to be active
-  //  across the full time between compute ticks, not only on them.
-  //
-  //  outerAntiWindupFired is repurposed: now means "CV bleed was active this
-  //  tick." Log schema meaning has changed; see comment in thermalLog_tick().
-  // ---------------------------------------------------------------------------
+  // CV integrator bleed: in CV stages, if iterm < 0 (stale cold-boost bias
+  // from bulk), TrackAppliedOutput(0) bleeds it toward zero via back-calculation
+  // (slow by design). Asymmetric — positive thermal derate is never touched.
+  // Runs every tempPID_tick (~16 Hz), not just on Compute() ticks; dt-scaled.
+  // outerAntiWindupFired here means "CV bleed was active this tick."
   outerAntiWindupFired = false;
 
   if (!inPureBulk) {

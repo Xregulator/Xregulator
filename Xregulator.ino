@@ -81,6 +81,7 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 struct UpdateInfo;
 struct StreamingExtractor;
 struct HttpsRequest;
+struct SensorSnapshot;  // full definition near line 1334 (PSRAM sensor ring)
 // Auto-prototype generator fails on default-argument functions defined in later .ino files.
 bool fieldOffSettled(uint32_t extraMs = 0);
 
@@ -126,55 +127,10 @@ CachedGzFile loadFileToRAM(const char *path) {
   return result;
 }
 
-// ── Async LittleFS write queue ────────────────────────────────
-// Decouples writeFileThrottled() from the actual flash write.
-// FlushFileWriteQueue() drains one entry per loop() call.
-// queueFSWrite() deduplicates by path — repeated writes to the same file
-// (e.g. board_temp_max firing every loop while rising) update in-place and
-// consume only one slot, so the depth only needs to equal the number of
-// unique paths ever pending simultaneously, not the write rate.
-#define FS_WRITE_QUEUE_DEPTH 64
-#define FS_WRITE_PATH_MAX 48
-#define FS_WRITE_DATA_MAX 48  // bump if any setting value exceeds 47 chars
-
-struct PendingFSWrite {
-  char path[FS_WRITE_PATH_MAX];
-  char data[FS_WRITE_DATA_MAX];
-};
-
-static PendingFSWrite fsWriteQueue[FS_WRITE_QUEUE_DEPTH];
-static volatile uint8_t fsWriteHead = 0;  // consumer (FlushFileWriteQueue)
-static volatile uint8_t fsWriteTail = 0;  // producer (writeFileThrottled)
-uint32_t fsWriteQueueDrops = 0;           // wire into telemetry
-uint32_t fsFlushDeferred = 0;             // times FlushFileWriteQueue skipped because NVS committed same tick
-bool heavyIOThisTick = false;             // set by NVS commit or FS write; prevents co-fire in same tick
-
-// Flash write diagnostics — quantify LittleFS write-time tail to prove/disprove
-// wear-leveling / GC stalls. Each writeFile() call inside FlushFileWriteQueue()
-// is bracketed with micros(). Histogram buckets (ms, inclusive-lower):
-//   [0] <25  [1] 25-50  [2] 50-100  [3] 100-200  [4] 200-500  [5] >=500
-// A bimodal distribution (tall bar in fast bucket, small bar in 200-500/500+)
-// is the fingerprint of LittleFS rebalancing/wear-leveling. A smooth slope
-// would indicate queueing or contention instead.
-uint32_t fsWriteCount = 0;                // total writes serviced since boot
-uint32_t fsWriteLongCount = 0;            // writes that took >= 100 ms
-uint32_t fsWriteHist[6] = {0};            // duration histogram (see bucket map above)
-uint16_t fsWriteWorstMs = 0;              // worst single writeFile duration since boot (ms)
-
-// Slow-write ring of 8 — captures the most recent writes that crossed the
-// long-write threshold (100 ms). Lets us see whether slow writes hit the
-// SAME file (caller pattern) or RANDOM files (true LittleFS GC/rebalance).
-#define FS_SLOW_RING_SIZE 8
-#define FS_SLOW_PATH_MAX 32
-struct FsSlowWrite {
-  uint32_t whenMs;      // millis() at write completion
-  uint16_t durationMs;  // measured write duration
-  uint16_t dataLen;     // length of data written (bytes)
-  char     path[FS_SLOW_PATH_MAX];
-};
-static FsSlowWrite fsSlowRing[FS_SLOW_RING_SIZE];
-static uint8_t fsSlowRingHead = 0;    // next slot to overwrite
-static uint8_t fsSlowRingCount = 0;   // total slow writes captured (saturates at ring size)
+// Co-fire guard — prevents an ADS1115 I2C stall and an NVS commit from
+// landing on the same loop tick. Set by either side when it incurs heavy I/O,
+// read by the other to defer. Reset every tick at the top of loop().
+bool heavyIOThisTick = false;
 
 // NVS commit timing — nvs_commit() is the flush of all staged NVS writes
 // to flash. It can stall hundreds of ms on its own (independent of the
@@ -1193,9 +1149,6 @@ bool isRegistered = false;  // Registration status
 const int PAYLOAD_BUFFER_SIZE = 4096;
 const int CONFIG_PAYLOAD_SIZE = 8192;
 
-char lastUploadedFilePath[128] = "";  // Track which file to delete after successful upload
-
-
 char *tempBuffer;
 
 const int FILENAME_BUFFER_SIZE = 64;
@@ -1210,7 +1163,7 @@ bool timeIsSynced = false;
 time_t timeBase = 0;               // Unix timestamp at last sync
 unsigned long timeBaseMillis = 0;  // millis() at last sync
 unsigned long lastTimeSyncAttempt = 0;
-const unsigned long TIME_SYNC_INTERVAL = 43200000;  // 12 hour , was previously 1 hour during testing and worked
+const unsigned long TIME_SYNC_INTERVAL = 43200000;  // 12 hour
 enum TimeSource { TIME_NONE,
                   TIME_GPS,
                   TIME_NTP,
@@ -1371,6 +1324,23 @@ struct SensorWindow {
 };
 SensorWindow *currentWindow = nullptr;  // allocated to PSRAM in init
 
+// PSRAM ring of completed sensor snapshots, waiting to upload to Supabase.
+// Replaces the old per-snapshot LittleFS write that stalled Core 1 for ~400 ms
+// during sector erase. Pushes are microseconds. Uploads drain to httpsQueue
+// from the cloud-feature block (field-off gate) or via the "Upload Now" button.
+struct SensorSnapshot {
+  int32_t collectionTime;       // time_t — positive epoch if synced, negative-millis marker if not
+  SensorWindow window;          // accumulated min/max/area for this 5-min period
+};
+const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~700 B ≈ 700 KB PSRAM; ~83 hr at 5 min/sample
+SensorSnapshot *sensorRing = nullptr;    // ps_malloc'd in setup()
+volatile uint16_t sensorRingHead = 0;    // next write slot
+volatile uint16_t sensorRingTail = 0;    // oldest unread slot
+volatile uint16_t sensorRingCount = 0;   // 0..SENSOR_RING_SIZE
+volatile int32_t sensorRingInFlightIndex = -1;  // ring index currently being uploaded by Core 0 (-1 = none)
+volatile bool forceCloudFlushPending = false;   // set by /get?forceCloudFlush=1, cleared after drain attempt
+volatile bool sensorRingAnnouncedEmpty = false; // throttle for "all data uploaded" console — fires once per drain-to-empty
+
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
   int32_t accel_x_min, accel_x_max;
@@ -1463,10 +1433,7 @@ bool sensorUploadInProgress = false;
 // What must NOT set it:
 //   - Anything that can fire during active charging. Setting this flag while RPM
 //     could change blinds the protection logic and PID for the full duration of
-//     the op. TempTask used to set it during a 190–750 ms DS18B20 conversion every
-//     5 s; that caused +1.5 V voltage overshoots when RPM ramped during the freeze
-//     (see fuckingdisaster.csv, 2026-05). TempTask now only READS it (to defer its
-//     own work during HTTPS), and never sets it.
+//     the op.
 //
 // Readers: TempTask (defer own work), testInternetSpeed (skip), scheduled restart
 // (wait up to 30 s), OTA orchestration, and the AFLM gate at 6_functions.ino:1388.
@@ -1595,8 +1562,33 @@ uint32_t prev_vltTime_AllTime = 0;
 int32_t prev_AvgSOC = 0;
 int32_t prev_AvgSOC_AllTime = 0;
 static float prev_sailing_days_alltime = -1.0f;
-uint64_t prev_socAccum_AllTime = 0;  // moved from saveNVSData() static — needed across phases
+uint64_t prev_socAccum_AllTime = 0;
 uint32_t prev_socTime_AllTime = 0;
+
+// NVS shadow caches — used by saveNVSData() change-detection to skip unchanged keys.
+float prev_MaxSpeed = 0.0f;
+float prev_MaxSpeed_AllTime = 0.0f;
+float prev_MeasAmpsMax = 0.0f;
+float prev_MeasAmpsMax_AllTime = 0.0f;
+float prev_RPMMax = 0.0f;
+float prev_RPMMax_AllTime = 0.0f;
+float prev_IBVMax = 0.0f;
+float prev_PeakV_AllTime = 0.0f;
+float prev_MinVoltage = 0.0f;
+float prev_MinVoltage_AllTime = 0.0f;
+float prev_board_temp_max = 0.0f;
+float prev_board_temp_min = 0.0f;
+float prev_baro_max = 0.0f;
+float prev_baro_min = 0.0f;
+float prev_MaxTempTherm = 0.0f;
+float prev_MaxTempTherm_AllTime = 0.0f;
+float prev_MaxAltTempF = 0.0f;
+float prev_MaxAltTempF_AllTime = 0.0f;
+float prev_MaxWindApp = 0.0f;
+float prev_MaxWindTrue = 0.0f;
+float prev_UVToday = 0.0f;
+float prev_UVTomorrow = 0.0f;
+float prev_UVDay2 = 0.0f;
 
 // Accumulators for runtime tracking
 unsigned long engineRunAccumulator = 0;     // Milliseconds accumulator for engine runtime
@@ -1884,7 +1876,6 @@ FuncTiming ft_rai_bmp_state;       // BMP388 state machine — cost per state st
 FuncTiming ft_rai_imu;             // IMU FIFO drain block
 FuncTiming ft_updateAccelMetrics;  // accel ring-buffer processing (updateAccelMetrics)
 FuncTiming ft_ReadVEData;
-FuncTiming ft_FlushFileWriteQueue;
 FuncTiming ft_efficiencyTracker;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
@@ -2337,6 +2328,24 @@ volatile bool pendingClearVesselInfo = false;
 bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared after full flush
 bool shutdownNVSFlushDone = false;     // true once NVS+sensor window saved this shutdown
 uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain window
+
+// Field-off NVS drain trigger — fires saveNVSDataFull + saveEfficiencyMatrix once per
+// field-off window, 5s after the field-off edge. Re-arms on field-on edge. Independent
+// of fieldOffSettled() (which has a 60s baseline used by cloud/network callers).
+bool fieldOffFlushDone = false;
+int8_t lastFieldStateForFlush = -1;    // -1 = uninit; 0 = field off; 1 = field on
+uint32_t fieldOffEdgeMs = 0;           // millis() captured at most recent field-on -> field-off edge
+
+// Record-update freshness guard: any V/I/RPM record being set bumps this to millis().
+// inCriticalZone() blocks NVS commits for 5s after — setting a new max means we're at
+// an electrically stressed moment, so defer the periodic commit until things settle.
+uint32_t lastElectricalRecordMs = 0;
+
+// "Reset Peak Values" button window — millis() at the most recent reset (0 at boot,
+// which makes (millis() - perfCountersResetMs) = uptime since boot). CSV1 slot 28
+// carries (millis() - perfCountersResetMs)/1000 to the dashboard so all per-session
+// peak labels can display "Worst — last X min / X.X hr" relative to this timestamp.
+uint32_t perfCountersResetMs = 0;
 
 // Momentary Actions (Reset to 0 after execution)
 int ResetLearningTable = 0;    // OBSOLETE LEGACY EXTRA
@@ -3311,7 +3320,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "<button type=\"submit\">Save Configuration</button>"
 
   "<div class=\"info-box\">"
-  "After saving, this page may become unresponsive or disappear. In any case, wait 20 seconds, then reconnect to your chosen network to access the full alternator interface."
+  "After saving, this page may become unresponsive or disappear. In any case, wait 20 seconds, then reconnect to your chosen network to access the full alternator interface at the same url (alternator.local)."
   "</div>"
   "</form>"
   "</div>"
@@ -3339,6 +3348,9 @@ void setup() {
   timestampBuffer = (char *)ps_malloc(TIMESTAMP_BUFFER_SIZE);
   messageBuffer = (char *)ps_malloc(MESSAGE_BUFFER_SIZE);
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
+  sensorRing = (SensorSnapshot *)ps_malloc(SENSOR_RING_SIZE * sizeof(SensorSnapshot));
+  if (!sensorRing) Serial.println("FATAL: sensorRing ps_malloc failed");
+  else memset(sensorRing, 0, SENSOR_RING_SIZE * sizeof(SensorSnapshot));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
   // CH1 interval ring — 30 KB to PSRAM
@@ -3465,6 +3477,9 @@ void setup() {
       ;  // halt
   } else {
     initSensorBuffer();
+    // Restore PSRAM ring from LittleFS backup if Phase 4 dumped one before
+    // last power-down. No-op if no backup file exists.
+    restoreSensorRingFromLittleFS();
   }
   delay(50);
   checkWebFilesExist();
@@ -3500,7 +3515,6 @@ void setup() {
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
   memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
-  memset(&ft_FlushFileWriteQueue, 0, sizeof(FuncTiming));
   memset(&ft_efficiencyTracker, 0, sizeof(FuncTiming));
 
 
@@ -3760,7 +3774,6 @@ void loop() {
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   TIMED_CALL(ft_saveNVSData, saveNVSData());                    // phased: one group per NVS_TICK_SPACING ticks
-  TIMED_CALL(ft_FlushFileWriteQueue, FlushFileWriteQueue());
   // Deferred saves from Core 0 button handlers — executed here on Core 1 so Core 0 SSE is not blocked.
   // Gated: wait 5 consecutive seconds out of critical zone before firing, to avoid bursting I/O
   // the moment voltage drops. All flags in this block execute in the same tick — no re-entry possible.
@@ -3897,7 +3910,16 @@ void loop() {
             // Lets the CloudFeatures block continue uploading, and keeps WiFi open to verify the drain.
             setCpuFrequencyMhz(240);
           } else {
-            // Phase 4: done (buffer empty or timed out) — clear flags; low power on next tick
+            // Phase 4: 30-min cloud drain window expired. If the PSRAM ring
+            // still has unsent records, bulk-dump them to LittleFS so they
+            // survive the imminent power-down. setup() will restore them on
+            // next boot. Acceptable to block on flash here — device is about
+            // to sleep anyway.
+            if (!ringIsEmpty()) {
+              Serial.printf("Shutdown Phase 4: ring still has %u records — dumping to LittleFS\n",
+                            (unsigned)sensorRingCount);
+              dumpSensorRingToLittleFS();
+            }
             pendingShutdownFlush = false;
             shutdownNVSFlushDone = false;
             shutdownCloudDeadlineMs = 0;
@@ -4049,6 +4071,30 @@ void loop() {
         lastAccelEnabled = accelEnabled;
       }
 
+      // ===== FIELD-OFF NVS DRAIN (5s settled, once per field-off window) =====
+      // Independent of fieldOffSettled() — that helper has a 60s baseline intended for
+      // cloud/network callers. This drain wants to lock telemetry to flash quickly after
+      // the field cuts (engine pause, idle, ignition cut) without waiting for the 2-min
+      // schedule. Skips when pendingShutdownFlush owns the ignition-off sequence.
+      {
+        bool fieldNowActive = (fieldActiveStatus > 0);
+        if (lastFieldStateForFlush == 1 && !fieldNowActive) {
+          fieldOffEdgeMs = millis();  // capture the field-on -> field-off edge
+        } else if (lastFieldStateForFlush == 0 && fieldNowActive) {
+          fieldOffFlushDone = false;  // re-arm on field-on edge
+        } else if (lastFieldStateForFlush == -1 && !fieldNowActive) {
+          fieldOffEdgeMs = millis();  // first observation; field already off
+        }
+        lastFieldStateForFlush = fieldNowActive ? 1 : 0;
+
+        if (!fieldOffFlushDone && !pendingShutdownFlush && !fieldNowActive
+            && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 5000UL) {
+          saveNVSDataFull();
+          saveEfficiencyMatrix();
+          fieldOffFlushDone = true;
+        }
+      }
+
       if (CloudFeatures == 1) {
         if (otaInProgress) {
           return;  // Skip during OTA
@@ -4067,13 +4113,24 @@ void loop() {
           esp_task_wdt_reset();
         }
 
-        // Upload buffered records every BUFFER_UPLOAD_INTERVAL — requires field off for 65s
-        if (fieldOffSettled(5000) && currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7) {
+        // Upload buffered records every BUFFER_UPLOAD_INTERVAL — requires field off for 70s.
+        // Bumped from 65s to 70s so the buffered upload's TLS handshake doesn't land on top
+        // of the field-off NVS drain (fires at 5s). 60s baseline + 10s extra = 70s total.
+        // The "Upload Cloud Now" dashboard button sets forceCloudFlushPending = true which
+        // bypasses BOTH the field-off settle AND the 13s interval throttle so records drain
+        // back-to-back (still rate-limited by the HTTPS queue depth on Core 0).
+        bool flushBypass = forceCloudFlushPending;
+        if ((fieldOffSettled(10000) || flushBypass)
+            && (flushBypass || currentMillisz - lastBufferUploadAttempt >= BUFFER_UPLOAD_INTERVAL - 7)) {
           lastBufferUploadAttempt = currentMillisz;
           if (bufferedRecordCount > 0) {
             esp_task_wdt_reset();                                           // Feed before upload
-            TIMED_CALL(ft_uploadBufferedRecords, uploadBufferedRecords());  // times LittleFS read + queue send; HTTP transfer is on core 0 and not captured here
+            TIMED_CALL(ft_uploadBufferedRecords, uploadBufferedRecords());  // times JSON build + queue send; HTTP transfer is on core 0 and not captured here
             esp_task_wdt_reset();                                           // Feed after upload completes
+          } else if (flushBypass) {
+            // Ring empty — force-flush goal met, clear the flag.
+            forceCloudFlushPending = false;
+            queueConsoleMessage("Cloud sync: forced flush complete (queue empty)");
           }
         }
         
@@ -4162,7 +4219,6 @@ void loop() {
     ft_rai_imu.worstWindow = 0;
     ft_updateAccelMetrics.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
-    ft_FlushFileWriteQueue.worstWindow = 0;
     ft_efficiencyTracker.worstWindow = 0;
     voltLoopWorstInterval_5s = 0;
 

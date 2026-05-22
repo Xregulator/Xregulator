@@ -154,6 +154,20 @@ textarea {
   animation: field-heartbeat 2s ease-in-out infinite;
 }
 
+.field-status-waiting-cloud {
+  color: #f0a500 !important;
+  animation: field-heartbeat-wait 1.2s ease-in-out infinite;
+}
+
+@keyframes field-heartbeat-wait {
+  0%, 100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1.0;
+  }
+}
+
 @keyframes field-heartbeat {
 
   0%,
@@ -3038,6 +3052,43 @@ input:checked+.slider:before {
   .sensor-health-grid .metric-row:nth-last-child(-n+2) {
     border-bottom: none;
   }
+}
+
+/* Floating Cloud Upload pill — bottom-left to avoid the bottom-right WiFi pill */
+#cloud-flush-pill {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  z-index: 9999;
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--border, #ccc);
+  border-radius: 22px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 8px 14px;
+  font-size: 13px;
+  max-width: 280px;
+}
+#cloud-flush-pill-btn {
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent, #00a19a);
+  cursor: pointer;
+}
+#cloud-flush-pill-confirm {
+  margin-top: 8px;
+}
+#cloud-flush-pill-confirm .cfp-warn {
+  font-size: 11px;
+  color: #b87b00;
+  margin-bottom: 6px;
+}
+#cloud-flush-pill-confirm .cfp-btn {
+  margin-right: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
 }
 
 /* XREG_END */

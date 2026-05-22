@@ -462,15 +462,9 @@ cleanup:
 
     if (writeMaxTemp) {
       MaxAlternatorTemperatureF = pendingMaxTemp;
-      char tbuf[32];
-      snprintf(tbuf, sizeof(tbuf), "%.2f", pendingMaxTemp);
-      writeFile(LittleFS, "/MaxAlternatorTemperatureF.txt", tbuf);
     }
     if (writeMaxTempAllTime) {
       MaxAlternatorTemperatureF_AllTime = pendingMaxTempAllTime;
-      char tbuf2[32];
-      snprintf(tbuf2, sizeof(tbuf2), "%.2f", pendingMaxTempAllTime);
-      writeFile(LittleFS, "/MaxAlternatorTemperatureF_AllTime.txt", tbuf2);
     }
 
     if (otaInProgress) {
@@ -1100,81 +1094,21 @@ void updateSensorWindow() {
   currentWindow->lon_current = smoothLon;
 }
 
-// FILE BUFFERING
-void saveToLocalBuffer(time_t collectionTime) {
-  if (otaInProgress) {
-    return;  // Skip during OTA
-  }
-  // Don't buffer if not registered or token is empty
-if (!isRegistered || authToken.isEmpty()) {
-    static unsigned long lastNotRegisteredMsgMs = 0;
-    if (millis() - lastNotRegisteredMsgMs >= 30000) {
-      lastNotRegisteredMsgMs = millis();
-      Serial.println("Skipping buffer save - not registered or no token");
-      queueConsoleMessage("Skipped buffer save: not registered");
-    }
-    return;
-  }
-  esp_task_wdt_reset();
-  fsTakeLock();  //- must be before any LittleFS call or fsReleaseLock()
-  // Enforce max buffered records (delete oldest to make room for newest)
-  if (bufferedRecordCount >= MAX_BUFFERED_RECORDS) {
-    File root = LittleFS.open(SENSOR_BUFFER_DIR);
-    if (root && root.isDirectory()) {
-      char oldestFile[FILENAME_BUFFER_SIZE] = "";
-      unsigned long oldestTimestamp = ULONG_MAX;
-      File file = root.openNextFile();
-      while (file) {
-        esp_task_wdt_reset();
-        if (!file.isDirectory()) {
-          const char *name = file.name();  // e.g. "1739051234.json" or with path
-          if (name) {
-            // Find last '.' in name
-            const char *dot = strrchr(name, '.');
-            if (dot && dot > name) {
-              // Parse leading unsigned long from start of name up to dot
-              unsigned long ts = 0;
-              const char *p = name;
-
-              // If name includes directories, advance to basename
-              const char *slash = strrchr(name, '/');
-              if (slash) p = slash + 1;
-
-              while (p < dot && (*p >= '0' && *p <= '9')) {
-                ts = (ts * 10UL) + (unsigned long)(*p - '0');
-                p++;
-              }
-
-              // Accept only if we parsed at least one digit and consumed all chars up to dot
-              if (p > (slash ? slash + 1 : name) && p == dot) {
-                if (ts < oldestTimestamp) {
-                  oldestTimestamp = ts;
-                  strncpy(oldestFile, file.path(), FILENAME_BUFFER_SIZE - 1);
-                  oldestFile[FILENAME_BUFFER_SIZE - 1] = '\0';
-                }
-              }
-            }
-          }
-        }
-        file = root.openNextFile();
-      }
-      root.close();
-
-      if (oldestFile[0] != '\0') {
-        LittleFS.remove(oldestFile);
-        if (bufferedRecordCount > 0) {
-          bufferedRecordCount--;
-        }
-      }
-    }
-  }
-
-// Add the SAFE_AVG macro here for the snprintf section below
+// Build the cloud upload JSON for one sensor snapshot into the global
+// payloadBuffer. Returns bytes written (excluding null terminator), 0 on
+// overflow. Shared by the PSRAM-ring upload path (uploadBufferedRecords) and
+// the legacy LittleFS-buffer path (saveToLocalBuffer, still used for the
+// scheduled-restart bridge).
+//
+// All-time globals (AvgVoltage_AllTime, EngineRunTime_AllTime, totalOverheats,
+// etc.) are read LIVE — they represent cumulative state as of upload time,
+// not snapshot capture time. For delayed uploads this means an older buffered
+// snapshot will report current cumulative totals; acceptable simplification.
+size_t buildSnapshotJson(const SensorSnapshot &snap) {
 #define SAFE_AVG(area, valid) ((valid) > 0 ? ((double)(area) / (double)(valid)) / 100.0 : 0.0)
-  time_t finalTs = reconstructTimestamp(collectionTime);
+  time_t finalTs = reconstructTimestamp((time_t)snap.collectionTime);
   const char *timestampStr = formatTimestamp(finalTs);
   unsigned long intendedIntervalSec = SENSOR_UPLOAD_INTERVAL / 1000;
-  // NORMAL JSON structure - but possibly with bad token/UID/timestamp
   int written = snprintf(
     payloadBuffer, PAYLOAD_BUFFER_SIZE,
     "{"
@@ -1286,85 +1220,84 @@ if (!isRegistered || authToken.isEmpty()) {
     "\"baro_pressure_max_alltime\":%.2f,"
     "\"baro_pressure_min_alltime\":%.2f"
     "}",
-    // VALUES START HERE
-    device_id_hex,      // device_uid
-    authToken.c_str(),  // token
-    timestampStr,       // timestamp
+    device_id_hex,
+    authToken.c_str(),
+    timestampStr,
     FIRMWARE_VERSION,
-    currentWindow->battVolt_min / 100.0,
-    currentWindow->battVolt_max / 100.0,
-    SAFE_AVG(currentWindow->battVolt_area_v_us, currentWindow->battVolt_valid_us),
+    snap.window.battVolt_min / 100.0,
+    snap.window.battVolt_max / 100.0,
+    SAFE_AVG(snap.window.battVolt_area_v_us, snap.window.battVolt_valid_us),
     AvgVoltage_AllTime,
     (unsigned long)totalVoltageSampleTime_AllTime,
-    currentWindow->battCurr_min / 100.0,
-    currentWindow->battCurr_max / 100.0,
-    SAFE_AVG(currentWindow->battCurr_area_v_us, currentWindow->battCurr_valid_us),
-    currentWindow->altCurr_min / 100.0,
-    currentWindow->altCurr_max / 100.0,
-    SAFE_AVG(currentWindow->altCurr_area_v_us, currentWindow->altCurr_valid_us),
-    currentWindow->victronCurr_min / 100.0,
-    currentWindow->victronCurr_max / 100.0,
-    SAFE_AVG(currentWindow->victronCurr_area_v_us, currentWindow->victronCurr_valid_us),
-    currentWindow->soc_min / 100.0,
-    currentWindow->soc_max / 100.0,
-    SAFE_AVG(currentWindow->soc_area_v_us, currentWindow->soc_valid_us),
+    snap.window.battCurr_min / 100.0,
+    snap.window.battCurr_max / 100.0,
+    SAFE_AVG(snap.window.battCurr_area_v_us, snap.window.battCurr_valid_us),
+    snap.window.altCurr_min / 100.0,
+    snap.window.altCurr_max / 100.0,
+    SAFE_AVG(snap.window.altCurr_area_v_us, snap.window.altCurr_valid_us),
+    snap.window.victronCurr_min / 100.0,
+    snap.window.victronCurr_max / 100.0,
+    SAFE_AVG(snap.window.victronCurr_area_v_us, snap.window.victronCurr_valid_us),
+    snap.window.soc_min / 100.0,
+    snap.window.soc_max / 100.0,
+    SAFE_AVG(snap.window.soc_area_v_us, snap.window.soc_valid_us),
     AvgSOC_AllTime,
     (unsigned long)totalSocSampleTime_AllTime,
-    currentWindow->baro_min / 100.0,
-    currentWindow->baro_max / 100.0,
-    SAFE_AVG(currentWindow->baro_area_v_us, currentWindow->baro_valid_us),
-    currentWindow->altTemp_min / 100.0,
-    currentWindow->altTemp_max / 100.0,
-    SAFE_AVG(currentWindow->altTemp_area_v_us, currentWindow->altTemp_valid_us),
-    currentWindow->tempTherm_min / 100.0,
-    currentWindow->tempTherm_max / 100.0,
-    SAFE_AVG(currentWindow->tempTherm_area_v_us, currentWindow->tempTherm_valid_us),
-    currentWindow->ambTemp_min / 100.0,
-    currentWindow->ambTemp_max / 100.0,
-    SAFE_AVG(currentWindow->ambTemp_area_v_us, currentWindow->ambTemp_valid_us),
-    currentWindow->rpm_min,
-    currentWindow->rpm_max,
-    (int)SAFE_AVG(currentWindow->rpm_area_v_us, currentWindow->rpm_valid_us),
-    currentWindow->wifiStr_min,
-    currentWindow->wifiStr_max,
-    (int)SAFE_AVG(currentWindow->wifiStr_area_v_us, currentWindow->wifiStr_valid_us),
-    currentWindow->dutyCycle_min / 100.0,
-    currentWindow->dutyCycle_max / 100.0,
-    SAFE_AVG(currentWindow->dutyCycle_area_v_us, currentWindow->dutyCycle_valid_us),
-    currentWindow->altZero_min / 100.0,
-    currentWindow->altZero_max / 100.0,
-    SAFE_AVG(currentWindow->altZero_area_v_us, currentWindow->altZero_valid_us),
-    currentWindow->sog_min / 100.0,
-    currentWindow->sog_max / 100.0,
-    SAFE_AVG(currentWindow->sog_area_v_us, currentWindow->sog_valid_us),
+    snap.window.baro_min / 100.0,
+    snap.window.baro_max / 100.0,
+    SAFE_AVG(snap.window.baro_area_v_us, snap.window.baro_valid_us),
+    snap.window.altTemp_min / 100.0,
+    snap.window.altTemp_max / 100.0,
+    SAFE_AVG(snap.window.altTemp_area_v_us, snap.window.altTemp_valid_us),
+    snap.window.tempTherm_min / 100.0,
+    snap.window.tempTherm_max / 100.0,
+    SAFE_AVG(snap.window.tempTherm_area_v_us, snap.window.tempTherm_valid_us),
+    snap.window.ambTemp_min / 100.0,
+    snap.window.ambTemp_max / 100.0,
+    SAFE_AVG(snap.window.ambTemp_area_v_us, snap.window.ambTemp_valid_us),
+    snap.window.rpm_min,
+    snap.window.rpm_max,
+    (int)SAFE_AVG(snap.window.rpm_area_v_us, snap.window.rpm_valid_us),
+    snap.window.wifiStr_min,
+    snap.window.wifiStr_max,
+    (int)SAFE_AVG(snap.window.wifiStr_area_v_us, snap.window.wifiStr_valid_us),
+    snap.window.dutyCycle_min / 100.0,
+    snap.window.dutyCycle_max / 100.0,
+    SAFE_AVG(snap.window.dutyCycle_area_v_us, snap.window.dutyCycle_valid_us),
+    snap.window.altZero_min / 100.0,
+    snap.window.altZero_max / 100.0,
+    SAFE_AVG(snap.window.altZero_area_v_us, snap.window.altZero_valid_us),
+    snap.window.sog_min / 100.0,
+    snap.window.sog_max / 100.0,
+    SAFE_AVG(snap.window.sog_area_v_us, snap.window.sog_valid_us),
     AvgSpeed_AllTime,
     (unsigned long)totalSpeedSampleTime_AllTime,
-    currentWindow->cog_min / 100.0,
-    currentWindow->cog_max / 100.0,
-    SAFE_AVG(currentWindow->cog_area_v_us, currentWindow->cog_valid_us),
-    currentWindow->heading_min / 100.0,
-    currentWindow->heading_max / 100.0,
-    SAFE_AVG(currentWindow->heading_area_v_us, currentWindow->heading_valid_us),
-    currentWindow->aws_min / 100.0,
-    currentWindow->aws_max / 100.0,
-    SAFE_AVG(currentWindow->aws_area_v_us, currentWindow->aws_valid_us),
-    currentWindow->awa_min / 100.0,
-    currentWindow->awa_max / 100.0,
-    SAFE_AVG(currentWindow->awa_area_v_us, currentWindow->awa_valid_us),
-    currentWindow->tws_min / 100.0,
-    currentWindow->tws_max / 100.0,
-    SAFE_AVG(currentWindow->tws_area_v_us, currentWindow->tws_valid_us),
-    currentWindow->twa_min / 100.0,
-    currentWindow->twa_max / 100.0,
-    SAFE_AVG(currentWindow->twa_area_v_us, currentWindow->twa_valid_us),
-    currentWindow->leeway_min / 100.0,
-    currentWindow->leeway_max / 100.0,
-    SAFE_AVG(currentWindow->leeway_area_v_us, currentWindow->leeway_valid_us),
-    currentWindow->vmg_min / 100.0,
-    currentWindow->vmg_max / 100.0,
-    SAFE_AVG(currentWindow->vmg_area_v_us, currentWindow->vmg_valid_us),
-    currentWindow->lat_current,
-    currentWindow->lon_current,
+    snap.window.cog_min / 100.0,
+    snap.window.cog_max / 100.0,
+    SAFE_AVG(snap.window.cog_area_v_us, snap.window.cog_valid_us),
+    snap.window.heading_min / 100.0,
+    snap.window.heading_max / 100.0,
+    SAFE_AVG(snap.window.heading_area_v_us, snap.window.heading_valid_us),
+    snap.window.aws_min / 100.0,
+    snap.window.aws_max / 100.0,
+    SAFE_AVG(snap.window.aws_area_v_us, snap.window.aws_valid_us),
+    snap.window.awa_min / 100.0,
+    snap.window.awa_max / 100.0,
+    SAFE_AVG(snap.window.awa_area_v_us, snap.window.awa_valid_us),
+    snap.window.tws_min / 100.0,
+    snap.window.tws_max / 100.0,
+    SAFE_AVG(snap.window.tws_area_v_us, snap.window.tws_valid_us),
+    snap.window.twa_min / 100.0,
+    snap.window.twa_max / 100.0,
+    SAFE_AVG(snap.window.twa_area_v_us, snap.window.twa_valid_us),
+    snap.window.leeway_min / 100.0,
+    snap.window.leeway_max / 100.0,
+    SAFE_AVG(snap.window.leeway_area_v_us, snap.window.leeway_valid_us),
+    snap.window.vmg_min / 100.0,
+    snap.window.vmg_max / 100.0,
+    SAFE_AVG(snap.window.vmg_area_v_us, snap.window.vmg_valid_us),
+    snap.window.lat_current,
+    snap.window.lon_current,
     EngineRunTime_AllTime,
     AlternatorOnTime_AllTime,
     EngineCycles_AllTime,
@@ -1375,12 +1308,12 @@ if (!isRegistered || authToken.isEmpty()) {
     SolarChargedEnergy / 1000.0,
     SolarChargedEnergy_AllTime / 1000.0,
     intendedIntervalSec,
-    currentWindow->uTargetAmps_min / 100.0,
-    currentWindow->uTargetAmps_max / 100.0,
-    SAFE_AVG(currentWindow->uTargetAmps_area_v_us, currentWindow->uTargetAmps_valid_us),
-    currentWindow->tempMargin_min / 100.0,
-    currentWindow->tempMargin_max / 100.0,
-    SAFE_AVG(currentWindow->tempMargin_area_v_us, currentWindow->tempMargin_valid_us),
+    snap.window.uTargetAmps_min / 100.0,
+    snap.window.uTargetAmps_max / 100.0,
+    SAFE_AVG(snap.window.uTargetAmps_area_v_us, snap.window.uTargetAmps_valid_us),
+    snap.window.tempMargin_min / 100.0,
+    snap.window.tempMargin_max / 100.0,
+    SAFE_AVG(snap.window.tempMargin_area_v_us, snap.window.tempMargin_valid_us),
     (unsigned int)totalOverheats,
     (float)totalSafeHours,
     ChargedEnergy_AllTime / 1000.0,
@@ -1394,8 +1327,88 @@ if (!isRegistered || authToken.isEmpty()) {
     board_temp_min_alltime,
     baro_pressure_max_alltime,
     baro_pressure_min_alltime);
+#undef SAFE_AVG
+  if (written <= 0 || written >= PAYLOAD_BUFFER_SIZE) return 0;
+  return (size_t)written;
+}
 
-  if (written <= 0 || written >= PAYLOAD_BUFFER_SIZE) {
+// FILE BUFFERING
+void saveToLocalBuffer(time_t collectionTime) {
+  if (otaInProgress) {
+    return;  // Skip during OTA
+  }
+  // Don't buffer if not registered or token is empty
+if (!isRegistered || authToken.isEmpty()) {
+    static unsigned long lastNotRegisteredMsgMs = 0;
+    if (millis() - lastNotRegisteredMsgMs >= 30000) {
+      lastNotRegisteredMsgMs = millis();
+      Serial.println("Skipping buffer save - not registered or no token");
+      queueConsoleMessage("Skipped buffer save: not registered");
+    }
+    return;
+  }
+  esp_task_wdt_reset();
+  fsTakeLock();  //- must be before any LittleFS call or fsReleaseLock()
+  // Enforce max buffered records (delete oldest to make room for newest)
+  if (bufferedRecordCount >= MAX_BUFFERED_RECORDS) {
+    File root = LittleFS.open(SENSOR_BUFFER_DIR);
+    if (root && root.isDirectory()) {
+      char oldestFile[FILENAME_BUFFER_SIZE] = "";
+      unsigned long oldestTimestamp = ULONG_MAX;
+      File file = root.openNextFile();
+      while (file) {
+        esp_task_wdt_reset();
+        if (!file.isDirectory()) {
+          const char *name = file.name();  // e.g. "1739051234.json" or with path
+          if (name) {
+            // Find last '.' in name
+            const char *dot = strrchr(name, '.');
+            if (dot && dot > name) {
+              // Parse leading unsigned long from start of name up to dot
+              unsigned long ts = 0;
+              const char *p = name;
+
+              // If name includes directories, advance to basename
+              const char *slash = strrchr(name, '/');
+              if (slash) p = slash + 1;
+
+              while (p < dot && (*p >= '0' && *p <= '9')) {
+                ts = (ts * 10UL) + (unsigned long)(*p - '0');
+                p++;
+              }
+
+              // Accept only if we parsed at least one digit and consumed all chars up to dot
+              if (p > (slash ? slash + 1 : name) && p == dot) {
+                if (ts < oldestTimestamp) {
+                  oldestTimestamp = ts;
+                  strncpy(oldestFile, file.path(), FILENAME_BUFFER_SIZE - 1);
+                  oldestFile[FILENAME_BUFFER_SIZE - 1] = '\0';
+                }
+              }
+            }
+          }
+        }
+        file = root.openNextFile();
+      }
+      root.close();
+
+      if (oldestFile[0] != '\0') {
+        LittleFS.remove(oldestFile);
+        if (bufferedRecordCount > 0) {
+          bufferedRecordCount--;
+        }
+      }
+    }
+  }
+
+  // Build a temp snapshot from current state and let the shared helper produce
+  // the JSON. Same byte-for-byte format as the PSRAM-ring upload path.
+  SensorSnapshot tmpSnap;
+  tmpSnap.collectionTime = (int32_t)collectionTime;
+  tmpSnap.window = *currentWindow;
+  size_t written = buildSnapshotJson(tmpSnap);
+
+  if (written == 0) {
     fsReleaseLock();
     Serial.println("Failed to build buffered JSON (overflow)");
     return;
@@ -1412,7 +1425,6 @@ if (!isRegistered || authToken.isEmpty()) {
     return;
   }
   size_t bytesWritten = file.write((const uint8_t *)payloadBuffer, written);
-  file.close();
 
   if (bytesWritten != written) {
     queueConsoleMessage("Buffer save failed: incomplete write");
@@ -1420,93 +1432,51 @@ if (!isRegistered || authToken.isEmpty()) {
     return;
   }
 
-  bufferedRecordCount++;
+  file.close();
+  // NOTE: bufferedRecordCount is no longer incremented here. It now mirrors
+  // sensorRingCount (the PSRAM ring). LittleFS files written by this
+  // restart-bridge path are dormant until Phase 3 boot-restore loads them
+  // back into the ring, at which point push will bump bufferedRecordCount.
   fsReleaseLock();
   esp_task_wdt_reset();
 }
 void uploadBufferedRecords() {
-  if (otaInProgress) {
-    return;  // Skip during OTA
-  }
-  if (bufferedRecordCount == 0) return;
-  // Don't attempt uploads if not registered - files should be cleared manually
+  if (otaInProgress) return;
+  if (ringIsEmpty()) return;
   if (!isRegistered || authToken.isEmpty()) {
-    Serial.println("uploadBufferedRecords: Skipping - not registered (buffer has stale files)");
+    Serial.println("uploadBufferedRecords: skipping — not registered");
     return;
   }
-  // Removed core0Busy check - queue handles busy state
-  if (!canUploadNow()) {
-    Serial.println("Skipping buffer upload, !canUploadNow");
+  if (!canUploadNow()) return;
+
+  // One upload in flight at a time. Core 0 advances the tail when it succeeds
+  // (or hits a 400/401). On network failure it leaves the slot alone for retry.
+  if (sensorRingInFlightIndex >= 0) return;
+
+  SensorSnapshot snap;
+  if (!peekTailSnapshot(&snap)) return;
+
+  size_t written = buildSnapshotJson(snap);
+  if (written == 0) {
+    // JSON build overflow — drop this slot so we don't loop on it forever.
+    Serial.println("uploadBufferedRecords: JSON overflow, dropping tail snapshot");
+    popTailSnapshot();
     return;
   }
-  unsigned long funcStart = millis();
-  Serial.printf("uploadBufferedRecords: %d files buffered\n", bufferedRecordCount);
-  esp_task_wdt_reset();
-  fsTakeLock();
-  File root = LittleFS.open(SENSOR_BUFFER_DIR);
-  if (!root || !root.isDirectory()) {
-    Serial.println("ERROR: Cannot open buffer directory");
-    fsReleaseLock();
-    return;
-  }
-  char oldestFile[FILENAME_BUFFER_SIZE] = "";
-  File file = root.openNextFile();
-  while (file) {
-    if (!file.isDirectory()) {
-      strncpy(oldestFile, file.path(), sizeof(oldestFile) - 1);
-      oldestFile[sizeof(oldestFile) - 1] = '\0';
-      file.close();
-      break;
-    }
-    file.close();
-    file = root.openNextFile();
-  }
-  root.close();
-  if (oldestFile[0] == '\0') {
-    Serial.println("ERROR: No valid files found in buffer");
-    fsReleaseLock();
-    return;
-  }
-  Serial.printf("Selected file: %s\n", oldestFile);
-  File payloadFile = LittleFS.open(oldestFile, "r");
-  if (!payloadFile) {
-    Serial.printf("ERROR: Cannot open file: %s\n", oldestFile);
-    fsReleaseLock();
-    return;
-  }
-  size_t fileSize = payloadFile.size();
-  if (fileSize == 0 || fileSize >= PAYLOAD_BUFFER_SIZE) {
-    payloadFile.close();
-    LittleFS.remove(oldestFile);
-    if (bufferedRecordCount > 0) {
-      bufferedRecordCount--;
-    }
-    fsReleaseLock();
-    Serial.printf("Deleted invalid file (%d bytes): %s\n", (int)fileSize, oldestFile);
-    return;
-  }
-  size_t bytesRead = payloadFile.readBytes(payloadBuffer, fileSize);
-  payloadBuffer[bytesRead] = '\0';
-  payloadFile.close();
-  // Serial.printf("Read %d bytes from file\n", (int)bytesRead);
-  // Serial.println("=== BUFFERED FILE CONTENTS ===");
-  // Serial.printf("First 500 chars: %.500s\n", payloadBuffer);
-  // Serial.println("==============================");
-  fsReleaseLock();
+
   HttpsRequest req = {};
   req.type = HTTPS_UPLOAD_PAYLOAD;
   strncpy(req.payload, payloadBuffer, sizeof(req.payload) - 1);
   req.payload[sizeof(req.payload) - 1] = '\0';
+
   if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
-    strncpy(lastUploadedFilePath, oldestFile, sizeof(lastUploadedFilePath) - 1);
-    lastUploadedFilePath[sizeof(lastUploadedFilePath) - 1] = '\0';
+    sensorRingInFlightIndex = (int32_t)sensorRingTail;
     lastUploadWasBuffered = true;
-    Serial.println("Queued for upload (Core0 will delete on success)");
+    Serial.printf("Queued ring slot %d for upload (count=%u)\n",
+                  (int)sensorRingInFlightIndex, (unsigned)sensorRingCount);
   } else {
-    Serial.println("ERROR: Queue full, upload not queued");
+    Serial.println("uploadBufferedRecords: httpsQueue full, will retry next tick");
   }
-  unsigned long totalDuration = millis() - funcStart;
-  Serial.printf("✓ Queued buffered record for upload (Core0 will process) - took %lums\n", totalDuration);
   esp_task_wdt_reset();
 }
 bool executeUploadPayload(const char *payload) {
@@ -1656,108 +1626,250 @@ done_headers:
   Serial.printf("HTTP %d\n", httpCode);
   lastHttpResponseCode = httpCode;
 
-  // ===== Handle file deletion based on response code =====
-  if (lastUploadWasBuffered && lastUploadedFilePath[0] != '\0') {
-
+  // ===== Handle PSRAM-ring slot based on response code =====
+  // sensorRingInFlightIndex was set by uploadBufferedRecords() when it queued
+  // this request. On 200 → pop tail (slot consumed). On 400/401 → also pop
+  // (bad data, no point retrying). On network/server error → leave ring as-is
+  // and the next uploadBufferedRecords() tick will re-queue the same slot.
+  if (lastUploadWasBuffered && sensorRingInFlightIndex >= 0) {
     if (httpCode == 200) {
-      // ✅ SUCCESS - Delete uploaded file
-      // Serial.printf("HTTP 200: Attempting delete of '%s'\n", lastUploadedFilePath);
-      if (fsRemove(lastUploadedFilePath)) {
-        fsTakeLock();
-        if (bufferedRecordCount > 0) {
-          bufferedRecordCount--;
-        }
-        fsReleaseLock();
-        Serial.printf("✓ Uploaded & deleted: %s (remaining: %d)\n", lastUploadedFilePath, bufferedRecordCount);
-        if (bufferedRecordCount == 0) {
+      popTailSnapshot();
+      Serial.printf("✓ Uploaded ring slot (remaining: %u)\n", (unsigned)sensorRingCount);
+      if (ringIsEmpty()) {
+        // Only announce "all uploaded" once per drain-to-empty transition.
+        // pushSensorSnapshot re-arms the flag when count goes back above zero.
+        if (!sensorRingAnnouncedEmpty) {
           queueConsoleMessage("Cloud sync: all data uploaded");
-        } else {
-          snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync: %d records queued", bufferedRecordCount);
+          sensorRingAnnouncedEmpty = true;
+        }
+      } else {
+        // Throttle the "N queued" progress chatter to at most one per minute.
+        // Full drain visibility is still on the dashboard's bufferedRecordCount.
+        static unsigned long lastQueuedMsgMs = 0;
+        if (millis() - lastQueuedMsgMs >= 60000) {
+          lastQueuedMsgMs = millis();
+          snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync: %u records queued", (unsigned)sensorRingCount);
           queueConsoleMessage(messageBuffer);
         }
-      } else {
-        Serial.printf("✗ Upload succeeded but delete failed: %s\n", lastUploadedFilePath);
       }
-      lastUploadedFilePath[0] = '\0';
+      sensorRingInFlightIndex = -1;
 
     } else if (httpCode == 400 || httpCode == 401) {
-      // ❌ VALIDATION ERROR - Delete bad data immediately
-      Serial.printf("HTTP %d: Deleting bad data: %s\n", httpCode, lastUploadedFilePath);
-      if (fsRemove(lastUploadedFilePath)) {
-        fsTakeLock();
-        if (bufferedRecordCount > 0) {
-          bufferedRecordCount--;
-        }
-        fsReleaseLock();
-        Serial.printf("✓ Deleted bad data (remaining: %d)\n", bufferedRecordCount);
-        snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cleared bad data (%d queued)", bufferedRecordCount);
-        queueConsoleMessage(messageBuffer);
-      } else {
-        Serial.printf("✗ Failed to delete bad data: %s\n", lastUploadedFilePath);
-      }
-      lastUploadedFilePath[0] = '\0';
+      Serial.printf("HTTP %d: dropping bad-data ring slot\n", httpCode);
+      popTailSnapshot();
+      snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cleared bad data (%u queued)", (unsigned)sensorRingCount);
+      queueConsoleMessage(messageBuffer);
+      sensorRingInFlightIndex = -1;
 
     } else {
-      // ⚠️ NETWORK/SERVER ERROR - Keep file for retry
-      Serial.printf("⚠ HTTP %d: Keeping file for retry: %s\n", httpCode, lastUploadedFilePath);
+      // Network/server error — keep slot for retry on next tick.
+      Serial.printf("⚠ HTTP %d: keeping ring slot for retry\n", httpCode);
       snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync failed (HTTP %d)", httpCode);
       queueConsoleMessage(messageBuffer);
-      // Don't clear lastUploadedFilePath or set to '\0' - will retry
+      sensorRingInFlightIndex = -1;  // allow re-queue next tick
     }
-
-  } else {
-    // No buffered file or path not set
-    Serial.printf("No delete: code=%d, buffered=%d, path='%s'\n",
-                  httpCode, lastUploadWasBuffered, lastUploadedFilePath);
-    if (lastUploadWasBuffered && httpCode != 200) {
-      snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync failed (HTTP %d)", httpCode);
-      queueConsoleMessage(messageBuffer);
-    }
-  }
-
-  // NEW: Only clear buffered flag when we're done with the file (path cleared).
-  // This avoids losing delete/retry state if upstream doesn't re-arm the flag.
-  if (lastUploadedFilePath[0] == '\0') {
+    lastUploadWasBuffered = false;
+  } else if (lastUploadWasBuffered && httpCode != 200) {
+    // Buffered flag set but no in-flight ring slot (shouldn't normally happen).
+    snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Cloud sync failed (HTTP %d)", httpCode);
+    queueConsoleMessage(messageBuffer);
     lastUploadWasBuffered = false;
   }
 
   return (httpCode == 200);
 }
 
-void uploadSensorHistory() {
-  if (otaInProgress) {
-    return;  // Skip during OTA
-  }
-  // Serial.printf("=== UPLOAD DEBUG ===\n");
-  // Serial.printf("authToken: '%s' (len=%d)\n", authToken.c_str(), authToken.length());
-  // Serial.printf("device_id_hex: '%s'\n", device_id_hex);
-  // Serial.printf("isRegistered: %d\n", isRegistered);
-  // Serial.printf("===================\n");
+// ─────────────────────────────────────────────────────────────────────────────
+// PSRAM sensor-snapshot ring (replaces the old LittleFS /buffer/*.json layout).
+// One slot per completed SENSOR_UPLOAD_INTERVAL window. Push is microseconds;
+// no flash I/O, no Core 1 stall. Drain to Supabase happens from the cloud-
+// feature block in loop() under the same field-off gate as uploadBufferedRecords.
+// On overflow, the oldest unread slot is dropped — matches the prior 900-file
+// LittleFS cap behavior.
+// ─────────────────────────────────────────────────────────────────────────────
+inline bool ringIsFull()  { return sensorRingCount >= SENSOR_RING_SIZE; }
+inline bool ringIsEmpty() { return sensorRingCount == 0; }
 
-  if (currentWindow->battVolt_valid_us == 0) {  // check if any data collected
+// Push current window snapshot. Drops oldest if ring is full (unless the
+// oldest slot is currently being uploaded — then drop the new sample instead
+// so we don't yank the rug out from Core 0 mid-upload).
+void pushSensorSnapshot(time_t collectionTime) {
+  if (!sensorRing) return;
+  if (ringIsFull()) {
+    if (sensorRingInFlightIndex == (int32_t)sensorRingTail) {
+      // Oldest slot is being uploaded; drop the NEW snapshot instead.
+      Serial.println("sensorRing full + tail in-flight; dropping newest snapshot");
+      return;
+    }
+    // Drop oldest to make room.
+    sensorRingTail = (sensorRingTail + 1) % SENSOR_RING_SIZE;
+    sensorRingCount--;
+  }
+  sensorRing[sensorRingHead].collectionTime = (int32_t)collectionTime;
+  sensorRing[sensorRingHead].window = *currentWindow;  // struct copy from PSRAM to PSRAM
+  sensorRingHead = (sensorRingHead + 1) % SENSOR_RING_SIZE;
+  sensorRingCount++;
+  bufferedRecordCount = sensorRingCount;  // dashboard mirror
+  // Re-arm the "all uploaded" console message — count just went non-zero so
+  // the next time we drain to empty, we want to announce it once.
+  extern volatile bool sensorRingAnnouncedEmpty;
+  sensorRingAnnouncedEmpty = false;
+}
+
+// Peek at oldest unread snapshot without removing it. Caller passes a pointer
+// to a SensorSnapshot it'll copy into. Returns false if ring is empty or busy.
+bool peekTailSnapshot(SensorSnapshot *out) {
+  if (!sensorRing || ringIsEmpty() || !out) return false;
+  *out = sensorRing[sensorRingTail];
+  return true;
+}
+
+// Pop oldest. Caller must have already successfully consumed it (e.g. queued
+// for upload and Core 0 confirmed 200 OK).
+void popTailSnapshot() {
+  if (!sensorRing || ringIsEmpty()) return;
+  sensorRingTail = (sensorRingTail + 1) % SENSOR_RING_SIZE;
+  sensorRingCount--;
+  bufferedRecordCount = sensorRingCount;  // dashboard mirror
+}
+
+// Binary-format file used by Phase 3 (shutdown dump + boot restore) so the
+// PSRAM ring survives a power-cycle when WiFi/cloud couldn't drain everything
+// during the 30-min ignition-off window.
+#define SENSOR_RING_BACKUP_PATH  "/sensor_ring_backup.bin"
+#define SENSOR_RING_BACKUP_MAGIC 0x53524258u  // 'SRBX'
+#define SENSOR_RING_BACKUP_VER   1u
+
+struct SensorRingBackupHeader {
+  uint32_t magic;
+  uint32_t version;
+  uint32_t count;
+  uint32_t entrySize;  // sizeof(SensorSnapshot) — sanity guard against struct layout change
+};
+
+// One-shot bulk dump of the PSRAM ring to LittleFS. Called from shutdown
+// Phase 4 when the 30-min cloud drain window expired with records remaining.
+// Returns number of snapshots written, or 0 if ring was empty / on error.
+// Blocking flash write is acceptable here — the field is already off and the
+// device is about to sleep.
+uint16_t dumpSensorRingToLittleFS() {
+  if (!sensorRing || ringIsEmpty()) return 0;
+  fsTakeLock();
+  File f = LittleFS.open(SENSOR_RING_BACKUP_PATH, "w");
+  if (!f) {
+    fsReleaseLock();
+    Serial.println("dumpSensorRingToLittleFS: open failed");
+    return 0;
+  }
+  SensorRingBackupHeader hdr = {
+    SENSOR_RING_BACKUP_MAGIC,
+    SENSOR_RING_BACKUP_VER,
+    (uint32_t)sensorRingCount,
+    (uint32_t)sizeof(SensorSnapshot),
+  };
+  size_t hdrWritten = f.write((const uint8_t *)&hdr, sizeof(hdr));
+  if (hdrWritten != sizeof(hdr)) {
+    f.close();
+    LittleFS.remove(SENSOR_RING_BACKUP_PATH);
+    fsReleaseLock();
+    Serial.println("dumpSensorRingToLittleFS: header write failed");
+    return 0;
+  }
+  uint16_t written = 0;
+  uint16_t idx = sensorRingTail;
+  for (uint16_t i = 0; i < sensorRingCount; i++) {
+    size_t n = f.write((const uint8_t *)&sensorRing[idx], sizeof(SensorSnapshot));
+    if (n != sizeof(SensorSnapshot)) {
+      Serial.printf("dumpSensorRingToLittleFS: short write at entry %u\n", i);
+      break;
+    }
+    written++;
+    idx = (idx + 1) % SENSOR_RING_SIZE;
+    esp_task_wdt_reset();
+  }
+  f.close();
+  fsReleaseLock();
+  Serial.printf("dumpSensorRingToLittleFS: wrote %u snapshots\n", written);
+  return written;
+}
+
+// Boot-time restore: read the LittleFS backup file (if present) and re-push
+// each snapshot into the empty PSRAM ring. Delete the file regardless of
+// success — a partial restore is acceptable, but leaving a stale backup
+// around would cause double-uploads on the next boot.
+// Returns count restored. Safe to call when no backup file exists.
+uint16_t restoreSensorRingFromLittleFS() {
+  if (!sensorRing) return 0;
+  if (!fsExists(SENSOR_RING_BACKUP_PATH)) return 0;
+  fsTakeLock();
+  File f = LittleFS.open(SENSOR_RING_BACKUP_PATH, "r");
+  if (!f) {
+    fsReleaseLock();
+    Serial.println("restoreSensorRingFromLittleFS: open failed");
+    return 0;
+  }
+  SensorRingBackupHeader hdr;
+  if (f.readBytes((char *)&hdr, sizeof(hdr)) != sizeof(hdr)) {
+    f.close();
+    LittleFS.remove(SENSOR_RING_BACKUP_PATH);
+    fsReleaseLock();
+    Serial.println("restoreSensorRingFromLittleFS: short header read, file removed");
+    return 0;
+  }
+  if (hdr.magic != SENSOR_RING_BACKUP_MAGIC
+      || hdr.version != SENSOR_RING_BACKUP_VER
+      || hdr.entrySize != sizeof(SensorSnapshot)) {
+    f.close();
+    LittleFS.remove(SENSOR_RING_BACKUP_PATH);
+    fsReleaseLock();
+    Serial.printf("restoreSensorRingFromLittleFS: header mismatch (magic=%08x ver=%u sz=%u), discarding\n",
+                  hdr.magic, hdr.version, hdr.entrySize);
+    return 0;
+  }
+  uint16_t restored = 0;
+  uint32_t toRestore = (hdr.count > SENSOR_RING_SIZE) ? SENSOR_RING_SIZE : hdr.count;
+  SensorSnapshot tmp;
+  for (uint32_t i = 0; i < toRestore; i++) {
+    if (f.readBytes((char *)&tmp, sizeof(tmp)) != sizeof(tmp)) {
+      Serial.printf("restoreSensorRingFromLittleFS: short read at entry %u\n", i);
+      break;
+    }
+    // Push directly into the ring (bypass pushSensorSnapshot to avoid the
+    // currentWindow copy — we have the full snapshot already).
+    sensorRing[sensorRingHead] = tmp;
+    sensorRingHead = (sensorRingHead + 1) % SENSOR_RING_SIZE;
+    if (sensorRingCount < SENSOR_RING_SIZE) sensorRingCount++;
+    restored++;
+    esp_task_wdt_reset();
+  }
+  bufferedRecordCount = sensorRingCount;
+  f.close();
+  LittleFS.remove(SENSOR_RING_BACKUP_PATH);
+  fsReleaseLock();
+  Serial.printf("restoreSensorRingFromLittleFS: restored %u snapshots\n", restored);
+  return restored;
+}
+
+// Snapshot current sensor window into the PSRAM ring. Replaces the old
+// LittleFS write path; this is microseconds and does not stall Core 1.
+// Actual upload to Supabase happens later from the cloud-feature block
+// (gated by field-off settle, or forced by the "Upload Now" button).
+void uploadSensorHistory() {
+  if (otaInProgress) return;
+
+  if (currentWindow->battVolt_valid_us == 0) {  // no data collected this window
     resetSensorWindow();
     resetAccelWindow();
-    return;  // No sensor data at all, skip upload
+    return;
   }
 
-  esp_task_wdt_reset();
-
-  //Serial.println("=== uploadSensorHistory() ===");
-  // Serial.printf("Samples: %u, buffered: %d\n", currentWindow->sampleCount, bufferedRecordCount);  // OLD - commented out
-
-  // NTP sync removed from this path — checkTimeSync() handles it on its own
-  // interval and is now gated by fieldOffSettled(). computeCollectionTime()
-  // falls back to millis-based timestamps if time is not yet synced.
+  // Stamp collection time NOW (still reflects when the window closed even if
+  // upload is deferred minutes/hours).
   time_t collectionTime = computeCollectionTime();
-  saveToLocalBuffer(collectionTime);  // This eventually will include IMU data in JSON
-  // CHANGED - Updated debug to show time-weighted stats
-  //Serial.printf("UPLOAD DEBUG: baro_min=%d, baro_max=%d, baro_area=%lld, baro_valid_us=%llu\n",
-  //  currentWindow->baro_min, currentWindow->baro_max,
-  //currentWindow->baro_area_v_us, currentWindow->baro_valid_us);
-  // Reset BOTH windows after local save
+  pushSensorSnapshot(collectionTime);
+
   resetSensorWindow();
   resetAccelWindow();
-  esp_task_wdt_reset();
 }
 // Below is NOT REALLY NEEDED.  I only need to run it once to clear bad tokens from buffer leftover from old strategies
 void clearSensorBuffer() {
