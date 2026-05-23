@@ -133,6 +133,9 @@
 
     </div>
 
+    <!-- PROTECTIONS DISABLED banner (test-mode override) — reuses .lock-status-locked styling -->
+    <div id="protections-banner" class="lock-status-locked" style="display:none;">⚠️ PROTECTIONS DISABLED FOR TUNING — RE-ENABLE BEFORE NORMAL USE ⚠️</div>
+
     <!-- Settings Access -->
     <div id="settings-access-section" class="settings-access-tier">
       <div id="lock-status">Settings are Locked</div>
@@ -1058,38 +1061,6 @@
                   </div>
                 </div>
 
-                <!-- Alternator Current Limit -->
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Alternator Current Limit (A) (<span id="MaxTableValue_echo">?</span>) — OC trips at <span id="HardOCTripAmps_echo">?</span>A:</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard ceiling on commanded output current. No RPM range or control loop can command above this value. Set to the continuous current rating of your alternator. The hard overcurrent trip threshold is automatically set 10A above this value — if measured current exceeds that level for the debounce duration, GPIO4 is cut immediately in all modes.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="MaxTableValue" type="number" step="1" min="0" max="500000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <!-- Overcurrent Trip Debounce -->
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Overcurrent Trip Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long measured current must continuously exceed the OC trip threshold (Alternator Current Limit + 10A) before GPIO4 is cut. Guards against single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively met by any qualifying sample. Default: 20ms.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
                 <!-- Warmup Ramp Rate -->
                 <hr />
                 <div class="form-row">
@@ -1109,6 +1080,516 @@
                 </div>
 
               </details><!-- END Output Control -->
+
+              <!-- Rate Limiting (closed) -->
+              <details class="alt-nested-section">
+                <summary class="alt-summary-nested">Rate Limiting</summary>
+
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Setpoint Rise Rate (A/s) (<span id="SetpointRiseRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
+                        rate the current target can increase during AUTO operation. Does not apply during on/off
+                        transitions — only Duty Ramp Rate applies then. Use a slower rate (e.g. 5 A/s) to prevent sudden
+                        demand spikes.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SetpointRiseRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Setpoint Fall Rate (A/s) (<span id="SetpointFallRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
+                        rate the current target can decrease during AUTO operation. No effect during on/off transitions
+                        — only Duty Ramp Rate applies then.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SetpointFallRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Startup Rise Rate (A/s) (<span id="StartupRiseRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Setpoint
+                        slew rate applied only when the field is first turned on (OFF to AUTO). A slow value (e.g. 3
+                        A/s) lets the alternator build field current gradually, preventing integrator windup and the
+                        FastOV crash-to-zero that can follow. Has no effect on tuning steps, CV load-connect recovery,
+                        or RPM step-ups — those use Setpoint Rise Rate.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="StartupRiseRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Duty Ramp Rate (%/s) (<span id="DutyRampRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
+                        rate of duty cycle change in ALL cases including on/off transitions. Lower values prevent rapid
+                        field changes that can disturb the tachometer signal.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="DutyRampRate" type="number" step="0.01" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Shutdown Slow Ramp Rate (%/s) (<span id="DutySlowRampRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at
+                        which field duty ramps from minimum to 0% during Phase 3 shutdown. Lower = slower, gentler on
+                        LM2907 tach signal. Default 1%/s takes ~5s from 5% to 0.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="DutySlowRampRate" type="number" step="0.1" min="0.1" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Shutdown Phase 2 Hold Time (ms) (<span id="ShutdownPhase2HoldMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
+                        to hold at minimum field duty before beginning slow ramp to 0. Set to 0 to skip Phase 2
+                        entirely.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ShutdownPhase2HoldMs" type="number" step="1" min="0" max="10000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+              </details><!-- END Rate Limiting -->
+
+              <!-- Protections (open) -->
+              <details open class="alt-nested-section">
+                <summary class="alt-summary-nested">Protections</summary>
+
+                <p style="font-size: 12px; color: var(--text-muted); margin: 8px 0 14px 0; line-height: 1.5;">
+                  Define how the alternator is throttled/capped/cut when an abnormal condition appears. Tune the control loops first (in Tuning tab), then adjust these Protections.
+                </p>
+
+                <hr />
+
+                <!-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                     HARDWARE CURRENT TRIP (separate from the protection-group family)
+                     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:10px 0 4px 0;">Alternator Current Limit</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">When exceeded, GPIO4 is cut and the field collapses.</p>
+
+                <!-- Alternator Current Limit -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Command Limit (A) (<span id="MaxTableValue_echo">?</span>) — OC trips at <span id="HardOCTripAmps_echo">?</span>A:</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard ceiling on commanded output current. No RPM range or control loop can command above this value. Set to the continuous current rating of your alternator. The hard overcurrent trip threshold is automatically set 10 A above this value — if measured current exceeds that level for the debounce duration, GPIO4 is cut immediately in all modes (including Manual and Limp Home).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="MaxTableValue" type="number" step="1" min="0" max="500000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <!-- Overcurrent Trip Debounce -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Overcurrent Trip Debounce (ms) (<span id="HardOCDebounceMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long measured current must continuously exceed the OC trip threshold (Alternator Current Limit + 10 A) before GPIO4 is cut. Guards against single-sample noise spikes. At 16 Hz ADS sampling (~62 ms/sample) the default 20 ms is effectively met by any qualifying sample. Default: 20 ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="HardOCDebounceMs" type="number" step="1" min="0" max="999999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+
+                <!-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                     PROTECTION LAYERS — 4 GROUPS, EACH WITH ITS OWN DETECTION + ACTION KNOBS
+                     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:14px 0 4px 0;">Protection Layers</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Four independent detectors run in every automatic mode. Each watches a different signal and trims the alternator current when it fires. Whichever one fires (or several at once), the <em>Shared Action</em> below takes over to drain the voltage loop integrator; once <em>every</em> group releases, the <em>Shared Recovery</em> block restarts the integrator from a safe seed value.</p>
+
+                <!-- ─── GROUP 1: Prediction-Based ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 1 — Predictive OV</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    Predicts where battery voltage will be a fraction of a second from now (predicted = measured + TdPred × current rate-of-rise) and starts trimming current if that prediction exceeds the active charge target by more than OvPredMargin. Only arms when measured voltage is already within 60 mV of target.
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Group 1 Enable (<span id="OvGroup1Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable Group 1 (prediction-based cap). Note: the <strong>FastOV Hard Events</strong> dashboard counter is shared between Group 1 and Group 2 — disabling Group 1 alone will not stop hard events if Group 2 is still on. The unified <strong>Protection Events (total)</strong> counter increments here too.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvGroup1Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvGroup1Enable_checkbox', 'OvGroup1Enable', 'OvGroup1Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvGroup1Enable" name="OvGroup1Enable" type="number" value="" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>OvPredMargin — Group 1 Trigger Margin (V) (<span id="OvPredMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the <em>predicted</em> voltage must exceed the active charge target before Group 1 engages. Default 0.150 V (150 mV). Set higher than OvMeasMargin (Group 2's trigger) so the prediction-based layer leads the measurement-based layer.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="OvPredMarginV" type="number" step="0.01" min="0.05" max="1.0" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (seconds) the predicted voltage is projected: predicted = measured battery voltage + TdPred × voltage rate-of-rise. Used only by Group 1. Only the rising component of rate-of-rise is used — falling voltage is ignored. Default 0.045 s (45 ms).</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>dvdt EMA TC (ms) (<span id="DvdtTC_echo">?</span>) — smoothing for rate-of-rise signal:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                        <span class="tooltip-box">Time constant for the EMA smoothing applied to the raw voltage rate-of-rise signal before it enters the Group 1 prediction. Larger TC = more smoothing, more lag, fewer false fires. Smaller TC = faster response, noisier. The filter is dt-aware (alpha = dt / (TC + dt) per sample), so behavior stays consistent across INA228 sample-cadence jitter. Default 58 ms. <strong>Sample window:</strong> updates only when samples arrive 1–100 ms apart. Slow mode (field off, ~1054 ms cycle) is rejected — the signal holds its last value. Safe because Group 1 only arms while the field is on. Constraint: do not lower TC below ~25 ms without retesting false-fire rate at idle — the 16 mV noise margin is thin.</span>
+                      </span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="DvdtTC" type="number" step="1" min="5" max="500" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>KHard — Response Slope (A/V) (<span id="KHard_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Current ceiling slope used by <strong>both Group 1 and Group 2</strong> to compute how hard to cut current per volt of excess. cap = setpointLimited − KHard × excess. Default 35. Higher = faster field reduction on severe transients. Not used by Group 3 or Load Dump — those have their own response shaping.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="KHard" type="number" step="0.5" min="1" max="200" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div><!-- end Group 1 box -->
+
+                <!-- ─── GROUP 2: Measured Voltage Threshold ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 2 — Measured OV</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    Fires when raw measured battery voltage exceeds the active charging target by more than OvMeasMargin.
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Group 2 Enable (<span id="OvGroup2Enable_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable Group 2 (measured-voltage threshold). Only disable to test Group 1 or Group 3 in isolation. Note: Group 2 increments the <strong>FastOV Hard Events</strong> counter — disabling Group 1 but leaving Group 2 on will still show hard event counts.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Off</span>
+                        <label class="switch">
+                          <input id="OvGroup2Enable_checkbox" type="checkbox"
+                            onchange="if(handleUserToggle('OvGroup2Enable_checkbox', 'OvGroup2Enable', 'OvGroup2Enable')) { this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">On</span>
+                        <input id="OvGroup2Enable" name="OvGroup2Enable" type="number" value="" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must exceed the active charge target before Group 2 engages. Default 0.100 V (100 mV). <strong>Dual role:</strong> this knob also gates Group 3 (iExcess), which only arms when measured voltage reaches <em>within</em> OvMeasMargin of target. Lowering this makes Group 2 more sensitive AND arms iExcess earlier; raising it relaxes both. Watch your steady-state ripple amplitude — set OvMeasMargin meaningfully above your peak-to-peak ripple to avoid false fires.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="0.5" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <p style="font-size:11px;opacity:0.65;margin:6px 0 2px 0;">KHard is shared with Group 1 — set in Group 1 box above.</p>
+                </div><!-- end Group 2 box -->
+
+                <!-- ─── GROUP 3: Current-Based (iExcess supervisor) ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 3 — Current Excess (iExcess)</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    Watches the alternator output current — using whichever filter you pick below (smoothed MA, EMA, or raw). Fires when that signal exceeds the commanded current setpoint by the threshold (K_excess) for N consecutive ticks. Armed only when measured battery voltage is within the overvoltage measurement margin (OvMeasMargin) of the target, so it cannot false-fire during RPM-ceiling ramp-up before the CV loop has engaged. Suppressed while any protection event (G1, G2, Load Dump, or its own prior fire) is still depressing the setpoint, and released only once the measured current settles back within K_excess of the new setpoint — this avoids cascading off the previous event's own field-decay current droop.
+                  </div>
+
+                  <!-- Signal source selector -->
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Signal Filter (<span id="IExcessSigSrc_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How the alternator current is filtered before comparison. <strong>MA(N)</strong>: moving average of N samples — default, smooth, few false trips. <strong>EMA(TC)</strong>: exponential moving average using InputFilterTC as its time constant (the same TC set in Tuning → Plant Delay, shown read-only below). <strong>Raw</strong>: instantaneous ADC reading — fastest, most noise-sensitive. MA window (N) is adjustable below; EMA time constant is shared with Plant Delay and not independently adjustable here.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <div class="cap-mode-toggle">
+                        <button type="button" id="iExcessSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setIExcessSigSrc(0)">MA(N)</button>
+                        <button type="button" id="iExcessSigSrc_1_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(1)">EMA(TC)</button>
+                        <button type="button" id="iExcessSigSrc_2_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(2)">Raw</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>MA Window — N samples (<span id="IExcessMA_N_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal. Default 2. Each sample is ~5 ms apart (CH1 is read 3 times per ADS1115 cycle of ~14 ms), so N=2 ≈ 10 ms window, N=10 ≈ 50 ms. Larger N = smoother, more lag. Independent of the Output Current PID's MA window.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessMA_N" type="number" step="1" min="1" max="10" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo_grp3">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal used by Group 3 when Signal Filter is set to EMA(TC). A faster (lower) value lets it react sooner. Set in Tuning → Plant Delay.</span></span>
+                    </div>
+                    <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
+                      Read-only — set in Tuning → Plant Delay
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>K_excess — Threshold (A above setpoint) (<span id="IExcessK_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default 5.0 A.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND measured battery voltage is within OvMeasMargin of the active charge target. This is target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessK" type="number" step="0.1" min="0.5" max="50" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>N — Persistence (consecutive ticks) (<span id="IExcessN_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many consecutive measurement ticks the current must remain above threshold before Group 3 fires. Each tick ≈ 5 ms. Higher values filter noise spikes but cost lead time. Default 3 (≈ 15 ms).</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessN" type="number" step="1" min="1" max="20" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how the voltage loop integrator (cv_I) is driven down <em>during</em> a Group 3 event, on top of the Shared Action bleed. Both modes run continuously every tick:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response, default).<br>• <strong>&gt; 0</strong> = each tick, subtract (K_bleed × amps-of-excess × tick-duration) from the integrator. Walks the integrator down gradually instead of pinning it.<br><br>Proportional mode is gentler and lowers undershoot risk after the event clears. Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.<br><br>Recovery is always handled by the Shared Recovery block (preEvent × Recovery Seed Fraction), regardless of mode.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessKBleed" type="number" step="0.1" min="0" max="50" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div><!-- end Group 3 box -->
+
+                <!-- ─── GROUP 4: Load Dump (current-derivative spike) ─── -->
+                <div class="layer-box">
+                  <div class="layer-box-header">Group 4 — Load Dump</div>
+                  <div class="layer-box-desc" style="margin-bottom:8px;">
+                    Detects sudden battery-current rate-of-change events (dBcur/dt) caused by loads dropping off while the alternator is still outputting current. Signal is the <strong>raw INA228 Bcur derivative</strong> — no EMA, no smoothing, no user-tunable filter. That is intentional: an EMA would smear the very transient you're trying to catch, so noise rejection is built into a 3-tier cascade instead. On detection: cv_I snaps to 0 and the current setpoint collapses to 0. Recovery uses the Shared Recovery block (preEvent × Recovery Seed Fraction).
+                  </div>
+
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Tier 1 — Single-Sample Threshold (A/s) (<span id="LoadDumpDtThresh1_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 1 fires on a SINGLE sample above this threshold — fastest tier, catches hard-switched FET disconnects. Default 4000 A/s. Set high enough that no single noise sample reaches it.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="LoadDumpDtThresh1" type="number" step="100" min="1000" max="20000" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Tier 2 — Two-Consecutive Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 2 fires when TWO consecutive INA228 samples both exceed this threshold. INA228 noise is alternating-sign — two consecutive same-direction spikes cannot be measurement noise. This is the workhorse tier. Noise ceiling from field measurements: ~354 A/s consecutive. Default 1500 A/s.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="LoadDumpDtThresh" type="number" step="100" min="500" max="10000" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Tier 3 — Three-Consecutive Threshold (A/s) (<span id="LoadDumpDtThresh3_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 3 fires when THREE consecutive INA228 samples all exceed this threshold. Lowest threshold — targets slow relay-contact disconnects where the current ramp spans several samples (~15 ms). Default 1000 A/s.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="LoadDumpDtThresh3" type="number" step="100" min="300" max="5000" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div><!-- end Group 4 box -->
+
+                <hr />
+
+                <!-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                     SHARED ACTION (during the event)
+                     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:14px 0 4px 0;">Shared Action — While Any Protection Is Clamping</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Runs continuously, every tick, whenever any of the four groups above has the unified protection flag asserted. Drains the voltage loop integrator (cv_I) so the alternator's commanded current actually comes down instead of being held high by built-up integrator state. Releases the moment all four groups clear.</p>
+
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at which the voltage loop integrator (cv_I) is bled toward zero while ANY protection group (G1, G2, G3, or G4 Load Dump) is asserted. Expressed as a fraction of the Alternator Current Limit per second, so the proportional aggression stays the same regardless of alternator size. Default 2.0 → at a 150 A current limit gives 300 A/s. A 100 ms protection event at default bleeds ~30 A of integrator value.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+
+                <!-- ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                     SHARED RECOVERY (once every protection clears)
+                     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:14px 0 4px 0;">Shared Recovery — Once All Protections Release</p>
+                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Single falling-edge handler. The moment every group clears, the voltage loop integrator is reseeded to a fraction (set below) of a snapshot captured back when no protection was active. The seed is protected briefly so a re-fire can't immediately wipe it. Overlapping or chained protection events all share the same snapshot, so a later release using a degraded mid-event value is impossible.</p>
+
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Recovery Seed Fraction (<span id="ReseedFrac_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Fraction of the pre-event voltage loop integrator restored when ALL four protections have cleared. cv_I_new = preEvent × ReseedFrac. Default 0.5 = restart at half the pre-event level. Lower = safer, slower rebuild. Higher = faster recovery, more risk of immediate re-trip. Range 0.1–0.9. Shared across all four protections (Groups 1, 2, 3, and Load Dump).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ReseedFrac" type="number" step="0.05" min="0.1" max="0.9" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after either of these two events during which the AW Bleed Rate above is suppressed:<br><br>• A <strong>CV-entry bumpless seed</strong> fires (when CV mode first activates),<br>• A <strong>protection-release reseed</strong> fires (when every protection clears).<br><br>Prevents the just-seeded integrator from being immediately bled back to zero if a brief new protection event fires right after the seed. 0 = disabled. Default 150 ms.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- AW Recovery Rate row removed — hardcoded to 0.1 in firmware (Xregulator.ino AwRecoverRate). CSV3 slot CSV3_reserved_AwRecoverRate held as reserved for future use. -->
+
+
+              </details><!-- END Protections -->
 
               <!-- Temperature Settings (closed) -->
               <details class="alt-nested-section">
@@ -1131,6 +1612,51 @@
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
                       <input type="hidden" name="password" class="password_field">
                       <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers WARNING. Duty ramps to zero and lockout starts. If temperature stays above warning for TempSustainedTimeout, escalates to TEMP_SUSTAINED and GPIO4 cuts after duty settles. Compares raw sensor temperature (not projected). Default: 2°F.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers an immediate field cut (GPIO4 LOW, no ramp, no settle wait). Compares raw sensor temperature (not projected). Highest-priority thermal protection event. Default: 10°F.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to TEMP_SUSTAINED, which ramps duty to zero then cuts GPIO4. Timer resets if temp drops below the warning threshold. Enter in seconds — stored internally as milliseconds. Default: 120s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1370,7 +1896,7 @@
 
 
               <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:0 0 14px 0;font-size:13px;line-height:1.55;">
-                <strong>CV Mode</strong> holds the alternator output to a fixed user-specified voltage target, bypassing the normal bulk/absorption/float charge algorithm. The voltage loop PI controller adjusts the current setpoint every 100 ms to eliminate steady-state voltage error. Use this tab to tune voltage loop parameters or simulate a fixed-voltage regulator. <strong>⚠️ Not intended for lithium batteries.</strong> 
+                <strong>CV Mode</strong> holds the alternator output to a fixed user-specified voltage target, bypassing the normal Bulk / Absorption / Float charge algorithm. The voltage loop adjusts the current setpoint every 100 ms (set by Voltage Loop Interval) using Voltage Loop Kp and Ki to eliminate steady-state voltage error. All current limits remain fully active — RPM Cap Table, thermal penalty, Fast OV, Load Dump, Group 3 iExcess, and any user overrides — so the only thing this mode changes is the voltage target. Use this tab to tune voltage loop parameters or simulate a fixed-voltage regulator. <strong>⚠️ Not intended for lithium batteries.</strong>
               </div>
 
               <div class="form-row" style="margin-bottom:8px;">
@@ -1565,13 +2091,17 @@
                     every qualifying operating point is checked against the reference for its current
                     bin. <em>Tier 1</em> is instantaneous — if the current output falls outside the
                     stored reference min/max range (plus your configured tolerance), an error is
-                    counted immediately. This catches sudden failures like a broken belt or failed
-                    diode. <em>Tier 2</em> is thermal — it accumulates a running average over
-                    approximately 90 seconds of operation in the same bin, then compares that settled
-                    average against the reference average. This catches gradual degradation that stays
-                    within the historical range on any individual reading but represents a sustained
-                    downward trend. Both tiers check in both directions — unexpectedly high output
-                    is also flagged, as it can indicate a regulator fault or measurement error.
+                    counted immediately and continues to count on every qualifying tick the deviation
+                    persists. This catches sudden failures like a broken belt or failed diode.
+                    <em>Tier 2</em> is thermal — once at least 90 qualifying samples have accumulated
+                    in the same bin during this session (roughly 90 seconds at the typical 1 Hz
+                    sample rate), the running session average is compared against the reference
+                    average. If it has drifted past your configured degradation percentage, a single
+                    Tier 2 error is recorded for that bin (it fires at most once per bin per power
+                    cycle). This catches gradual degradation that stays inside the historical range
+                    on any individual reading but represents a sustained drift. Both tiers check in
+                    both directions — unexpectedly high output is also flagged, as it can indicate a
+                    regulator fault or measurement error.
                   </p>
                   <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                     <strong>The Plot:</strong> The scatter plot shows field drive voltage on the
@@ -2057,10 +2587,9 @@
               </summary>
 
               <p style="font-size: 12px; color: var(--text-muted); margin: 8px 0 12px 0; line-height: 1.5;">
-                Protections that ramp the field down or cut it entirely when a battery-safety limit is exceeded.
-                These thresholds are the user-facing layer above the Group 1/2/3 throttling protections (which
-                are tuned alongside the CV PI gains on the Tuning tab) and the INA228 hardware ALERT pin (a
-                hardware backup that needs no configuration).
+                Battery-side protections that ramp the field down or cut it entirely when a battery-safety limit is exceeded.
+                These thresholds sit above the four control-loop throttling protections (Settings → Alternator → Protections)
+                and the INA228 hardware ALERT pin (a hardware backup that needs no configuration).
               </p>
 
               <div class="form-row">
@@ -2151,59 +2680,6 @@
                     <input name="SettleTimeBeforeCut" type="number" step="1" min="0" max="999999" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
-                </div>
-              </div>
-
-              <hr />
-              <!-- Load Dump Protection (dBcur/dt 3-tier cascade) -->
-              <div style="border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin: 16px 0; background: rgba(0,0,0,0.02);">
-                <div style="font-weight: bold; font-size: 14px; margin-bottom: 6px;">Load Dump Protection</div>
-                <p style="font-size: 12px; color: var(--text-muted); margin: 0 0 12px 0; line-height: 1.5;">
-                  Detects sudden battery-current rate-of-change events (dBcur/dt) caused by loads dropping while the alternator is still outputting current. Signal is the <strong>raw INA228 Bcur derivative — no EMA, no smoothing, no user-tunable filter</strong>. That is intentional: an EMA would smear the very transient you're trying to catch, so noise rejection is built into the cascade instead — Tier 1 catches single-sample FET disconnects, Tier 2 (the default workhorse) catches typical load drops where two same-sign samples in a row cannot be measurement noise (INA228 noise alternates sign), and Tier 3 catches slow relay-contact disconnects where the current ramp spans several samples. On detection: cv_I snaps to 0, current setpoint collapses to 0. On release: cv_I restarts at <strong>preEvent × Recovery Seed Fraction</strong> (shared knob in Tuning → Voltage → Shared Response Tuning) for predictable, conservative recovery.
-                </p>
-
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Load Dump Tier 1 — Single-sample Threshold (A/s) (<span id="LoadDumpDtThresh1_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Load dump protection detects sudden spikes in the battery current rate-of-change (dBcur/dt — raw INA228 Bcur derivative, no EMA, no user-tunable filter — by design, so transients aren't smeared), caused by loads dropping off while the alternator is still outputting full current. Three-tier cascade: Tier 1 fires on a SINGLE sample above this threshold (fastest — catches hard-switched FET disconnects). Tier 2 fires when TWO consecutive samples exceed the Tier 2 threshold. Tier 3 fires when THREE consecutive samples exceed the Tier 3 threshold. On detection: the voltage loop integrator is immediately snapped to 0 and the current setpoint collapses to 0. On release, the integrator restarts at preEvent × Recovery Seed Fraction (shared knob, default 0.5). Default 4000 A/s.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="LoadDumpDtThresh1" type="number" step="100" min="1000" max="20000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Load Dump Tier 2 — Two-consecutive Threshold (A/s) (<span id="LoadDumpDtThresh_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 2: fires when TWO consecutive INA228 samples both exceed this threshold. INA228 noise is alternating-sign — two consecutive same-direction spikes cannot be measurement noise. Noise ceiling from field measurements: ~354 A/s consecutive. Default 1500 A/s.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="LoadDumpDtThresh" type="number" step="100" min="500" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Load Dump Tier 3 — Three-consecutive Threshold (A/s) (<span id="LoadDumpDtThresh3_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Tier 3: fires when THREE consecutive INA228 samples all exceed this threshold. Lowest threshold — targets slow relay-contact disconnects where the current ramp spans several INA228 samples (~15 ms). Default 1000 A/s.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="LoadDumpDtThresh3" type="number" step="100" min="300" max="5000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
                 </div>
               </div>
 
@@ -2403,37 +2879,38 @@
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0; line-height: 1.5; color: #666;">
                 <p style="margin: 0;">
-                  <strong>Rebulk:</strong> The system always begins in Bulk when charging is enabled. It returns to Bulk
-                  from Float or Idle if battery voltage drops below <strong>Rebulk Voltage</strong> or net discharge
-                  current
-                  exceeds <strong>Rebulk Current Threshold</strong> — continuously for
-                  <strong>Rebulk Debounce Time</strong>. The timer resets if the condition clears before
-                  the debounce expires. If <strong>Float Duration</strong> expires, the system also
-                  returns to Bulk. If SoC data is available, it will suppress rebulk when the battery
-                  is near full, or permit it when SoC has dropped below the allow threshold — but SoC
-                  alone cannot trigger rebulk; voltage, current, or timeout criteria must also be met.
+                  <strong>Rebulk:</strong> The system always begins in Bulk when charging is enabled. It returns to
+                  Bulk from Float or Idle if battery voltage drops below <strong>Rebulk Voltage</strong> or net
+                  discharge current exceeds <strong>Rebulk Current Threshold</strong> — continuously for
+                  <strong>Rebulk Debounce Time</strong>. The timer resets if the condition clears before the
+                  debounce expires. If SoC data is available, it suppresses rebulk when the battery is at or above
+                  the block threshold and permits it again when SoC drops to the allow threshold — but SoC alone
+                  cannot trigger rebulk; voltage, current, or (in float) timeout criteria must also be met.
                 </p>
                 <p style="margin: 10px 0 0 0;">
-                  <strong>Bulk:</strong> The system pushes maximum thermally(and otherwise)-allowed current from the RPM
-                  table.
-                  Bulk ends once battery voltage has remained continuously at or above <strong>Bulk Voltage</strong>
-                  for <strong>Bulk Voltage Debounce Time</strong>.
+                  <strong>Bulk:</strong> The system pushes the maximum thermally- (and otherwise-) allowed current
+                  from the RPM Cap Table. Bulk ends once battery voltage has remained continuously at or above
+                  <strong>Bulk Voltage</strong> for <strong>Bulk Voltage Debounce Time</strong> (default 0.25 sec).
                 </p>
                 <p style="margin: 10px 0 0 0;">
                   <strong>Absorption:</strong> The voltage loop holds the battery at <strong>Absorption
-                    Voltage</strong>.
-                  Current is no longer commanded — the battery dictates how much it accepts and it tapers naturally
-                  as the battery fills. Absorption ends when current drops to or below <strong>Tail Current</strong>
-                  continuously for <strong>Absorption Completion Time</strong>. If tail current is never reached,
-                  a safety exit occurs after <strong>Absorption Timeout</strong>.
+                    Voltage</strong>. Current is no longer commanded — the battery dictates how much it accepts and
+                  it tapers naturally as the battery fills. Absorption ends when current drops to or below
+                  <strong>Tail Current</strong> continuously for <strong>Absorption Completion Time</strong>. If
+                  the system is thermally constrained (the thermal penalty is meaningfully active and current is
+                  already near the tail threshold), tail detection is suspended until thermal headroom recovers —
+                  this prevents a false "battery full" exit triggered by the thermal loop pulling current down. If
+                  tail current is never reached, a safety exit to float or idle occurs after
+                  <strong>Absorption Timeout</strong>.
                 </p>
                 <p style="margin: 10px 0 0 0;">
                   <strong>Float (if enabled):</strong> The system holds the battery gently at <strong>Float
-                    Voltage</strong>.
-                  After <strong>Minimum Float Time</strong> has elapsed, rebulk criteria are evaluated. If
-                  <strong>Float Duration</strong> expires, the system also returns to Bulk.
-                  If <strong>Use Float is OFF</strong>, charging stops after Absorption and the system idles until
-                  rebulk criteria are met — better for lithium longevity in cycling applications.
+                    Voltage</strong>. After <strong>Minimum Float Time</strong> has elapsed, rebulk criteria are
+                  evaluated. Float also has a hard ceiling — if <strong>Float Duration</strong> elapses while in
+                  float, the system returns to Bulk regardless of voltage or current. (Idle has no equivalent
+                  timeout; only the rebulk conditions can leave it.) If <strong>Use Float is OFF</strong>, charging
+                  stops after Absorption and the system idles until rebulk criteria are met — better for lithium
+                  longevity in cycling applications.
                 </p>
               </div>
             </details>
@@ -3592,9 +4069,9 @@
 
         <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:0 0 16px 0;font-size:13px;line-height:1.55;">
           <strong>Plant Delay</strong> — the measured electrical lag between a field duty command and the resulting current response.
-          The two <strong>current</strong> filters (excess current detection, output PID feedback) work best when their TCs match this delay, so each loop reacts to a current signal that has fully responded to the previous command.
-          The <strong>voltage</strong> filter feeds slope-bleed and stage-transition checks — a value near the plant delay is a sensible default but its role is different.
-          Run the test at a steady speed somewhere within your normal operating range. When the test finishes, the modal that pops up shows a recommended value and a "Set All Filters" button that writes it to all three filter settings at the bottom of this page at once. You can also set the three filters individually.
+          The two <strong>current</strong> filters (excess current detection, output PID feedback) sit inside control paths, so their sensor filter wants to be roughly <strong>1/3 of the plant delay</strong>. Setting them equal to the plant stacks two equal lags in series and erodes phase margin — the controller ends up reacting to where the current <em>was</em> rather than where it <em>is</em>. Faster than 1/3 starts feeding sensor noise into Kp/Kd without buying much.
+          The <strong>voltage</strong> filter is different — its main consumer is the slope-bleed dV/dt, which is computed once per voltage loop tick (default 100 ms, set by the Voltage Loop Interval). Filtering at roughly the full plant delay is in the textbook range relative to that differencing interval.
+          Run the test at a steady speed somewhere within your normal operating range. When the test finishes, the modal shows the measured plant delay and a "Set All Filters" button that writes <strong>plant/3</strong> to the two current filters and the <strong>full plant delay</strong> to the voltage filter. You can also set the three filters individually.
         </div>
 
         <p class="card-group-title" style="margin:0 0 10px 0;">Test Parameters</p>
@@ -3612,6 +4089,29 @@
               <input name="SystemIDStepAmplitude" type="number" step="1" min="5" max="40" />
               <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
             </form>
+          </div>
+        </div>
+
+        <!-- Protection toggle (per-page; all three pages share the same firmware flag) -->
+        <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
+          <div class="form-row" style="margin-bottom:0;">
+            <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+              <span>⚠️ Protections:</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and AlternatorHardShutdownV normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+            </div>
+            <div class="form-input">
+              <form action="/get" method="GET" target="hidden-form">
+                <input type="hidden" name="password" class="password_field">
+                <span class="toggle-label">Disabled</span>
+                <label class="switch">
+                  <input id="testProtectionsEnabled_plant_checkbox" type="checkbox" checked
+                    onchange="if(handleUserToggle('testProtectionsEnabled_plant_checkbox', 'testProtectionsEnabled_plant', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_plant_checkbox'); this.form.submit(); submitMessage(); }" />
+                  <span class="slider round"></span>
+                </label>
+                <span class="toggle-label">Enabled</span>
+                <input id="testProtectionsEnabled_plant" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
+              </form>
+            </div>
           </div>
         </div>
 
@@ -3671,13 +4171,13 @@
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Apply Results</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measured the field coil's electrical lag — how long a PWM change takes to produce a measurable change in alternator current. Each filter below can be set independently to that delay (or whatever value works best for its specific role). The "Set All Filters" button inside the Plant Delay Test modal writes the recommended value to all three at once after a successful test.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measures the field coil's electrical lag (plant delay). The "Set All Filters" button inside the modal writes <strong>plant/3</strong> to the two current filters and the <strong>full plant delay</strong> to the voltage filter — see each tooltip below for the reasoning. You can also override any value individually.</p>
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal used by the excess current (overcurrent trip) detector in Group 3. A faster value lets the detector react sooner to real overcurrent events; a slower value reduces false trips from brief spikes. <strong>Only active when Group 3 signal source is set to EMA(TC) — has no effect in MA(N) (default) or Raw modes.</strong> Echoed read-only in Current tab → OV Protection Group 3. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal used by the Group 3 excess-current (overcurrent trip) detector. Set All Filters writes <strong>plant/3</strong> here. The detector also stacks an <code>IExcessN</code> persist counter on top of this EMA, so the effective trip lag is roughly <code>N × loop_tick + 3τ</code>. Filtering at the full plant delay would make the trip too sluggish to catch real transients before the fastOV supervisor has to clean them up; <code>plant/3</code> gives the detector a clear view of current dynamics in the plant's response band while still rejecting noise above it. <strong>Only active when Group 3 signal source is set to EMA(TC) — has no effect in MA(N) (default) or Raw modes.</strong> Echoed read-only in Current tab → OV Protection Group 3. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3694,7 +4194,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID controller. Independent from the excess current detector filter (Group 3). <strong>Only active when Output PID signal source is set to EMA(TC) (the default) — has no effect in MA(N) or Raw modes.</strong> Echoed read-only in Current tab → Output Current Controller. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID. Set All Filters writes <strong>plant/3</strong> here. The plant (field coil L/R) is already a first-order low-pass inside the loop; setting the sensor filter equal to it stacks two equal lags in series, which costs ~45° of phase margin at crossover and forces lower Kp than you'd otherwise get away with. A filter at roughly <code>plant/3</code> lets the controller see current dynamics in close to real time without feeding raw sensor noise into Kp/Kd. Independent from the Group 3 excess-current filter. <strong>Mostly inert when the Output PID signal source is MA(N) or Raw, but the same EMA is also used unconditionally to seed the CV integrator on the AUTO→CV handoff.</strong> Echoed read-only in Current tab → Output Current Controller. Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3711,7 +4211,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Smoothing time constant applied to the measured battery voltage. Used by the slope bleed signal and the charging stage machine (Bulk → Absorption transitions). Voltage Loop Kp/Ki and the Group 1/2 voltage comparisons all use raw battery voltage instead — this setting doesn't affect them. Group 1's voltage rate-of-change uses its own separate EMA, controlled by dvdt EMA TC. Larger value = smoother slope bleed and less twitchy stage transitions. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant applied to the measured battery voltage. Set All Filters writes the <strong>full plant delay</strong> here (not plant/3) because this filter isn't inside a control path — its dominant consumer is the slope-bleed dV/dt, computed as a backward difference of the filtered voltage over the ~200 ms voltage-loop tick. Filtering at roughly half the differencing interval is the standard balance: slower and the slope reacts too late, faster and the slope gets noisy. Also used by the charging stage machine (Bulk → Absorption hold timer), where the timescale is seconds and the filter TC barely matters. Voltage Loop Kp/Ki and the Group 1/2 voltage comparisons all use raw battery voltage instead — this setting doesn't affect them. Group 1's voltage rate-of-change uses its own separate EMA (dvdt EMA TC). Default: 100 ms.</span>
             </span>
           </div>
           <div class="form-input">
@@ -3859,6 +4359,29 @@
               <!-- Current Target Generator (collapsed) -->
               <details class="tuning-section">
                 <summary class="tuning-section-title">Current Target Generator</summary>
+
+                <!-- Protection toggle (per-page; all three test pages share the same firmware flag) -->
+                <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
+                  <div class="form-row" style="margin-bottom:0;">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>⚠️ Protections:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and AlternatorHardShutdownV normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Disabled</span>
+                        <label class="switch">
+                          <input id="testProtectionsEnabled_current_checkbox" type="checkbox" checked
+                            onchange="if(handleUserToggle('testProtectionsEnabled_current_checkbox', 'testProtectionsEnabled_current', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_current_checkbox'); this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">Enabled</span>
+                        <input id="testProtectionsEnabled_current" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+                </div>
 
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -4184,115 +4707,7 @@
 
               </details> <!-- END Output Current Controller Parameters -->
 
-              <!-- Rate Limiting (collapsed) -->
-              <details class="tuning-section">
-                <summary class="tuning-section-title">Rate Limiting</summary>
-
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Setpoint Rise Rate (A/s) (<span id="SetpointRiseRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        rate the current target can increase during AUTO operation. Does not apply during on/off
-                        transitions — only Duty Ramp Rate applies then. Use a slower rate (e.g. 5 A/s) to prevent sudden
-                        demand spikes.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SetpointRiseRate" type="number" step="0.1" min="0.1" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Setpoint Fall Rate (A/s) (<span id="SetpointFallRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        rate the current target can decrease during AUTO operation. No effect during on/off transitions
-                        — only Duty Ramp Rate applies then.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="SetpointFallRate" type="number" step="0.1" min="0.1" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Startup Rise Rate (A/s) (<span id="StartupRiseRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Setpoint
-                        slew rate applied only when the field is first turned on (OFF to AUTO). A slow value (e.g. 3
-                        A/s) lets the alternator build field current gradually, preventing integrator windup and the
-                        FastOV crash-to-zero that can follow. Has no effect on tuning steps, CV load-connect recovery,
-                        or RPM step-ups — those use Setpoint Rise Rate.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="StartupRiseRate" type="number" step="0.1" min="0.1" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Duty Ramp Rate (%/s) (<span id="DutyRampRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
-                        rate of duty cycle change in ALL cases including on/off transitions. Lower values prevent rapid
-                        field changes that can disturb the tachometer signal.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="DutyRampRate" type="number" step="0.01" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Shutdown Slow Ramp Rate (%/s) (<span id="DutySlowRampRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at
-                        which field duty ramps from minimum to 0% during Phase 3 shutdown. Lower = slower, gentler on
-                        LM2907 tach signal. Default 1%/s takes ~5s from 5% to 0.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="DutySlowRampRate" type="number" step="0.1" min="0.1" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Shutdown Phase 2 Hold Time (ms) (<span id="ShutdownPhase2HoldMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                        to hold at minimum field duty before beginning slow ramp to 0. Set to 0 to skip Phase 2
-                        entirely.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="ShutdownPhase2HoldMs" type="number" step="1" min="0" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-              </details> <!-- END Rate Limiting -->
+              <!-- Rate Limiting moved to Settings → Alternator → Rate Limiting -->
 
       </div>
     </div>
@@ -4413,6 +4828,29 @@
               <!-- Voltage Step Generator (collapsed) -->
               <details class="tuning-section">
                 <summary class="tuning-section-title">Voltage Step Generator</summary>
+
+                <!-- Protection toggle (per-page; all three test pages share the same firmware flag) -->
+                <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
+                  <div class="form-row" style="margin-bottom:0;">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>⚠️ Protections:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and AlternatorHardShutdownV normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Disabled</span>
+                        <label class="switch">
+                          <input id="testProtectionsEnabled_voltage_checkbox" type="checkbox" checked
+                            onchange="if(handleUserToggle('testProtectionsEnabled_voltage_checkbox', 'testProtectionsEnabled_voltage', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_voltage_checkbox'); this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">Enabled</span>
+                        <input id="testProtectionsEnabled_voltage" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
+                      </form>
+                    </div>
+                  </div>
+                </div>
 
                 <!-- Enable/Disable Test Mode -->
                 <div class="form-row">
@@ -4564,10 +5002,10 @@
                         <th style="padding:3px 4px;">SFR</th>
                         <th style="padding:3px 4px;">AwBl</th>
                         <th style="padding:3px 4px;">AwRec</th>
-                        <th style="padding:3px 4px;">AwSP</th>
-                        <th style="padding:3px 4px;">IRF</th>
-                        <th style="padding:3px 4px;">KS</th>
-                        <th style="padding:3px 4px;">KH</th>
+                        <th style="padding:3px 4px;" title="AwSeedProtectMs — anti-windup integrator seed protection time (ms)">AwSP</th>
+                        <th style="padding:3px 4px;" title="ReseedFrac — fraction of seed restored on integrator reseed">RsF</th>
+                        <th style="padding:3px 4px;" title="SlopeBleedK — slope-aware integrator bleed gain A/(V/s)">KS</th>
+                        <th style="padding:3px 4px;" title="KHard — fastOV hard-clamp gain">KH</th>
                         <th style="padding:3px 4px;">IExK</th>
                         <th style="padding:3px 4px;">IExN</th>
                         <th style="padding:3px 4px;">IKB</th>
@@ -4591,7 +5029,7 @@
                       </tr>
                     </thead>
                     <tbody id="cvTuningLogBody">
-                      <tr><td colspan="41" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
+                      <tr><td colspan="40" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -4730,309 +5168,6 @@
                     </form>
                   </div>
                 </div>
-
-                <!-- ═══════════════════════════════════════════════════
-                     OV PROTECTION — 4-GROUP SUPERVISOR
-                     ═══════════════════════════════════════════════════ -->
-                <hr />
-                <p style="font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--accent);margin:10px 0 4px 0;">OV Protections</p>
-                <p style="font-size:11px;opacity:0.65;margin:0 0 10px 0;line-height:1.5;">Three independent protection groups act in all non-idle charging stages. Group 1 uses predicted future voltage to get ahead of transients. Group 2 acts on present measured voltage. Group 3 acts on alternator current. All three arm target-relatively — they fire on voltage/current excess above whatever the active stage target is.</p>
-
-                <!-- ─── Shared Response Tuning ─── -->
-                <p style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.07em;opacity:0.6;margin:14px 0 4px 0;">Shared Response Tuning</p>
-                <p style="font-size:11px;opacity:0.65;margin:0 0 8px 0;line-height:1.5;">Controls what happens to the voltage loop integrator when any protection group fires. When a protection event occurs, the integrator is bled down to reduce current demand — these settings control how aggressively it bleeds and how quickly it recovers afterward. Applies to Groups 1, 2, and 3.</p>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup bleed rate as a fraction of the RPM table ceiling per second. Scales with alternator size. Default 2.0: at 150A table gives 300 A/s. A 100 ms Group 1/2 fire at default bleeds ~30A from the voltage loop integrator.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwBleedRate" type="number" step="0.1" min="0.1" max="10" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Recovery Rate (×Table/s) (<span id="AwRecoverRate_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Anti-windup ceiling recovery rate as a fraction of the RPM table ceiling per second. Default 0.1. Lower = more inter-event damping; higher = faster current restoration after transients.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwRecoverRate" type="number" step="0.01" min="0.01" max="5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>AW Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after a bumpless seed fires during which the AW Bleed Rate and the CC-tracker are suppressed. Prevents the seeded voltage loop integrator from being immediately destroyed by a brief Group 1/2 fire at that transition. 0 = disabled. Default 150.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="AwSeedProtectMs" type="number" step="10" min="0" max="2000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Recovery Seed Fraction (<span id="ReseedFrac_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Fraction of the pre-event voltage loop integrator used to restart it after any protection event clears. 0.5 = restart at half the pre-event level. Lower = safer, slower rebuild. Range 0.1–0.9. Shared across all four protections (Groups 1, 2, 3, and Load Dump).</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="ReseedFrac" type="number" step="0.05" min="0.1" max="0.9" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <!-- ─── GROUP 1: Prediction-Based ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Group 1 — Prediction-Based Cap</div>
-                  <div class="layer-box-desc" style="margin-bottom:8px;">
-                    Predicts where battery voltage will be a fraction of a second from now (using TdPred × current rate-of-rise), and starts trimming current if that prediction exceeds the active target by more than OvPredMargin. Only arms when measured voltage is already within 60 mV of target — prevents false fires during ramp-up.
-                  </div>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Group 1 Enable (<span id="OvGroup1Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable Group 1 (prediction-based cap). Note: the "Hard Events" counter is shared between Group 1 and Group 2 — disabling Group 1 alone will not stop hard events if Group 2 is still on.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <span class="toggle-label">Off</span>
-                        <label class="switch">
-                          <input id="OvGroup1Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvGroup1Enable_checkbox', 'OvGroup1Enable', 'OvGroup1Enable')) { this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">On</span>
-                        <input id="OvGroup1Enable" name="OvGroup1Enable" type="number" value="" style="display:none;" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <!-- Shared: TdPred -->
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (in seconds) the predicted voltage is projected: predicted = measured battery voltage + TdPred × voltage rate-of-rise. Used by Group 1 (prediction-based cap). Only the rising component is used — falling voltage is ignored.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="TdPred" type="number" step="0.005" min="0.01" max="0.3" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <!-- Shared: DvdtTC -->
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>dvdt EMA TC (ms) (<span id="DvdtTC_echo">?</span>) — smoothing for rate-of-rise signal:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                        <span class="tooltip-box">Time constant for the EMA smoothing applied to the raw voltage rate-of-rise signal before it enters the Group 1 prediction. Larger TC = more smoothing, more lag, fewer false fires. Smaller TC = faster response, noisier. The filter is dt-aware (alpha = dt / (TC + dt) per sample), so behavior stays consistent across INA228 sample-cadence jitter — unlike a fixed-alpha filter whose effective TC drifts with sample rate. Default 58 ms (matches the prior fixed-alpha=0.08 behavior at 5 ms nominal cadence). <strong>Sample window:</strong> updates only when samples arrive 1–100 ms apart. Slow mode (field off, ~1054 ms cycle) is rejected — the signal holds its last value. Safe because Group 1 only arms while the field is on. Constraint: do not lower TC below ~25 ms without retesting false-fire rate at idle — the 16 mV noise margin is thin.</span>
-                      </span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="DvdtTC" type="number" step="1" min="5" max="500" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>OvPredMargin — Group 1 Trigger Margin (V) (<span id="OvPredMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the predicted voltage must exceed the charging target before Group 1 engages. Default 0.150 V (150 mV). Set higher than OvMeasMargin (Group 2's trigger margin) so prediction-based response leads the measured-voltage response. Rarely needs adjustment.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="OvPredMarginV" type="number" step="0.01" min="0.05" max="1.0" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>KHard — Response Slope (A/V) (<span id="KHard_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Current ceiling slope used by Group 1 and Group 2. Default 35. Higher = faster field reduction on severe transients.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="KHard" type="number" step="0.5" min="1" max="200" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-                </div><!-- end Group 1 box -->
-
-                <!-- ─── GROUP 2: Measured Voltage Threshold ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Group 2 — Measured Voltage Threshold</div>
-                  <div class="layer-box-desc" style="margin-bottom:8px;">
-                    Fires when raw measured battery voltage exceeds the active charging target by more than OvMeasMargin.
-                  </div>
-
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Group 2 Enable (<span id="OvGroup2Enable_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enable or disable Group 2 (measured-voltage threshold). This is the cleanest discriminator between idle noise and real events — keep enabled during normal operation. Only disable to test Group 1 or Group 3 in isolation. Note: Group 2 increments the "Hard Events" counter — disabling Group 1 but leaving Group 2 on will still show hard event counts.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <span class="toggle-label">Off</span>
-                        <label class="switch">
-                          <input id="OvGroup2Enable_checkbox" type="checkbox"
-                            onchange="if(handleUserToggle('OvGroup2Enable_checkbox', 'OvGroup2Enable', 'OvGroup2Enable')) { this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">On</span>
-                        <input id="OvGroup2Enable" name="OvGroup2Enable" type="number" value="" style="display:none;" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Group 2 fire threshold, Group 3 gate.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="OvMeasMarginV" type="number" step="0.005" min="0.02" max="0.5" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <p style="font-size:11px;opacity:0.65;margin:6px 0 2px 0;">KHard (set in Group 1)</p>
-                </div><!-- end Group 2 box -->
-
-                <!-- ─── GROUP 3: Current-Based (iExcess supervisor) ─── -->
-                <div class="layer-box">
-                  <div class="layer-box-header">Group 3 — Current-Based (iExcess supervisor)</div>
-                  <div class="layer-box-desc" style="margin-bottom:8px;">
-                    Watches alternator output current. Fires when current exceeds the commanded setpoint by K_excess for N consecutive ticks. Armed when measured battery voltage reaches OvMeasMargin below the target. Locked out briefly after Group 1, Group 2, or load dump fires.
-                  </div>
-
-                  <!-- Signal source selector -->
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Signal Filter (<span id="IExcessSigSrc_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator current is filtered before comparison. MA(N): moving average of N samples — default, smooth, few false trips. EMA(TC): exponential moving average using InputFilterTC as its time constant — the same TC set in Tuning → Plant Delay, shown read-only in the row directly below. Raw: instantaneous ADC reading — fastest response, most noise-sensitive. MA window (N) is adjustable below; EMA time constant is shared with Plant Delay and not independently adjustable here.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <div class="cap-mode-toggle">
-                        <button type="button" id="iExcessSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setIExcessSigSrc(0)">MA(N)</button>
-                        <button type="button" id="iExcessSigSrc_1_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(1)">EMA(TC)</button>
-                        <button type="button" id="iExcessSigSrc_2_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(2)">Raw</button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>MA Window — N samples (<span id="IExcessMA_N_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal. Default 2. Each sample is ~5 ms apart (CH1 is read 3 times per ADS1115 cycle of ~14 ms), so N=2 ≈ 10 ms window, N=10 ≈ 50 ms. Larger N = smoother signal, more lag. Independent from the Output Current PID MA window.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessMA_N" type="number" step="1" min="1" max="10" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo_grp3">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal used by this excess current detector. A faster (lower) value lets it react sooner. Set in Tuning → Plant Delay.</span></span>
-                    </div>
-                    <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
-                      Read-only — set in Tuning → Plant Delay
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>K_excess — Threshold (A above setpoint) (<span id="IExcessK_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default: 5.0 A.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND measured battery voltage is within OvMeasMargin of the active charge target. This is target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike — and is independent of the load-dump proximity gate.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessK" type="number" step="0.1" min="0.5" max="50" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>N — Persistence (consecutive ticks) (<span id="IExcessN_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many consecutive measurement ticks the current must remain above threshold before the supervisor fires. Each tick ≈ 5 ms. Higher values filter noise spikes but cost lead time. Default: 3.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessN" type="number" step="1" min="1" max="20" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how the voltage loop integrator is driven down while a Group 3 event is active. Both modes run continuously every tick, not once at the start of the event:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response, default). The integrator stays at 0 for the full duration of the event.<br>• <strong>&gt; 0</strong> = each tick, subtract (K_bleed × amps-of-excess × tick-duration) from the integrator. Walks the integrator down gradually instead of pinning it.<br><br>The proportional mode is gentler and lowers undershoot risk after the event clears. Try 2–5 if snap causes an unacceptable voltage dip below target.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <input name="IExcessKBleed" type="number" step="0.1" min="0" max="50" />
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </form>
-                    </div>
-                  </div>
-
-                </div><!-- end Group 3 box -->
 
               </details> <!-- END VTM Controller Parameters -->
 
@@ -5495,53 +5630,7 @@
                   </div>
                 </div>
 
-
-
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers WARNING. Duty ramps to zero and lockout starts. If temperature stays above warning for TempSustainedTimeout, escalates to TEMP_SUSTAINED and GPIO4 cuts after duty settles. Compares raw sensor temperature (not projected). Default: 2°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempWarnExcess" type="number" step="0.1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers an immediate field cut (GPIO4 LOW, no ramp, no settle wait). Compares raw sensor temperature (not projected). Highest-priority thermal protection event. Default: 10°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempCritExcess" type="number" step="0.1" min="0" max="9999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to TEMP_SUSTAINED, which ramps duty to zero then cuts GPIO4. Timer resets if temp drops below the warning threshold. Enter in seconds — stored internally as milliseconds. Default: 120s.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="TempSustainedTimeout" type="number" step="1" min="0" max="999999" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+                <!-- Temp Warning/Critical Excess and Sustained Timeout moved to Settings → Alternator → Temperature Settings -->
 
               </details> <!-- END Temperature Controller Parameters -->
 
@@ -5558,68 +5647,95 @@
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Two-Loop Control Architecture:</strong> The system uses two PID controllers running at
-                  different speeds. The <em>output current loop</em> runs fast — roughly 16 times per second — and continuously
-                  adjusts the alternator field duty cycle to hit a current target. The <em>temperature loop</em> runs every 5
-                  seconds and watches temperature. When temperature climbs toward the configured limit, the temperature loop
-                  accumulates a thermal penalty that reduces the current the output current loop is allowed to chase. The two
-                  loops are cascaded: the temperature loop constrains what the output current loop can do, but never interferes with
-                  how it does it.
+                  <strong>Three-Loop Cascaded Control:</strong> Three independent controllers run at different rates
+                  and stack on top of each other. The <em>output current loop</em> runs 10 times per second and drives
+                  the alternator field duty cycle to chase a current target. The <em>voltage loop</em> also runs 10
+                  times per second, but only during Bulk, Absorption, and Float — it computes the current target that
+                  holds the battery at the configured voltage. The <em>temperature loop</em> runs once every 5
+                  seconds, and outputs a single thermal penalty in amps that gets subtracted from the RPM Cap Table
+                  ceiling before the inner loops see it. The cascade is strict: temperature constrains what current
+                  the voltage loop is allowed to ask for; the voltage loop constrains what the output current loop is
+                  allowed to chase; the output current loop is the only thing that touches the field. Each layer
+                  never reaches past the one below it.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>RPM Cap Table:</strong> For each engine RPM range, you configure a hard ceiling based on your
-                  installation's physical limits — belt load, shaft stress, alternator and battery bank ratings. This
-                  ceiling is enforced after the thermal penalty is applied and is never exceeded regardless of thermal
-                  state. The ceiling can be entered as either a current limit (amps) or a power limit (kW) using the
-                  toggle above the table. In <em>amps mode</em>, the configured value is a fixed current ceiling. In
-                  <em>kW mode</em>, the firmware divides your power limit by live battery voltage on every control tick
-                  to derive the amp ceiling — so the mechanical load on the belt and shaft stays constant regardless of
-                  voltage sag or rise during charging.
+                  <strong>RPM Cap Table:</strong> For each engine RPM range, you configure a hard ceiling based on
+                  your installation's physical limits — belt load, shaft stress, alternator and battery bank
+                  ratings. This ceiling is enforced after the thermal penalty is applied and is never exceeded
+                  regardless of thermal state. The ceiling can be entered as either a current limit (Amps mode) or a
+                  power limit (kW mode) using the toggle above the table. In Amps mode the configured value is a
+                  fixed current ceiling. In kW mode the regulator divides your power limit by live battery voltage
+                  on every control tick to derive the amp ceiling — so the mechanical load on the belt and shaft
+                  stays constant regardless of voltage sag or rise during charging.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Thermal Penalty:</strong> The temperature PID outputs a single number — thermal penalty
-                  in amps. Zero means no restriction. As temperature climbs toward the configured limit, the penalty
-                  grows and current is reduced. When the alternator cools, the penalty shrinks and current recovers.
-                  Because the penalty is relative rather than absolute, it transfers intelligently across RPM changes. A
-                  20-second derivative window allows the temperature loop to react to rising thermal momentum before the
-                  setpoint is actually reached.
+                  <strong>Forecasted Thermal Penalty:</strong> The temperature controller does not act on the current
+                  temperature reading. It acts on a projected temperature — current filtered temperature plus the
+                  measured rate of rise multiplied by the Thermal Lookahead horizon (default 90 seconds). This is
+                  what lets the loop pull current down <em>before</em> the alternator actually reaches the limit. The
+                  setpoint is the real damage limit (Alternator Temp Limit) and the output is a penalty in amps: zero
+                  means no restriction, higher numbers mean more current pulled away from what the RPM Cap Table
+                  would otherwise allow. Because the penalty is relative rather than absolute, it transfers cleanly
+                  across RPM and stage changes. The penalty itself is slew-limited so brief temperature noise doesn't
+                  cause harsh current swings.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Three-Stage Charging:</strong> The system implements a CC/CV/Float charging cycle, with an
-                  optional Idle mode after Absorption for lithium longevity.
+                  <strong>Voltage Loop:</strong> A proportional-integral controller (Voltage Loop Kp and Ki) holds
+                  battery voltage at target during Bulk, Absorption, and Float. The integrator uses asymmetric gain —
+                  it bleeds down fast when voltage runs above target and rises slowly when below, biasing toward
+                  safety. The Slope Bleed Gain drains the integrator when voltage is climbing quickly, which prevents
+                  overshoot during the approach to target. Anti-windup freezes upward integration whenever the
+                  current ceiling — not voltage — is the binding constraint, so the integrator does not load up while
+                  unable to act.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  In <em>bulk stage</em>, the voltage loop is off and the system charges at the maximum thermally
-                  allowed current from the RPM table. This continues until battery voltage has been held at the bulk
-                  voltage target continuously for the configured hold time — a debounce that prevents transient voltage
-                  spikes from triggering a premature transition.
+                  <strong>Three-Stage Charging:</strong> The regulator implements a constant-current / constant-voltage /
+                  float charging cycle (CC/CV/Float), with an optional Idle mode after Absorption for lithium longevity.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  In <em>absorption stage</em>, the voltage loop engages and holds the battery at the absorption
-                  voltage. The battery itself now dictates how much current it accepts — current tapers naturally as the
-                  battery fills. The system exits absorption when charge current has dropped to or below the configured
-                  tail current for the required hold period, confirming the battery is genuinely full. If the system is
-                  thermally constrained and current is already near its limit, tail detection is suspended until thermal
-                  headroom recovers — preventing a premature exit before the battery is truly full. A safety timeout
-                  forces a transition to float (or idle, if Use Float is off) if tail current is never reached.
+                  In <em>Bulk</em>, the voltage loop is off and the system charges at the maximum thermally allowed
+                  current from the RPM Cap Table. This continues until battery voltage has been held at the Bulk
+                  Voltage target continuously for the Bulk Voltage Debounce Time — a debounce that prevents transient
+                  voltage spikes from triggering a premature transition.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  In <em>float stage</em>, the voltage loop holds the battery at the lower float voltage. After the
-                  minimum float time has elapsed, the system monitors for voltage sag or sustained discharge current. If
-                  either condition persists for the rebulk debounce period, or if float duration expires, bulk charging
-                  restarts — subject to SoC blocking if SoC data is available. If Use Float is OFF, the system skips
-                  float entirely and enters Idle after Absorption, charging again only when rebulk criteria are met.
-
+                  In <em>Absorption</em>, the voltage loop engages and holds the battery at the Absorption Voltage.
+                  The battery itself now dictates how much current it accepts — current tapers naturally as the
+                  battery fills. The system exits Absorption when charge current has dropped to or below the Tail
+                  Current for the Absorption Completion Time, confirming the battery is genuinely full. If the system
+                  is thermally constrained — meaning the thermal penalty is meaningfully active AND current is
+                  already near the Tail Current — tail detection is suspended until thermal headroom recovers,
+                  preventing a false exit before the battery is truly full. A safety timeout (Absorption Timeout)
+                  forces a transition to Float (or Idle, if Use Float is Off) if Tail Current is never reached.
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  In <em>Float</em>, the voltage loop holds the battery at the lower Float Voltage. After the Minimum
+                  Float Time has elapsed, the system monitors for voltage sag or sustained discharge current. If
+                  either condition persists for the Rebulk Debounce Time, or if Float Duration expires, Bulk charging
+                  restarts — subject to SoC blocking if SoC data is available. If Use Float is Off, the system skips
+                  Float entirely and enters Idle after Absorption, charging again only when rebulk criteria are met.
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  <strong>Independent Protection Layers:</strong> Several fast-response protections sit outside the
+                  three-loop cascade and act on raw sensor readings without filter lag. <em>Fast OV</em> (Groups 1
+                  and 2) caps current immediately when raw battery voltage runs above a margin below the charging
+                  target. <em>Load Dump</em> protection caps current when a sustained battery-current rise rate is
+                  detected, catching FET disconnect or load drop events. <em>Group 3 (iExcess)</em> bleeds the
+                  voltage-loop integrator if current overshoots, killing the cause rather than just the symptom. None
+                  of these depend on the control loops being active — they are always armed.
                 </p>
                 <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Stability and Recovery:</strong> All mode transitions are bumpless: the output current PID integrator
-                  is aligned to the current operating point before switching. If the temperature sensor goes stale, the
-                  temperature loop freezes its last penalty value until fresh data returns. The anti-windup system ensures the
-                  temperature loop's integrator stays correctly positioned — parked near any tighter non-thermal constraint
-                  when thermals are not the binding limit, and free to drive the penalty upward the moment temperature
-                  demands it. Independent hard protection layers — warning ramp-down and critical immediate shutdown via
-                  GPIO4 — operate completely separately from the PID and remain active regardless of PID state. Any
-                  fault that interrupts charging will restart from bulk when charging resumes, never mid-cycle.
+                  <strong>Stability and Recovery:</strong> All mode transitions are bumpless — both the output
+                  current loop integrator and the voltage loop integrator are seeded to the operating point before
+                  the new mode takes over, so transitions never produce a setpoint step. If the temperature sensor
+                  goes stale, the temperature loop holds its last penalty value and re-enters smoothly when fresh
+                  data returns rather than snapping back. Anti-windup keeps the temperature integrator parked near
+                  any tighter non-thermal constraint when thermals are not the binding limit, so the penalty can
+                  climb the instant temperature demands it. A hardware-level shutdown path (GPIO4) provides two
+                  independent escape hatches: immediate cut for critical conditions (temperature critically over
+                  limit, hard fault) and a controlled ramp-then-cut for sustained warning-level conditions. GPIO4
+                  protection remains active regardless of loop state. Any fault that interrupts charging restarts
+                  from Bulk when charging resumes, never mid-cycle.
                 </p>
               </div>
 
@@ -5631,42 +5747,54 @@
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Overview:</strong> This system uses a three-phase tuning process. The goal is to tune the
-                  core PID loop first, then verify it handles the rate limiters gracefully with anti-windup tracking.
-                  Tuning is done in bulk stage — absorption and float use the same output current loop but with the voltage
-                  controller constraining the setpoint, so a well-tuned bulk response carries through automatically.
+                  <strong>Overview:</strong> The output current loop, the voltage loop, and the temperature loop each
+                  have their own dedicated tuning mode (Tuning Mode for the inner current loop, CV Tuning Mode for the
+                  voltage loop, Thermal Tuning Mode for the temperature loop). Tune them in that order — inner loop
+                  first, then voltage, then thermal — because each layer depends on the one beneath it being stable.
+                  This section covers the inner current loop. Voltage and thermal tuning have their own dedicated tabs
+                  with built-in step tests and live scoring.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Phase 1 - Core Loop Tuning (Unrestricted):</strong><br>
+                  <strong>Three-Phase Process:</strong> The goal is to tune the core PID first, then verify it handles
+                  the rate limiters gracefully with anti-windup tracking. Tune in bulk stage — absorption and float
+                  share the same output current loop, so a well-tuned bulk response carries through automatically.
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  <strong>Phase 1 — Core Loop (Unrestricted):</strong><br>
                   Set both slew limiters to very high values to effectively disable them:<br>
                   &bull; <em>Setpoint Rise Rate:</em> 1000 A/s<br>
                   &bull; <em>Setpoint Fall Rate:</em> 1000 A/s<br>
                   &bull; <em>Duty Ramp Rate:</em> 1000 %/s<br>
-                  Enable Tuning Mode and observe the response on plots. Tune Kp, Ki, and Kd until you get well-damped
-                  step responses with minimal overshoot (10–20%) and fast settling time (2–4 seconds).
+                  Enable Tuning Mode and watch the step response on the plots. Tune Kp, Ki, and Kd until you get
+                  well-damped step responses with minimal overshoot (10–20%) and fast settling time (2–4 seconds).
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Phase 2 - Actuator Slew + Anti-Windup Tuning:</strong><br>
-                  Enable the actuator slew limiter by setting <em>Duty Ramp Rate</em> to a realistic value (typically
+                  <strong>Phase 2 — Actuator Slew + Anti-Windup:</strong><br>
+                  Re-enable the actuator slew limiter by setting <em>Duty Ramp Rate</em> to a realistic value (typically
                   10–30 %/s). Keep setpoint slew limiters high (1000 A/s). Run tuning mode again and watch for
-                  overshoot after transitions. If you see overshoot after the duty ramp catches up, increase <em>PID
-                    Tracking Gain</em> from its default until the overshoot disappears.
+                  overshoot after transitions. If you see overshoot once the duty ramp catches up, increase
+                  <em>PID Tracking Gain</em> from its default until the overshoot disappears. This is the
+                  back-calculation gain that bleeds the integrator down whenever the duty output is rate-limited.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Phase 3 - Production Verification:</strong><br>
+                  <strong>Phase 3 — Production Verification:</strong><br>
                   Set <em>Setpoint Rise Rate</em> and <em>Setpoint Fall Rate</em> to your desired production values
                   (typically 5–20 A/s rise, 20–50 A/s fall). Run tuning mode one final time to verify the loop remains
-                  stable and well-behaved.
+                  stable and well-behaved with both rate limiters active.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Tuning Philosophy for Cruising:</strong><br>
-                  Run tests at moderate RPM within your typical cruising range. A slower, well-damped loop (4–6 second
-                  settling time) is preferable to a fast loop that causes harsh load transitions. The multi-layer safety
-                  systems protect your equipment — you don't need the PID to react instantly. Smooth and stable beats
-                  fast and harsh.
+                  Run tests at moderate RPM within your typical cruising range. A slower, well-damped loop (4–6
+                  second settling time) is preferable to a fast loop that causes harsh load transitions. The
+                  independent protection layers (Fast OV, Load Dump, Group 3 iExcess, GPIO4 hard cut) handle the
+                  unsafe edges — you don't need the loop itself to react instantly. Smooth and stable beats fast and
+                  harsh.
                 </p>
                 <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Typical Starting Values:</strong> Kp = 0.3, Ki = 1.5, Kd = 0.0, Tracking Gain = 2.0–4.0
+                  <strong>Current Defaults:</strong> Kp = 0.5, Ki = 2.0, Kd = 0.01, PID Tracking Gain = 4.0, Duty
+                  Ramp Rate = 50 %/s, Setpoint Rise Rate = 30 A/s, Setpoint Fall Rate = 50 A/s. These are sensible
+                  starting points but every installation is different — always verify with a step test in your own
+                  setup.
                 </p>
               </div>
 
@@ -5744,14 +5872,26 @@
 
           <div class="card">
             <p>Alternator Current</p>
-            <p class="reading" style="font-size: 36px;"><span id="MeasAmpsID">0</span> A</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="MeasAmpsID">0</span> A</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="MeasAmpsID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="MeasAmpsID_lo">—</span></span>
+              </span>
+            </p>
           </div>
 
           <div class="card-group">
             <p class="card-group-title">Temperature</p>
             <div class="metric-row">
               <span class="metric-label">Alternator</span>
-              <span class="metric-value" style="font-size: 24px;"><span id="AltTempID">0</span> <span class="temp-unit-label">°F</span></span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 20px;"><span id="AltTempID">0</span> <span class="temp-unit-label">°F</span></span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="AltTempID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="AltTempID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Thermistor</span>
@@ -5975,7 +6115,13 @@
 
           <div class="card">
             <p>State of Charge</p>
-            <p class="reading" style="font-size: 36px;"><span id="SOC_percentID">0</span> %</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="SOC_percentID">0</span> %</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="SOC_percentID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="SOC_percentID_lo">—</span></span>
+              </span>
+            </p>
           </div>
 
           <div class="card-group">
@@ -5987,7 +6133,13 @@
                   <span class="tooltip-box">Measured by INA228 uC - primary source</span>
                 </span>
               </span>
-              <span class="metric-value" style="font-size: 18px;"><span id="IBVID">0</span> V</span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="IBVID">0</span> V</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="IBVID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="IBVID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Battery Voltage (ADS)
@@ -6018,7 +6170,13 @@
             <p class="card-group-title">Battery Current</p>
             <div class="metric-row">
               <span class="metric-label">Battery Current</span>
-              <span class="metric-value"><span id="BCurrID">0</span> A</span>
+              <span class="with-wm">
+                <span class="metric-value"><span id="BCurrID">0</span> A</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="BCurrID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="BCurrID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Victron Battery Current</span>
@@ -6054,7 +6212,13 @@
 
         <div class="card">
           <p>Engine Speed</p>
-          <p class="reading"><span id="RPMID">0</span> rev/min</p>
+          <p class="reading with-wm" style="font-size: 28px;">
+            <span><span id="RPMID">0</span> rev/min</span>
+            <span class="wm-inline">
+              <span><span class="arr">↑</span><span id="RPMID_hi">—</span></span>
+              <span><span class="arr">↓</span><span id="RPMID_lo">—</span></span>
+            </span>
+          </p>
         </div>
 
       </div>
@@ -6070,7 +6234,13 @@
             <p class="card-group-title">Boat Speed</p>
             <div class="metric-row">
               <span class="metric-label">Speed Over Ground (SOG)</span>
-              <span class="metric-value" style="font-size: 18px;"><span id="SOGNMEA_ID">0</span> kts</span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="SOGNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="SOGNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="SOGNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
               <span class="metric-label">Velocity Made Good (VMG)
@@ -6143,8 +6313,13 @@
                   </span>
                 </span>
               </span>
-              <span class="metric-value" style="font-size: 24px;"><span id="ApparentWindSpeedNMEA_ID">0</span>
-                kts</span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 20px;"><span id="ApparentWindSpeedNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="ApparentWindSpeedNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="ApparentWindSpeedNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row">
               <span class="metric-label">Apparent Wind Angle
@@ -6166,7 +6341,13 @@
                   </span>
                 </span>
               </span>
-              <span class="metric-value" style="font-size: 24px;"><span id="TrueWindSpeedNMEA_ID">0</span> kts</span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 20px;"><span id="TrueWindSpeedNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="TrueWindSpeedNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="TrueWindSpeedNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row">
               <span class="metric-label">True Wind Direction
@@ -6235,17 +6416,35 @@
           <!-- Current Angles -->
           <div class="card">
             <p>Heel Angle</p>
-            <p class="reading" style="font-size: 36px;"><span id="imu_heel_deg_ID">0.0</span>°</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="imu_heel_deg_ID">0.0</span>°</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="imu_heel_deg_ID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="imu_heel_deg_ID_lo">—</span></span>
+              </span>
+            </p>
           </div>
 
           <div class="card">
             <p>Pitch Angle</p>
-            <p class="reading" style="font-size: 36px;"><span id="imu_pitch_deg_ID">0.0</span>°</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="imu_pitch_deg_ID">0.0</span>°</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="imu_pitch_deg_ID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="imu_pitch_deg_ID_lo">—</span></span>
+              </span>
+            </p>
           </div>
 
           <div class="card">
             <p>Vertical Acceleration</p>
-            <p class="reading" style="font-size: 36px;"><span id="imu_vertical_accel_g_ID">0.00</span> g</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="imu_vertical_accel_g_ID">0.00</span> g</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="imu_vertical_accel_g_ID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="imu_vertical_accel_g_ID_lo">—</span></span>
+              </span>
+            </p>
           </div>
 
           <!-- Current Motion — always-on basics -->
@@ -7100,37 +7299,6 @@
                 </div>
               </div>
 
-              <!-- Save NVS Data -->
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Save NVS Data
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Worst CPU time spent inside a SINGLE call to saveNVSData() — i.e. how long one loop iteration was stalled by NVS work. saveNVSData() is a phased state machine: each invocation runs only one small slice (write a few keys, or do the commit) and returns. The commit phase alone can take 50–150 ms and is the primary single-call stall. This number is NOT the total time to drain a full cycle — see "Last Full NVS Cycle" below for that.</span>
-                  </span>
-                </div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_saveNVSData_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_saveNVSData_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- ↳ NVS Cycle Duration -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #888; padding-left: 20px;">↳ Last Full NVS Cycle
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">WALL-CLOCK time from start of phase 1 to end of phase 9 (commit + close) for the most recent complete cycle. This spans many loop iterations: NVS_TICK_SPACING=100 fast ticks separate each phase, so the loop runs lots of unrelated work between slices. Cycles routinely reach 400+ ms even when no single slice ("Save NVS Data" above) exceeds ~10 ms — that's the design working as intended (long total cycle, short per-call stalls). Compare to the "Save NVS Data" worst-since-reset value above: that's the worst single-slice CPU stall; this is total elapsed wall time.</span>
-                  </span>
-                </div>
-                <div style="padding: 6px 8px; font-size: 13px; font-weight: bold; text-align: right;"><span
-                    id="nvsCycleMs_ID">0</span> ms</div>
-                <div
-                  style="padding: 6px 8px; font-size: 13px; text-align: right; border-left: 1px solid var(--border); color: #888;">
-                  —
-                </div>
-              </div>
-
               <!-- Efficiency Tracker -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Efficiency Tracker
@@ -7320,13 +7488,57 @@
           </div>
 
 
+          <!-- NVS FULL-SAVE DIAGNOSTICS -->
+          <div class="card-group">
+            <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
+              <span>NVS Full Save</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">saveNVSDataFull() persists all session/lifetime accumulators (charged energy, runtime, fuel, distance, lifetime damage, dynamic learning, IMU lifetime counters) to flash in a single synchronous commit. It runs only at the field-off edge (5s after field cuts), at shutdown, and on capsize/pitchpole events. The commit blocks Core 1 for as long as it takes — that's safe because the field is off so there's no OV risk during the stall. If you've been running continuously for hours and the device loses power before the next field-off edge, the deltas since the last save are lost.</span>
+              </span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Time Since Last Save (s)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Seconds since the last successful saveNVSDataFull(). The longer this gets, the more accumulated session/lifetime data is at risk if the device loses power before the next field-off edge. 0 means no save has happened yet this boot.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="nvsSecsSinceLastSave_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Last Save Duration (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Wall-clock time the most recent saveNVSDataFull() call took to complete, including the nvs_commit() flash write. Expected 50-300ms depending on how many sectors needed erasing. Always runs with field off so any duration is safe.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="nvsFullSaveLastMs_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Worst Save Duration (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Longest saveNVSDataFull() duration seen since boot. Useful as a long-term wear indicator — if this climbs steadily over many months, the NVS partition is fragmenting and may benefit from an erase.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="nvsFullSaveWorstMs_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Save Count
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Total saveNVSDataFull() calls since boot. Confirms the field-off drain is firing as expected — should increment each time the field cuts (engine pause, anchor, dock).</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="nvsFullSaveCount_ID">0</span></span>
+            </div>
+          </div>
+
+
           <!-- CH1 INTERVAL DIAGNOSTICS -->
           <div class="card-group">
             <p class="card-group-title">CH1 Sample Interval (ms)</p>
             <div class="metric-row">
               <span class="metric-label">Last Interval (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Most recent time between CH1 reads, ms</span>
+                  <span class="tooltip-box">Most recent time between CH1 reads, ms. Note: this interval spans multiple loop iterations (the ADS1115 state machine advances one step per loop and CH1 reads happen every ~4 loops). It is wall-clock time across non-blocking iterations, NOT a single-loop stall — so it commonly exceeds the worst loop time without anything actually being blocked.</span>
                 </span>
               </span>
               <span class="metric-value"><span id="ch1_last_ms_ID">0</span></span>
@@ -7411,7 +7623,7 @@
               <span>INA228 Read Interval (ms)</span>
               <span class="tooltip" onclick="this.classList.toggle('active')">
                 ℹ️
-                <span class="tooltip-box">Inter-sample timing for INA228 voltage/current reads. Stats are gated to "field on" only. With the field on the INA228 runs in fast mode (~5 ms cycle target) and these values update. With the field off the INA228 drops to low-speed mode (~1054 ms cycle) and these values are intentionally frozen at their last reading — zero / dashes here means the field has not been on yet this session.</span>
+                <span class="tooltip-box">Inter-sample timing for INA228 voltage/current reads. Stats are gated to "field on" only. With the field on the INA228 runs in fast mode (~5 ms cycle target) and these values update. With the field off the INA228 drops to low-speed mode (~1054 ms cycle) and these values are intentionally frozen at their last reading — zero / dashes here means the field has not been on yet this session. Note: this interval is wall-clock time between successive read completions and spans multiple loop iterations. It commonly exceeds the worst single-loop time without anything actually being blocked — only the worst loop time tells you about a true stall.</span>
               </span>
             </p>
             <div class="metric-row">
@@ -7502,7 +7714,7 @@
               <span>Voltage Loop Actual Interval (ms)</span>
               <span class="tooltip" onclick="this.classList.toggle('active')">
                 ℹ️
-                <span class="tooltip-box">Measured time between consecutive voltage loop PI fires in CV mode. Target is VoltageLoopInterval (100ms). Values significantly above target indicate a stalled loop tick during CV operation. Zero until CV mode has fired at least twice.</span>
+                <span class="tooltip-box">Measured time between consecutive voltage loop PI fires in CV mode. Target is VoltageLoopInterval (100ms). Values significantly above target indicate a stalled loop tick during CV operation. Zero until CV mode has fired at least twice. Note: this interval is wall-clock time across multiple loop iterations — it can exceed the worst single-loop time without any single loop being blocked. Also note that CV exit/re-entry inflates this number because the gap to the previous in-CV fire is reported even when CV mode was off in between. The worst single-loop time in the Function Timing table is the authoritative stall indicator.</span>
               </span>
             </p>
             <div class="metric-row">
@@ -7743,9 +7955,9 @@
           <span class="metric-value telemetry-value"><span id="fastOvCurrentCapID">?</span> A</span>
         </div>
         <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">FastOV Events (total)
+          <span class="metric-label telemetry-label">Protection Events (total)
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: any FastOV activation (soft predictive, hard predictive, or measured-voltage hysteresis). Slow growth during transients is normal. Fast growth at steady state suggests thresholds need tuning.</span>
+              <span class="tooltip-box">Rising-edge count of the unified protection flag — increments on every distinct activation of <strong>any</strong> protection: Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), or Group 4 (Load Dump). Slow growth during transients is normal. Fast growth at steady state means thresholds need tuning. Overlapping events count as one activation (rising edge only).</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="fastOvClampCountID">?</span></span>
@@ -7753,7 +7965,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">FastOV Hard Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: Group 1 (prediction-based cap) OR Group 2 (measured-voltage threshold) — both contribute to this single counter. Disabling Group 1 alone will not stop this counter if Group 2 is still active. Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
+              <span class="tooltip-box">Rising-edge count of <strong>hard</strong> OV activations only — Group 1 (predictive K_HARD) OR Group 2 (measurement hysteresis). Both contribute to this single counter. Does NOT include Group 3 iExcess or Group 4 Load Dump (those increment the Protection Events counter above, plus their own per-group counters). Should be rare. Accumulation at steady state means real overshoot is occurring.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="fastOvHardCountID">?</span></span>
@@ -7868,8 +8080,12 @@
 
           <div class="card">
             <p>Barometric Pressure</p>
-            <p class="reading" id="baroPressure-display">
-              <span id="baroPressureID">0</span> mbar
+            <p class="reading with-wm" id="baroPressure-display" style="font-size: 28px;">
+              <span><span id="baroPressureID">0</span> mbar</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
+              </span>
             </p>
           </div>
 
@@ -7883,8 +8099,12 @@
                 </span>
               </span>
             </p>
-            <p class="reading" id="ambientTemp-display">
-              <span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span>
+            <p class="reading with-wm" id="ambientTemp-display" style="font-size: 28px;">
+              <span><span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span></span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="ambientTempID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="ambientTempID_lo">—</span></span>
+              </span>
             </p>
           </div>
 
@@ -9169,6 +9389,8 @@
     <span id="systemIDQuietPP_0_ID" style="display:none;">0</span>
     <span id="systemIDQuietPP_1_ID" style="display:none;">0</span>
     <span id="systemIDQuietPP_2_ID" style="display:none;">0</span>
+    <span id="systemIDAbortReason_ID" style="display:none;">0</span>
+    <span id="systemIDAbortPhase_ID" style="display:none;">0</span>
     <input id="timeAxisModeChanging" name="timeAxisModeChanging" type="number" value style="display:none;" />
     <input id="webgaugesinterval" style="display:none;" value="0" />
     <input id="plotTimeWindow" style="display:none;" value="0" />
@@ -9305,6 +9527,7 @@
           <div id="sysid-check-amps"   style="padding:4px 0;">⬜ Alternator producing current</div>
           <div id="sysid-check-volt"   style="padding:4px 0;">⬜ Battery voltage OK</div>
           <div id="sysid-check-mode"   style="padding:4px 0;">⬜ Charging mode</div>
+          <div id="sysid-check-tests"  style="padding:4px 0;">⬜ No other tuning tests active</div>
         </div>
 
         <div id="sysid-est-time" style="font-size:0.88em; color:#aaa; margin-bottom:20px;"></div>

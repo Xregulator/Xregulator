@@ -423,6 +423,7 @@ void TempTask(void *parameter) {
         tempTaskHealthy = true;
         thisReadSucceeded = true;
         MARK_FRESH(IDX_ALTERNATOR_TEMP);
+        wmIgnUpdate(wmIgn_altTempF, AlternatorTemperatureF);  // ignition-cycle watermark
 
         if (AlternatorTemperatureF > MaxAlternatorTemperatureF) {
           pendingMaxTemp = AlternatorTemperatureF;

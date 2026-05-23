@@ -244,6 +244,8 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
                        reasonToString(reason), caughtBy, BatteryV, IBV, fabsf(BatteryV - IBV));
   // If a plant delay test is running, abort it — results from an interrupted test are invalid
   if (systemIDActive != 0 && !systemIDAbortRequested) {
+    systemIDAbortReason = (uint8_t)reason;
+    systemIDAbortPhase = systemIDActive;
     systemIDAbortRequested = true;
     queueConsoleMessageF("SystemID: ABORTED — protection fired (%s) during phase %d — run the test again",
                          reasonToString(reason), (int)systemIDActive);
@@ -569,6 +571,17 @@ void loadCVTuningLog() {
   if (!cvTuningLog) return;
   File f = LittleFS.open("/cvtuninglog.bin", "r");
   if (!f) return;
+  // Struct size is part of the wire format. Bail cleanly on mismatch (e.g. after
+  // CVTuningRecord layout changed) instead of reading garbage into the array.
+  const size_t expected = sizeof(cvTuningLogCount) + sizeof(cvTuningLogHead)
+                          + sizeof(cvTuningRunCounter) + 50 * sizeof(CVTuningRecord);
+  if (f.size() != expected) {
+    Serial.printf("CVTuningLog: size mismatch (%u vs %u expected) — discarding old log\n",
+                  (unsigned)f.size(), (unsigned)expected);
+    f.close();
+    LittleFS.remove("/cvtuninglog.bin");
+    return;
+  }
   f.read((uint8_t *)&cvTuningLogCount, sizeof(cvTuningLogCount));
   f.read((uint8_t *)&cvTuningLogHead, sizeof(cvTuningLogHead));
   f.read((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
@@ -577,6 +590,13 @@ void loadCVTuningLog() {
   Serial.printf("CVTuningLog: loaded %d records, counter=%d\n", cvTuningLogCount, cvTuningRunCounter);
 }
 
+// TODO (future): the CV tuning score (ISE/T, settling, overshoot) currently does NOT
+// distinguish runs taken with testProtectionsEnabled=true vs =false. Scores under
+// protections-on are loop+protection composite; under protections-off they are pure
+// loop. Comparing them directly is misleading. Future redo: tag each record with the
+// flag state at the time of the run so the UI can group/filter, and rethink whether
+// fastOvFires/iExcessFires/loadDumpFires belong in the score formula when protections
+// were disabled (they can't fire then, so the counts will always be zero).
 void commitCVTuningRecord() {
   if (!cvTuningLog || cvTuningScore.scoredHighCount < 1) {
     cvTuningScore = {};
@@ -608,6 +628,7 @@ void commitCVTuningRecord() {
   rec.awRecoverRate = AwRecoverRate;
   rec.awSeedProtectMs = AwSeedProtectMs;
   rec.reseedFrac = ReseedFrac;
+  rec.slopeBleedK = SlopeBleedK;
   rec.kHard = KHard;
   rec.iExcessK = IExcessK;
   rec.iExcessN = IExcessN;
@@ -1020,13 +1041,22 @@ void AdjustFieldLearnMode() {
   // Direct cv_I clamp kept here because the CV loop only runs every 100ms;
   // without it cv_I builds positive for up to 100ms while battV is above target.
 
+  // Pre-event cv_I snapshot for the protection-release reseed. Refreshed every
+  // tick no protection is active; freezes the moment any supervisor asserts; used
+  // on the unified falling edge (see the reseed in the bumpless tracker block far
+  // below). g_fastOvClampActive here holds LAST tick's final value because its
+  // update has been moved to the end of the bumpless block, after every supervisor
+  // has voted — so this read reflects the true unified flag.
+  static float preEventCvI = 0.0f;
+  if (!g_fastOvClampActive) {
+    preEventCvI = cv_I;  // refresh while no protection is clamping
+  }
+
   {
     static float vPrev = 0.0f;
     static uint32_t vPrevMs = 0;
     static float dvdt = 0.0f;
     static bool ovActive = false;
-    static float preEventIcv = 0.0f;
-    static float preEventCvI_g12 = 0.0f;  // cv_I snapshot before any Group 1/2 bleed (for explicit recovery seed)
 
     g_fastOvHardActive = false;
     g_fastOvVpred = IBV;
@@ -1054,12 +1084,15 @@ void AdjustFieldLearnMode() {
       float Vpred = IBV + TD_PRED * fmaxf(0.0f, dvdt);
       g_fastOvVpred = Vpred;
 
-      if (!ovActive) {
-        preEventIcv = Icv;
-        preEventCvI_g12 = cv_I;  // captured before AwBleed touches it during this event
-      }
+      // (pre-event cv_I capture now centralised in preEventCvI above —
+      //  this block no longer maintains its own snapshot.)
 
-      if (IBV > ChargingVoltageTarget - PRED_GUARD) {
+      // Test-mode bypass: when testProtectionsEnabled is false (user toggled it off on a
+      // tuning page), G1 and G2 are inhibited from firing so a step-test can characterise
+      // the plant without protection layers fighting the input. The release condition below
+      // is not gated — if ovActive was already set before the user disabled, it can still
+      // de-assert cleanly.
+      if (testProtectionsEnabled && IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
           fastOvCurrentCap = fminf(fastOvCurrentCap, hardCap);
@@ -1068,7 +1101,7 @@ void AdjustFieldLearnMode() {
         }
       }
 
-      if (OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
+      if (testProtectionsEnabled && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
         float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
@@ -1077,18 +1110,13 @@ void AdjustFieldLearnMode() {
         g_fastOvHardActive = true;
       }
 
-      // Recovery seed on clamp de-assert: cv_I = preEventCvI_g12 × ReseedFrac (independent of event duration; see CV_Loop_Dev_Summary.md).
+      // Group 1/2 release condition: battV back at/under target AND prediction safe.
+      // cv_I reseed itself is now handled by the unified falling-edge reseed in the
+      // bumpless tracker block — fires only when ALL protection paths (G1/2, iExcess,
+      // LoadDump) have cleared, using the single preEventCvI snapshot.
       if (ovActive
           && (IBV <= ChargingVoltageTarget)
           && (Vpred <= V_HARD)) {
-
-        float e = ChargingVoltageTarget - IBV;
-        float icvHi = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
-
-        cv_I = clamp_f(preEventCvI_g12 * ReseedFrac, 0.0f, icvHi);
-        Icv = clamp_f(VoltageKp * e + cv_I, 0.0f, icvHi);
-        setpointLimited = Icv;
-
         ovActive = false;
       }
     } else {
@@ -1096,14 +1124,15 @@ void AdjustFieldLearnMode() {
     }
   }
 
-  // ── Fast OV telemetry export ──────────────────────────────────────────────
+  // ── Group 1/2 hard-OV telemetry export ────────────────────────────────────
+  // g_fastOvHardActive is set only by Group 1 (predictive K_HARD) and Group 2
+  // (measurement hysteresis) in the FAST OV block above — iExcess and LoadDump
+  // never raise it. So this rising-edge counter and the inner-PID integrator
+  // reset belong here, right after the Group 1/2 supervisor finishes.
+  // The unified telemetry (g_fastOvClampActive, g_fastOvClampCount, g_fastOvCurrentCap)
+  // is exported later in the bumpless tracker block, after iExcess and LoadDump
+  // have also had a chance to vote — otherwise it would only reflect Group 1/2.
   static bool g_fastOvHardActive_prev = false;
-
-  g_fastOvCurrentCap = fastOvCurrentCap;
-
-  if (fastOvClampActive && !g_fastOvClampActive) {
-    g_fastOvClampCount++;  // rising-edge only — count each new FastOV activation
-  }
   if (g_fastOvHardActive && !g_fastOvHardActive_prev) {
     g_fastOvHardCount++;  // rising-edge only — count each new hard FastOV activation
     // Collapse inner PID integrator on hard OV onset. fastOvCap already drives
@@ -1114,8 +1143,6 @@ void AdjustFieldLearnMode() {
     currentPID.ResetIntegratorTo(0.0);
     queueConsoleMessage("FastOV hard: inner PID integrator reset");
   }
-
-  g_fastOvClampActive = fastOvClampActive;
   g_fastOvHardActive_prev = g_fastOvHardActive;
 
   // ========== EMERGENCY LIMP HOME MODE (runs every loop) ==========
@@ -1688,10 +1715,14 @@ void AdjustFieldLearnMode() {
 
           static bool iExcessActive = false;
           static int iExcessPersistCount = 0;
-          static float preEventCvI = 0.0f;  // cv_I captured just before snap, used to seed recovery
+          // (pre-event cv_I capture and reseed now centralised — see preEventCvI
+          //  above and the unified falling-edge reseed in the bumpless tracker block.)
 
           // Gate: CV active AND battV within OvMeasMarginV of target.
-          if (voltageControlActive && (IBV > ChargingVoltageTarget - OvMeasMarginV)) {
+          // testProtectionsEnabled=false also inhibits G3 firing — falls through to the else
+          // branch which clears persist count and iExcessActive, ensuring a clean release if
+          // user disables protections mid-event.
+          if (testProtectionsEnabled && voltageControlActive && (IBV > ChargingVoltageTarget - OvMeasMarginV)) {
             float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
                            : (IExcessSigSrc == 1) ? getFiltI()
                                                   : g_iMA_N;
@@ -1745,7 +1776,6 @@ void AdjustFieldLearnMode() {
 
             if (iExcessPersistCount >= IExcessN) {
               if (iExcessPersistCount == IExcessN) {
-                preEventCvI = cv_I;         // rising edge — capture before any snap or bleed
                 cv_I_aw_cap = cv_I;         // cap the bumpless tracker ceiling to pre-event level — prevents current-limited rewind
                 postFastOvMismatch = true;  // iExcess collapses setpointLimited the same way fastOV does; block re-trigger during field TC wind-down
                 g_iExcessCount++;
@@ -1757,7 +1787,8 @@ void AdjustFieldLearnMode() {
               // IExcessKBleed = 0: snap to zero (maximum response — field falls at 100ms physics TC).
               // IExcessKBleed > 0: proportional bleed at K_bleed × excess A/s each 5ms tick.
               // Both modes drive output current loop to minimum duty within one tick; difference is recovery depth.
-              // Recovery is seeded with preEventCvI on release regardless of mode.
+              // Recovery is seeded by the unified falling-edge reseed (bumpless tracker block)
+              // when ALL protections clear, regardless of which mode fired here.
               if (IExcessKBleed <= 0.0f) {
                 cv_I = 0.0f;
               } else {
@@ -1766,20 +1797,11 @@ void AdjustFieldLearnMode() {
             } else if (iExcessActive && !belowHysteresis) {
               fastOvClampActive = true;  // hold govBypass during hysteresis
             } else {
-              if (iExcessActive) {
-                // Seed recovery to ReseedFrac of the pre-event level so the PI
-                // rebuilds from below target rather than bouncing straight back through
-                // the setpoint and re-triggering.
-                cv_I = preEventCvI * ReseedFrac;
-              }
-              iExcessActive = false;
+              iExcessActive = false;     // release; unified reseed handles cv_I
             }
           } else {
-            // Gate closed (battV dropped below targV - OvMeasMarginV) — still seed recovery
-            // if an event was active, otherwise cv_I stays at zero and the trap persists.
-            if (iExcessActive) {
-              cv_I = preEventCvI * ReseedFrac;
-            }
+            // Gate closed (battV dropped below targV - OvMeasMarginV) — release;
+            // unified reseed will fire on the falling edge of fastOvClampActive.
             iExcessPersistCount = 0;
             iExcessActive = false;
           }
@@ -1804,7 +1826,8 @@ void AdjustFieldLearnMode() {
           static int ldCount1 = 0;  // consecutive samples above LoadDumpDtThresh1
           static int ldCount2 = 0;  // consecutive samples above LoadDumpDtThresh
           static int ldCount3 = 0;  // consecutive samples above LoadDumpDtThresh3
-          static float preEventCvI_ld = 0.0f;  // cv_I snapshot before LD snap (for explicit recovery seed on release)
+          // (pre-event cv_I capture and reseed now centralised — see preEventCvI
+          //  above and the unified falling-edge reseed in the bumpless tracker block.)
           if (voltageControlActive && inaFastModeActive) {
             if (g_dBcur_dt > LoadDumpDtThresh1) {
               ldCount1++;
@@ -1827,14 +1850,12 @@ void AdjustFieldLearnMode() {
               setpointLimited = 0.0f;
               fastOvClampActive = true;
               if (!ldWasActive) {
-                preEventCvI_ld = cv_I;  // capture before snap so we can seed recovery from it
                 cv_I = 0.0f;            // snap integrator on rising edge
                 g_loadDumpCount++;
               }
-            } else if (ldWasActive) {
-              // Falling edge — explicit recovery seed (matches Group 3 / Groups 1-2 pattern).
-              cv_I = preEventCvI_ld * ReseedFrac;
             }
+            // Falling-edge cv_I reseed handled by the unified reseed in the bumpless
+            // tracker block — fires once all protection paths have cleared.
             g_loadDumpActive = ldNow;
             ldWasActive = ldNow;
           } else {
@@ -2049,6 +2070,30 @@ void AdjustFieldLearnMode() {
             cv_I_aw_cap = (float)MaxTableValue;    // clear AW cap — stale values constrain CV entry
             awSeedProtectStartMs = currentMillis;  // start seed-protection window
           }
+          // ── Unified protection-release reseed + unified telemetry export ───────────
+          // Single falling-edge handler for ALL three protection paths (Group 1/2 OV,
+          // iExcess, LoadDump). Fires when fastOvClampActive goes 1 → 0 — i.e., every
+          // protection has cleared. Uses preEventCvI captured back when no protection
+          // was clamping, so chained/overlapping events don't burn intermediate
+          // snapshots. Engages AwSeedProtectMs so the per-tick cv_I bleed below
+          // cannot wipe the reseed if a new event re-fires within the protect window.
+          //
+          // g_fastOvClampActive (read here, written at end of this block) is the
+          // unified flag — every supervisor has voted by the time we reach this point.
+          if (voltageControlActive && g_fastOvClampActive && !fastOvClampActive) {
+            float icvHi_seed = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+            cv_I = clamp_f(preEventCvI * ReseedFrac, 0.0f, icvHi_seed);
+            cv_I_track = cv_I;
+            awSeedProtectStartMs = currentMillis;  // engage seed-protection window
+          }
+          // Unified-flag rising-edge counter — counts every distinct activation of
+          // ANY protection (G1/2 OV, iExcess, LoadDump). Must be incremented BEFORE
+          // g_fastOvClampActive is updated for next tick.
+          if (fastOvClampActive && !g_fastOvClampActive) {
+            g_fastOvClampCount++;
+          }
+          g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
+          g_fastOvClampActive = fastOvClampActive;  // commit unified flag for next tick
           bool seedProtected = (AwSeedProtectMs > 0) && ((currentMillis - awSeedProtectStartMs) < (uint32_t)AwSeedProtectMs);
 
           // Anti-windup ceiling: bleeds down while fastOV is active so the bumpless
@@ -2056,7 +2101,7 @@ void AdjustFieldLearnMode() {
           // each overshoot. Recovers gradually after fastOV clears, giving the battery
           // time to settle before full current ramps back up.
           // cv_I_aw_cap is declared above the iExcess block so both blocks share it.
-          // AwBleedRate and AwRecoverRate are user-adjustable globals (LittleFS-persisted).
+          // AwBleedRate is a user-adjustable global (LittleFS-persisted). AwRecoverRate is hardcoded (0.1f).
           // Scale bleed/recover rates by MaxTableValue so a fixed fraction-per-second
           // applies the same proportional aggression regardless of alternator size.
           // AwBleedRate=2.0 at 50A table → 100 A/s; at 150A table → 300 A/s.
@@ -2843,7 +2888,10 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
 
   // PRIORITY 5: WARNING CONDITIONS (all start lockout)
   // AlternatorHardShutdownV is an absolute voltage — should be set just below BMS shutdown.
-  if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) {
+  // Suppressed when tick.testProtectionsEnabled is false (tuning toggle off): the INA228
+  // hardware ALERT pin is always armed and will trip first if voltage genuinely climbs to
+  // a dangerous level.
+  if (tick.testProtectionsEnabled && tick.currentBatteryVoltage > tick.alternatorHardShutdownV) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
   if (tick.voltageDisagreementWarning) {
@@ -3242,6 +3290,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Thresholds
   tick.bulkVoltage = BulkVoltage;
   tick.alternatorHardShutdownV = AlternatorHardShutdownV;
+  tick.testProtectionsEnabled = testProtectionsEnabled;
   tick.inAbsorptionStage = inAbsorptionStage;
 
   return tick;

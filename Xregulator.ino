@@ -82,12 +82,15 @@ struct UpdateInfo;
 struct StreamingExtractor;
 struct HttpsRequest;
 struct SensorSnapshot;  // full definition near line 1334 (PSRAM sensor ring)
+struct IgnWatermark;    // full definition further down; needed here so the
+                        // auto-prototype of wmIgnUpdate(IgnWatermark&, float)
+                        // doesn't precede the struct declaration
 // Auto-prototype generator fails on default-argument functions defined in later .ino files.
 bool fieldOffSettled(uint32_t extraMs = 0);
 
 SET_LOOP_TASK_STACK_SIZE(20 * 1024);  // Increase stack from 8KB to 20KB, necessary for SSL/TLS operations, backtraced at 12 on 4/18/26
 int hardwarePresent = 1;              // usage varies
-// Parse JSON update response - this struct definition cannot move down in file, I don't know why, but leave it here.
+// Parse JSON update response - this struct definition cannot move down in file, leave it here.
 struct UpdateInfo {
   bool hasUpdate;
   String version;
@@ -126,20 +129,6 @@ CachedGzFile loadFileToRAM(const char *path) {
   f.close();
   return result;
 }
-
-// Co-fire guard — prevents an ADS1115 I2C stall and an NVS commit from
-// landing on the same loop tick. Set by either side when it incurs heavy I/O,
-// read by the other to defer. Reset every tick at the top of loop().
-bool heavyIOThisTick = false;
-
-// NVS commit timing — nvs_commit() is the flush of all staged NVS writes
-// to flash. It can stall hundreds of ms on its own (independent of the
-// phased nvs_set_*() calls). Bracketed with micros() in saveNVSData()
-// to separate commit cost from the 9-phase cycle cost (nvsCycleMs).
-uint32_t nvsCommitCount = 0;          // total nvs_commit() calls since boot
-uint32_t nvsCommitLongCount = 0;      // commits that took >= 100 ms
-uint16_t nvsCommitWorstMs = 0;        // worst single commit duration since boot (ms)
-uint16_t nvsCommitLastMs  = 0;        // most recent commit duration (ms)
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
@@ -210,8 +199,9 @@ static uint32_t sessionHealthCount = 0;
 // Set when history changes — triggers SSE resend
 static bool effHistoryDirty = false;
 
-// Set when a save was blocked by inCriticalZone() — retried every 30s when safe
-static bool effMatrixNeedsSave = false;
+// Set when a save was blocked by inCriticalZone() — retried every 20s when safe.
+// Only eff_cs (single-float session health, still in NVS) uses this path; the
+// matrix moved to LittleFS and saves only at field-off / shutdown, so no defer flag.
 static bool sessionHealthNeedsSave = false;
 
 #define FUNC_TIMING_WINDOW_MS 10000  // rolling window for per-function worst-case timing (ms)
@@ -583,7 +573,7 @@ float imu_pitch_max_lifetime = 0;
 float imu_slam_peak_lifetime = 0;
 
 // --- MOUNTING ORIENTATION ---
-uint8_t imuMountOrientation = 0;  // 0-3, saved to NVS key "IMU_Orient"
+uint8_t imuMountOrientation = 0;  // 0-3, persisted via /vessel_info.json on LittleFS
 
 // --- COMPLEMENTARY FILTER STATE ---
 float cf_heel = 0;   // Filtered heel angle
@@ -613,10 +603,6 @@ uint32_t prev_imu_min_stat_gentle = 0;
 uint32_t prev_imu_min_stat_moderate = 0;
 uint32_t prev_imu_min_stat_rough = 0;
 uint32_t prev_imu_min_stat_extreme = 0;
-static uint8_t prev_imuMountOrientation = 0;
-static float prev_CAPSIZE_THRESHOLD_DEG = 0;
-static float prev_PITCHPOLE_THRESHOLD_DEG = 0;
-static float prev_SLAM_THRESHOLD_G = 0;
 
 
 
@@ -844,7 +830,7 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // α = dt / (TC + dt), computed per-sample from actual elapsed time so
 // variable loop cadence is handled correctly without a fixed assumption.
 // _filtered variables are the smoothed outputs; originals are unchanged.
-// Safeties continue to read originals. Control loops will migrate to
+// Protections continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
 float InputFilterTC = 100.0f;      // ms — iExcess EMA TC, LittleFS-backed
@@ -869,6 +855,8 @@ volatile bool systemIDAbortRequested = false;  // set true by UI handler to abor
 uint8_t systemIDActive = 0;                    // 0=idle, 1-9=current phase (sent to UI for progress)
 bool systemIDResultsReady = false;             // set true when post-processing is complete
 uint32_t systemIDLastEndMs = 0;                // millis() when last test ended (cooldown guard)
+uint8_t systemIDAbortReason = 0;               // FieldEventReason code if protection aborted the test; 0 = no abort / clean exit
+uint8_t systemIDAbortPhase = 0;                // phase (1-9) at moment of protection abort; 0 = no abort
 
 // ── Stabilize-phase constants ────────────────────────────────────────────────
 #define SYSID_STABILIZE_AMPS 10.0f        // target alternator output before baseline begins
@@ -994,7 +982,7 @@ uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absor
 
 float FieldAdjustmentInterval = 50;  // The regulator field output is updated once every this many milliseconds
 float TemperatureLimitF = 150;       // the offset appears to be +40 to +50 to get true max alternator external metal temp, depending on temp sensor installation, so 150 here will produce a metal temp ~200F
-int ManualFieldToggle = 1;           // set to 1 to enable manual control of regulator field output, helpful for debugging
+int ManualFieldToggle = 0;           // 0 = Auto (PID) — fresh-flash default. Set to 1 for manual field control (debugging).
 int SwitchControlOverride = 1;       // set to 1 for web interface switches to override physical switch panel
 int MaintainMode = 0;                // Set to 1 to target 0 amps at battery
 int TargetVoltageMode = 0;
@@ -1467,11 +1455,10 @@ unsigned long lastDataSaveTime = 0;       // Last time data was saved to LittleF
 int SOCUpdateInterval = 2000;             // Update SOC every 2 seconds.   Don't make this smaller than 1 without study
 
 //NVS Stuff
-unsigned long lastNVSSaveTime = 0;
-const unsigned long NVS_SAVE_INTERVAL = 120000;  // 2 minutes
-const uint16_t NVS_TICK_SPACING = 100;           // fast ticks between NVS write phases
-uint8_t nvsPhase = 0;                            // 0=idle, 1-8=write phases, 9=commit; exported to CSV
-uint32_t nvsCycleMs = 0;                         // ms elapsed for last complete NVS drain cycle
+unsigned long lastNVSSaveTime = 0;  // millis() at end of last successful saveNVSDataFull() — 0 = never saved
+uint32_t nvsFullSaveCount = 0;      // total saveNVSDataFull() calls since boot
+uint16_t nvsFullSaveLastMs = 0;     // wall-clock duration of most recent saveNVSDataFull() (ms)
+uint16_t nvsFullSaveWorstMs = 0;    // worst saveNVSDataFull() duration since boot (ms)
 
 /*
 NVS lifetime analysis (ESP32-S3-WROOM-1U-N16R8, 16 MB flash)
@@ -1499,7 +1486,7 @@ UPDATE: IMU NVS additions (estimate +3-8 keys changing per save):
   Event-driven writes (outside normal save cycle):
     imu_capsize_count, imu_pitchpole_count - immediate write on event (rare)
   
-  Periodic/threshold writes (within saveNVSData):
+  Periodic/threshold writes (committed by saveNVSDataFull at field-off edge):
     imu_slam_count_lifetime - only if slams occurred (variable)
     imu_hours_gentle/mod/rough/extr - once per hour when bucket transitions
     VibEnvelope blob - only when envelope changes >threshold (~1/hour)
@@ -1562,7 +1549,7 @@ static float prev_sailing_days_alltime = -1.0f;
 uint64_t prev_socAccum_AllTime = 0;
 uint32_t prev_socTime_AllTime = 0;
 
-// NVS shadow caches — used by saveNVSData() change-detection to skip unchanged keys.
+// NVS shadow caches — used by saveNVSDataFull() change-detection to skip unchanged keys.
 float prev_MaxSpeed = 0.0f;
 float prev_MaxSpeed_AllTime = 0.0f;
 float prev_MeasAmpsMax = 0.0f;
@@ -1841,7 +1828,6 @@ struct FuncTiming {
 
 // One instance per timed function
 FuncTiming ft_ReadAnalogInputs;
-FuncTiming ft_saveNVSData;
 FuncTiming ft_AdjustFieldLearnMode;
 FuncTiming ft_logDashboardValues;
 FuncTiming ft_updateSystemHealthStats;
@@ -2071,6 +2057,7 @@ struct CVTuningRecord {
   float awBleedRate, awRecoverRate;
   uint16_t awSeedProtectMs;
   float reseedFrac;
+  float slopeBleedK;  // A/(V/s) — slope-aware integrator bleed gain (column "KS")
   // FastOV supervisor
   float kHard;
   // iExcess
@@ -2273,8 +2260,16 @@ float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
-float AwRecoverRate = 0.1f;      // fraction of MaxTableValue/s — cv_I_aw_cap recovery after fastOV clears
+float AwRecoverRate = 0.1f;      // HARDCODED — no longer user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
 uint16_t AwSeedProtectMs = 150;  // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
+// --- Test-mode protection override ---
+// User-controlled flag (per test page). When TRUE (default) G1, G2, G3, and
+// AlternatorHardShutdownV all fire normally. When FALSE the user has disabled them
+// so step-tests can characterise the plant without protection layers fighting the
+// test. NOT persisted — resets to TRUE (enabled) on every boot. G4 (Load Dump),
+// INA228 hardware OV, and the hardware OC trip (MaxTableValue+10) stay active
+// regardless of this flag.
+bool testProtectionsEnabled = true;
 // --- CV loop runtime state ---
 float VoltageTrimLimit = 5.0f;            // OBSOLETE DELETE LATER
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
@@ -2324,10 +2319,14 @@ bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared afte
 bool shutdownNVSFlushDone = false;     // true once NVS+sensor window saved this shutdown
 uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain window
 
-// Field-off NVS drain trigger — fires saveNVSDataFull + saveEfficiencyMatrix once per
-// field-off window, 5s after the field-off edge. Re-arms on field-on edge. Independent
-// of fieldOffSettled() (which has a 60s baseline used by cloud/network callers).
-bool fieldOffFlushDone = false;
+// Field-off flush triggers — two staggered gates off the same field-off edge.
+// +5s:  saveNVSDataFull()      drains the storage namespace to NVS (heavy commit).
+// +13s: saveEfficiencyMatrix() writes /effmatrix.bin to LittleFS (~12.5 KB).
+// Staggered so the LittleFS write doesn't pile onto the NVS commit's flash
+// relocation tail. Both re-arm on the next field-on edge. Independent of
+// fieldOffSettled() (which has a 60s baseline used by cloud/network callers).
+bool fieldOffFlushDone = false;         // NVS drain done this field-off window
+bool fieldOffMatrixFlushDone = false;   // matrix write done this field-off window
 int8_t lastFieldStateForFlush = -1;    // -1 = uninit; 0 = field off; 1 = field on
 uint32_t fieldOffEdgeMs = 0;           // millis() captured at most recent field-on -> field-off edge
 
@@ -2403,6 +2402,7 @@ struct TickSnapshot {
 
   float bulkVoltage;
   float alternatorHardShutdownV;
+  bool testProtectionsEnabled;  // snapshot of the per-tick value so the decision logic sees a stable flag
 
   float tempToUseF;
   float tempLimitF;
@@ -2475,10 +2475,13 @@ uint32_t lastReportMs = 0;
 // --- Lockout Transition Tracking ---
 bool lockoutWasActive = false;
 
-// Fast OV supervisor instrumentation
-float g_fastOvCurrentCap = 0.0f;   // live cap ceiling this tick (amps)
-bool g_fastOvClampActive = false;  // true if cap is below MaxTableValue this tick
-uint32_t g_fastOvClampCount = 0;   // rising-edge counter — watch for increments
+// Fast OV supervisor instrumentation — unified across all protection paths
+// (Group 1/2 OV, iExcess, LoadDump). Exported from the bumpless tracker block
+// in AdjustFieldLearnMode after every supervisor has voted, so all three flags
+// below reflect the true combined state, not just Group 1/2.
+float g_fastOvCurrentCap = 0.0f;   // live unified cap ceiling this tick (amps)
+bool g_fastOvClampActive = false;  // true if ANY protection capped current this tick
+uint32_t g_fastOvClampCount = 0;   // rising-edge counter across all protections
 
 float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO tick
 
@@ -3009,6 +3012,39 @@ float board_temp_max_alltime = -999.0;        // Maximum board temperature (°F)
 float board_temp_min_alltime = 999.0;         // Minimum board temperature (°F)
 float baro_pressure_max_alltime = 0.0;        // Maximum barometric pressure (mbar)
 float baro_pressure_min_alltime = 9999.0;     // Minimum barometric pressure (mbar)
+
+// ─────────────────────────────────────────────────────────────────────
+// IGNITION-CYCLE WATERMARKS
+// Min/max since boot (= since ignition cycled). SEPARATE from the
+// *_AllTime / *Max / *_min systems above — those persist across boots
+// via NVS; these reset every boot. Initialized to NAN so the first valid
+// sample seeds both ends (see wmIgnUpdate).
+// 14 pairs × 8 bytes = 112 bytes, internal RAM, plain globals.
+// ─────────────────────────────────────────────────────────────────────
+struct IgnWatermark { float lo; float hi; };
+
+IgnWatermark wmIgn_amps     = { NAN, NAN };   // MeasuredAmps (A)
+IgnWatermark wmIgn_altTempF = { NAN, NAN };   // AlternatorTemperatureF (°F)
+IgnWatermark wmIgn_IBV      = { NAN, NAN };   // IBV — INA228 battery V
+IgnWatermark wmIgn_Bcur     = { NAN, NAN };   // Bcur — INA228 battery A
+IgnWatermark wmIgn_SOC      = { NAN, NAN };   // SOC percent (0..100, float)
+IgnWatermark wmIgn_RPM      = { NAN, NAN };   // RPM
+IgnWatermark wmIgn_SOG      = { NAN, NAN };   // SOGNMEA (knots)
+IgnWatermark wmIgn_AWS      = { NAN, NAN };   // ApparentWindSpeedNMEA (knots)
+IgnWatermark wmIgn_TWS      = { NAN, NAN };   // TrueWindSpeedNMEA (knots)
+IgnWatermark wmIgn_heel     = { NAN, NAN };   // imu_heel_deg
+IgnWatermark wmIgn_pitch    = { NAN, NAN };   // imu_pitch_deg
+IgnWatermark wmIgn_vacc     = { NAN, NAN };   // imu_vertical_accel_g
+IgnWatermark wmIgn_baro     = { NAN, NAN };   // baroPressure (mbar)
+IgnWatermark wmIgn_ambient  = { NAN, NAN };   // ambientTemp (°F)
+
+inline void wmIgnUpdate(IgnWatermark &w, float v) {
+  if (!isfinite(v)) return;
+  if (isnan(w.lo) || v < w.lo) w.lo = v;
+  if (isnan(w.hi) || v > w.hi) w.hi = v;
+}
+inline float wmIgnSafe(float v) { return isnan(v) ? 0.0f : v; }
+
 // Helper variables for distance tracking
 double last_position_lat = 0.0;
 double last_position_lon = 0.0;
@@ -3483,7 +3519,6 @@ void setup() {
   MaximumLoopTime = 0;
   loopTime5sWindow = 0;
   memset(&ft_ReadAnalogInputs, 0, sizeof(FuncTiming));
-  memset(&ft_saveNVSData, 0, sizeof(FuncTiming));
   memset(&ft_AdjustFieldLearnMode, 0, sizeof(FuncTiming));
   memset(&ft_logDashboardValues, 0, sizeof(FuncTiming));
   memset(&ft_updateSystemHealthStats, 0, sizeof(FuncTiming));
@@ -3750,7 +3785,6 @@ void loop() {
   // // === END OTA UPDATE ===
   esp_task_wdt_reset();              // Feed the watchdog to prevent timeout
   starttime = esp_timer_get_time();  // Record start time for Loop
-  heavyIOThisTick = false;           // reset co-fire guard each tick
   currentTime = millis();
 
   // SOC and runtime update every 2 seconds (runs regardless of hardwarePresent)
@@ -3768,7 +3802,10 @@ void loop() {
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
-  TIMED_CALL(ft_saveNVSData, saveNVSData());                    // phased: one group per NVS_TICK_SPACING ticks
+  // Periodic NVS save removed: nvs_commit() can block Core 1 for hundreds of ms during
+  // flash sector erase, which collides with the voltage loop and risks OV on transients.
+  // NVS now persists only at the field-off edge (saveNVSDataFull() further down in loop)
+  // and at the shutdown sequence — both run with field off, so any commit duration is safe.
   // Deferred saves from Core 0 button handlers — executed here on Core 1 so Core 0 SSE is not blocked.
   // Gated: wait 5 consecutive seconds out of critical zone before firing, to avoid bursting I/O
   // the moment voltage drops. All flags in this block execute in the same tick — no re-entry possible.
@@ -3994,8 +4031,6 @@ void loop() {
         checkTempTaskHealth();  // digital temperature measurement monitor (only with real hardware)
 
         TIMED_CALL(ft_ReadAnalogInputs, ReadAnalogInputs());
-        // If the ADS1115 step stalled (I2C hang), block NVS commit from also firing this tick
-        if (ft_rai_ads_state.lastCall > 5000) heavyIOThisTick = true;
       } else {
         imuEnabled = true;        //hack but it works for now
         ReadAnalogInputs_Fake();  // Fake sensor readings for development
@@ -4076,17 +4111,25 @@ void loop() {
         if (lastFieldStateForFlush == 1 && !fieldNowActive) {
           fieldOffEdgeMs = millis();  // capture the field-on -> field-off edge
         } else if (lastFieldStateForFlush == 0 && fieldNowActive) {
-          fieldOffFlushDone = false;  // re-arm on field-on edge
+          fieldOffFlushDone = false;        // re-arm on field-on edge
+          fieldOffMatrixFlushDone = false;
         } else if (lastFieldStateForFlush == -1 && !fieldNowActive) {
           fieldOffEdgeMs = millis();  // first observation; field already off
         }
         lastFieldStateForFlush = fieldNowActive ? 1 : 0;
 
+        // Gate 1 (+5 s): drain storage namespace to NVS
         if (!fieldOffFlushDone && !pendingShutdownFlush && !fieldNowActive
             && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 5000UL) {
           saveNVSDataFull();
-          saveEfficiencyMatrix();
           fieldOffFlushDone = true;
+        }
+        // Gate 2 (+13 s): write performance matrix to LittleFS — staggered so
+        // the ~150 ms file write doesn't land on the NVS commit's relocation tail
+        if (!fieldOffMatrixFlushDone && !pendingShutdownFlush && !fieldNowActive
+            && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 13000UL) {
+          saveEfficiencyMatrix();
+          fieldOffMatrixFlushDone = true;
         }
       }
 
@@ -4182,7 +4225,6 @@ void loop() {
     loopTime5sWindow = 0;                                // rolling 5s loop worst resets here; MaximumLoopTime is now session-persistent
     // Reset all per-function rolling windows
     ft_ReadAnalogInputs.worstWindow = 0;
-    ft_saveNVSData.worstWindow = 0;
     ft_AdjustFieldLearnMode.worstWindow = 0;
     ft_logDashboardValues.worstWindow = 0;
     ft_updateSystemHealthStats.worstWindow = 0;

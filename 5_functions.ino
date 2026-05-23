@@ -113,6 +113,7 @@ void COGSOG(const tN2kMsg &N2kMsg) {
     if (SOGNMEA > MaxSpeed_AllTime) {
       MaxSpeed_AllTime = SOGNMEA;
     }
+    wmIgnUpdate(wmIgn_SOG, SOGNMEA);  // ignition-cycle watermark
 
   } else {
     OutputStream->print("Failed to parse PGN: ");
@@ -733,6 +734,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   CoulombCount_Ah_scaled = constrain(CoulombCount_Ah_scaled, 0, BatteryCapacity_Ah * 100);
   float SoC_float = (float)CoulombCount_Ah_scaled / (BatteryCapacity_Ah * 100.0f) * 100.0f;
   SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
+  wmIgnUpdate(wmIgn_SOC, SoC_float);     // ignition-cycle watermark (float percent, 0..100)
 
   // =================================================================
   //     FULL CHARGE DETECTION - WORKS FROM ANY CHARGING SOURCE
@@ -1141,6 +1143,9 @@ void UpdateWindMaximums() {
   if (!isnan(TrueWindSpeedNMEA) && TrueWindSpeedNMEA > max_wind_speed_true_alltime) {
     max_wind_speed_true_alltime = TrueWindSpeedNMEA;
   }
+  // ignition-cycle watermarks (lo + hi, separate from *_alltime above)
+  if (!IS_STALE(IDX_APPARENT_WIND_SPEED)) wmIgnUpdate(wmIgn_AWS, ApparentWindSpeedNMEA);
+  if (!isnan(TrueWindSpeedNMEA))          wmIgnUpdate(wmIgn_TWS, TrueWindSpeedNMEA);
 }
 
 void UpdateBoardTempPressureMaximums() {
@@ -1148,6 +1153,9 @@ void UpdateBoardTempPressureMaximums() {
   if (ambientTemp < board_temp_min_alltime)        board_temp_min_alltime    = ambientTemp;
   if (baroPressure > baro_pressure_max_alltime)    baro_pressure_max_alltime = baroPressure;
   if (baroPressure < baro_pressure_min_alltime)    baro_pressure_min_alltime = baroPressure;
+  // ignition-cycle watermarks
+  wmIgnUpdate(wmIgn_ambient, ambientTemp);
+  wmIgnUpdate(wmIgn_baro, baroPressure);
 }
 
 void resetDistanceThisInterval() {
@@ -1390,7 +1398,8 @@ void CheckAlarms() {
         alertStatus = readINA228AlertRegister(INA.getAddress());
         float busV = INA.getBusVoltage();
 
-        if (!(alertStatus & 0x0010)) {
+        // I²C error (0xFFFF) → treat as "still set", hold latch (fail-safe)
+        if (alertStatus != 0xFFFF && !(alertStatus & 0x0010)) {
           // Cleared — was a transient. Release latch now.
           inaOvervoltageLatched = false;
           inaOvervoltageClearedMs = millis();
@@ -1419,7 +1428,8 @@ void CheckAlarms() {
         alertStatus = readINA228AlertRegister(INA.getAddress());
         float busV = INA.getBusVoltage();
 
-        if (!(alertStatus & 0x0010)) {
+        // I²C error (0xFFFF) → treat as "still set", hold latch (fail-safe)
+        if (alertStatus != 0xFFFF && !(alertStatus & 0x0010)) {
           inaOvervoltageLatched = false;
           inaOvervoltageClearedMs = millis();
           queueConsoleMessageF(
@@ -1451,7 +1461,8 @@ void CheckAlarms() {
       lastINA228Check = millis();
       alertStatus = readINA228AlertRegister(INA.getAddress());
 
-      if (alertStatus & 0x0010) {
+      // I²C error (0xFFFF) → skip detection this tick (avoid false-positive OV latch)
+      if (alertStatus != 0xFFFF && (alertStatus & 0x0010)) {
         if (!inaOvervoltageLatched) {
           inaOvervoltageLatched = true;
           inaOvervoltageTime = millis();
@@ -2052,6 +2063,8 @@ void _ReadAnalogInputs_inner() {
                        if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
                        if (IBV < MinVoltage)          { MinVoltage          = IBV; lastElectricalRecordMs = millis(); }
                        if (IBV < MinVoltage_AllTime)  { MinVoltage_AllTime  = IBV; lastElectricalRecordMs = millis(); }
+                       wmIgnUpdate(wmIgn_IBV,  IBV);   // ignition-cycle watermarks (lo + hi)
+                       wmIgnUpdate(wmIgn_Bcur, Bcur);
                      }
 
                    } catch (...) {
@@ -2217,6 +2230,7 @@ void _ReadAnalogInputs_inner() {
 
                            if (MeasuredAmps > -kSanityLim[rIdx] && MeasuredAmps < kSanityLim[rIdx]) {  // Sanity check
                              MARK_FRESH(IDX_MEASURED_AMPS);
+                             wmIgnUpdate(wmIgn_amps, MeasuredAmps);  // ignition-cycle watermark
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
                              // ── EMA filters ────────────────────────────────────────────────────────
                              // iExcess EMA (InputFilterTC) and Output PID EMA (OutputPIDFilterTC) run
@@ -2289,6 +2303,7 @@ void _ReadAnalogInputs_inner() {
                            }
                            if (RPM >= 0 && RPM < 10000) {  // Sanity check
                              MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
+                             wmIgnUpdate(wmIgn_RPM, RPM);  // ignition-cycle watermark
                            }
                            break;
 
@@ -3501,6 +3516,7 @@ void initializeNVS() {
 // Synchronous full write — for setup() and emergency use only.
 // Not safe to call from loop() — blocks for up to 200ms.
 void saveNVSDataFull() {
+  uint32_t _nvsT0 = millis();
   nvs_handle_t h;
   esp_err_t err = nvs_open("storage", NVS_READWRITE, &h);
   if (err != ESP_OK) {
@@ -3570,14 +3586,16 @@ void saveNVSDataFull() {
   if (prev_imu_heel_max_lifetime != imu_heel_max_lifetime)                  { nvs_set_blob(h, "IMU_HeelMax",   &imu_heel_max_lifetime,      sizeof(float));     prev_imu_heel_max_lifetime = imu_heel_max_lifetime;                  chg = true; }
   if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime)                { nvs_set_blob(h, "IMU_PitchMax",  &imu_pitch_max_lifetime,     sizeof(float));     prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;                chg = true; }
   if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)                { nvs_set_blob(h, "IMU_SlamMax",   &imu_slam_peak_lifetime,     sizeof(float));     prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;                chg = true; }
-  if (prev_imuMountOrientation != imuMountOrientation)                      { nvs_set_u8(h,   "IMU_Orient",    imuMountOrientation);                            prev_imuMountOrientation = imuMountOrientation;                      chg = true; }
-  if (prev_CAPSIZE_THRESHOLD_DEG != CAPSIZE_THRESHOLD_DEG)                  { nvs_set_blob(h, "IMU_CapThres",  &CAPSIZE_THRESHOLD_DEG,      sizeof(float));     prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;                  chg = true; }
-  if (prev_PITCHPOLE_THRESHOLD_DEG != PITCHPOLE_THRESHOLD_DEG)              { nvs_set_blob(h, "IMU_PitThres",  &PITCHPOLE_THRESHOLD_DEG,    sizeof(float));     prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;              chg = true; }
-  if (prev_SLAM_THRESHOLD_G != SLAM_THRESHOLD_G)                            { nvs_set_blob(h, "IMU_SlamThrs",  &SLAM_THRESHOLD_G,           sizeof(float));     prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;                            chg = true; }
+  // imuMountOrientation / CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G
+  // moved to LittleFS (Pattern B) — user-set form inputs, no longer in NVS.
 
   if (chg) nvs_commit(h);
   nvs_close(h);
   lastNVSSaveTime = millis();
+  uint32_t _nvsElapsed = lastNVSSaveTime - _nvsT0;
+  nvsFullSaveLastMs = (_nvsElapsed > 65535UL) ? 65535 : (uint16_t)_nvsElapsed;
+  if (nvsFullSaveLastMs > nvsFullSaveWorstMs) nvsFullSaveWorstMs = nvsFullSaveLastMs;
+  nvsFullSaveCount++;
 }
 
 // Returns true when battery is high AND field is on — the window where a 50ms stall
@@ -3623,179 +3641,12 @@ bool fieldOffSettled(uint32_t extraMs) {
   return (millis() - fieldOffAt >= 60000UL + extraMs);
 }
 
-// Phased NVS write — called every loop() tick.
-// Phase 0: idle, waiting for 2-minute gate.
-// Phases 1-8: one logical write group per active call, with NVS_TICK_SPACING
-//             fast ticks between each group so the loop() stall is ~2-10ms
-//             instead of 50-200ms all at once.
-// Phase 9: commit + close.  nvsCycleMs records how long the full drain took.
-//          Skipped if inCriticalZone() — handle closed without commit, cycle restarts.
-void saveNVSData() {
-  static uint16_t      nvsTick      = 0;
-  static nvs_handle_t  nvsH         = 0;
-  static bool          nvsChg       = false;
-  static uint32_t      nvsCycleStart = 0;
+// Periodic phased NVS save deleted — nvs_commit() blocks Core 1 for hundreds of ms
+// during sector erase and can collide with the voltage control loop on a transient.
+// All NVS persistence now goes through saveNVSDataFull() at the field-off edge
+// (Xregulator.ino loop) and the shutdown sequence — both run with field off so any
+// commit duration is safe. See git log for the original 9-phase implementation.
 
-  if (nvsPhase == 0) {
-    if (millis() - lastNVSSaveTime < NVS_SAVE_INTERVAL) return;
-    if (inCriticalZone()) return;  // don't start a cycle while voltage is high and field is on
-    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvsH);
-    if (err != ESP_OK) {
-      queueConsoleMessage("ERROR: Failed to open NVS");
-      Serial.println("ERROR: Failed to open NVS");
-      lastNVSSaveTime = millis();  // back off; don't hammer on failure
-      return;
-    }
-    nvsChg = false;
-    nvsTick = NVS_TICK_SPACING;  // fire phase 1 on the very next active call
-    nvsCycleStart = millis();
-    nvsPhase = 1;
-    return;
-  }
-
-  if (nvsTick < NVS_TICK_SPACING) { nvsTick++; return; }
-  nvsTick = 0;
-
-  switch (nvsPhase) {
-
-    case 1:  // Session Energy
-      if (prev_ChargedEnergy  != (uint32_t)ChargedEnergy)             { nvs_set_u32(nvsH, "ChargedEnergy",  (uint32_t)ChargedEnergy);             prev_ChargedEnergy  = (uint32_t)ChargedEnergy;             nvsChg = true; }
-      if (prev_DischrgdEnergy != (uint32_t)DischargedEnergy)          { nvs_set_u32(nvsH, "DischrgdEnergy", (uint32_t)DischargedEnergy);          prev_DischrgdEnergy = (uint32_t)DischargedEnergy;          nvsChg = true; }
-      if (prev_AltChrgdEnergy != (uint32_t)AlternatorChargedEnergy)   { nvs_set_u32(nvsH, "AltChrgdEnergy", (uint32_t)AlternatorChargedEnergy);   prev_AltChrgdEnergy = (uint32_t)AlternatorChargedEnergy;   nvsChg = true; }
-      if (prev_SolarEnergy    != (uint32_t)SolarChargedEnergy)        { nvs_set_u32(nvsH, "SolarEnergy",    (uint32_t)SolarChargedEnergy);        prev_SolarEnergy    = (uint32_t)SolarChargedEnergy;        nvsChg = true; }
-      if (prev_AltFuelUsed    != (int32_t)(AlternatorFuelUsed * 10))  { nvs_set_i32(nvsH, "AltFuelUsed",    (int32_t)(AlternatorFuelUsed * 10));  prev_AltFuelUsed    = (int32_t)(AlternatorFuelUsed * 10);  nvsChg = true; }
-      if (prev_EngineFuel     != (int32_t)(EngineFuelUsed * 10))      { nvs_set_i32(nvsH, "EngineFuel",     (int32_t)(EngineFuelUsed * 10));      prev_EngineFuel     = (int32_t)(EngineFuelUsed * 10);      nvsChg = true; }
-      nvsPhase = 2; break;
-
-    case 2:  // Lifetime Energy
-      if (prev_ChargedEnergy_AllTime  != (uint32_t)ChargedEnergy_AllTime)           { nvs_set_u32(nvsH, "ChrgdEng_AT",   (uint32_t)ChargedEnergy_AllTime);           prev_ChargedEnergy_AllTime  = (uint32_t)ChargedEnergy_AllTime;           nvsChg = true; }
-      if (prev_DischrgdEnergy_AllTime != (uint32_t)DischargedEnergy_AllTime)        { nvs_set_u32(nvsH, "DschrgEng_AT",  (uint32_t)DischargedEnergy_AllTime);        prev_DischrgdEnergy_AllTime = (uint32_t)DischargedEnergy_AllTime;        nvsChg = true; }
-      if (prev_AltChrgdEnergy_AllTime != (uint32_t)AlternatorChargedEnergy_AllTime) { nvs_set_u32(nvsH, "AltChrgEng_AT", (uint32_t)AlternatorChargedEnergy_AllTime); prev_AltChrgdEnergy_AllTime = (uint32_t)AlternatorChargedEnergy_AllTime; nvsChg = true; }
-      if (prev_SolarEnergy_AllTime    != (uint32_t)SolarChargedEnergy_AllTime)      { nvs_set_u32(nvsH, "SolarEng_AT",   (uint32_t)SolarChargedEnergy_AllTime);      prev_SolarEnergy_AllTime    = (uint32_t)SolarChargedEnergy_AllTime;      nvsChg = true; }
-      if (prev_AltFuelUsed_AllTime    != (int32_t)(AlternatorFuelUsed_AllTime * 10)) { nvs_set_i32(nvsH, "AltFuel_AT",  (int32_t)(AlternatorFuelUsed_AllTime * 10)); prev_AltFuelUsed_AllTime    = (int32_t)(AlternatorFuelUsed_AllTime * 10); nvsChg = true; }
-      if (prev_EngineFuel_AllTime     != (int32_t)(EngineFuelUsed_AllTime * 10))    { nvs_set_i32(nvsH, "EngFuel_AT",    (int32_t)(EngineFuelUsed_AllTime * 10));    prev_EngineFuel_AllTime     = (int32_t)(EngineFuelUsed_AllTime * 10);    nvsChg = true; }
-      nvsPhase = 3; break;
-
-    case 3:  // Runtime + Charge Cycles (session + alltime)
-      if (prev_EngineRunTime       != (int32_t)EngineRunTime)        { nvs_set_i32(nvsH, "EngineRunTime", (int32_t)EngineRunTime);        prev_EngineRunTime       = (int32_t)EngineRunTime;        nvsChg = true; }
-      if (prev_EngineCycles        != (int32_t)EngineCycles)         { nvs_set_i32(nvsH, "EngineCycles",  (int32_t)EngineCycles);         prev_EngineCycles        = (int32_t)EngineCycles;         nvsChg = true; }
-      if (prev_AltOnTime           != (int32_t)AlternatorOnTime)     { nvs_set_i32(nvsH, "AltOnTime",     (int32_t)AlternatorOnTime);     prev_AltOnTime           = (int32_t)AlternatorOnTime;     nvsChg = true; }
-      if (prev_EngineRunTime_AllTime != (int32_t)EngineRunTime_AllTime) { nvs_set_i32(nvsH, "EngRunTime_AT", (int32_t)EngineRunTime_AllTime); prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime; nvsChg = true; }
-      if (prev_EngineCycles_AllTime  != (int32_t)EngineCycles_AllTime)  { nvs_set_i32(nvsH, "EngCycles_AT",  (int32_t)EngineCycles_AllTime);  prev_EngineCycles_AllTime  = (int32_t)EngineCycles_AllTime;  nvsChg = true; }
-      if (prev_AltOnTime_AllTime     != (int32_t)AlternatorOnTime_AllTime) { nvs_set_i32(nvsH, "AltOnTime_AT", (int32_t)AlternatorOnTime_AllTime); prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime; nvsChg = true; }
-      if (prev_ChargeCycles          != (int32_t)ChargeCycles)        { nvs_set_i32(nvsH, "ChrgCycles",    (int32_t)ChargeCycles);         prev_ChargeCycles          = (int32_t)ChargeCycles;        nvsChg = true; }
-      if (prev_ChargeCycles_AllTime  != (int32_t)ChargeCycles_AllTime) { nvs_set_i32(nvsH, "ChrgCyc_AT",  (int32_t)ChargeCycles_AllTime); prev_ChargeCycles_AllTime  = (int32_t)ChargeCycles_AllTime; nvsChg = true; }
-      nvsPhase = 4; break;
-
-    case 4:  // Travel + session average SOC + speed AllTime accumulators + speed/RPM/current extrema
-      if (prev_TotalDist       != (int32_t)TotalDistance)             { nvs_set_i32(nvsH, "TotalDist",  (int32_t)TotalDistance);              prev_TotalDist       = (int32_t)TotalDistance;             nvsChg = true; }
-      if (prev_AvgSpeed        != (int32_t)(AvgSpeed * 100))          { nvs_set_i32(nvsH, "AvgSpeed",   (int32_t)(AvgSpeed * 100));           prev_AvgSpeed        = (int32_t)(AvgSpeed * 100);          nvsChg = true; }
-      if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)   { nvs_set_i32(nvsH, "TotDist_AT", (int32_t)TotalDistance_AllTime);      prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;   nvsChg = true; }
-      if (prev_AvgSpeed_AllTime  != (int32_t)(AvgSpeed_AllTime * 100)) { nvs_set_i32(nvsH, "AvgSpd_AT", (int32_t)(AvgSpeed_AllTime * 100));   prev_AvgSpeed_AllTime  = (int32_t)(AvgSpeed_AllTime * 100); nvsChg = true; }
-      if (prev_spdAccum_AllTime  != speedAccumulator_AllTime)          { nvs_set_blob(nvsH, "SpdAccum_AT", &speedAccumulator_AllTime, sizeof(float));    prev_spdAccum_AllTime  = speedAccumulator_AllTime;          nvsChg = true; }
-      if (prev_spdTime_AllTime   != (uint32_t)totalSpeedSampleTime_AllTime) { nvs_set_u32(nvsH, "SpdTime_AT", (uint32_t)totalSpeedSampleTime_AllTime); prev_spdTime_AllTime = (uint32_t)totalSpeedSampleTime_AllTime; nvsChg = true; }
-      if (prev_AvgSOC          != (int32_t)(AvgSOC * 100))            { nvs_set_i32(nvsH, "AvgSOC",     (int32_t)(AvgSOC * 100));             prev_AvgSOC          = (int32_t)(AvgSOC * 100);            nvsChg = true; }
-      if (prev_MaxSpeed             != MaxSpeed)                 { nvs_set_blob(nvsH, "MaxSpd",      &MaxSpeed,                 sizeof(float)); prev_MaxSpeed             = MaxSpeed;                 nvsChg = true; }
-      if (prev_MaxSpeed_AllTime     != MaxSpeed_AllTime)         { nvs_set_blob(nvsH, "MaxSpd_AT",   &MaxSpeed_AllTime,         sizeof(float)); prev_MaxSpeed_AllTime     = MaxSpeed_AllTime;         nvsChg = true; }
-      if (prev_MeasAmpsMax          != MeasuredAmpsMax)          { nvs_set_blob(nvsH, "MAmpsMax",    &MeasuredAmpsMax,          sizeof(float)); prev_MeasAmpsMax          = MeasuredAmpsMax;          nvsChg = true; }
-      if (prev_MeasAmpsMax_AllTime  != MeasuredAmpsMax_AllTime)  { nvs_set_blob(nvsH, "MAmpsMax_AT", &MeasuredAmpsMax_AllTime,  sizeof(float)); prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;  nvsChg = true; }
-      if (prev_RPMMax               != RPMMax)                   { nvs_set_blob(nvsH, "RPMMax",      &RPMMax,                   sizeof(float)); prev_RPMMax               = RPMMax;                   nvsChg = true; }
-      if (prev_RPMMax_AllTime       != RPMMax_AllTime)           { nvs_set_blob(nvsH, "RPMMax_AT",   &RPMMax_AllTime,           sizeof(float)); prev_RPMMax_AllTime       = RPMMax_AllTime;           nvsChg = true; }
-      nvsPhase = 5; break;
-
-    case 5: {  // SOC alltime accumulators + voltage AllTime accumulators + battery state + voltage extrema
-      uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
-      if (prev_socAccum_AllTime != sc)                                       { nvs_set_u64(nvsH, "SocAccum_AT",  sc);                                    prev_socAccum_AllTime = sc;                                    nvsChg = true; }
-      if (prev_socTime_AllTime  != (uint32_t)totalSocSampleTime_AllTime)    { nvs_set_u32(nvsH, "SocTime_AT",   (uint32_t)totalSocSampleTime_AllTime);  prev_socTime_AllTime  = (uint32_t)totalSocSampleTime_AllTime;  nvsChg = true; }
-      if (prev_vltAccum_AllTime  != voltageAccumulator_AllTime)              { nvs_set_blob(nvsH, "VltAccum_AT", &voltageAccumulator_AllTime, sizeof(float));    prev_vltAccum_AllTime  = voltageAccumulator_AllTime;          nvsChg = true; }
-      if (prev_vltTime_AllTime   != (uint32_t)totalVoltageSampleTime_AllTime) { nvs_set_u32(nvsH, "VltTime_AT", (uint32_t)totalVoltageSampleTime_AllTime); prev_vltTime_AllTime = (uint32_t)totalVoltageSampleTime_AllTime; nvsChg = true; }
-      if (prev_SOC_percent      != (int32_t)SOC_percent)                    { nvs_set_i32(nvsH, "SOC_percent",  (int32_t)SOC_percent);                  prev_SOC_percent      = (int32_t)SOC_percent;                  nvsChg = true; }
-      if (prev_CoulombCount     != (int32_t)CoulombCount_Ah_scaled)         { nvs_set_i32(nvsH, "CoulombCount", (int32_t)CoulombCount_Ah_scaled);       prev_CoulombCount     = (int32_t)CoulombCount_Ah_scaled;       nvsChg = true; }
-      if (prev_IBVMax              != IBVMax)              { nvs_set_blob(nvsH, "IBVMax",   &IBVMax,              sizeof(float)); prev_IBVMax              = IBVMax;              nvsChg = true; }
-      if (prev_PeakV_AllTime       != PeakVoltage_AllTime) { nvs_set_blob(nvsH, "PeakV_AT", &PeakVoltage_AllTime, sizeof(float)); prev_PeakV_AllTime       = PeakVoltage_AllTime; nvsChg = true; }
-      if (prev_MinVoltage          != MinVoltage)          { nvs_set_blob(nvsH, "MinV",     &MinVoltage,          sizeof(float)); prev_MinVoltage          = MinVoltage;          nvsChg = true; }
-      if (prev_MinVoltage_AllTime  != MinVoltage_AllTime)  { nvs_set_blob(nvsH, "MinV_AT",  &MinVoltage_AllTime,  sizeof(float)); prev_MinVoltage_AllTime  = MinVoltage_AllTime;  nvsChg = true; }
-      nvsPhase = 6; break;
-    }
-
-    case 6:  // Session + system health
-      if (prev_SessionDur  != (uint32_t)CurrentSessionDuration) { nvs_set_u32(nvsH, "SessionDur",  (uint32_t)CurrentSessionDuration); prev_SessionDur  = (uint32_t)CurrentSessionDuration; nvsChg = true; }
-      if (prev_MaxLoop     != (int32_t)MaxLoopTime)              { nvs_set_i32(nvsH, "MaxLoop",     (int32_t)MaxLoopTime);             prev_MaxLoop     = (int32_t)MaxLoopTime;             nvsChg = true; }
-      if (prev_MinHeap     != (int32_t)MinFreeHeap)              { nvs_set_i32(nvsH, "MinHeap",     (int32_t)MinFreeHeap);             prev_MinHeap     = (int32_t)MinFreeHeap;             nvsChg = true; }
-      if (prev_PowerCycles != (int32_t)totalPowerCycles)         { nvs_set_i32(nvsH, "PowerCycles", (int32_t)totalPowerCycles);        prev_PowerCycles = (int32_t)totalPowerCycles;        nvsChg = true; }
-      nvsPhase = 7; break;
-
-    case 7:  // Thermal stress + dynamic learning calibration + environment/UV extrema
-      if (prev_InsulDamage != CumulativeInsulationDamage)   { nvs_set_blob(nvsH, "InsulDamage",  &CumulativeInsulationDamage, sizeof(float)); prev_InsulDamage  = CumulativeInsulationDamage;   nvsChg = true; }
-      if (prev_GreaseDamage != CumulativeGreaseDamage)       { nvs_set_blob(nvsH, "GreaseDamage", &CumulativeGreaseDamage,     sizeof(float)); prev_GreaseDamage = CumulativeGreaseDamage;       nvsChg = true; }
-      if (prev_BrushDamage  != CumulativeBrushDamage)        { nvs_set_blob(nvsH, "BrushDamage",  &CumulativeBrushDamage,      sizeof(float)); prev_BrushDamage  = CumulativeBrushDamage;        nvsChg = true; }
-      if (prev_ShuntGain    != DynamicShuntGainFactor)        { nvs_set_blob(nvsH, "ShuntGain",    &DynamicShuntGainFactor,     sizeof(float)); prev_ShuntGain    = DynamicShuntGainFactor;        nvsChg = true; }
-      if (prev_AltZero      != DynamicAltCurrentZero)         { nvs_set_blob(nvsH, "AltZero",      &DynamicAltCurrentZero,      sizeof(float)); prev_AltZero      = DynamicAltCurrentZero;         nvsChg = true; }
-      if (prev_LastGainTime != (uint32_t)lastGainCorrectionTime) { nvs_set_u32(nvsH, "LastGainTime", (uint32_t)lastGainCorrectionTime); prev_LastGainTime = (uint32_t)lastGainCorrectionTime; nvsChg = true; }
-      if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime)    { nvs_set_u32(nvsH, "LastZeroTime",  (uint32_t)lastAutoZeroTime);         prev_LastZeroTime = (uint32_t)lastAutoZeroTime;    nvsChg = true; }
-      if (prev_LastZeroTemp != lastAutoZeroTemp)               { nvs_set_blob(nvsH, "LastZeroTemp", &lastAutoZeroTemp,           sizeof(float)); prev_LastZeroTemp = lastAutoZeroTemp;             nvsChg = true; }
-      if (prev_sailing_days_alltime != sailing_days_alltime)  { nvs_set_blob(nvsH, "SailDays_AT",  &sailing_days_alltime,       sizeof(float)); prev_sailing_days_alltime = sailing_days_alltime; nvsChg = true; }
-      if (prev_board_temp_max        != board_temp_max_alltime)             { nvs_set_blob(nvsH, "BdTmpMaxAt",  &board_temp_max_alltime,             sizeof(float)); prev_board_temp_max        = board_temp_max_alltime;             nvsChg = true; }
-      if (prev_board_temp_min        != board_temp_min_alltime)             { nvs_set_blob(nvsH, "BdTmpMinAt",  &board_temp_min_alltime,             sizeof(float)); prev_board_temp_min        = board_temp_min_alltime;             nvsChg = true; }
-      if (prev_baro_max              != baro_pressure_max_alltime)          { nvs_set_blob(nvsH, "BaroMaxAt",   &baro_pressure_max_alltime,          sizeof(float)); prev_baro_max              = baro_pressure_max_alltime;          nvsChg = true; }
-      if (prev_baro_min              != baro_pressure_min_alltime)          { nvs_set_blob(nvsH, "BaroMinAt",   &baro_pressure_min_alltime,          sizeof(float)); prev_baro_min              = baro_pressure_min_alltime;          nvsChg = true; }
-      if (prev_MaxTempTherm          != MaxTemperatureThermistor)           { nvs_set_blob(nvsH, "MaxTherm",    &MaxTemperatureThermistor,           sizeof(float)); prev_MaxTempTherm          = MaxTemperatureThermistor;           nvsChg = true; }
-      if (prev_MaxTempTherm_AllTime  != MaxTemperatureThermistor_AllTime)   { nvs_set_blob(nvsH, "MaxTherm_AT", &MaxTemperatureThermistor_AllTime,   sizeof(float)); prev_MaxTempTherm_AllTime  = MaxTemperatureThermistor_AllTime;   nvsChg = true; }
-      if (prev_MaxAltTempF           != MaxAlternatorTemperatureF)          { nvs_set_blob(nvsH, "MaxAltTempF", &MaxAlternatorTemperatureF,          sizeof(float)); prev_MaxAltTempF           = MaxAlternatorTemperatureF;          nvsChg = true; }
-      if (prev_MaxAltTempF_AllTime   != MaxAlternatorTemperatureF_AllTime)  { nvs_set_blob(nvsH, "MAltTempF_AT", &MaxAlternatorTemperatureF_AllTime, sizeof(float)); prev_MaxAltTempF_AllTime   = MaxAlternatorTemperatureF_AllTime;  nvsChg = true; }
-      if (prev_MaxWindApp            != max_wind_speed_apparent_alltime)    { nvs_set_blob(nvsH, "MaxWApp_AT",  &max_wind_speed_apparent_alltime,    sizeof(float)); prev_MaxWindApp            = max_wind_speed_apparent_alltime;    nvsChg = true; }
-      if (prev_MaxWindTrue           != max_wind_speed_true_alltime)        { nvs_set_blob(nvsH, "MaxWTr_AT",   &max_wind_speed_true_alltime,        sizeof(float)); prev_MaxWindTrue           = max_wind_speed_true_alltime;        nvsChg = true; }
-      if (prev_UVToday               != UVToday)                            { nvs_set_blob(nvsH, "UVToday",     &UVToday,                            sizeof(float)); prev_UVToday               = UVToday;                            nvsChg = true; }
-      if (prev_UVTomorrow            != UVTomorrow)                         { nvs_set_blob(nvsH, "UVTomorrow",  &UVTomorrow,                         sizeof(float)); prev_UVTomorrow            = UVTomorrow;                         nvsChg = true; }
-      if (prev_UVDay2                != UVDay2)                             { nvs_set_blob(nvsH, "UVDay2",      &UVDay2,                             sizeof(float)); prev_UVDay2                = UVDay2;                             nvsChg = true; }
-      nvsPhase = 8; break;
-
-    case 8:  // IMU lifetime counters, maxima, and settings
-      if (prev_imu_capsize_count      != imu_capsize_count)          { nvs_set_u32(nvsH,  "IMU_Capsize",  imu_capsize_count);                             prev_imu_capsize_count      = imu_capsize_count;          nvsChg = true; }
-      if (prev_imu_pitchpole_count    != imu_pitchpole_count)        { nvs_set_u32(nvsH,  "IMU_Pitchpol", imu_pitchpole_count);                           prev_imu_pitchpole_count    = imu_pitchpole_count;        nvsChg = true; }
-      if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime)   { nvs_set_u32(nvsH,  "IMU_SlamLife", imu_slam_count_lifetime);                       prev_imu_slam_count_lifetime = imu_slam_count_lifetime;  nvsChg = true; }
-      if (prev_imu_heel_max_lifetime  != imu_heel_max_lifetime)      { nvs_set_blob(nvsH, "IMU_HeelMax",  &imu_heel_max_lifetime,  sizeof(float));        prev_imu_heel_max_lifetime  = imu_heel_max_lifetime;      nvsChg = true; }
-      if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime)     { nvs_set_blob(nvsH, "IMU_PitchMax", &imu_pitch_max_lifetime, sizeof(float));        prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;     nvsChg = true; }
-      if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)     { nvs_set_blob(nvsH, "IMU_SlamMax",  &imu_slam_peak_lifetime, sizeof(float));        prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;     nvsChg = true; }
-      if (prev_imuMountOrientation    != imuMountOrientation)        { nvs_set_u8(nvsH,   "IMU_Orient",   imuMountOrientation);                           prev_imuMountOrientation    = imuMountOrientation;        nvsChg = true; }
-      if (prev_CAPSIZE_THRESHOLD_DEG  != CAPSIZE_THRESHOLD_DEG)      { nvs_set_blob(nvsH, "IMU_CapThres", &CAPSIZE_THRESHOLD_DEG,  sizeof(float));        prev_CAPSIZE_THRESHOLD_DEG  = CAPSIZE_THRESHOLD_DEG;      nvsChg = true; }
-      if (prev_PITCHPOLE_THRESHOLD_DEG != PITCHPOLE_THRESHOLD_DEG)   { nvs_set_blob(nvsH, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, sizeof(float));       prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;  nvsChg = true; }
-      if (prev_SLAM_THRESHOLD_G       != SLAM_THRESHOLD_G)           { nvs_set_blob(nvsH, "IMU_SlamThrs", &SLAM_THRESHOLD_G,        sizeof(float));        prev_SLAM_THRESHOLD_G       = SLAM_THRESHOLD_G;           nvsChg = true; }
-      // TODO: sea state minute counters (IMU_MinMvGnt/Mod/Rgh/Ext, IMU_MinStGnt/Mod/Rgh/Ext) — add here when ready
-      nvsPhase = 9; break;
-
-    case 9:  // Commit + close — skip commit if in critical zone, restart cycle immediately
-      if (heavyIOThisTick) { nvsTick = NVS_TICK_SPACING; return; }  // ADS stall this tick — retry next tick
-      if (inCriticalZone()) {
-        nvs_close(nvsH);   // discard staged values
-        nvsH = 0;
-        lastNVSSaveTime = 0;  // restart cycle as soon as zone clears (no 2-min wait)
-        nvsPhase = 0;
-        break;
-      }
-      if (nvsChg) {
-        uint32_t _cmt0 = micros();
-        nvs_commit(nvsH);
-        uint32_t _cmtMs = (micros() - _cmt0) / 1000UL;
-        nvsCommitCount++;
-        nvsCommitLastMs = (_cmtMs > 65535UL) ? 65535 : (uint16_t)_cmtMs;
-        if (_cmtMs > nvsCommitWorstMs) nvsCommitWorstMs = nvsCommitLastMs;
-        if (_cmtMs >= 100) nvsCommitLongCount++;
-        heavyIOThisTick = true;  // co-fire guard for ADS1115 read on same tick
-      }
-      nvs_close(nvsH);
-      nvsH = 0;
-      nvsCycleMs = millis() - nvsCycleStart;
-      lastNVSSaveTime = millis();
-      nvsPhase = 0;
-      break;
-
-    default:
-      if (nvsH != 0) { nvs_close(nvsH); nvsH = 0; }
-      nvsPhase = 0;
-      break;
-  }
-}
 void loadNVSData() {
   nvs_handle_t nvs_handle;
   esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
@@ -3969,12 +3820,9 @@ void loadNVSData() {
   nvs_get_blob(nvs_handle, "IMU_PitchMax", &imu_pitch_max_lifetime, &required_size);
   nvs_get_blob(nvs_handle, "IMU_SlamMax", &imu_slam_peak_lifetime, &required_size);
 
-  // IMU Settings
-  uint8_t temp_uint8;
-  if (nvs_get_u8(nvs_handle, "IMU_Orient", &temp_uint8) == ESP_OK) imuMountOrientation = temp_uint8;
-  nvs_get_blob(nvs_handle, "IMU_CapThres", &CAPSIZE_THRESHOLD_DEG, &required_size);
-  nvs_get_blob(nvs_handle, "IMU_PitThres", &PITCHPOLE_THRESHOLD_DEG, &required_size);
-  nvs_get_blob(nvs_handle, "IMU_SlamThrs", &SLAM_THRESHOLD_G, &required_size);
+  // imuMountOrientation now loads from /vessel_info.json in InitSystemSettings.
+  // CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G now load from
+  // their own LittleFS files in InitSystemSettings (Pattern B).
 
   // Extrema, environment maxima, and UV forecast
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxSpd",      &MaxSpeed,                         &required_size);
@@ -4082,11 +3930,6 @@ void initNVSCache() {
   // prev_imu_min_stat_moderate   = imu_min_stat_moderate;
   // prev_imu_min_stat_rough      = imu_min_stat_rough;
   // prev_imu_min_stat_extreme    = imu_min_stat_extreme;
-  prev_imuMountOrientation = imuMountOrientation;
-  prev_CAPSIZE_THRESHOLD_DEG = CAPSIZE_THRESHOLD_DEG;
-  prev_PITCHPOLE_THRESHOLD_DEG = PITCHPOLE_THRESHOLD_DEG;
-  prev_SLAM_THRESHOLD_G = SLAM_THRESHOLD_G;
-
   prev_MaxSpeed             = MaxSpeed;
   prev_MaxSpeed_AllTime     = MaxSpeed_AllTime;
   prev_MeasAmpsMax          = MeasuredAmpsMax;

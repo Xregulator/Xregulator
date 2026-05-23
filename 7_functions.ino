@@ -147,78 +147,116 @@ static bool checkPointValid(float amps, float battV, float &fieldVolts,
 
 
 // ============================================================
-// NVS — SAVE
-// Namespace "effmat" (distinct from "storage" and old "effgrid").
-// One blob per RPM row: "mat_r0".."mat_r7".
-// Each blob = NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS * sizeof(MatrixCell).
-// referenceFinalized flag stored as "mat_final".
+// LittleFS — SAVE / LOAD
+// One binary file holds the entire PSRAM matrix + referenceFinalized.
+// Replaces the previous "effmat" NVS namespace, which couldn't fit the
+// ~12.5 KB matrix inside the 20 KB NVS partition. Saves only happen at
+// the field-off +13 s flush and the shutdown Phase 2 flush — both run
+// with the field already off, so the ~100–150 ms LittleFS write is safe.
+// History blobs (eff_hist, eff_cs) still live in NVS — they're tiny.
 // ============================================================
+
+#define EFFMATRIX_FILE_PATH  "/effmatrix.bin"
+#define EFFMATRIX_FILE_MAGIC 0x45464D58u  // 'EFMX'
+#define EFFMATRIX_FILE_VER   1u
+
+struct EffMatrixFileHeader {
+  uint32_t magic;
+  uint32_t version;
+  uint32_t cellCount;          // sanity guard against bucket-dim change
+  uint32_t cellSize;           // sanity guard against MatrixCell layout change
+  uint32_t referenceFinalized; // 0 or 1
+};
 
 static void saveEfficiencyMatrix() {
   if (!effMatrix || hardwarePresent != 1) return;
-  if (inCriticalZone()) {
-    effMatrixNeedsSave = true;
+
+  const size_t bodySize = (size_t)NUM_MATRIX_CELLS * sizeof(MatrixCell);
+
+  fsTakeLock();
+  File f = LittleFS.open(EFFMATRIX_FILE_PATH, "w");
+  if (!f) {
+    fsReleaseLock();
+    queueConsoleMessage("EffMatrix: LittleFS open failed (save)");
     return;
   }
-  nvs_handle_t handle;
-  if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) {
-    queueConsoleMessage("EffMatrix: NVS open failed (save)");
-    return;
+
+  EffMatrixFileHeader hdr = {
+    EFFMATRIX_FILE_MAGIC,
+    EFFMATRIX_FILE_VER,
+    (uint32_t)NUM_MATRIX_CELLS,
+    (uint32_t)sizeof(MatrixCell),
+    (uint32_t)(referenceFinalized ? 1 : 0),
+  };
+  size_t hdrWritten = f.write((const uint8_t *)&hdr, sizeof(hdr));
+  size_t bodyWritten = 0;
+  if (hdrWritten == sizeof(hdr)) {
+    bodyWritten = f.write((const uint8_t *)effMatrix, bodySize);
   }
+  f.close();
+  fsReleaseLock();
 
-  const size_t rowSize = (size_t)NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS * sizeof(MatrixCell);
-
-  for (int r = 0; r < NUM_RPM_BUCKETS; r++) {
-    char key[12];
-    snprintf(key, sizeof(key), "mat_r%d", r);
-    nvs_set_blob(handle, key, &MATRIX_CELL(r, 0, 0), rowSize);
+  if (hdrWritten != sizeof(hdr) || bodyWritten != bodySize) {
+    queueConsoleMessageF(
+      "EffMatrix: short write — hdr %u/%u body %u/%u",
+      (unsigned)hdrWritten, (unsigned)sizeof(hdr),
+      (unsigned)bodyWritten, (unsigned)bodySize);
   }
-
-  nvs_set_u8(handle, "mat_final", (uint8_t)referenceFinalized);
-
-  nvs_commit(handle);
-  nvs_close(handle);
-  effMatrixNeedsSave = false;
 }
 
-
-// ============================================================
-// NVS — LOAD
-// Size mismatch on any row resets that row only (same strategy as old system).
-// ============================================================
 
 static void loadEfficiencyMatrix() {
   if (!effMatrix) return;
 
-  nvs_handle_t handle;
-  if (nvs_open("effmat", NVS_READONLY, &handle) != ESP_OK) {
-    return;  // No persisted data yet — matrix stays zeroed
+  if (!fsExists(EFFMATRIX_FILE_PATH)) {
+    loadEffHistory();  // history blobs still live in NVS
+    return;
   }
 
-  const size_t rowSize = (size_t)NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS * sizeof(MatrixCell);
+  const size_t bodySize = (size_t)NUM_MATRIX_CELLS * sizeof(MatrixCell);
 
-  for (int r = 0; r < NUM_RPM_BUCKETS; r++) {
-    char key[12];
-    snprintf(key, sizeof(key), "mat_r%d", r);
-
-    size_t sz = rowSize;
-    esp_err_t err = nvs_get_blob(handle, key, &MATRIX_CELL(r, 0, 0), &sz);
-
-    if (err != ESP_OK || sz != rowSize) {
-      memset(&MATRIX_CELL(r, 0, 0), 0, rowSize);
-      queueConsoleMessageF(
-        "EffMatrix: RPM row %d size mismatch (got %u, want %u) — row reset",
-        r, (unsigned)sz, (unsigned)rowSize);
-    }
+  fsTakeLock();
+  File f = LittleFS.open(EFFMATRIX_FILE_PATH, "r");
+  if (!f) {
+    fsReleaseLock();
+    queueConsoleMessage("EffMatrix: LittleFS open failed (load)");
+    loadEffHistory();
+    return;
   }
 
-  uint8_t finalized = 0;
-  if (nvs_get_u8(handle, "mat_final", &finalized) == ESP_OK) {
-    referenceFinalized = (finalized != 0);
+  EffMatrixFileHeader hdr;
+  size_t hdrRead = f.readBytes((char *)&hdr, sizeof(hdr));
+  bool hdrOK = (hdrRead == sizeof(hdr)
+                && hdr.magic == EFFMATRIX_FILE_MAGIC
+                && hdr.version == EFFMATRIX_FILE_VER
+                && hdr.cellCount == (uint32_t)NUM_MATRIX_CELLS
+                && hdr.cellSize == (uint32_t)sizeof(MatrixCell));
+
+  if (!hdrOK) {
+    f.close();
+    LittleFS.remove(EFFMATRIX_FILE_PATH);
+    fsReleaseLock();
+    queueConsoleMessageF(
+      "EffMatrix: header mismatch (magic=%08x ver=%u cells=%u sz=%u) — file discarded",
+      hdr.magic, (unsigned)hdr.version, (unsigned)hdr.cellCount, (unsigned)hdr.cellSize);
+    loadEffHistory();
+    return;
   }
 
-  nvs_close(handle);
-  loadEffHistory();  // Commit previous session and load history buffer
+  size_t bodyRead = f.readBytes((char *)effMatrix, bodySize);
+  f.close();
+  fsReleaseLock();
+
+  if (bodyRead != bodySize) {
+    memset(effMatrix, 0, bodySize);
+    queueConsoleMessageF(
+      "EffMatrix: short body read (%u/%u) — matrix reset",
+      (unsigned)bodyRead, (unsigned)bodySize);
+  } else {
+    referenceFinalized = (hdr.referenceFinalized != 0);
+  }
+
+  loadEffHistory();  // history blobs still live in NVS
 }
 
 
@@ -439,7 +477,10 @@ static void mergeWindowIntoMatrix() {
     //  cell.avg_amps, cell.min_amps, cell.max_amps,
     //  REF_MIN_SS_SECONDS);
 
-    saveEfficiencyMatrix();
+    // No save here — matrix lives in PSRAM, persists to /effmatrix.bin at
+    // the field-off +13 s flush and at shutdown Phase 2 (field already off).
+    // selectReferenceBins() may still call saveEfficiencyMatrix() once on
+    // the freeze edge; that's a one-shot LittleFS write over the lifetime.
     selectReferenceBins();
   }
   // Save current session health snapshot so it survives unexpected power loss
@@ -874,7 +915,9 @@ void efficiencyTracker_tick() {
   if (now - last20s >= 20000) {
     last20s = now;
     if (!inCriticalZone()) {
-      if (effMatrixNeedsSave)     saveEfficiencyMatrix();
+      // Matrix save no longer rides this tick — it persists at the field-off
+      // +13 s flush (Xregulator.ino) and shutdown Phase 2. eff_cs (session
+      // health, single float) is still NVS-resident, so it keeps the retry.
       if (sessionHealthNeedsSave) saveCurrentSessionHealth();
     }
   }
@@ -1086,7 +1129,7 @@ void cvLog_tick(uint32_t nowMs) {
 
   e.awState = g_awState;
   e.rpm = (int16_t)constrain((int)RPM, -32768, 32767);
-  e.battV_filt_x100 = (int16_t)clamp_f(IBV * 100.0f, -32767.0f, 32767.0f);
+  e.battV_filt_x100 = (int16_t)clamp_f(IBV_filtered * 100.0f, -32767.0f, 32767.0f);
   e.iMeas_filt_x10 = (int16_t)clamp_f(MeasuredAmps_filtered * 10.0f, -32767.0f, 32767.0f);
   e.cvDSlope_x10000 = (int16_t)clamp_f(cvDSlope * 10000.0f, -32767.0f, 32767.0f);
   e.ch1IntervalMs = (int16_t)g_ch1LastIntervalMs;

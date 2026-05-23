@@ -53,6 +53,18 @@ plt.rcParams.update({
 DOWNLOADS    = os.path.expanduser("~/Downloads")
 FILE_KEYWORD = "AltHealthMatrix"
 
+# Mirrored from Xregulator.ino (DEV-INTERMEDIATE block, lines 260-267).
+# Production values shown after each //. Update if firmware constants change.
+REF_NUM_BINS_REQUIRED  = 3     # production: 10
+REF_FREEZE_TOTAL_SS    = 180   # production: 6000     (seconds)
+REF_SPREAD_TEMP_DEG    = 10.0  # production: 50.0     (°F)
+REF_SPREAD_FIELD_VOLTS = 1.0   # production: 3.75     (V)
+REF_SPREAD_RPM         = 200.0 # production: 1000.0   (RPM)
+
+# Default SS gate used by the firmware before a sample reaches the matrix.
+# Annotated on the plot for reader context; not enforced here.
+FIRMWARE_SS_GATE_SECONDS = 13
+
 SS_CMAP  = matplotlib.cm.YlOrRd.copy();  SS_CMAP.set_bad(color="#cccccc")
 AMP_CMAP = matplotlib.cm.plasma.copy();  AMP_CMAP.set_bad(color="#cccccc")
 RPM_LINE_CMAP = matplotlib.cm.get_cmap("RdYlBu_r")
@@ -135,6 +147,88 @@ def field_center(label):
     """'4.3-6.4V' → 5.35  (midpoint of the two boundary numbers)."""
     nums = re.findall(r"[\d.]+", label)
     return (float(nums[0]) + float(nums[1])) / 2 if len(nums) >= 2 else float(nums[0])
+
+
+def label_bounds(label):
+    """Parse '500-1k', '<80F', '2.1-4.3V', '4k+' to a (lo, hi) span.
+
+    Used to compute per-axis spread (max boundary − min boundary) across
+    populated bins, for the reference-freeze status panel.
+
+    The regex is unsigned on purpose — the dash between two numbers is a
+    range separator, not a negative sign. "80-110F" must read as (80, 110).
+    """
+    raw = str(label)
+    s = raw.replace("k", "000").replace("F", "").replace("V", "").replace("°", "")
+    nums = re.findall(r"\d+\.?\d*", s)
+    if not nums:
+        return (0.0, 0.0)
+    vals = [float(n) for n in nums]
+    if "<" in raw:
+        # "<80F" → (0, 80)
+        return (0.0, vals[0])
+    if "+" in raw or ">" in raw:
+        # "4k+" → treat as a single point at the lower bound
+        return (vals[0], vals[0])
+    if len(vals) >= 2:
+        return (vals[0], vals[1])
+    return (vals[0], vals[0])
+
+
+def compute_reference_status(df):
+    """Returns a dict summarizing how close the matrix is to a frozen reference.
+
+    Spread = max upper-boundary minus min lower-boundary across all populated
+    bins on that axis. This is a rough indicator — the firmware's greedy
+    bin-picker in tryFreezeReference() may select a different subset.
+    """
+    pop = df[df["populated"]]
+    frozen_count = int((df["is_reference_bin"] == 1).sum())
+
+    def axis_spread(label_col):
+        if pop.empty:
+            return 0.0
+        labels = pop[label_col].unique()
+        lows  = [label_bounds(l)[0] for l in labels]
+        highs = [label_bounds(l)[1] for l in labels]
+        return max(highs) - min(lows)
+
+    return {
+        "frozen":       frozen_count > 0,
+        "n_ref_bins":   frozen_count,
+        "n_populated":  int(len(pop)),
+        "total_ss":     int(pop["ss_seconds"].sum()) if not pop.empty else 0,
+        "temp_spread":  axis_spread("temp_label"),
+        "field_spread": axis_spread("field_label"),
+        "rpm_spread":   axis_spread("rpm_label"),
+    }
+
+
+def reference_status_lines(df):
+    """Multi-line text block for the upper-right freeze-status panel."""
+    s = compute_reference_status(df)
+    if s["frozen"]:
+        return [
+            "REFERENCE: FROZEN",
+            f"  {s['n_ref_bins']} reference bins in matrix",
+        ]
+    checks = [
+        ("Populated bins", s["n_populated"],  REF_NUM_BINS_REQUIRED,  ""),
+        ("Total SS time",  s["total_ss"],     REF_FREEZE_TOTAL_SS,    " s"),
+        ("Temp spread",    s["temp_spread"],  REF_SPREAD_TEMP_DEG,    " °F"),
+        ("Field spread",   s["field_spread"], REF_SPREAD_FIELD_VOLTS, " V"),
+        ("RPM spread",     s["rpm_spread"],   REF_SPREAD_RPM,         " RPM"),
+    ]
+    lines = ["REFERENCE: NOT FROZEN"]
+    for name, val, need, unit in checks:
+        ok = val >= need
+        mark = "✓" if ok else "✗"
+        lines.append(f"  {mark} {name}: {val:g}{unit} / {need:g}{unit}")
+    # Spreads are measured across all populated bins here; firmware's greedy
+    # picker selects the top-N most-diverse subset, so even an all-✓ panel
+    # may not yet trigger freeze in the firmware.
+    lines.append("  (spread = all populated bins; firmware uses top-N subset)")
+    return lines
 
 
 def pivot(df, rpm_bucket, value_col, mask_empty=True):
@@ -349,7 +443,9 @@ class MatrixViewer:
         fig_frame = tk.Frame(parent)
         fig_frame.pack(fill="both", expand=True)
 
-        self.fc_fig, self.fc_ax = plt.subplots(figsize=(13, 6), tight_layout=True)
+        # Manual layout via subplots_adjust in _redraw_field_curve — tight_layout
+        # would overwrite room reserved for subtitle and bottom note.
+        self.fc_fig, self.fc_ax = plt.subplots(figsize=(13, 6))
         self.fc_canvas = FigureCanvasTkAgg(self.fc_fig, master=fig_frame)
         self.fc_canvas.draw()
         fc_toolbar = NavigationToolbar2Tk(self.fc_canvas, fig_frame)
@@ -424,6 +520,7 @@ class MatrixViewer:
         x_all    = self.field_centers
         n_lines  = 0
         handles  = []
+        visited_fields = set()  # field_bucket indices populated in current view
 
         for r in range(rpm_lo, rpm_hi + 1):
             for t in range(temp_lo, temp_hi + 1):
@@ -441,10 +538,13 @@ class MatrixViewer:
                 y_avg = sub["avg_amps"].values
                 y_min = sub["min_amps"].values
                 y_max = sub["max_amps"].values
+                ss    = sub["ss_seconds"].values
 
                 color  = self.rpm_colors[r]
                 marker = TEMP_MARKERS[t % len(TEMP_MARKERS)]
-                lbl    = f"{self.rpm_labels[r]} RPM · {self.temp_labels[t]}"
+                series_ss = int(ss.sum())
+                lbl    = (f"{self.rpm_labels[r]} RPM · {self.temp_labels[t]} · "
+                          f"{series_ss}s dwell")
 
                 ln, = ax.plot(x_pts, y_avg, color=color, marker=marker,
                               linewidth=1.8, markersize=7, label=lbl, zorder=3)
@@ -453,6 +553,14 @@ class MatrixViewer:
                 if bands:
                     ax.fill_between(x_pts, y_min, y_max, color=color, alpha=0.13, zorder=2)
 
+                # Per-point dwell annotation — small label next to each marker.
+                for x, y, s in zip(x_pts, y_avg, ss):
+                    ax.annotate(f"{int(s)}s",
+                                xy=(x, y), xytext=(6, 6),
+                                textcoords="offset points",
+                                fontsize=6.5, color=color, alpha=0.85, zorder=4)
+
+                visited_fields.update(int(f) for f in sub["field_bucket"])
                 n_lines += 1
 
         ax.set_xlabel("Field Voltage (V)", fontsize=11)
@@ -461,23 +569,61 @@ class MatrixViewer:
         title = (f"Output Amps vs Field Voltage  ·  "
                  f"RPM {self.rpm_labels[rpm_lo]}–{self.rpm_labels[rpm_hi]}  ·  "
                  f"Temp {self.temp_labels[temp_lo]}–{self.temp_labels[temp_hi]}")
-        if min_ss > 0:
-            title += f"  ·  SS ≥ {min_ss}s"
-        ax.set_title(title, fontsize=9)
+        ax.set_title(title, fontsize=10, pad=22)
+
+        # Subtitle line — SS gate and band semantics. Lives just under the title
+        # in axes-relative coords so it tracks zoom/pan without overlap.
+        ss_gate_txt = (f"firmware SS gate ≥ {FIRMWARE_SS_GATE_SECONDS}s"
+                       + (f"  ·  plot filter SS ≥ {min_ss}s" if min_ss > 0 else ""))
+        subtitle = (f"Line = bin average  ·  Band = observed min→max envelope "
+                    f"(NOT statistical CI)  ·  {ss_gate_txt}")
+        ax.text(0.5, 1.012, subtitle, transform=ax.transAxes,
+                ha="center", va="bottom", fontsize=7.5, color="#555555", style="italic")
+
+        # Reference-freeze status panel — upper-right inside axes.
+        status_lines = reference_status_lines(df)
+        is_frozen = status_lines[0].endswith("FROZEN")
+        panel_bg  = "#e8f7e0" if is_frozen else "#fdecea"
+        panel_ec  = "#5aab61" if is_frozen else "#c43d2c"
+        ax.text(0.985, 0.985, "\n".join(status_lines),
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=7, family="monospace", zorder=5,
+                bbox=dict(boxstyle="round,pad=0.4",
+                          facecolor=panel_bg, edgecolor=panel_ec, linewidth=0.8))
 
         if n_lines > 0:
             ax.legend(handles=handles, loc="upper left", fontsize=7,
                       ncol=max(1, n_lines // 8),
-                      framealpha=0.9, borderpad=0.5)
+                      framealpha=0.9, borderpad=0.5,
+                      title="series · per-bin SS dwell",
+                      title_fontsize=7)
+
+            # "Unvisited bins" note — which field-voltage buckets in the
+            # selected RPM×Temp range produced no SS-qualified samples.
+            all_field_idx = set(range(self.n_fld))
+            unvisited = sorted(all_field_idx - visited_fields)
+            if unvisited:
+                unvisited_labels = [self.field_labels[i] for i in unvisited]
+                shown = ", ".join(unvisited_labels[:6])
+                if len(unvisited_labels) > 6:
+                    shown += f", … (+{len(unvisited_labels) - 6} more)"
+                ax.text(0.5, -0.16,
+                        f"No SS-qualified samples in selected range for field bins: {shown}",
+                        transform=ax.transAxes, ha="center", va="top",
+                        fontsize=7, color="#888888", style="italic")
         else:
             ax.text(0.5, 0.5,
-                    "No data in selected range.\nTry widening bucket sliders or reducing Min SS seconds.",
+                    "No data in selected range.\n"
+                    f"Try widening bucket sliders or lowering Min SS (currently {min_ss}s).\n"
+                    f"Firmware also drops samples below SS ≥ {FIRMWARE_SS_GATE_SECONDS}s "
+                    "before they reach the matrix.",
                     ha="center", va="center", transform=ax.transAxes,
-                    fontsize=12, color="#888888")
+                    fontsize=11, color="#888888")
 
         ax.grid(True, linestyle="--", alpha=0.45)
         ax.set_xlim(left=0)
         ax.set_ylim(bottom=0)
+        self.fc_fig.subplots_adjust(top=0.88, bottom=0.18)
         self.fc_canvas.draw_idle()
 
 

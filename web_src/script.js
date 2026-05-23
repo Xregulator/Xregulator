@@ -240,7 +240,7 @@ const CSV2_FIELDS = [
     "VeData",
     "NMEA0183Data",
     "NMEA2KData",
-    "alarmLatch",
+    "AlarmLatchState",
     "ResetAlarmLatch",
     "ResetLearningTable",
     "ClearOverheatHistory",
@@ -593,9 +593,6 @@ const CSV2_FIELDS = [
     "systemIDFallDelay_2",
     "systemIDRiseAvg",
     "systemIDFallAvg",
-    "nvsPhase",
-    "ft_saveNVSData_win",
-    "ft_saveNVSData_ses",
     "ft_efficiencyTracker_win",
     "ft_efficiencyTracker_ses",
     "systemIDActive",
@@ -606,14 +603,29 @@ const CSV2_FIELDS = [
     "systemIDQuietPP_0",
     "systemIDQuietPP_1",
     "systemIDQuietPP_2",
-    "nvsCycleMs",                          // ms elapsed for last complete NVS drain cycle
+    "systemIDAbortReason",                 // FieldEventReason code if protection aborted last test; 0=no abort
+    "systemIDAbortPhase",                  // phase 1-9 at moment of protection abort; 0=no abort
     "voltLoopWorstInterval_5s",            // worst voltage loop actual interval 5s window (ms)
     "voltLoopWorstInterval_ses",           // worst voltage loop actual interval since boot (ms)
-    // NVS commit timing — separates commit cost from 9-phase cycle cost
-    "nvsCommitCount",                      // total nvs_commit() calls
-    "nvsCommitLongCount",                  // commits >= 100 ms
-    "nvsCommitWorstMs",                    // worst single commit (ms)
-    "nvsCommitLastMs",                     // most recent commit (ms)
+    "nvsSecsSinceLastSave",                // seconds since last successful saveNVSDataFull() (0 = never)
+    "nvsFullSaveLastMs",                   // wall-clock duration of most recent saveNVSDataFull() (ms)
+    "nvsFullSaveWorstMs",                  // worst saveNVSDataFull() duration since boot (ms)
+    "nvsFullSaveCount",                    // total saveNVSDataFull() calls since boot
+    // 28 ignition-cycle watermarks (lo + hi pairs, reset every boot). Order MUST match firmware CSV2 enum.
+    "wmIgn_amps_lo",     "wmIgn_amps_hi",      // MeasuredAmps (A, int)
+    "wmIgn_altTempF_lo", "wmIgn_altTempF_hi",  // AlternatorTemperatureF (°F, int)
+    "wmIgn_IBV_lo",      "wmIgn_IBV_hi",       // INA228 battery V (×10, 1 decimal)
+    "wmIgn_Bcur_lo",     "wmIgn_Bcur_hi",      // INA228 battery A (int)
+    "wmIgn_SOC_lo",      "wmIgn_SOC_hi",       // SOC percent (0..100, int)
+    "wmIgn_RPM_lo",      "wmIgn_RPM_hi",       // Engine RPM (int)
+    "wmIgn_SOG_lo",      "wmIgn_SOG_hi",       // SOGNMEA knots (int)
+    "wmIgn_AWS_lo",      "wmIgn_AWS_hi",       // ApparentWindSpeedNMEA knots (int)
+    "wmIgn_TWS_lo",      "wmIgn_TWS_hi",       // TrueWindSpeedNMEA knots (int)
+    "wmIgn_heel_lo",     "wmIgn_heel_hi",      // imu_heel_deg (int)
+    "wmIgn_pitch_lo",    "wmIgn_pitch_hi",     // imu_pitch_deg (int)
+    "wmIgn_vacc_lo",     "wmIgn_vacc_hi",      // imu_vertical_accel_g (×10, 1 decimal)
+    "wmIgn_baro_lo",     "wmIgn_baro_hi",      // baroPressure mbar (int)
+    "wmIgn_ambient_lo",  "wmIgn_ambient_hi",   // ambientTemp °F (int)
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",
@@ -798,7 +810,7 @@ const CSV3_FIELDS = [
     "IgnoreRPM",
     "MinRPMForField",
     "AwBleedRate",
-    "AwRecoverRate",
+    "reserved_AwRecoverRate",          // RESERVED — was AwRecoverRate (hardcoded to 0.1 in firmware; free slot for future use)
     "KHard",                           // 183 (was 184; 183 reserved — was KSoft)
     "ReseedFrac",                      // shared across all four protections (was IExcessReseedFrac)
     "AwSeedProtectMs",
@@ -892,6 +904,7 @@ const CSV3_FIELDS = [
     "LoadDumpDtThresh3",
     "VMGUseTrueWind",                  // moved from CSV2
     "hardwarePresent",                 // moved from CSV2
+    "testProtectionsEnabled",         // runtime flag — not persisted, resets true (enabled) on boot
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -2663,7 +2676,9 @@ function processCSVDataOptimized(data) {
         }
 
         // CV voltage tuning plot data — all four series now come from CSV1 (fast rate).
-        if (cvTuningData) {
+        // When the corner "lock" button is engaged, skip the shift/append so the
+        // plot stays frozen for inspection. New samples are simply dropped while paused.
+        if (cvTuningData && !cvTuningPlotPaused) {
             const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
             const battV      = 'BatteryV_raw' in data ? parseFloat(data.BatteryV_raw) / 100 : null;
             const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
@@ -3055,7 +3070,6 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'AwBleedRate',       id: 'AwBleedRate_echo',       transform: v => (v / 10).toFixed(1) },
-        { key: 'AwRecoverRate',     id: 'AwRecoverRate_echo',     transform: v => (v / 10).toFixed(2) },
         { key: 'KHard',             id: 'KHard_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'ReseedFrac',        id: 'ReseedFrac_echo',        transform: v => (v / 100).toFixed(2) },
         { key: 'AwSeedProtectMs',   id: 'AwSeedProtectMs_echo',   transform: v => v },
@@ -3732,8 +3746,17 @@ function commitTuningScore() {
     if (btn) btn.disabled = true;
     if (status) status.textContent = 'Sending…';
     const pw = currentAdminPassword || '';
+    // Note: r.ok must be checked — firmware returns 403 when the dashboard is
+    // locked (empty/wrong password) before the commit flag is ever set.
     fetch(buildURL('/get?commitTuningScore=1&password=' + encodeURIComponent(pw)))
         .then(r => {
+            if (!r.ok) {
+                if (btn) btn.disabled = false;
+                if (status) status.textContent = (r.status === 403)
+                    ? 'Rejected — dashboard locked. Unlock first.'
+                    : ('Rejected — HTTP ' + r.status);
+                return;
+            }
             if (status) status.textContent = 'Committed — check Score Log.';
             setTimeout(() => { if (status) status.textContent = ''; }, 4000);
             fetchTuningLog();
@@ -3757,8 +3780,17 @@ function commitCVTuningScore() {
     if (btn) btn.disabled = true;
     if (status) status.textContent = 'Sending…';
     const pw = currentAdminPassword || '';
+    // Note: r.ok must be checked — firmware returns 403 when the dashboard is
+    // locked (empty/wrong password) before the commit flag is ever set.
     fetch(buildURL('/get?commitCVTuningScore=1&password=' + encodeURIComponent(pw)))
         .then(r => {
+            if (!r.ok) {
+                if (btn) btn.disabled = false;
+                if (status) status.textContent = (r.status === 403)
+                    ? 'Rejected — dashboard locked. Unlock first.'
+                    : ('Rejected — HTTP ' + r.status);
+                return;
+            }
             if (status) status.textContent = 'Committed — check Score Log.';
             setTimeout(() => { if (status) status.textContent = ''; }, 4000);
             fetchCVTuningLog();
@@ -3774,7 +3806,13 @@ function restartCVTest() {
     if (status) status.textContent = 'Restarting…';
     const pw = currentAdminPassword || '';
     fetch(buildURL('/get?restartCVTest=1&password=' + encodeURIComponent(pw)))
-        .then(() => {
+        .then(r => {
+            if (!r.ok) {
+                if (status) status.textContent = (r.status === 403)
+                    ? 'Rejected — dashboard locked. Unlock first.'
+                    : ('Rejected — HTTP ' + r.status);
+                return;
+            }
             if (status) status.textContent = 'Restarted.';
             setTimeout(() => { if (status) status.textContent = ''; }, 3000);
             fetchCVTuningLog();
@@ -4051,6 +4089,7 @@ document.addEventListener('DOMContentLoaded', () => {
 let cvTuningPlot = null;
 let cvTuningData = null;
 let cvTuningPlotResizeObserver = null;
+let cvTuningPlotPaused = false;  // toggled by the corner "lock" button
 
 // Cache of last-seen CSV2 values for the CV tuning plot.
 // voltageTarget and Icv are CSV2 — not available in processCSVDataOptimized's data object.
@@ -4155,6 +4194,25 @@ function initCVTuningPlot() {
     cvTuningPlot = new uPlot(opts, cvTuningData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvTuningPlot);
     createCVTuningLegend();
+
+    // Corner lock button — style copied from the Plots tab voltage plot.
+    // When locked, the data-injection block in processCSVDataOptimized skips
+    // the shift/append, freezing the plot for inspection.
+    plotEl.style.position = 'relative';
+    const existingLock = plotEl.querySelector('.autoscale-ctrl');
+    if (existingLock) existingLock.remove();
+    cvTuningPlotPaused = false;
+    const lockDiv = document.createElement('div');
+    lockDiv.className = 'autoscale-ctrl';
+    lockDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    lockDiv.innerHTML = '<button id="lock-cv-tuning-btn" style="font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(lockDiv);
+    const lockBtnCV = document.getElementById('lock-cv-tuning-btn');
+    lockBtnCV.addEventListener('click', () => {
+        cvTuningPlotPaused = !cvTuningPlotPaused;
+        lockBtnCV.textContent = cvTuningPlotPaused ? 'unlock' : 'lock';
+        lockBtnCV.style.opacity = cvTuningPlotPaused ? '1' : '0.6';
+    });
 
     if (cvTuningPlotResizeObserver) cvTuningPlotResizeObserver.disconnect();
     cvTuningPlotResizeObserver = new ResizeObserver(() => {
@@ -4911,7 +4969,7 @@ function initVoltagePlot() {
                     (u) => {
                         createCustomLegend('voltage-plot', [
                             { label: "ADS Battery (V)", color: "#FF9800" },
-                            { label: "INA Battery (V)", color: "#607D8B" },
+                            { label: "INA Battery (V)", color: "#4CAF50" },
                             { label: "Field %", color: "#9E9E9E" }
                         ]);
 
@@ -5863,6 +5921,15 @@ function updateTogglesFromData(data) {
         updateCheckbox("AutoAltCurrentZero_checkbox", data.AutoAltCurrentZero, "AutoAltCurrentZero");
         updateCheckbox("CVTuningMode_checkbox", data.CVTuningMode, "CVTuningMode");
         updateCheckbox("ThermalTuningMode_checkbox", data.ThermalTuningMode, "ThermalTuningMode");
+        // Three checkboxes share the same firmware flag — all three reflect data.testProtectionsEnabled.
+        updateCheckbox("testProtectionsEnabled_plant_checkbox",   data.testProtectionsEnabled, "testProtectionsEnabled");
+        updateCheckbox("testProtectionsEnabled_current_checkbox", data.testProtectionsEnabled, "testProtectionsEnabled");
+        updateCheckbox("testProtectionsEnabled_voltage_checkbox", data.testProtectionsEnabled, "testProtectionsEnabled");
+        // Global banner — visible on every page when protections are DISABLED (value === 0).
+        const protBanner = document.getElementById('protections-banner');
+        if (protBanner && data.testProtectionsEnabled !== undefined) {
+            protBanner.style.display = (data.testProtectionsEnabled === 0) ? 'block' : 'none';
+        }
         updateCheckbox("timeAxisModeChanging_checkbox", data.timeAxisModeChanging, "timeAxisModeChanging");
         updateCheckbox("weatherModeEnabled_checkbox", data.weatherModeEnabled, "weatherModeEnabled");
         updateCheckbox("accelEnabled_checkbox", data.accelEnabled, "accelEnabled");
@@ -5915,6 +5982,28 @@ function handleUserToggle(checkboxId, hiddenInputId, dataKey) {
 // Initialize learning table flag BEFORE any event handlers
 if (typeof window.learningTableInitialized === 'undefined') {
     window.learningTableInitialized = false;
+}
+
+// ===========================================================================
+// TEST-MODE PROTECTION DISABLE — shared firmware flag exposed via three toggles
+// (one on each of Plant Delay / Current Tuning / Voltage Tuning pages). When the
+// user flips one, this helper mirrors the new state to the other two checkboxes
+// optimistically so a mid-flight page switch doesn't show stale state, then
+// delegates to handleUserToggle for the actual pending/echo plumbing.
+// ===========================================================================
+const TEST_PROT_CHECKBOXES = [
+    'testProtectionsEnabled_plant_checkbox',
+    'testProtectionsEnabled_current_checkbox',
+    'testProtectionsEnabled_voltage_checkbox',
+];
+function mirrorTestProtectionsToggle(srcCheckboxId) {
+    const src = document.getElementById(srcCheckboxId);
+    if (!src) return;
+    TEST_PROT_CHECKBOXES.forEach(id => {
+        if (id === srcCheckboxId) return;
+        const cb = document.getElementById(id);
+        if (cb && cb.checked !== src.checked) cb.checked = src.checked;
+    });
 }
 
 
@@ -6964,6 +7053,11 @@ window.addEventListener("load", function () {
                     else if (key.startsWith("safeHours")) {
                         newTextContent = (value / 3600).toFixed(2);
                     }
+                    // Ignition-cycle watermarks sent ×10 (1 decimal): IBV and vertical accel
+                    else if (key === "wmIgn_IBV_lo" || key === "wmIgn_IBV_hi"
+                          || key === "wmIgn_vacc_lo" || key === "wmIgn_vacc_hi") {
+                        newTextContent = (value / 10).toFixed(1);
+                    }
                     // Default: display as integer
                     else {
                         newTextContent = Math.round(value);
@@ -7284,9 +7378,6 @@ window.addEventListener("load", function () {
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
                 ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
-                ["ft_saveNVSData_win_ID", "ft_saveNVSData_win"],
-                ["ft_saveNVSData_ses_ID", "ft_saveNVSData_ses"],
-                ["nvsCycleMs_ID", "nvsCycleMs"],             // last full NVS drain cycle (ms)
                 ["ft_efficiencyTracker_win_ID", "ft_efficiencyTracker_win"],
                 ["ft_efficiencyTracker_ses_ID", "ft_efficiencyTracker_ses"],
                 ["VeTime2_ID", "VeTime2"],
@@ -7298,6 +7389,8 @@ window.addEventListener("load", function () {
                 ["systemIDQuietPP_0_ID", "systemIDQuietPP_0"],
                 ["systemIDQuietPP_1_ID", "systemIDQuietPP_1"],
                 ["systemIDQuietPP_2_ID", "systemIDQuietPP_2"],
+                ["systemIDAbortReason_ID", "systemIDAbortReason"],
+                ["systemIDAbortPhase_ID", "systemIDAbortPhase"],
                 ["systemIDRiseDelay_0_ID", "systemIDRiseDelay_0"],
                 ["systemIDRiseDelay_1_ID", "systemIDRiseDelay_1"],
                 ["systemIDRiseDelay_2_ID", "systemIDRiseDelay_2"],
@@ -7395,6 +7488,27 @@ window.addEventListener("load", function () {
                 ["ina_over2x_at_ID", "ina_over2x_at"],
                 ["voltLoopWorstInterval_5s_ID", "voltLoopWorstInterval_5s"],
                 ["voltLoopWorstInterval_ses_ID", "voltLoopWorstInterval_ses"],
+                ["nvsSecsSinceLastSave_ID", "nvsSecsSinceLastSave"],
+                ["nvsFullSaveLastMs_ID", "nvsFullSaveLastMs"],
+                ["nvsFullSaveWorstMs_ID", "nvsFullSaveWorstMs"],
+                ["nvsFullSaveCount_ID", "nvsFullSaveCount"],
+
+                // 28 ignition-cycle watermarks — hi/lo spans next to each primary value on the dashboard.
+                // IBV and vacc are sent ×10 and rendered with toFixed(1) in the formatter chain above.
+                ["MeasAmpsID_hi",                "wmIgn_amps_hi"],     ["MeasAmpsID_lo",                "wmIgn_amps_lo"],
+                ["AltTempID_hi",                 "wmIgn_altTempF_hi"], ["AltTempID_lo",                 "wmIgn_altTempF_lo"],
+                ["IBVID_hi",                     "wmIgn_IBV_hi"],      ["IBVID_lo",                     "wmIgn_IBV_lo"],
+                ["BCurrID_hi",                   "wmIgn_Bcur_hi"],     ["BCurrID_lo",                   "wmIgn_Bcur_lo"],
+                ["SOC_percentID_hi",             "wmIgn_SOC_hi"],      ["SOC_percentID_lo",             "wmIgn_SOC_lo"],
+                ["RPMID_hi",                     "wmIgn_RPM_hi"],      ["RPMID_lo",                     "wmIgn_RPM_lo"],
+                ["SOGNMEA_ID_hi",                "wmIgn_SOG_hi"],      ["SOGNMEA_ID_lo",                "wmIgn_SOG_lo"],
+                ["ApparentWindSpeedNMEA_ID_hi",  "wmIgn_AWS_hi"],      ["ApparentWindSpeedNMEA_ID_lo",  "wmIgn_AWS_lo"],
+                ["TrueWindSpeedNMEA_ID_hi",      "wmIgn_TWS_hi"],      ["TrueWindSpeedNMEA_ID_lo",      "wmIgn_TWS_lo"],
+                ["imu_heel_deg_ID_hi",           "wmIgn_heel_hi"],     ["imu_heel_deg_ID_lo",           "wmIgn_heel_lo"],
+                ["imu_pitch_deg_ID_hi",          "wmIgn_pitch_hi"],    ["imu_pitch_deg_ID_lo",          "wmIgn_pitch_lo"],
+                ["imu_vertical_accel_g_ID_hi",   "wmIgn_vacc_hi"],     ["imu_vertical_accel_g_ID_lo",   "wmIgn_vacc_lo"],
+                ["baroPressureID_hi",            "wmIgn_baro_hi"],     ["baroPressureID_lo",            "wmIgn_baro_lo"],
+                ["ambientTempID_hi",             "wmIgn_ambient_hi"],  ["ambientTempID_lo",             "wmIgn_ambient_lo"],
 
             ];
 
@@ -8113,7 +8227,6 @@ function handleResetPerfCounters() {
                 'ft_rai_ads_state_ses_ID', 'ft_rai_bmp_state_ses_ID', 'ft_rai_imu_ses_ID', 'ft_updateAccelMetrics_ses_ID',
                 'VeTime2_ID', 'ft_AdjustFieldLearnMode_ses_ID', 'ft_uploadSensorHistory_ses_ID',
                 'ft_uploadBufferedRecords_ses_ID', 'ft_buildConfigPayload_ses_ID',
-                'ft_saveNVSData_ses_ID',
                 'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
                 'MaximumLoopTimeID',
                 'ft_loop_win_ID', 'ft_loop_ses_ID',
@@ -11386,7 +11499,7 @@ function cvBinToCsv(d, csv3) {
         `# FastOV: OvMeasMarginV=${fmtRaw(c.OvMeasMarginV, 3)}V OvPredMarginV=${fmtRaw(c.OvPredMarginV, 3)}V` +
         ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtTC=${fmtDiv(c.DvdtTC, 10, 1)}ms` +
         ` KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
-        ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s AwRecoverRate=${fmtDiv(c.AwRecoverRate, 10, 2)}A/s`
+        ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s`  // AwRecoverRate removed from header — hardcoded to 0.1 in firmware
     );
     lines.push(
         `# SlopeBleed: SlopeBleedThresh=${d.sbThresh.toFixed(3)}V/s SlopeBleedK=${d.sbK.toFixed(1)}A/(V/s) SlopeBleedProxV=${d.sbProxV.toFixed(3)}V`
@@ -11438,30 +11551,24 @@ function cvBinToCsv(d, csv3) {
 // Fetches /cvlog.bin, decodes, saves as timestamped CSV.
 // ---------------------------------------------------------------------------
 async function downloadCvLog() {
-    const statusEl = document.getElementById('cvlog-status');
-    if (statusEl) statusEl.textContent = 'Downloading…';
-
     let buf;
     try {
         const resp = await fetch('/cvlog.bin');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         buf = await resp.arrayBuffer();
     } catch (err) {
-        const msg = `CV log download failed: ${err}`;
-        if (statusEl) statusEl.textContent = msg;
-        console.error(msg);
+        console.error(`CV log download failed: ${err}`);
         return;
     }
 
     if (!buf || buf.byteLength < CV_LOG_HEADER_SIZE + CV_LOG_ENTRY_SIZE) {
-        const msg = 'CV log empty — run in AUTO mode with voltage control active first.';
-        if (statusEl) statusEl.textContent = msg;
+        console.warn('CV log empty — run in AUTO mode with voltage control active first.');
         return;
     }
 
     const d = parseCvBin(buf);
     if (!d) {
-        if (statusEl) statusEl.textContent = 'CV log parse failed.';
+        console.error('CV log parse failed.');
         return;
     }
 
@@ -11476,9 +11583,6 @@ async function downloadCvLog() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-
-    if (statusEl) statusEl.textContent =
-        `Downloaded ${d.count} rows (Kp=${d.voltKp.toFixed(2)} Ki=${d.voltKi.toFixed(3)} interval=${d.voltInterval}ms)`;
 }
 
 //SYSTEMID System ID section
@@ -11750,6 +11854,27 @@ const SYSID_PHASE_NAMES = {
     9: 'Processing results'
 };
 
+// FieldEventReason codes from firmware enum — must match Xregulator.ino enum FieldEventReason
+const SYSID_ABORT_REASONS = {
+    0:  'no abort recorded',
+    1:  'auto-zero active',
+    2:  'temperature data stale',
+    3:  'temperature critical',
+    4:  'temperature warning',
+    5:  'temperature sustained over limit',
+    6:  'battery voltage implausible',
+    7:  'voltage sensor disagreement (critical)',
+    8:  'voltage spike',
+    9:  'voltage sensor disagreement (warning)',
+    10: 'lockout active',
+    11: 'charging disabled',
+    12: 'switched to manual mode',
+    13: 'hard overvoltage shutdown (INA228)',
+    14: 'hard overcurrent shutdown',
+    15: 'RPM dropped below minimum',
+    16: 'current sensor data stale'
+};
+
 function sysidInitDrag() {
     const panel  = document.getElementById('sysid-modal-panel');
     const handle = document.getElementById('sysid-drag-handle');
@@ -11871,12 +11996,27 @@ function sysidUpdatePreflight() {
                 ? '❌ Mode: ' + stageLabel + ' — charging must be active (not idle or maintain)'
                 : '❌ Mode: Charging not active'));
 
-    const allOK   = rpmOK && ampsOK && voltOK && modeOK;
+    // Mutex check: refuse start if any square-wave tuning test is on. Firmware enforces this too;
+    // this preflight row just makes the reason visible before the user clicks Start. Read the raw
+    // hidden <input> value (not the _echo span, which contains "On"/"Off" text).
+    const tuningOn = parseInt(getField("TuningMode") ?? 0) === 1;
+    const cvTuningOn = parseInt(getField("CVTuningMode") ?? 0) === 1;
+    const thermalTuningOn = parseInt(getField("ThermalTuningMode") ?? 0) === 1;
+    const testsOK = !tuningOn && !cvTuningOn && !thermalTuningOn;
+    const activeTestName = tuningOn ? 'Current tuning'
+                                    : (cvTuningOn ? 'Voltage tuning'
+                                                  : (thermalTuningOn ? 'Thermal tuning' : null));
+    const testsMsg = testsOK
+        ? '✅ No other tuning tests active'
+        : '❌ ' + activeTestName + ' is on — turn it off first';
 
-    document.getElementById('sysid-check-rpm').textContent  = (rpmOK  ? '✅' : '❌') + ' Engine running (RPM: ' + rpm.toFixed(0) + ' / min ' + minRpm.toFixed(0) + ')';
-    document.getElementById('sysid-check-amps').textContent = (ampsOK ? '✅' : '❌') + ' Alternator producing current (' + amps.toFixed(1) + 'A)';
-    document.getElementById('sysid-check-volt').textContent = (voltOK ? '✅' : '❌') + ' Battery voltage OK (' + battV.toFixed(2) + 'V)';
-    document.getElementById('sysid-check-mode').textContent = modeMsg;
+    const allOK   = rpmOK && ampsOK && voltOK && modeOK && testsOK;
+
+    document.getElementById('sysid-check-rpm').textContent   = (rpmOK  ? '✅' : '❌') + ' Engine running (RPM: ' + rpm.toFixed(0) + ' / min ' + minRpm.toFixed(0) + ')';
+    document.getElementById('sysid-check-amps').textContent  = (ampsOK ? '✅' : '❌') + ' Alternator producing current (' + amps.toFixed(1) + 'A)';
+    document.getElementById('sysid-check-volt').textContent  = (voltOK ? '✅' : '❌') + ' Battery voltage OK (' + battV.toFixed(2) + 'V)';
+    document.getElementById('sysid-check-mode').textContent  = modeMsg;
+    document.getElementById('sysid-check-tests').textContent = testsMsg;
 
     // Estimated duration: 20s stabilize overhead + 7 hold phases
     const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
@@ -12008,10 +12148,14 @@ function sysidStartProgressPoll() {
         // Protection layer fired mid-test — firmware aborted it, results are invalid
         if (phase === 0 && ready !== 1 && sysidEverActive) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
-            sysidShowAborted(
-                '⚠ Test aborted — a protection layer (RPM drop, overcurrent, or overvoltage) fired mid-test. ' +
-                'Check the serial console for details. Bring the engine to stable RPM and run again.'
-            );
+            const reasonCode = parseInt(getField("systemIDAbortReason_ID") ?? 0);
+            const abortPhase = parseInt(getField("systemIDAbortPhase_ID") ?? 0);
+            const reasonText = SYSID_ABORT_REASONS[reasonCode] ?? ('reason code ' + reasonCode);
+            const phaseText  = SYSID_PHASE_NAMES[abortPhase] ?? ('phase ' + abortPhase);
+            const msg = (reasonCode === 0)
+                ? '⚠ Test aborted — a protection layer fired mid-test. Check the serial console for details.'
+                : '⚠ Aborted at phase ' + abortPhase + ' (' + phaseText + '): ' + reasonText + '.';
+            sysidShowAborted(msg);
             return;
         }
 
@@ -12116,12 +12260,17 @@ function showSystemIDResults() {
         '<td style="padding:8px 4px;">' + (fa >= 0 ? fa.toFixed(0) : '—') + '</td>';
     tbody.appendChild(avgRow);
 
+    const tcFast = Math.max(1, Math.round(sysidSuggestedTC / 3));
+    const tcSlow = Math.max(1, Math.round(sysidSuggestedTC));
     document.getElementById('sysid-results-summary').innerHTML =
-        'Recommended TC: <strong style="color:#4a9eff;">' + sysidSuggestedTC.toFixed(0) + ' ms</strong>' +
-        ' (highest single trial)';
+        'Measured plant delay: <strong style="color:#4a9eff;">' + sysidSuggestedTC.toFixed(0) + ' ms</strong>' +
+        ' (highest single trial)<br>' +
+        '<span style="font-size:0.85em; color:#aaa;">Suggested filter TCs: ' +
+        '<strong>' + tcFast + ' ms</strong> for excess-current detection &amp; PID feedback (plant/3), ' +
+        '<strong>' + tcSlow + ' ms</strong> for voltage smoothing (full plant delay)</span>';
 
     const applyBtn = document.getElementById('sysid-apply-btn');
-    if (applyBtn) { applyBtn.style.display = ''; applyBtn.textContent = 'Set All Filters = ' + sysidSuggestedTC.toFixed(0) + ' ms'; }
+    if (applyBtn) { applyBtn.style.display = ''; applyBtn.textContent = 'Set All Filters (' + tcFast + ' / ' + tcFast + ' / ' + tcSlow + ' ms)'; }
 
     // Variance check: if spread within rise or fall trials > 25%, recommend re-run
     const warnEl = document.getElementById('sysid-results-warning');
@@ -12147,13 +12296,19 @@ function showSystemIDResults() {
 
 function applySystemIDResults() {
     if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
-    const tc = encodeURIComponent(sysidSuggestedTC);
+    // Excess-current detection and PID feedback get plant/3 to preserve phase margin
+    // inside the control loop. Voltage smoothing gets the full plant delay because its
+    // consumer (slope bleed dV/dt) runs on the same timescale as the voltage loop tick.
+    const tcFast = Math.max(1, Math.round(sysidSuggestedTC / 3));
+    const tcSlow = Math.max(1, Math.round(sysidSuggestedTC));
+    const tcFastEnc = encodeURIComponent(tcFast);
+    const tcSlowEnc = encodeURIComponent(tcSlow);
     const pw = encodeURIComponent(currentAdminPassword);
-    fetch(buildURL("/get?InputFilterTC=" + tc + "&password=" + pw))
-        .then(() => fetch(buildURL("/get?OutputPIDFilterTC=" + tc + "&password=" + pw)))
-        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tc + "&password=" + pw)))
+    fetch(buildURL("/get?InputFilterTC=" + tcFastEnc + "&password=" + pw))
+        .then(() => fetch(buildURL("/get?OutputPIDFilterTC=" + tcFastEnc + "&password=" + pw)))
+        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlowEnc + "&password=" + pw)))
         .then(() => {
-            console.log("All filter TCs updated to " + sysidSuggestedTC + " ms");
+            console.log("Filter TCs updated: iExcess=" + tcFast + "ms, PID=" + tcFast + "ms, Voltage=" + tcSlow + "ms");
             closeSystemIDModal();
         })
         .catch(err => console.error("Filter TC update failed:", err));

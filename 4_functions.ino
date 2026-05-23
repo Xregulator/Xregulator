@@ -1759,11 +1759,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     AwBleedRate = readFile(LittleFS, "/AwBleedRate.txt").toFloat();
   }
-  if (!fsExists("/AwRecoverRate.txt")) {
-    writeFile(LittleFS, "/AwRecoverRate.txt", String(AwRecoverRate, 2).c_str());
-  } else {
-    AwRecoverRate = readFile(LittleFS, "/AwRecoverRate.txt").toFloat();
-  }
+  // AwRecoverRate is hardcoded (0.1f) — no LittleFS persistence
   if (!fsExists("/AwSeedProtectMs.txt")) {
     writeFile(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
   } else {
@@ -1937,6 +1933,23 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/EffYMax.txt", String(EffYMax, 2).c_str());
   } else {
     EffYMax = readFile(LittleFS, "/EffYMax.txt").toFloat();
+  }
+  // IMU safety thresholds — user-set via form, persisted to LittleFS (Pattern B).
+  // imuMountOrientation rides on /vessel_info.json (separate path).
+  if (!fsExists("/CAPSIZE_THRESHOLD_DEG.txt")) {
+    writeFile(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt", String(CAPSIZE_THRESHOLD_DEG, 1).c_str());
+  } else {
+    CAPSIZE_THRESHOLD_DEG = readFile(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt").toFloat();
+  }
+  if (!fsExists("/PITCHPOLE_THRESHOLD_DEG.txt")) {
+    writeFile(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt", String(PITCHPOLE_THRESHOLD_DEG, 1).c_str());
+  } else {
+    PITCHPOLE_THRESHOLD_DEG = readFile(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt").toFloat();
+  }
+  if (!fsExists("/SLAM_THRESHOLD_G.txt")) {
+    writeFile(LittleFS, "/SLAM_THRESHOLD_G.txt", String(SLAM_THRESHOLD_G, 2).c_str());
+  } else {
+    SLAM_THRESHOLD_G = readFile(LittleFS, "/SLAM_THRESHOLD_G.txt").toFloat();
   }
 }
 
@@ -2211,6 +2224,7 @@ void updateAccelMetrics() {
     imu_accel_z_raw = az;
     imu_vertical_accel_g = az;
     imu_total_accel_g = sqrt(ax * ax + ay * ay + az * az);
+    wmIgnUpdate(wmIgn_vacc, imu_vertical_accel_g);  // ignition-cycle watermark
 
     // TODO: Wave period decimation and processing
 
@@ -2395,6 +2409,8 @@ void updateAccelMetrics() {
   // Update current display values
   imu_heel_deg = cf_heel;
   imu_pitch_deg = cf_pitch;
+  wmIgnUpdate(wmIgn_heel,  imu_heel_deg);   // ignition-cycle watermarks
+  wmIgnUpdate(wmIgn_pitch, imu_pitch_deg);
 
   // Update 60s rolling window (called at ~1Hz from main loop)
   static unsigned long last60sUpdate = 0;
@@ -2515,7 +2531,7 @@ void updateAccelMetrics() {
     } else if (!capsize_reported && (now - capsize_start > 1000)) {  // fires once per event
       imu_capsize_count++;
       queueConsoleMessageF("CAPSIZE EVENT: %.1f deg", cf_heel);
-      lastNVSSaveTime = 0;  // Force immediate NVS write — boat may lose power
+      saveNVSDataFull();  // boat may lose power — commit lifetime counter now (sync)
       capsize_reported = true;
     }
   } else {
@@ -2530,7 +2546,7 @@ void updateAccelMetrics() {
     } else if (!pitchpole_reported && (now - pitchpole_start > 1000)) {  // fires once per event
       imu_pitchpole_count++;
       queueConsoleMessageF("PITCHPOLE EVENT: %.1f deg", cf_pitch);
-      lastNVSSaveTime = 0;  // Force immediate NVS write — boat may lose power
+      saveNVSDataFull();  // boat may lose power — commit lifetime counter now (sync)
       pitchpole_reported = true;
     }
   } else {

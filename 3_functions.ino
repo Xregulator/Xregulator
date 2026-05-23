@@ -450,9 +450,6 @@ enum Csv2Index {
   CSV2_systemIDFallDelay_2,
   CSV2_systemIDRiseAvg,
   CSV2_systemIDFallAvg,
-  CSV2_nvsPhase,
-  CSV2_ft_saveNVSData_win,
-  CSV2_ft_saveNVSData_ses,
   CSV2_ft_efficiencyTracker_win,
   CSV2_ft_efficiencyTracker_ses,
   CSV2_systemIDActive,
@@ -463,16 +460,33 @@ enum Csv2Index {
   CSV2_systemIDQuietPP_0,
   CSV2_systemIDQuietPP_1,
   CSV2_systemIDQuietPP_2,
-  CSV2_nvsCycleMs,                // ms elapsed for last complete NVS drain cycle
+  CSV2_systemIDAbortReason,       // FieldEventReason code if protection aborted last test; 0=no abort
+  CSV2_systemIDAbortPhase,        // phase 1-9 at moment of protection abort; 0=no abort
   CSV2_voltLoopWorstInterval_5s,  // worst voltage loop actual interval in 5s window (ms)
   CSV2_voltLoopWorstInterval_ses, // worst voltage loop actual interval since boot (ms)
-  // NVS commit timing — separates commit cost from the 9-phase cycle cost.
-  CSV2_nvsCommitCount,            // total nvs_commit() calls since boot
-  CSV2_nvsCommitLongCount,        // commits that took >= 100 ms
-  CSV2_nvsCommitWorstMs,          // worst single commit duration since boot (ms)
-  CSV2_nvsCommitLastMs,           // most recent commit duration (ms)
+  // NVS full-save diagnostics — saveNVSDataFull() fires only at field-off edge / shutdown / capsize.
+  CSV2_nvsSecsSinceLastSave,      // seconds since last successful saveNVSDataFull() (0 = never saved this boot)
+  CSV2_nvsFullSaveLastMs,         // wall-clock duration of most recent saveNVSDataFull() (ms)
+  CSV2_nvsFullSaveWorstMs,        // worst saveNVSDataFull() duration since boot (ms)
+  CSV2_nvsFullSaveCount,          // total saveNVSDataFull() calls since boot
 
-  CSV2_FIELD_COUNT  // = 410
+  // Ignition-cycle watermarks (lo + hi pairs, reset every boot). See wmIgn_* globals in Xregulator.ino.
+  CSV2_wmIgn_amps_lo,     CSV2_wmIgn_amps_hi,      // MeasuredAmps (A, int)
+  CSV2_wmIgn_altTempF_lo, CSV2_wmIgn_altTempF_hi,  // AlternatorTemperatureF (°F, int)
+  CSV2_wmIgn_IBV_lo,      CSV2_wmIgn_IBV_hi,       // INA228 battery V (×10, 1 decimal)
+  CSV2_wmIgn_Bcur_lo,     CSV2_wmIgn_Bcur_hi,      // INA228 battery A (int)
+  CSV2_wmIgn_SOC_lo,      CSV2_wmIgn_SOC_hi,       // SOC percent (0..100, int)
+  CSV2_wmIgn_RPM_lo,      CSV2_wmIgn_RPM_hi,       // Engine RPM (int)
+  CSV2_wmIgn_SOG_lo,      CSV2_wmIgn_SOG_hi,       // SOGNMEA knots (int)
+  CSV2_wmIgn_AWS_lo,      CSV2_wmIgn_AWS_hi,       // ApparentWindSpeedNMEA knots (int)
+  CSV2_wmIgn_TWS_lo,      CSV2_wmIgn_TWS_hi,       // TrueWindSpeedNMEA knots (int)
+  CSV2_wmIgn_heel_lo,     CSV2_wmIgn_heel_hi,      // imu_heel_deg (int)
+  CSV2_wmIgn_pitch_lo,    CSV2_wmIgn_pitch_hi,     // imu_pitch_deg (int)
+  CSV2_wmIgn_vacc_lo,     CSV2_wmIgn_vacc_hi,      // imu_vertical_accel_g (×10, 1 decimal)
+  CSV2_wmIgn_baro_lo,     CSV2_wmIgn_baro_hi,      // baroPressure mbar (int)
+  CSV2_wmIgn_ambient_lo,  CSV2_wmIgn_ambient_hi,   // ambientTemp °F (int)
+
+  CSV2_FIELD_COUNT  // = 436 (408 baseline + 28 ignition-cycle watermark fields)
 };
 
 enum Csv3Index {
@@ -660,7 +674,7 @@ enum Csv3Index {
   CSV3_IgnoreRPM,
   CSV3_MinRPMForField,
   CSV3_AwBleedRate,
-  CSV3_AwRecoverRate,
+  CSV3_reserved_AwRecoverRate,  // RESERVED — was AwRecoverRate; hardcoded to 0.1 in firmware. Free slot for future use.
   CSV3_KHard,
   CSV3_ReseedFrac,
   CSV3_AwSeedProtectMs,
@@ -756,8 +770,9 @@ enum Csv3Index {
   CSV3_LoadDumpDtThresh3,
   CSV3_VMGUseTrueWind,   // moved from CSV2
   CSV3_hardwarePresent,  // moved from CSV2
+  CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets false on boot
 
-  CSV3_FIELD_COUNT  // = 276 (was 274 before VMG/HW migration; the earlier PAYLOAD3_SIZE comment that said "276 fields" was wrong — pre-migration count was 274 to match this sentinel)
+  CSV3_FIELD_COUNT  // = 277 (added testProtectionsEnabled; was 276 after VMG/HW migration)
 };
 
 
@@ -2204,14 +2219,22 @@ void setupServer() {
     else if (request->hasParam("startSystemID")) {
       foundParameter = true;
       bool sysidModeOK = (sysMode == SYS_MODE_AUTO);
+      // Mutex: refuse if any square-wave tuning test is already on. All four tests must run independently.
+      const char *activeTuning = TuningMode ? "Current tuning"
+                                            : (CVTuningMode ? "Voltage tuning"
+                                                            : (ThermalTuningMode ? "Thermal tuning" : nullptr));
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
       } else if (!sysidModeOK) {
         queueConsoleMessage("SystemID: start blocked — only allowed in AUTO mode (bulk, absorption, float, or target voltage)");
+      } else if (activeTuning != nullptr) {
+        queueConsoleMessageF("SystemID: start blocked — %s is active. Turn it off before running the Plant Delay Test.", activeTuning);
       } else if (systemIDActive == 0 && (millis() - systemIDLastEndMs) > 2000UL) {
         systemIDRequested = true;
         systemIDResultsReady = false;
         systemIDAbortRequested = false;   // clear any stale abort from a prior run
+        systemIDAbortReason = 0;          // clear prior abort reason so UI doesn't show stale value
+        systemIDAbortPhase = 0;
         queueConsoleMessage("SystemID: test requested via web UI");
       } else {
         queueConsoleMessage("SystemID: start ignored (cooldown or already active)");
@@ -2979,7 +3002,7 @@ void setupServer() {
       CumulativeInsulationDamage = 1.0 - life_fraction;
       CumulativeGreaseDamage = 1.0 - life_fraction;
       CumulativeBrushDamage = 1.0 - life_fraction;
-      // Persistence handled by saveNVSData() phase 7 (InsulDamage/GreaseDamage/BrushDamage).
+      // Persistence handled at next field-off edge by saveNVSDataFull() (InsulDamage/GreaseDamage/BrushDamage).
       queueConsoleMessageF("Alternator life manually set to %d%%", ManualLifePercentage);
     }
     if (request->hasParam("webgaugesinterval")) {
@@ -3089,17 +3112,20 @@ void setupServer() {
     if (request->hasParam("CAPSIZE_THRESHOLD_DEG")) {
       foundParameter = true;
       inputMessage = request->getParam("CAPSIZE_THRESHOLD_DEG")->value();
-      CAPSIZE_THRESHOLD_DEG = inputMessage.toFloat();  // NVS persistence handled by periodic save in 5_functions
+      writeFile(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt", inputMessage.c_str());
+      CAPSIZE_THRESHOLD_DEG = inputMessage.toFloat();
     }
     if (request->hasParam("PITCHPOLE_THRESHOLD_DEG")) {
       foundParameter = true;
       inputMessage = request->getParam("PITCHPOLE_THRESHOLD_DEG")->value();
-      PITCHPOLE_THRESHOLD_DEG = inputMessage.toFloat();  // NVS persistence handled by periodic save in 5_functions
+      writeFile(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt", inputMessage.c_str());
+      PITCHPOLE_THRESHOLD_DEG = inputMessage.toFloat();
     }
     if (request->hasParam("SLAM_THRESHOLD_G")) {
       foundParameter = true;
       inputMessage = request->getParam("SLAM_THRESHOLD_G")->value();
-      SLAM_THRESHOLD_G = inputMessage.toFloat();  // NVS persistence handled by periodic save in 5_functions
+      writeFile(LittleFS, "/SLAM_THRESHOLD_G.txt", inputMessage.c_str());
+      SLAM_THRESHOLD_G = inputMessage.toFloat();
     }
     if (request->hasParam("LearningPaused")) {
       foundParameter = true;
@@ -3150,11 +3176,38 @@ void setupServer() {
       writeFile(LittleFS, "/EnableAmbientCorrection.txt", inputMessage.c_str());
       EnableAmbientCorrection = inputMessage.toInt();
     }
+    if (request->hasParam("testProtectionsEnabled")) {
+      foundParameter = true;
+      inputMessage = request->getParam("testProtectionsEnabled")->value();
+      testProtectionsEnabled = (inputMessage.toInt() != 0);
+      // NOT persisted to LittleFS — resets TRUE (enabled) on every boot by design.
+      // foundParameter=true above bumps settingsDirty so CSV3 echoes the change immediately,
+      // which fires the dashboard banner show/hide and syncs the per-page toggle states.
+      if (testProtectionsEnabled) {
+        queueConsoleMessage("PROTECTIONS ENABLED — all protection layers restored");
+      } else {
+        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2/G3 + AlternatorHardShutdownV bypassed; G4, INA228, and hardware OC remain active");
+      }
+    }
     if (request->hasParam("TuningMode")) {
       foundParameter = true;
       inputMessage = request->getParam("TuningMode")->value();
-      writeFile(LittleFS, "/TuningMode.txt", inputMessage.c_str());
-      TuningMode = inputMessage.toInt();
+      int requested = inputMessage.toInt();
+      // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
+      if (requested == 1 && TuningMode == 0) {
+        const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
+                                                    : (CVTuningMode ? "Voltage tuning"
+                                                                    : (ThermalTuningMode ? "Thermal tuning" : nullptr));
+        if (blocker != nullptr) {
+          queueConsoleMessageF("Current tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
+        } else {
+          writeFile(LittleFS, "/TuningMode.txt", inputMessage.c_str());
+          TuningMode = requested;
+        }
+      } else {
+        writeFile(LittleFS, "/TuningMode.txt", inputMessage.c_str());
+        TuningMode = requested;
+      }
     }
     if (request->hasParam("commitTuningScore")) {
       foundParameter = true;
@@ -3666,14 +3719,7 @@ void setupServer() {
       queueConsoleMessageF("AW bleed rate set to: %.1f A/s", AwBleedRate);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    if (request->hasParam("AwRecoverRate")) {
-      foundParameter = true;
-      inputMessage = request->getParam("AwRecoverRate")->value();
-      AwRecoverRate = inputMessage.toFloat();
-      writeFile(LittleFS, "/AwRecoverRate.txt", String(AwRecoverRate, 1).c_str());
-      queueConsoleMessageF("AW recovery rate set to: %.1f A/s", AwRecoverRate);
-      if (CVTuningMode) cvTuningParamChanged = true;
-    }
+    // AwRecoverRate handler removed — hardcoded in firmware (0.1f), no longer user-adjustable
     if (request->hasParam("AwSeedProtectMs")) {
       foundParameter = true;
       inputMessage = request->getParam("AwSeedProtectMs")->value();
@@ -3787,8 +3833,22 @@ void setupServer() {
     if (request->hasParam("CVTuningMode")) {
       foundParameter = true;
       inputMessage = request->getParam("CVTuningMode")->value();
-      writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
-      CVTuningMode = inputMessage.toInt();
+      int requested = inputMessage.toInt();
+      // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
+      if (requested == 1 && CVTuningMode == 0) {
+        const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
+                                                    : (TuningMode ? "Current tuning"
+                                                                  : (ThermalTuningMode ? "Thermal tuning" : nullptr));
+        if (blocker != nullptr) {
+          queueConsoleMessageF("Voltage tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
+        } else {
+          writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
+          CVTuningMode = requested;
+        }
+      } else {
+        writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
+        CVTuningMode = requested;
+      }
     }
     if (request->hasParam("commitCVTuningScore")) {
       foundParameter = true;
@@ -3830,8 +3890,22 @@ void setupServer() {
     if (request->hasParam("ThermalTuningMode")) {
       foundParameter = true;
       inputMessage = request->getParam("ThermalTuningMode")->value();
-      writeFile(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
-      ThermalTuningMode = inputMessage.toInt();
+      int requested = inputMessage.toInt();
+      // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
+      if (requested == 1 && ThermalTuningMode == 0) {
+        const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
+                                                    : (TuningMode ? "Current tuning"
+                                                                  : (CVTuningMode ? "Voltage tuning" : nullptr));
+        if (blocker != nullptr) {
+          queueConsoleMessageF("Thermal tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
+        } else {
+          writeFile(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
+          ThermalTuningMode = requested;
+        }
+      } else {
+        writeFile(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
+        ThermalTuningMode = requested;
+      }
     }
     if (request->hasParam("thermalWaveLowF")) {
       foundParameter = true;
@@ -3942,7 +4016,6 @@ void setupServer() {
       // worstWindow reset block in loop() so every timer on the dashboard
       // actually clears on button press).
       ft_ReadAnalogInputs.worstSession = 0;
-      ft_saveNVSData.worstSession = 0;
       ft_AdjustFieldLearnMode.worstSession = 0;
       ft_logDashboardValues.worstSession = 0;
       ft_updateSystemHealthStats.worstSession = 0;
@@ -4059,7 +4132,7 @@ void setupServer() {
       imu_slam_count_lifetime      = 0;
       imu_capsize_count            = 0;
       imu_pitchpole_count          = 0;
-      // Reset shadow vars so saveNVSData() sees a change and writes 0s to NVS
+      // Reset shadow vars so the next saveNVSDataFull() sees a change and writes 0s to NVS
       prev_imu_heel_max_lifetime   = -1;
       prev_imu_pitch_max_lifetime  = -1;
       prev_imu_slam_peak_lifetime  = -1;
@@ -4516,8 +4589,11 @@ void setupServer() {
   });
 
   server.on("/tuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
-    char *buf = (char *)ps_malloc(10240);
-    if (!buf) { request->send(500, "text/plain", "OOM"); return; }
+    // PSRAM-backed buffer; shared_ptr deleter frees on response destruction
+    // (normal completion OR abort). Avoids 10 KB transient on the internal heap.
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(10240), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
 
     // Build sorted index (insertion sort — 50 entries max)
     uint8_t sortIdx[50];
@@ -4559,13 +4635,26 @@ void setupServer() {
       liveScoreVal[0], liveScoreVal[1], liveScoreVal[2], liveScoreVal[3],
       ts, (int)tuningScore.toggleCount, testActive ? 1 : 0);
 
-    request->send(200, "application/json", String(buf));
-    free(buf);
+    // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
+    size_t total = (size_t)pos;
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/json",
+      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
+        memcpy(out, bufPtr.get() + index, toSend);
+        return toSend;
+      });
+    request->send(response);
   });
 
   server.on("/cvtuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
-    char *buf = (char *)ps_malloc(16384);
-    if (!buf) { request->send(500, "text/plain", "OOM"); return; }
+    // PSRAM-backed buffer (50 records × ~420 bytes ≈ 21 KB). shared_ptr deleter runs
+    // when the chunked-response lambda is destroyed (normal completion OR abort), so
+    // no manual free is needed and aborted requests can't leak.
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(32768), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
 
     // Build sorted index (insertion sort, best score first)
     uint8_t sortIdx[50];
@@ -4582,17 +4671,17 @@ void setupServer() {
     }
 
     int pos = 0;
-    pos += snprintf(buf + pos, (pos >= 16384 ? 0 : 16384 - pos), "{\"rec\":[");
-    for (int i = 0; i < cvTuningLogCount && pos < 15800; i++) {
+    pos += snprintf(buf + pos, (pos >= 32768 ? 0 : 32768 - pos), "{\"rec\":[");
+    for (int i = 0; i < cvTuningLogCount && pos < 32000; i++) {
       CVTuningRecord &r = cvTuningLog[sortIdx[i]];
-      pos += snprintf(buf + pos, (pos >= 16384 ? 0 : 16384 - pos),
+      pos += snprintf(buf + pos, (pos >= 32768 ? 0 : 32768 - pos),
         "%s{\"n\":%d,\"s\":%.2f,\"st\":%.1f,\"wo\":%.3f,\"io\":%.4f,\"t\":%.1f,"
         "\"ls\":%.2f,\"lst\":%.1f,\"lwo\":%.3f,\"lio\":%.4f,\"lus\":%.3f,"
         "\"fov\":%d,\"iex\":%d,\"ld\":%d,\"hoc\":%d,"
         "\"vkp\":%.3f,\"vki\":%.3f,\"vkd\":%.2f,"
         "\"srr\":%.1f,\"sfr\":%.1f,"
         "\"abl\":%.2f,\"arl\":%.3f,\"asp\":%d,\"irf\":%.2f,"
-        "\"kh\":%.1f,"
+        "\"ks\":%.1f,\"kh\":%.1f,"
         "\"iek\":%.1f,\"ien\":%d,\"iekb\":%.2f,"
         "\"lddt\":%.0f,\"ldt1\":%.0f,\"ldt3\":%.0f,"
         "\"tc\":%.0f,\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
@@ -4605,7 +4694,7 @@ void setupServer() {
         r.voltageKp, r.voltageKi, r.voltageKd,
         r.setpointRiseRate, r.setpointFallRate,
         r.awBleedRate, r.awRecoverRate, (int)r.awSeedProtectMs, r.reseedFrac,
-        r.kHard,
+        r.slopeBleedK, r.kHard,
         r.iExcessK, (int)r.iExcessN, r.iExcessKBleed,
         r.loadDumpDtThresh, r.loadDumpDtThresh1, r.loadDumpDtThresh3,
         r.inputFilterTC, r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
@@ -4620,14 +4709,25 @@ void setupServer() {
                         + cvTuningScore.totalLowUndershootVs)
              / cvTuningScore.activeTimeSec;
     }
-    pos += snprintf(buf + pos, (pos >= 16384 ? 0 : 16384 - pos),
+    pos += snprintf(buf + pos, (pos >= 32768 ? 0 : 32768 - pos),
       "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
       "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
       cvLiveScoreVal[0], cvLiveScoreVal[1], cvLiveScoreVal[2], cvLiveScoreVal[3],
       cvts, (int)cvTuningScore.scoredHighCount, cvTestActive ? 1 : 0);
 
-    request->send(200, "application/json", String(buf));
-    free(buf);
+    // Chunked send: only ~1.5 KB per chunk lands on the internal heap. bufPtr is
+    // captured by value (ref-count) so the PSRAM buffer lives for the duration of
+    // the response and is freed automatically when the lambda is destroyed.
+    size_t total = (size_t)pos;
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/json",
+      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
+        memcpy(out, bufPtr.get() + index, toSend);
+        return toSend;
+      });
+    request->send(response);
   });
 
   server.on("/resetcvtuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -4650,8 +4750,11 @@ void setupServer() {
   });
 
   server.on("/thermaltuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
-    char *buf = (char *)ps_malloc(8192);
-    if (!buf) { request->send(500, "text/plain", "OOM"); return; }
+    // PSRAM-backed buffer; shared_ptr deleter frees on response destruction
+    // (normal completion OR abort). Avoids 8 KB transient on the internal heap.
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(8192), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
 
     // Sort by score ascending (best first)
     uint8_t sortIdx[50];
@@ -4704,8 +4807,17 @@ void setupServer() {
       thermalLiveScoreVal[2], thermalLiveScoreVal[3],
       ts, (int)thermalTuningScore.scoredStepCount, testActive ? 1 : 0);
 
-    request->send(200, "application/json", String(buf));
-    free(buf);
+    // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
+    size_t total = (size_t)pos;
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/json",
+      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
+        memcpy(out, bufPtr.get() + index, toSend);
+        return toSend;
+      });
+    request->send(response);
   });
 
   server.on("/resetthermaltuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -5080,7 +5192,7 @@ void SendWifiData() {
     WifiStrength = cachedWiFiRSSI;
     ch1_compute_stats();
     static char *payload2 = nullptr;
-    static const size_t PAYLOAD2_SIZE = 3400;  // (410 fields + 1) × 7 = 2877, rounded up to 3400
+    static const size_t PAYLOAD2_SIZE = 3400;  // (436 fields + 1) × 7 = 3059, rounded up to 3400
     if (!payload2) {
       payload2 = (char *)ps_malloc(PAYLOAD2_SIZE);  // allocated to PSRAM
       if (!payload2) {
@@ -5130,7 +5242,11 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // 28 ignition-cycle watermark fields (14 lo + 14 hi)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -5531,9 +5647,6 @@ void SendWifiData() {
                                (int)systemIDFallDelay_ms[2],
                                (int)systemIDRiseAvg_ms,
                                (int)systemIDFallAvg_ms,
-                               (int)nvsPhase,
-                               SafeInt(ft_saveNVSData.worstWindow),
-                               SafeInt(ft_saveNVSData.worstSession),
                                SafeInt(ft_efficiencyTracker.worstWindow),
                                SafeInt(ft_efficiencyTracker.worstSession),
                                (int)systemIDActive,
@@ -5544,13 +5657,29 @@ void SendWifiData() {
                                (int)(systemIDQuietPP_A[0] * 10),
                                (int)(systemIDQuietPP_A[1] * 10),
                                (int)(systemIDQuietPP_A[2] * 10),
-                               SafeInt(nvsCycleMs),                              // ms elapsed for last complete NVS drain cycle
+                               (int)systemIDAbortReason,
+                               (int)systemIDAbortPhase,
                                SafeInt(voltLoopWorstInterval_5s),
                                SafeInt(voltLoopWorstInterval_ses),
-                               SafeInt(nvsCommitCount),
-                               SafeInt(nvsCommitLongCount),
-                               SafeInt(nvsCommitWorstMs),
-                               SafeInt(nvsCommitLastMs)
+                               (int)((lastNVSSaveTime == 0) ? 0 : ((millis() - lastNVSSaveTime) / 1000UL)),
+                               SafeInt(nvsFullSaveLastMs),
+                               SafeInt(nvsFullSaveWorstMs),
+                               SafeInt(nvsFullSaveCount),
+                               // 28 ignition-cycle watermarks (lo, hi for 14 params). Scale must match enum comments.
+                               SafeInt(wmIgnSafe(wmIgn_amps.lo), 1),     SafeInt(wmIgnSafe(wmIgn_amps.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_altTempF.lo), 1), SafeInt(wmIgnSafe(wmIgn_altTempF.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_IBV.lo), 10),     SafeInt(wmIgnSafe(wmIgn_IBV.hi), 10),
+                               SafeInt(wmIgnSafe(wmIgn_Bcur.lo), 1),     SafeInt(wmIgnSafe(wmIgn_Bcur.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_SOC.lo), 1),      SafeInt(wmIgnSafe(wmIgn_SOC.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_RPM.lo), 1),      SafeInt(wmIgnSafe(wmIgn_RPM.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_SOG.lo), 1),      SafeInt(wmIgnSafe(wmIgn_SOG.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_AWS.lo), 1),      SafeInt(wmIgnSafe(wmIgn_AWS.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_TWS.lo), 1),      SafeInt(wmIgnSafe(wmIgn_TWS.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_heel.lo), 1),     SafeInt(wmIgnSafe(wmIgn_heel.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_pitch.lo), 1),    SafeInt(wmIgnSafe(wmIgn_pitch.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_vacc.lo), 10),    SafeInt(wmIgnSafe(wmIgn_vacc.hi), 10),
+                               SafeInt(wmIgnSafe(wmIgn_baro.lo), 1),     SafeInt(wmIgnSafe(wmIgn_baro.hi), 1),
+                               SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),  SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1)
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -5606,7 +5735,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -5791,7 +5920,7 @@ void SendWifiData() {
                                SafeInt(IgnoreRPM),
                                SafeInt(MinRPMForField),
                                SafeInt(AwBleedRate, 10),                         // ×10, 1 decimal
-                               SafeInt(AwRecoverRate, 10),                       // ×10, 1 decimal
+                               0,                                                 // RESERVED — was AwRecoverRate (hardcoded to 0.1 in firmware; free slot for future use)
                                SafeInt(KHard, 10),                               // ×10, 1 decimal
                                SafeInt(ReseedFrac, 100),                         // ×100, 2 decimal (shared recovery seed fraction)
                                (int)AwSeedProtectMs,
@@ -5886,7 +6015,8 @@ void SendWifiData() {
                                SafeInt(Ymax4),
                                SafeInt(LoadDumpDtThresh3),                       // A/s tier-3 threshold (3 consecutive)
                                SafeInt(VMGUseTrueWind),                          // moved from CSV2
-                               SafeInt(hardwarePresent)                          // moved from CSV2
+                               SafeInt(hardwarePresent),                         // moved from CSV2
+                               (int)testProtectionsEnabled                      // 0/1 — runtime flag, not persisted
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
