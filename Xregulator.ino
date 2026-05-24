@@ -2257,6 +2257,7 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
+float IExcessArmMarginV = 0.500f; // V below target at which iExcess voltage gate opens (decoupled from OvMeasMarginV 2026-05-23)
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)

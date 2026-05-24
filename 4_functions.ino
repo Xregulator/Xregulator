@@ -1754,6 +1754,11 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     IExcessKBleed = readFile(LittleFS, "/IExcessKBleed.txt").toFloat();
   }
+  if (!fsExists("/IExcessArmMarginV.txt")) {
+    writeFile(LittleFS, "/IExcessArmMarginV.txt", String(IExcessArmMarginV, 3).c_str());
+  } else {
+    IExcessArmMarginV = readFile(LittleFS, "/IExcessArmMarginV.txt").toFloat();
+  }
   if (!fsExists("/AwBleedRate.txt")) {
     writeFile(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 2).c_str());
   } else {

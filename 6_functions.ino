@@ -974,6 +974,13 @@ void AdjustFieldLearnMode() {
   static uint32_t lastControlTickMs = 0;
   uint32_t currentMillis = millis();
 
+  // Thermal log runs FIRST so temperature history accumulates regardless of mode.
+  // Every early-return below (immediate cut, LimpHome, stale CH1, non-normal mode,
+  // sysID, cloud-busy hold) used to skip the log; hoisting fixes that. Internal
+  // 1 Hz throttle keeps cadence. Control-side fields (pidOut, outerTermP/I/D,
+  // cv_I) freeze when their owners aren't ticking; temperature fields keep moving.
+  thermalLog_tick(currentMillis);
+
   uint32_t actualDtMs = (lastControlTickMs == 0) ? 62 : (currentMillis - lastControlTickMs);
   if (actualDtMs > 500) actualDtMs = 500;
   float actualDtSec = (float)actualDtMs / 1000.0f;
@@ -990,9 +997,8 @@ void AdjustFieldLearnMode() {
 
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
   // pidLog_tick() runs at the END of the normal control path, after all state is final.
-
-  // thermalLog_tick() runs at the end of the tick (after tempPID_tick in AUTO mode),
-  // outside the AUTO-only block, so temperature history accumulates in all modes.
+  // thermalLog_tick() runs at the TOP of this function (above) — unconditional,
+  // so temperature history continues during off/fault/shutdown/sysID.
 
   isTempSustainedWarning(tick.nowMs, tick.tempToUseF, tick.tempLimitF,
                          tick.tempWarnExcessF, tick.ignoreTemperature);
@@ -1088,11 +1094,11 @@ void AdjustFieldLearnMode() {
       //  this block no longer maintains its own snapshot.)
 
       // Test-mode bypass: when testProtectionsEnabled is false (user toggled it off on a
-      // tuning page), G1 and G2 are inhibited from firing so a step-test can characterise
-      // the plant without protection layers fighting the input. The release condition below
-      // is not gated — if ovActive was already set before the user disabled, it can still
-      // de-assert cleanly.
-      if (testProtectionsEnabled && IBV > ChargingVoltageTarget - PRED_GUARD) {
+      // tuning page) OR TuningMode is active (current-waveform step test), G1 and G2 are
+      // inhibited from firing so a step-test can characterise the plant without protection
+      // layers fighting the input. The release condition below is not gated — if ovActive
+      // was already set before the user disabled, it can still de-assert cleanly.
+      if (testProtectionsEnabled && !TuningMode && IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
           fastOvCurrentCap = fminf(fastOvCurrentCap, hardCap);
@@ -1101,7 +1107,7 @@ void AdjustFieldLearnMode() {
         }
       }
 
-      if (testProtectionsEnabled && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
+      if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
         float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
@@ -1699,13 +1705,11 @@ void AdjustFieldLearnMode() {
         // separates brief resonance peaks (~3-4 ticks) from sustained RPM-step excess.
         //
         // VOLTAGE GATE — iExcess is only allowed to fire when the battery voltage is
-        // already close to the charging target. The gate distance is intentionally
-        // tied to OvMeasMarginV (the Group 2 measured-voltage trigger margin) so the
-        // user has ONE knob that controls "how close to target before I start treating
-        // overshoots seriously":
-        //   • Group 2 fires when IBV >  target + OvMeasMarginV (overshoot is happening)
-        //   • iExcess arms when  IBV >  target − OvMeasMarginV (overshoot is imminent)
-        // Symmetric around target, scales with the user's tuning, no separate knob.
+        // close enough to the charging target. Gate opens when IBV > target − IExcessArmMarginV.
+        // Decoupled from OvMeasMarginV (Group 2's trigger) on 2026-05-23: those two knobs
+        // moved in opposite directions on the same physical preference, so raising
+        // OvMeasMarginV to calm Group 2 silently widened the iExcess arming window. Now
+        // each detector has its own threshold knob.
         // The gate exists because during ramp-up the alternator is *supposed* to be at
         // ceiling current and the CV loop has not engaged — firing iExcess there would
         // be a false positive that kills the integrator and slows charging for nothing.
@@ -1718,11 +1722,12 @@ void AdjustFieldLearnMode() {
           // (pre-event cv_I capture and reseed now centralised — see preEventCvI
           //  above and the unified falling-edge reseed in the bumpless tracker block.)
 
-          // Gate: CV active AND battV within OvMeasMarginV of target.
-          // testProtectionsEnabled=false also inhibits G3 firing — falls through to the else
-          // branch which clears persist count and iExcessActive, ensuring a clean release if
-          // user disables protections mid-event.
-          if (testProtectionsEnabled && voltageControlActive && (IBV > ChargingVoltageTarget - OvMeasMarginV)) {
+          // Gate: CV active AND battV within IExcessArmMarginV of target.
+          // testProtectionsEnabled=false OR TuningMode=1 (current-waveform step test) also
+          // inhibits G3 firing — falls through to the else branch which clears persist count
+          // and iExcessActive, ensuring a clean release if user disables protections or ends
+          // the test mid-event.
+          if (testProtectionsEnabled && !TuningMode && voltageControlActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
             float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
                            : (IExcessSigSrc == 1) ? getFiltI()
                                                   : g_iMA_N;
@@ -2353,11 +2358,6 @@ void AdjustFieldLearnMode() {
       pidInput = (double)((OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                          : g_pidI_filtered);
     }  // end of MANUAL mode else
-
-    // Thermal log runs at the end of the control tick so tempPID_tick() has
-    // already run (when in AUTO). Called here — outside the AUTO-only block —
-    // so temperature history accumulates in every mode, not just NORMAL AUTO.
-    thermalLog_tick(currentMillis);
   }  // end if (!sysIDRunning)
 
 

@@ -771,8 +771,9 @@ enum Csv3Index {
   CSV3_VMGUseTrueWind,   // moved from CSV2
   CSV3_hardwarePresent,  // moved from CSV2
   CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets false on boot
+  CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate (decoupled from OvMeasMarginV 2026-05-23)
 
-  CSV3_FIELD_COUNT  // = 277 (added testProtectionsEnabled; was 276 after VMG/HW migration)
+  CSV3_FIELD_COUNT  // = 278 (added IExcessArmMarginV)
 };
 
 
@@ -3711,6 +3712,13 @@ void setupServer() {
       queueConsoleMessageF("K_bleed set to: %.2f A/s per A", IExcessKBleed);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    if (request->hasParam("IExcessArmMarginV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessArmMarginV")->value();
+      IExcessArmMarginV = constrain(inputMessage.toFloat(), 0.020f, 5.000f);
+      writeFile(LittleFS, "/IExcessArmMarginV.txt", String(IExcessArmMarginV, 3).c_str());
+      queueConsoleMessageF("iExcess arming margin set to: %.0f mV below target", IExcessArmMarginV * 1000.0f);
+    }
     if (request->hasParam("AwBleedRate")) {
       foundParameter = true;
       inputMessage = request->getParam("AwBleedRate")->value();
@@ -5735,7 +5743,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f",
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -5911,7 +5919,7 @@ void SendWifiData() {
                                (int)rpmCapPowerTable[9],
                                SafeInt(VoltageTrimLimit, 100),
                                (int)InputFilterTC,
-                               (int)SystemIDStepAmplitude,
+                               SafeInt(SystemIDStepAmplitude, 10),               // ×10, 1 decimal
                                SafeInt(HardOCTripAmps, 10),                      // ×10, 1 decimal
                                SafeInt(HardOCDebounceMs),                        // raw ms
                                SafeInt(IExcessK, 10),                            // ×10, 1 decimal
@@ -6016,7 +6024,8 @@ void SendWifiData() {
                                SafeInt(LoadDumpDtThresh3),                       // A/s tier-3 threshold (3 consecutive)
                                SafeInt(VMGUseTrueWind),                          // moved from CSV2
                                SafeInt(hardwarePresent),                         // moved from CSV2
-                               (int)testProtectionsEnabled                      // 0/1 — runtime flag, not persisted
+                               (int)testProtectionsEnabled,                     // 0/1 — runtime flag, not persisted
+                               IExcessArmMarginV                                // %.3f — iExcess voltage gate margin
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

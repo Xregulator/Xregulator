@@ -1367,7 +1367,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must exceed the active charge target before Group 2 engages. Default 0.100 V (100 mV). <strong>Dual role:</strong> this knob also gates Group 3 (iExcess), which only arms when measured voltage reaches <em>within</em> OvMeasMargin of target. Lowering this makes Group 2 more sensitive AND arms iExcess earlier; raising it relaxes both. Watch your steady-state ripple amplitude — set OvMeasMargin meaningfully above your peak-to-peak ripple to avoid false fires.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must exceed the active charge target before Group 2 engages. Default 0.100 V (100 mV). Lowering this makes Group 2 more sensitive (fires sooner above target); raising it relaxes Group 2. Watch your steady-state ripple amplitude — set OvMeasMargin meaningfully above your peak-to-peak ripple to avoid false fires. <em>Note: as of 2026-05-23 this no longer affects Group 3 (iExcess) — see Group 3's own Arming Margin knob.</em></span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -1385,7 +1385,7 @@
                 <div class="layer-box">
                   <div class="layer-box-header">Group 3 — Current Excess (iExcess)</div>
                   <div class="layer-box-desc" style="margin-bottom:8px;">
-                    Watches the alternator output current — using whichever filter you pick below (smoothed MA, EMA, or raw). Fires when that signal exceeds the commanded current setpoint by the threshold (K_excess) for N consecutive ticks. Armed only when measured battery voltage is within the overvoltage measurement margin (OvMeasMargin) of the target, so it cannot false-fire during RPM-ceiling ramp-up before the CV loop has engaged. Suppressed while any protection event (G1, G2, Load Dump, or its own prior fire) is still depressing the setpoint, and released only once the measured current settles back within K_excess of the new setpoint — this avoids cascading off the previous event's own field-decay current droop.
+                    Watches the alternator output current — using whichever filter you pick below (smoothed MA, EMA, or raw). Fires when that signal exceeds the commanded current setpoint by the threshold (K_excess) for N consecutive ticks. Armed only when measured battery voltage is within the iExcess Arming Margin of the target, so it cannot false-fire during RPM-ceiling ramp-up before the CV loop has engaged. Suppressed while any protection event (G1, G2, Load Dump, or its own prior fire) is still depressing the setpoint, and released only once the measured current settles back within K_excess of the new setpoint — this avoids cascading off the previous event's own field-decay current droop.
                   </div>
 
                   <!-- Signal source selector -->
@@ -1432,8 +1432,23 @@
                   <hr />
                   <div class="form-row">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>Arming Margin — V below target (<span id="IExcessArmMarginV_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close to the active charge target the measured battery voltage must be before Group 3 is allowed to fire. The gate opens when <em>battV &gt; target − ArmingMargin</em>. Default 0.500 V — i.e. iExcess can fire once battV is within 500 mV below the target. Larger values arm earlier in the ramp (more aggressive); smaller values restrict iExcess to near-target only. The gate exists to suppress false fires during early ramp-up when the alternator is supposed to be at its current ceiling and the CV loop has not yet engaged. <strong>Big-bank installs</strong> where voltage barely deflects above target can set this large (e.g. 1.0–5.0 V) so iExcess remains the primary current-overshoot detector. Decoupled from OvMeasMargin (Group 2's trigger) on 2026-05-23 so the two settings move independently.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="IExcessArmMarginV" type="number" step="0.005" min="0.020" max="5.000" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>K_excess — Threshold (A above setpoint) (<span id="IExcessK_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default 5.0 A.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND measured battery voltage is within OvMeasMargin of the active charge target. This is target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default 5.0 A.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND the iExcess arming margin (set above) is satisfied — measured battery voltage must be within ArmingMargin volts below the active charge target. Target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4086,7 +4101,7 @@
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
               <input type="hidden" name="password" class="password_field">
-              <input name="SystemIDStepAmplitude" type="number" step="1" min="5" max="40" />
+              <input name="SystemIDStepAmplitude" type="number" step="0.1" min="0.1" max="1000" />
               <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
             </form>
           </div>

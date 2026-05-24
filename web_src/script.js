@@ -905,6 +905,7 @@ const CSV3_FIELDS = [
     "VMGUseTrueWind",                  // moved from CSV2
     "hardwarePresent",                 // moved from CSV2
     "testProtectionsEnabled",         // runtime flag — not persisted, resets true (enabled) on boot
+    "IExcessArmMarginV",              // raw float (%.3f) — iExcess voltage gate margin
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3043,6 +3044,7 @@ function updateAllEchosOptimized(data) {
         { key: 'IExcessK', id: 'IExcessK_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'IExcessN', id: 'IExcessN_echo', transform: v => Math.round(v) },
         { key: 'IExcessKBleed', id: 'IExcessKBleed_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'IExcessArmMarginV', id: 'IExcessArmMarginV_echo', transform: v => v.toFixed(3) },
         { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'VoltageDisagreeTimeout', id: 'VoltageDisagreeTimeout_echo', transform: v => Math.round(v) },
         { key: 'VoltageKp', id: 'VoltageKp_echo', transform: v => (v / 100).toFixed(2) },
@@ -3103,7 +3105,7 @@ function updateAllEchosOptimized(data) {
         { key: 'DvdtTC',                id: 'DvdtTC_echo',                    transform: v => (v / 10).toFixed(1) },
         { key: 'SlopeBleedProxV',       id: 'SlopeBleedProxV_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'StartupRiseRate',       id: 'StartupRiseRate_echo',           transform: v => (v / 100).toFixed(2) },
-        { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => v },
+        { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'cvWaveAmplitudeV',  id: 'cvWaveAmplitudeV_echo',  transform: v => (v / 100).toFixed(2) },
@@ -11499,7 +11501,8 @@ function cvBinToCsv(d, csv3) {
         `# FastOV: OvMeasMarginV=${fmtRaw(c.OvMeasMarginV, 3)}V OvPredMarginV=${fmtRaw(c.OvPredMarginV, 3)}V` +
         ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtTC=${fmtDiv(c.DvdtTC, 10, 1)}ms` +
         ` KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
-        ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s`  // AwRecoverRate removed from header — hardcoded to 0.1 in firmware
+        ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s` +  // AwRecoverRate removed from header — hardcoded to 0.1 in firmware
+        ` IExcessArmMarginV=${fmtRaw(c.IExcessArmMarginV, 3)}V`
     );
     lines.push(
         `# SlopeBleed: SlopeBleedThresh=${d.sbThresh.toFixed(3)}V/s SlopeBleedK=${d.sbK.toFixed(1)}A/(V/s) SlopeBleedProxV=${d.sbProxV.toFixed(3)}V`
@@ -11764,11 +11767,6 @@ function checkCurrTestGate(checkbox) {
     if (conflict && conflict !== 'curr') {
         checkbox.checked = false;
         alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
-        return false;
-    }
-    if (gLastChargeStage !== CS_BULK) {
-        checkbox.checked = false;
-        alert('Current Waveform Test requires BULK stage.\n\nThe inner current loop only has full authority when the system is bulk charging. In absorption / float / CV, the voltage loop caps current and the score is meaningless.\n\nWait for BULK, then enable the test.');
         return false;
     }
     return true;
