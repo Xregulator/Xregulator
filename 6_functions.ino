@@ -1057,6 +1057,10 @@ void AdjustFieldLearnMode() {
   if (!g_fastOvClampActive) {
     preEventCvI = cv_I;  // refresh while no protection is clamping
   }
+  // Post-protection fast-rise window — opened by the falling-edge handler below.
+  // 0 = window inactive. Gated again at slew site by FastSetpointRiseWindowMs cap
+  // and FastSetpointRiseHeadroomV vs ChargingVoltageTarget.
+  static uint32_t postProtectRiseStartMs = 0;
 
   {
     static float vPrev = 0.0f;
@@ -1114,6 +1118,18 @@ void AdjustFieldLearnMode() {
         fastOvClampActive = true;
         ovActive = true;
         g_fastOvHardActive = true;
+      }
+      // Hysteresis-band hold: keep the Group 2 clamp continuous while ovActive is latched
+      // but IBV has dipped below the firing threshold (between target+OvMeasMarginV and target).
+      // Without this, fastOvClampActive drops in the band, setpointLimited recovers at
+      // SetpointRiseRate, voltage rises, Group 2 re-fires — producing on/off flicker.
+      // Softer reference (IBV - target) so the cap relaxes linearly as voltage falls toward
+      // the release point. No g_fastOvHardActive — this is the soft hold, not a fresh fire.
+      else if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && ovActive && IBV > ChargingVoltageTarget) {
+        float ovExcessSoft = IBV - ChargingVoltageTarget;
+        float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcessSoft);
+        fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
+        fastOvClampActive = true;
       }
 
       // Group 1/2 release condition: battV back at/under target AND prediction safe.
@@ -1789,11 +1805,16 @@ void AdjustFieldLearnMode() {
               fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
               fastOvClampActive = true;
               iExcessActive = true;
-              // IExcessKBleed = 0: snap to zero (maximum response — field falls at 100ms physics TC).
-              // IExcessKBleed > 0: proportional bleed at K_bleed × excess A/s each 5ms tick.
-              // Both modes drive output current loop to minimum duty within one tick; difference is recovery depth.
-              // Recovery is seeded by the unified falling-edge reseed (bumpless tracker block)
-              // when ALL protections clear, regardless of which mode fired here.
+              // One-shot cv_I drain on the rising edge only — postFastOvMismatch arms below
+              // and prevents persistCount from re-reaching IExcessN during the event, so this
+              // branch does not execute again until the gate releases. Sustained per-tick drain
+              // for the rest of the event comes from awBleedAmpS in the bumpless tracker block.
+              // IExcessKBleed = 0: snap cv_I to zero (deepest starting point for recovery).
+              // IExcessKBleed > 0: subtract K_bleed × excess × dtSec from cv_I once.
+              // Both modes drive output current to minimum duty within one tick via the
+              // fastOvCurrentCap collapse and the 1e9 fall-rate override on setpointLimited;
+              // the IExcessKBleed knob only sets the post-event recovery depth.
+              // Final reseed is via the unified falling-edge reseed when ALL protections clear.
               if (IExcessKBleed <= 0.0f) {
                 cv_I = 0.0f;
               } else {
@@ -2089,7 +2110,8 @@ void AdjustFieldLearnMode() {
             float icvHi_seed = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
             cv_I = clamp_f(preEventCvI * ReseedFrac, 0.0f, icvHi_seed);
             cv_I_track = cv_I;
-            awSeedProtectStartMs = currentMillis;  // engage seed-protection window
+            awSeedProtectStartMs = currentMillis;     // engage seed-protection window
+            postProtectRiseStartMs = currentMillis;   // open fast-rise window (closed by either time cap or voltage gate at slew site)
           }
           // Unified-flag rising-edge counter — counts every distinct activation of
           // ANY protection (G1/2 OV, iExcess, LoadDump). Must be incremented BEFORE
@@ -2325,7 +2347,20 @@ void AdjustFieldLearnMode() {
         liveScore_thisCmd = setpointCommand;
 
         float effectiveFallRate = fastOvClampActive ? 1.0e9f : SetpointFallRate;
-        float effectiveRiseRate = inStartupRamp ? StartupRiseRate : SetpointRiseRate;
+        // Post-protection fast-rise: while the window is open AND battV still has
+        // clear headroom below the active charge target, multiply the normal rise
+        // slew so the alternator crosses its deadband and starts producing again
+        // quickly. Window opens on the unified fastOvClampActive falling edge above;
+        // closes when EITHER the time cap expires OR battV climbs into the headroom.
+        bool postProtectRiseActive =
+            voltageControlActive &&
+            (postProtectRiseStartMs != 0) &&
+            ((currentMillis - postProtectRiseStartMs) < FastSetpointRiseWindowMs) &&
+            (IBV < ChargingVoltageTarget - FastSetpointRiseHeadroomV);
+        float effectiveRiseRate;
+        if (inStartupRamp)              effectiveRiseRate = StartupRiseRate;
+        else if (postProtectRiseActive) effectiveRiseRate = SetpointRiseRate * FastSetpointRiseRate;
+        else                            effectiveRiseRate = SetpointRiseRate;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        effectiveRiseRate, effectiveFallRate, actualDtSec);
         // Clear startup ramp once setpointLimited has caught up to command

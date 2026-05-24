@@ -772,8 +772,11 @@ enum Csv3Index {
   CSV3_hardwarePresent,  // moved from CSV2
   CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets false on boot
   CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate (decoupled from OvMeasMarginV 2026-05-23)
+  CSV3_FastSetpointRiseRate,    // ×100, 1 decimal — multiplier on setpoint rise slew during post-protection recovery
+  CSV3_FastSetpointRiseWindowMs, // raw ms — hard upper bound on fast-rise window
+  CSV3_FastSetpointRiseHeadroomV, // ×100, 2 decimal — V below target at which fast-rise gate stays open
 
-  CSV3_FIELD_COUNT  // = 278 (added IExcessArmMarginV)
+  CSV3_FIELD_COUNT  // = 281 (added FastSetpointRiseWindowMs, FastSetpointRiseHeadroomV)
 };
 
 
@@ -3567,6 +3570,7 @@ void setupServer() {
       writeFile(LittleFS, "/LearningTempHysteresis.txt", inputMessage.c_str());
       LearningTempHysteresis = inputMessage.toInt();
     }
+    // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
     if (request->hasParam("MaxTableValue")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxTableValue")->value();
@@ -3674,6 +3678,7 @@ void setupServer() {
       AlternatorHardShutdownV = inputMessage.toFloat();
       queueConsoleMessageF("Alternator hard-shutdown voltage set to: %.2fV (absolute)", AlternatorHardShutdownV);
     }
+    // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
     if (request->hasParam("HardOCDebounceMs")) {
       foundParameter = true;
       inputMessage = request->getParam("HardOCDebounceMs")->value();
@@ -3728,6 +3733,27 @@ void setupServer() {
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     // AwRecoverRate handler removed — hardcoded in firmware (0.1f), no longer user-adjustable
+    if (request->hasParam("FastSetpointRiseRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("FastSetpointRiseRate")->value();
+      FastSetpointRiseRate = constrain(inputMessage.toFloat(), 1.0f, 50.0f);
+      writeFile(LittleFS, "/FastSetpointRiseRate.txt", String(FastSetpointRiseRate, 1).c_str());
+      queueConsoleMessageF("Fast setpoint rise rate set to: %.1fx", FastSetpointRiseRate);
+    }
+    if (request->hasParam("FastSetpointRiseWindowMs")) {
+      foundParameter = true;
+      inputMessage = request->getParam("FastSetpointRiseWindowMs")->value();
+      FastSetpointRiseWindowMs = (uint32_t)constrain(inputMessage.toInt(), 500, 30000);
+      writeFile(LittleFS, "/FastSetpointRiseWindowMs.txt", String(FastSetpointRiseWindowMs).c_str());
+      queueConsoleMessageF("Fast rise window set to: %ums", FastSetpointRiseWindowMs);
+    }
+    if (request->hasParam("FastSetpointRiseHeadroomV")) {
+      foundParameter = true;
+      inputMessage = request->getParam("FastSetpointRiseHeadroomV")->value();
+      FastSetpointRiseHeadroomV = constrain(inputMessage.toFloat(), 0.05f, 2.0f);
+      writeFile(LittleFS, "/FastSetpointRiseHeadroomV.txt", String(FastSetpointRiseHeadroomV, 2).c_str());
+      queueConsoleMessageF("Fast rise headroom set to: %.2fV", FastSetpointRiseHeadroomV);
+    }
     if (request->hasParam("AwSeedProtectMs")) {
       foundParameter = true;
       inputMessage = request->getParam("AwSeedProtectMs")->value();
@@ -5743,7 +5769,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -6025,7 +6051,10 @@ void SendWifiData() {
                                SafeInt(VMGUseTrueWind),                          // moved from CSV2
                                SafeInt(hardwarePresent),                         // moved from CSV2
                                (int)testProtectionsEnabled,                     // 0/1 — runtime flag, not persisted
-                               IExcessArmMarginV                                // %.3f — iExcess voltage gate margin
+                               IExcessArmMarginV,                               // %.3f — iExcess voltage gate margin
+                               SafeInt(FastSetpointRiseRate, 100),              // ×100, 1 decimal — post-protection rise-slew multiplier
+                               (int)FastSetpointRiseWindowMs,                   // raw ms
+                               SafeInt(FastSetpointRiseHeadroomV, 100)          // ×100, 2 decimal — V headroom gate
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

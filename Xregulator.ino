@@ -997,6 +997,7 @@ int resolution = 12;       // for OneWire temp sensor measurement
 int VeData = 0;            // Set to 1 if VE serial data exists
 int NMEA0183Data = 0;      // Set to 1 if NMEA serial data exists doesn't do anything yet
 // ── HARD OVER-CURRENT PROTECTION ─────────────────────────────
+// "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
 float HardOCTripAmps = 160.0f;   // derived: MaxTableValue + 10A — recomputed at boot and on MaxTableValue change, not persisted
 uint32_t HardOCDebounceMs = 20;  // user-adjustable, persisted in LittleFS
 uint32_t hardOCStartMs = 0;
@@ -2263,6 +2264,9 @@ float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any p
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
 float AwRecoverRate = 0.1f;      // HARDCODED — no longer user-adjustable. cv_I_aw_cap recovery rate (fraction of MaxTableValue/s) after fastOV clears. Only exercised on cold CV re-entry (MANUAL→AUTO, idle→bulk, post-shutdown). CSV3 slot CSV3_reserved_AwRecoverRate held for future use.
 uint16_t AwSeedProtectMs = 150;  // ms to suppress AwBleed + CC-tracker after any bumpless seed fires; 0=disabled
+float FastSetpointRiseRate = 8.0f;       // multiplier on normal setpoint rise slew during post-protection recovery window
+uint32_t FastSetpointRiseWindowMs = 5000; // hard upper bound (ms) on how long the fast-rise window stays open after any protection releases
+float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at which fast-rise is allowed; gate closes once IBV climbs into target - this margin
 // --- Test-mode protection override ---
 // User-controlled flag (per test page). When TRUE (default) G1, G2, G3, and
 // AlternatorHardShutdownV all fire normally. When FALSE the user has disabled them
@@ -2284,6 +2288,7 @@ bool voltageControlActive = false;        // true when voltage PID is active (no
 uint32_t thermalScoreLastExternalMs = 0;  // last ms when voltageControlActive was true; gates 3-min blanking
 // =====================================================================================
 // Table Bounds & Safety
+// "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
 float MaxTableValue = 150.0;               // Maximum table entry (A)
 float MinTableValue = 0.0;                 // OBSOLETE REMOVE LATER
 float MaxPenaltyPercent = 15.0;            // Max penalty as % of nominal

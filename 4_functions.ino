@@ -1770,6 +1770,21 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     AwSeedProtectMs = (uint16_t)readFile(LittleFS, "/AwSeedProtectMs.txt").toInt();
   }
+  if (!fsExists("/FastSetpointRiseRate.txt")) {
+    writeFile(LittleFS, "/FastSetpointRiseRate.txt", String(FastSetpointRiseRate, 1).c_str());
+  } else {
+    FastSetpointRiseRate = readFile(LittleFS, "/FastSetpointRiseRate.txt").toFloat();
+  }
+  if (!fsExists("/FastSetpointRiseWindowMs.txt")) {
+    writeFile(LittleFS, "/FastSetpointRiseWindowMs.txt", String(FastSetpointRiseWindowMs).c_str());
+  } else {
+    FastSetpointRiseWindowMs = (uint32_t)readFile(LittleFS, "/FastSetpointRiseWindowMs.txt").toInt();
+  }
+  if (!fsExists("/FastSetpointRiseHeadroomV.txt")) {
+    writeFile(LittleFS, "/FastSetpointRiseHeadroomV.txt", String(FastSetpointRiseHeadroomV, 2).c_str());
+  } else {
+    FastSetpointRiseHeadroomV = readFile(LittleFS, "/FastSetpointRiseHeadroomV.txt").toFloat();
+  }
   if (!fsExists("/KHard.txt")) {
     writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
   } else {

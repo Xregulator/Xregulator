@@ -906,6 +906,9 @@ const CSV3_FIELDS = [
     "hardwarePresent",                 // moved from CSV2
     "testProtectionsEnabled",         // runtime flag — not persisted, resets true (enabled) on boot
     "IExcessArmMarginV",              // raw float (%.3f) — iExcess voltage gate margin
+    "FastSetpointRiseRate",           // ×100, 1 decimal — multiplier on setpoint rise slew during post-protection recovery
+    "FastSetpointRiseWindowMs",       // raw ms — hard upper bound on fast-rise window
+    "FastSetpointRiseHeadroomV",      // ×100, 2 decimal — V below target at which fast-rise gate stays open
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3075,6 +3078,9 @@ function updateAllEchosOptimized(data) {
         { key: 'KHard',             id: 'KHard_echo',             transform: v => (v / 10).toFixed(1) },
         { key: 'ReseedFrac',        id: 'ReseedFrac_echo',        transform: v => (v / 100).toFixed(2) },
         { key: 'AwSeedProtectMs',   id: 'AwSeedProtectMs_echo',   transform: v => v },
+        { key: 'FastSetpointRiseRate', id: 'FastSetpointRiseRate_echo', transform: v => (v / 100).toFixed(1) },
+        { key: 'FastSetpointRiseWindowMs', id: 'FastSetpointRiseWindowMs_echo', transform: v => v },
+        { key: 'FastSetpointRiseHeadroomV', id: 'FastSetpointRiseHeadroomV_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'OvGroup1Enable',    id: 'OvGroup1Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'OvGroup2Enable',    id: 'OvGroup2Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'TdPred',            id: 'TdPred_echo',            transform: v => v.toFixed(3) },
@@ -12324,5 +12330,45 @@ window.addEventListener('load', function () {
     if (el) { el.value = autopass; setAdminPassword(); }
   }
 });
+
+// Protections alt-tab — filter pills + intro toggling + empty-phase hiding.
+// Scoped to #alt-panel-protections so it can't affect the rest of the site.
+(function initProtectionsFilters() {
+  const panel = document.getElementById('alt-panel-protections');
+  if (!panel) return;
+
+  const pills = panel.querySelectorAll('.protections-filters button[data-filter]');
+  let activeFilter = 'all';
+
+  function applyFilter() {
+    panel.querySelectorAll('.protections-param').forEach(card => {
+      const groups = (card.dataset.groups || '').split(/\s+/).filter(Boolean);
+      const show = (activeFilter === 'all') || groups.includes(activeFilter);
+      card.style.display = show ? '' : 'none';
+    });
+    panel.querySelectorAll('.protections-intro p').forEach(p => {
+      p.classList.toggle('active', p.dataset.intro === activeFilter);
+    });
+    panel.querySelectorAll('.protections-phase').forEach(sec => {
+      const anyCard = Array.from(sec.querySelectorAll('.protections-param'))
+        .some(a => a.style.display !== 'none');
+      const anyIntro = sec.querySelector('.protections-intro p.active') !== null;
+      sec.classList.toggle('empty', !anyCard && !anyIntro);
+      const grid = sec.querySelector('.protections-cards');
+      if (grid) grid.classList.toggle('empty', !anyCard);
+    });
+  }
+
+  pills.forEach(btn => {
+    btn.addEventListener('click', () => {
+      pills.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeFilter = btn.dataset.filter;
+      applyFilter();
+    });
+  });
+
+  applyFilter();
+})();
 
 /* XREG_END */

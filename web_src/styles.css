@@ -3125,4 +3125,230 @@ input:checked+.slider:before {
   font-size: 12px;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   Protections alt-tab — phase-first layout with group-filter pills.
+   Scoped under #alt-panel-protections so it can't collide with the
+   rest of the site. Reuses existing .tooltip / .switch / .btn-primary
+   / .cap-mode-toggle / .password_field styles unchanged.
+   ═══════════════════════════════════════════════════════════════════ */
+#alt-panel-protections .protections-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--card-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+#alt-panel-protections .protections-filter-label {
+  font-size: 12px;
+  color: #777;
+  margin-right: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+#alt-panel-protections .protections-filters button {
+  background: var(--card-light);
+  color: var(--text-dark);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.15;
+  min-height: 40px;
+}
+#alt-panel-protections .protections-filters button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#alt-panel-protections .protections-filters button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+#alt-panel-protections .protections-filters button .group-label {
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #888;
+  font-weight: 600;
+}
+#alt-panel-protections .protections-filters button.active .group-label {
+  color: rgba(255, 255, 255, 0.85);
+}
+#alt-panel-protections .protections-filters button .nick-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+#alt-panel-protections .protections-filters button.single-line {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#alt-panel-protections .protections-phase {
+  margin-bottom: 16px;
+  background: var(--card-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+#alt-panel-protections .protections-phase.empty {
+  display: none;
+}
+#alt-panel-protections .protections-section-title {
+  background-color: #f0f0f0;
+  color: var(--text-dark);
+  padding: 6px 10px;
+  margin: -12px -12px 12px -12px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-weight: bold;
+  border-left: 2px solid var(--accent);
+  font-size: 16px;
+}
+
+#alt-panel-protections .protections-intro {
+  margin-bottom: 12px;
+}
+#alt-panel-protections .protections-intro p {
+  display: none;
+  margin: 0;
+  padding: 10px 12px;
+  background: #fafafa;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 13px;
+  color: #444;
+  line-height: 1.55;
+}
+#alt-panel-protections .protections-intro p.active {
+  display: block;
+}
+#alt-panel-protections .protections-intro p strong {
+  color: var(--text-dark);
+}
+
+#alt-panel-protections .protections-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+}
+#alt-panel-protections .protections-cards.empty {
+  display: none;
+}
+
+#alt-panel-protections .protections-param {
+  background: var(--card-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+#alt-panel-protections .protections-param:hover {
+  border-color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 161, 154, 0.08);
+}
+#alt-panel-protections .protections-name {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dark);
+  line-height: 1.4;
+}
+#alt-panel-protections .protections-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#alt-panel-protections .protections-edit-row input[type="number"] {
+  width: 100px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 14px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  background: var(--card-light);
+  color: var(--text-dark);
+}
+#alt-panel-protections .protections-unit {
+  font-size: 13px;
+  color: #666;
+  min-width: 24px;
+}
+#alt-panel-protections .protections-edit-row .btn-primary {
+  margin-left: auto;
+}
+#alt-panel-protections .protections-readonly-row {
+  font-style: italic;
+  color: #777;
+  padding: 6px 0;
+  font-size: 13px;
+}
+
+#alt-panel-protections .protections-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+  border: 1px solid;
+  background: var(--card-light);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+#alt-panel-protections .protections-tag.g0 { color: #c0392b; border-color: #c0392b; }
+#alt-panel-protections .protections-tag.g1 { color: #1a73e8; border-color: #1a73e8; }
+#alt-panel-protections .protections-tag.g2 { color: var(--accent); border-color: var(--accent); }
+#alt-panel-protections .protections-tag.g3 { color: #d68910; border-color: #d68910; }
+#alt-panel-protections .protections-tag.g4 { color: #7d3c98; border-color: #7d3c98; }
+
+/* Dark-mode overrides — match the rest of the site's dark variants. */
+body.dark-mode #alt-panel-protections .protections-filters,
+body.dark-mode #alt-panel-protections .protections-phase,
+body.dark-mode #alt-panel-protections .protections-param,
+body.dark-mode #alt-panel-protections .protections-filters button {
+  background: #242424;
+  border-color: #444;
+  color: #e0e0e0;
+}
+body.dark-mode #alt-panel-protections .protections-filter-label,
+body.dark-mode #alt-panel-protections .protections-unit,
+body.dark-mode #alt-panel-protections .protections-readonly-row {
+  color: #aaa;
+}
+body.dark-mode #alt-panel-protections .protections-section-title {
+  background-color: #2a2a2a;
+  color: #e0e0e0;
+}
+body.dark-mode #alt-panel-protections .protections-intro p {
+  background: #1e1e1e;
+  color: #ccc;
+}
+body.dark-mode #alt-panel-protections .protections-intro p strong {
+  color: #fff;
+}
+body.dark-mode #alt-panel-protections .protections-edit-row input[type="number"] {
+  background: #2a2a2a;
+  color: #e0e0e0;
+  border-color: #444;
+}
+body.dark-mode #alt-panel-protections .protections-tag {
+  background: #242424;
+}
+
 /* XREG_END */
