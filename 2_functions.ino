@@ -163,6 +163,26 @@ void performDeepFactoryReset() {
   Serial.println("\n=== DEEP FACTORY RESET INITIATED ===");
   queueConsoleMessage("DEEP FACTORY RESET: Scorched-earth reset starting...");
 
+  // Step 0: Preserve cloud identity (authToken) across the wipe so that pressing
+  // Erase All Memory does NOT lock the user out of their cloud account. Token is
+  // held in a stack buffer for the ~2-3 second wipe; power-loss in that window
+  // loses the token and requires support contact for re-registration.
+  char savedToken[128] = { 0 };
+  {
+    nvs_handle_t h;
+    if (nvs_open("cloud", NVS_READONLY, &h) == ESP_OK) {
+      size_t len = sizeof(savedToken);
+      esp_err_t e = nvs_get_str(h, "authToken", savedToken, &len);
+      if (e != ESP_OK) savedToken[0] = '\0';
+      nvs_close(h);
+    }
+    if (savedToken[0] != '\0') {
+      Serial.println("RESET: Preserving authToken across NVS wipe");
+    } else {
+      Serial.println("RESET: No authToken to preserve (device unregistered)");
+    }
+  }
+
   // Step 1: Unmount and reformat LittleFS (userdata partition - all settings/buffer files)
   Serial.println("RESET: Acquiring FS mutex and unmounting LittleFS...");
   if (fsMutex) {
@@ -214,6 +234,25 @@ void performDeepFactoryReset() {
   Serial.println("RESET: Reinitializing settings with defaults...");
   InitSystemSettings();
   Serial.println("RESET: InitSystemSettings() complete");
+
+  // Step 4: Restore preserved authToken so cloud account survives the wipe
+  if (savedToken[0] != '\0') {
+    nvs_handle_t h;
+    if (nvs_open("cloud", NVS_READWRITE, &h) == ESP_OK) {
+      esp_err_t e = nvs_set_str(h, "authToken", savedToken);
+      if (e == ESP_OK) e = nvs_commit(h);
+      nvs_close(h);
+      if (e == ESP_OK) {
+        authToken = String(savedToken);
+        isRegistered = true;
+        Serial.println("RESET: authToken restored - cloud account preserved");
+        queueConsoleMessage("RESET: Cloud registration preserved");
+      } else {
+        Serial.printf("RESET: WARNING - authToken restore failed: %s\n", esp_err_to_name(e));
+        queueConsoleMessage("WARNING: Cloud token restore failed - contact support");
+      }
+    }
+  }
 
   queueConsoleMessage("DEEP FACTORY RESET: Complete! Restarting now...");
   Serial.println("=== DEEP FACTORY RESET COMPLETE - RESTARTING ===\n");
@@ -1364,8 +1403,6 @@ void uploadBufferedRecords() {
   if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
     sensorRingInFlightIndex = (int32_t)sensorRingTail;
     lastUploadWasBuffered = true;
-    Serial.printf("Queued ring slot %d for upload (count=%u)\n",
-                  (int)sensorRingInFlightIndex, (unsigned)sensorRingCount);
   } else {
     Serial.println("uploadBufferedRecords: httpsQueue full, will retry next tick");
   }
@@ -1380,28 +1417,28 @@ bool executeUploadPayload(const char *payload) {
   }
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(5);
+  // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
+  // the read loops below use available()+read() polling with explicit millis() deadlines,
+  // so the Stream-level timeout doesn't gate anything here.
   client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
 
   uint32_t start = millis();
   esp_task_wdt_reset();
 
-  Serial.println("Connecting...");
-  // Hard-bounded TLS connect
+  // Hard-bounded TLS connect (silent on success; logs only on failure)
   if (!client.connect(host, port, CONNECT_TIMEOUT)) {
-    Serial.println("Connect fail");
+    Serial.println("Upload: connect fail");
     client.stop();
     return false;
   }
 
-  // NEW: Defensive global timeout check after connect/handshake
+  // Defensive global timeout check after connect/handshake
   if (millis() - start > GLOBAL_TIMEOUT) {
-    Serial.println("Connect exceeded global timeout");
+    Serial.println("Upload: connect exceeded global timeout");
     client.stop();
     return false;
   }
 
-  Serial.println("Connected");
   esp_task_wdt_reset();
 
   // Serial.println("=== REQUEST DEBUG ===");
@@ -1515,7 +1552,8 @@ done_headers:
     return false;
   }
 
-  Serial.printf("HTTP %d\n", httpCode);
+  // Log only non-200 codes — success is the common path and was noisy.
+  if (httpCode != 200) Serial.printf("Upload: HTTP %d\n", httpCode);
   lastHttpResponseCode = httpCode;
 
   // ===== Handle PSRAM-ring slot based on response code =====
@@ -1526,7 +1564,6 @@ done_headers:
   if (lastUploadWasBuffered && sensorRingInFlightIndex >= 0) {
     if (httpCode == 200) {
       popTailSnapshot();
-      Serial.printf("✓ Uploaded ring slot (remaining: %u)\n", (unsigned)sensorRingCount);
       if (ringIsEmpty()) {
         // Only announce "all uploaded" once per drain-to-empty transition.
         // pushSensorSnapshot re-arms the flag when count goes back above zero.
@@ -2076,7 +2113,9 @@ bool executeUploadConfig(const char *payload) {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(5);
+  // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
+  // the read loops below use available()+read() polling with explicit millis() deadlines,
+  // so the Stream-level timeout doesn't gate anything here.
   client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
 
   uint32_t start = millis();
@@ -2097,7 +2136,6 @@ bool executeUploadConfig(const char *payload) {
     return false;
   }
 
-  Serial.println("Config: Connected");
   esp_task_wdt_reset();
 
   int headerBytes = client.printf(

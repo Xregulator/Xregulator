@@ -4278,13 +4278,3 @@ time_t reconstructTimestamp(time_t collectionTime) {
   return getCurrentTimestamp();
 }
 
-// Called from Core 1 main loop via pendingClearToken flag — nvs_commit blocks 50-200ms, not safe on Core 0
-void executeClearToken() {
-  nvs_handle_t nvs_handle;
-  if (nvs_open("auth", NVS_READWRITE, &nvs_handle) == ESP_OK) {
-    nvs_erase_key(nvs_handle, "token");
-    nvs_erase_key(nvs_handle, "registered");
-    nvs_commit(nvs_handle);
-    nvs_close(nvs_handle);
-  }
-}

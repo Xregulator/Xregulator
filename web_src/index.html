@@ -4122,7 +4122,7 @@
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Erase All Memory:</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Scorched-earth reset. Erases all settings, WiFi credentials, calibration data, auth tokens, and buffered logs. Device will restart into WiFi config mode. You will need to re-enter your WiFi network name and password before the regulator will operate again.</span>
+                    <span class="tooltip-box">Scorched-earth reset. Erases all settings, WiFi credentials, calibration data, and buffered logs. The cloud registration token is deliberately preserved so your cloud account and history stay intact — after reconnecting WiFi, cloud features resume automatically. To also wipe the cloud account, press Delete All Data first. Device restarts into WiFi config mode; you will need to re-enter your WiFi network name and password before the regulator will operate again.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -7962,6 +7962,15 @@
               <span class="metric-value"><span id="currentModeID">?</span></span>
             </div>
             <div class="metric-row">
+              <span class="metric-label">Device Serial
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Unique factory-burned ID for this regulator. Include this in any email to
+                    support about cloud account recovery.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="systemDeviceUID_ID" style="font-family:monospace;font-size:12px;">?</span></span>
+            </div>
+            <div class="metric-row">
               <span class="metric-label">Software Version</span>
               <span class="metric-value"><span id="current-version-display-2">Loading...</span></span>
             </div>
@@ -8493,27 +8502,6 @@
 
           <div id="profile-message" style="margin-top: 15px; padding: 10px; display: none; border-radius: 4px;"></div>
         </form>
-
-        <hr />
-
-        <!-- Clear Auth Token -->
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Clear Auth Token</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Force device re-registration (advanced).</span>
-            </span>
-          </div>
-          <div class="form-input" style="display:flex;justify-content:flex-end;align-items:center;">
-            <form action="/get" method="GET" target="hidden-form" style="display:inline;margin:0;">
-              <input type="hidden" name="password" class="password_field">
-              <input type="hidden" name="ClearToken" value="1">
-              <input onclick="return handleClearToken();" type="submit" value="Clear Token" class="btn-danger"
-                title="Force device re-registration (advanced)" />
-            </form>
-          </div>
-        </div>
 
         <hr />
 

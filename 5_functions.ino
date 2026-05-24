@@ -72,6 +72,7 @@ void Heading(const tN2kMsg &N2kMsg) {
   double Variation;
 
   if (ParseN2kHeading(N2kMsg, SID, Heading, Deviation, Variation, HeadingReference)) {
+    if (N2kIsNA(Heading)) return;        // F-RES-04: skip NA field, otherwise -1e9 leaks into HeadingNMEA
     // Parsing succeeded - update variable and mark fresh
     HeadingNMEA = Heading * 180.0 / PI;  // Convert radians to degrees
     MARK_FRESH(IDX_HEADING_NMEA);        // Only called on successful parse
@@ -102,18 +103,24 @@ void COGSOG(const tN2kMsg &N2kMsg) {
   double SOG;
 
   if (ParseN2kCOGSOGRapid(N2kMsg, SID, HeadingReference, COG, SOG)) {
-    COGNMEA = COG * 180.0 / PI;  // radians → degrees (matches Heading() pattern)
-    SOGNMEA = SOG * 1.94384;     // m/s → knots (matches WindSpeed() pattern)
-    MARK_FRESH(IDX_COG_NMEA);
-    MARK_FRESH(IDX_SOG_NMEA);
+    // F-RES-04: bail entirely if both fields NA; otherwise update each independently.
+    if (N2kIsNA(COG) && N2kIsNA(SOG)) return;
+    if (!N2kIsNA(COG)) {
+      COGNMEA = COG * 180.0 / PI;  // radians → degrees (matches Heading() pattern)
+      MARK_FRESH(IDX_COG_NMEA);
+    }
+    if (!N2kIsNA(SOG)) {
+      SOGNMEA = SOG * 1.94384;     // m/s → knots (matches WindSpeed() pattern)
+      MARK_FRESH(IDX_SOG_NMEA);
 
-    if (SOGNMEA > MaxSpeed) {
-      MaxSpeed = SOGNMEA;
+      if (SOGNMEA > MaxSpeed) {
+        MaxSpeed = SOGNMEA;
+      }
+      if (SOGNMEA > MaxSpeed_AllTime) {
+        MaxSpeed_AllTime = SOGNMEA;
+      }
+      wmIgnUpdate(wmIgn_SOG, SOGNMEA);  // ignition-cycle watermark
     }
-    if (SOGNMEA > MaxSpeed_AllTime) {
-      MaxSpeed_AllTime = SOGNMEA;
-    }
-    wmIgnUpdate(wmIgn_SOG, SOGNMEA);  // ignition-cycle watermark
 
   } else {
     OutputStream->print("Failed to parse PGN: ");
@@ -296,12 +303,17 @@ void WindSpeed(const tN2kMsg &N2kMsg) {
   tN2kWindReference WindReference;
 
   if (ParseN2kWindSpeed(N2kMsg, SID, WindSpeed, WindAngle, WindReference)) {
-    ApparentWindSpeedNMEA = WindSpeed * 1.94384;
-    ApparentWindAngleNMEA = WindAngle * 180.0 / PI;
-    MARK_FRESH(IDX_APPARENT_WIND_SPEED);
-    MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
-
-    UpdateWindMaximums();  // NEW - add this line
+    // F-RES-04: bail entirely if both fields NA; otherwise update each independently.
+    if (N2kIsNA(WindSpeed) && N2kIsNA(WindAngle)) return;
+    if (!N2kIsNA(WindSpeed)) {
+      ApparentWindSpeedNMEA = WindSpeed * 1.94384;
+      MARK_FRESH(IDX_APPARENT_WIND_SPEED);
+    }
+    if (!N2kIsNA(WindAngle)) {
+      ApparentWindAngleNMEA = WindAngle * 180.0 / PI;
+      MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
+    }
+    if (!N2kIsNA(WindSpeed)) UpdateWindMaximums();  // only if speed valid; UpdateWindMaximums also guards TrueWindSpeedNMEA internally
 
   } else {
     OutputStream->print("Failed to parse PGN: ");
@@ -3410,8 +3422,6 @@ void queueConsoleMessageF(const char *format, ...) {
   vsnprintf(formattedMsg, sizeof(formattedMsg), format, args);
   va_end(args);
 
-  Serial.print("QUEUE DEBUG: ");
-  Serial.println(formattedMsg);
 
   portENTER_CRITICAL(&consoleMux);
   if (consoleCount >= CONSOLE_QUEUE_SIZE) {
@@ -3588,6 +3598,31 @@ void saveNVSDataFull() {
   if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)                { nvs_set_blob(h, "IMU_SlamMax",   &imu_slam_peak_lifetime,     sizeof(float));     prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;                chg = true; }
   // imuMountOrientation / CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G
   // moved to LittleFS (Pattern B) — user-set form inputs, no longer in NVS.
+
+  // Watermarks (session + lifetime peaks) — load block at top of loadNVSData() previously had no matching writes (F-RES-03 fix).
+  if (prev_MaxSpeed != MaxSpeed)                                            { nvs_set_blob(h, "MaxSpd",        &MaxSpeed,                          sizeof(float));    prev_MaxSpeed = MaxSpeed;                                            chg = true; }
+  if (prev_MaxSpeed_AllTime != MaxSpeed_AllTime)                            { nvs_set_blob(h, "MaxSpd_AT",     &MaxSpeed_AllTime,                  sizeof(float));    prev_MaxSpeed_AllTime = MaxSpeed_AllTime;                            chg = true; }
+  if (prev_MeasAmpsMax != MeasuredAmpsMax)                                  { nvs_set_blob(h, "MAmpsMax",      &MeasuredAmpsMax,                   sizeof(float));    prev_MeasAmpsMax = MeasuredAmpsMax;                                  chg = true; }
+  if (prev_MeasAmpsMax_AllTime != MeasuredAmpsMax_AllTime)                  { nvs_set_blob(h, "MAmpsMax_AT",   &MeasuredAmpsMax_AllTime,           sizeof(float));    prev_MeasAmpsMax_AllTime = MeasuredAmpsMax_AllTime;                  chg = true; }
+  if (prev_RPMMax != RPMMax)                                                { nvs_set_blob(h, "RPMMax",        &RPMMax,                            sizeof(float));    prev_RPMMax = RPMMax;                                                chg = true; }
+  if (prev_RPMMax_AllTime != RPMMax_AllTime)                                { nvs_set_blob(h, "RPMMax_AT",     &RPMMax_AllTime,                    sizeof(float));    prev_RPMMax_AllTime = RPMMax_AllTime;                                chg = true; }
+  if (prev_IBVMax != IBVMax)                                                { nvs_set_blob(h, "IBVMax",        &IBVMax,                            sizeof(float));    prev_IBVMax = IBVMax;                                                chg = true; }
+  if (prev_PeakV_AllTime != PeakVoltage_AllTime)                            { nvs_set_blob(h, "PeakV_AT",      &PeakVoltage_AllTime,               sizeof(float));    prev_PeakV_AllTime = PeakVoltage_AllTime;                            chg = true; }
+  if (prev_MinVoltage != MinVoltage)                                        { nvs_set_blob(h, "MinV",          &MinVoltage,                        sizeof(float));    prev_MinVoltage = MinVoltage;                                        chg = true; }
+  if (prev_MinVoltage_AllTime != MinVoltage_AllTime)                        { nvs_set_blob(h, "MinV_AT",       &MinVoltage_AllTime,                sizeof(float));    prev_MinVoltage_AllTime = MinVoltage_AllTime;                        chg = true; }
+  if (prev_board_temp_max != board_temp_max_alltime)                        { nvs_set_blob(h, "BdTmpMaxAt",    &board_temp_max_alltime,            sizeof(float));    prev_board_temp_max = board_temp_max_alltime;                        chg = true; }
+  if (prev_board_temp_min != board_temp_min_alltime)                        { nvs_set_blob(h, "BdTmpMinAt",    &board_temp_min_alltime,            sizeof(float));    prev_board_temp_min = board_temp_min_alltime;                        chg = true; }
+  if (prev_baro_max != baro_pressure_max_alltime)                           { nvs_set_blob(h, "BaroMaxAt",     &baro_pressure_max_alltime,         sizeof(float));    prev_baro_max = baro_pressure_max_alltime;                           chg = true; }
+  if (prev_baro_min != baro_pressure_min_alltime)                           { nvs_set_blob(h, "BaroMinAt",     &baro_pressure_min_alltime,         sizeof(float));    prev_baro_min = baro_pressure_min_alltime;                           chg = true; }
+  if (prev_MaxTempTherm != MaxTemperatureThermistor)                        { nvs_set_blob(h, "MaxTherm",      &MaxTemperatureThermistor,          sizeof(float));    prev_MaxTempTherm = MaxTemperatureThermistor;                        chg = true; }
+  if (prev_MaxTempTherm_AllTime != MaxTemperatureThermistor_AllTime)        { nvs_set_blob(h, "MaxTherm_AT",   &MaxTemperatureThermistor_AllTime,  sizeof(float));    prev_MaxTempTherm_AllTime = MaxTemperatureThermistor_AllTime;        chg = true; }
+  if (prev_MaxAltTempF != MaxAlternatorTemperatureF)                        { nvs_set_blob(h, "MaxAltTempF",   &MaxAlternatorTemperatureF,         sizeof(float));    prev_MaxAltTempF = MaxAlternatorTemperatureF;                        chg = true; }
+  if (prev_MaxAltTempF_AllTime != MaxAlternatorTemperatureF_AllTime)        { nvs_set_blob(h, "MAltTempF_AT",  &MaxAlternatorTemperatureF_AllTime, sizeof(float));    prev_MaxAltTempF_AllTime = MaxAlternatorTemperatureF_AllTime;        chg = true; }
+  if (prev_MaxWindApp != max_wind_speed_apparent_alltime)                   { nvs_set_blob(h, "MaxWApp_AT",    &max_wind_speed_apparent_alltime,   sizeof(float));    prev_MaxWindApp = max_wind_speed_apparent_alltime;                   chg = true; }
+  if (prev_MaxWindTrue != max_wind_speed_true_alltime)                      { nvs_set_blob(h, "MaxWTr_AT",     &max_wind_speed_true_alltime,       sizeof(float));    prev_MaxWindTrue = max_wind_speed_true_alltime;                      chg = true; }
+  if (prev_UVToday != UVToday)                                              { nvs_set_blob(h, "UVToday",       &UVToday,                           sizeof(float));    prev_UVToday = UVToday;                                              chg = true; }
+  if (prev_UVTomorrow != UVTomorrow)                                        { nvs_set_blob(h, "UVTomorrow",    &UVTomorrow,                        sizeof(float));    prev_UVTomorrow = UVTomorrow;                                        chg = true; }
+  if (prev_UVDay2 != UVDay2)                                                { nvs_set_blob(h, "UVDay2",        &UVDay2,                            sizeof(float));    prev_UVDay2 = UVDay2;                                                chg = true; }
 
   if (chg) nvs_commit(h);
   nvs_close(h);

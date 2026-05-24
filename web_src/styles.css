@@ -1691,11 +1691,11 @@ input[type="password"] {
   border-radius: var(--radius);
   padding: 6px 8px;
   /* Consistent with button padding */
-  height: 28px;
-  /* Match button height */
+  height: 32px;
+  /* Taller than buttons to fit 16px text */
   box-sizing: border-box;
-  font-size: 12px;
-  /* Match button font size */
+  font-size: 16px;
+  /* 16px required to suppress iOS WKWebView focus auto-zoom */
 }
 
 input:focus {

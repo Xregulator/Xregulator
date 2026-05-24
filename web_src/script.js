@@ -134,8 +134,7 @@ let isDeviceRegistered = false; // Tracks if device is registered for Cloud Feat
 
 let source; // Declare at broader scope
 
-//let vesselInfoComplete = false; // Tracks if vessel info is filled out
-let vesselInfoComplete = true; // TEMP: bypass for local testing
+let vesselInfoComplete = false; // Tracks if vessel info is filled out
 
 window.vesselInfo = null; // Cache for vessel data
 
@@ -2086,7 +2085,7 @@ function displayAvailableVersions() {
 // Confirm update
 function confirmUpdate(version) {
     // Password is guaranteed to exist because button can only be clicked after unlock
-    return confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, web interface will be accessible in the usual way, and the Software Update sub-tab in Cloud Features will confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may start fresh with the factory golden image, which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
+    return confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, web interface will be accessible in the usual way, and the Software Update sub-tab in Cloud Features will confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Green/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
 }
 
 // Track previous values to detect changes
@@ -2121,8 +2120,10 @@ function updateDeviceId() {
             deviceIdLower.toString(16).padStart(8, '0');
         const macAddress = deviceIdHex.toUpperCase();  // Use all 16 chars
 
-        // Update only the profile display
+        // Update profile display + System panel (latter shown when cloud features locked)
         document.getElementById('profile-device-uid').textContent = macAddress;
+        const sysDeviceUid = document.getElementById('systemDeviceUID_ID');
+        if (sysDeviceUid) sysDeviceUid.textContent = macAddress;
 
         prevDeviceIdUpper = deviceIdUpper;
         prevDeviceIdLower = deviceIdLower;
@@ -2130,6 +2131,12 @@ function updateDeviceId() {
 }
 
 //forced OTA stuff
+// Set when user clicks "Update Now" on the forced-update modal. Suppresses the
+// modal from re-rendering on subsequent CSV2 ticks while the download is in
+// flight. Page reload after device reboot clears it naturally; the 6-minute
+// timeout below is a fallback for failed updates so user can retry.
+let forcedUpdateInProgressUntil = 0;
+
 // Convert firmware version int to string (e.g., 35 → "0.0.35")
 function firmwareIntToString(versionInt) {
     const major = Math.floor(versionInt / 10000);
@@ -2225,34 +2232,63 @@ function handleForcedUpdate(data) {
 
     const versionStr = firmwareIntToString(forcedVersionInt);
     const now = Math.floor(Date.now() / 1000); // Current Unix timestamp
-    const isPastDeadline = now >= deadline;
+    // deadline === 0 means none was set in cloud — treat as "upgrade required now"
+    // rather than "deadline passed" which falsely implies the user missed a window.
+    const noDeadlineSet = !deadline || deadline === 0;
+    const isPastDeadline = !noDeadlineSet && now >= deadline;
+    const requireBlocking = noDeadlineSet || isPastDeadline;
 
-    if (isPastDeadline) {
+    if (requireBlocking) {
         // BLOCK EVERYTHING - show overlay
         banner.style.display = 'none';
         overlay.style.display = 'flex';
 
-        overlay.innerHTML = `
-          <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-              <div class="section-title" style="margin-bottom: 12px; text-align:center;">
-                  Forced Firmware Update
+        // If user already pressed Update Now within the last few minutes, show
+        // a progress message instead of re-rendering the prompt every 5 s.
+        const updateActive = Date.now() < forcedUpdateInProgressUntil;
+        if (updateActive) {
+            overlay.innerHTML = `
+              <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
+                  <div class="section-title" style="margin-bottom: 12px; text-align:center;">
+                      Update in progress…
+                  </div>
+                  <p style="margin: 8px 0 4px 0; font-size: 15px;">
+                      Downloading firmware v<strong>${versionStr}</strong> and rebooting.
+                  </p>
+                  <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
+                      Takes 2-3 minutes total. The dashboard will reload automatically when the device is back online.
+                  </p>
+                  <p style="margin-top: 12px; font-size: 11px; color: #888;">
+                      Do not close this tab or power-cycle the device.
+                  </p>
               </div>
-              <p style="margin: 8px 0 4px 0; font-size: 15px;">
-                  This device must upgrade to firmware v<strong>${versionStr}</strong>.
-              </p>
-              <p style="margin: 4px 0 16px 0; font-size: 13px; color: #666;">
-                  The deadline has passed!
-              </p>
-              <button onclick="triggerForcedUpdate('${versionStr}')"
-                      class="forced-update-btn btn-primary"
-                      style="margin-top: 4px;">
-                  Update Now
-              </button>
-              <p style="margin-top: 12px; font-size: 11px; color: #888;">
-                  To postpone, restart with WiFi disconnected or in Factory Mode.  
-              </p>
-          </div>
-        `;
+            `;
+        } else {
+            const subline = noDeadlineSet
+              ? 'A mandatory update is required to continue.'
+              : 'The deadline has passed.';
+            overlay.innerHTML = `
+              <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
+                  <div class="section-title" style="margin-bottom: 12px; text-align:center;">
+                      Forced Firmware Update
+                  </div>
+                  <p style="margin: 8px 0 4px 0; font-size: 15px;">
+                      This device must upgrade to firmware v<strong>${versionStr}</strong>.
+                  </p>
+                  <p style="margin: 4px 0 16px 0; font-size: 13px; color: #666;">
+                      ${subline}
+                  </p>
+                  <button onclick="triggerForcedUpdate('${versionStr}')"
+                          class="forced-update-btn btn-primary"
+                          style="margin-top: 4px;">
+                      Update Now
+                  </button>
+                  <p style="margin-top: 12px; font-size: 11px; color: #888;">
+                      To postpone, restart with WiFi disconnected or in Factory Mode.
+                  </p>
+              </div>
+            `;
+        }
 
         disableAllInputs();
 
@@ -2305,6 +2341,31 @@ function enableAllInputs() {
 function triggerForcedUpdate(versionStr) {
     const confirmed = confirm('Update process begins in ~7 seconds and takes 2-3 minutes, includes re-boots.  Do not interfere.  Web interface will then be accessible in the usual way, and Software Update sub-tab in Cloud Features will show the new version #.  If process fails, you may try again with better internet.  If the whole thing bricks, you may start fresh with the factory golden image.  Continue?');
     if (confirmed) {
+        // Suppress the prompt modal from re-rendering on subsequent CSV2 ticks
+        // while the update is in flight. 6 minutes = headroom for the 2-3 min
+        // typical OTA + reboot, then fall back to the prompt if it didn't take.
+        forcedUpdateInProgressUntil = Date.now() + 6 * 60 * 1000;
+        // Immediately re-render the modal as "in progress" so the user gets
+        // feedback before the next CSV2 tick (~5 s away).
+        const overlay = document.getElementById('forced-update-overlay');
+        if (overlay) {
+            overlay.innerHTML = `
+              <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
+                  <div class="section-title" style="margin-bottom: 12px; text-align:center;">
+                      Update in progress…
+                  </div>
+                  <p style="margin: 8px 0 4px 0; font-size: 15px;">
+                      Downloading firmware v<strong>${versionStr}</strong> and rebooting.
+                  </p>
+                  <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
+                      Takes 2-3 minutes total. The dashboard will reload automatically when the device is back online.
+                  </p>
+                  <p style="margin-top: 12px; font-size: 11px; color: #888;">
+                      Do not close this tab or power-cycle the device.
+                  </p>
+              </div>`;
+        }
+
         const form = document.createElement('form');
         form.action = '/get';
         form.method = 'GET';
@@ -3626,21 +3687,21 @@ function handleDeleteAllData() {
 
 function resetThermalPID() {
     if (!confirm('Reset thermal PID? Integrator and filter will be cleared and rebuilt from scratch.')) return;
-    fetch('/resetThermalPID', { method: 'POST' })
+    fetch(buildURL('/resetThermalPID'), { method: 'POST' })
         .then(r => r.ok ? console.log('Thermal PID reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetInnerPID() {
     if (!confirm('Reset output current PID? Integrator will be zeroed and duty will ramp up from 0 via slew limiter.')) return;
-    fetch('/resetInnerPID', { method: 'POST' })
+    fetch(buildURL('/resetInnerPID'), { method: 'POST' })
         .then(r => r.ok ? console.log('Output current PID reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetVoltageLoop() {
     if (!confirm('Reset CV integrator (cv_I)? The voltage loop will rebuild from zero on the next tick.')) return;
-    fetch('/resetVoltageLoop', { method: 'POST' })
+    fetch(buildURL('/resetVoltageLoop'), { method: 'POST' })
         .then(r => r.ok ? console.log('Voltage loop reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
@@ -3652,7 +3713,7 @@ function resetVoltageLoop() {
 let _tuningLogPollTimer = null;
 
 function fetchTuningLog() {
-    fetch('/tuninglog')
+    fetch(buildURL('/tuninglog'))
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (data) renderTuningLog(data); })
         .catch(() => {});
@@ -3777,7 +3838,7 @@ function commitTuningScore() {
 
 function resetTuningLog() {
     if (!confirm('Reset all tuning scores and live windows?')) return;
-    fetch('/resettuninglog', { method: 'POST' })
+    fetch(buildURL('/resettuninglog'), { method: 'POST' })
         .then(() => fetchTuningLog())
         .catch(() => {});
 }
@@ -3849,7 +3910,7 @@ document.addEventListener('DOMContentLoaded', () => {
 let _cvTuningLogPollTimer = null;
 
 function fetchCVTuningLog() {
-    fetch('/cvtuninglog')
+    fetch(buildURL('/cvtuninglog'))
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (data) renderCVTuningLog(data); })
         .catch(() => {});
@@ -3965,7 +4026,7 @@ function renderCVTuningLog(data) {
 
 function resetCVTuningLog() {
     if (!confirm('Reset all CV tuning records?')) return;
-    fetch('/resetcvtuninglog', { method: 'POST' })
+    fetch(buildURL('/resetcvtuninglog'), { method: 'POST' })
         .then(() => fetchCVTuningLog())
         .catch(() => {});
 }
@@ -3989,7 +4050,7 @@ document.addEventListener('DOMContentLoaded', () => {
 let _thermalTuningLogPollTimer = null;
 
 function fetchThermalTuningLog() {
-    fetch('/thermaltuninglog')
+    fetch(buildURL('/thermaltuninglog'))
         .then(r => r.ok ? r.json() : null)
         .then(data => { if (data) renderThermalTuningLog(data); })
         .catch(() => {});
@@ -4074,7 +4135,7 @@ function renderThermalTuningLog(data) {
 
 function resetThermalTuningLog() {
     if (!confirm('Reset all thermal tuning records and live scores?')) return;
-    fetch('/resetthermaltuninglog', { method: 'POST' })
+    fetch(buildURL('/resetthermaltuninglog'), { method: 'POST' })
         .then(() => fetchThermalTuningLog())
         .catch(() => {});
 }
@@ -4311,21 +4372,21 @@ function resetCVAxisRanges() {
 
 function resetVoltageProtectionCounters() {
     if (!confirm('Reset all voltage & current protection counters? FastOV, iExcess, INA OV, hard OC, spike, and disagree counts will be cleared.')) return;
-    fetch('/resetVoltageProtectionCounters', { method: 'POST' })
+    fetch(buildURL('/resetVoltageProtectionCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('Voltage protection counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetThermalProtectionCounters() {
     if (!confirm('Reset thermal protection event counters? Temp critical, sustained, and stale counts will be cleared.')) return;
-    fetch('/resetThermalProtectionCounters', { method: 'POST' })
+    fetch(buildURL('/resetThermalProtectionCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('Thermal protection counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetTempTaskCounters() {
     if (!confirm('Reset DS18B20 sensor health counters? All read/CRC/fail counts will be cleared.')) return;
-    fetch('/resetTempTaskCounters', { method: 'POST' })
+    fetch(buildURL('/resetTempTaskCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('TempTask counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
@@ -8284,22 +8345,6 @@ function handleResetAccelLifetime() {
         .catch(err => diagError('Reset accel lifetime failed:', err));
 }
 
-function handleClearToken() {
-    const confirmation = confirm(
-        "🔴 CLEAR AUTH TOKEN 🔴\n\n" +
-        "This will force the device to re-register.\n\n" +
-        "What will happen:\n" +
-        "• Device will show 'Not Registered' screen\n" +
-        "• All uploads will stop until re-registered\n" +
-        "• You'll need to enter vessel info again\n\n" +
-        "Only do this if:\n" +
-        "• You're troubleshooting registration issues\n" +
-        "• Device is stuck in bad state\n" +
-        "• You suspect token corruption\n\n" +
-        "ARE YOU SURE?"
-    );
-    return confirmation;
-}
 function handleClearOverheatHistory() {
     const confirmation = confirm(
         "⚠️ CLEAR OVERHEAT HISTORY ⚠️\n\n" +
@@ -9636,7 +9681,7 @@ function clearVesselData() {
     const form = this.form || this.closest('form');
     const password = form.querySelector('.password_field').value;
 
-    fetch('/clearVesselInfo', {
+    fetch(buildURL('/clearVesselInfo'), {
         method: 'POST',
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -9798,7 +9843,7 @@ function fetchMatrixStats(explicit = false) {
         return;
     }
 
-    fetch('/effmatrixstats')
+    fetch(buildURL('/effmatrixstats'))
         .then(r => r.json())
         .then(d => {
             if (d.error) return;
@@ -9863,14 +9908,14 @@ function downloadLogs() {
     downloadCvLog();
 
     setTimeout(() => {
-        fetch('/resetlogs', { method: 'POST' })
+        fetch(buildURL('/resetlogs'), { method: 'POST' })
             .catch(err => console.warn('Log reset failed:', err));
     }, 5000);
 }
 
 
 function resetLogs() {
-    fetch('/resetlogs', { method: 'POST' })
+    fetch(buildURL('/resetlogs'), { method: 'POST' })
         .catch(() => { });
 }
 
@@ -10521,7 +10566,7 @@ async function fetchAndRenderThermalLog() {
     const statusEl = document.getElementById('thermallog-status');
     if (statusEl) statusEl.textContent = 'Fetching…';
     try {
-        const resp = await fetch('/thermallog.bin');
+        const resp = await fetch(buildURL('/thermallog.bin'));
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const buf = await resp.arrayBuffer();
         // Capture scroll position only when we're about to do real DOM work (chart rebuild).
@@ -11562,7 +11607,7 @@ function cvBinToCsv(d, csv3) {
 async function downloadCvLog() {
     let buf;
     try {
-        const resp = await fetch('/cvlog.bin');
+        const resp = await fetch(buildURL('/cvlog.bin'));
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         buf = await resp.arrayBuffer();
     } catch (err) {

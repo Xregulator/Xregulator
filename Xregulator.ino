@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.32";
+const char *FIRMWARE_VERSION = "0.0.36";
 
 String currentUID;
 
@@ -2318,7 +2318,6 @@ volatile bool pendingSaveThermalTuningLog = false;
 volatile bool pendingResetEfficiencyMatrix = false;
 volatile bool pendingClearOverheatHistory = false;
 volatile bool pendingSaveUserTableEdits = false;
-volatile bool pendingClearToken = false;
 volatile bool pendingSaveVesselInfo = false;
 volatile bool pendingClearVesselInfo = false;
 bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared after full flush
@@ -3338,7 +3337,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
 
   "<div class=\"info-box\">"
   "<strong>Non-Preferred Option:</strong><br>"
-  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, blue wire) to Ground.  I recommend to just leave it connected to GND forever if you prefer this mode."
+  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, blue wire) to Ground.  Leave it connected to GND forever if you prefer this mode."
   "</div>"
 
   "<label>New Alt. Reg. Hotspot Name (SSID):</label>"
@@ -3347,17 +3346,17 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "<input type=\"password\" name=\"ap_password\" placeholder=\"Leave blank for default: alternator123\">"
 
   "<div class=\"info-box\">"
-  "***To boot into Hotspot mode, the Hotspot Wire must be connected to Ground during a restart.***"
+  "***To boot into Hotspot mode, the Hotspot Wire (pin 12 in RJ3, the rightmost ethernet connector, blue wire) must be connected to Ground during a restart.***"
   "</div>"
 
   "<div class=\"info-box\">"
-  "To return to this Wifi Configuration page at any time, connect the Wifi Configuration Wire to Ground during a restart."
+  "To return to this Wifi Configuration page at any time, connect the WifiReset wire (pin 11, RJ3, Orange/White) to Ground during a restart."
   "</div>"
 
   "<button type=\"submit\">Save Configuration</button>"
 
   "<div class=\"info-box\">"
-  "After saving, this page may become unresponsive or disappear. In any case, wait 20 seconds, then reconnect to your chosen network to access the full alternator interface at the same url (alternator.local)."
+  "After saving, this page may become unresponsive or disappear. In any case, wait 20 seconds, then reconnect to your chosen network to access the full alternator interface at this same url (alternator.local).  Or, just use the iOS app."
   "</div>"
   "</form>"
   "</div>"
@@ -3841,10 +3840,6 @@ void loop() {
       pendingSaveUserTableEdits = false;
       saveUserTableEdits();
     }
-    if (pendingClearToken) {
-      pendingClearToken = false;
-      executeClearToken();
-    }
     if (pendingSaveVesselInfo) {
       pendingSaveVesselInfo = false;
       saveVesselInfoToFile();
@@ -3928,10 +3923,6 @@ void loop() {
             if (pendingSaveUserTableEdits) {
               pendingSaveUserTableEdits = false;
               saveUserTableEdits();
-            }
-            if (pendingClearToken) {
-              pendingClearToken = false;
-              executeClearToken();
             }
             if (pendingSaveVesselInfo) {
               pendingSaveVesselInfo = false;

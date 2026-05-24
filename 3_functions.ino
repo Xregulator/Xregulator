@@ -1304,6 +1304,155 @@ void setupWiFiConfigServer() {
   Serial.println("=== WIFI CONFIG SERVER SETUP COMPLETE ===");
 }
 
+// F-RES-01/F-RES-02 fix (2026-05-24). Replaces HTTPClient in the 4 cloud-POST handlers
+// (/checkRegistration /registerProfile /updateProfile /deleteAllData). Reasons documented
+// in private_refs "what fixed your crash.md": HTTPClient::getString() hangs on TLS, and
+// http.begin(url) with no WiFiClientSecure has undefined behavior on https URLs. Pattern
+// mirrors executeUploadPayload() in 2_functions.ino. Returns HTTP status code (e.g. 200,
+// 401) on success, or a negative sentinel on transport failure:
+//   -1 = low heap, -2 = connect fail, -3 = handshake/global timeout, -4 = send fail,
+//   -5 = read timeout / no status line.
+// responseBuf is null-terminated on return; pass nullptr if body not needed.
+int doCloudPOST(const char *endpointPath, const char *payload,
+                char *responseBuf, size_t responseBufSize) {
+  if (responseBuf && responseBufSize > 0) responseBuf[0] = '\0';
+
+  // Hard floor only — setInsecure() TLS footprint is ~5-10 KB; matches the
+  // (zero) pre-check in executeUploadPayload (which also uses setInsecure).
+  // The original 40 KB threshold was sized for setCACert and tripped right
+  // after a sensor upload finished (heap not fully reclaimed yet). If we hit
+  // a real OOM, client.connect() will return false → -2 with diagnostic.
+  if (ESP.getMaxAllocHeap() < 15000) {
+    Serial.printf("doCloudPOST(%s): heap critically low (max alloc %u), aborting\n",
+                  endpointPath, ESP.getMaxAllocHeap());
+    return -1;
+  }
+
+  WiFiClientSecure client;
+  // Match executeUploadPayload (2_functions.ino) which uses setInsecure(). The original
+  // doCloudPOST attempt used setCACert(server_root_ca) but that's our Let's Encrypt ISRG
+  // Root X1 — Supabase fronts behind Cloudflare and presents a different chain, so cert
+  // verification failed with mbedTLS -0x2700 (X509 verify failed) and connect() returned
+  // false in ~770 ms. Moving to setCACert across all cloud calls is bug scan F-RES-09
+  // (Optional, explicitly deferred — marine threat model is trusted owner-WiFi).
+  client.setInsecure();
+  // setTimeout omitted: Stream::setTimeout is ms (not seconds as some docs claim) and
+  // our read loops use available()+read() polling with explicit millis() deadlines,
+  // so the Stream-level timeout doesn't gate anything in this path.
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+
+  uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  if (!client.connect(host, port, CONNECT_TIMEOUT)) {
+    char errBuf[128] = {0};
+    int lastErr = client.lastError(errBuf, sizeof(errBuf));
+    Serial.printf("doCloudPOST(%s): connect FAIL in %u ms, mbedTLS err=%d (0x%X) '%s'\n",
+                  endpointPath, (unsigned)(millis() - start), lastErr, lastErr, errBuf);
+    client.stop();
+    return -2;
+  }
+  esp_task_wdt_reset();
+  if (millis() - start > GLOBAL_TIMEOUT) {
+    Serial.printf("doCloudPOST(%s): GLOBAL_TIMEOUT after connect at %u ms\n",
+                  endpointPath, (unsigned)(millis() - start));
+    client.stop();
+    return -3;
+  }
+
+  size_t payloadLen = strlen(payload);
+  // HTTP/1.0 deliberately: Cloudflare (which fronts Supabase) sends
+  // `Transfer-Encoding: chunked` to HTTP/1.1 clients, and our simple read-until-EOF
+  // body loop below has no chunked-decoder. HTTP/1.0 forces Cloudflare to send a
+  // plain body + `Connection: close`, which the loop handles correctly. We don't
+  // need keep-alive here (each handler does at most one POST).
+  int headerBytes = client.printf(
+    "POST %s HTTP/1.0\r\n"
+    "Host: %s\r\n"
+    "Content-Type: application/json\r\n"
+    "Authorization: Bearer %s\r\n"
+    "Connection: close\r\n"
+    "Content-Length: %u\r\n\r\n",
+    endpointPath, host, SUPABASE_ANON_KEY, (unsigned)payloadLen);
+
+  if (headerBytes <= 0 || !client.connected()) {
+    Serial.printf("doCloudPOST(%s): header write FAIL headerBytes=%d connected=%d\n",
+                  endpointPath, headerBytes, (int)client.connected());
+    client.stop();
+    return -4;
+  }
+
+  size_t sent = client.write((const uint8_t *)payload, payloadLen);
+  if (sent != payloadLen) {
+    Serial.printf("doCloudPOST(%s): payload write SHORT sent=%u expected=%u\n",
+                  endpointPath, (unsigned)sent, (unsigned)payloadLen);
+    client.stop();
+    return -4;
+  }
+
+  // Read status line into local buffer
+  int httpCode = 0;
+  uint32_t readStart = millis();
+  char statusBuf[64];
+  size_t statusLen = 0;
+  bool gotStatusLine = false;
+
+  while (client.connected() && (millis() - readStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
+      if (c == '\n') { gotStatusLine = true; break; }
+    }
+    if (gotStatusLine) break;
+    if (millis() - start > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+  if (!gotStatusLine) {
+    Serial.printf("doCloudPOST(%s): no status line within READ_TIMEOUT (got %u bytes, connected=%d)\n",
+                  endpointPath, (unsigned)statusLen, (int)client.connected());
+    client.stop();
+    return -5;
+  }
+  statusBuf[statusLen] = '\0';
+  char *sp = strchr(statusBuf, ' ');
+  if (sp) httpCode = atoi(sp + 1);
+  if (httpCode <= 0) {
+    Serial.printf("doCloudPOST(%s): unparseable status line '%s'\n", endpointPath, statusBuf);
+    client.stop();
+    return -5;
+  }
+
+  // Drain headers until \r\n\r\n, then read body into responseBuf
+  enum { ST_HDR, ST_BODY } state = ST_HDR;
+  int crlfRun = 0;
+  size_t bodyLen = 0;
+
+  while (client.connected() && (millis() - readStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      if (state == ST_HDR) {
+        if (c == '\r') continue;
+        if (c == '\n') {
+          crlfRun++;
+          if (crlfRun >= 2) state = ST_BODY;
+        } else {
+          crlfRun = 0;
+        }
+      } else {
+        if (responseBuf && bodyLen < responseBufSize - 1) responseBuf[bodyLen++] = c;
+      }
+    }
+    if (millis() - start > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+  if (responseBuf && responseBufSize > 0) responseBuf[bodyLen] = '\0';
+
+  client.stop();
+  return httpCode;
+}
+
 void setupServer() {
 
   static bool serverInitialized = false;
@@ -2263,18 +2412,6 @@ void setupServer() {
       queueConsoleMessage("Upload buffer manually cleared from web");
       inputMessage = "1";
     }
-    if (request->hasParam("ClearToken")) {
-      foundParameter = true;
-
-      authToken = "";
-      isRegistered = false;
-
-      pendingClearToken = true;  // nvs_commit deferred to Core 1 to avoid SSE gap
-
-      queueConsoleMessage("Auth token cleared - device requires re-registration");
-      inputMessage = "1";
-    }
-
     else if (request->hasParam("degradationThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("degradationThreshold")->value();
@@ -4305,7 +4442,6 @@ void setupServer() {
     String deviceUID = String(device_id_hex);
     Serial.println("=== checkRegistration called ===");
     Serial.println("isRegistered: " + String(isRegistered));
-    Serial.println("authToken: " + authToken);
     Serial.println("Current deviceUID: " + deviceUID);
 
     if (!isRegistered) {
@@ -4314,22 +4450,16 @@ void setupServer() {
     }
 
     // Validate token with Supabase (send only token, not device_uid)
-    HTTPClient http;
-    char url[256];
-    snprintf(url, sizeof(url), "%s/functions/v1/validate-token", SUPABASE_URL);
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    char authHeader[512];
-    snprintf(authHeader, sizeof(authHeader), "Bearer %s", SUPABASE_ANON_KEY);
-    http.addHeader("Authorization", authHeader);
-
+    // F-RES-01/F-RES-02: switched from HTTPClient to doCloudPOST() raw WiFiClientSecure.
     DynamicJsonDocument payloadDoc(256);
     payloadDoc["token"] = authToken;
     String payload;
     serializeJson(payloadDoc, payload);
-    int httpCode = http.POST(payload);
-    String response = http.getString();
-    http.end();
+
+    char responseBuf[2048];
+    int httpCode = doCloudPOST("/functions/v1/validate-token", payload.c_str(),
+                               responseBuf, sizeof(responseBuf));
+    String response = String(responseBuf);
 
     Serial.println("Validate-token HTTP code: " + String(httpCode));
     Serial.println("Validate-token response: " + response);
@@ -4422,7 +4552,6 @@ void setupServer() {
     String deviceUID = String(device_id_hex);
     DynamicJsonDocument doc(2048);
     doc["device_uid"] = deviceUID;
-    doc["password"] = String(requiredPassword);
     // User account info
     doc["username"] = request->getParam("username", true)->value();
     doc["email"] = request->getParam("email", true)->value();
@@ -4446,31 +4575,21 @@ void setupServer() {
     String payload;
     serializeJson(doc, payload);
     Serial.println("=== REGISTRATION REQUEST ===");
-    Serial.println("Payload: " + payload);
-    HTTPClient http;
-    char url[256];
-    snprintf(url, sizeof(url), "%s/functions/v1/register-device", SUPABASE_URL);
-    Serial.print("Connecting to: ");
-    Serial.println(url);
     Serial.printf("=== PRE-REGISTRATION HEAP ===\n");
     Serial.printf("Free internal: %u\n", ESP.getFreeHeap());
     Serial.printf("Max alloc internal: %u\n", ESP.getMaxAllocHeap());
     Serial.printf("Free PSRAM: %u\n", ESP.getFreePsram());
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    char authHeader[512];
-    snprintf(authHeader, sizeof(authHeader), "Bearer %s", SUPABASE_ANON_KEY);
-    http.addHeader("Authorization", authHeader);
 
-    int httpCode = http.POST(payload);
-    String response = http.getString();
+    // F-RES-01/F-RES-02: doCloudPOST() = raw WiFiClientSecure + setCACert + bounded read.
+    char responseBuf[2048];
+    int httpCode = doCloudPOST("/functions/v1/register-device", payload.c_str(),
+                               responseBuf, sizeof(responseBuf));
+    String response = String(responseBuf);
 
     Serial.println("Response code: " + String(httpCode));
     Serial.println("Response: " + response);
 
-    http.end();
-
-    // Connection-level failure (DNS, timeout, refused, etc.)
+    // Connection-level failure (negative sentinels from doCloudPOST)
     if (httpCode <= 0) {
       Serial.println("HTTP connection failed: " + String(httpCode));
       request->send(503, "application/json",
@@ -4546,27 +4665,22 @@ void setupServer() {
     serializeJson(doc, payload);
 
     Serial.println("=== UPDATE PROFILE REQUEST ===");
-    Serial.println("Token from NVS: " + token);
     Serial.println("Device UID: " + deviceUID);
-    Serial.println("Payload: " + payload);
 
-    HTTPClient http;
-    char url[256];
-    snprintf(url, sizeof(url), "%s/functions/v1/update-profile", SUPABASE_URL);
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    char authHeader[512];
-    snprintf(authHeader, sizeof(authHeader), "Bearer %s", SUPABASE_ANON_KEY);
-    http.addHeader("Authorization", authHeader);
-
-    int httpCode = http.POST(payload);
-    String response = http.getString();
+    // F-RES-01/F-RES-02: doCloudPOST() = raw WiFiClientSecure + setCACert + bounded read.
+    char responseBuf[2048];
+    int httpCode = doCloudPOST("/functions/v1/update-profile", payload.c_str(),
+                               responseBuf, sizeof(responseBuf));
+    String response = String(responseBuf);
 
     Serial.println("Response code: " + String(httpCode));
     Serial.println("Response: " + response);
 
-    http.end();
-
+    if (httpCode <= 0) {
+      request->send(503, "application/json",
+                    "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
+      return;
+    }
     request->send(httpCode, "application/json", response);
   });
 
@@ -4577,33 +4691,35 @@ void setupServer() {
       return;
     }
 
-    String deviceUID = String(device_id_hex);
-    // Use ArduinoJson for consistency
+    // Cloud requires auth_token to authorize the cascade delete
+    String token = loadAuthToken();
+    if (token.length() == 0) {
+      request->send(400, "application/json", "{\"success\":false,\"error\":\"Not registered\"}");
+      return;
+    }
+
     DynamicJsonDocument doc(256);
-    doc["device_uid"] = deviceUID;
+    doc["token"] = token;
 
     String payload;
     serializeJson(doc, payload);
 
     Serial.println("=== DELETE ALL DATA REQUEST ===");
-    Serial.println("Payload: " + payload);
 
-    HTTPClient http;
-    char url[256];
-    snprintf(url, sizeof(url), "%s/functions/v1/delete-user-data", SUPABASE_URL);
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    char authHeader[512];
-    snprintf(authHeader, sizeof(authHeader), "Bearer %s", SUPABASE_ANON_KEY);
-    http.addHeader("Authorization", authHeader);
-
-    int httpCode = http.POST(payload);
-    String response = http.getString();
-    http.end();
+    // F-RES-01/F-RES-02: doCloudPOST() = raw WiFiClientSecure + setCACert + bounded read.
+    char responseBuf[1024];
+    int httpCode = doCloudPOST("/functions/v1/delete-user-data", payload.c_str(),
+                               responseBuf, sizeof(responseBuf));
+    String response = String(responseBuf);
 
     Serial.println("Response code: " + String(httpCode));
     Serial.println("Response: " + response);
 
+    if (httpCode <= 0) {
+      request->send(503, "application/json",
+                    "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
+      return;
+    }
     if (httpCode == 200) {
       clearAuthToken();
       Serial.println("Auth token cleared from NVS");
@@ -4967,13 +5083,21 @@ void setupServer() {
       Serial.printf("ERROR: Failed to open NVS namespace 'cloud' (err=%d)\n", (int)err);
     }
 
-    char out[768];
-    const char *globalTok = authToken.c_str();  // authToken is your global String
+    // Redact token to last 4 chars - this endpoint is unauthenticated; the full
+    // token would let anyone on the LAN impersonate the device against the cloud.
+    auto tail4 = [](const char *s) -> const char * {
+      size_t n = strlen(s);
+      return (n > 4) ? (s + n - 4) : s;
+    };
+    char out[512];
+    const char *globalTok = authToken.c_str();
     snprintf(out, sizeof(out),
-             "isRegistered: %d\nauthToken global: %s\nNVS stored token: %s\n",
+             "isRegistered: %d\nauthToken global: ...%s (len=%u)\nNVS stored token: ...%s (len=%u)\n",
              (int)isRegistered,
-             globalTok ? globalTok : "",
-             haveStored ? storedToken : "");
+             globalTok && *globalTok ? tail4(globalTok) : "(empty)",
+             (unsigned)strlen(globalTok),
+             haveStored ? tail4(storedToken) : "(empty)",
+             haveStored ? (unsigned)strlen(storedToken) : 0u);
     request->send(200, "text/plain", out);
   });
 
@@ -6152,10 +6276,9 @@ String loadAuthToken() {
   isRegistered = (authToken.length() > 0);
 
   Serial.println("=== loadAuthToken ===");
-  Serial.println("Token from NVS: " + authToken);
 
   if (isRegistered) {
-    Serial.println("Auth token loaded: " + authToken);
+    Serial.println("Auth token loaded (registered)");
   } else {
     Serial.println("No auth token found - device not registered");
   }
