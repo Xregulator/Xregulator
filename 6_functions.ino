@@ -95,6 +95,7 @@ int clamp_i(int x, int lo, int hi) {
  * @return         Slew-limited value
  */
 float slew_limit_f(float prev, float target, float rise_per_s, float fall_per_s, float dt_sec) {
+  if (dt_sec <= 0.0f) return prev;  // no time elapsed → no change; also guards negative/NaN dt
   float max_rise = rise_per_s * dt_sec;
   float max_fall = fall_per_s * dt_sec;
   float delta = target - prev;
@@ -983,6 +984,7 @@ void AdjustFieldLearnMode() {
 
   uint32_t actualDtMs = (lastControlTickMs == 0) ? 62 : (currentMillis - lastControlTickMs);
   if (actualDtMs > 500) actualDtMs = 500;
+  if (actualDtMs == 0) actualDtMs = 1;  // floor prevents 0-div in slew calcs when tick runs twice in same ms
   float actualDtSec = (float)actualDtMs / 1000.0f;
 
   static float uTargetRaw_cached = 50.0f;   // always MaxTableValue (assigned from uTargetRaw); used only for supervisorLimiting gate
@@ -3846,12 +3848,15 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
       float rawSlope = (tempSample - oldest) / windowSec;
       const float SLOPE_CLAMP = 0.5f;  // °F/sec — beyond this is sensor noise or fault
       if (fabsf(rawSlope) > SLOPE_CLAMP) {
-        rawSlope = clamp_f(rawSlope, -SLOPE_CLAMP, SLOPE_CLAMP);
+        // Reject as sensor noise; hold the previous slope so a real fast rise still has
+        // predictive signal while one outlier sample rolls through the 60s window.
+        // Old behavior was to clamp to ±0.5 — that injected up to ±15 °F false lookahead.
         static uint32_t slopeClampLastLogMs = 0;
         if ((uint32_t)(nowMs - slopeClampLastLogMs) >= 60000) {
           slopeClampLastLogMs = nowMs;
-          queueConsoleMessageF("TempPID: slope clamped to %.3f °F/s — check sensor", rawSlope);
+          queueConsoleMessageF("TempPID: raw slope %.3f °F/s rejected as sensor noise — holding previous", rawSlope);
         }
+        rawSlope = thermalSlopeFPerSec;  // hold previous good value
       }
       thermalSlopeFPerSec = rawSlope;
     } else {

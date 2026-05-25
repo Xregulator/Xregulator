@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.36";
+const char *FIRMWARE_VERSION = "0.0.41";
 
 String currentUID;
 
@@ -972,7 +972,7 @@ int UseFloat = 0;              // 1 = enter float after absorption, 0 = idle unt
 
 
 // Absorption stage
-bool inAbsorptionStage = false;
+volatile bool inAbsorptionStage = false;
 uint32_t absorptionStartTime = 0;
 float AbsorptionVoltage = 14.0f;
 uint32_t AbsorptionTimeoutMs = 1200000UL;   //
@@ -1078,12 +1078,13 @@ volatile bool battVFreshFlag = false;
 bool ibvFreshFlag = false;  // set each INA228 read; cleared by fastOV dvdt block
 
 // === Cloud Features Variables (and some others later added to LiveData) ===
-// Energy (Wh)
-float ChargedEnergy_AllTime = 0.0f;            // Wh (lifetime total produced from all sources)
-float DischargedEnergy_AllTime = 0.0f;         // Wh (lifetime)
+// Energy (Wh) — _AllTime totals are double so they survive years of accumulation
+// without losing precision (float mantissa runs out around 16M Wh)
+double ChargedEnergy_AllTime = 0.0;            // Wh (lifetime total produced from all sources)
+double DischargedEnergy_AllTime = 0.0;         // Wh (lifetime)
 float SolarChargedEnergy = 0.0f;               // Solar Wh (session)
-float SolarChargedEnergy_AllTime = 0.0f;       // Solar Wh (lifetime)
-float AlternatorChargedEnergy_AllTime = 0.0f;  // Alternator Wh (lifetime)
+double SolarChargedEnergy_AllTime = 0.0;       // Solar Wh (lifetime)
+double AlternatorChargedEnergy_AllTime = 0.0;  // Alternator Wh (lifetime)
 // Fuel (L)
 float EngineFuelUsed = 0.0f;              // L (session)
 float EngineFuelUsed_AllTime = 0.0f;      // L (lifetime)
@@ -1100,7 +1101,7 @@ float PeakVoltage_AllTime = 0.0f;  // V (lifetime peak)
 float MinVoltage = 99.0f;          // V (session min)
 float MinVoltage_AllTime = 99.0f;  // V (lifetime min)
 // Runtime (hours)
-float EngineRunTime_AllTime = 0.0f;  // hours (lifetime)
+double EngineRunTime_AllTime = 0.0;  // seconds (lifetime) — divide by 3600 for hours; double for many-year precision
 // Charge cycles (count)
 float ChargeCycles = 0;          // count (session)
 float ChargeCycles_AllTime = 0;  // count (lifetime)
@@ -1124,8 +1125,8 @@ float socAccumulator_AllTime = 0.0f;
 unsigned long totalSocSampleTime_AllTime = 0;
 unsigned long totalVoltageSampleTime_AllTime = 0;
 unsigned long totalSpeedSampleTime_AllTime = 0;
-float voltageAccumulator_AllTime = 0.0f;
-float speedAccumulator_AllTime = 0.0f;  //
+double voltageAccumulator_AllTime = 0.0;  // V·s (lifetime) — double; float overflowed in ~14 days
+double speedAccumulator_AllTime = 0.0;    // kt·s (lifetime) — double
 float AvgVoltage_AllTime = 0.0f;
 
 
@@ -1329,6 +1330,17 @@ volatile uint16_t sensorRingCount = 0;   // 0..SENSOR_RING_SIZE
 volatile int32_t sensorRingInFlightIndex = -1;  // ring index currently being uploaded by Core 0 (-1 = none)
 volatile bool forceCloudFlushPending = false;   // set by /get?forceCloudFlush=1, cleared after drain attempt
 volatile bool sensorRingAnnouncedEmpty = false; // throttle for "all data uploaded" console — fires once per drain-to-empty
+
+// Barometric pressure history — 10-min cadence, 7 days. Feeds the Other-tab barometer
+// (3hr tendency for Zambretti + plot of pressure trend). Beyond 1 week → cloud.
+// Sized small (2 KB blob) to keep NVS wear negligible; saved only at field-off edge.
+const uint16_t  BARO_HISTORY_SIZE       = 1008;                  // 7 d × 24 h × 6 samp/h
+const uint32_t  BARO_SAMPLE_INTERVAL_MS = 10UL * 60UL * 1000UL;  // 10 minutes
+uint16_t       *baroPressureHistory     = nullptr;               // ps_malloc'd in setup(); mbar × 10 (0 = no sample)
+volatile uint16_t baroHistoryHead       = 0;                     // next write slot (circular)
+uint16_t        prev_baroHistoryHead    = 0xFFFF;                // NVS shadow — write only when head moved
+unsigned long   lastBaroSampleMs        = 0;                     // millis() of last sample
+time_t          baroHistoryLastEpoch    = 0;                     // GPS/NTP epoch of newest sample (0 = unsynced — JS falls back to fixed sample spacing)
 
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
@@ -1540,9 +1552,9 @@ int32_t prev_AltOnTime_AllTime = 0;
 float prev_ChargeCycles_AllTime = 0;
 int32_t prev_TotalDist_AllTime = 0;
 int32_t prev_AvgSpeed_AllTime = 0;
-float prev_spdAccum_AllTime = -1.0f;
+double prev_spdAccum_AllTime = -1.0;
 uint32_t prev_spdTime_AllTime = 0;
-float prev_vltAccum_AllTime = -1.0f;
+double prev_vltAccum_AllTime = -1.0;
 uint32_t prev_vltTime_AllTime = 0;
 int32_t prev_AvgSOC = 0;
 int32_t prev_AvgSOC_AllTime = 0;
@@ -1934,9 +1946,9 @@ bool setpointInitialized = false;
 // ===== LEARNING MODE CONTROL PARAMETERS =====
 // Primary Controls
 //int loggingEnabled = 0;             // 0=disabled, 1=enabled    was a dead variable
-int LearningPaused = 0;           // Temporarily pause learning
-int LearningUpwardEnabled = 1;    // Allow upward table adjustments
-int LearningDownwardEnabled = 1;  // Allow downward table adjustments
+// LearningPaused / LearningUpwardEnabled / LearningDownwardEnabled removed —
+// were write-only (settable via /get, persisted, transmitted in CSV3 + config snapshot)
+// but never consumed in any control logic. UI never built. Cleaner to delete than leave dormant.
 
 bool learningTableUpdated = false;
 
@@ -2300,14 +2312,13 @@ unsigned long LearningMemoryDuration = 2592000000;  // How long to remember even
 
 // Safety Overrides
 int IgnoreLearningDuringPenalty = 1;  // Block learning during penalty
-int EnableNeighborLearning = 1;       // Update adjacent RPM points
+// EnableNeighborLearning removed — write-only with no consumer (see note above on LearningPaused).
 int EnableAmbientCorrection = 0;      // Apply temperature correction
 
 // Diagnostics & Debugging
-int ShowLearningDebugMessages = 1;  // Verbose console output
+// ShowLearningDebugMessages / LearningDryRunMode removed — write-only with no consumer.
 int LogAllLearningEvents = 0;       // Log every learning decision
 int CloudFeatures = 1;
-int LearningDryRunMode = 0;  // Calculate but don't apply changes
 
 // Data Management
 // Deferred saves — set by Core 0 (AsyncWebServer handlers), executed on Core 1 in main loop
@@ -2485,7 +2496,7 @@ bool lockoutWasActive = false;
 // in AdjustFieldLearnMode after every supervisor has voted, so all three flags
 // below reflect the true combined state, not just Group 1/2.
 float g_fastOvCurrentCap = 0.0f;   // live unified cap ceiling this tick (amps)
-bool g_fastOvClampActive = false;  // true if ANY protection capped current this tick
+volatile bool g_fastOvClampActive = false;  // true if ANY protection capped current this tick
 uint32_t g_fastOvClampCount = 0;   // rising-edge counter across all protections
 
 float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO tick
@@ -2988,7 +2999,7 @@ float g_iExcessDutyCap = 100.0f;
 float LoadDumpDtThresh1 = 4000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
 float LoadDumpDtThresh  = 1500.0f;  // A/s — tier 2: fires when TWO consecutive samples both exceed this; noise ceiling ~354 A/s consecutive
 float LoadDumpDtThresh3 = 1000.0f;  // A/s — tier 3: fires when THREE consecutive samples all exceed this (slow relay-contact disconnects)
-bool g_loadDumpActive = false;
+volatile bool g_loadDumpActive = false;
 uint8_t g_awState = 0;  // integrator AW state: 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
 uint32_t g_loadDumpCount = 0;
 
@@ -3293,7 +3304,7 @@ const uint16_t adsMuxCodes[4] = {
 
 // Forward declarations (for WiFi functions)
 String readFile(fs::FS &fs, const char *path);
-void writeFile(fs::FS &fs, const char *path, const char *message);
+bool writeFile(fs::FS &fs, const char *path, const char *message);
 void setupWiFi();
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout);
 void setupAccessPoint();
@@ -3337,7 +3348,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
 
   "<div class=\"info-box\">"
   "<strong>Non-Preferred Option:</strong><br>"
-  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, blue wire) to Ground.  Leave it connected to GND forever if you prefer this mode."
+  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, Blue wire) to Ground.  Leave it connected to GND forever if you prefer this mode."
   "</div>"
 
   "<label>New Alt. Reg. Hotspot Name (SSID):</label>"
@@ -3346,7 +3357,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "<input type=\"password\" name=\"ap_password\" placeholder=\"Leave blank for default: alternator123\">"
 
   "<div class=\"info-box\">"
-  "***To boot into Hotspot mode, the Hotspot Wire (pin 12 in RJ3, the rightmost ethernet connector, blue wire) must be connected to Ground during a restart.***"
+  "***To boot into Hotspot mode, the Hotspot Wire (pin 12 in RJ3, the rightmost ethernet connector, Blue wire) must be connected to Ground during a restart.***"
   "</div>"
 
   "<div class=\"info-box\">"
@@ -3378,15 +3389,24 @@ void setup() {
   Serial.println("\n\n=== SYSTEM STARTUP ===");
   // Allocate buffers from PSRAM
   configPayloadBuffer = (char *)ps_malloc(CONFIG_PAYLOAD_SIZE);
+  if (!configPayloadBuffer) Serial.println("FATAL: configPayloadBuffer ps_malloc failed");
   payloadBuffer = (char *)ps_malloc(PAYLOAD_BUFFER_SIZE);
+  if (!payloadBuffer) Serial.println("FATAL: payloadBuffer ps_malloc failed");
   tempBuffer = (char *)ps_malloc(PAYLOAD_BUFFER_SIZE);
+  if (!tempBuffer) Serial.println("FATAL: tempBuffer ps_malloc failed");
   filenameBuffer = (char *)ps_malloc(FILENAME_BUFFER_SIZE);
+  if (!filenameBuffer) Serial.println("FATAL: filenameBuffer ps_malloc failed");
   timestampBuffer = (char *)ps_malloc(TIMESTAMP_BUFFER_SIZE);
+  if (!timestampBuffer) Serial.println("FATAL: timestampBuffer ps_malloc failed");
   messageBuffer = (char *)ps_malloc(MESSAGE_BUFFER_SIZE);
+  if (!messageBuffer) Serial.println("FATAL: messageBuffer ps_malloc failed");
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   sensorRing = (SensorSnapshot *)ps_malloc(SENSOR_RING_SIZE * sizeof(SensorSnapshot));
   if (!sensorRing) Serial.println("FATAL: sensorRing ps_malloc failed");
   else memset(sensorRing, 0, SENSOR_RING_SIZE * sizeof(SensorSnapshot));
+  baroPressureHistory = (uint16_t *)ps_malloc(BARO_HISTORY_SIZE * sizeof(uint16_t));
+  if (!baroPressureHistory) Serial.println("FATAL: baroPressureHistory ps_malloc failed");
+  else memset(baroPressureHistory, 0, BARO_HISTORY_SIZE * sizeof(uint16_t));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
   // CH1 interval ring — 30 KB to PSRAM
@@ -3551,6 +3571,11 @@ void setup() {
   memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
   memset(&ft_efficiencyTracker, 0, sizeof(FuncTiming));
+  memset(&ft_rai_total, 0, sizeof(FuncTiming));
+  memset(&ft_rai_ina228, 0, sizeof(FuncTiming));
+  memset(&ft_rai_ads_state, 0, sizeof(FuncTiming));
+  memset(&ft_rai_bmp_state, 0, sizeof(FuncTiming));
+  memset(&ft_rai_imu, 0, sizeof(FuncTiming));
 
 
   captureResetReason();            // immediately capture the reason for last ESP32 shutdown and store in LittleFS and variable that won't be overwritten until next boot
@@ -3766,19 +3791,29 @@ void loop() {
       if (!core0Busy) {
         Serial.println("OTA: Running one-time firmware/version checks after 3s...");
 
+        // Both sends must succeed before we mark otaCheckDone — otherwise a queue-full
+        // at boot would skip both retries permanently. httpsQueue is only depth-2.
+        bool bothSent = true;
+
         debugStackBeforeHTTPS("updateFirmwareVersionInSupabase");
         if (WiFi.RSSI() >= -76) {
           HttpsRequest req = { .type = HTTPS_UPDATE_FW_VERSION };
-          xQueueSend(httpsQueue, &req, 0);
+          if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+            Serial.println("OTA: HTTPS queue full — will retry FW version push next loop");
+            bothSent = false;
+          }
         }
 
         debugStackBeforeHTTPS("checkForForcedUpdate");
         if (WiFi.RSSI() >= -76) {
           HttpsRequest req = { .type = HTTPS_CHECK_FORCED_UPDATE };
-          xQueueSend(httpsQueue, &req, 0);
+          if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+            Serial.println("OTA: HTTPS queue full — will retry forced-update check next loop");
+            bothSent = false;
+          }
         }
 
-        otaCheckDone = true;
+        if (bothSent) otaCheckDone = true;
       }
       // If blocked, will retry next loop iteration
     } else {
@@ -3805,6 +3840,19 @@ void loop() {
     TIMED_CALL(ft_UpdateBoardTempPressureMaximums, UpdateBoardTempPressureMaximums());  // NEW
     TIMED_CALL(ft_handleSocGainReset, handleSocGainReset());                            // do the dynamic updates
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
+
+    // Barometric pressure history sampler — 5-min cadence into baroPressureHistory ring.
+    // Skipped if BMP388 hasn't reported (NAN). Wall-clock epoch stamped only if timeIsSynced
+    // (NTP or GPS); on cold boot before sync, last-sample epoch stays at its loaded NVS value
+    // so the JS can detect a power-off gap and grey out the affected slots.
+    if (baroPressureHistory && (currentTime - lastBaroSampleMs >= BARO_SAMPLE_INTERVAL_MS)) {
+      lastBaroSampleMs = currentTime;
+      if (!isnan(baroPressure)) {
+        baroPressureHistory[baroHistoryHead] = (uint16_t)(baroPressure * 10.0f + 0.5f);
+        baroHistoryHead = (baroHistoryHead + 1) % BARO_HISTORY_SIZE;
+        if (timeIsSynced) baroHistoryLastEpoch = timeBase + (currentTime - timeBaseMillis) / 1000;
+      }
+    }
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   // Periodic NVS save removed: nvs_commit() can block Core 1 for hundreds of ms during
@@ -4181,7 +4229,9 @@ void loop() {
                 req.type = HTTPS_UPLOAD_CONFIG;
                 strncpy(req.payload, configPayloadBuffer, sizeof(req.payload) - 1);
                 req.payload[sizeof(req.payload) - 1] = '\0';
-                xQueueSend(httpsQueue, &req, 0);
+                if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                  queueConsoleMessage("Config snapshot: HTTPS queue full, will retry next interval");
+                }
               }
             }
           }

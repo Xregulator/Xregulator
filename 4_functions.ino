@@ -152,19 +152,19 @@ bool executeFetchWeatherData() {
   // Called by HTTPS task on Core 0
   Serial.println(">>> executeFetchWeatherData() ENTERED");
   if (LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0) {
-    strcpy(weatherLastError, "No GPS coordinates available");
+    snprintf(weatherLastError, sizeof(weatherLastError), "No GPS coordinates available");
     weatherDataValid = 0;
     queueConsoleMessageF("Weather: No GPS coordinates");
     return false;
   }
   if (currentMode != MODE_CLIENT) {
-    strcpy(weatherLastError, "Not in client mode");
+    snprintf(weatherLastError, sizeof(weatherLastError), "Not in client mode");
     weatherDataValid = 0;
     return false;
   }
 
   if (WiFi.status() != WL_CONNECTED) {
-    strcpy(weatherLastError, "WiFi not connected");
+    snprintf(weatherLastError, sizeof(weatherLastError), "WiFi not connected");
     weatherDataValid = 0;
     return false;
   }
@@ -203,7 +203,7 @@ bool executeFetchWeatherData() {
     }
     JsonArray radiation = doc["daily"]["shortwave_radiation_sum"];
     if (radiation.size() < 3) {
-      strcpy(weatherLastError, "Insufficient forecast data");
+      snprintf(weatherLastError, sizeof(weatherLastError), "Insufficient forecast data");
       weatherDataValid = 0;
       http.end();
       return false;
@@ -284,8 +284,8 @@ void updateWeatherMode() {
     return;
   }
 
-  // Check if time to auto-refresh
-  if (now >= nextWeatherUpdate) {
+  // Check if time to auto-refresh — signed delta survives the 49.7-day millis() rollover
+  if ((int32_t)(now - nextWeatherUpdate) >= 0) {
     HttpsRequest req = { .type = HTTPS_FETCH_WEATHER };
     if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
       nextWeatherUpdate = now + WeatherUpdateInterval;
@@ -1416,11 +1416,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     accelEnabled = readFile(LittleFS, "/accelEnabled.txt").toInt();
   }
 
-  if (!fsExists("/LearningPaused.txt")) {
-    writeFile(LittleFS, "/LearningPaused.txt", String(LearningPaused).c_str());
-  } else {
-    LearningPaused = readFile(LittleFS, "/LearningPaused.txt").toInt();
-  }
   if (!fsExists("/IgnoreLearningDuringPenalty.txt")) {
     writeFile(LittleFS, "/IgnoreLearningDuringPenalty.txt", String(IgnoreLearningDuringPenalty).c_str());
   } else {
@@ -1431,27 +1426,10 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     CloudFeatures = readFile(LittleFS, "/CloudFeatures.txt").toInt();
   }
-  if (!fsExists("/LearningDryRunMode.txt")) {
-    writeFile(LittleFS, "/LearningDryRunMode.txt", String(LearningDryRunMode).c_str());
-  } else {
-    LearningDryRunMode = readFile(LittleFS, "/LearningDryRunMode.txt").toInt();
-  }
   // AutoSaveLearningTable — OBSOLETE REMOVE LATER (LittleFS init removed)
-  if (!fsExists("/LearningUpwardEnabled.txt")) {
-    writeFile(LittleFS, "/LearningUpwardEnabled.txt", String(LearningUpwardEnabled).c_str());
-  } else {
-    LearningUpwardEnabled = readFile(LittleFS, "/LearningUpwardEnabled.txt").toInt();
-  }
-  if (!fsExists("/LearningDownwardEnabled.txt")) {
-    writeFile(LittleFS, "/LearningDownwardEnabled.txt", String(LearningDownwardEnabled).c_str());
-  } else {
-    LearningDownwardEnabled = readFile(LittleFS, "/LearningDownwardEnabled.txt").toInt();
-  }
-  if (!fsExists("/EnableNeighborLearning.txt")) {
-    writeFile(LittleFS, "/EnableNeighborLearning.txt", String(EnableNeighborLearning).c_str());
-  } else {
-    EnableNeighborLearning = readFile(LittleFS, "/EnableNeighborLearning.txt").toInt();
-  }
+  // LearningPaused / LearningUpwardEnabled / LearningDownwardEnabled / EnableNeighborLearning /
+  // ShowLearningDebugMessages / LearningDryRunMode boot-init removed — vars deleted (write-only no-consumers).
+  // Existing on-disk /LearningX.txt files left as harmless orphans; no migration code (memory: no-unshipped-migration).
   if (!fsExists("/EnableAmbientCorrection.txt")) {
     writeFile(LittleFS, "/EnableAmbientCorrection.txt", String(EnableAmbientCorrection).c_str());
   } else {
@@ -1461,11 +1439,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/TuningMode.txt", String(TuningMode).c_str());
   } else {
     TuningMode = readFile(LittleFS, "/TuningMode.txt").toInt();
-  }
-  if (!fsExists("/ShowLearningDebugMessages.txt")) {
-    writeFile(LittleFS, "/ShowLearningDebugMessages.txt", String(ShowLearningDebugMessages).c_str());
-  } else {
-    ShowLearningDebugMessages = readFile(LittleFS, "/ShowLearningDebugMessages.txt").toInt();
   }
   if (!fsExists("/LogAllLearningEvents.txt")) {
     writeFile(LittleFS, "/LogAllLearningEvents.txt", String(LogAllLearningEvents).c_str());
@@ -1887,14 +1860,14 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   }
   // Anomaly margin amps
   if (!fsExists("/anomalyMarginAmps.txt")) {
-    writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps).c_str());
+    writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps, 4).c_str());
   } else {
     anomalyMarginAmps = readFile(LittleFS, "/anomalyMarginAmps.txt").toFloat();
   }
 
   if (!fsExists("/degradationThresh.txt")) {
     writeFile(LittleFS, "/degradationThresh.txt",
-              String(degradationThreshold).c_str());
+              String(degradationThreshold, 4).c_str());
   } else {
     degradationThreshold =
       readFile(LittleFS, "/degradationThresh.txt").toFloat();
@@ -3225,6 +3198,8 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   }
 
   Serial.println("10. Attempting http.begin() with SSL...");
+  // No M17-style heap pre-check here: tried in 0.0.38, broke OTA. prepareForOTA() above
+  // already frees memory for TLS; let http.begin() / mbedTLS surface failures themselves.
   beginSuccess = http.begin(client, updateInfo.firmwareUrl);
   otaHeapMark("AFTER http.begin");
 
@@ -3258,6 +3233,14 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   }
 
   contentLength = http.getSize();
+  if (contentLength <= 0) {
+    // Missing/invalid Content-Length → while-loop never enters, hash computes over zero bytes,
+    // signature verify fails with a misleading "verification FAILED" message. Fail fast instead.
+    Serial.printf("ABORT: OTA server returned invalid Content-Length: %d\n", contentLength);
+    queueConsoleMessage("OTA FAILED: Server returned no Content-Length");
+    http.end();
+    goto cleanup;
+  }
   stream = http.getStreamPtr();
 
   // Streaming tar extraction
@@ -3413,6 +3396,7 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
   client.setCACert(server_root_ca);
   HTTPClient http;
   Serial.printf("📥 Downloading signature from: %s\n", updateInfo.signatureUrl.c_str());
+  // No 40K heap gate — see notes at firmware-download http.begin above.
   http.begin(client, updateInfo.signatureUrl);
   http.addHeader("Device-ID", getDeviceId());
   int httpCode = http.GET();
@@ -3572,6 +3556,7 @@ void performOTAUpdateToVersion(const char *targetVersion) {
   String url = String(OTA_SERVER_URL) + "/api/firmware/check.php?requestedVersion=" + String(targetVersion);
   Serial.println("🌐 Requesting specific version from: " + url);
 
+  // No 40K heap gate — see notes at firmware-download http.begin above.
   http.begin(client, url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("User-Agent", "XRegulator/2.0");

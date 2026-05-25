@@ -74,27 +74,40 @@ String readFile(fs::FS &fs, const char *path) {
   return result;
 }
 
-void writeFile(fs::FS &fs, const char *path, const char *message) {
+bool writeFile(fs::FS &fs, const char *path, const char *message) {
   if (!littleFSMounted && !ensureLittleFS()) {
-    return;
+    return false;
   }
 
   if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
     Serial.printf("writeFile: mutex timeout: %s\n", path);
-    return;
+    return false;
   }
 
   File file = fs.open(path, "w");
   if (!file) {
     xSemaphoreGive(fsMutex);
-    return;
+    return false;
   }
 
-  file.print(message);
+  const size_t expected = strlen(message);
+  const size_t written  = file.print(message);
   file.flush();
   file.close();
 
+  // Truncated write — LittleFS full or other I/O failure. Delete the partial
+  // file so the next boot reads "no setting" (and Pattern B re-initializes the
+  // default) instead of "" → toFloat()→0.0 → silent zeroing of a critical setting.
+  if (written != expected) {
+    Serial.printf("writeFile: truncated write on %s (%u/%u bytes) — deleting\n",
+                  path, (unsigned)written, (unsigned)expected);
+    fs.remove(path);
+    xSemaphoreGive(fsMutex);
+    return false;
+  }
+
   xSemaphoreGive(fsMutex);
+  return true;
 }
 bool fsExists(const char *path) {
   if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
@@ -1900,16 +1913,17 @@ bool buildConfigPayload() {
                      BatteryVoltageSource, BatteryCurrentSource);
 
   // Learning System Settings
+  // (learning_paused / learning_upward_enabled / learning_downward_enabled fields removed —
+  //  underlying vars were write-only with no consumer; deleted from firmware entirely.)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"learning_mode\":%d,\"learning_paused\":%d"
-                     ",\"learning_upward_enabled\":%d,\"learning_downward_enabled\":%d"
+                     ",\"learning_mode\":%d"
                      ",\"alternator_nominal_amps\":%d,\"learning_up_step\":%.2f"
                      ",\"learning_down_step\":%.2f,\"ambient_temp_correction_factor\":%.3f"
                      ",\"ambient_temp_baseline\":%.1f,\"min_learning_interval\":%lu"
                      ",\"safe_operation_threshold\":%lu,\"last_significant_rpm_change\":%lu"
                      ",\"last_stable_rpm\":%d,\"learning_settling_period\":%d"
                      ",\"learning_rpm_change_threshold\":%d,\"learning_temp_hysteresis\":%d",
-                     LearningMode, LearningPaused, LearningUpwardEnabled, LearningDownwardEnabled,
+                     LearningMode,
                      AlternatorNominalAmps, LearningUpStep, LearningDownStep,
                      AmbientTempCorrectionFactor, xTime, MinLearningInterval,
                      SafeOperationThreshold, lastSignificantRPMChange, lastStableRPM,
@@ -1924,19 +1938,21 @@ bool buildConfigPayload() {
                      MaxPenaltyPercent, MaxPenaltyDuration);
 
   // Learning Diagnostics
+  // (enable_neighbor_learning / learning_dry_run_mode fields removed — underlying vars
+  //  were write-only with no consumer; deleted from firmware entirely.)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
                      ",\"neighbor_learning_factor\":%.2f,\"learning_rpm_spacing\":%d"
                      ",\"learning_memory_duration\":%lu,\"ignore_learning_during_penalty\":%d"
-                     ",\"enable_neighbor_learning\":%d,\"enable_ambient_correction\":%d"
-                     ",\"learning_failsafe_mode\":%d,\"learning_dry_run_mode\":%d"
+                     ",\"enable_ambient_correction\":%d"
+                     ",\"learning_failsafe_mode\":%d"
                      // auto_save_learning_table and learning_table_save_interval — OBSOLETE REMOVE LATER
                      ",\"clear_overheat_history\":%d,\"overheating_penalty_timer\":%lu"
                      ",\"overheating_penalty_amps\":%.1f,\"total_learning_events\":%lu"
                      ",\"total_overheats\":%lu,\"total_safe_hours\":%lu"
                      ",\"average_table_value\":%.2f",
                      NeighborLearningFactor, yyMax, LearningMemoryDuration,
-                     IgnoreLearningDuringPenalty, EnableNeighborLearning, EnableAmbientCorrection,
-                     TuningMode, LearningDryRunMode, ClearOverheatHistory, overheatingPenaltyTimer,
+                     IgnoreLearningDuringPenalty, EnableAmbientCorrection,
+                     TuningMode, ClearOverheatHistory, overheatingPenaltyTimer,
                      overheatingPenaltyAmps, totalLearningEvents, totalOverheats,
                      totalSafeHours, averageTableValue);
 

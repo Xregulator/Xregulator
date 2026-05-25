@@ -147,6 +147,7 @@ let sseReconnectAttempts = 0;
 const MAX_SSE_RECONNECTS = 10;
 let sseReconnectTimer = null;
 let isAppInBackground = false;
+let isOfflineMode = false; // True after user clicks "Continue Offline"; cleared on next successful SSE open
 
 let activeTimers = []; // Track all active timers
 
@@ -234,11 +235,11 @@ const CSV2_FIELDS = [
     "UVTomorrow",
     "UVDay2",
     "weatherDataValid",
-    "SolarWatts",
-    "performanceRatio",
-    "VeData",
-    "NMEA0183Data",
-    "NMEA2KData",
+    "reserved_SolarWatts",        // moved to CSV3
+    "reserved_performanceRatio",  // moved to CSV3
+    "reserved_VeData",            // moved to CSV3
+    "reserved_NMEA0183Data",      // moved to CSV3
+    "reserved_NMEA2KData",        // moved to CSV3
     "AlarmLatchState",
     "ResetAlarmLatch",
     "ResetLearningTable",
@@ -438,7 +439,7 @@ const CSV2_FIELDS = [
     "HeadingNMEA",
     "EngineCycles",
     "CurrentSessionDuration",
-    "timeAxisModeChanging",
+    "reserved_timeAxisModeChanging",  // moved to CSV3
     "currentPartitionType",
     "fastOvCurrentCap",
     "fastOvClampCount",
@@ -649,8 +650,6 @@ const CSV3_FIELDS = [
     "RPMScalingFactor",
     "MaximumAllowedBatteryAmps",
     "BatteryVoltageSource",
-    "LearningUpwardEnabled",
-    "LearningDownwardEnabled",
     "AlternatorNominalAmps",
     "LearningUpStep",
     "LearningDownStep",
@@ -668,7 +667,6 @@ const CSV3_FIELDS = [
     "NeighborLearningFactor",
     "yyMax",
     "LearningMemoryDuration",
-    "EnableNeighborLearning",
     "EnableAmbientCorrection",
     "TuningMode",
     "rpmCurrentTable0",
@@ -848,12 +846,9 @@ const CSV3_FIELDS = [
     "MaintainMode",
     "ManualSOCPoint",
     "LearningMode",
-    "LearningPaused",
     "IgnoreLearningDuringPenalty",
-    "ShowLearningDebugMessages",
     "LogAllLearningEvents",
     "CloudFeatures",
-    "LearningDryRunMode",
     "AutoShuntGainCorrection",
     "AutoAltCurrentZero",
     "WindingTempOffset",
@@ -908,6 +903,12 @@ const CSV3_FIELDS = [
     "FastSetpointRiseRate",           // ×100, 1 decimal — multiplier on setpoint rise slew during post-protection recovery
     "FastSetpointRiseWindowMs",       // raw ms — hard upper bound on fast-rise window
     "FastSetpointRiseHeadroomV",      // ×100, 2 decimal — V below target at which fast-rise gate stays open
+    "SolarWatts",                     // moved from CSV2
+    "performanceRatio",               // moved from CSV2 (÷100 for display)
+    "VeData",                         // moved from CSV2 (0/1)
+    "NMEA0183Data",                   // moved from CSV2 (0/1)
+    "NMEA2KData",                     // moved from CSV2 (0/1)
+    "timeAxisModeChanging",           // moved from CSV2 (0/1)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -1011,6 +1012,7 @@ function manualReconnect() {
     isAppInBackground = false;
     initializeEventSource();
     document.getElementById('reconnect-button').style.display = 'none';
+    closeRecovery(); // Dismiss the Connection Lost dialog if user used the in-page button instead
 }
 
 // ============================================================================
@@ -1249,12 +1251,13 @@ function initializeEventSource() {
     if (sseReconnectAttempts >= MAX_SSE_RECONNECTS) {
         diagLog("Max SSE reconnection attempts reached (10 attempts over 20 seconds). Manual reconnect required.");
 
-        // Show reconnect button if it exists
+        // Show the Connection Lost dialog (gives user the choice of full-reload retry
+        // or "Continue Offline" which disables inputs). Hide the in-page reconnect-button
+        // while the dialog is up to avoid two competing recovery affordances on screen.
+        showRecoveryOptions();
         const reconnectBtn = document.getElementById('reconnect-button');
         if (reconnectBtn) {
-            reconnectBtn.style.display = 'block';
-        } else {
-            console.error('reconnect-button element not found in HTML - button will not appear');
+            reconnectBtn.style.display = 'none';
         }
 
         return;
@@ -1276,6 +1279,8 @@ function initializeEventSource() {
         source.addEventListener('open', function () {
             sseReconnectAttempts = 0; // Reset on successful connection
             updateInlineStatus(true);  // Flip indicator green on SSE connect
+            closeRecovery();           // Dismiss Connection Lost dialog if it's open
+            if (isOfflineMode) exitOfflineMode(); // Re-enable inputs if user had gone offline
         }, false);
 
 
@@ -1372,6 +1377,15 @@ function initializeEventSource() {
             }
         }, false);
 
+        // Re-bind stream listeners (CSVData/CSVData2/CSVData3/TimestampData/console)
+        // on every reconnect. Without this, only the open/EffMatrix/EffRed/EffHistory/error
+        // listeners survive a reconnect and the main telemetry streams go silent.
+        // window.attachStreamListeners is defined inside the window 'load' callback,
+        // so it is undefined on the very first call to initializeEventSource() — the
+        // initial attach is performed by the load callback itself once.
+        if (typeof window.attachStreamListeners === 'function') {
+            window.attachStreamListeners(source);
+        }
 
     } catch (error) {
         diagError("Failed to create EventSource:", error);
@@ -1388,15 +1402,16 @@ function enableDemoMode() {
     DEMO_MODE = true;
     console.log('[DEMO MODE] Enabled - Generating simulated data');
 
-    // Add visual demo banner
+    // Add visual demo banner. padding-top includes env(safe-area-inset-top) so
+    // the warning isn't hidden under the iPhone notch / Dynamic Island.
     const banner = document.createElement('div');
     banner.id = 'demo-banner';
-    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#ff9800;color:#000;padding:10px;text-align:center;z-index:10000;font-weight:bold;font-size:14px;';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#ff9800;color:#000;padding:calc(10px + env(safe-area-inset-top)) 10px 10px;text-align:center;z-index:10000;font-weight:bold;font-size:14px;';
     banner.textContent = '⚠️ DEMO MODE - Simulated Data (No Hardware Connected)';
     document.body.insertBefore(banner, document.body.firstChild);
 
-    // Adjust body padding to account for banner
-    document.body.style.paddingTop = '40px';
+    // Adjust body padding to account for banner (also notch-aware).
+    document.body.style.paddingTop = 'calc(40px + env(safe-area-inset-top))';
 
     // Start generating fake data
     startDemoData();
@@ -1447,41 +1462,25 @@ function sendFakeCSVData() {
 }
 
 
-// Also update header display values directly for demo mode
-const headerElements = {
-    'header-voltage': (12.5 + Math.random() * 0.8).toFixed(1),
-    'header-soc': Math.floor(75 + Math.random() * 15),
-    'header-alt-current': (40 + Math.random() * 30).toFixed(1),
-    'header-batt-current': (35 + Math.random() * 25).toFixed(1),
-    'header-alt-temp': Math.floor(75 + Math.random() * 20),
-    'header-rpm': Math.floor(1800 + Math.random() * 600)
-};
-
-// Update each header element
-Object.keys(headerElements).forEach(id => {
-    const element = document.getElementById(id);
-    if (element) {
-        element.textContent = headerElements[id];
-    }
-});
-
-// Update ignition status
-const ignitionStatus = document.getElementById('ignition-status');
-if (ignitionStatus) {
-    ignitionStatus.textContent = 'ON';
-    ignitionStatus.className = 'duo-num ignition-on';
-}
+// (Removed: top-level "demo header values" block — used to overwrite the HTML
+// defaults of "-" / "?" with random fake voltage/SOC/current/RPM + red "ON"
+// ignition at script-load time, BEFORE the SSE connect or demo-mode decision.
+// Cold-start showed ~10s of fake-looking real data. Real demo mode runs via
+// sendFakeCSVData()+csvHandler path, which routes through normal CSV1 dispatch
+// and updates the same headers correctly. Initial state now stays at "-" / "?".)
 
 
 function checkForDemoMode() {
-    // Wait 3 seconds after load, then check if ESP32 connected
+    // Wait 10 seconds after load, then check if ESP32 connected.
+    // CONNECTING is intentionally NOT a trigger — slow-WiFi users can sit in
+    // CONNECTING for many seconds, and tripping demo on that state pinned a
+    // permanent demo banner over real data.
     setTimeout(() => {
-        // If no EventSource connection established, enable demo mode
-        if (!source || source.readyState === EventSource.CLOSED || source.readyState === EventSource.CONNECTING) {
-            console.log('[DEMO MODE] No ESP32 detected after 3 seconds - enabling demo mode');
+        if (!source || source.readyState === EventSource.CLOSED) {
+            console.log('[DEMO MODE] No ESP32 detected after 10 seconds - enabling demo mode');
             enableDemoMode();
         }
-    }, 3000);
+    }, 10000);
 }
 
 // ============================================================================
@@ -1927,8 +1926,8 @@ async function testInternetConnectivity() {
         const controller = new AbortController();
         const timeoutId = setTrackedTimeout(() => controller.abort(), 3000); // 3 second timeout
 
-        // Same endpoint ESP32 uses: Cloudflare's trace
-        const response = await fetch('http://cloudflare.com/cdn-cgi/trace', {
+        // Cloudflare's trace endpoint over HTTPS (iOS WKWebView blocks mixed content)
+        const response = await fetch('https://cloudflare.com/cdn-cgi/trace', {
             method: 'GET',
             signal: controller.signal,
             cache: 'no-store'
@@ -1985,7 +1984,8 @@ async function loadAvailableVersions() {
         const timeoutId = setTrackedTimeout(() => controller.abort(), 15000); // 15 second timeout
 
         const response = await fetch('https://ota.xengineering.net/api/firmware/versions.php', {
-            signal: controller.signal
+            signal: controller.signal,
+            cache: 'no-store'
         });
 
         clearTimeout(timeoutId);
@@ -3442,7 +3442,7 @@ async function fetchAndPopulateVesselInfo() {
         form.BOAT_LENGTH_FT.value = data.boat_length_ft || '';
         form.BOAT_TYPE.value = data.boat_type || 'monohull';
         form.BOAT_MAKE_MODEL.value = data.boat_make_model || '';
-        form.BOAT_YEAR.value = data.boat_year || 2025;
+        form.BOAT_YEAR.value = data.boat_year || new Date().getFullYear();
         form.HOME_PORT.value = data.home_port || '';  // ← ADD THIS LINE
         form.ENGINE_MAKE.value = data.engine_make || '';
         form.ENGINE_HP.value = data.engine_hp || '';
@@ -3650,7 +3650,7 @@ function handleDeleteAllData() {
         return;
     }
 
-    if (!confirm('⚠️ WARNING: This will permanently delete ALL your cloud data including history, profile, and statistics. This CANNOT be undone.\n\nYour device will continue to work locally, but all cloud features is reset.\n\nType DELETE in the next prompt to confirm.')) {
+    if (!confirm('⚠️ WARNING: This will permanently delete ALL your cloud data including history, profile, and statistics. This CANNOT be undone.\n\nYour device will continue to work locally, but all cloud features are reset.\n\nType DELETE in the next prompt to confirm.')) {
         return;
     }
 
@@ -4467,7 +4467,7 @@ async function loadLeaderboardsInIframe() {
         const data = await response.json();
 
         if (data.registered && data.token) {
-            iframe.src = `https://supabase-nine-ashy.vercel.app/leaderboards.html?token=${data.token}`;
+            iframe.src = `https://supabase-nine-ashy.vercel.app/leaderboards.html?token=${encodeURIComponent(data.token)}`;
             iframe.style.display = 'block';
             iframe.onload = function () {
                 if (statusEl) statusEl.style.display = 'none';
@@ -6237,6 +6237,13 @@ window.addEventListener("load", function () {
 
     interceptDualControlSubmissions();
 
+    // Mobile: every <input type="number"> gets inputmode="decimal" so iOS shows
+    // the decimal keypad (with a `.` key) instead of the telephone-style numeric pad.
+    // Done at runtime to avoid editing 201 individual inputs in HTML.
+    document.querySelectorAll('input[type="number"]').forEach(el => {
+        if (!el.hasAttribute('inputmode')) el.setAttribute('inputmode', 'decimal');
+    });
+
     populateYearDropdown();
 
     // Attach vessel info form handler
@@ -6543,8 +6550,10 @@ window.addEventListener("load", function () {
         checkForDemoMode();
     }
 
-    // Add event listeners to source after initialization
-    if (source) {
+    // Stream listeners — extracted so initializeEventSource() can re-bind them on
+    // every reconnect. Before this refactor, after the first SSE reconnect the
+    // new EventSource had no CSV/console listeners and telemetry went silent.
+    window.attachStreamListeners = function (source) {
         // Console event listener
         // Timestamp = time received by app (not time sent by regulator).
         // Messages throttled by firmware: max 5 per 700ms (adjustable).
@@ -7584,6 +7593,15 @@ window.addEventListener("load", function () {
             // Update other fields every cycle
             updateFields(otherFields);
 
+            // Refresh the barometer panel (Other tab) each CSV2 cycle. Cheap no-op if the
+            // panel hasn't been initialized yet (tab never opened). try/catch so a bug in
+            // the baro module can never break the rest of the dispatcher (firmware version,
+            // device id, etc. live downstream of this line).
+            if (typeof window.updateBaroDisplay === 'function') {
+                try { window.updateBaroDisplay(data, window.sensorAges); }
+                catch (e) { console.warn('baro update failed:', e); }
+            }
+
             // Temperature PID terms displayed as current contributions (sign-flipped:
             // positive = adding amps, negative = removing amps)
             for (const [id, key] of [
@@ -8147,7 +8165,9 @@ window.addEventListener("load", function () {
 
 
 
-    }
+    };
+    // Initial attach (subsequent attaches happen automatically inside initializeEventSource on reconnect).
+    if (source) window.attachStreamListeners(source);
 
 
 
@@ -8526,6 +8546,11 @@ function showSubTab(parentTab, subTabName, evt = null) {
         fetchMatrixStats();
     }
 
+    // Initialize / refresh the barometer panel whenever the Other tab is opened
+    if (parentTab === 'livedata' && subTabName === 'other') {
+        if (typeof window.initBaroPanel === 'function') window.initBaroPanel();
+    }
+
     // Initialize profile tab when switching to My Profile
     if (parentTab === 'cloudfeatures' && subTabName === 'myprofile') {
         if (typeof initializeProfileTab === 'function') {
@@ -8630,8 +8655,8 @@ function closeRecovery() {
 }
 function enterOfflineMode() {
     closeRecovery();
-    // Don't run multiple times
-    if (document.getElementById('offlineBanner')) return;
+    if (isOfflineMode) return;
+    isOfflineMode = true;
     // Disable all form controls and buttons except reconnect and tab navigation
     document.querySelectorAll('input[type="submit"], button, input[type="checkbox"], input[type="number"], input[type="text"], input[type="password"], select').forEach(el => {
         // Skip the dark mode toggle, reconnect buttons, and tab navigation
@@ -8655,6 +8680,35 @@ function enterOfflineMode() {
         cornerStatus.className = 'corner-status corner-status-disconnected';
         cornerStatus.textContent = 'OFFLINE MODE';
         cornerStatus.style.backgroundColor = '#ff6600';
+    }
+}
+
+// Called from the SSE 'open' handler when a reconnect succeeds after the user
+// had clicked "Continue Offline". Mirrors enterOfflineMode's selectors so the
+// same set of elements is re-enabled. Corner status itself is reset by
+// updateInlineStatus(true) which the 'open' handler already calls.
+function exitOfflineMode() {
+    if (!isOfflineMode) return;
+    isOfflineMode = false;
+    document.querySelectorAll('input[type="submit"], button, input[type="checkbox"], input[type="number"], input[type="text"], input[type="password"], select').forEach(el => {
+        if (!el.id.includes('DarkMode') &&
+            !el.onclick?.toString().includes('location.reload') &&
+            !el.classList.contains('main-tab') &&
+            !el.classList.contains('sub-tab')) {
+            el.disabled = false;
+            el.style.opacity = '';
+            el.style.cursor = '';
+        }
+    });
+    document.querySelectorAll('.switch input').forEach(el => {
+        el.disabled = false;
+        el.style.opacity = '';
+    });
+    // Override the inline backgroundColor set by enterOfflineMode so the CSS class
+    // takes back over. updateInlineStatus(true) already flipped the class to connected.
+    const cornerStatus = document.getElementById('corner-status');
+    if (cornerStatus) {
+        cornerStatus.style.backgroundColor = '';
     }
 }
 
@@ -9661,11 +9715,16 @@ function interceptDualControlSubmissions() {
 function populateYearDropdown() {
     const yearSelect = document.querySelector('[name="BOAT_YEAR"]');
     if (yearSelect) {
-        for (let year = 2200; year >= 1700; year--) {
+        // Range: 1900 floor (no real recreational boats older), current year + 5
+        // ceiling so the dropdown is still valid for the next 5 calendar years
+        // without a code change. Descending order puts the most-likely selections
+        // near the top. Default selection is the current calendar year.
+        const currentYear = new Date().getFullYear();
+        for (let year = currentYear + 5; year >= 1900; year--) {
             const option = document.createElement('option');
             option.value = year;
             option.textContent = year;
-            if (year === 2025) {
+            if (year === currentYear) {
                 option.selected = true;
             }
             yearSelect.appendChild(option);
@@ -12414,6 +12473,390 @@ window.addEventListener('load', function () {
   });
 
   applyFilter();
+})();
+
+// ========================================================================
+// BAROMETER PANEL (Other tab) — Zambretti forecast + 14-day history plot
+// Lives in its own IIFE so locals don't leak into the global namespace.
+// Public hooks (window.*) are how the rest of the app pokes us:
+//   window.initBaroPanel()              — call on Other-tab activation (idempotent)
+//   window.updateBaroDisplay(data, sa)  — call from CSV2 dispatcher each cycle
+// ========================================================================
+(function () {
+  'use strict';
+
+  const BARO_HISTORY_SIZE = 1008;              // must match firmware (7 days × 6 samples/h)
+  const SAMPLE_INTERVAL_MIN = 10;              // ditto — firmware samples every 10 min
+  const FETCH_INTERVAL_MS = 10 * 60 * 1000;    // refresh history every 10 min while tab visible
+  const STALE_MS_NMEA = 10000;                 // mirrors STALE_THRESHOLD_TEMP_MS-style logic for NMEA fields
+
+  // 26-slot Zambretti forecast table (slot 1 = best, slot 26 = worst).
+  // Wording follows the conventional 1985 Beteljuice reproduction commonly cited online.
+  const Z_FORECASTS = [
+    'Settled fine',
+    'Fine weather',
+    'Becoming fine',
+    'Fine, becoming less settled',
+    'Fine, possible showers',
+    'Fairly fine, improving',
+    'Fairly fine, possible showers early',
+    'Fairly fine, showery later',
+    'Showery early, improving',
+    'Changeable, mending',
+    'Fairly fine, showers likely',
+    'Rather unsettled, clearing later',
+    'Unsettled, probably improving',
+    'Showery, bright intervals',
+    'Showery, becoming less settled',
+    'Changeable, some rain',
+    'Unsettled, short fine intervals',
+    'Unsettled, rain later',
+    'Unsettled, rain at times',
+    'Very unsettled, rain',
+    'Stormy, may improve',
+    'Stormy, much rain',
+    'Rain at times, worse later',
+    'Rain at times, very unsettled',
+    'Rain, becoming heavy and squally',
+    'Stormy, possibly worse'
+  ];
+
+  // Pressure zones (mbar). Colors mirror the prototype palette and degrade gracefully in dark mode.
+  const ZONES = [
+    { min: -Infinity, max: 980,      name: 'STORMY',   color: '#c62828', dark: '#e57373', range: 'below 980 mbar' },
+    { min: 980,       max: 1000,     name: 'RAIN',     color: '#ef6c00', dark: '#ffb74d', range: '980–1000 mbar' },
+    { min: 1000,      max: 1010,     name: 'CHANGE',   color: '#c0a000', dark: '#ddcc66', range: '1000–1010 mbar' },
+    { min: 1010,      max: 1025,     name: 'FAIR',     color: '#2e7d32', dark: '#81c784', range: '1010–1025 mbar' },
+    { min: 1025,      max: Infinity, name: 'VERY DRY', color: '#1565c0', dark: '#64b5f6', range: 'above 1025 mbar' }
+  ];
+
+  // State — buffer is held chronologically (oldest at index 0, newest at end).
+  // NaN slots = empty (no sample yet, or wiped because too old to display).
+  let baroPlot = null;
+  let baroBuffer = new Float32Array(BARO_HISTORY_SIZE);
+  let baroBufferEpochAtEnd = 0;          // unix seconds of the newest non-NaN sample (0 = unknown)
+  let currentRangeHours = 24;
+  let autoscaleY = false;
+  let fetchTimer = null;
+  let initialized = false;
+  let panelVisible = false;
+
+  for (let i = 0; i < BARO_HISTORY_SIZE; i++) baroBuffer[i] = NaN;
+
+  // ---------- PUBLIC API ---------------------------------------------------
+  window.initBaroPanel = function () {
+    panelVisible = true;
+    if (!initialized) {
+      wireControls();
+      initialized = true;
+    }
+    fetchBaroHistory();
+    if (fetchTimer) clearInterval(fetchTimer);
+    fetchTimer = setInterval(() => { if (panelVisible) fetchBaroHistory(); }, FETCH_INTERVAL_MS);
+  };
+
+  // Note: we don't have a "tab hidden" hook so panelVisible stays true. Fetches are cheap (~8 KB)
+  // so re-fetching every 5 min in the background is fine.
+
+  window.updateBaroDisplay = function (data, sa) {
+    if (!data) return;
+    const p = parseFloat(data.baroPressure);
+    if (!isFinite(p) || p < 800 || p > 1100) {
+      setText('baroZoneLabel', '—');
+      setText('baroZoneSub', 'sensor offline');
+      return;
+    }
+
+    // Zone
+    const dark = document.body.classList.contains('dark-mode');
+    const zone = pressureZone(p);
+    const zoneColor = dark ? zone.dark : zone.color;
+    const zEl = document.getElementById('baroZoneLabel');
+    if (zEl) { zEl.textContent = zone.name; zEl.style.color = zoneColor; }
+    setText('baroZoneSub', zone.range);
+
+    // 3-hour tendency from buffer
+    const samplesPer3h = Math.round((3 * 60) / SAMPLE_INTERVAL_MIN);  // 36
+    let delta = null;
+    if (baroBufferEpochAtEnd > 0) {
+      // Newest non-NaN sample is at the last filled slot; walk back samplesPer3h slots.
+      const lastIdx = lastFilledIdx();
+      if (lastIdx >= samplesPer3h) {
+        const oldP = baroBuffer[lastIdx - samplesPer3h];
+        if (isFinite(oldP)) delta = p - oldP;
+      }
+    }
+
+    if (delta === null) {
+      setText('baroTendencyLabel', 'Building…');
+      setText('baroTendencyDelta', 'need 3 h of samples');
+      setHTML('baroTendencyArrow', makeTendencyArrow(0));
+    } else {
+      setText('baroTendencyLabel', tendencyLabel(delta));
+      setText('baroTendencyDelta', `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} mbar / 3h`);
+      setHTML('baroTendencyArrow', makeTendencyArrow(delta));
+    }
+
+    // Forecast — Zambretti when wind & GPS fresh, fallback otherwise
+    const headingFresh    = sa && sa.heading != null && sa.heading < STALE_MS_NMEA;
+    const trueWindFresh   = sa && sa.trueWindAngle != null && sa.trueWindAngle < STALE_MS_NMEA;
+    const latFresh        = isFinite(parseFloat(data.LatitudeNMEA)) && data.LatitudeNMEA !== 0;
+
+    let forecastStr, methodLabel, methodSub;
+    if (delta !== null && headingFresh && trueWindFresh && latFresh) {
+      const twdEarth = (parseFloat(data.HeadingNMEA) + parseFloat(data.TrueWindAngleNMEA) + 360) % 360;
+      const z = zambretti(p, delta, twdEarth, parseFloat(data.LatitudeNMEA), new Date());
+      forecastStr = z.text;
+      methodLabel = 'Zambretti';
+      methodSub = `wind ${twdToCompass(twdEarth)} · slot ${z.Z}`;
+    } else if (delta !== null) {
+      forecastStr = fallbackForecast(p, delta);
+      methodLabel = 'Tendency only';
+      const missing = [];
+      if (!headingFresh)  missing.push('heading');
+      if (!trueWindFresh) missing.push('true wind');
+      if (!latFresh)      missing.push('GPS');
+      methodSub = missing.length ? `no ${missing.join(', ')}` : '';
+    } else {
+      forecastStr = 'Collecting history — full forecast available after 3 h of samples.';
+      methodLabel = 'Warming up';
+      methodSub = '';
+    }
+    setText('baroForecastText', forecastStr);
+    setText('baroMethodLabel', methodLabel);
+    setText('baroMethodSub', methodSub);
+  };
+
+  // ---------- HISTORY FETCH ------------------------------------------------
+  function fetchBaroHistory() {
+    fetch('/baroHistory.bin', { cache: 'no-cache' })
+      .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+      .then(buf => parseHistory(buf))
+      .then(() => { if (baroPlot) refreshPlot(); else buildBaroPlot(); })
+      .catch(e => { /* offline / not yet implemented in older firmware — quietly skip */ });
+  }
+
+  function parseHistory(arrayBuf) {
+    // Header (8 B): u16 head, u32 epoch, u16 count.  Samples: u16 mbar×10 (0 = empty).
+    const view = new DataView(arrayBuf);
+    if (arrayBuf.byteLength < 8) return;
+    const head  = view.getUint16(0, true);
+    const epoch = view.getUint32(2, true);
+    const count = view.getUint16(6, true);
+    if (count !== BARO_HISTORY_SIZE) return;
+    if (arrayBuf.byteLength < 8 + count * 2) return;
+
+    // Firmware stores samples circularly with `head` = next write slot. The newest sample
+    // is at (head - 1) mod count; oldest unwritten slots are zero. Walk back chronologically.
+    for (let i = 0; i < count; i++) {
+      const ringIdx = (head - count + i + count) % count;
+      const raw = view.getUint16(8 + ringIdx * 2, true);
+      baroBuffer[i] = raw === 0 ? NaN : raw / 10.0;
+    }
+    baroBufferEpochAtEnd = epoch;
+  }
+
+  function lastFilledIdx() {
+    for (let i = BARO_HISTORY_SIZE - 1; i >= 0; i--) if (isFinite(baroBuffer[i])) return i;
+    return -1;
+  }
+
+  // ---------- PLOT ---------------------------------------------------------
+  function buildBaroPlot() {
+    const el = document.getElementById('baroPlot');
+    if (!el || typeof uPlot === 'undefined') return;
+    el.innerHTML = '';
+
+    const accent = getCss('--accent') || '#00a19a';
+    const ink    = getCss('--text-dark') || '#333';
+    const slice  = computePlotSlice();
+
+    const opts = {
+      width: Math.max(el.clientWidth, 320),
+      height: el.clientHeight || 280,
+      series: [
+        { label: 'Seconds ago' },
+        { label: 'Pressure (mbar)', stroke: accent, width: 2, fill: hexAlpha(accent, 0.12) }
+      ],
+      scales: {
+        x: { time: false, auto: false, range: [slice.xAxis[0], slice.xAxis[slice.xAxis.length - 1] || 0] },
+        y: { auto: false, range: () => computeYRange() }
+      },
+      axes: [
+        { label: 'Time', grid: { show: true }, values: (u, ticks) => ticks.map(formatAgoLabel) },
+        { scale: 'y', label: 'mbar', grid: { show: true }, side: 3 }
+      ],
+      legend: { show: false },
+      cursor: { drag: { x: false, y: false } }
+    };
+
+    baroPlot = new uPlot(opts, [slice.xAxis, slice.values], el);
+    new ResizeObserver(() => {
+      if (baroPlot) baroPlot.setSize({ width: el.clientWidth, height: el.clientHeight || 280 });
+    }).observe(el);
+  }
+
+  function refreshPlot() {
+    const slice = computePlotSlice();
+    baroPlot.setData([slice.xAxis, slice.values]);
+    baroPlot.setScale('x', { min: slice.xAxis[0], max: slice.xAxis[slice.xAxis.length - 1] || 0 });
+  }
+
+  function computePlotSlice() {
+    // X axis = seconds ago (negative). Newest sample is at x=0.
+    const samples = currentRangeHours * 60 / SAMPLE_INTERVAL_MIN;
+    const startIdx = Math.max(0, BARO_HISTORY_SIZE - samples);
+    const xAxis = new Array(BARO_HISTORY_SIZE - startIdx);
+    const values = new Array(BARO_HISTORY_SIZE - startIdx);
+    for (let i = startIdx; i < BARO_HISTORY_SIZE; i++) {
+      const ago = (BARO_HISTORY_SIZE - 1 - i) * SAMPLE_INTERVAL_MIN * 60;  // seconds
+      const k = i - startIdx;
+      xAxis[k]  = -ago;
+      values[k] = isFinite(baroBuffer[i]) ? baroBuffer[i] : null;
+    }
+    return { xAxis, values };
+  }
+
+  function computeYRange() {
+    if (!autoscaleY) return [940, 1050];
+    // Middle 2/3 of plot height: pad = 25% of data range above and below.
+    const slice = computePlotSlice().values;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of slice) { if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; } }
+    if (!isFinite(lo) || !isFinite(hi) || lo >= hi) return [940, 1050];
+    const range = Math.max(hi - lo, 2);
+    const pad = range * 0.25;
+    return [lo - pad, hi + pad];
+  }
+
+  function formatAgoLabel(secNeg) {
+    const s = Math.abs(secNeg);
+    if (s < 60) return 'now';
+    if (s < 3600) return '−' + Math.round(s / 60) + 'm';
+    const h = s / 3600;
+    if (h < 24) return '−' + (h % 1 ? h.toFixed(1) : h.toFixed(0)) + 'h';
+    const d = h / 24;
+    return '−' + (d % 1 ? d.toFixed(1) : d.toFixed(0)) + 'd';
+  }
+
+  // ---------- ZAMBRETTI ----------------------------------------------------
+  function zambretti(pressureMb, delta3h, windDirDeg, latDeg, dateObj) {
+    let tendency;
+    if (delta3h > 1.6)       tendency = 'rising';
+    else if (delta3h < -1.6) tendency = 'falling';
+    else                     tendency = 'steady';
+
+    // Base index: 1050 mbar → slot 1 (best), 950 mbar → slot 26 (worst). Clamp.
+    const p = Math.max(950, Math.min(1050, pressureMb));
+    let Z = Math.round(((1050 - p) / 100) * 25) + 1;
+
+    if (tendency === 'rising')  Z -= 5;
+    if (tendency === 'falling') Z += 5;
+
+    // Wind direction adjustment (NH; mirror N↔S for SH). Easterly winds in temperate latitudes
+    // are associated with pre-frontal weather (worse Z); westerlies with post-frontal clearing.
+    // Sector index from windDirDeg (FROM direction): 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW.
+    const adj = [0, 1, 2, 1, -1, 0, -1, -2];
+    const mirrorSH = [4, 3, 2, 1, 0, 7, 6, 5];
+    const sector = Math.round((((windDirDeg % 360) + 360) % 360) / 45) % 8;
+    Z += latDeg >= 0 ? adj[sector] : adj[mirrorSH[sector]];
+
+    // Season adjustment — Zambretti was developed for temperate latitudes
+    const month = dateObj.getMonth() + 1;
+    const summerN = month >= 4 && month <= 9;
+    const summer = latDeg >= 0 ? summerN : !summerN;
+    if (summer && tendency === 'rising')  Z -= 2;
+    if (summer && tendency === 'falling') Z += 1;
+
+    Z = Math.max(1, Math.min(26, Z));
+    return { Z, text: Z_FORECASTS[Z - 1], tendency };
+  }
+
+  // Fallback: UK Met Office Shipping Forecast wording, tendency-only.
+  function fallbackForecast(p, d) {
+    const a = Math.abs(d);
+    const falling = d < -0.3, rising = d > 0.3, steady = !falling && !rising;
+    const high = p > 1018, low = p < 1005;
+    if (falling && a > 6 && low)    return 'Storm approaching — secure gear and reduce sail.';
+    if (falling && a > 3.5)         return low
+      ? 'Front passing — wind and rain likely within hours.'
+      : 'Wind backing — rain likely within 12 h, reef early.';
+    if (falling && a > 1.5)         return high
+      ? 'Pressure easing — weather may turn, watch the sky.'
+      : 'Unsettled spell developing — stow loose gear.';
+    if (falling)                    return 'Slow decline — fair for now, watch the trend.';
+    if (steady && high)             return 'Settled high — light winds, fair skies.';
+    if (steady && low)              return 'Stalled low — unsettled, showers may persist.';
+    if (steady)                     return 'No notable change — conditions should hold.';
+    if (rising && a > 6)            return 'Sharp rise — gusty winds as the front clears.';
+    if (rising && a > 3.5)          return low
+      ? 'Clearing — winds easing, skies opening within hours.'
+      : 'Building — fair weather strengthening, light to moderate breeze.';
+    if (rising && a > 1.5)          return 'Improving — fair weather building over next 12 h.';
+    return 'Slow recovery — trending toward fair.';
+  }
+
+  function tendencyLabel(delta) {
+    const a = Math.abs(delta);
+    const dir = delta > 0 ? 'Rising' : (delta < 0 ? 'Falling' : '');
+    if (a < 0.1)  return 'Steady';
+    if (a < 1.5)  return dir + ' slowly';
+    if (a < 3.5)  return dir;
+    if (a < 6)    return dir + ' quickly';
+    return dir + ' very rapidly';
+  }
+
+  function pressureZone(p) {
+    for (const z of ZONES) if (p < z.max) return z;
+    return ZONES[ZONES.length - 1];
+  }
+
+  function makeTendencyArrow(delta) {
+    const abs = Math.abs(delta);
+    let rotation;
+    if (abs < 0.1) rotation = 90;
+    else {
+      const steep = abs < 1.5 ? 60 : (abs < 3.5 ? 35 : (abs < 6 ? 18 : 6));
+      rotation = delta > 0 ? steep : (180 - steep);
+    }
+    return `<svg viewBox="0 0 28 28" width="28" height="28">
+      <g transform="rotate(${rotation} 14 14)">
+        <line x1="14" y1="23" x2="14" y2="6" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M 8 11 L 14 5 L 20 11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </svg>`;
+  }
+
+  function twdToCompass(deg) {
+    const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+    return dirs[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+  }
+
+  // ---------- CONTROLS -----------------------------------------------------
+  function wireControls() {
+    const pills = document.querySelectorAll('#baroRangePills .sub-tab');
+    pills.forEach(btn => btn.addEventListener('click', () => {
+      pills.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentRangeHours = parseInt(btn.dataset.range, 10);
+      if (baroPlot) refreshPlot();
+    }));
+    const cb = document.getElementById('baroAutoscaleY');
+    if (cb) cb.addEventListener('change', e => {
+      autoscaleY = e.target.checked;
+      if (baroPlot) refreshPlot();
+    });
+  }
+
+  // ---------- HELPERS ------------------------------------------------------
+  function setText(id, t) { const e = document.getElementById(id); if (e) e.textContent = t; }
+  function setHTML(id, h) { const e = document.getElementById(id); if (e) e.innerHTML = h; }
+  function getCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function hexAlpha(hex, a) {
+    if (!hex || !hex.startsWith('#')) return hex;
+    const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
 })();
 
 /* XREG_END */

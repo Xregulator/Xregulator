@@ -1359,10 +1359,14 @@ input[type="submit"] {
   gap: 4px;
   white-space: nowrap;
   flex-shrink: 0;
+  /* 11px vertical padding + 22px checkbox = 44px iOS touch-safe minimum */
+  padding: 11px 4px;
 }
 
 .password-form .show-checkbox {
   margin: 0;
+  width: 22px;
+  height: 22px;
 }
 
 .password-form .show-label {
@@ -3088,11 +3092,13 @@ input:checked+.slider:before {
   }
 }
 
-/* Floating Cloud Upload pill — bottom-left to avoid the bottom-right WiFi pill */
+/* Floating Cloud Upload pill — bottom-left to avoid the bottom-right WiFi pill.
+   Offsets include env(safe-area-inset-*) so the pill clears the iPhone home
+   indicator and side-rounded corners on landscape. */
 #cloud-flush-pill {
   position: fixed;
-  bottom: 16px;
-  left: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: calc(16px + env(safe-area-inset-left));
   z-index: 9999;
   background: var(--card-bg, #fff);
   border: 1px solid var(--border, #ccc);
@@ -3350,5 +3356,121 @@ body.dark-mode #alt-panel-protections .protections-edit-row input[type="number"]
 body.dark-mode #alt-panel-protections .protections-tag {
   background: #242424;
 }
+
+/* ========================================================================
+   BAROMETER PANEL (Other tab) — conditions header + 14-day pressure plot
+   Pressure-zone colors (storm/rain/change/fair/dry) are scoped inline via
+   updateBaroDisplay() so they pick up dark-mode automatically.
+   ======================================================================== */
+.baro-panel { margin-bottom: 10px; }
+.baro-conditions {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(140px, 1fr) minmax(170px, 1fr) minmax(120px, 1fr);
+  gap: 12px 18px;
+  align-items: center;
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
+.baro-block { min-width: 0; }
+.baro-block + .baro-block { padding-left: 18px; border-left: 1px solid var(--border); }
+@media (max-width: 760px) {
+  .baro-conditions { grid-template-columns: 1fr 1fr; gap: 14px; }
+  .baro-block + .baro-block { padding-left: 0; border-left: none; }
+}
+@media (max-width: 440px) { .baro-conditions { grid-template-columns: 1fr; } }
+
+.baro-block-label {
+  font-size: 11px;
+  color: #666;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+body.dark-mode .baro-block-label { color: #aaa; }
+
+.baro-zone-label {
+  font-size: 24px;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.baro-zone-sub, .baro-method-sub {
+  font-size: 11px;
+  color: #666;
+}
+body.dark-mode .baro-zone-sub,
+body.dark-mode .baro-method-sub { color: #aaa; }
+
+.baro-reading-big {
+  font-size: 28px;
+  font-weight: bold;
+  color: var(--reading);
+  line-height: 1;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.baro-reading-sub { font-size: 11px; color: #666; }
+body.dark-mode .baro-reading-sub { color: #aaa; }
+
+.baro-tendency-row { display: flex; align-items: center; gap: 10px; }
+.baro-tendency-arrow {
+  width: 28px; height: 28px;
+  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent);
+}
+.baro-tendency-arrow svg { width: 100%; height: 100%; }
+.baro-tendency-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.baro-tendency-label { font-size: 15px; font-weight: bold; color: var(--reading); }
+.baro-tendency-delta {
+  font-size: 11px;
+  color: #666;
+  font-variant-numeric: tabular-nums;
+}
+body.dark-mode .baro-tendency-delta { color: #aaa; }
+
+.baro-method-label {
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--reading);
+  margin-bottom: 2px;
+}
+
+.baro-forecast-row {
+  font-style: italic;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dark);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.baro-plot-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.baro-autoscale-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dark);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.baro-autoscale-toggle input[type="checkbox"] { cursor: pointer; }
+.baro-range-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+/* .sub-tab styling already gives us pill buttons + teal active state */
+
+.baro-plot-container {
+  width: 100%;
+  height: 280px;
+  min-height: 200px;
+}
+@media (max-width: 600px) { .baro-plot-container { height: 220px; } }
 
 /* XREG_END */

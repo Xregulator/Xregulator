@@ -34,7 +34,7 @@
   <title>X Engineering Alternator Regulator</title>
   <link rel="stylesheet" href="styles.css">
   <meta name="viewport"
-    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 
   <!-- iOS-specific meta tags -->
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -8172,18 +8172,74 @@
     <!-- Other Live Data Sub-tab -->
     <div id="livedata-other" class="sub-tab-content">
       <div class="settings-card">
-        <div class="grid">
 
-          <div class="card">
-            <p>Barometric Pressure</p>
-            <p class="reading with-wm" id="baroPressure-display" style="font-size: 28px;">
-              <span><span id="baroPressureID">0</span> mbar</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
+        <!-- Barometric Pressure: conditions header + 14-day history plot. Replaces the prior
+             single-value baro card. Board Temp + ADS Ch3 sit in the grid below. -->
+        <div class="card-group baro-panel">
+          <div class="card-group-title">Barometric Pressure
+            <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️
+              <span class="tooltip-box">
+                Sea-level barometric pressure (mbar — the unit used by the BBC Shipping Forecast, NOAA marine VHF, and most marine instruments; 1 mbar = 1 hPa exactly).
+                Sampled every 10 minutes into a 7-day PSRAM ring buffer, persisted to NVS only at the field-off edge (no impact on loop timing).
+                Forecast uses the <strong>Zambretti algorithm</strong> (1915, refined 1985) when true wind direction (NMEA2k) and GPS latitude are both fresh — it combines current pressure, 3-hour tendency, wind direction, and hemisphere/season into one of 26 outcomes.
+                When either is stale, it falls back to a simpler tendency-only rule based on the UK Met Office Shipping Forecast Glossary (Steady / Rising slowly / Rising / Rising quickly / Rising very rapidly, thresholds 0.1 / 1.5 / 3.5 / 6 mbar over 3 h).
+                History older than 7 days is available in your cloud storage.
               </span>
-            </p>
+            </span>
           </div>
+
+          <div class="baro-conditions">
+            <div class="baro-block">
+              <div class="baro-block-label">Zone</div>
+              <div class="baro-zone-label" id="baroZoneLabel">—</div>
+              <div class="baro-zone-sub" id="baroZoneSub">—</div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">Current</div>
+              <div class="baro-reading-big"><span id="baroPressureID">—</span> <span style="font-size:14px;color:var(--text-muted,#777);font-weight:normal;">mbar</span></div>
+              <div class="baro-reading-sub">
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
+                </span>
+              </div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">3-Hour Tendency</div>
+              <div class="baro-tendency-row">
+                <div class="baro-tendency-arrow" id="baroTendencyArrow"></div>
+                <div class="baro-tendency-text">
+                  <span class="baro-tendency-label" id="baroTendencyLabel">—</span>
+                  <span class="baro-tendency-delta" id="baroTendencyDelta">—</span>
+                </div>
+              </div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">Forecast Method</div>
+              <div class="baro-method-label" id="baroMethodLabel">—</div>
+              <div class="baro-method-sub" id="baroMethodSub">—</div>
+            </div>
+          </div>
+
+          <div class="baro-forecast-row" id="baroForecastText">—</div>
+
+          <div class="baro-plot-controls">
+            <label class="baro-autoscale-toggle">
+              <input type="checkbox" id="baroAutoscaleY">
+              Autoscale Y
+            </label>
+            <div class="baro-range-pills" id="baroRangePills">
+              <button class="sub-tab" data-range="3">3H</button>
+              <button class="sub-tab" data-range="6">6H</button>
+              <button class="sub-tab active" data-range="24">24H</button>
+              <button class="sub-tab" data-range="48">48H</button>
+              <button class="sub-tab" data-range="168">1W</button>
+            </div>
+          </div>
+          <div id="baroPlot" class="baro-plot-container"></div>
+        </div>
+
+        <div class="grid">
 
           <div class="card">
             <p>Board Temperature
@@ -9472,13 +9528,6 @@
     <input id="SolarWatts" style="display:none;" value="0" />
     <input id="performanceRatio" style="display:none;" value="0" />
     <input id="LearningMode" name="LearningMode" type="number" value="" style="display:none;" />
-    <input id="LearningPaused" name="LearningPaused" type="number" value="" style="display:none;" />
-    <input id="LearningDryRunMode" name="LearningDryRunMode" type="number" value="" style="display:none;" />
-    <input id="LearningUpwardEnabled" name="LearningUpwardEnabled" type="number" value="" style="display:none;" />
-    <input id="LearningDownwardEnabled" name="LearningDownwardEnabled" type="number" value="" style="display:none;" />
-    <input id="EnableNeighborLearning" name="EnableNeighborLearning" type="number" value="" style="display:none;" />
-    <input id="ShowLearningDebugMessages" name="ShowLearningDebugMessages" type="number" value=""
-      style="display:none;" />
     <input id="AlternatorNominalAmps" style="display:none;" value="0" />
     <input id="LearningUpStep" style="display:none;" value="0" />
     <input id="LearningDownStep" style="display:none;" value="0" />
@@ -9489,7 +9538,6 @@
     <input id="PidKd" style="display:none;" value="0" />
     <input id="PidSampleDivisor" style="display:none;" value="0" />
     <input type="hidden" id="CloudFeatures" name="CloudFeatures" value="0">
-    <input type="hidden" id="VMGUseTrueWind" name="VMGUseTrueWind" value="0">
     <input id="AbsorptionVoltage" style="display:none;" value="0" />
     <input id="TargetVoltageSetpoint" style="display:none;" value="0" />
     <input id="AbsorptionTimeoutMs" style="display:none;" value="0" />

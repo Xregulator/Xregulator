@@ -305,15 +305,56 @@ void WindSpeed(const tN2kMsg &N2kMsg) {
   if (ParseN2kWindSpeed(N2kMsg, SID, WindSpeed, WindAngle, WindReference)) {
     // F-RES-04: bail entirely if both fields NA; otherwise update each independently.
     if (N2kIsNA(WindSpeed) && N2kIsNA(WindAngle)) return;
-    if (!N2kIsNA(WindSpeed)) {
-      ApparentWindSpeedNMEA = WindSpeed * 1.94384;
-      MARK_FRESH(IDX_APPARENT_WIND_SPEED);
+
+    // PGN 130306 carries either apparent OR true wind — branch on WindReference so we
+    // don't dump true-wind values into apparent globals (the bug we hit when a network
+    // published true-N directly; calculateDerivedMetrics then ran apparent→true math on
+    // them again, producing nonsense). True_North and Magnetic are earth-frame TWD; we
+    // convert to boat-relative TWA via HeadingNMEA so TrueWindAngleNMEA stays consistent
+    // with the existing apparent→true derivation. True_boat / True_water are already
+    // boat-relative. Apparent path unchanged.
+    bool isTrue = (WindReference == N2kWind_True_North ||
+                   WindReference == N2kWind_Magnetic ||
+                   WindReference == N2kWind_True_boat ||
+                   WindReference == N2kWind_True_water);
+
+    if (isTrue) {
+      if (!N2kIsNA(WindSpeed)) {
+        TrueWindSpeedNMEA = WindSpeed * 1.94384;
+        MARK_FRESH(IDX_TRUE_WIND_SPEED);
+      }
+      if (!N2kIsNA(WindAngle)) {
+        float angDeg = WindAngle * 180.0 / PI;
+        while (angDeg < 0)       angDeg += 360.0;
+        while (angDeg >= 360.0)  angDeg -= 360.0;
+        if ((WindReference == N2kWind_True_North || WindReference == N2kWind_Magnetic) &&
+            !IS_STALE(IDX_HEADING_NMEA)) {
+          // Earth-frame TWD → convert to boat-relative TWA
+          float twa = angDeg - HeadingNMEA;
+          while (twa < 0)        twa += 360.0;
+          while (twa >= 360.0)   twa -= 360.0;
+          TrueWindAngleNMEA = twa;
+        } else {
+          // True_boat / True_water → already boat-relative
+          // (or earth-frame without heading — fall through; better than nothing for Zambretti
+          //  which adds heading back in JS)
+          TrueWindAngleNMEA = angDeg;
+        }
+        MARK_FRESH(IDX_TRUE_WIND_ANGLE);
+      }
+      if (!N2kIsNA(WindSpeed)) UpdateWindMaximums();
+    } else {
+      // Apparent (N2kWind_Apparent or unknown reference)
+      if (!N2kIsNA(WindSpeed)) {
+        ApparentWindSpeedNMEA = WindSpeed * 1.94384;
+        MARK_FRESH(IDX_APPARENT_WIND_SPEED);
+      }
+      if (!N2kIsNA(WindAngle)) {
+        ApparentWindAngleNMEA = WindAngle * 180.0 / PI;
+        MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
+      }
+      if (!N2kIsNA(WindSpeed)) UpdateWindMaximums();  // also guards TrueWindSpeedNMEA internally
     }
-    if (!N2kIsNA(WindAngle)) {
-      ApparentWindAngleNMEA = WindAngle * 180.0 / PI;
-      MARK_FRESH(IDX_APPARENT_WIND_ANGLE);
-    }
-    if (!N2kIsNA(WindSpeed)) UpdateWindMaximums();  // only if speed valid; UpdateWindMaximums also guards TrueWindSpeedNMEA internally
 
   } else {
     OutputStream->print("Failed to parse PGN: ");
@@ -401,7 +442,8 @@ void ReadVEData() {
   bool dataReceived = false;  // Track if we got any valid data
   float solarPower_W = 0.0f;  // Track solar power for this update
 
-  while (Serial1.available()) {
+  int veDrainBudget = 256;  // cap per-tick drain so a chatty Victron can't starve the loop
+  while (veDrainBudget-- > 0 && Serial1.available()) {
     myve.rxData(Serial1.read());
     for (int i = 0; i < myve.veEnd; i++) {
       if (strcmp(myve.veName[i], "V") == 0) {
@@ -1161,13 +1203,18 @@ void UpdateWindMaximums() {
 }
 
 void UpdateBoardTempPressureMaximums() {
-  if (ambientTemp > board_temp_max_alltime)        board_temp_max_alltime    = ambientTemp;
-  if (ambientTemp < board_temp_min_alltime)        board_temp_min_alltime    = ambientTemp;
-  if (baroPressure > baro_pressure_max_alltime)    baro_pressure_max_alltime = baroPressure;
-  if (baroPressure < baro_pressure_min_alltime)    baro_pressure_min_alltime = baroPressure;
-  // ignition-cycle watermarks
-  wmIgnUpdate(wmIgn_ambient, ambientTemp);
-  wmIgnUpdate(wmIgn_baro, baroPressure);
+  // Guard per-field — NaN compares false against everything, but watermark updaters
+  // shouldn't ingest NaN. A BMP388 read failure could surface NaN on either channel.
+  if (!isnan(ambientTemp)) {
+    if (ambientTemp > board_temp_max_alltime)        board_temp_max_alltime    = ambientTemp;
+    if (ambientTemp < board_temp_min_alltime)        board_temp_min_alltime    = ambientTemp;
+    wmIgnUpdate(wmIgn_ambient, ambientTemp);
+  }
+  if (!isnan(baroPressure)) {
+    if (baroPressure > baro_pressure_max_alltime)    baro_pressure_max_alltime = baroPressure;
+    if (baroPressure < baro_pressure_min_alltime)    baro_pressure_min_alltime = baroPressure;
+    wmIgnUpdate(wmIgn_baro, baroPressure);
+  }
 }
 
 void resetDistanceThisInterval() {
@@ -3100,8 +3147,12 @@ void performFactoryReset() {
 
 void calculateDerivedMetrics() {
   // ===== TRUE WIND CALCULATION =====
-  // Only calculate if we have valid apparent wind and boat speed data
-  if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && !IS_STALE(IDX_APPARENT_WIND_ANGLE) && !IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_HEADING_NMEA)) {
+  // Skip if the bus already provided true wind directly (WindSpeed PGN handler populated
+  // it from a True_North / Magnetic / True_boat reference). Only derive from apparent
+  // when no upstream true source is available.
+  if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && !IS_STALE(IDX_APPARENT_WIND_ANGLE) &&
+      !IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_HEADING_NMEA) &&
+      IS_STALE(IDX_TRUE_WIND_SPEED)) {
 
     // Convert apparent wind angle to radians for calculation
     float awaRad = ApparentWindAngleNMEA * PI / 180.0;
@@ -3124,11 +3175,12 @@ void calculateDerivedMetrics() {
 
     MARK_FRESH(IDX_TRUE_WIND_SPEED);
     MARK_FRESH(IDX_TRUE_WIND_ANGLE);
-  } else {
-    // NMEA2K data not available - set to NAN
+  } else if (IS_STALE(IDX_TRUE_WIND_SPEED) && IS_STALE(IDX_TRUE_WIND_ANGLE)) {
+    // No upstream true PGN AND no apparent-derived path — clear to NAN.
     TrueWindSpeedNMEA = NAN;
     TrueWindAngleNMEA = NAN;
   }
+  // (else: bus is providing true wind directly via WindSpeed PGN handler — leave it alone)
 
   // ===== LEEWAY CALCULATION =====
   // Only calculate if we have valid heading and COG
@@ -3564,14 +3616,14 @@ void saveNVSDataFull() {
   if (prev_AvgSpeed != (int32_t)(AvgSpeed * 100))                           { nvs_set_i32(h, "AvgSpeed",       (int32_t)(AvgSpeed * 100));                     prev_AvgSpeed = (int32_t)(AvgSpeed * 100);                           chg = true; }
   if (prev_TotalDist_AllTime != (int32_t)TotalDistance_AllTime)             { nvs_set_i32(h, "TotDist_AT",     (int32_t)TotalDistance_AllTime);                prev_TotalDist_AllTime = (int32_t)TotalDistance_AllTime;             chg = true; }
   if (prev_AvgSpeed_AllTime != (int32_t)(AvgSpeed_AllTime * 100))           { nvs_set_i32(h, "AvgSpd_AT",      (int32_t)(AvgSpeed_AllTime * 100));             prev_AvgSpeed_AllTime = (int32_t)(AvgSpeed_AllTime * 100);           chg = true; }
-  if (prev_spdAccum_AllTime  != speedAccumulator_AllTime)                   { nvs_set_blob(h, "SpdAccum_AT",   &speedAccumulator_AllTime,   sizeof(float));    prev_spdAccum_AllTime  = speedAccumulator_AllTime;                   chg = true; }
+  if (prev_spdAccum_AllTime  != speedAccumulator_AllTime)                   { nvs_set_blob(h, "SpdAccum_AT",   &speedAccumulator_AllTime,   sizeof(double));   prev_spdAccum_AllTime  = speedAccumulator_AllTime;                   chg = true; }
   if (prev_spdTime_AllTime   != (uint32_t)totalSpeedSampleTime_AllTime)     { nvs_set_u32(h, "SpdTime_AT",     (uint32_t)totalSpeedSampleTime_AllTime);        prev_spdTime_AllTime   = (uint32_t)totalSpeedSampleTime_AllTime;     chg = true; }
   if (prev_AvgSOC != (int32_t)(AvgSOC * 100))                               { nvs_set_i32(h, "AvgSOC",         (int32_t)(AvgSOC * 100));                       prev_AvgSOC = (int32_t)(AvgSOC * 100);                               chg = true; }
   // SOC alltime + voltage AllTime accumulators + battery state
   { uint64_t sc = (uint64_t)(socAccumulator_AllTime * 100.0f);
     if (prev_socAccum_AllTime != sc)                                         { nvs_set_u64(h, "SocAccum_AT", sc);                                               prev_socAccum_AllTime = sc;                                          chg = true; } }
   if (prev_socTime_AllTime != (uint32_t)totalSocSampleTime_AllTime)         { nvs_set_u32(h, "SocTime_AT",     (uint32_t)totalSocSampleTime_AllTime);          prev_socTime_AllTime = (uint32_t)totalSocSampleTime_AllTime;         chg = true; }
-  if (prev_vltAccum_AllTime  != voltageAccumulator_AllTime)                  { nvs_set_blob(h, "VltAccum_AT",   &voltageAccumulator_AllTime, sizeof(float));    prev_vltAccum_AllTime  = voltageAccumulator_AllTime;                  chg = true; }
+  if (prev_vltAccum_AllTime  != voltageAccumulator_AllTime)                  { nvs_set_blob(h, "VltAccum_AT",   &voltageAccumulator_AllTime, sizeof(double));   prev_vltAccum_AllTime  = voltageAccumulator_AllTime;                  chg = true; }
   if (prev_vltTime_AllTime   != (uint32_t)totalVoltageSampleTime_AllTime)    { nvs_set_u32(h, "VltTime_AT",     (uint32_t)totalVoltageSampleTime_AllTime);      prev_vltTime_AllTime   = (uint32_t)totalVoltageSampleTime_AllTime;    chg = true; }
   if (prev_SOC_percent != (int32_t)SOC_percent)                             { nvs_set_i32(h, "SOC_percent",    (int32_t)SOC_percent);                          prev_SOC_percent = (int32_t)SOC_percent;                             chg = true; }
   if (prev_CoulombCount != (int32_t)CoulombCount_Ah_scaled)                 { nvs_set_i32(h, "CoulombCount",   (int32_t)CoulombCount_Ah_scaled);               prev_CoulombCount = (int32_t)CoulombCount_Ah_scaled;                 chg = true; }
@@ -3593,6 +3645,15 @@ void saveNVSDataFull() {
   if (prev_imu_capsize_count != imu_capsize_count)                          { nvs_set_u32(h,  "IMU_Capsize",   imu_capsize_count);                              prev_imu_capsize_count = imu_capsize_count;                          chg = true; }
   if (prev_imu_pitchpole_count != imu_pitchpole_count)                      { nvs_set_u32(h,  "IMU_Pitchpol",  imu_pitchpole_count);                           prev_imu_pitchpole_count = imu_pitchpole_count;                      chg = true; }
   if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime)              { nvs_set_u32(h,  "IMU_SlamLife",  imu_slam_count_lifetime);                        prev_imu_slam_count_lifetime = imu_slam_count_lifetime;              chg = true; }
+  // Sea state minute counters (NVS save).
+  if (prev_imu_min_moving_gentle != imu_min_moving_gentle)                  { nvs_set_u32(h,  "IMU_MinMvGnt",  imu_min_moving_gentle);                          prev_imu_min_moving_gentle = imu_min_moving_gentle;                  chg = true; }
+  if (prev_imu_min_moving_moderate != imu_min_moving_moderate)              { nvs_set_u32(h,  "IMU_MinMvMod",  imu_min_moving_moderate);                        prev_imu_min_moving_moderate = imu_min_moving_moderate;              chg = true; }
+  if (prev_imu_min_moving_rough != imu_min_moving_rough)                    { nvs_set_u32(h,  "IMU_MinMvRgh",  imu_min_moving_rough);                           prev_imu_min_moving_rough = imu_min_moving_rough;                    chg = true; }
+  if (prev_imu_min_moving_extreme != imu_min_moving_extreme)                { nvs_set_u32(h,  "IMU_MinMvExt",  imu_min_moving_extreme);                         prev_imu_min_moving_extreme = imu_min_moving_extreme;                chg = true; }
+  if (prev_imu_min_stat_gentle != imu_min_stat_gentle)                      { nvs_set_u32(h,  "IMU_MinStGnt",  imu_min_stat_gentle);                            prev_imu_min_stat_gentle = imu_min_stat_gentle;                      chg = true; }
+  if (prev_imu_min_stat_moderate != imu_min_stat_moderate)                  { nvs_set_u32(h,  "IMU_MinStMod",  imu_min_stat_moderate);                          prev_imu_min_stat_moderate = imu_min_stat_moderate;                  chg = true; }
+  if (prev_imu_min_stat_rough != imu_min_stat_rough)                        { nvs_set_u32(h,  "IMU_MinStRgh",  imu_min_stat_rough);                             prev_imu_min_stat_rough = imu_min_stat_rough;                        chg = true; }
+  if (prev_imu_min_stat_extreme != imu_min_stat_extreme)                    { nvs_set_u32(h,  "IMU_MinStExt",  imu_min_stat_extreme);                           prev_imu_min_stat_extreme = imu_min_stat_extreme;                    chg = true; }
   if (prev_imu_heel_max_lifetime != imu_heel_max_lifetime)                  { nvs_set_blob(h, "IMU_HeelMax",   &imu_heel_max_lifetime,      sizeof(float));     prev_imu_heel_max_lifetime = imu_heel_max_lifetime;                  chg = true; }
   if (prev_imu_pitch_max_lifetime != imu_pitch_max_lifetime)                { nvs_set_blob(h, "IMU_PitchMax",  &imu_pitch_max_lifetime,     sizeof(float));     prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;                chg = true; }
   if (prev_imu_slam_peak_lifetime != imu_slam_peak_lifetime)                { nvs_set_blob(h, "IMU_SlamMax",   &imu_slam_peak_lifetime,     sizeof(float));     prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;                chg = true; }
@@ -3623,6 +3684,16 @@ void saveNVSDataFull() {
   if (prev_UVToday != UVToday)                                              { nvs_set_blob(h, "UVToday",       &UVToday,                           sizeof(float));    prev_UVToday = UVToday;                                              chg = true; }
   if (prev_UVTomorrow != UVTomorrow)                                        { nvs_set_blob(h, "UVTomorrow",    &UVTomorrow,                        sizeof(float));    prev_UVTomorrow = UVTomorrow;                                        chg = true; }
   if (prev_UVDay2 != UVDay2)                                                { nvs_set_blob(h, "UVDay2",        &UVDay2,                            sizeof(float));    prev_UVDay2 = UVDay2;                                                chg = true; }
+
+  // Barometric pressure 14-day history — 8 KB blob + head index + last-sample epoch.
+  // Only written when the ring head moved since last save (a new sample landed).
+  if (baroPressureHistory && prev_baroHistoryHead != baroHistoryHead) {
+    nvs_set_blob(h, "BaroHist",     baroPressureHistory, BARO_HISTORY_SIZE * sizeof(uint16_t));
+    nvs_set_u16(h,  "BaroHistHead", baroHistoryHead);
+    nvs_set_u32(h,  "BaroHistEpch", (uint32_t)baroHistoryLastEpoch);
+    prev_baroHistoryHead = baroHistoryHead;
+    chg = true;
+  }
 
   if (chg) nvs_commit(h);
   nvs_close(h);
@@ -3736,7 +3807,7 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "AvgSpd_AT", &temp_int32) == ESP_OK) AvgSpeed_AllTime = temp_int32 / 100.0f;
 
   // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
-  required_size = sizeof(float);
+  required_size = sizeof(double);
   nvs_get_blob(nvs_handle, "SpdAccum_AT", &speedAccumulator_AllTime, &required_size);
   if (nvs_get_u32(nvs_handle, "SpdTime_AT", &temp_uint32) == ESP_OK) totalSpeedSampleTime_AllTime = temp_uint32;
   if (totalSpeedSampleTime_AllTime > 0)
@@ -3764,7 +3835,7 @@ void loadNVSData() {
   }
 
   // Voltage AllTime accumulators (restore so AvgVoltage_AllTime continues correctly after reboot)
-  required_size = sizeof(float);
+  required_size = sizeof(double);
   nvs_get_blob(nvs_handle, "VltAccum_AT", &voltageAccumulator_AllTime, &required_size);
   if (nvs_get_u32(nvs_handle, "VltTime_AT", &temp_uint32) == ESP_OK) totalVoltageSampleTime_AllTime = temp_uint32;
   if (totalVoltageSampleTime_AllTime > 0)
@@ -3839,15 +3910,15 @@ void loadNVSData() {
   if (nvs_get_u32(nvs_handle, "IMU_Pitchpol", &temp_uint32) == ESP_OK) imu_pitchpole_count = temp_uint32;
   if (nvs_get_u32(nvs_handle, "IMU_SlamLife", &temp_uint32) == ESP_OK) imu_slam_count_lifetime = temp_uint32;
 
-  // TODO: sea state minute counter NVS loads deferred — uncomment when saves are re-enabled
-  // if (nvs_get_u32(nvs_handle, "IMU_MinMvGnt",  &temp_uint32) == ESP_OK) imu_min_moving_gentle   = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinMvMod",  &temp_uint32) == ESP_OK) imu_min_moving_moderate = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinMvRgh",  &temp_uint32) == ESP_OK) imu_min_moving_rough    = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinMvExt",  &temp_uint32) == ESP_OK) imu_min_moving_extreme  = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinStGnt",  &temp_uint32) == ESP_OK) imu_min_stat_gentle     = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinStMod",  &temp_uint32) == ESP_OK) imu_min_stat_moderate   = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinStRgh",  &temp_uint32) == ESP_OK) imu_min_stat_rough      = temp_uint32;
-  // if (nvs_get_u32(nvs_handle, "IMU_MinStExt",  &temp_uint32) == ESP_OK) imu_min_stat_extreme    = temp_uint32;
+  // Sea state minute counters (NVS load).
+  if (nvs_get_u32(nvs_handle, "IMU_MinMvGnt",  &temp_uint32) == ESP_OK) imu_min_moving_gentle   = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinMvMod",  &temp_uint32) == ESP_OK) imu_min_moving_moderate = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinMvRgh",  &temp_uint32) == ESP_OK) imu_min_moving_rough    = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinMvExt",  &temp_uint32) == ESP_OK) imu_min_moving_extreme  = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinStGnt",  &temp_uint32) == ESP_OK) imu_min_stat_gentle     = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinStMod",  &temp_uint32) == ESP_OK) imu_min_stat_moderate   = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinStRgh",  &temp_uint32) == ESP_OK) imu_min_stat_rough      = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "IMU_MinStExt",  &temp_uint32) == ESP_OK) imu_min_stat_extreme    = temp_uint32;
 
   // IMU Lifetime Maximums
   required_size = sizeof(float);
@@ -3874,6 +3945,12 @@ void loadNVSData() {
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "BdTmpMinAt",  &board_temp_min_alltime,           &required_size);
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "BaroMaxAt",   &baro_pressure_max_alltime,        &required_size);
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "BaroMinAt",   &baro_pressure_min_alltime,        &required_size);
+  // Guard against NaN/Inf written by older firmware before the runtime isnan
+  // guard existed. Once a watermark turns NaN, comparisons never update it again.
+  if (!isfinite(board_temp_max_alltime))    board_temp_max_alltime    = -999.0f;
+  if (!isfinite(board_temp_min_alltime))    board_temp_min_alltime    =  999.0f;
+  if (!isfinite(baro_pressure_max_alltime)) baro_pressure_max_alltime =    0.0f;
+  if (!isfinite(baro_pressure_min_alltime)) baro_pressure_min_alltime = 9999.0f;
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxTherm",    &MaxTemperatureThermistor,         &required_size);
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxTherm_AT", &MaxTemperatureThermistor_AllTime, &required_size);
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxAltTempF", &MaxAlternatorTemperatureF,        &required_size);
@@ -3883,6 +3960,19 @@ void loadNVSData() {
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "UVToday",     &UVToday,                          &required_size);
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "UVTomorrow",  &UVTomorrow,                       &required_size);
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "UVDay2",      &UVDay2,                           &required_size);
+
+  // Barometric pressure 14-day history. Buffer is ps_malloc'd in setup() before this
+  // function runs, so it's safe to load directly into it. Missing-key paths leave the
+  // buffer zeroed (its memset default), which JS treats as "no sample".
+  if (baroPressureHistory) {
+    required_size = BARO_HISTORY_SIZE * sizeof(uint16_t);
+    nvs_get_blob(nvs_handle, "BaroHist", baroPressureHistory, &required_size);
+    nvs_get_u16(nvs_handle, "BaroHistHead", (uint16_t *)&baroHistoryHead);
+    uint32_t epochTmp = 0;
+    nvs_get_u32(nvs_handle, "BaroHistEpch", &epochTmp);
+    baroHistoryLastEpoch = (time_t)epochTmp;
+    prev_baroHistoryHead = baroHistoryHead;
+  }
 
   nvs_close(nvs_handle);
   //queueConsoleMessage("NVS: Persistent data loaded successfully");
@@ -3956,15 +4046,15 @@ void initNVSCache() {
   prev_imu_heel_max_lifetime = imu_heel_max_lifetime;
   prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;
   prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;
-  // TODO: sea state prev_ sync deferred — uncomment when saves are re-enabled
-  // prev_imu_min_moving_gentle   = imu_min_moving_gentle;
-  // prev_imu_min_moving_moderate = imu_min_moving_moderate;
-  // prev_imu_min_moving_rough    = imu_min_moving_rough;
-  // prev_imu_min_moving_extreme  = imu_min_moving_extreme;
-  // prev_imu_min_stat_gentle     = imu_min_stat_gentle;
-  // prev_imu_min_stat_moderate   = imu_min_stat_moderate;
-  // prev_imu_min_stat_rough      = imu_min_stat_rough;
-  // prev_imu_min_stat_extreme    = imu_min_stat_extreme;
+  // Sea state minute counters (prev_ shadow sync).
+  prev_imu_min_moving_gentle   = imu_min_moving_gentle;
+  prev_imu_min_moving_moderate = imu_min_moving_moderate;
+  prev_imu_min_moving_rough    = imu_min_moving_rough;
+  prev_imu_min_moving_extreme  = imu_min_moving_extreme;
+  prev_imu_min_stat_gentle     = imu_min_stat_gentle;
+  prev_imu_min_stat_moderate   = imu_min_stat_moderate;
+  prev_imu_min_stat_rough      = imu_min_stat_rough;
+  prev_imu_min_stat_extreme    = imu_min_stat_extreme;
   prev_MaxSpeed             = MaxSpeed;
   prev_MaxSpeed_AllTime     = MaxSpeed_AllTime;
   prev_MeasAmpsMax          = MeasuredAmpsMax;

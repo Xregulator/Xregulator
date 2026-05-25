@@ -90,11 +90,11 @@ enum Csv2Index {
   CSV2_UVTomorrow,
   CSV2_UVDay2,
   CSV2_weatherDataValid,
-  CSV2_SolarWatts,
-  CSV2_performanceRatio,
-  CSV2_VeData,
-  CSV2_NMEA0183Data,
-  CSV2_NMEA2KData,
+  CSV2_reserved_SolarWatts,        // moved to CSV3
+  CSV2_reserved_performanceRatio,  // moved to CSV3
+  CSV2_reserved_VeData,            // moved to CSV3
+  CSV2_reserved_NMEA0183Data,      // moved to CSV3
+  CSV2_reserved_NMEA2KData,        // moved to CSV3
   CSV2_AlarmLatchState,
   CSV2_ResetAlarmLatch,
   CSV2_ResetLearningTable,
@@ -295,7 +295,7 @@ enum Csv2Index {
   CSV2_HeadingNMEA,
   CSV2_EngineCycles,
   CSV2_CurrentSessionDuration,
-  CSV2_timeAxisModeChanging,
+  CSV2_reserved_timeAxisModeChanging,  // moved to CSV3
   CSV2_currentPartitionType,
   CSV2_fastOvCurrentCap,
   CSV2_fastOvClampCount,
@@ -514,8 +514,6 @@ enum Csv3Index {
   CSV3_RPMScalingFactor,
   CSV3_MaximumAllowedBatteryAmps,
   CSV3_BatteryVoltageSource,
-  CSV3_LearningUpwardEnabled,
-  CSV3_LearningDownwardEnabled,
   CSV3_AlternatorNominalAmps,
   CSV3_LearningUpStep,
   CSV3_LearningDownStep,
@@ -533,7 +531,6 @@ enum Csv3Index {
   CSV3_NeighborLearningFactor,
   CSV3_yyMax,
   CSV3_LearningMemoryDuration,
-  CSV3_EnableNeighborLearning,
   CSV3_EnableAmbientCorrection,
   CSV3_TuningMode,
   CSV3_rpmCurrentTable_0,
@@ -714,12 +711,9 @@ enum Csv3Index {
   CSV3_MaintainMode,
   CSV3_ManualSOCPoint,
   CSV3_LearningMode,
-  CSV3_LearningPaused,
   CSV3_IgnoreLearningDuringPenalty,
-  CSV3_ShowLearningDebugMessages,
   CSV3_LogAllLearningEvents,
   CSV3_CloudFeatures,
-  CSV3_LearningDryRunMode,
   CSV3_AutoShuntGainCorrection,
   CSV3_AutoAltCurrentZero,
   CSV3_WindingTempOffset,
@@ -775,8 +769,14 @@ enum Csv3Index {
   CSV3_FastSetpointRiseRate,    // ×100, 1 decimal — multiplier on setpoint rise slew during post-protection recovery
   CSV3_FastSetpointRiseWindowMs, // raw ms — hard upper bound on fast-rise window
   CSV3_FastSetpointRiseHeadroomV, // ×100, 2 decimal — V below target at which fast-rise gate stays open
+  CSV3_SolarWatts,              // moved from CSV2
+  CSV3_performanceRatio,        // moved from CSV2 (×100, 2 decimal)
+  CSV3_VeData,                  // moved from CSV2 (0/1)
+  CSV3_NMEA0183Data,            // moved from CSV2 (0/1)
+  CSV3_NMEA2KData,              // moved from CSV2 (0/1)
+  CSV3_timeAxisModeChanging,    // moved from CSV2 (0/1)
 
-  CSV3_FIELD_COUNT  // = 281 (added FastSetpointRiseWindowMs, FastSetpointRiseHeadroomV)
+  CSV3_FIELD_COUNT  // = 281 (was 287; removed 6 write-only Learning settings that had no UI consumer)
 };
 
 
@@ -820,9 +820,10 @@ void saveCapCurrentTableToNVS();
 void loadCapCurrentTableFromNVS();
 void loadCapTablesForMode(int mode);
 
-int SafeInt(float f, int scale = 1) {
+int SafeInt(double f, int scale = 1) {
   // where this is matters!!   Put utility functions like SafeInt() above setup() and loop() , according to ChatGPT.  And I proved it matters.
-  return isnan(f) || isinf(f) ? -1 : (int)roundf(f * scale);
+  // Param widened to double so AllTime accumulators don't narrow at call sites; float callers promote implicitly.
+  return isnan(f) || isinf(f) ? -1 : (int)round(f * scale);
 }
 void loadAPCredentials(bool forceDefaults = false) {
   if (forceDefaults) {
@@ -2096,6 +2097,64 @@ void setupServer() {
   });
 
 
+  // Barometric pressure 14-day history dump. 8-byte header + 4032 little-endian uint16
+  // samples (mbar × 10; 0 = no sample). Dashboard fetches once on Other-tab activation
+  // and every 5 min thereafter.
+  // Header layout (little-endian):
+  //   [0..1]  uint16 headIdx  — next write slot (samples[headIdx-1] is newest)
+  //   [2..5]  uint32 epoch    — wall-clock seconds of newest sample (0 if never synced)
+  //   [6..7]  uint16 count    — BARO_HISTORY_SIZE, for client-side sanity check
+  server.on("/baroHistory.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!baroPressureHistory) {
+      request->send(503, "application/octet-stream", "");
+      return;
+    }
+    struct BaroDLState {
+      uint8_t  header[8];
+      int      headerPos;
+      uint16_t samplePos;
+      bool     done;
+    };
+    BaroDLState state;
+    memset(&state, 0, sizeof(state));
+    uint16_t headLE  = baroHistoryHead;
+    uint32_t epochLE = (uint32_t)baroHistoryLastEpoch;
+    uint16_t countLE = BARO_HISTORY_SIZE;
+    memcpy(state.header + 0, &headLE,  2);
+    memcpy(state.header + 2, &epochLE, 4);
+    memcpy(state.header + 6, &countLE, 2);
+
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/octet-stream",
+      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (state.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state.headerPos < 8) {
+            size_t canSend = min(maxLen - written, (size_t)(8 - state.headerPos));
+            memcpy(buf + written, state.header + state.headerPos, canSend);
+            written += canSend;
+            state.headerPos += (int)canSend;
+            continue;
+          }
+          if (state.samplePos >= BARO_HISTORY_SIZE) {
+            state.done = true;
+            return written;
+          }
+          size_t bytesLeft = (BARO_HISTORY_SIZE - state.samplePos) * sizeof(uint16_t);
+          size_t canSend = min(maxLen - written, bytesLeft);
+          memcpy(buf + written,
+                 ((uint8_t *)baroPressureHistory) + state.samplePos * sizeof(uint16_t),
+                 canSend);
+          written += canSend;
+          state.samplePos += canSend / sizeof(uint16_t);
+        }
+        return written;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   server.on("/resetlogs", HTTP_POST, [](AsyncWebServerRequest *request) {
     thermalLogHead = 0;
     thermalLogCount = 0;
@@ -2418,12 +2477,12 @@ void setupServer() {
       // UI sends integer percent (e.g. 15), store as float fraction (0.15)
       degradationThreshold = inputMessage.toFloat() / 100.0f;
       writeFile(LittleFS, "/degradationThresh.txt",
-                String(degradationThreshold).c_str());
+                String(degradationThreshold, 4).c_str());
     } else if (request->hasParam("anomalyMarginAmps")) {
       foundParameter = true;
       inputMessage = request->getParam("anomalyMarginAmps")->value();
       anomalyMarginAmps = inputMessage.toFloat();
-      writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps).c_str());
+      writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps, 4).c_str());
     } else if (request->hasParam("anomalyAlarmThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("anomalyAlarmThreshold")->value();
@@ -3188,7 +3247,7 @@ void setupServer() {
       writeFile(LittleFS, "/LatitudeNMEA.txt", String(LatitudeNMEA, 6).c_str());
       writeFile(LittleFS, "/LongitudeNMEA.txt", String(LongitudeNMEA, 6).c_str());
       queueConsoleMessageF("GPS: Manual coords set to %.6f, %.6f", LatitudeNMEA, LongitudeNMEA);
-      nextWeatherUpdate = 0;
+      nextWeatherUpdate = millis();  // fire next tick (signed-delta safe; '= 0' would miss past 24.8d uptime)
     }
     if (request->hasParam("weatherModeEnabled")) {
       foundParameter = true;
@@ -3222,9 +3281,12 @@ void setupServer() {
         queueConsoleMessage("Weather update refused: disable the field first");
         inputMessage = "field_on";
       } else if (WiFi.RSSI() >= -76 && LatitudeNMEA != 0.0 && LongitudeNMEA != 0.0) {
-        queueConsoleMessage("Weather: Manual update triggered");
         HttpsRequest req = { .type = HTTPS_FETCH_WEATHER };
-        xQueueSend(httpsQueue, &req, 0);
+        if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
+          queueConsoleMessage("Weather: Manual update triggered");
+        } else {
+          queueConsoleMessage("Weather: HTTPS queue full, try again in a moment");
+        }
       }
     }
     if (request->hasParam("ResetLearningTable")) {
@@ -3268,12 +3330,6 @@ void setupServer() {
       writeFile(LittleFS, "/SLAM_THRESHOLD_G.txt", inputMessage.c_str());
       SLAM_THRESHOLD_G = inputMessage.toFloat();
     }
-    if (request->hasParam("LearningPaused")) {
-      foundParameter = true;
-      inputMessage = request->getParam("LearningPaused")->value();
-      writeFile(LittleFS, "/LearningPaused.txt", inputMessage.c_str());
-      LearningPaused = inputMessage.toInt();
-    }
     if (request->hasParam("IgnoreLearningDuringPenalty")) {
       foundParameter = true;
       inputMessage = request->getParam("IgnoreLearningDuringPenalty")->value();
@@ -3286,31 +3342,7 @@ void setupServer() {
       writeFile(LittleFS, "/CloudFeatures.txt", inputMessage.c_str());
       CloudFeatures = inputMessage.toInt();
     }
-    if (request->hasParam("LearningDryRunMode")) {
-      foundParameter = true;
-      inputMessage = request->getParam("LearningDryRunMode")->value();
-      writeFile(LittleFS, "/LearningDryRunMode.txt", inputMessage.c_str());
-      LearningDryRunMode = inputMessage.toInt();
-    }
     // AutoSaveLearningTable handler — OBSOLETE REMOVE LATER
-    if (request->hasParam("LearningUpwardEnabled")) {
-      foundParameter = true;
-      inputMessage = request->getParam("LearningUpwardEnabled")->value();
-      writeFile(LittleFS, "/LearningUpwardEnabled.txt", inputMessage.c_str());
-      LearningUpwardEnabled = inputMessage.toInt();
-    }
-    if (request->hasParam("LearningDownwardEnabled")) {
-      foundParameter = true;
-      inputMessage = request->getParam("LearningDownwardEnabled")->value();
-      writeFile(LittleFS, "/LearningDownwardEnabled.txt", inputMessage.c_str());
-      LearningDownwardEnabled = inputMessage.toInt();
-    }
-    if (request->hasParam("EnableNeighborLearning")) {
-      foundParameter = true;
-      inputMessage = request->getParam("EnableNeighborLearning")->value();
-      writeFile(LittleFS, "/EnableNeighborLearning.txt", inputMessage.c_str());
-      EnableNeighborLearning = inputMessage.toInt();
-    }
     if (request->hasParam("EnableAmbientCorrection")) {
       foundParameter = true;
       inputMessage = request->getParam("EnableAmbientCorrection")->value();
@@ -3354,12 +3386,6 @@ void setupServer() {
       foundParameter = true;
       manualCommitTuningRequested = true;
       queueConsoleMessage("TuningScore: manual commit requested via UI");
-    }
-    if (request->hasParam("ShowLearningDebugMessages")) {
-      foundParameter = true;
-      inputMessage = request->getParam("ShowLearningDebugMessages")->value();
-      writeFile(LittleFS, "/ShowLearningDebugMessages.txt", inputMessage.c_str());
-      ShowLearningDebugMessages = inputMessage.toInt();
     }
     if (request->hasParam("LogAllLearningEvents")) {
       foundParameter = true;
@@ -5439,11 +5465,11 @@ void SendWifiData() {
                                SafeInt(UVTomorrow, 100),
                                SafeInt(UVDay2, 100),
                                SafeInt(weatherDataValid),
-                               SafeInt(SolarWatts),
-                               SafeInt(performanceRatio, 100),
-                               SafeInt(VeData),
-                               SafeInt(NMEA0183Data),
-                               SafeInt(NMEA2KData),
+                               0,                                                // reserved — moved to CSV3 (SolarWatts)
+                               0,                                                // reserved — moved to CSV3 (performanceRatio)
+                               0,                                                // reserved — moved to CSV3 (VeData)
+                               0,                                                // reserved — moved to CSV3 (NMEA0183Data)
+                               0,                                                // reserved — moved to CSV3 (NMEA2KData)
                                SafeInt(alarmLatch ? 1 : 0),
                                SafeInt(ResetAlarmLatch),
                                SafeInt(ResetLearningTable),
@@ -5650,7 +5676,7 @@ void SendWifiData() {
                                SafeInt(HeadingNMEA),
                                SafeInt(EngineCycles),
                                SafeInt(CurrentSessionDuration),
-                               SafeInt(timeAxisModeChanging),
+                               0,                                                // reserved — moved to CSV3 (timeAxisModeChanging)
                                SafeInt(currentPartitionType),
                                SafeInt(g_fastOvCurrentCap, 100),
                                SafeInt(g_fastOvClampCount),
@@ -5868,9 +5894,9 @@ void SendWifiData() {
                                "%d,"  // CSV3_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"  // 2 removed: LearningUpwardEnabled, LearningDownwardEnabled
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // 1 removed: EnableNeighborLearning
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -5888,12 +5914,12 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,"  // 3 removed: LearningPaused, ShowLearningDebugMessages, LearningDryRunMode
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -5918,8 +5944,6 @@ void SendWifiData() {
                                SafeInt(RPMScalingFactor),
                                SafeInt(MaximumAllowedBatteryAmps),
                                SafeInt(BatteryVoltageSource),
-                               SafeInt(LearningUpwardEnabled),
-                               SafeInt(LearningDownwardEnabled),
                                SafeInt(AlternatorNominalAmps),
                                SafeInt(LearningUpStep, 100),
                                SafeInt(LearningDownStep, 100),
@@ -5937,7 +5961,6 @@ void SendWifiData() {
                                SafeInt(NeighborLearningFactor, 1000),
                                SafeInt(yyMax),
                                SafeInt(LearningMemoryDuration / 86400000),
-                               SafeInt(EnableNeighborLearning),
                                SafeInt(EnableAmbientCorrection),
                                SafeInt(TuningMode),
                                SafeInt(rpmCurrentTable[0]),
@@ -6118,12 +6141,9 @@ void SendWifiData() {
                                SafeInt(MaintainMode),
                                SafeInt(ManualSOCPoint),
                                SafeInt(LearningMode),
-                               SafeInt(LearningPaused),
                                SafeInt(IgnoreLearningDuringPenalty),
-                               SafeInt(ShowLearningDebugMessages),
                                SafeInt(LogAllLearningEvents),
                                SafeInt(CloudFeatures),
-                               SafeInt(LearningDryRunMode),
                                SafeInt(AutoShuntGainCorrection),
                                SafeInt(AutoAltCurrentZero),
                                SafeInt(WindingTempOffset),
@@ -6178,7 +6198,13 @@ void SendWifiData() {
                                IExcessArmMarginV,                               // %.3f — iExcess voltage gate margin
                                SafeInt(FastSetpointRiseRate, 100),              // ×100, 1 decimal — post-protection rise-slew multiplier
                                (int)FastSetpointRiseWindowMs,                   // raw ms
-                               SafeInt(FastSetpointRiseHeadroomV, 100)          // ×100, 2 decimal — V headroom gate
+                               SafeInt(FastSetpointRiseHeadroomV, 100),         // ×100, 2 decimal — V headroom gate
+                               SafeInt(SolarWatts),                             // moved from CSV2
+                               SafeInt(performanceRatio, 100),                  // moved from CSV2 (×100, 2 decimal)
+                               SafeInt(VeData),                                 // moved from CSV2
+                               SafeInt(NMEA0183Data),                           // moved from CSV2
+                               SafeInt(NMEA2KData),                             // moved from CSV2
+                               SafeInt(timeAxisModeChanging)                    // moved from CSV2
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
