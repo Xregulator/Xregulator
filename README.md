@@ -63,7 +63,7 @@ This goes against conventional software engineering practices, but it has advant
 - easier navigation by beginners
 - easier AI-assisted development (lower token spend)
 
-In 2026, the latter moatters more than just about anything else! 
+The latter matters more than just about anything else! 
 
 The goal was fast iteration, as an individual project, but is now moving to clarity, as ideally the open community starts to help.
 
