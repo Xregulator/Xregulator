@@ -2249,34 +2249,28 @@ function handleForcedUpdate(data) {
         if (updateActive) {
             overlay.innerHTML = `
               <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-                  <div class="section-title" style="margin-bottom: 12px; text-align:center;">
+                  <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
                       Update in progress…
                   </div>
                   <p style="margin: 8px 0 4px 0; font-size: 15px;">
                       Downloading firmware v<strong>${versionStr}</strong> and rebooting.
                   </p>
                   <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
-                      Takes 2-3 minutes total. The dashboard will reload automatically when the device is back online.
+                      Takes 2-3 minutes total. When it finishes, refresh this tab (or relaunch the app) to load the updated dashboard.
                   </p>
                   <p style="margin-top: 12px; font-size: 11px; color: #888;">
-                      Do not close this tab or power-cycle the device.
+                      Do not power-cycle the device during the update.
                   </p>
               </div>
             `;
         } else {
-            const subline = noDeadlineSet
-              ? 'A mandatory update is required to continue.'
-              : 'The deadline has passed.';
             overlay.innerHTML = `
               <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-                  <div class="section-title" style="margin-bottom: 12px; text-align:center;">
+                  <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
                       Forced Firmware Update
                   </div>
-                  <p style="margin: 8px 0 4px 0; font-size: 15px;">
+                  <p style="margin: 8px 0 16px 0; font-size: 15px;">
                       This device must upgrade to firmware v<strong>${versionStr}</strong>.
-                  </p>
-                  <p style="margin: 4px 0 16px 0; font-size: 13px; color: #666;">
-                      ${subline}
                   </p>
                   <button onclick="triggerForcedUpdate('${versionStr}')"
                           class="forced-update-btn btn-primary"
@@ -2351,17 +2345,17 @@ function triggerForcedUpdate(versionStr) {
         if (overlay) {
             overlay.innerHTML = `
               <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
-                  <div class="section-title" style="margin-bottom: 12px; text-align:center;">
+                  <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
                       Update in progress…
                   </div>
                   <p style="margin: 8px 0 4px 0; font-size: 15px;">
                       Downloading firmware v<strong>${versionStr}</strong> and rebooting.
                   </p>
                   <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
-                      Takes 2-3 minutes total. The dashboard will reload automatically when the device is back online.
+                      Takes 2-3 minutes total. When it finishes, refresh this tab (or relaunch the app) to load the updated dashboard.
                   </p>
                   <p style="margin-top: 12px; font-size: 11px; color: #888;">
-                      Do not close this tab or power-cycle the device.
+                      Do not power-cycle the device during the update.
                   </p>
               </div>`;
         }
@@ -3398,6 +3392,16 @@ async function initializeProfileTab() {
     const formData = new FormData();
     formData.append('password', currentAdminPassword);
 
+    // Show "Checking..." banner so the UI isn't blank while the cloud round-trip is in flight.
+    const banner = document.getElementById('profile-loading-banner');
+    const bannerText = document.getElementById('profile-loading-text');
+    if (banner) {
+        banner.style.display = 'block';
+        banner.style.background = '#e3f2fd';
+        banner.style.color = '#1976d2';
+        if (bannerText) bannerText.textContent = 'Checking cloud registration…';
+    }
+
     try {
         const response = await fetchWithTimeout(buildURL('/checkRegistration'), {
             method: 'POST',
@@ -3415,9 +3419,15 @@ async function initializeProfileTab() {
         } else {
             document.getElementById('profile-form').querySelector('input[type="submit"]').value = 'Register Device';
         }
-
+        if (banner) banner.style.display = 'none';
     } catch (error) {
         diagError('Error in initializeProfileTab:', error);
+        if (banner && bannerText) {
+            banner.style.background = '#ffebee';
+            banner.style.color = '#c62828';
+            bannerText.textContent = 'Could not reach cloud — check WiFi and try again.';
+            // Leave the error message visible; next tab open will reset it.
+        }
     }
 }
 
@@ -4450,6 +4460,325 @@ async function redirectToHistory() {
         }
     }
 }
+
+
+// ============================================
+// LONG TERM PLOTS — Dashboard-hosted brush
+// Lives in parent (NOT in iframe) so it sticks naturally to dashboard viewport.
+// Two-way postMessage sync with the iframe.
+// ============================================
+const _brushState = {
+    dataMin: null,
+    dataMax: null,
+    from: null,
+    to: null,
+    pinnedCrosshair: null,
+    latestSample: null,
+    stalenessTimerId: null,
+    wired: false,
+    iframeReady: false
+};
+
+function _brushEl(id) { return document.getElementById(id); }
+
+function _brushTimeToPixel(ms) {
+    const track = _brushEl('dashboard-brush-track');
+    if (!track || _brushState.dataMax === _brushState.dataMin) return 0;
+    const w = track.clientWidth || 0;
+    return (ms - _brushState.dataMin) / (_brushState.dataMax - _brushState.dataMin) * w;
+}
+function _brushPixelToTime(px) {
+    const track = _brushEl('dashboard-brush-track');
+    if (!track) return _brushState.dataMin;
+    const w = track.clientWidth || 1;
+    return _brushState.dataMin + (px / w) * (_brushState.dataMax - _brushState.dataMin);
+}
+
+function _brushFormatTime(ms) {
+    if (ms == null || !isFinite(ms)) return '—';
+    const d = new Date(ms);
+    const date = `${d.getMonth() + 1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)}`;
+    const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return `${date} ${time}`;
+}
+function _brushFormatDuration(ms) {
+    if (ms == null || ms <= 0) return '';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `(${s}s)`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `(${m}m)`;
+    const h = Math.floor(m / 60);
+    if (h < 48) return `(${h}h ${m % 60}m)`;
+    const d = Math.floor(h / 24);
+    return `(${d}d ${h % 24}h)`;
+}
+
+function _brushClamp(from, to) {
+    const minSpan = 60 * 1000;
+    if (to - from < minSpan) to = from + minSpan;
+    if (from < _brushState.dataMin) {
+        const span = to - from;
+        from = _brushState.dataMin;
+        to = Math.min(_brushState.dataMax, from + span);
+    }
+    if (to > _brushState.dataMax) {
+        const span = to - from;
+        to = _brushState.dataMax;
+        from = Math.max(_brushState.dataMin, to - span);
+    }
+    return { from, to };
+}
+
+function _brushUpdateSelectionUI() {
+    const sel = _brushEl('dashboard-brush-selection');
+    if (!sel || _brushState.dataMin == null) return;
+    const left = Math.max(0, _brushTimeToPixel(_brushState.from));
+    const right = _brushTimeToPixel(_brushState.to);
+    sel.style.left = left + 'px';
+    // Minimum 20px wide so even tiny selections (e.g. "1h" on 30-day-wide data)
+    // are visually obvious as "I selected something" instead of a 1px sliver.
+    sel.style.width = Math.max(20, right - left) + 'px';
+    _brushEl('dashboard-brush-duration').textContent =
+        _brushFormatDuration(_brushState.to - _brushState.from);
+}
+
+function _brushSendRangeToIframe() {
+    if (!_brushState.iframeReady) return;
+    const iframe = document.getElementById('history-iframe');
+    if (!iframe || !iframe.contentWindow) return;
+    iframe.contentWindow.postMessage({
+        type: 'BRUSH_RANGE_CHANGED',
+        from: _brushState.from,
+        to: _brushState.to
+    }, '*');
+}
+
+function _brushApplyRange(from, to, opts) {
+    opts = opts || {};
+    const c = _brushClamp(from, to);
+    _brushState.from = c.from;
+    _brushState.to = c.to;
+    _brushUpdateSelectionUI();
+    if (!opts.skipIframe) _brushSendRangeToIframe();
+}
+
+function _brushWireDrag() {
+    const track = _brushEl('dashboard-brush-track');
+    const sel = _brushEl('dashboard-brush-selection');
+    const handleLeft = sel.querySelector('.dashboard-brush-handle-left');
+    const handleRight = sel.querySelector('.dashboard-brush-handle-right');
+
+    let mode = null;
+    let startPx = 0, startFrom = 0, startTo = 0, createAnchorMs = 0;
+
+    const ptrX = (ev) => {
+        if (ev.touches && ev.touches.length) return ev.touches[0].clientX;
+        if (ev.changedTouches && ev.changedTouches.length) return ev.changedTouches[0].clientX;
+        return ev.clientX;
+    };
+
+    const onDown = (ev, kind) => {
+        ev.preventDefault();
+        const rect = track.getBoundingClientRect();
+        startPx = ptrX(ev) - rect.left;
+        startFrom = _brushState.from;
+        startTo = _brushState.to;
+        mode = kind;
+        if (kind === 'create') createAnchorMs = _brushPixelToTime(startPx);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+    };
+    const onMove = (ev) => {
+        if (!mode) return;
+        ev.preventDefault();
+        const rect = track.getBoundingClientRect();
+        const px = ptrX(ev) - rect.left;
+        const dpx = px - startPx;
+        const span = _brushState.dataMax - _brushState.dataMin;
+        const trackW = track.clientWidth || 1;
+        const dms = (dpx / trackW) * span;
+        // Visual-only during drag — iframe rebuild on drag end keeps things snappy.
+        // Pre-clamp the dragged edge so _brushClamp (designed for pan) doesn't shift
+        // the fixed edge when the dragged edge hits a data boundary. That was the
+        // un-physical feeling: drag the left handle off the left edge → right handle
+        // also moved. Now resize feels like a real edge-grab.
+        const opts = { skipIframe: true };
+        const MIN_SPAN = 60 * 1000; // 1 minute
+        const dMin = _brushState.dataMin;
+        const dMax = _brushState.dataMax;
+        if (mode === 'pan') {
+            _brushApplyRange(startFrom + dms, startTo + dms, opts);
+        } else if (mode === 'resize-left') {
+            const newFrom = Math.max(dMin, Math.min(startFrom + dms, startTo - MIN_SPAN));
+            _brushApplyRange(newFrom, startTo, opts);
+        } else if (mode === 'resize-right') {
+            const newTo = Math.min(dMax, Math.max(startTo + dms, startFrom + MIN_SPAN));
+            _brushApplyRange(startFrom, newTo, opts);
+        } else if (mode === 'create') {
+            const ptr = Math.max(dMin, Math.min(dMax, _brushPixelToTime(px)));
+            _brushApplyRange(Math.min(createAnchorMs, ptr), Math.max(createAnchorMs, ptr), opts);
+        }
+    };
+    const onUp = () => {
+        const wasDragging = mode != null;
+        mode = null;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend', onUp);
+        if (wasDragging) _brushSendRangeToIframe();
+    };
+
+    sel.addEventListener('mousedown', (e) => {
+        if (e.target === handleLeft || e.target === handleRight) return;
+        onDown(e, 'pan');
+    });
+    sel.addEventListener('touchstart', (e) => {
+        if (e.target === handleLeft || e.target === handleRight) return;
+        onDown(e, 'pan');
+    }, { passive: false });
+    handleLeft.addEventListener('mousedown', (e) => onDown(e, 'resize-left'));
+    handleLeft.addEventListener('touchstart', (e) => onDown(e, 'resize-left'), { passive: false });
+    handleRight.addEventListener('mousedown', (e) => onDown(e, 'resize-right'));
+    handleRight.addEventListener('touchstart', (e) => onDown(e, 'resize-right'), { passive: false });
+    track.addEventListener('mousedown', (e) => {
+        if (e.target === track) onDown(e, 'create');
+    });
+    track.addEventListener('touchstart', (e) => {
+        if (e.target === track) onDown(e, 'create');
+    }, { passive: false });
+
+    window.addEventListener('resize', _brushUpdateSelectionUI);
+}
+
+function _brushWireSnap() {
+    const allBtns = document.querySelectorAll('.dashboard-brush-snap-btn');
+    allBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            // Visual feedback: highlight the clicked snap, clear others. Helps user
+            // confirm "1h" or "All" actually fired (selection on the brush may be
+            // very narrow when the data range is wide).
+            allBtns.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            if (btn.getAttribute('data-all') === 'true') {
+                _brushApplyRange(_brushState.dataMin, _brushState.dataMax);
+                return;
+            }
+            const hours = parseInt(btn.getAttribute('data-hours'), 10);
+            if (!isFinite(hours) || hours <= 0) return;
+            const span = hours * 3600 * 1000;
+            const nowMs = Date.now();
+            const to = Math.min(_brushState.dataMax, nowMs);
+            const from = Math.max(_brushState.dataMin, to - span);
+            _brushApplyRange(from, to);
+        });
+    });
+}
+
+// Render the "Last data: HH:MM (Nm ago)" indicator. Color-graded:
+// green ≤5min, yellow ≤30min, red >30min. Called on BRUSH_DATA_RANGE
+// + every 10s via a tracked timer so "X ago" stays current.
+function _brushUpdateStaleness() {
+    const ago = _brushEl('dashboard-staleness-ago');
+    const tEl = _brushEl('dashboard-staleness-time');
+    if (!ago || !tEl) return;
+    const t = _brushState.latestSample;
+    if (t == null || !isFinite(t)) {
+        tEl.textContent = '—';
+        ago.textContent = '—';
+        ago.classList.remove('stale-warn', 'stale-err');
+        return;
+    }
+    tEl.textContent = _brushFormatTime(t);
+    const deltaMs = Date.now() - t;
+    const s = Math.max(0, Math.floor(deltaMs / 1000));
+    let label;
+    if (s < 60) label = s + 's ago';
+    else if (s < 3600) label = Math.floor(s / 60) + 'm ago';
+    else if (s < 86400) label = Math.floor(s / 3600) + 'h ' + (Math.floor(s / 60) % 60) + 'm ago';
+    else label = Math.floor(s / 86400) + 'd ago';
+    ago.textContent = label;
+    ago.classList.remove('stale-warn', 'stale-err');
+    if (s > 1800) ago.classList.add('stale-err');
+    else if (s > 300) ago.classList.add('stale-warn');
+}
+
+function _brushUpdateCrosshairIndicator() {
+    const ind = _brushEl('dashboard-crosshair-indicator');
+    const txt = _brushEl('dashboard-crosshair-time');
+    if (!ind || !txt) return;
+    if (_brushState.pinnedCrosshair == null) {
+        ind.style.display = 'none';
+        txt.textContent = '—';
+    } else {
+        ind.style.display = 'inline-block';
+        txt.textContent = _brushFormatTime(_brushState.pinnedCrosshair);
+    }
+}
+
+function _brushWireCrosshairClear() {
+    const btn = _brushEl('dashboard-crosshair-clear');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+        _brushState.pinnedCrosshair = null;
+        _brushUpdateCrosshairIndicator();
+        const iframe = document.getElementById('history-iframe');
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'BRUSH_CROSSHAIR_CLEAR' }, '*');
+        }
+    });
+}
+
+function _brushHandleMessage(e) {
+    // Origin check matches the IFRAME_HEIGHT handler's allowed list
+    if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
+    if (!e.data || !e.data.type) return;
+    if (e.data.type === 'BRUSH_DATA_RANGE') {
+        _brushState.dataMin = Number(e.data.min);
+        _brushState.dataMax = Number(e.data.max);
+        // Newest raw sample time (NOT the synthetic nowMs extension) for staleness display
+        if (e.data.latestSample != null) {
+            _brushState.latestSample = Number(e.data.latestSample);
+            _brushUpdateStaleness();
+            // Refresh the "X ago" text every 10 s so it stays current while the user
+            // leaves the tab open. setTrackedInterval handles cleanup on page unload.
+            if (_brushState.stalenessTimerId == null) {
+                _brushState.stalenessTimerId = (typeof setTrackedInterval === 'function'
+                    ? setTrackedInterval : setInterval)(_brushUpdateStaleness, 10000);
+            }
+        }
+        _brushState.iframeReady = true;
+        if (!isFinite(_brushState.dataMin) || !isFinite(_brushState.dataMax)) return;
+        // Initial selection: left edge at ~1/3 of the total data span, right edge
+        // at the newest data. Keeps the selection visibly smaller than the full
+        // track so the brush reads as a draggable selector, not as the whole bar.
+        const fullSpan = _brushState.dataMax - _brushState.dataMin;
+        _brushState.from = _brushState.dataMin + fullSpan / 3;
+        _brushState.to = _brushState.dataMax;
+        if (!_brushState.wired) {
+            _brushWireDrag();
+            _brushWireSnap();
+            _brushWireCrosshairClear();
+            _brushState.wired = true;
+        }
+        _brushEl('dashboard-brush').style.display = 'block';
+        // Populate the always-visible data bounds labels above the track
+        const minEl = _brushEl('dashboard-brush-data-min');
+        const maxEl = _brushEl('dashboard-brush-data-max');
+        if (minEl) minEl.textContent = _brushFormatTime(_brushState.dataMin);
+        if (maxEl) maxEl.textContent = _brushFormatTime(_brushState.dataMax);
+        _brushUpdateSelectionUI();
+        _brushSendRangeToIframe();
+    } else if (e.data.type === 'BRUSH_CROSSHAIR_SET') {
+        const t = Number(e.data.time);
+        if (!isFinite(t)) return;
+        _brushState.pinnedCrosshair = t;
+        _brushUpdateCrosshairIndicator();
+    }
+}
+window.addEventListener('message', _brushHandleMessage);
 
 
 // ============================================
@@ -7139,6 +7468,11 @@ window.addEventListener("load", function () {
                     // Default: display as integer
                     else {
                         newTextContent = Math.round(value);
+                    }
+
+                    // Banner SOC is tight against the % sign — show 1 decimal instead of 2 to avoid overlap.
+                    if (elementId === "header-soc" && key === "SOC_percent") {
+                        newTextContent = (value / 100).toFixed(1);
                     }
 
                     // ONLY UPDATE DOM IF VALUE ACTUALLY CHANGED

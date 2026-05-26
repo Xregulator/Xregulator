@@ -1054,6 +1054,140 @@ input[type="submit"] {
   }
 }
 
+/* ============================================
+   DASHBOARD-HOSTED LONG-TERM-PLOTS BRUSH
+   Lives in parent dashboard (not the iframe) so it can stick naturally to the
+   dashboard viewport top while the app banner scrolls away normally.
+   State syncs to the iframe via postMessage.
+   ============================================ */
+#dashboard-brush {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--card-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 10px 4px 10px;
+  margin-bottom: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+}
+/* Data bounds labels (oldest data far left, newest far right of brush track) */
+#dashboard-brush-bounds {
+  display: flex;
+  justify-content: space-between;
+  font-family: monospace;
+  font-size: 10px;
+  color: #888;
+  padding: 0 2px 2px 2px;
+}
+#dashboard-brush-track {
+  position: relative;
+  height: 22px;
+  background: linear-gradient(to bottom, #e8e8e8, #d8d8d8);
+  border: 1px solid #c0c0c0;
+  border-radius: 3px;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  cursor: crosshair;
+}
+#dashboard-brush-selection {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(0, 161, 154, 0.25);
+  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  cursor: grab;
+  box-sizing: border-box;
+  touch-action: none;
+}
+#dashboard-brush-selection:active { cursor: grabbing; }
+.dashboard-brush-handle {
+  position: absolute;
+  top: 0;
+  width: 14px;
+  height: 100%;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.dashboard-brush-handle-left { left: -7px; }
+.dashboard-brush-handle-right { right: -7px; }
+#dashboard-brush-info {
+  font-family: monospace;
+  font-size: 11px;
+  color: #555;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  line-height: 1.4;
+}
+#dashboard-brush-duration { color: #888; }
+#dashboard-brush-snap { display: inline-flex; gap: 2px; margin-left: auto; }
+.dashboard-brush-snap-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+#dashboard-staleness {
+  font-family: monospace;
+  font-size: 11px;
+  color: #666;
+}
+#dashboard-staleness-ago {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: rgba(0, 161, 154, 0.15);
+  color: #006a64;
+  font-weight: 600;
+}
+#dashboard-staleness-ago.stale-warn {
+  background: rgba(235, 160, 0, 0.25);
+  color: #7a5400;
+}
+#dashboard-staleness-ago.stale-err {
+  background: rgba(213, 94, 0, 0.25);
+  color: #6e3100;
+}
+.dashboard-brush-snap-btn {
+  padding: 1px 7px;
+  font-size: 11px;
+  font-family: monospace;
+  background: #f0f0f0;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  cursor: pointer;
+  color: #333;
+  line-height: 1.4;
+}
+.dashboard-brush-snap-btn:hover { background: #fff; border-color: #888; }
+.dashboard-brush-snap-btn:active { background: #ddd; }
+#dashboard-crosshair-indicator {
+  margin-left: 10px;
+  background: rgba(255, 235, 153, 0.6);
+  border-radius: 3px;
+  padding: 1px 6px;
+  color: #444;
+}
+#dashboard-crosshair-clear {
+  margin-left: 4px;
+  padding: 0 5px;
+  background: transparent;
+  border: 1px solid #888;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+#dashboard-crosshair-clear:hover { background: #fff; }
+@media (max-width: 600px) {
+  #dashboard-brush-snap { margin-left: 0; margin-top: 2px; flex-basis: 100%; }
+}
+
+
 .reading-item {
   display: flex;
   flex-direction: column;
@@ -1916,6 +2050,41 @@ hr {
 
 .btn-secondary.button-pulse {
   animation: button-pulse 0.4s ease-out;
+}
+
+/* Loading-dot animation for cloud registration check banner */
+.cloud-loading-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: #1976d2;
+  opacity: 0.3;
+  animation: cloud-loading-bounce 1.2s infinite ease-in-out;
+}
+
+.cloud-loading-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.cloud-loading-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes cloud-loading-bounce {
+
+  0%,
+  80%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.3;
+  }
+
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 /* Dark mode styles */

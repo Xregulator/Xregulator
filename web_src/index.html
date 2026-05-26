@@ -8514,6 +8514,13 @@
     <!-- My Profile Sub-tab -->
     <div id="cloudfeatures-myprofile" class="sub-tab-content active">
       <div class="settings-card">
+        <div id="profile-loading-banner"
+          style="display:none; padding:10px 12px; margin-bottom:12px; border-radius:4px; background:#e3f2fd; color:#1976d2; font-weight:500; text-align:center;">
+          <span class="cloud-loading-dot"></span>
+          <span class="cloud-loading-dot"></span>
+          <span class="cloud-loading-dot"></span>
+          <span id="profile-loading-text" style="margin-left:8px;">Checking cloud registration…</span>
+        </div>
         <form id="profile-form" onsubmit="handleProfileUpdate(event)">
 
           <!-- Device Information (Read-only) -->
@@ -9200,6 +9207,41 @@
 
     <!-- My History Sub-tab -->
     <div id="cloudfeatures-myhistory" class="sub-tab-content">
+      <!-- Global time-range brush. Lives in the dashboard (NOT inside the iframe) so it
+           sticks to dashboard viewport top and the app banner can scroll away naturally.
+           State syncs to the iframe via postMessage. -->
+      <div id="dashboard-brush" style="display:none;">
+        <!-- Data bounds: oldest data label anchored to far-left, newest to far-right of brush track -->
+        <div id="dashboard-brush-bounds">
+          <span id="dashboard-brush-data-min">—</span>
+          <span id="dashboard-brush-data-max">—</span>
+        </div>
+        <div id="dashboard-brush-track">
+          <div id="dashboard-brush-selection">
+            <div class="dashboard-brush-handle dashboard-brush-handle-left"></div>
+            <div class="dashboard-brush-handle dashboard-brush-handle-right"></div>
+          </div>
+        </div>
+        <div id="dashboard-brush-info">
+          <span id="dashboard-brush-duration"></span>
+          <span id="dashboard-brush-snap">
+            <button class="dashboard-brush-snap-btn" data-hours="1">1h</button>
+            <button class="dashboard-brush-snap-btn" data-hours="6">6h</button>
+            <button class="dashboard-brush-snap-btn" data-hours="24">24h</button>
+            <button class="dashboard-brush-snap-btn" data-hours="168">7d</button>
+            <button class="dashboard-brush-snap-btn" data-hours="720">30d</button>
+            <button class="dashboard-brush-snap-btn" data-all="true">All</button>
+          </span>
+          <span id="dashboard-staleness" title="Time since last data sample uploaded by the device">
+            Last data: <span id="dashboard-staleness-time">—</span>
+            <span id="dashboard-staleness-ago">—</span>
+          </span>
+          <span id="dashboard-crosshair-indicator" style="display:none;">
+            📍 <span id="dashboard-crosshair-time">—</span>
+            <button id="dashboard-crosshair-clear" title="Clear crosshair">×</button>
+          </span>
+        </div>
+      </div>
       <div class="history-container wide-card">
         <iframe id="history-iframe"
           style="width: 100%; border: none; display: block; height: 600px; overflow: hidden;"></iframe>
