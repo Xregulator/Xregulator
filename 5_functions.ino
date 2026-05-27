@@ -22,6 +22,7 @@ void SystemTime(const tN2kMsg &N2kMsg) {
   tN2kTimeSource TimeSource;
 
   if (ParseN2kSystemTime(N2kMsg, SID, SystemDate, SystemTime, TimeSource)) {
+    lastNmea2kSystemTimeMs = millis();  // freshness for priority chain (NMEA > Phone > NTP)
     // Sync time from GPS (Phase 2 Sensor History)
     syncTimeFromGPS(SystemDate, SystemTime);
 
@@ -171,6 +172,8 @@ void GNSS(const tN2kMsg &N2kMsg) {
       LatitudeNMEA = Latitude;
       LongitudeNMEA = Longitude;
       SatelliteCountNMEA = nSatellites;
+      lastNmea2kGnssMs = millis();  // freshness for GPS priority chain (NMEA > Phone)
+      currentGpsSource = GPS_NMEA;  // NMEA wins when present; consumePhoneGps() flips this when NMEA goes stale
 
       // Mark all GPS data as fresh - only called on valid data
       MARK_FRESH(IDX_LATITUDE_NMEA);
@@ -512,8 +515,37 @@ void checkAndRestart() {
     lastRestartTime = 0;
   }
 
-  if (currentMillis - lastRestartTime >= RESTART_INTERVAL) {
+  unsigned long elapsedMs = currentMillis - lastRestartTime;
+
+  // Warning window: publish remaining seconds for the dashboard banner + popup.
+  // 0 = outside window. Floors at 1 until the actual reboot fires.
+  if (elapsedMs + RESTART_WARNING_WINDOW_MS >= RESTART_INTERVAL && elapsedMs < RESTART_INTERVAL) {
+    unsigned long remainingMs = RESTART_INTERVAL - elapsedMs;
+    uint32_t sec = (uint32_t)(remainingMs / 1000UL);
+    restartRemainingSec = (sec == 0) ? 1 : sec;
+  } else if (elapsedMs < RESTART_INTERVAL) {
+    restartRemainingSec = 0;
+  }
+
+  if (elapsedMs >= RESTART_INTERVAL) {
+    restartRemainingSec = 1;  // keep banner visible through the shutdown sequence
     Serial.println("=== SCHEDULED RESTART APPROACHING ===");
+
+    // Graceful field-down: zero PWM immediately and gate the PID via OnOff=0.
+    // OnOff is RAM-only here — LittleFS is not touched, so on reboot the device
+    // returns to whatever OnOff state the user last set.
+    Serial.println("Restart: hard-zero PWM and disable charging");
+    apply_pwm_float(0.0f);
+    dutyCycle = 0.0f;
+    lastAppliedDuty = 0.0f;
+    OnOff = 0;
+    delay(500);            // brief settle so any in-flight tick sees OnOff=0
+    esp_task_wdt_reset();
+
+    // NVS drain: persist counters/extrema/lifetime values before reboot.
+    Serial.println("Restart: flushing NVS");
+    saveNVSDataFull();
+    esp_task_wdt_reset();
 
     // Wait for any in-progress uploads (max 30 seconds)
     unsigned long shutdownStart = millis();
@@ -2517,15 +2549,6 @@ void drainIMUFifo() {
   if (!imuEnabled || (millis() - lastIMUPoll < IMU_POLL_INTERVAL)) return;
   lastIMUPoll = millis();
   MARK_FRESH(IDX_IMU);
-  // If accel display is disabled, drain the hardware FIFO so it doesn't back up, but don't queue anything
-  if (!accelEnabled) {
-    uint16_t n = 0;
-    if (imu.Get_FIFO_Num_Samples(&n) == LSM6DSOX_OK && n > 0) {
-      uint16_t drain = (n > MAX_FIFO_DRAIN_PER_POLL) ? MAX_FIFO_DRAIN_PER_POLL : n;
-      imu.Get_FIFO_Sample(fifoBuffer, drain);
-    }
-    return;
-  }
 
   TIMED_CALL(ft_rai_imu, ([&]() {
                uint16_t fifo_samples = 0;

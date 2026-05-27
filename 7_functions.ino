@@ -1531,6 +1531,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   if (phase != SYSID_IDLE && systemIDAbortRequested) {
     systemIDAbortRequested = false;
     queueConsoleMessage("SystemID: test aborted");
+    commitSystemIDRecord(true);  // log aborted run to ring buffer for fleet visibility
     systemIDActive = 0;
     phase = SYSID_IDLE;
     stabilizeLastAdjMs = 0;
@@ -1629,6 +1630,9 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         "(last reading: %.1fA duty=%.1f%%)",
         SYSID_STABILIZE_AMPS, SYSID_STABILIZE_TIMEOUT_MS / 1000,
         ampsRaw, baseDuty);
+      systemIDAbortReason = 254;             // sentinel: stabilize-phase timeout (outside FieldEventReason enum)
+      systemIDAbortPhase  = systemIDActive;  // current phase before we clear it
+      commitSystemIDRecord(true);            // log the timeout-abort to ring buffer
       systemIDActive = 0;
       phase = SYSID_IDLE;
       dutyOut = baseDuty;
@@ -1928,6 +1932,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       systemIDFallDelay_ms[0], systemIDFallDelay_ms[1], systemIDFallDelay_ms[2], systemIDFallAvg_ms,
       sysIDSampleCount);
 
+    commitSystemIDRecord(false);  // log successful run to ring buffer
     systemIDResultsReady = true;
     systemIDActive = 0;
     systemIDLastEndMs = millis();

@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.50";
+const char *FIRMWARE_VERSION = "0.0.57";
 
 String currentUID;
 
@@ -338,13 +338,6 @@ static int activeFieldBucket = -1;
 static float redDot_fieldVolts = 0.0f;
 static float redDot_amps = 0.0f;
 static bool redDotValid = false;
-
-// Plot axis limits sent to JS
-float EffXMin = EFF_FIELD_MIN;
-float EffXMax = EFF_FIELD_MAX;
-float EffYMin = 0.0f;
-float EffYMax = 150.0f;
-
 
 // Supabase configuration......similar stuff is locally defined in a few functions that upload sensor data, config snapshots to cloud
 const char *SUPABASE_URL = "https://qnbekuaoweuteylitzvo.supabase.co";
@@ -614,12 +607,15 @@ int forcedFwVersionInt = 0;
 // WiFiClientSecure secureClient;  // Reusable SSL client to prevent stack overflow when we had individual ones for each upload   ABANDONED, THIS WAS NOT GOOD IN FLAKY WIFI
 unsigned long lastHttpsOperationTime = 0;
 const unsigned long HTTPS_MIN_INTERVAL = 500;            // was 2 seconds between any HTTPS calls becasue core0 tiny system stacks (ipc0 = 1024 bytes) , not sure it was necessary
-const unsigned long CONFIG_SNAPSHOT_INTERVAL = 2400000;  //86400000;  // 24 hours  //2400000;  //40 minutes     300000 is 5 mins
-//unsigned long SENSOR_UPLOAD_INTERVAL = 300000;            // 300000 is 5 mins
-unsigned long SENSOR_UPLOAD_INTERVAL = 30000;        // 30 seconds for testing
+const unsigned long CONFIG_SNAPSHOT_INTERVAL = 86400000;  // 24 hours — production
+// SENSOR_UPLOAD_INTERVAL is firmware-only (no UI, no LittleFS) — edit + reflash to change.
+const unsigned long SENSOR_UPLOAD_INTERVAL = 600000;          // 10 minutes — production
 const unsigned long BUFFER_UPLOAD_INTERVAL = 13000;  // 13 seconds
-const unsigned long RESTART_INTERVAL = 43200000;     //12 hours    // 4 hour MAINTENANCE INTERVAL 14400000
-//const unsigned long RESTART_INTERVAL= 1800000; // 30 mins
+// TODO TEST — temporarily 15 min to validate the warning banner/popup/graceful shutdown.
+// Revert to 43200000 (12 hr) for production. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min.)
+
+//const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
+const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
 
 //Configuration Snapshot Stuff
 char *configPayloadBuffer;
@@ -870,6 +866,31 @@ float systemIDRiseAvg_ms = 0.0f;
 float systemIDFallAvg_ms = 0.0f;
 float systemIDStepAmp_A[3] = { 0.0f, 0.0f, 0.0f };    // rise step amplitude per trial (upMean - quietMean), A
 float systemIDQuietPP_A[3] = { 0.0f, 0.0f, 0.0f };    // quiet-phase peak-to-peak noise per trial (quietMax - quietMin), A
+
+// ── SystemID ring buffer log (50 records, persisted to /systemidlog.bin) ──
+// Mirrors tuningLog / cvTuningLog / thermalTuningLog pattern. Captured on
+// every test completion (success or abort) so fleet snapshots can ship a
+// short history of plant-delay results.
+struct SystemIDRecord {
+  uint16_t runNumber;
+  float    score;              // = riseAvg_ms (lower = faster plant). -1 if aborted / no rises.
+  float    riseDelays[3];      // ms per trial; -1 if not measured
+  float    fallDelays[3];      // ms per trial; -1 if not measured
+  float    riseAvg_ms;
+  float    fallAvg_ms;
+  float    stepAmps[3];        // A per trial (upMean - quietMean)
+  float    quietPP[3];         // A peak-to-peak quiet-phase noise per trial
+  uint8_t  abortReason;        // 0 = clean exit; non-zero = FieldEventReason
+  uint8_t  abortPhase;         // phase number at abort; 0 = clean exit
+  float    setupStepAmplitude; // SystemIDStepAmplitude at test time (% duty)
+  float    avgRPM;             // RPM snapshot at commit
+  float    avgAltTempF;        // AlternatorTemperatureF snapshot at commit
+};
+
+SystemIDRecord *systemIDLog = nullptr;  // ps_malloc(50 × sizeof(SystemIDRecord))
+uint8_t  systemIDLogCount = 0;          // records currently in ring buffer (0–50)
+uint8_t  systemIDLogHead  = 0;          // next write index
+uint16_t systemIDRunCounter = 0;        // increments each commit; persists via loadSystemIDLog
 
 struct SystemIDSample {
   uint32_t ts;     // millis() at sample time
@@ -1156,9 +1177,41 @@ unsigned long lastTimeSyncAttempt = 0;
 const unsigned long TIME_SYNC_INTERVAL = 43200000;  // 12 hour
 enum TimeSource { TIME_NONE,
                   TIME_GPS,
+                  TIME_PHONE,
                   TIME_NTP,
                   TIME_MILLIS };
 TimeSource currentTimeSource = TIME_NONE;
+
+// Freshness trackers for the priority chain (NMEA → Phone → NTP).
+// Without these, once a source sets currentTimeSource, the device never
+// re-considers other sources even if the chosen source goes silent (the
+// "once TIME_GPS, never NTP again" bug).
+unsigned long lastNmea2kSystemTimeMs = 0;  // millis() of last successful PGN 126992 SystemTime parse
+unsigned long lastNmea2kGnssMs       = 0;  // millis() of last successful PGN 129029 GNSS position parse
+unsigned long lastPhoneTimeMs        = 0;  // millis() of last phone-sourced time POST
+unsigned long lastPhoneGpsMs         = 0;  // millis() of last phone-sourced GPS POST
+const unsigned long NMEA_TIME_FRESH_MS = 300000UL;   // 5 min — fall back to other sources if no SystemTime
+const unsigned long NMEA_GPS_FRESH_MS  = 60000UL;    //  1 min — GPS PGN cadence is ~1-2s, anything >60s is dead
+const unsigned long PHONE_FRESH_MS     = 120000UL;   //  2 min — app posts every ~30-60s
+
+// Phone-sourced values (held separately from NMEA so the priority chain can
+// arbitrate cleanly without one source overwriting the other's globals).
+double LatitudePhone  = 0.0;
+double LongitudePhone = 0.0;
+time_t PhoneTimeEpoch = 0;  // Unix seconds the phone reported, anchored at lastPhoneTimeMs
+
+// Which source the *effective* GPS position currently comes from. Resolved
+// every tick by resolveSources() in 4_functions.ino. Published in CSV2 slot
+// `currentGpsSource` for the dashboard's live source indicator.
+enum GpsSource { GPS_NONE, GPS_NMEA, GPS_PHONE };
+GpsSource currentGpsSource = GPS_NONE;
+
+// User override for the GPS+time priority chain. Default GTS_AUTO runs the
+// freshness-arbitrated chain. The forced modes pin behaviour even if the
+// chosen source is stale (resolver still shows the value but skips MARK_FRESH,
+// so distance/smoothing know not to use it). Persisted in LittleFS Pattern B.
+enum GpsTimeSourceMode { GTS_AUTO, GTS_NMEA, GTS_PHONE, GTS_NTP };
+uint8_t gpsTimeSourceMode = GTS_AUTO;
 
 // Sensor aggregation window
 struct SensorWindow {
@@ -1906,6 +1959,10 @@ uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before
 // Global variable to track ESP32 restart time
 unsigned long lastRestartTime = 0;
 bool systemShuttingDown = false;
+// Scheduled-restart user warning. 0 = outside the 10-min warning window (dashboard hides banner).
+// Updated each loop tick by checkAndRestart(); published via CSV2.
+uint32_t restartRemainingSec = 0;
+const unsigned long RESTART_WARNING_WINDOW_MS = 600000UL;  // 10 minutes
 
 int BatteryVoltageSource = 0;  // OBSOLETE REMOVE LATER
 int BatteryCurrentSource = 0;  // 0=INA228, 1=NMEA2K Batt, 2=NMEA0183 Batt, 3=Victron Batt
@@ -2230,10 +2287,9 @@ float xTime = 60.0;     // seconds    PID Chart
 int yyMax = 105;        // PID Chart     Amps
 int yyMin = -25;        //  PID Chart Amps
 float pidError = 0.0f;  // PID error for display (A)
-int LearningMode = 0;   // 0=disabled, 1=enabled
 
 
-int accelEnabled = 1;  // Set to false to block accelerometer related calcs
+// (accelEnabled global removed 2026-05-26 — accelerometer is always on; UI toggle/LittleFS persistence purged)
 
 // =====================================================================================
 // === CV LOOP PARAMETERS — all tunable values consolidated here
@@ -2326,6 +2382,7 @@ int CloudFeatures = 1;
 volatile bool pendingSaveCVTuningLog = false;
 volatile bool pendingSaveTuningLog = false;
 volatile bool pendingSaveThermalTuningLog = false;
+volatile bool pendingSaveSystemIDLog = false;
 volatile bool pendingResetEfficiencyMatrix = false;
 volatile bool pendingClearOverheatHistory = false;
 volatile bool pendingSaveUserTableEdits = false;
@@ -3455,6 +3512,10 @@ void setup() {
   thermalTuningLog = (ThermalTuningRecord *)ps_malloc(50 * sizeof(ThermalTuningRecord));
   if (!thermalTuningLog) Serial.println("FATAL: thermalTuningLog ps_malloc failed");
   else memset(thermalTuningLog, 0, 50 * sizeof(ThermalTuningRecord));
+  // SystemID log — 50 records × ~76 bytes = ~3.8 KB PSRAM
+  systemIDLog = (SystemIDRecord *)ps_malloc(50 * sizeof(SystemIDRecord));
+  if (!systemIDLog) Serial.println("FATAL: systemIDLog ps_malloc failed");
+  else memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
   // Thermal live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
   for (int i = 0; i < 4; i++) {
     thermalLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
@@ -3611,6 +3672,7 @@ void setup() {
   loadTuningLog();            // restore last session's tuning records from LittleFS
   loadCVTuningLog();          // restore CV tuning records from LittleFS
   loadThermalTuningLog();     // restore thermal step test records from LittleFS
+  loadSystemIDLog();          // restore plant-delay (SystemID) records from LittleFS
   loadPasswordHash();
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;
@@ -3876,6 +3938,10 @@ void loop() {
       pendingSaveThermalTuningLog = false;
       saveThermalTuningLog();
     }
+    if (pendingSaveSystemIDLog) {
+      pendingSaveSystemIDLog = false;
+      saveSystemIDLog();
+    }
     if (pendingResetEfficiencyMatrix) {
       pendingResetEfficiencyMatrix = false;
       resetEfficiencyMatrix();
@@ -3959,6 +4025,10 @@ void loop() {
             if (pendingSaveThermalTuningLog) {
               pendingSaveThermalTuningLog = false;
               saveThermalTuningLog();
+            }
+            if (pendingSaveSystemIDLog) {
+              pendingSaveSystemIDLog = false;
+              saveSystemIDLog();
             }
             if (pendingResetEfficiencyMatrix) {
               pendingResetEfficiencyMatrix = false;
@@ -4132,19 +4202,9 @@ void loop() {
       }
       TIMED_CALL(ft_logDashboardValues, logDashboardValues());            //  nice to have some history in the Console
       TIMED_CALL(ft_updateSystemHealthStats, updateSystemHealthStats());  // samples CPU load + heap stats into globals for CSVData2
+      resolveSources();                                                   // GPS/time source arbitration: promote phone fallback, demote stale labels
       TIMED_CALL(ft_updateSensorWindow, updateSensorWindow());            // Update sensor aggregation (after sensor reads)
-      {
-        static int lastAccelEnabled = 0;
-        if (accelEnabled == 1) {
-          if (lastAccelEnabled == 0 && imuRingBuffer) {
-            // Flush stale samples accumulated while disabled — avoids draining 2000 samples in one shot
-            imuRingBuffer->accel_tail = imuRingBuffer->accel_head;
-            imuRingBuffer->gyro_tail = imuRingBuffer->gyro_head;
-          }
-          TIMED_CALL(ft_updateAccelMetrics, updateAccelMetrics());
-        }
-        lastAccelEnabled = accelEnabled;
-      }
+      TIMED_CALL(ft_updateAccelMetrics, updateAccelMetrics());            // accel always on; toggle/transition flush removed
 
       // ===== FIELD-OFF NVS DRAIN (5s settled, once per field-off window) =====
       // Independent of fieldOffSettled() — that helper has a 60s baseline intended for

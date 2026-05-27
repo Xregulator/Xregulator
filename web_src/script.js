@@ -626,6 +626,9 @@ const CSV2_FIELDS = [
     "wmIgn_vacc_lo",     "wmIgn_vacc_hi",      // imu_vertical_accel_g (×10, 1 decimal)
     "wmIgn_baro_lo",     "wmIgn_baro_hi",      // baroPressure mbar (int)
     "wmIgn_ambient_lo",  "wmIgn_ambient_hi",   // ambientTemp °F (int)
+    "restartRemainingSec",                     // seconds until scheduled reboot (0 = banner hidden)
+    "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone
+    "currentTimeSource",                       // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",
@@ -777,7 +780,7 @@ const CSV3_FIELDS = [
     "MinFloatTime",
     "SOC_BlockRebulk_percent",
     "SOC_AllowRebulk_percent",
-    "accelEnabled",
+    "reserved_accelEnabled",  // RESERVED — was accelEnabled; accelerometer now always-on, no UI toggle
     "DutySlowRampRate",
     "ShutdownPhase2HoldMs",
     "TempPIDKp",
@@ -845,7 +848,6 @@ const CSV3_FIELDS = [
     "AlarmLatchEnabled",
     "MaintainMode",
     "ManualSOCPoint",
-    "LearningMode",
     "IgnoreLearningDuringPenalty",
     "LogAllLearningEvents",
     "CloudFeatures",
@@ -855,7 +857,7 @@ const CSV3_FIELDS = [
     "ManualLifePercentage",
     "UVThresholdHigh",
     "weatherModeEnabled",
-    "SENSOR_UPLOAD_INTERVAL",
+    "reserved_SENSOR_UPLOAD_INTERVAL",  // RESERVED — was SENSOR_UPLOAD_INTERVAL; now firmware-only constant (edit + reflash)
     "imuEnabled",
     "AbsorptionVoltage",
     "AbsorptionTimeoutMs",
@@ -909,6 +911,7 @@ const CSV3_FIELDS = [
     "NMEA0183Data",                   // moved from CSV2 (0/1)
     "NMEA2KData",                     // moved from CSV2 (0/1)
     "timeAxisModeChanging",           // moved from CSV2 (0/1)
+    "gpsTimeSourceMode",              // 0=auto, 1=NMEA, 2=Phone, 3=NTP (time only)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -949,6 +952,84 @@ const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : '';
 // const API_BASE_URL = IS_CAPACITOR ? 'http://192.168.4.1' : ''; // For AP mode
 // const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : ''; // For Client mode with mDNS
 
+// ---------------------------------------------------------------
+// Biometric (Face ID / Touch ID) admin-password autofill — iOS Capacitor only
+// ---------------------------------------------------------------
+// Admin password is stored in the iOS Keychain behind a biometric gate.
+// Cold launch fires Face ID automatically; on success the password is
+// filled and the existing /checkPassword flow runs, so the user lands on
+// the unlocked dashboard without typing. Browser builds: full no-op.
+const BIO_SERVER_KEY = 'xreg-admin';
+const Bio = {
+    plugin() {
+        if (!IS_CAPACITOR) return null;
+        const p = window.Capacitor.Plugins && window.Capacitor.Plugins.NativeBiometric;
+        return p || null;
+    },
+    async available() {
+        const p = this.plugin();
+        if (!p) return false;
+        try {
+            const r = await p.isAvailable();
+            return !!(r && r.isAvailable);
+        } catch (e) { return false; }
+    },
+    async getSaved() {
+        // Returns the saved password or null. Skips the Face ID prompt
+        // entirely if nothing is saved yet — important for first-launch UX.
+        const p = this.plugin();
+        if (!p) return null;
+        try {
+            const saved = await p.isCredentialsSaved({ server: BIO_SERVER_KEY });
+            if (!saved || !saved.isSaved) return null;
+            await p.verifyIdentity({
+                reason: 'Unlock regulator settings',
+                title: 'X Regulator',
+                subtitle: 'Authenticate to unlock settings'
+            });
+            const c = await p.getCredentials({ server: BIO_SERVER_KEY });
+            return (c && c.password) ? c.password : null;
+        } catch (e) { return null; }
+    },
+    async save(password) {
+        const p = this.plugin();
+        if (!p || !password) return;
+        try {
+            await p.setCredentials({
+                username: 'admin',
+                password: String(password),
+                server: BIO_SERVER_KEY
+            });
+        } catch (e) { /* non-fatal */ }
+    },
+    async clear() {
+        const p = this.plugin();
+        if (!p) return;
+        try { await p.deleteCredentials({ server: BIO_SERVER_KEY }); }
+        catch (e) { /* non-fatal */ }
+    }
+};
+
+// Flag tracks whether the in-flight /checkPassword attempt came from Face ID
+// autofill, so the Wrong-Password branch can drop a stale Keychain entry.
+let __bioAutofillInFlight = false;
+
+async function tryBiometricUnlock() {
+    if (!await Bio.available()) return;
+    const pw = await Bio.getSaved();
+    if (!pw) return;
+    const input = document.getElementById('admin_password');
+    if (!input || typeof setAdminPassword !== 'function') return;
+    input.value = pw;
+    __bioAutofillInFlight = true;
+    setAdminPassword();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Defer one tick so other init code registers first.
+    setTimeout(tryBiometricUnlock, 0);
+});
+
 
 
 if (typeof window.gpsManualOverride === 'undefined') {
@@ -963,6 +1044,79 @@ function buildURL(path) {// Helper function to build absolute URLs
     }
     return `${API_BASE_URL}${path}`;
 }
+
+// =====================================================================
+// Phone GPS + time backup poster
+// =====================================================================
+// When the boat's NMEA2K GPS is unavailable (transducer fault, bus issue,
+// or just not installed), the device falls back to phone-provided location
+// and time. We POST every 60s; firmware ignores it if NMEA is fresh, uses
+// it as a fallback otherwise. See /set_phone_data handler in 3_functions.ino
+// and the priority resolution functions consumePhoneGps() / syncTimeFromPhone().
+
+const PHONE_DATA_POST_INTERVAL_MS = 60000;  // every 60 sec when foregrounded
+let phoneDataPosterTimer = null;
+
+async function getPhoneLocation() {
+    // Returns { latitude, longitude } or null. Works in both browser
+    // (navigator.geolocation) and Capacitor (Geolocation plugin).
+    if (IS_CAPACITOR && window.Capacitor.Plugins && window.Capacitor.Plugins.Geolocation) {
+        try {
+            const pos = await window.Capacitor.Plugins.Geolocation.getCurrentPosition({
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 60000
+            });
+            return { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        } catch (e) {
+            console.warn('[PhoneGPS] Capacitor Geolocation failed:', e && e.message);
+            return null;
+        }
+    }
+    if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        return new Promise(resolve => {
+            navigator.geolocation.getCurrentPosition(
+                pos => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+                err => { console.warn('[PhoneGPS] navigator.geolocation failed:', err && err.message); resolve(null); },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+            );
+        });
+    }
+    return null;  // no geolocation API available
+}
+
+async function postPhoneDataToDevice() {
+    const pwField = document.querySelector('.password_field');
+    const pw = pwField ? pwField.value : '';
+    if (!pw) return;  // settings still locked; don't POST without auth
+
+    const loc = await getPhoneLocation();
+    const epochMs = Date.now();
+
+    const params = new URLSearchParams();
+    params.set('password', pw);
+    params.set('epochMs', String(epochMs));
+    if (loc) {
+        params.set('lat', loc.latitude.toFixed(6));
+        params.set('lon', loc.longitude.toFixed(6));
+    }
+    try {
+        await fetch(buildURL('/set_phone_data') + '?' + params.toString(), { method: 'GET' });
+    } catch (e) {
+        // Device unreachable — fine, we'll try again on the next tick.
+    }
+}
+
+function startPhoneDataPoster() {
+    if (phoneDataPosterTimer) return;  // already running
+    // Fire once after a short delay (let SSE establish first), then on interval.
+    setTimeout(postPhoneDataToDevice, 5000);
+    phoneDataPosterTimer = setInterval(postPhoneDataToDevice, PHONE_DATA_POST_INTERVAL_MS);
+}
+
+// Kick off poster on page load. Function is safe to call before unlock —
+// it no-ops until the password field has a value.
+document.addEventListener('DOMContentLoaded', startPhoneDataPoster);
 
 function setupDemoPasswordHandler() {
     // Intercept the password form submission
@@ -2054,6 +2208,13 @@ function displayAvailableVersions() {
         return;
     }
 
+    // Forms are rendered dynamically AFTER the user unlocks settings, so
+    // .password_field elements here won't get auto-populated by the unlock flow.
+    // Grab the current password value from any existing populated password_field
+    // and inject it directly into each version's form.
+    const existingPwField = document.querySelector('.password_field');
+    const passwordValue = existingPwField ? existingPwField.value : '';
+
     let html = '<div style="margin: 10px 0;">Click a version to update:</div>';
     sortedVersions.forEach(version => {
         const versionData = availableVersions[version];
@@ -2068,7 +2229,8 @@ function displayAvailableVersions() {
                         <span style="color: #666; font-size: 0.9em;">${notes}</span><br>
                         <span style="color: #888; font-size: 0.8em;">${size}</span>
                     </div>
-                    <form action="/get" method="GET" target="hidden-form" onsubmit="return confirmUpdate('${version}')">
+                    <form action="${buildURL('/get')}" method="GET" target="hidden-form" onsubmit="return confirmUpdate('${version}')">
+                        <input type="hidden" name="password" class="password_field" value="${passwordValue}">
                         <input type="hidden" name="UpdateToVersion" value="${version}">
                         <input type="submit" value="Change to ${version}" class="btn-primary">
                     </form>
@@ -2085,7 +2247,64 @@ function displayAvailableVersions() {
 // Confirm update
 function confirmUpdate(version) {
     // Password is guaranteed to exist because button can only be clicked after unlock
-    return confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, web interface will be accessible in the usual way, and the Software Update sub-tab in Cloud Features will confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Green/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
+    const confirmed = confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Green/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
+    if (confirmed) {
+        kickOffAppWebUpdate(version);  // No-op in browser; in iOS app downloads matching web bundle in parallel
+        showUpdateInProgressOverlay(version);  // Same modal the forced-update path shows
+    }
+    return confirmed;
+}
+
+// Shows the "Update in progress…" full-screen overlay used by both the manual
+// "Change to X.X.XX" flow and the forced-update flow. The message text tells
+// mobile users to fully close + reopen the app once the device finishes — that's
+// the standard live-update apply trigger (matches Capgo/CodePush/Expo pattern).
+function showUpdateInProgressOverlay(versionStr) {
+    forcedUpdateInProgressUntil = Date.now() + 6 * 60 * 1000;
+    const overlay = document.getElementById('forced-update-overlay');
+    if (!overlay) return;
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `
+      <div class="settings-card" style="max-width: 520px; width: 100%; text-align: center;">
+          <div style="margin-bottom: 12px; text-align:center; font-weight: bold; font-size: 16px;">
+              Update in progress…
+          </div>
+          <p style="margin: 8px 0 4px 0; font-size: 15px;">
+              Downloading firmware v<strong>${versionStr}</strong> and rebooting.
+          </p>
+          <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
+              Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
+          </p>
+          <p style="margin-top: 12px; font-size: 11px; color: #888;">
+              Do not power-cycle the device during the update.
+          </p>
+      </div>`;
+}
+
+// When running inside the iOS (Capacitor) app, kick off a parallel download of
+// the matching web bundle from the OTA server. The device firmware update is
+// still triggered by the form submit; this just keeps the app's local web UI
+// in sync. Silently no-ops in a regular browser.
+async function kickOffAppWebUpdate(version) {
+    if (!window.Capacitor || !window.Capacitor.isNativePlatform || !window.Capacitor.isNativePlatform()) {
+        return;
+    }
+    const plugin = window.Capacitor.Plugins && window.Capacitor.Plugins.LiveUpdate;
+    if (!plugin) {
+        console.warn('[LiveUpdate] Plugin unavailable, skipping app web bundle download');
+        return;
+    }
+    try {
+        if (plugin.addListener) {
+            plugin.addListener('downloadProgress', (data) => {
+                console.log(`[LiveUpdate] ${data.version}: ${Math.round(data.progress * 100)}%`);
+            });
+        }
+        const result = await plugin.downloadVersion({ version });
+        console.log('[LiveUpdate] App bundle ready, applies on next cold launch:', result);
+    } catch (err) {
+        console.error('[LiveUpdate] App web bundle download failed:', err);
+    }
 }
 
 // Track previous values to detect changes
@@ -2187,7 +2406,7 @@ function handleForcedUpdate(data) {
         left: 0;
         right: 0;
         z-index: 10000;
-        padding: 28px 36px;
+        padding: calc(28px + env(safe-area-inset-top)) 36px 28px;
         text-align: center;
         font-weight: 600;
         display: none;
@@ -2256,7 +2475,7 @@ function handleForcedUpdate(data) {
                       Downloading firmware v<strong>${versionStr}</strong> and rebooting.
                   </p>
                   <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
-                      Takes 2-3 minutes total. When it finishes, refresh this tab (or relaunch the app) to load the updated dashboard.
+                      Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
                   </p>
                   <p style="margin-top: 12px; font-size: 11px; color: #888;">
                       Do not power-cycle the device during the update.
@@ -2333,8 +2552,9 @@ function enableAllInputs() {
 
 // Trigger forced update manually
 function triggerForcedUpdate(versionStr) {
-    const confirmed = confirm('Update process begins in ~7 seconds and takes 2-3 minutes, includes re-boots.  Do not interfere.  Web interface will then be accessible in the usual way, and Software Update sub-tab in Cloud Features will show the new version #.  If process fails, you may try again with better internet.  If the whole thing bricks, you may start fresh with the factory golden image.  Continue?');
+    const confirmed = confirm('Update process begins in ~7 seconds and takes 2-3 minutes, includes re-boots.  Do not interfere.  Web interface will then be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI.  The Software Update sub-tab in Cloud Features will then show the new version #.  If process fails, you may try again with better internet.  If the whole thing bricks, you may start fresh with the factory golden image.  Continue?');
     if (confirmed) {
+        kickOffAppWebUpdate(versionStr);  // No-op in browser; in iOS app downloads matching web bundle in parallel
         // Suppress the prompt modal from re-rendering on subsequent CSV2 ticks
         // while the update is in flight. 6 minutes = headroom for the 2-3 min
         // typical OTA + reboot, then fall back to the prompt if it didn't take.
@@ -2352,7 +2572,7 @@ function triggerForcedUpdate(versionStr) {
                       Downloading firmware v<strong>${versionStr}</strong> and rebooting.
                   </p>
                   <p style="margin: 12px 0 4px 0; font-size: 13px; color: #666;">
-                      Takes 2-3 minutes total. When it finishes, refresh this tab (or relaunch the app) to load the updated dashboard.
+                      Takes 2-3 minutes total. When it finishes, <strong>hard-refresh</strong> this tab to load the updated dashboard — Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux, or fully close and reopen the app on mobile. A regular refresh may show stale cached files.
                   </p>
                   <p style="margin-top: 12px; font-size: 11px; color: #888;">
                       Do not power-cycle the device during the update.
@@ -2361,7 +2581,7 @@ function triggerForcedUpdate(versionStr) {
         }
 
         const form = document.createElement('form');
-        form.action = '/get';
+        form.action = buildURL('/get');
         form.method = 'GET';
         form.target = 'hidden-form';
 
@@ -3063,6 +3283,7 @@ function updateAllEchosOptimized(data) {
         { key: 'ManualLifePercentage', id: 'ManualLifePercentage_echo', transform: v => v },
         { key: 'BatteryCurrentSource', id: 'BatteryCurrentSource_echo', transform: v => ({0: 'INA228 Shunt', 1: 'NMEA2K', 2: 'NMEA0183', 3: 'Victron VE.Direct'}[v] ?? v) },
         { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v == 1 ? 'UNIX' : 'Elapsed' },
+        { key: 'gpsTimeSourceMode', id: 'gpsTimeSourceMode_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only', 3:'NTP time only'}[v] ?? '?') },
         { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
         { key: 'plotTimeWindow', id: 'plotTimeWindow_echo', transform: v => v },
         { key: 'Ymin1', id: 'Ymin1_echo', transform: v => v },
@@ -3077,7 +3298,6 @@ function updateAllEchosOptimized(data) {
         { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
         { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'UVThresholdHigh', id: 'UVThresholdHigh_echo', transform: v => v },
-        { key: 'accelEnabled', id: 'accelEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'TuningMode', id: 'TuningMode_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'CloudFeatures', id: 'CloudFeatures_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'PidKp', id: 'PidKp_echo', transform: v => (v / 1000).toFixed(3) },
@@ -3090,7 +3310,6 @@ function updateAllEchosOptimized(data) {
         { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
-        { key: 'SENSOR_UPLOAD_INTERVAL', id: 'SENSOR_UPLOAD_INTERVAL_echo', transform: v => (v / 60000).toFixed(2) },
         { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
         { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
@@ -3217,6 +3436,7 @@ function updateAllEchosOptimized(data) {
     const selectSyncs = [
         { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
         { key: 'BatteryCurrentSource',  name: 'BatteryCurrentSource' },
+        { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
     ];
     selectSyncs.forEach(({ key, name }) => {
         if (key in data) {
@@ -3901,6 +4121,22 @@ function restartCVTest() {
         });
 }
 
+// Waiting-for-regulator overlay: show 5s after load if no CSV packet has arrived,
+// hide on first packet. hideWaitingForRegulator() is also called from the CSVData
+// listener below; both paths are idempotent.
+window._firstCsvPacketReceived = false;
+function hideWaitingForRegulator() {
+    const el = document.getElementById('waiting-for-regulator');
+    if (el) el.style.display = 'none';
+}
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+        if (window._firstCsvPacketReceived) return;
+        const el = document.getElementById('waiting-for-regulator');
+        if (el) el.style.display = 'flex';
+    }, 5000);
+});
+
 // Poll while the tuning score section is open
 document.addEventListener('DOMContentLoaded', () => {
     const section = document.getElementById('tuningScoreSection');
@@ -4160,6 +4396,76 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             clearInterval(_thermalTuningLogPollTimer);
             _thermalTuningLogPollTimer = null;
+        }
+    });
+});
+
+// ── SystemID (plant-delay) log ────────────────────────────────────────────
+let _systemIDLogPollTimer = null;
+
+function fetchSystemIDLog() {
+    fetch(buildURL('/systemidlog'))
+        .then(r => r.ok ? r.json() : null)
+        .then(data => { if (data) renderSystemIDLog(data); })
+        .catch(() => {});
+}
+
+function renderSystemIDLog(data) {
+    const records = (data.rec || []).slice();
+    const tbody = document.getElementById('systemIDLogBody');
+    if (!tbody) return;
+
+    if (records.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="11" style="padding:12px;text-align:center;color:var(--text-muted);">No plant-delay runs logged yet.</td></tr>';
+        return;
+    }
+
+    const fmtMs = v => (v == null || v < 0) ? '—' : v.toFixed(0);
+    const fmtA  = v => (v == null || !isFinite(v)) ? '—' : v.toFixed(2);
+
+    tbody.innerHTML = records.map(r => {
+        const aborted = (r.ar > 0) || (r.s < 0);
+        const scoreColor = aborted
+            ? '#ef4444'
+            : (r.ra < 50 ? '#22c55e' : r.ra < 150 ? '#eab308' : '#ef4444');
+        const abortLabel = aborted ? `R${r.ar}/P${r.ap}` : '—';
+        const rd = r.rd || [-1, -1, -1];
+        const fd = r.fd || [-1, -1, -1];
+        const sa = r.sa || [0, 0, 0];
+        const qp = r.qp || [0, 0, 0];
+        return `<tr style="${aborted ? 'opacity:0.55;' : ''}">
+            <td style="padding:2px 4px;">${r.n}</td>
+            <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${fmtMs(r.ra)}</td>
+            <td style="padding:2px 4px;">${fmtMs(r.fa)}</td>
+            <td style="padding:2px 4px;">${fmtMs(rd[0])} / ${fmtMs(rd[1])} / ${fmtMs(rd[2])}</td>
+            <td style="padding:2px 4px;">${fmtMs(fd[0])} / ${fmtMs(fd[1])} / ${fmtMs(fd[2])}</td>
+            <td style="padding:2px 4px;">${fmtA(sa[0])} / ${fmtA(sa[1])} / ${fmtA(sa[2])}</td>
+            <td style="padding:2px 4px;">${fmtA(qp[0])} / ${fmtA(qp[1])} / ${fmtA(qp[2])}</td>
+            <td style="padding:2px 4px;">${(r.amp || 0).toFixed(1)}</td>
+            <td style="padding:2px 4px;">${(r.rpm || 0).toFixed(0)}</td>
+            <td style="padding:2px 4px;">${(r.temp || 0).toFixed(0)}</td>
+            <td style="padding:2px 4px;color:${aborted ? '#ef4444' : 'inherit'};">${abortLabel}</td>
+        </tr>`;
+    }).join('');
+}
+
+function resetSystemIDLog() {
+    if (!confirm('Reset all Plant Delay (SystemID) records?')) return;
+    fetch(buildURL('/resetsystemidlog'), { method: 'POST' })
+        .then(() => fetchSystemIDLog())
+        .catch(() => {});
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const section = document.getElementById('systemIDLogSection');
+    if (!section) return;
+    section.addEventListener('toggle', e => {
+        if (e.target.open) {
+            fetchSystemIDLog();
+            _systemIDLogPollTimer = setInterval(fetchSystemIDLog, 8000);
+        } else {
+            clearInterval(_systemIDLogPollTimer);
+            _systemIDLogPollTimer = null;
         }
     });
 });
@@ -6096,13 +6402,26 @@ function setAdminPassword() {
                 msg.style.color = "#00a19a";
 
                 hideSettingsAccess();
+
+                // Save (or refresh) the Keychain copy so the next cold launch
+                // unlocks via Face ID. No-op outside Capacitor iOS.
+                Bio.save(password).catch(() => { });
             }
 
 
             else {
                 msg.textContent = "Wrong Password";
                 msg.style.color = "#00a19a";
+
+                // If this attempt came from a Face ID autofill, the saved
+                // password is stale (e.g. user changed it via System Settings
+                // on another device). Drop the Keychain copy so the user can
+                // type the new one and re-save.
+                if (__bioAutofillInFlight) {
+                    Bio.clear().catch(() => { });
+                }
             }
+            __bioAutofillInFlight = false;
             input.value = "";
             setTrackedTimeout(() => { msg.textContent = ""; button.disabled = false; }, 2000);
         })
@@ -6146,6 +6465,10 @@ function setNewPassword() {
             if (text.trim() === "OK") {
                 msg.textContent = "Password Changed";
                 msg.style.color = "#00a19a";
+
+                // Keep the Keychain copy in sync so next cold launch's Face ID
+                // unlock uses the new password.
+                Bio.save(input.value).catch(() => { });
             } else {
                 msg.textContent = "Wrong Password";
                 msg.style.color = "#00a19a";
@@ -6330,7 +6653,6 @@ function updateTogglesFromData(data) {
         }
         updateCheckbox("timeAxisModeChanging_checkbox", data.timeAxisModeChanging, "timeAxisModeChanging");
         updateCheckbox("weatherModeEnabled_checkbox", data.weatherModeEnabled, "weatherModeEnabled");
-        updateCheckbox("accelEnabled_checkbox", data.accelEnabled, "accelEnabled");
         updateCheckbox("UseFloat_checkbox", data.UseFloat, "UseFloat");
 
 
@@ -7222,7 +7544,13 @@ window.addEventListener("load", function () {
             if (handlerDuration > 30) diagWarn(`[PERF] handleCSVData slow: ${handlerDuration}ms`);
         };
         window._csvDataHandler = handleCSVData; // Store for demo mode
-        source.addEventListener('CSVData', handleCSVData, false);
+        source.addEventListener('CSVData', function (e) {
+            if (!window._firstCsvPacketReceived) {
+                window._firstCsvPacketReceived = true;
+                hideWaitingForRegulator();
+            }
+            handleCSVData(e);
+        }, false);
 
         source.addEventListener('CSVData2', function (e) {
             const raw = e.data.split(',').map(Number);
@@ -7254,6 +7582,41 @@ window.addEventListener("load", function () {
             }
 
             handleForcedUpdate(data);
+
+            // Scheduled-restart warning: banner + one-shot popup per page-load cycle
+            try {
+                const restSec = Number(data.restartRemainingSec);
+                if (Number.isFinite(restSec) && restSec > 0) {
+                    const banner = document.getElementById('restart-countdown-banner');
+                    const txt = document.getElementById('restart-countdown-text');
+                    if (banner && txt) {
+                        const m = Math.floor(restSec / 60);
+                        const s = restSec % 60;
+                        txt.textContent = 'Scheduled restart in ' + m + ':' + (s < 10 ? '0' : '') + s + ' — device will reboot cleanly';
+                        banner.style.display = 'block';
+                    }
+                    if (!window.restartPopupShownThisCycle) {
+                        const overlay = document.getElementById('restart-popup-overlay');
+                        if (overlay) overlay.style.display = 'flex';
+                        window.restartPopupShownThisCycle = true;
+                    }
+                } else {
+                    const banner = document.getElementById('restart-countdown-banner');
+                    if (banner) banner.style.display = 'none';
+                    window.restartPopupShownThisCycle = false;
+                }
+            } catch (err) { /* never let banner logic break CSV2 dispatch */ }
+
+            // Live GPS / time source indicator for the System Settings panel.
+            // Reads two CSV2 ints just published by resolveSources() in firmware.
+            try {
+                const ind = document.getElementById('liveSourceIndicator');
+                if (ind && (data.currentGpsSource !== undefined || data.currentTimeSource !== undefined)) {
+                    const gpsLbl  = ({0:'no GPS', 1:'NMEA GPS', 2:'Phone GPS'})[Number(data.currentGpsSource)] ?? '?';
+                    const timeLbl = ({0:'no time', 1:'GPS time', 2:'phone time', 3:'NTP time', 4:'drifting'})[Number(data.currentTimeSource)] ?? '?';
+                    ind.textContent = gpsLbl + ' · ' + timeLbl;
+                }
+            } catch (err) { /* never let indicator break CSV2 dispatch */ }
 
             // Update GPS moving state for IMU mode graying (SOGNMEA is scaled ×100)
             if (data.SOGNMEA !== undefined) {
@@ -8239,9 +8602,6 @@ window.addEventListener("load", function () {
             }
             updateTestActivePanel();
 
-            // Update learning table inputs
-            // CRITICAL: Read mode from incoming data, not DOM (which may be stale)
-            const learningModeActive = data.LearningMode === 1;
 
             // =====================
             // FUEL TABLE INIT 
@@ -8573,7 +8933,6 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("anomalyAlarmEnable_checkbox").checked = (document.getElementById("anomalyAlarmEnable").value === "1");
     document.getElementById("TuningMode_checkbox").checked = (document.getElementById("TuningMode").value === "1");
     document.getElementById("socInfoAvailable_checkbox").checked = (document.getElementById("socInfoAvailable").value === "1");
-    document.getElementById("accelEnabled_checkbox").checked = (document.getElementById("accelEnabled").value === "1");
     document.getElementById("CloudFeatures_checkbox").checked = (document.getElementById("CloudFeatures").value === "1");
     document.getElementById("AutoAltCurrentZero_checkbox").checked = (document.getElementById("AutoAltCurrentZero").value === "1");
     document.getElementById("HardwarePresent_checkbox").checked = (document.getElementById("hardwarePresent").value === "1");

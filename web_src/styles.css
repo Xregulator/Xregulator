@@ -2451,6 +2451,14 @@ input:checked+.slider:before {
   color: #666;
 }
 
+/* Center the Leaderboards iframe container on screen (matches the 900px
+   max-width of the Vercel-hosted leaderboards.html content). */
+#cloudfeatures-leaderboards .history-container {
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 /* ESP32 Live Data - Grouped Metrics */
 .card-group {
   background: var(--card-light);
@@ -3641,5 +3649,33 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
   min-height: 200px;
 }
 @media (max-width: 600px) { .baro-plot-container { height: 220px; } }
+
+/* Waiting-for-regulator overlay — placeholder for future sailing-boat animation. */
+#waiting-for-regulator {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: rgba(10, 14, 20, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-family: inherit;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.wfr-inner { text-align: center; padding: 0 24px; }
+.wfr-spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #fff;
+  border-radius: 50%;
+  margin: 0 auto 20px;
+  animation: wfr-spin 1s linear infinite;
+}
+@keyframes wfr-spin { to { transform: rotate(360deg); } }
+.wfr-title { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+.wfr-sub { font-size: 13px; opacity: 0.7; }
 
 /* XREG_END */

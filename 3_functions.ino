@@ -485,8 +485,11 @@ enum Csv2Index {
   CSV2_wmIgn_vacc_lo,     CSV2_wmIgn_vacc_hi,      // imu_vertical_accel_g (×10, 1 decimal)
   CSV2_wmIgn_baro_lo,     CSV2_wmIgn_baro_hi,      // baroPressure mbar (int)
   CSV2_wmIgn_ambient_lo,  CSV2_wmIgn_ambient_hi,   // ambientTemp °F (int)
+  CSV2_restartRemainingSec,                        // seconds until scheduled reboot (0 = outside 10-min warning window)
+  CSV2_currentGpsSource,                           // 0=none, 1=NMEA, 2=Phone (GpsSource enum)
+  CSV2_currentTimeSource,                          // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting (TimeSource enum)
 
-  CSV2_FIELD_COUNT  // = 436 (408 baseline + 28 ignition-cycle watermark fields)
+  CSV2_FIELD_COUNT  // = 439 (437 prior + currentGpsSource + currentTimeSource)
 };
 
 enum Csv3Index {
@@ -641,7 +644,7 @@ enum Csv3Index {
   CSV3_MinFloatTime,
   CSV3_SOC_BlockRebulk_percent,
   CSV3_SOC_AllowRebulk_percent,
-  CSV3_accelEnabled,
+  CSV3_reserved_accelEnabled,  // RESERVED — was accelEnabled; accelerometer now always-on, no UI toggle
   CSV3_DutySlowRampRate,
   CSV3_ShutdownPhase2HoldMs,
   CSV3_TempPIDKp,
@@ -710,7 +713,6 @@ enum Csv3Index {
   CSV3_AlarmLatchEnabled,
   CSV3_MaintainMode,
   CSV3_ManualSOCPoint,
-  CSV3_LearningMode,
   CSV3_IgnoreLearningDuringPenalty,
   CSV3_LogAllLearningEvents,
   CSV3_CloudFeatures,
@@ -720,7 +722,7 @@ enum Csv3Index {
   CSV3_ManualLifePercentage,
   CSV3_UVThresholdHigh,
   CSV3_weatherModeEnabled,
-  CSV3_SENSOR_UPLOAD_INTERVAL,
+  CSV3_reserved_SENSOR_UPLOAD_INTERVAL,  // RESERVED — was SENSOR_UPLOAD_INTERVAL; now firmware-only constant (edit + reflash)
   CSV3_imuEnabled,
   CSV3_AbsorptionVoltage,
   CSV3_AbsorptionTimeoutMs,
@@ -775,8 +777,9 @@ enum Csv3Index {
   CSV3_NMEA0183Data,            // moved from CSV2 (0/1)
   CSV3_NMEA2KData,              // moved from CSV2 (0/1)
   CSV3_timeAxisModeChanging,    // moved from CSV2 (0/1)
+  CSV3_gpsTimeSourceMode,       // 0=auto, 1=NMEA-forced, 2=Phone-forced, 3=NTP-time-forced
 
-  CSV3_FIELD_COUNT  // = 281 (was 287; removed 6 write-only Learning settings that had no UI consumer)
+  CSV3_FIELD_COUNT  // = 281 (280 prior + gpsTimeSourceMode)
 };
 
 
@@ -2937,13 +2940,18 @@ void setupServer() {
       VMGUseTrueWind = inputMessage.toInt();
       queueConsoleMessageF("VMG uses true wind %s", VMGUseTrueWind ? "enabled" : "disabled");
     }
-    if (request->hasParam("SENSOR_UPLOAD_INTERVAL")) {
+    if (request->hasParam("gpsTimeSourceMode")) {
       foundParameter = true;
-      inputMessage = request->getParam("SENSOR_UPLOAD_INTERVAL")->value();
-      float minutes = inputMessage.toFloat();
-      SENSOR_UPLOAD_INTERVAL = minutes * 60000;  // Convert minutes to milliseconds
-      writeFile(LittleFS, "/SENSOR_UPLOAD_INTERVAL.txt", String(SENSOR_UPLOAD_INTERVAL).c_str());
-      queueConsoleMessageF("Cloud upload interval set to %.1f minutes", minutes);
+      inputMessage = request->getParam("gpsTimeSourceMode")->value();
+      uint8_t m = (uint8_t)inputMessage.toInt();
+      if (m > GTS_NTP) m = GTS_AUTO;  // sanity
+      gpsTimeSourceMode = m;
+      writeFile(LittleFS, "/gpsTimeSourceMode.txt", String(gpsTimeSourceMode).c_str());
+      const char *lbl = (m == GTS_AUTO)  ? "auto"
+                      : (m == GTS_NMEA)  ? "NMEA only"
+                      : (m == GTS_PHONE) ? "phone only"
+                                         : "NTP time only";
+      queueConsoleMessageF("GPS/time source mode set to %s", lbl);
     }
     if (request->hasParam("ResetThermTemp")) {
       foundParameter = true;
@@ -3299,18 +3307,6 @@ void setupServer() {
       foundParameter = true;
       pendingClearOverheatHistory = true;  // deferred to Core 1 to avoid SSE gap
       inputMessage = "1";
-    }
-    if (request->hasParam("LearningMode")) {
-      foundParameter = true;
-      inputMessage = request->getParam("LearningMode")->value();
-      writeFile(LittleFS, "/LearningMode.txt", inputMessage.c_str());
-      LearningMode = inputMessage.toInt();
-    }
-    if (request->hasParam("accelEnabled")) {
-      foundParameter = true;
-      inputMessage = request->getParam("accelEnabled")->value();
-      writeFile(LittleFS, "/accelEnabled.txt", inputMessage.c_str());
-      accelEnabled = inputMessage.toInt();
     }
     if (request->hasParam("CAPSIZE_THRESHOLD_DEG")) {
       foundParameter = true;
@@ -4183,30 +4179,6 @@ void setupServer() {
       writeFile(LittleFS, "/FIELD_COLLAPSE_DELAY.txt", String(temp).c_str());
       FIELD_COLLAPSE_DELAY = temp;
     }
-    if (request->hasParam("EffXMin")) {
-      foundParameter = true;
-      inputMessage = request->getParam("EffXMin")->value();
-      writeFile(LittleFS, "/EffXMin.txt", inputMessage.c_str());
-      EffXMin = inputMessage.toFloat();
-    }
-    if (request->hasParam("EffXMax")) {
-      foundParameter = true;
-      inputMessage = request->getParam("EffXMax")->value();
-      writeFile(LittleFS, "/EffXMax.txt", inputMessage.c_str());
-      EffXMax = inputMessage.toFloat();
-    }
-    if (request->hasParam("EffYMin")) {
-      foundParameter = true;
-      inputMessage = request->getParam("EffYMin")->value();
-      writeFile(LittleFS, "/EffYMin.txt", inputMessage.c_str());
-      EffYMin = inputMessage.toFloat();
-    }
-    if (request->hasParam("EffYMax")) {
-      foundParameter = true;
-      inputMessage = request->getParam("EffYMax")->value();
-      writeFile(LittleFS, "/EffYMax.txt", inputMessage.c_str());
-      EffYMax = inputMessage.toFloat();
-    }
     if (request->hasParam("ResetPerfCounters")) {
       foundParameter = true;
       // Function timing — session worsts (full list mirrors the periodic
@@ -4448,12 +4420,82 @@ void setupServer() {
   // Diagnostic endpoint to check partition and version
   server.on("/debug", HTTP_GET, [](AsyncWebServerRequest *request) {
     const esp_partition_t *running = esp_ota_get_running_partition();
-    char out[192];
+    const char *timeSrcName = (currentTimeSource == TIME_GPS)   ? "NMEA-GPS"
+                            : (currentTimeSource == TIME_PHONE) ? "Phone"
+                            : (currentTimeSource == TIME_NTP)   ? "NTP"
+                            : (currentTimeSource == TIME_MILLIS) ? "drifting" : "none";
+    const char *gpsSrcName  = (currentGpsSource == GPS_NMEA)  ? "NMEA"
+                            : (currentGpsSource == GPS_PHONE) ? "Phone" : "none";
+    unsigned long now = millis();
+    char out[384];
     snprintf(out, sizeof(out),
-             "Partition: %s\nVersion: %s\nFree heap: %lu\n",
+             "Partition: %s\nVersion: %s\nFree heap: %lu\n"
+             "Time source: %s (NMEA last sync: %lus ago, Phone last: %lus ago)\n"
+             "GPS source:  %s (NMEA last fix: %lus ago, Phone last: %lus ago)\n"
+             "Lat/Lon: %.6f, %.6f\n",
              (running && running->label) ? running->label : "unknown",
              FIRMWARE_VERSION,
-             (unsigned long)ESP.getFreeHeap());
+             (unsigned long)ESP.getFreeHeap(),
+             timeSrcName,
+             lastNmea2kSystemTimeMs ? (now - lastNmea2kSystemTimeMs) / 1000UL : 0UL,
+             lastPhoneTimeMs        ? (now - lastPhoneTimeMs)        / 1000UL : 0UL,
+             gpsSrcName,
+             lastNmea2kGnssMs       ? (now - lastNmea2kGnssMs)       / 1000UL : 0UL,
+             lastPhoneGpsMs         ? (now - lastPhoneGpsMs)         / 1000UL : 0UL,
+             LatitudeNMEA, LongitudeNMEA);
+    request->send(200, "text/plain", out);
+  });
+
+  // Phone-sourced GPS + time backup. Browser + Capacitor app both POST here
+  // periodically (every ~30-60s) when they have a location fix. The priority
+  // chain (NMEA → Phone → NTP) consumes these via the *Phone globals and the
+  // lastPhone*Ms freshness timestamps. Partial submissions are OK — send only
+  // the fields you have.
+  server.on("/set_phone_data", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("password") ||
+        strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
+      request->send(403, "text/plain", "Forbidden");
+      return;
+    }
+    bool acceptedGps = false, acceptedTime = false;
+    if (request->hasParam("lat") && request->hasParam("lon")) {
+      // Use strtod + endptr (not String::toDouble — that silently returns 0.0
+      // for unparseable input, so "lat=NaN&lon=42" would pass as (0.0, 42)).
+      const char *latStr = request->getParam("lat")->value().c_str();
+      const char *lonStr = request->getParam("lon")->value().c_str();
+      char *latEnd = nullptr, *lonEnd = nullptr;
+      double lat = strtod(latStr, &latEnd);
+      double lon = strtod(lonStr, &lonEnd);
+      bool latOk = (latEnd != latStr) && (*latEnd == '\0' || *latEnd == ' ');
+      bool lonOk = (lonEnd != lonStr) && (*lonEnd == '\0' || *lonEnd == ' ');
+      if (latOk && lonOk &&
+          !isnan(lat) && !isnan(lon) &&
+          fabs(lat) <= 90.0 && fabs(lon) <= 180.0 &&
+          !(lat == 0.0 && lon == 0.0)) {
+        LatitudePhone  = lat;
+        LongitudePhone = lon;
+        lastPhoneGpsMs = millis();
+        acceptedGps = true;
+      }
+    }
+    if (request->hasParam("epochMs")) {
+      // JS Date.now() is millis since 1970. We store seconds for parity with
+      // the GPS/NTP path. Reject anything before Jan 1, 2020 (sanity).
+      uint64_t ms = (uint64_t)strtoull(request->getParam("epochMs")->value().c_str(), nullptr, 10);
+      time_t sec = (time_t)(ms / 1000ULL);
+      if (sec > 1577836800) {
+        PhoneTimeEpoch  = sec;
+        lastPhoneTimeMs = millis();
+        acceptedTime = true;
+      }
+    }
+    // Promote phone data into the effective globals if NMEA is stale. Both of
+    // these are no-ops when NMEA is fresh (NMEA wins), so it's safe to call
+    // unconditionally.
+    if (acceptedGps)  consumePhoneGps();
+    if (acceptedTime) syncTimeFromPhone(PhoneTimeEpoch);
+    char out[64];
+    snprintf(out, sizeof(out), "gps=%d time=%d", acceptedGps ? 1 : 0, acceptedTime ? 1 : 0);
     request->send(200, "text/plain", out);
   });
 
@@ -4824,6 +4866,67 @@ void setupServer() {
     request->send(response);
   });
 
+  server.on("/systemidlog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    // PSRAM-backed buffer (50 records × ~200 bytes ≈ 10 KB).
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(10240), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+
+    // Sort by score (lower = faster plant = better). Aborted runs (-1) sink to end.
+    uint8_t sortIdx[50];
+    for (int i = 0; i < systemIDLogCount; i++) sortIdx[i] = i;
+    for (int i = 1; i < systemIDLogCount; i++) {
+      uint8_t key = sortIdx[i];
+      float keyScore = systemIDLog[key].score;
+      if (keyScore < 0.0f) keyScore = 1e9f;  // aborted → sort last
+      int j = i - 1;
+      while (j >= 0) {
+        float prev = systemIDLog[sortIdx[j]].score;
+        if (prev < 0.0f) prev = 1e9f;
+        if (prev <= keyScore) break;
+        sortIdx[j + 1] = sortIdx[j];
+        j--;
+      }
+      sortIdx[j + 1] = key;
+    }
+
+    int pos = 0;
+    pos += snprintf(buf + pos, 10240 - pos, "{\"rec\":[");
+    for (int i = 0; i < systemIDLogCount && pos < 9800; i++) {
+      SystemIDRecord &r = systemIDLog[sortIdx[i]];
+      pos += snprintf(buf + pos, 10240 - pos,
+        "%s{\"n\":%u,\"s\":%.1f,"
+        "\"rd\":[%.0f,%.0f,%.0f],\"fd\":[%.0f,%.0f,%.0f],"
+        "\"ra\":%.1f,\"fa\":%.1f,"
+        "\"sa\":[%.2f,%.2f,%.2f],\"qp\":[%.3f,%.3f,%.3f],"
+        "\"ar\":%u,\"ap\":%u,\"amp\":%.2f,"
+        "\"rpm\":%.0f,\"temp\":%.1f}",
+        i > 0 ? "," : "",
+        (unsigned)r.runNumber, r.score,
+        r.riseDelays[0], r.riseDelays[1], r.riseDelays[2],
+        r.fallDelays[0], r.fallDelays[1], r.fallDelays[2],
+        r.riseAvg_ms, r.fallAvg_ms,
+        r.stepAmps[0], r.stepAmps[1], r.stepAmps[2],
+        r.quietPP[0], r.quietPP[1], r.quietPP[2],
+        (unsigned)r.abortReason, (unsigned)r.abortPhase, r.setupStepAmplitude,
+        r.avgRPM, r.avgAltTempF);
+    }
+    pos += snprintf(buf + pos, 10240 - pos,
+      "],\"active\":%d,\"ready\":%d}",
+      (int)systemIDActive, systemIDResultsReady ? 1 : 0);
+
+    size_t total = (size_t)pos;
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/json",
+      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
+        memcpy(out, bufPtr.get() + index, toSend);
+        return toSend;
+      });
+    request->send(response);
+  });
+
   server.on("/cvtuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
     // PSRAM-backed buffer (50 records × ~420 bytes ≈ 21 KB). shared_ptr deleter runs
     // when the chunked-response lambda is destroyed (normal completion OR abort), so
@@ -5032,6 +5135,15 @@ void setupServer() {
     liveScore_lastStepMs = 0;
     liveScore_inWindow   = false;
     pendingSaveTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resetsystemidlog", HTTP_POST, [](AsyncWebServerRequest *request) {
+    systemIDLogCount    = 0;
+    systemIDLogHead     = 0;
+    systemIDRunCounter  = 0;
+    if (systemIDLog) memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
+    pendingSaveSystemIDLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
@@ -5430,7 +5542,9 @@ void SendWifiData() {
                                // 28 ignition-cycle watermark fields (14 lo + 14 hi)
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // restartRemainingSec + GPS/time source labels
+                               "%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -5863,7 +5977,10 @@ void SendWifiData() {
                                SafeInt(wmIgnSafe(wmIgn_pitch.lo), 1),    SafeInt(wmIgnSafe(wmIgn_pitch.hi), 1),
                                SafeInt(wmIgnSafe(wmIgn_vacc.lo), 10),    SafeInt(wmIgnSafe(wmIgn_vacc.hi), 10),
                                SafeInt(wmIgnSafe(wmIgn_baro.lo), 1),     SafeInt(wmIgnSafe(wmIgn_baro.hi), 1),
-                               SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),  SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1)
+                               SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),  SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1),
+                               (int)restartRemainingSec,
+                               (int)currentGpsSource,                    // 0=none 1=NMEA 2=Phone
+                               (int)currentTimeSource                    // 0=none 1=GPS 2=Phone 3=NTP 4=drifting
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -5914,12 +6031,12 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,"  // 3 removed: LearningPaused, ShowLearningDebugMessages, LearningDryRunMode
+                               "%d,%d,%d,%d,%d,%d,"  // 4 removed: LearningPaused, ShowLearningDebugMessages, LearningDryRunMode, LearningMode
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -6071,7 +6188,7 @@ void SendWifiData() {
                                SafeInt(MinFloatTime),
                                SafeInt(SOC_BlockRebulk_percent),
                                SafeInt(SOC_AllowRebulk_percent),
-                               SafeInt(accelEnabled),
+                               0,                                                 // RESERVED — was accelEnabled (always-on, UI toggle removed)
                                SafeInt(DutySlowRampRate, 100),
                                SafeInt(ShutdownPhase2HoldMs),
                                SafeInt(TempPIDKp, 1000),
@@ -6140,7 +6257,6 @@ void SendWifiData() {
                                SafeInt(AlarmLatchEnabled),
                                SafeInt(MaintainMode),
                                SafeInt(ManualSOCPoint),
-                               SafeInt(LearningMode),
                                SafeInt(IgnoreLearningDuringPenalty),
                                SafeInt(LogAllLearningEvents),
                                SafeInt(CloudFeatures),
@@ -6150,7 +6266,7 @@ void SendWifiData() {
                                SafeInt(ManualLifePercentage),
                                SafeInt(UVThresholdHigh, 100),
                                SafeInt(weatherModeEnabled),
-                               SafeInt(SENSOR_UPLOAD_INTERVAL),
+                               0,                                                 // RESERVED — was SENSOR_UPLOAD_INTERVAL (firmware-only constant)
                                SafeInt(imuEnabled ? 1 : 0),
                                SafeInt(AbsorptionVoltage * 100),
                                SafeInt(AbsorptionTimeoutMs),
@@ -6204,7 +6320,8 @@ void SendWifiData() {
                                SafeInt(VeData),                                 // moved from CSV2
                                SafeInt(NMEA0183Data),                           // moved from CSV2
                                SafeInt(NMEA2KData),                             // moved from CSV2
-                               SafeInt(timeAxisModeChanging)                    // moved from CSV2
+                               SafeInt(timeAxisModeChanging),                   // moved from CSV2
+                               (int)gpsTimeSourceMode                           // 0=auto,1=NMEA,2=Phone,3=NTP
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
@@ -6430,6 +6547,13 @@ void saveVesselInfoToFile() {
     file.close();
   }
   xSemaphoreGive(fsMutex);
+
+  // Mirror duplicated fields into their standalone LittleFS files so the next
+  // boot's standalone-load doesn't overwrite the vesselData values in RAM.
+  // The reverse direction (standalone /get handlers → vessel_info.json) is
+  // handled by updateVesselInfoField().
+  writeFile(LittleFS, "/BatteryCapacity_Ah.txt", String(BatteryCapacity_Ah).c_str());
+  writeFile(LittleFS, "/SolarWatts.txt",         String(SolarWatts).c_str());
 }
 
 // Called from Core 1 main loop via pendingClearVesselInfo flag — not safe to call on Core 0

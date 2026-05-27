@@ -1914,16 +1914,15 @@ bool buildConfigPayload() {
 
   // Learning System Settings
   // (learning_paused / learning_upward_enabled / learning_downward_enabled fields removed —
-  //  underlying vars were write-only with no consumer; deleted from firmware entirely.)
+  //  underlying vars were write-only with no consumer; deleted from firmware entirely.
+  //  learning_mode removed 2026-05-26 — also dead, no algorithmic consumer.)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"learning_mode\":%d"
                      ",\"alternator_nominal_amps\":%d,\"learning_up_step\":%.2f"
                      ",\"learning_down_step\":%.2f,\"ambient_temp_correction_factor\":%.3f"
                      ",\"ambient_temp_baseline\":%.1f,\"min_learning_interval\":%lu"
                      ",\"safe_operation_threshold\":%lu,\"last_significant_rpm_change\":%lu"
                      ",\"last_stable_rpm\":%d,\"learning_settling_period\":%d"
                      ",\"learning_rpm_change_threshold\":%d,\"learning_temp_hysteresis\":%d",
-                     LearningMode,
                      AlternatorNominalAmps, LearningUpStep, LearningDownStep,
                      AmbientTempCorrectionFactor, xTime, MinLearningInterval,
                      SafeOperationThreshold, lastSignificantRPMChange, lastStableRPM,
@@ -2259,9 +2258,18 @@ done_headers_cfg:
 
 void syncTimeFromNTP() {
   if (otaInProgress) {
-    return;  // Skip during OTA
+    return;  // Skip during OTA — don't arm fast retry; OTA path is brief.
   }
-  if (currentMode != MODE_CLIENT || WiFi.status() != WL_CONNECTED) return;  // MODE_CLIENT = 1
+  // Manual mode gate: only AUTO and NTP-forced ever fall through to NTP.
+  if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_PHONE) return;
+  if (currentMode != MODE_CLIENT || WiFi.status() != WL_CONNECTED) {
+    // WiFi not ready yet (typical on cold boot before association). Arm a
+    // fast retry so the next checkTimeSync() tick fires ~60s from now
+    // instead of waiting the full 12h. Underflow on early-boot millis is
+    // intentional and handled by unsigned wraparound in the gate.
+    lastTimeSyncAttempt = millis() - (TIME_SYNC_INTERVAL - 60000UL);
+    return;
+  }
 
   Serial.println("Starting NTP sync...");
   // Hold core0Busy so RunAlternator will not enable the field while we block
@@ -2293,7 +2301,8 @@ void syncTimeFromNTP() {
   }
 
   Serial.println("NTP sync attempt failed");
-  lastTimeSyncAttempt = millis();
+  // Arm fast retry — only successful syncs get the full 12h throttle.
+  lastTimeSyncAttempt = millis() - (TIME_SYNC_INTERVAL - 60000UL);
   core0Busy = false;
 }
 

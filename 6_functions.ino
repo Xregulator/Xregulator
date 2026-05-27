@@ -794,6 +794,83 @@ void commitThermalTuningRecord() {
   thermalTuningScore = {};
 }
 
+// ── SystemID (plant-delay) ring buffer log — mirrors tuning logs above ────
+void saveSystemIDLog() {
+  if (!systemIDLog) return;
+  File f = LittleFS.open("/systemidlog.bin", "w");
+  if (!f) return;
+  f.write((uint8_t *)&systemIDLogCount,   sizeof(systemIDLogCount));
+  f.write((uint8_t *)&systemIDLogHead,    sizeof(systemIDLogHead));
+  f.write((uint8_t *)&systemIDRunCounter, sizeof(systemIDRunCounter));
+  f.write((uint8_t *)systemIDLog,         50 * sizeof(SystemIDRecord));
+  f.close();
+}
+
+void loadSystemIDLog() {
+  if (!systemIDLog) return;
+  File f = LittleFS.open("/systemidlog.bin", "r");
+  if (!f) return;
+  f.read((uint8_t *)&systemIDLogCount,   sizeof(systemIDLogCount));
+  f.read((uint8_t *)&systemIDLogHead,    sizeof(systemIDLogHead));
+  f.read((uint8_t *)&systemIDRunCounter, sizeof(systemIDRunCounter));
+  f.read((uint8_t *)systemIDLog,         50 * sizeof(SystemIDRecord));
+  f.close();
+  Serial.printf("SystemIDLog: loaded %d records, counter=%d\n",
+                systemIDLogCount, systemIDRunCounter);
+}
+
+// Push the current SystemID result globals into the ring buffer.
+// `aborted == true` means the test never produced rise/fall numbers — we
+// still record so users see the abort in the history.
+void commitSystemIDRecord(bool aborted) {
+  if (!systemIDLog) return;
+
+  SystemIDRecord rec = {};
+  rec.runNumber          = ++systemIDRunCounter;
+  rec.setupStepAmplitude = SystemIDStepAmplitude;
+  rec.abortReason        = systemIDAbortReason;
+  rec.abortPhase         = systemIDAbortPhase;
+  // Conditions snapshot at commit (no per-test accumulator exists for SystemID)
+  rec.avgRPM       = (float)RPM;
+  rec.avgAltTempF  = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
+
+  if (aborted) {
+    rec.score = -1.0f;
+    rec.riseAvg_ms = -1.0f;
+    rec.fallAvg_ms = -1.0f;
+    for (int i = 0; i < 3; i++) {
+      rec.riseDelays[i] = -1.0f;
+      rec.fallDelays[i] = -1.0f;
+      rec.stepAmps[i]   = 0.0f;
+      rec.quietPP[i]    = 0.0f;
+    }
+  } else {
+    // Score = rise average (lower = faster plant). If rise didn't measure, fall back to fall.
+    rec.score = (systemIDRiseAvg_ms > 0.0f) ? systemIDRiseAvg_ms
+              : (systemIDFallAvg_ms > 0.0f) ? systemIDFallAvg_ms
+              : -1.0f;
+    rec.riseAvg_ms = systemIDRiseAvg_ms;
+    rec.fallAvg_ms = systemIDFallAvg_ms;
+    for (int i = 0; i < 3; i++) {
+      rec.riseDelays[i] = systemIDRiseDelay_ms[i];
+      rec.fallDelays[i] = systemIDFallDelay_ms[i];
+      rec.stepAmps[i]   = systemIDStepAmp_A[i];
+      rec.quietPP[i]    = systemIDQuietPP_A[i];
+    }
+  }
+
+  systemIDLog[systemIDLogHead] = rec;
+  systemIDLogHead = (systemIDLogHead + 1) % 50;
+  if (systemIDLogCount < 50) systemIDLogCount++;
+
+  pendingSaveSystemIDLog = true;  // deferred to Core 1 — avoids blocking Core 0
+
+  queueConsoleMessageF("SystemID: run#%d %s rise=%.0f fall=%.0f stepAmp=%.1f%%",
+                       rec.runNumber,
+                       aborted ? "ABORTED" : "logged",
+                       rec.riseAvg_ms, rec.fallAvg_ms, rec.setupStepAmplitude);
+}
+
 static float computeThermalLiveScore(int w) {
   float e = 0.0f, t = 0.0f;
   if (!thermalLiveScoreBuckets[w]) return 0.0f;

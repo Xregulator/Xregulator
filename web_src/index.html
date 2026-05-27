@@ -55,6 +55,18 @@
 
 <body><iframe name="hidden-form" style="display:none"></iframe>
 
+  <!-- Waiting-for-regulator overlay. Hidden by default. JS shows it 5s after load
+       if no CSV packet has arrived (e.g. Capacitor app cold launch with no device
+       reachable), and hides it on first packet. Replace inner content with a
+       sailing-boat SVG animation later. -->
+  <div id="waiting-for-regulator" style="display:none;">
+    <div class="wfr-inner">
+      <div class="wfr-spinner"></div>
+      <div class="wfr-title">Waiting for regulator…</div>
+      <div class="wfr-sub">Checking connection</div>
+    </div>
+  </div>
+
   <div class="permanent-header">
 
     <!-- Brand row: wordmark left, field cluster right -->
@@ -3716,44 +3728,6 @@
 
               <hr />
               <div class="form-row">
-                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Cloud Data Upload Interval (<span id="SENSOR_UPLOAD_INTERVAL_echo">?</span>) minutes:</span>
-                  <span class="tooltip" onclick="this.classList.toggle('active')">
-                    ℹ️
-                    <span class="tooltip-box">How often to upload sensor data to cloud for historical tracking. Default
-                      is
-                      10 minutes. Minimum 0.3 minutes to prevent excessive cloud traffic.</span>
-                  </span>
-                </div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <input name="SENSOR_UPLOAD_INTERVAL" type="number" step=".1" min=".3" max="1440" />
-                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
-                <div class="form-label">Accelerometer Data:(<span id="accelEnabled_echo">?</span>):</div>
-                <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
-                    <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="accelEnabled_checkbox" type="checkbox"
-                        onchange="if(handleUserToggle('accelEnabled_checkbox', 'accelEnabled', 'accelEnabled')) { this.form.submit(); submitMessage(); }">
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="accelEnabled" name="accelEnabled" type="number" value="" style="display:none;" />
-                  </form>
-                </div>
-              </div>
-
-              <hr />
-              <div class="form-row">
                 <div class="form-label">VE.Direct Data (<span id="VeData_echo">?</span>):</div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -3802,6 +3776,38 @@
                     </label>
                     <span class="toggle-label">On</span>
                     <input id="NMEA2KData" name="NMEA2KData" type="number" value="" style="display:none;" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Dashboard Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">How often this dashboard / phone app receives fresh sensor data
+                      from the regulator, in milliseconds. Default is 100 ms (about 10 updates per second), which
+                      is right for almost everyone.
+                      <br><br>
+                      <b>Lower values</b> (e.g. 50 ms) make gauges and plots feel snappier but increase the
+                      regulator's WiFi and CPU load. Going much below 50 ms can start to crowd out the regulator's
+                      other tasks.
+                      <br><br>
+                      <b>Higher values</b> (e.g. 1000 ms or more) reduce network traffic but make the live display
+                      feel laggy and stretch plot points apart.
+                      <br><br>
+                      This setting only affects how fast data is pushed to your <i>display</i>. It has no effect
+                      on how fast the regulator actually controls the alternator. <b>Most users should leave this
+                      at the default.</b>
+                    </span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="webgaugesinterval" type="number" step="10" min="50" max="2000" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
               </div>
@@ -4255,6 +4261,43 @@
           </div>
         </div>
 
+
+        <hr />
+        <details id="systemIDLogSection" class="tuning-section">
+          <summary class="tuning-section-title">Plant Delay History</summary>
+          <div>
+            <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+              <button type="button" class="btn-secondary" onclick="fetchSystemIDLog()">↺ Refresh</button>
+              <button type="button" class="btn-secondary" onclick="resetSystemIDLog()">Reset Log</button>
+            </div>
+            <div style="overflow-x:auto;">
+              <table style="width:100%;min-width:900px;border-collapse:collapse;font-size:12px;">
+                <thead>
+                  <tr style="background:var(--bg-card);color:var(--text-muted);">
+                    <th style="padding:4px 6px;text-align:left;">#</th>
+                    <th style="padding:4px 6px;text-align:left;">Rise Avg (ms)</th>
+                    <th style="padding:4px 6px;text-align:left;">Fall Avg (ms)</th>
+                    <th style="padding:4px 6px;text-align:left;">Rise Trials (ms)</th>
+                    <th style="padding:4px 6px;text-align:left;">Fall Trials (ms)</th>
+                    <th style="padding:4px 6px;text-align:left;">Step Amp (A)</th>
+                    <th style="padding:4px 6px;text-align:left;">Quiet PP (A)</th>
+                    <th style="padding:4px 6px;text-align:left;">Setup (%)</th>
+                    <th style="padding:4px 6px;text-align:left;">RPM</th>
+                    <th style="padding:4px 6px;text-align:left;">Alt Temp (°F)</th>
+                    <th style="padding:4px 6px;text-align:left;">Abort</th>
+                  </tr>
+                </thead>
+                <tbody id="systemIDLogBody">
+                  <tr><td colspan="11" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:12px;">
+              Sorted by Rise Average (lower = faster plant = better). Aborted runs sink to end and are dimmed.
+              Abort column shows <code>R<i>reason</i>/P<i>phase</i></code> — reason 254 = stabilize-phase timeout; others map to the firmware's FieldEventReason enum.
+            </p>
+          </div>
+        </details>
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Apply Results</p>
@@ -8319,27 +8362,6 @@
       <div class="settings-card">
 
         <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">How often sensor data is sent to this display (milliseconds). Lower = more
-                responsive display but higher CPU/network load. Range: 50-1000ms. Does not affect actual control
-                speed.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="webgaugesinterval" type="number" step="1" min="50" max="5000" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-
-        <hr />
-        <div class="form-row">
           <div class="form-label">Plot Time Window (sec) (<span id="plotTimeWindow_echo">?</span>):</div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -8374,6 +8396,35 @@
               <span class="toggle-label">UNIX</span>
               <input id="timeAxisModeChanging" name="timeAxisModeChanging" type="number" value=""
                 style="display:none;" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>GPS / Time Source (<span id="gpsTimeSourceMode_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">
+                Auto: NMEA wins when present, phone fills in when NMEA goes silent, NTP as last resort.<br>
+                NMEA only: ignore phone and NTP even if NMEA is dead.<br>
+                Phone only: ignore NMEA and NTP even if phone is offline.<br>
+                NTP time only: use internet time only; GPS still falls through Auto.<br>
+                Forcing a stale source still shows its last value (greyed) so you can diagnose.
+              </span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <select id="gpsTimeSourceMode" name="gpsTimeSourceMode"
+                onchange="this.form.submit(); submitMessage();">
+                <option value="0">Auto (recommended)</option>
+                <option value="1">NMEA only</option>
+                <option value="2">Phone only</option>
+                <option value="3">NTP time only</option>
+              </select>
             </form>
           </div>
         </div>
@@ -9399,7 +9450,6 @@
     <span id="T0_C_echo" style="display:none;">0</span>
     <span id="TempSource_echo" style="display:none;">0</span>
     <span id="IgnitionOverride_echo" style="display:none;">0</span>
-    <span id="accelEnabled_echo" style="display:none;">0</span>
     <span id="AlarmLatchEnabled_echo" style="display:none;">0</span>
     <span id="AlarmTest_echo" style="display:none;">0</span>
     <span id="AlarmLatchState_display" style="display:none;">Normal</span>
@@ -9569,7 +9619,6 @@
     <input id="plotTimeWindow" style="display:none;" value="0" />
     <input id="SolarWatts" style="display:none;" value="0" />
     <input id="performanceRatio" style="display:none;" value="0" />
-    <input id="LearningMode" name="LearningMode" type="number" value="" style="display:none;" />
     <input id="AlternatorNominalAmps" style="display:none;" value="0" />
     <input id="LearningUpStep" style="display:none;" value="0" />
     <input id="LearningDownStep" style="display:none;" value="0" />
@@ -9798,6 +9847,31 @@
       </div><!-- END screens padding wrapper -->
     </div><!-- END sysid-modal-panel -->
   </div><!-- END sysid-modal-overlay -->
+
+  <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->
+  <div id="restart-countdown-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9000;
+       background:#b91c1c; color:#fff; text-align:center; font-weight:600;
+       padding:calc(8px + env(safe-area-inset-top)) 12px 8px;
+       box-shadow:0 2px 6px rgba(0,0,0,0.3); font-family:inherit;">
+    <span id="restart-countdown-text">Scheduled restart in M:SS</span>
+  </div>
+
+  <!-- One-shot restart-warning popup overlay -->
+  <div id="restart-popup-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55);
+       z-index:9100; align-items:center; justify-content:center;">
+    <div style="background:#1f2937; color:#f3f4f6; max-width:420px; width:90%; padding:20px 22px;
+         border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,0.5); font-family:inherit;">
+      <div style="font-size:18px; font-weight:700; margin-bottom:10px; color:#fca5a5;">⚠ Scheduled Restart Coming</div>
+      <div id="restart-popup-text" style="font-size:14px; line-height:1.5; margin-bottom:14px;">
+        The regulator will perform its scheduled maintenance reboot within the next 10 minutes.
+        Field will be cleanly ramped down, settings are saved automatically, and the device will
+        return to its current operating mode after restart. Any active tests will be aborted.
+      </div>
+      <div style="text-align:right;">
+        <button type="button" class="btn-primary" onclick="document.getElementById('restart-popup-overlay').style.display='none';">OK</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Floating Cloud Upload pill (visible only on Long Term Plots / Leaderboards / Fleet Stats) -->
   <div id="cloud-flush-pill" style="display:none;">

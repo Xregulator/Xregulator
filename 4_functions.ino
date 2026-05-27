@@ -970,15 +970,16 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     hardwarePresent = readFile(LittleFS, "/hardwarePresent.txt").toInt();
   }
-  if (!fsExists("/SENSOR_UPLOAD_INTERVAL.txt")) {
-    writeFile(LittleFS, "/SENSOR_UPLOAD_INTERVAL.txt", String(SENSOR_UPLOAD_INTERVAL).c_str());
-  } else {
-    SENSOR_UPLOAD_INTERVAL = (unsigned long)readFile(LittleFS, "/SENSOR_UPLOAD_INTERVAL.txt").toInt();
-  }
   if (!fsExists("/VMGUseTrueWind.txt")) {
     writeFile(LittleFS, "/VMGUseTrueWind.txt", String(VMGUseTrueWind).c_str());
   } else {
     VMGUseTrueWind = readFile(LittleFS, "/VMGUseTrueWind.txt").toInt();
+  }
+  if (!fsExists("/gpsTimeSourceMode.txt")) {
+    writeFile(LittleFS, "/gpsTimeSourceMode.txt", String(gpsTimeSourceMode).c_str());
+  } else {
+    gpsTimeSourceMode = (uint8_t)readFile(LittleFS, "/gpsTimeSourceMode.txt").toInt();
+    if (gpsTimeSourceMode > GTS_NTP) gpsTimeSourceMode = GTS_AUTO;  // sanity
   }
   if (!fsExists("/MaintainMode.txt")) {
     writeFile(LittleFS, "/MaintainMode.txt", String(MaintainMode).c_str());
@@ -1405,17 +1406,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     plotTimeWindow = readFile(LittleFS, "/plotTimeWindow.txt").toInt();
     plotTimeWindow = constrain(plotTimeWindow, 1, 1000000);  // 10s to 10min
   }
-  if (!fsExists("/LearningMode.txt")) {
-    writeFile(LittleFS, "/LearningMode.txt", String(LearningMode).c_str());
-  } else {
-    LearningMode = readFile(LittleFS, "/LearningMode.txt").toInt();
-  }
-  if (!fsExists("/accelEnabled.txt")) {
-    writeFile(LittleFS, "/accelEnabled.txt", String(accelEnabled).c_str());
-  } else {
-    accelEnabled = readFile(LittleFS, "/accelEnabled.txt").toInt();
-  }
-
   if (!fsExists("/IgnoreLearningDuringPenalty.txt")) {
     writeFile(LittleFS, "/IgnoreLearningDuringPenalty.txt", String(IgnoreLearningDuringPenalty).c_str());
   } else {
@@ -1906,26 +1896,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/FIELD_COLLAPSE_DELAY.txt", String(FIELD_COLLAPSE_DELAY).c_str());
   } else {
     FIELD_COLLAPSE_DELAY = readFile(LittleFS, "/FIELD_COLLAPSE_DELAY.txt").toInt();
-  }
-  if (!fsExists("/EffXMin.txt")) {
-    writeFile(LittleFS, "/EffXMin.txt", String(EffXMin, 2).c_str());
-  } else {
-    EffXMin = readFile(LittleFS, "/EffXMin.txt").toFloat();
-  }
-  if (!fsExists("/EffXMax.txt")) {
-    writeFile(LittleFS, "/EffXMax.txt", String(EffXMax, 2).c_str());
-  } else {
-    EffXMax = readFile(LittleFS, "/EffXMax.txt").toFloat();
-  }
-  if (!fsExists("/EffYMin.txt")) {
-    writeFile(LittleFS, "/EffYMin.txt", String(EffYMin, 2).c_str());
-  } else {
-    EffYMin = readFile(LittleFS, "/EffYMin.txt").toFloat();
-  }
-  if (!fsExists("/EffYMax.txt")) {
-    writeFile(LittleFS, "/EffYMax.txt", String(EffYMax, 2).c_str());
-  } else {
-    EffYMax = readFile(LittleFS, "/EffYMax.txt").toFloat();
   }
   // IMU safety thresholds — user-set via form, persisted to LittleFS (Pattern B).
   // imuMountOrientation rides on /vessel_info.json (separate path).
@@ -4091,16 +4061,19 @@ void loadTimeSyncState() {
 
   uint64_t tb_u64 = 0;
   uint32_t tbm_u32 = 0;
-  int32_t ts_i32 = TIME_NONE;
 
   esp_err_t e1 = nvs_get_u64(nvs_handle, "timeBase", &tb_u64);
   esp_err_t e2 = nvs_get_u32(nvs_handle, "timeBaseMillis", &tbm_u32);
-  esp_err_t e3 = nvs_get_i32(nvs_handle, "timeSource", &ts_i32);
+  // Note: timeSource is intentionally NOT restored. It's a runtime label
+  // derived from current freshness state — restoring it from a prior boot
+  // makes the dashboard claim e.g. "NMEA-GPS" before any source has actually
+  // reported. Leave currentTimeSource at its boot default (TIME_NONE); the
+  // first successful sync or resolveSources() tick will set it.
 
   nvs_close(nvs_handle);
 
-  // Require all three keys; otherwise treat as “no valid state”
-  if (e1 != ESP_OK || e2 != ESP_OK || e3 != ESP_OK) {
+  // Require both kept keys; otherwise treat as "no valid state"
+  if (e1 != ESP_OK || e2 != ESP_OK) {
     Serial.println("No complete time sync state in NVS (missing key)");
     timeIsSynced = false;
     timeBase = 0;
@@ -4110,7 +4083,6 @@ void loadTimeSyncState() {
   // Restore globals
   timeBase = (time_t)tb_u64;
   timeBaseMillis = (unsigned long)tbm_u32;
-  currentTimeSource = (TimeSource)ts_i32;
 
   // Sanity check: if timeBase looks recent and reasonable, trust it
   // Allow reconstruction for ~30 days after reboot (well under 49-day millis wrap)
@@ -4139,11 +4111,12 @@ void saveTimeSyncState() {
 
   esp_err_t e1 = nvs_set_u64(nvs_handle, "timeBase", (uint64_t)timeBase);
   esp_err_t e2 = nvs_set_u32(nvs_handle, "timeBaseMillis", (uint32_t)timeBaseMillis);
-  esp_err_t e3 = nvs_set_i32(nvs_handle, "timeSource", (int32_t)currentTimeSource);
+  // timeSource intentionally not written — see loadTimeSyncState comment.
+  // (Any pre-existing NVS entry under that key is harmless; we just ignore it.)
 
-  if (e1 != ESP_OK || e2 != ESP_OK || e3 != ESP_OK) {
-    Serial.printf("ERROR: Failed writing time sync state: e1=%d e2=%d e3=%d\n",
-                  (int)e1, (int)e2, (int)e3);
+  if (e1 != ESP_OK || e2 != ESP_OK) {
+    Serial.printf("ERROR: Failed writing time sync state: e1=%d e2=%d\n",
+                  (int)e1, (int)e2);
     nvs_close(nvs_handle);
     return;
   }
@@ -4166,6 +4139,8 @@ time_t getCurrentTimestamp() {
   return 0;
 }
 void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
+  // Manual mode gate: only AUTO and NMEA-forced accept NMEA time.
+  if (gpsTimeSourceMode == GTS_PHONE || gpsTimeSourceMode == GTS_NTP) return;
   time_t gpsTime = (daysSince1970 * 86400UL) + (time_t)secondsSinceMidnight;
 
   if (gpsTime > 1577836800) {  // Jan 1, 2020
@@ -4183,6 +4158,123 @@ void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
   }
 }
 
+// Adopt phone-provided time IF NMEA SystemTime isn't fresher AND the user
+// hasn't forced a non-phone source. Called from /set_phone_data handler.
+void syncTimeFromPhone(time_t phoneEpochSec) {
+  if (phoneEpochSec <= 1577836800) return;  // sanity (pre-2020)
+  // Skew sanity: if we already have a trusted timebase, reject phone times
+  // more than 24h off — guards against phones with manually-set clocks or
+  // simulators that boot without time sync. First sync skips this (nothing
+  // to compare); NMEA/NTP will eventually overwrite a bad first sync.
+  if (timeIsSynced && timeBase > 0) {
+    time_t now = getCurrentTimestamp();
+    long long diff = (long long)phoneEpochSec - (long long)now;
+    if (diff < 0) diff = -diff;
+    if (diff > 86400LL) return;  // > 24h off — likely bad phone clock
+  }
+  // Manual mode gate: only AUTO and PHONE-forced accept phone time.
+  if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_NTP) return;
+  // AUTO: NMEA still wins if fresh. PHONE-forced: take it regardless.
+  if (gpsTimeSourceMode == GTS_AUTO) {
+    bool nmeaFresh = (lastNmea2kSystemTimeMs > 0) &&
+                     (millis() - lastNmea2kSystemTimeMs < NMEA_TIME_FRESH_MS);
+    if (nmeaFresh) return;
+  }
+  timeBase = phoneEpochSec;
+  timeBaseMillis = millis();
+  timeIsSynced = true;
+  currentTimeSource = TIME_PHONE;
+  lastTimeSyncAttempt = millis();
+  saveTimeSyncState();
+}
+
+// Promote phone GPS into the effective Latitude/Longitude globals. Respects
+// gpsTimeSourceMode: AUTO defers to fresh NMEA; PHONE-forced always proceeds;
+// NMEA/NTP-forced never proceed. MARK_FRESH on each index so IS_STALE-gated
+// consumers (distance, smoothing, sensor hist) actually see the phone fix.
+void consumePhoneGps() {
+  if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_NTP) return;
+  if (gpsTimeSourceMode == GTS_AUTO) {
+    bool nmeaFresh = (lastNmea2kGnssMs > 0) &&
+                     (millis() - lastNmea2kGnssMs < NMEA_GPS_FRESH_MS);
+    if (nmeaFresh) return;  // NMEA wins in AUTO
+  }
+  bool phoneFresh = (lastPhoneGpsMs > 0) &&
+                    (millis() - lastPhoneGpsMs < PHONE_FRESH_MS);
+  if (!phoneFresh) return;
+  LatitudeNMEA  = LatitudePhone;
+  LongitudeNMEA = LongitudePhone;
+  MARK_FRESH(IDX_LATITUDE_NMEA);
+  MARK_FRESH(IDX_LONGITUDE_NMEA);
+  MARK_FRESH(IDX_SATELLITE_COUNT);
+  currentGpsSource = GPS_PHONE;
+}
+
+// Resolve current GPS + time source labels every loop tick. Behaviour depends
+// on user-set gpsTimeSourceMode:
+//   GTS_AUTO  — freshness-arbitrated priority chain (NMEA→Phone→NTP). Promotes
+//               phone GPS to effective globals when NMEA stale; demotes both
+//               source labels to none/drifting when nothing fresh.
+//   GTS_NMEA  — force NMEA. Don't touch GNSS handler's writes. Label NMEA
+//               always (even when stale — dashboard's IS_STALE greying alerts
+//               the user).
+//   GTS_PHONE — force phone. Overwrite LatitudeNMEA/LongitudeNMEA from phone
+//               values. MARK_FRESH only if phone is actually fresh (so stale
+//               forced data doesn't poison distance/smoothing).
+//   GTS_NTP   — NTP-only time; GPS falls through to AUTO chain (NTP doesn't
+//               give position).
+// Cheap (a few unsigned compares); safe to call every tick.
+void resolveSources() {
+  unsigned long now = millis();
+  bool nmeaGpsFresh   = (lastNmea2kGnssMs > 0)       && (now - lastNmea2kGnssMs       < NMEA_GPS_FRESH_MS);
+  bool phoneGpsFresh  = (lastPhoneGpsMs > 0)         && (now - lastPhoneGpsMs         < PHONE_FRESH_MS);
+  bool nmeaTimeFresh  = (lastNmea2kSystemTimeMs > 0) && (now - lastNmea2kSystemTimeMs < NMEA_TIME_FRESH_MS);
+  bool phoneTimeFresh = (lastPhoneTimeMs > 0)        && (now - lastPhoneTimeMs        < PHONE_FRESH_MS);
+
+  // ── GPS source ─────────────────────────────────────────────────────────
+  switch (gpsTimeSourceMode) {
+    case GTS_NMEA:
+      currentGpsSource = GPS_NMEA;  // honor user choice even when stale
+      break;
+    case GTS_PHONE:
+      LatitudeNMEA  = LatitudePhone;
+      LongitudeNMEA = LongitudePhone;
+      if (phoneGpsFresh) {
+        MARK_FRESH(IDX_LATITUDE_NMEA);
+        MARK_FRESH(IDX_LONGITUDE_NMEA);
+        MARK_FRESH(IDX_SATELLITE_COUNT);
+      }
+      currentGpsSource = GPS_PHONE;
+      break;
+    case GTS_AUTO:
+    case GTS_NTP:  // GPS falls through to AUTO (NTP is time-only)
+    default:
+      if (nmeaGpsFresh) {
+        // GNSS handler already set GPS_NMEA + MARK_FRESH on parse.
+      } else if (phoneGpsFresh) {
+        consumePhoneGps();  // overwrites globals, MARK_FRESH, sets GPS_PHONE
+      } else {
+        currentGpsSource = GPS_NONE;
+      }
+      break;
+  }
+
+  // ── Time source label ──────────────────────────────────────────────────
+  // (Forced modes never need label-flipping here — the syncTime* setters are
+  // already gated, so only the authorized source can write the timebase.)
+  if (gpsTimeSourceMode == GTS_AUTO) {
+    if (nmeaTimeFresh) {
+      // SystemTime handler sets TIME_GPS on parse.
+    } else if (phoneTimeFresh) {
+      if (currentTimeSource != TIME_PHONE && currentTimeSource != TIME_NTP) {
+        currentTimeSource = TIME_PHONE;
+      }
+    } else if (currentTimeSource == TIME_GPS || currentTimeSource == TIME_PHONE) {
+      currentTimeSource = TIME_MILLIS;
+    }
+  }
+}
+
 void checkTimeSync() {
   unsigned long currentMillis = millis();
 
@@ -4190,10 +4282,21 @@ void checkTimeSync() {
     return;
   }
 
-  // Only use NTP if GPS isn't providing time
-  if (currentTimeSource != TIME_GPS) {
+  // AUTO: NTP fires only when BOTH NMEA SystemTime AND phone time are stale
+  // (phone is fresher and wins). NTP-forced: always fire — syncTimeFromNTP
+  // itself early-returns if the mode disallows it. NMEA/Phone-forced: never
+  // touch NTP (the syncTimeFromNTP early-return handles this too, but skip
+  // the call to avoid the WiFi check + log noise).
+  if (gpsTimeSourceMode == GTS_AUTO) {
+    bool nmeaTimeFresh  = (lastNmea2kSystemTimeMs > 0) &&
+                          (currentMillis - lastNmea2kSystemTimeMs < NMEA_TIME_FRESH_MS);
+    bool phoneTimeFresh = (lastPhoneTimeMs > 0) &&
+                          (currentMillis - lastPhoneTimeMs < PHONE_FRESH_MS);
+    if (!nmeaTimeFresh && !phoneTimeFresh) syncTimeFromNTP();
+  } else if (gpsTimeSourceMode == GTS_NTP) {
     syncTimeFromNTP();
   }
+  // GTS_NMEA / GTS_PHONE → never NTP.
 }
 // Format timestamp into static buffer - returns pointer to timestampBuffer
 const char *formatTimestamp(time_t timestamp) {
