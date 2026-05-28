@@ -1151,235 +1151,125 @@ void updateSensorWindow() {
 // Build the cloud upload JSON for one sensor snapshot into the global
 // payloadBuffer. Returns bytes written (excluding null terminator), 0 on
 // overflow. Used by the PSRAM-ring upload path (uploadBufferedRecords).
-//
-// All-time globals (AvgVoltage_AllTime, EngineRunTime_AllTime, totalOverheats,
-// etc.) are read LIVE — they represent cumulative state as of upload time,
-// not snapshot capture time. For delayed uploads this means an older buffered
-// snapshot will report current cumulative totals; acceptable simplification.
+// All payload values come from the snapshot itself (snap.window + snap.imu);
+// lifetime/session accumulators moved to the 24h config snapshot upload.
 size_t buildSnapshotJson(const SensorSnapshot &snap) {
-#define SAFE_AVG(area, valid) ((valid) > 0 ? ((double)(area) / (double)(valid)) / 100.0 : 0.0)
+// Per-window avg = time-weighted area / valid microseconds, then un-scale.
+// Two scale factors in play: SensorWindow uses ×100 for most fields;
+// ImuWindow uses ×100 for heel/pitch but ×1000 for vertical/total accel.
+#define SAFE_AVG_100(area, valid)  ((valid) > 0 ? ((double)(area) / (double)(valid)) / 100.0  : 0.0)
+#define SAFE_AVG_1000(area, valid) ((valid) > 0 ? ((double)(area) / (double)(valid)) / 1000.0 : 0.0)
   time_t finalTs = reconstructTimestamp((time_t)snap.collectionTime);
   const char *timestampStr = formatTimestamp(finalTs);
-  unsigned long intendedIntervalSec = SENSOR_UPLOAD_INTERVAL / 1000;
   int written = snprintf(
     payloadBuffer, PAYLOAD_BUFFER_SIZE,
     "{"
+    // Identity & metadata
     "\"device_uid\":\"%s\","
     "\"token\":\"%s\","
     "\"timestamp\":\"%s\","
-    "\"firmware_version\":\"%s\","
-    "\"batt_volt_min\":%.2f,"
-    "\"batt_volt_max\":%.2f,"
-    "\"batt_volt_avg\":%.2f,"
-    "\"voltage_avg_lifetime\":%.2f,"
-    "\"voltage_sample_time\":%lu,"
-    "\"batt_curr_min\":%.2f,"
-    "\"batt_curr_max\":%.2f,"
-    "\"batt_curr_avg\":%.2f,"
-    "\"alt_curr_min\":%.2f,"
-    "\"alt_curr_max\":%.2f,"
-    "\"alt_curr_avg\":%.2f,"
-    "\"victron_curr_min\":%.2f,"
-    "\"victron_curr_max\":%.2f,"
-    "\"victron_curr_avg\":%.2f,"
-    "\"soc_min\":%.2f,"
-    "\"soc_max\":%.2f,"
-    "\"soc_avg\":%.2f,"
-    "\"soc_avg_lifetime\":%.2f,"
-    "\"soc_sample_time\":%lu,"
-    "\"baro_min\":%.2f,"
-    "\"baro_max\":%.2f,"
-    "\"baro_avg\":%.2f,"
-    "\"alt_temp_min\":%.2f,"
-    "\"alt_temp_max\":%.2f,"
-    "\"alt_temp_avg\":%.2f,"
-    "\"temp_therm_min\":%.2f,"
-    "\"temp_therm_max\":%.2f,"
-    "\"temp_therm_avg\":%.2f,"
-    "\"amb_temp_min\":%.2f,"
-    "\"amb_temp_max\":%.2f,"
-    "\"amb_temp_avg\":%.2f,"
-    "\"rpm_min\":%d,"
-    "\"rpm_max\":%d,"
-    "\"rpm_avg\":%d,"
-    "\"wifi_str_min\":%d,"
-    "\"wifi_str_max\":%d,"
-    "\"wifi_str_avg\":%d,"
-    "\"duty_cycle_min\":%.2f,"
-    "\"duty_cycle_max\":%.2f,"
-    "\"duty_cycle_avg\":%.2f,"
-    "\"alt_zero_min\":%.2f,"
-    "\"alt_zero_max\":%.2f,"
-    "\"alt_zero_avg\":%.2f,"
-    "\"sog_min\":%.2f,"
-    "\"sog_max\":%.2f,"
-    "\"sog_avg\":%.2f,"
-    "\"speed_avg_lifetime\":%.2f,"
-    "\"speed_sample_time\":%lu,"
-    "\"cog_min\":%.2f,"
-    "\"cog_max\":%.2f,"
-    "\"cog_avg\":%.2f,"
-    "\"heading_min\":%.2f,"
-    "\"heading_max\":%.2f,"
-    "\"heading_avg\":%.2f,"
-    "\"aws_min\":%.2f,"
-    "\"aws_max\":%.2f,"
-    "\"aws_avg\":%.2f,"
-    "\"awa_min\":%.2f,"
-    "\"awa_max\":%.2f,"
-    "\"awa_avg\":%.2f,"
-    "\"tws_min\":%.2f,"
-    "\"tws_max\":%.2f,"
-    "\"tws_avg\":%.2f,"
-    "\"twa_min\":%.2f,"
-    "\"twa_max\":%.2f,"
-    "\"twa_avg\":%.2f,"
-    "\"leeway_min\":%.2f,"
-    "\"leeway_max\":%.2f,"
-    "\"leeway_avg\":%.2f,"
-    "\"vmg_min\":%.2f,"
-    "\"vmg_max\":%.2f,"
-    "\"vmg_avg\":%.2f,"
-    "\"lat_avg\":%.6f,"
-    "\"lon_avg\":%.6f,"
-    "\"eng_hrs\":%.2f,"
-    "\"alt_hrs\":%.2f,"
-    "\"eng_cycles\":%d,"
-    "\"eng_fuel\":%.2f,"
-    "\"alt_fuel\":%.2f,"
-    "\"charge_cycles\":%u,"
-    "\"total_dist\":%.2f,"
-    "\"solar_kwh\":%.2f,"
-    "\"solar_kwh_alltime\":%.2f,"
-    "\"intended_interval_sec\":%lu,"
-    "\"u_target_amps_min\":%.2f,"
-    "\"u_target_amps_max\":%.2f,"
-    "\"u_target_amps_avg\":%.2f,"
-    "\"temp_margin_min\":%.2f,"
-    "\"temp_margin_max\":%.2f,"
-    "\"temp_margin_avg\":%.2f,"
-    "\"total_overheats\":%u,"
-    "\"total_safe_hours\":%.2f,"
-    "\"charged_energy_alltime\":%.2f,"
-    "\"discharged_energy_alltime\":%.2f,"
-    "\"sailing_days_alltime\":%.2f,"
-    "\"sailing_ratio\":%.2f,"
-    "\"distance_this_interval\":%.2f,"
-    "\"max_wind_speed_true_alltime\":%.2f,"
-    "\"max_wind_speed_apparent_alltime\":%.2f,"
-    "\"board_temp_max_alltime\":%.2f,"
-    "\"board_temp_min_alltime\":%.2f,"
-    "\"baro_pressure_max_alltime\":%.2f,"
-    "\"baro_pressure_min_alltime\":%.2f"
+    "\"firmware_version_int\":%d,"
+    "\"current_time_source\":%d,"
+    // Battery
+    "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
+    "\"batt_curr_min\":%.2f,\"batt_curr_max\":%.2f,\"batt_curr_avg\":%.2f,"
+    // Alternator
+    "\"alt_curr_min\":%.2f,\"alt_curr_max\":%.2f,\"alt_curr_avg\":%.2f,"
+    "\"duty_cycle_min\":%.2f,\"duty_cycle_max\":%.2f,\"duty_cycle_avg\":%.2f,"
+    // Victron / external
+    "\"victron_curr_min\":%.2f,\"victron_curr_max\":%.2f,\"victron_curr_avg\":%.2f,"
+    // SOC
+    "\"soc_min\":%.2f,\"soc_max\":%.2f,\"soc_avg\":%.2f,"
+    // Engine
+    "\"rpm_min\":%d,\"rpm_max\":%d,\"rpm_avg\":%d,"
+    // Temperatures
+    "\"alt_temp_min\":%.2f,\"alt_temp_max\":%.2f,\"alt_temp_avg\":%.2f,"
+    "\"temp_therm_min\":%.2f,\"temp_therm_max\":%.2f,\"temp_therm_avg\":%.2f,"
+    "\"amb_temp_min\":%.2f,\"amb_temp_max\":%.2f,\"amb_temp_avg\":%.2f,"
+    // Pressure
+    "\"baro_min\":%.2f,\"baro_max\":%.2f,\"baro_avg\":%.2f,"
+    // Control loop diagnostics
+    "\"u_target_amps_min\":%.2f,\"u_target_amps_max\":%.2f,\"u_target_amps_avg\":%.2f,"
+    // NMEA navigation
+    "\"sog_min\":%.2f,\"sog_max\":%.2f,\"sog_avg\":%.2f,"
+    "\"lat_current\":%.6f,\"lon_current\":%.6f,"
+    // NMEA wind & sailing
+    "\"aws_min\":%.2f,\"aws_max\":%.2f,\"aws_avg\":%.2f,"
+    "\"tws_min\":%.2f,\"tws_max\":%.2f,\"tws_avg\":%.2f,"
+    "\"vmg_min\":%.2f,\"vmg_max\":%.2f,\"vmg_avg\":%.2f,"
+    "\"leeway_min\":%.2f,\"leeway_max\":%.2f,\"leeway_avg\":%.2f,"
+    // IMU peak motion (per-window aggregates)
+    "\"imu_heel_min\":%.2f,\"imu_heel_max\":%.2f,\"imu_heel_avg\":%.2f,"
+    "\"imu_pitch_min\":%.2f,\"imu_pitch_max\":%.2f,\"imu_pitch_avg\":%.2f,"
+    "\"imu_vertical_accel_min\":%.3f,\"imu_vertical_accel_max\":%.3f,\"imu_vertical_accel_avg\":%.3f,"
+    "\"imu_total_accel_min\":%.3f,\"imu_total_accel_max\":%.3f,\"imu_total_accel_avg\":%.3f,"
+    // IMU comfort scores (point values at upload time)
+    "\"imu_msi_score\":%.2f,"
+    "\"imu_vomit_pct\":%.2f,"
+    "\"imu_anchorage_comfort\":%.2f,"
+    "\"imu_wave_period_sec\":%.2f,"
+    // IMU events (counters for this window)
+    "\"imu_slam_count_window\":%u,"
+    "\"imu_slam_peak_max_window\":%.3f"
     "}",
     device_id_hex,
     authToken.c_str(),
     timestampStr,
-    FIRMWARE_VERSION,
-    snap.window.battVolt_min / 100.0,
-    snap.window.battVolt_max / 100.0,
-    SAFE_AVG(snap.window.battVolt_area_v_us, snap.window.battVolt_valid_us),
-    AvgVoltage_AllTime,
-    (unsigned long)totalVoltageSampleTime_AllTime,
-    snap.window.battCurr_min / 100.0,
-    snap.window.battCurr_max / 100.0,
-    SAFE_AVG(snap.window.battCurr_area_v_us, snap.window.battCurr_valid_us),
-    snap.window.altCurr_min / 100.0,
-    snap.window.altCurr_max / 100.0,
-    SAFE_AVG(snap.window.altCurr_area_v_us, snap.window.altCurr_valid_us),
-    snap.window.victronCurr_min / 100.0,
-    snap.window.victronCurr_max / 100.0,
-    SAFE_AVG(snap.window.victronCurr_area_v_us, snap.window.victronCurr_valid_us),
-    snap.window.soc_min / 100.0,
-    snap.window.soc_max / 100.0,
-    SAFE_AVG(snap.window.soc_area_v_us, snap.window.soc_valid_us),
-    AvgSOC_AllTime,
-    (unsigned long)totalSocSampleTime_AllTime,
-    snap.window.baro_min / 100.0,
-    snap.window.baro_max / 100.0,
-    SAFE_AVG(snap.window.baro_area_v_us, snap.window.baro_valid_us),
-    snap.window.altTemp_min / 100.0,
-    snap.window.altTemp_max / 100.0,
-    SAFE_AVG(snap.window.altTemp_area_v_us, snap.window.altTemp_valid_us),
-    snap.window.tempTherm_min / 100.0,
-    snap.window.tempTherm_max / 100.0,
-    SAFE_AVG(snap.window.tempTherm_area_v_us, snap.window.tempTherm_valid_us),
-    snap.window.ambTemp_min / 100.0,
-    snap.window.ambTemp_max / 100.0,
-    SAFE_AVG(snap.window.ambTemp_area_v_us, snap.window.ambTemp_valid_us),
-    snap.window.rpm_min,
-    snap.window.rpm_max,
-    (int)SAFE_AVG(snap.window.rpm_area_v_us, snap.window.rpm_valid_us),
-    snap.window.wifiStr_min,
-    snap.window.wifiStr_max,
-    (int)SAFE_AVG(snap.window.wifiStr_area_v_us, snap.window.wifiStr_valid_us),
-    snap.window.dutyCycle_min / 100.0,
-    snap.window.dutyCycle_max / 100.0,
-    SAFE_AVG(snap.window.dutyCycle_area_v_us, snap.window.dutyCycle_valid_us),
-    snap.window.altZero_min / 100.0,
-    snap.window.altZero_max / 100.0,
-    SAFE_AVG(snap.window.altZero_area_v_us, snap.window.altZero_valid_us),
-    snap.window.sog_min / 100.0,
-    snap.window.sog_max / 100.0,
-    SAFE_AVG(snap.window.sog_area_v_us, snap.window.sog_valid_us),
-    AvgSpeed_AllTime,
-    (unsigned long)totalSpeedSampleTime_AllTime,
-    snap.window.cog_min / 100.0,
-    snap.window.cog_max / 100.0,
-    SAFE_AVG(snap.window.cog_area_v_us, snap.window.cog_valid_us),
-    snap.window.heading_min / 100.0,
-    snap.window.heading_max / 100.0,
-    SAFE_AVG(snap.window.heading_area_v_us, snap.window.heading_valid_us),
-    snap.window.aws_min / 100.0,
-    snap.window.aws_max / 100.0,
-    SAFE_AVG(snap.window.aws_area_v_us, snap.window.aws_valid_us),
-    snap.window.awa_min / 100.0,
-    snap.window.awa_max / 100.0,
-    SAFE_AVG(snap.window.awa_area_v_us, snap.window.awa_valid_us),
-    snap.window.tws_min / 100.0,
-    snap.window.tws_max / 100.0,
-    SAFE_AVG(snap.window.tws_area_v_us, snap.window.tws_valid_us),
-    snap.window.twa_min / 100.0,
-    snap.window.twa_max / 100.0,
-    SAFE_AVG(snap.window.twa_area_v_us, snap.window.twa_valid_us),
-    snap.window.leeway_min / 100.0,
-    snap.window.leeway_max / 100.0,
-    SAFE_AVG(snap.window.leeway_area_v_us, snap.window.leeway_valid_us),
-    snap.window.vmg_min / 100.0,
-    snap.window.vmg_max / 100.0,
-    SAFE_AVG(snap.window.vmg_area_v_us, snap.window.vmg_valid_us),
-    snap.window.lat_current,
-    snap.window.lon_current,
-    EngineRunTime_AllTime,
-    AlternatorOnTime_AllTime,
-    EngineCycles_AllTime,
-    EngineFuelUsed_AllTime,
-    AlternatorFuelUsed_AllTime,
-    ChargeCycles_AllTime,
-    TotalDistance,
-    SolarChargedEnergy / 1000.0,
-    SolarChargedEnergy_AllTime / 1000.0,
-    intendedIntervalSec,
-    snap.window.uTargetAmps_min / 100.0,
-    snap.window.uTargetAmps_max / 100.0,
-    SAFE_AVG(snap.window.uTargetAmps_area_v_us, snap.window.uTargetAmps_valid_us),
-    snap.window.tempMargin_min / 100.0,
-    snap.window.tempMargin_max / 100.0,
-    SAFE_AVG(snap.window.tempMargin_area_v_us, snap.window.tempMargin_valid_us),
-    (unsigned int)totalOverheats,
-    (float)totalSafeHours,
-    ChargedEnergy_AllTime / 1000.0,
-    DischargedEnergy_AllTime / 1000.0,
-    sailing_days_alltime,
-    sailing_ratio,
-    distance_this_interval,
-    max_wind_speed_true_alltime,
-    max_wind_speed_apparent_alltime,
-    board_temp_max_alltime,
-    board_temp_min_alltime,
-    baro_pressure_max_alltime,
-    baro_pressure_min_alltime);
-#undef SAFE_AVG
+    firmwareVersionInt,
+    (int)currentTimeSource,
+    snap.window.battVolt_min / 100.0, snap.window.battVolt_max / 100.0,
+    SAFE_AVG_100(snap.window.battVolt_area_v_us, snap.window.battVolt_valid_us),
+    snap.window.battCurr_min / 100.0, snap.window.battCurr_max / 100.0,
+    SAFE_AVG_100(snap.window.battCurr_area_v_us, snap.window.battCurr_valid_us),
+    snap.window.altCurr_min / 100.0, snap.window.altCurr_max / 100.0,
+    SAFE_AVG_100(snap.window.altCurr_area_v_us, snap.window.altCurr_valid_us),
+    snap.window.dutyCycle_min / 100.0, snap.window.dutyCycle_max / 100.0,
+    SAFE_AVG_100(snap.window.dutyCycle_area_v_us, snap.window.dutyCycle_valid_us),
+    snap.window.victronCurr_min / 100.0, snap.window.victronCurr_max / 100.0,
+    SAFE_AVG_100(snap.window.victronCurr_area_v_us, snap.window.victronCurr_valid_us),
+    snap.window.soc_min / 100.0, snap.window.soc_max / 100.0,
+    SAFE_AVG_100(snap.window.soc_area_v_us, snap.window.soc_valid_us),
+    snap.window.rpm_min, snap.window.rpm_max,
+    (int)SAFE_AVG_100(snap.window.rpm_area_v_us, snap.window.rpm_valid_us),
+    snap.window.altTemp_min / 100.0, snap.window.altTemp_max / 100.0,
+    SAFE_AVG_100(snap.window.altTemp_area_v_us, snap.window.altTemp_valid_us),
+    snap.window.tempTherm_min / 100.0, snap.window.tempTherm_max / 100.0,
+    SAFE_AVG_100(snap.window.tempTherm_area_v_us, snap.window.tempTherm_valid_us),
+    snap.window.ambTemp_min / 100.0, snap.window.ambTemp_max / 100.0,
+    SAFE_AVG_100(snap.window.ambTemp_area_v_us, snap.window.ambTemp_valid_us),
+    snap.window.baro_min / 100.0, snap.window.baro_max / 100.0,
+    SAFE_AVG_100(snap.window.baro_area_v_us, snap.window.baro_valid_us),
+    snap.window.uTargetAmps_min / 100.0, snap.window.uTargetAmps_max / 100.0,
+    SAFE_AVG_100(snap.window.uTargetAmps_area_v_us, snap.window.uTargetAmps_valid_us),
+    snap.window.sog_min / 100.0, snap.window.sog_max / 100.0,
+    SAFE_AVG_100(snap.window.sog_area_v_us, snap.window.sog_valid_us),
+    snap.window.lat_current, snap.window.lon_current,
+    snap.window.aws_min / 100.0, snap.window.aws_max / 100.0,
+    SAFE_AVG_100(snap.window.aws_area_v_us, snap.window.aws_valid_us),
+    snap.window.tws_min / 100.0, snap.window.tws_max / 100.0,
+    SAFE_AVG_100(snap.window.tws_area_v_us, snap.window.tws_valid_us),
+    snap.window.vmg_min / 100.0, snap.window.vmg_max / 100.0,
+    SAFE_AVG_100(snap.window.vmg_area_v_us, snap.window.vmg_valid_us),
+    snap.window.leeway_min / 100.0, snap.window.leeway_max / 100.0,
+    SAFE_AVG_100(snap.window.leeway_area_v_us, snap.window.leeway_valid_us),
+    // IMU values read from the frozen ImuSnapshot — values matching the moment
+    // the window was rolled, not whatever imuWindow currently holds at upload time.
+    snap.imu.heel_min / 100.0, snap.imu.heel_max / 100.0,
+    SAFE_AVG_100(snap.imu.heel_area_v_us, snap.imu.heel_valid_us),
+    snap.imu.pitch_min / 100.0, snap.imu.pitch_max / 100.0,
+    SAFE_AVG_100(snap.imu.pitch_area_v_us, snap.imu.pitch_valid_us),
+    snap.imu.vertical_accel_min / 1000.0, snap.imu.vertical_accel_max / 1000.0,
+    SAFE_AVG_1000(snap.imu.vertical_accel_area_v_us, snap.imu.vertical_accel_valid_us),
+    snap.imu.total_accel_min / 1000.0, snap.imu.total_accel_max / 1000.0,
+    SAFE_AVG_1000(snap.imu.total_accel_area_v_us, snap.imu.total_accel_valid_us),
+    snap.imu.msi_score,
+    snap.imu.vomit_pct,
+    snap.imu.anchorage_comfort,
+    snap.imu.wave_period / 1000.0,
+    (unsigned int)snap.imu.slam_count,
+    snap.imu.slam_peak_max / 1000.0);
+#undef SAFE_AVG_100
+#undef SAFE_AVG_1000
   if (written <= 0 || written >= PAYLOAD_BUFFER_SIZE) return 0;
   return (size_t)written;
 }
@@ -1648,6 +1538,31 @@ void pushSensorSnapshot(time_t collectionTime) {
   }
   sensorRing[sensorRingHead].collectionTime = (int32_t)collectionTime;
   sensorRing[sensorRingHead].window = *currentWindow;  // struct copy from PSRAM to PSRAM
+  // Freeze the IMU subset (caller resets imuWindow right after, so we capture
+  // the closing window's values here before they get clobbered).
+  ImuSnapshot &is = sensorRing[sensorRingHead].imu;
+  is.heel_min                  = imuWindow->heel_min;
+  is.heel_max                  = imuWindow->heel_max;
+  is.heel_area_v_us            = imuWindow->heel_area_v_us;
+  is.heel_valid_us             = imuWindow->heel_valid_us;
+  is.pitch_min                 = imuWindow->pitch_min;
+  is.pitch_max                 = imuWindow->pitch_max;
+  is.pitch_area_v_us           = imuWindow->pitch_area_v_us;
+  is.pitch_valid_us            = imuWindow->pitch_valid_us;
+  is.vertical_accel_min        = imuWindow->vertical_accel_min;
+  is.vertical_accel_max        = imuWindow->vertical_accel_max;
+  is.vertical_accel_area_v_us  = imuWindow->vertical_accel_area_v_us;
+  is.vertical_accel_valid_us   = imuWindow->vertical_accel_valid_us;
+  is.total_accel_min           = imuWindow->total_accel_min;
+  is.total_accel_max           = imuWindow->total_accel_max;
+  is.total_accel_area_v_us     = imuWindow->total_accel_area_v_us;
+  is.total_accel_valid_us      = imuWindow->total_accel_valid_us;
+  is.msi_score                 = imu_msi_score;
+  is.vomit_pct                 = imu_vomit_pct;
+  is.anchorage_comfort         = imu_anchorage_comfort;
+  is.wave_period               = imuWindow->wave_period;
+  is.slam_count                = imuWindow->slam_count;
+  is.slam_peak_max             = imuWindow->slam_peak_max;
   sensorRingHead = (sensorRingHead + 1) % SENSOR_RING_SIZE;
   sensorRingCount++;
   bufferedRecordCount = sensorRingCount;  // dashboard mirror

@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.57";
+const char *FIRMWARE_VERSION = "0.0.58";
 
 String currentUID;
 
@@ -1367,15 +1367,54 @@ struct SensorWindow {
 };
 SensorWindow *currentWindow = nullptr;  // allocated to PSRAM in init
 
+// Subset of ImuWindow + the three comfort score globals, captured at
+// window-roll time and frozen into the SensorSnapshot. Without this, buffered
+// records would all read the live (post-reset) imuWindow at upload time,
+// because uploads are field-off-gated and run minutes-to-hours after the
+// snapshot was rolled. Only fields actually uploaded to the cloud are kept
+// (raw per-axis accel/gyro, hf_vibe, 60s rolling metrics intentionally excluded).
+struct ImuSnapshot {
+  // Heel (×100)
+  int32_t  heel_min;
+  int32_t  heel_max;
+  int64_t  heel_area_v_us;
+  uint64_t heel_valid_us;
+  // Pitch (×100)
+  int32_t  pitch_min;
+  int32_t  pitch_max;
+  int64_t  pitch_area_v_us;
+  uint64_t pitch_valid_us;
+  // Vertical accel (×1000)
+  int32_t  vertical_accel_min;
+  int32_t  vertical_accel_max;
+  int64_t  vertical_accel_area_v_us;
+  uint64_t vertical_accel_valid_us;
+  // Total accel magnitude (×1000, always positive)
+  int32_t  total_accel_min;
+  int32_t  total_accel_max;
+  int64_t  total_accel_area_v_us;
+  uint64_t total_accel_valid_us;
+  // Comfort score point values at roll time (raw firmware 0-100 scales)
+  float    msi_score;
+  float    vomit_pct;
+  float    anchorage_comfort;
+  // Wave period (×1000; -1000 if invalid)
+  int32_t  wave_period;
+  // Events this window
+  uint32_t slam_count;
+  int32_t  slam_peak_max;  // ×1000 (millig's)
+};
+
 // PSRAM ring of completed sensor snapshots, waiting to upload to Supabase.
 // Replaces the old per-snapshot LittleFS write that stalled Core 1 for ~400 ms
 // during sector erase. Pushes are microseconds. Uploads drain to httpsQueue
 // from the cloud-feature block (field-off gate) or via the "Upload Now" button.
 struct SensorSnapshot {
   int32_t collectionTime;       // time_t — positive epoch if synced, negative-millis marker if not
-  SensorWindow window;          // accumulated min/max/area for this 5-min period
+  SensorWindow window;          // accumulated min/max/area for this window
+  ImuSnapshot imu;              // frozen IMU subset (resists imuWindow reset between roll and upload)
 };
-const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~700 B ≈ 700 KB PSRAM; ~83 hr at 5 min/sample
+const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~820 B ≈ 820 KB PSRAM; ~83 hr at 5 min/sample
 SensorSnapshot *sensorRing = nullptr;    // ps_malloc'd in setup()
 volatile uint16_t sensorRingHead = 0;    // next write slot
 volatile uint16_t sensorRingTail = 0;    // oldest unread slot
