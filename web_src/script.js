@@ -188,6 +188,7 @@ const CSV1_FIELDS = [
     "MeasuredAmps_filtered",
     "voltageTarget",
     "Icv",
+    "WaterDepth_ft",
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -627,7 +628,7 @@ const CSV2_FIELDS = [
     "wmIgn_baro_lo",     "wmIgn_baro_hi",      // baroPressure mbar (int)
     "wmIgn_ambient_lo",  "wmIgn_ambient_hi",   // ambientTemp °F (int)
     "restartRemainingSec",                     // seconds until scheduled reboot (0 = banner hidden)
-    "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone
+    "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone, 3=Manual
     "currentTimeSource",                       // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting
 ];
 const CSV3_FIELDS = [
@@ -4732,7 +4733,7 @@ async function redirectToHistory() {
         if (data.registered && data.token) {
             if (statusEl) statusEl.textContent = 'Loading history viewer...';
             // IMPORTANT: only set src if it hasn't been set to the history URL yet
-            const targetUrl = `https://supabase-nine-ashy.vercel.app/?token=${encodeURIComponent(data.token)}`;
+            const targetUrl = `https://supabase-nine-ashy.vercel.app/?token=${encodeURIComponent(data.token)}&dark=${cloudDarkParam()}`;
             // iframe.src is always an absolute URL once set; handle initial about:blank
             const currentSrc = iframe.getAttribute('src') || '';
 
@@ -5088,6 +5089,26 @@ window.addEventListener('message', _brushHandleMessage);
 
 
 // ============================================
+// CLOUD FEATURES - Dark mode for embedded Vercel pages
+// The cloud pages live in iframes and can't see this dashboard's dark-mode toggle.
+// We tell them: ?dark=N on the URL for flash-free first paint, plus a SET_THEME
+// postMessage when the user flips the toggle while a cloud tab is open.
+// ============================================
+function cloudDarkParam() {
+    return document.body.classList.contains('dark-mode') ? '1' : '0';
+}
+function broadcastThemeToCloudIframes() {
+    const dark = document.body.classList.contains('dark-mode');
+    ['history-iframe', 'leaderboards-iframe', 'fleetstats-iframe'].forEach(id => {
+        const f = document.getElementById(id);
+        if (f && f.contentWindow) {
+            f.contentWindow.postMessage({ type: 'SET_THEME', dark }, 'https://supabase-nine-ashy.vercel.app');
+        }
+    });
+}
+
+
+// ============================================
 // CLOUD FEATURES - Leaderboards
 async function loadLeaderboardsInIframe() {
     const statusEl = document.getElementById('leaderboards-status');
@@ -5102,7 +5123,7 @@ async function loadLeaderboardsInIframe() {
         const data = await response.json();
 
         if (data.registered && data.token) {
-            iframe.src = `https://supabase-nine-ashy.vercel.app/leaderboards.html?token=${encodeURIComponent(data.token)}`;
+            iframe.src = `https://supabase-nine-ashy.vercel.app/leaderboards.html?token=${encodeURIComponent(data.token)}&dark=${cloudDarkParam()}`;
             iframe.style.display = 'block';
             iframe.onload = function () {
                 if (statusEl) statusEl.style.display = 'none';
@@ -5134,7 +5155,7 @@ async function loadFleetStatsInIframe() {
     if (statusEl) statusEl.textContent = 'Loading fleet statistics...';
 
     try {
-        iframe.src = 'https://supabase-nine-ashy.vercel.app/fleet-stats.html';
+        iframe.src = `https://supabase-nine-ashy.vercel.app/fleet-stats.html?dark=${cloudDarkParam()}`;
         iframe.style.display = 'block';
 
         iframe.onload = function () {
@@ -6508,14 +6529,37 @@ function updateGPSDisplay(lat, lon) {
     document.getElementById('LatitudeNMEA_display').textContent = lat.toFixed(5);
     document.getElementById('LongitudeNMEA_display').textContent = lon.toFixed(5);
 
+    // Reflect the firmware's resolved source (stashed by the CSV2 dispatcher).
+    // 0=none, 1=NMEA(boat), 2=Phone, 3=Manual(sticky override).
+    const src = Number(window.currentGpsSource);
     const source = document.getElementById('gps-source');
-    if (lat === 0.0 && lon === 0.0) {
-        source.textContent = '(No GPS - manual entry required)';
-        source.style.color = '#ff6464';
-    } else {
-        source.textContent = '(from GPS compass or manual)';
-        source.style.color = 'var(--accent)';
+    const clearBtn = document.getElementById('gps-clear-manual-row');
+    const manualActive = (src === 3);
+
+    // Suppress the client-side "stale" banner while a sticky manual override is
+    // in force — the value is intentional, not stale telemetry.
+    window.gpsManualOverride = manualActive;
+
+    if (source) {
+        if (lat === 0.0 && lon === 0.0) {
+            source.textContent = '(No GPS — enter coordinates manually below)';
+            source.style.color = '#ff6464';
+        } else if (manualActive) {
+            source.textContent = '(manual override — sticky, beats boat & phone GPS)';
+            source.style.color = '#ff9800';
+        } else if (src === 1) {
+            source.textContent = '(from boat GPS / NMEA2000)';
+            source.style.color = 'var(--accent)';
+        } else if (src === 2) {
+            source.textContent = '(from phone GPS)';
+            source.style.color = 'var(--accent)';
+        } else {
+            source.textContent = '';
+            source.style.color = 'var(--accent)';
+        }
     }
+    // Show the "Use automatic GPS" clear button only while manual is engaged.
+    if (clearBtn) clearBtn.style.display = manualActive ? 'block' : 'none';
 }
 
 
@@ -7408,6 +7452,9 @@ window.addEventListener("load", function () {
                     else if (key === "voltageTarget" || key === "voltageError") {
                         newTextContent = (value / 100).toFixed(3);
                     }
+                    else if (key === "WaterDepth_ft") {
+                        newTextContent = (value === 0) ? "—" : (value / 10).toFixed(1);
+                    }
                     else if (key === "Icv") {
                         newTextContent = (value / 100).toFixed(2);
                     }
@@ -7440,6 +7487,7 @@ window.addEventListener("load", function () {
                 ["RPMID", "RPM"],                        // Engine Speed 
                 ["WifiHeartBeatID", "WifiHeartBeat"],     // WifiHeartbeat
                 ["ADS3ID", "Channel3V"],
+                ["WaterDepthID", "WaterDepth_ft"],
                 ["FieldVoltsID", "vvout"],
                 ["FieldVoltsID2", "vvout"], // have to use 2 because it appears in two HTML displays (Dumb rule)
                 ["FieldAmpsID", "iiout"],
@@ -7611,8 +7659,13 @@ window.addEventListener("load", function () {
             // Reads two CSV2 ints just published by resolveSources() in firmware.
             try {
                 const ind = document.getElementById('liveSourceIndicator');
+                if (data.currentGpsSource !== undefined) {
+                    // Stash for the Weather Mode source label (lives on the CSV1
+                    // dispatcher, which doesn't see currentGpsSource directly).
+                    window.currentGpsSource = Number(data.currentGpsSource);
+                }
                 if (ind && (data.currentGpsSource !== undefined || data.currentTimeSource !== undefined)) {
-                    const gpsLbl  = ({0:'no GPS', 1:'NMEA GPS', 2:'Phone GPS'})[Number(data.currentGpsSource)] ?? '?';
+                    const gpsLbl  = ({0:'no GPS', 1:'NMEA GPS', 2:'Phone GPS', 3:'Manual'})[Number(data.currentGpsSource)] ?? '?';
                     const timeLbl = ({0:'no time', 1:'GPS time', 2:'phone time', 3:'NTP time', 4:'drifting'})[Number(data.currentTimeSource)] ?? '?';
                     ind.textContent = gpsLbl + ' · ' + timeLbl;
                 }
@@ -9194,10 +9247,10 @@ function showSubTab(parentTab, subTabName, evt = null) {
         return;
     }
 
-    // Block access to Cloud Features subtabs if not registered
+    // Block access to Cloud Features subtabs if not registered.
+    // 'mydashboard' (Statistics) was relocated to Live Data → Statistics; content is local data so the gate no longer applies.
     if (parentTab === 'cloudfeatures' && subTabName !== 'myprofile' && !isDeviceRegistered) {
         const featureNames = {
-            'mydashboard': 'Statistics',
             'myhistory': 'Long Term Plots',
             'leaderboards': 'Leaderboards',
             'fleetstats': 'Fleet Stats',

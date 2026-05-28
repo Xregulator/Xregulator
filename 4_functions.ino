@@ -310,6 +310,26 @@ void initWeatherModeSettings() {
   } else {
     LongitudeNMEA = readFile(LittleFS, "/LongitudeNMEA.txt").toDouble();
   }
+  // Sticky manual GPS override (Weather Mode). Restored across reboot.
+  if (!fsExists("/LatitudeManual.txt")) {
+    writeFile(LittleFS, "/LatitudeManual.txt", "0.0");
+  } else {
+    LatitudeManual = readFile(LittleFS, "/LatitudeManual.txt").toDouble();
+  }
+  if (!fsExists("/LongitudeManual.txt")) {
+    writeFile(LittleFS, "/LongitudeManual.txt", "0.0");
+  } else {
+    LongitudeManual = readFile(LittleFS, "/LongitudeManual.txt").toDouble();
+  }
+  if (!fsExists("/gpsManualActive.txt")) {
+    writeFile(LittleFS, "/gpsManualActive.txt", "0");
+  } else {
+    gpsManualActive = (readFile(LittleFS, "/gpsManualActive.txt").toInt() == 1);
+  }
+  if (gpsManualActive) {  // apply immediately so weather has coords before first resolveSources()
+    LatitudeNMEA  = LatitudeManual;
+    LongitudeNMEA = LongitudeManual;
+  }
   if (!fsExists("/weatherModeEnabled.txt")) {
     writeFile(LittleFS, "/weatherModeEnabled.txt", String(weatherModeEnabled).c_str());
   } else {
@@ -4193,6 +4213,7 @@ void syncTimeFromPhone(time_t phoneEpochSec) {
 // NMEA/NTP-forced never proceed. MARK_FRESH on each index so IS_STALE-gated
 // consumers (distance, smoothing, sensor hist) actually see the phone fix.
 void consumePhoneGps() {
+  if (gpsManualActive) return;  // sticky manual override beats phone
   if (gpsTimeSourceMode == GTS_NMEA || gpsTimeSourceMode == GTS_NTP) return;
   if (gpsTimeSourceMode == GTS_AUTO) {
     bool nmeaFresh = (lastNmea2kGnssMs > 0) &&
@@ -4232,6 +4253,16 @@ void resolveSources() {
   bool phoneTimeFresh = (lastPhoneTimeMs > 0)        && (now - lastPhoneTimeMs        < PHONE_FRESH_MS);
 
   // ── GPS source ─────────────────────────────────────────────────────────
+  // Sticky manual override sits ABOVE the source-mode chain: when the user has
+  // typed coordinates in Weather Mode, they win over boat NMEA and phone GPS
+  // (and even the forced modes) and are reasserted every tick until cleared.
+  if (gpsManualActive) {
+    LatitudeNMEA  = LatitudeManual;
+    LongitudeNMEA = LongitudeManual;
+    MARK_FRESH(IDX_LATITUDE_NMEA);   // manual coords are always "fresh" — user vouched for them
+    MARK_FRESH(IDX_LONGITUDE_NMEA);
+    currentGpsSource = GPS_MANUAL;
+  } else
   switch (gpsTimeSourceMode) {
     case GTS_NMEA:
       currentGpsSource = GPS_NMEA;  // honor user choice even when stale

@@ -51,8 +51,9 @@ enum Csv1Index {
   CSV1_MeasuredAmps_filtered,
   CSV1_voltageTarget,
   CSV1_Icv,
+  CSV1_WaterDepth_ft,  // NMEA2k depth ×3.28084 (meters → feet), scaled ×10 (0.1 ft); 0 if stale
 
-  CSV1_FIELD_COUNT  // = 34
+  CSV1_FIELD_COUNT  // = 35
 };
 
 enum Csv2Index {
@@ -486,7 +487,7 @@ enum Csv2Index {
   CSV2_wmIgn_baro_lo,     CSV2_wmIgn_baro_hi,      // baroPressure mbar (int)
   CSV2_wmIgn_ambient_lo,  CSV2_wmIgn_ambient_hi,   // ambientTemp °F (int)
   CSV2_restartRemainingSec,                        // seconds until scheduled reboot (0 = outside 10-min warning window)
-  CSV2_currentGpsSource,                           // 0=none, 1=NMEA, 2=Phone (GpsSource enum)
+  CSV2_currentGpsSource,                           // 0=none, 1=NMEA, 2=Phone, 3=Manual (GpsSource enum)
   CSV2_currentTimeSource,                          // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting (TimeSource enum)
 
   CSV2_FIELD_COUNT  // = 439 (437 prior + currentGpsSource + currentTimeSource)
@@ -3250,12 +3251,26 @@ void setupServer() {
     }
     if (request->hasParam("LatitudeNMEA") && request->hasParam("LongitudeNMEA")) {
       foundParameter = true;
-      LatitudeNMEA = request->getParam("LatitudeNMEA")->value().toDouble();
-      LongitudeNMEA = request->getParam("LongitudeNMEA")->value().toDouble();
-      writeFile(LittleFS, "/LatitudeNMEA.txt", String(LatitudeNMEA, 6).c_str());
-      writeFile(LittleFS, "/LongitudeNMEA.txt", String(LongitudeNMEA, 6).c_str());
-      queueConsoleMessageF("GPS: Manual coords set to %.6f, %.6f", LatitudeNMEA, LongitudeNMEA);
+      // Engage the sticky manual override: these coords now beat boat NMEA and
+      // phone GPS until the user clears it (clearGpsManual). resolveSources()
+      // reasserts them every tick, so the auto-sources can't clobber them.
+      LatitudeManual  = request->getParam("LatitudeNMEA")->value().toDouble();
+      LongitudeManual = request->getParam("LongitudeNMEA")->value().toDouble();
+      gpsManualActive = true;
+      LatitudeNMEA  = LatitudeManual;   // apply immediately
+      LongitudeNMEA = LongitudeManual;
+      writeFile(LittleFS, "/LatitudeManual.txt", String(LatitudeManual, 6).c_str());
+      writeFile(LittleFS, "/LongitudeManual.txt", String(LongitudeManual, 6).c_str());
+      writeFile(LittleFS, "/gpsManualActive.txt", "1");
+      queueConsoleMessageF("GPS: Manual override set to %.6f, %.6f (sticky — beats NMEA & phone)", LatitudeManual, LongitudeManual);
       nextWeatherUpdate = millis();  // fire next tick (signed-delta safe; '= 0' would miss past 24.8d uptime)
+    }
+    if (request->hasParam("clearGpsManual")) {
+      foundParameter = true;
+      gpsManualActive = false;
+      writeFile(LittleFS, "/gpsManualActive.txt", "0");
+      queueConsoleMessage("GPS: Manual override cleared — back to automatic (NMEA/phone)");
+      nextWeatherUpdate = millis();  // refresh weather with whatever the auto chain now resolves
     }
     if (request->hasParam("weatherModeEnabled")) {
       foundParameter = true;
@@ -4261,6 +4276,19 @@ void setupServer() {
       // Voltage loop worst (labeled "Worst Session" in UI) — wasn't reset before;
       // adding here so the label-renamed "Worst — last X min" tracks reality.
       voltLoopWorstInterval_ses = 0;
+      // Longest single trip — clear the lifetime max. In-progress trip (currentTripDistanceNm) is intentionally preserved.
+      LongestSingleTrip_Nm_AllTime = 0.0f;
+      // 24-hour rolling distance — clear watermark + ring (otherwise post-reset window keeps the pre-reset peak alive).
+      Max24hrDistance_AllTime = 0.0f;
+      for (uint8_t i = 0; i < 24; i++) distHourBuckets[i] = 0.0f;
+      distHourHead = 0;
+      distHourStartMs = millis();
+      // Deepest anchorage — clear watermark + ring (same rationale: pre-reset window shouldn't keep winning post-reset).
+      DeepestAnchorage_Ft_AllTime = 0.0f;
+      if (anchorageRing) memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
+      anchorageRingHead = 0;
+      anchorageRingCount = 0;
+      lastAnchorageSampleMs = 0;
       // Stamp the reset moment. Dashboard reads CSV1 slot 28 = (millis()-this)/1000
       // and formats it as "last 12 min" / "last 1.4 hr" on all .session-window-label spans.
       perfCountersResetMs = millis();
@@ -4424,8 +4452,9 @@ void setupServer() {
                             : (currentTimeSource == TIME_PHONE) ? "Phone"
                             : (currentTimeSource == TIME_NTP)   ? "NTP"
                             : (currentTimeSource == TIME_MILLIS) ? "drifting" : "none";
-    const char *gpsSrcName  = (currentGpsSource == GPS_NMEA)  ? "NMEA"
-                            : (currentGpsSource == GPS_PHONE) ? "Phone" : "none";
+    const char *gpsSrcName  = (currentGpsSource == GPS_NMEA)   ? "NMEA"
+                            : (currentGpsSource == GPS_PHONE)  ? "Phone"
+                            : (currentGpsSource == GPS_MANUAL) ? "Manual" : "none";
     unsigned long now = millis();
     char out[384];
     snprintf(out, sizeof(out),
@@ -5428,7 +5457,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d",
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -5464,7 +5493,9 @@ void SendWifiData() {
                                SafeInt(BatteryV, 100),                  // raw ADS1115
                                SafeInt(MeasuredAmps_filtered, 100),
                                SafeInt(ChargingVoltageTarget * 100),
-                               SafeInt(Icv * 100)
+                               SafeInt(Icv * 100),
+                               // Water depth in feet ×10 (0.1 ft resolution). 0 if NMEA depth stale or unavailable.
+                               SafeInt(IS_STALE(IDX_WATER_DEPTH) ? 0 : (WaterDepth_m * 3.28084f), 10)
     );
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
@@ -5979,7 +6010,7 @@ void SendWifiData() {
                                SafeInt(wmIgnSafe(wmIgn_baro.lo), 1),     SafeInt(wmIgnSafe(wmIgn_baro.hi), 1),
                                SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),  SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1),
                                (int)restartRemainingSec,
-                               (int)currentGpsSource,                    // 0=none 1=NMEA 2=Phone
+                               (int)currentGpsSource,                    // 0=none 1=NMEA 2=Phone 3=Manual
                                (int)currentTimeSource                    // 0=none 1=GPS 2=Phone 3=NTP 4=drifting
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {

@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.58";
+const char *FIRMWARE_VERSION = "0.0.69";
 
 String currentUID;
 
@@ -607,9 +607,9 @@ int forcedFwVersionInt = 0;
 // WiFiClientSecure secureClient;  // Reusable SSL client to prevent stack overflow when we had individual ones for each upload   ABANDONED, THIS WAS NOT GOOD IN FLAKY WIFI
 unsigned long lastHttpsOperationTime = 0;
 const unsigned long HTTPS_MIN_INTERVAL = 500;            // was 2 seconds between any HTTPS calls becasue core0 tiny system stacks (ipc0 = 1024 bytes) , not sure it was necessary
-const unsigned long CONFIG_SNAPSHOT_INTERVAL = 86400000;  // 24 hours — production
+const unsigned long CONFIG_SNAPSHOT_INTERVAL = 300000;    // 5 min — TEST (production: 86400000 = 24 hr)
 // SENSOR_UPLOAD_INTERVAL is firmware-only (no UI, no LittleFS) — edit + reflash to change.
-const unsigned long SENSOR_UPLOAD_INTERVAL = 600000;          // 10 minutes — production
+const unsigned long SENSOR_UPLOAD_INTERVAL = 120000;          // 2 min — TEST (production: 600000 = 10 min)
 const unsigned long BUFFER_UPLOAD_INTERVAL = 13000;  // 13 seconds
 // TODO TEST — temporarily 15 min to validate the warning banner/popup/graceful shutdown.
 // Revert to 43200000 (12 hr) for production. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min.)
@@ -1050,7 +1050,7 @@ volatile float AlternatorTemperatureF = NAN;  // alternator temperature
 float MaxAlternatorTemperatureF = 0;          // maximum alternator temperature
 // === Thermistor Stuff
 float R_fixed = 10000.0;               // Series resistor in ohms
-float Beta = 3950.0;                   // Thermistor Beta constant (e.g. 3950K)
+float Beta = 3380.0;                   // Thermistor Beta constant — default matches Murata NXFT15XH103FA2B050 (β25/50 = 3380K)
 float R0 = 10000.0;                    // Thermistor resistance at T0
 float T0_C = 25.0;                     // Reference temp in Celsius
 int TempSource = 0;                    // 0 for OneWire default, 1 for Thermistor
@@ -1131,6 +1131,37 @@ float TotalDistance = 0.0f;                      // nm (session)
 float TotalDistance_AllTime = 0.0f;              // nm (lifetime)
 float MaxSpeed = 0.0f;                           // kts (session)
 float MaxSpeed_AllTime = 0.0f;                   // kts (lifetime)
+// Longest single trip (nm). Trip ends after 60 min continuous GPS-invalid OR continuous SOG < 1.5 kn.
+float LongestSingleTrip_Nm_AllTime = 0.0f;       // nm (lifetime — winning trip)
+float currentTripDistanceNm = 0.0f;              // nm (in-progress trip; NVS-persisted with epoch)
+uint32_t currentTripLastUpdateEpoch = 0;         // Unix seconds of last advance (0 = unknown; only stamped when timeIsSynced)
+bool tripActive = false;                         // true between motion start and 60-min stall finalize
+bool tripPendingRecovery = false;                // set true on boot if NVS had a saved in-progress trip; resolved once time syncs
+uint32_t timeSinceLastMotion = 0;                // ms accumulated below 1.5 kn while trip active
+uint32_t timeSinceLastValidGps = 0;              // ms accumulated with invalid GPS while trip active
+// Rolling 24-hour max distance (lb-max-24hr leaderboard). 24 hourly buckets; bucket[head] = in-progress hour.
+// Sum of all 24 ≈ last 24 hours of motion (~1 hr undercount worst case). Ring is session-only; watermark is NVS-persisted.
+float Max24hrDistance_AllTime = 0.0f;            // nm (lifetime max over any rolling 24-hr window)
+float distHourBuckets[24] = {0};                 // per-hour distance accumulators (nm)
+uint8_t distHourHead = 0;                        // index of current in-progress hour bucket
+uint32_t distHourStartMs = 0;                    // millis() at start of current hour bucket (0 = uninitialized)
+// Water depth (NMEA2k PGN 128267). Stored in meters (NMEA native); displayed in feet (×3.28084).
+float WaterDepth_m = 0.0f;                       // depth below transducer in meters
+// Deepest anchorage leaderboard — sliding 5-hr window. Qualifying anchorage = boat stays within 100yd
+// AND depth changes by 2–100 ft. Ring is allocated in PSRAM at boot (see setup()); watermark NVS-persisted.
+float DeepestAnchorage_Ft_AllTime = 0.0f;        // ft (lifetime deepest qualifying anchorage avg depth)
+// Sample tuple held in PSRAM ring; ~24 B × 300 slots = ~7.2 KB.
+struct AnchorageSample {
+  uint32_t sampleMs;   // millis() at sample
+  double lat;
+  double lon;
+  float depth_ft;      // converted to feet for direct comparison with thresholds
+};
+AnchorageSample *anchorageRing = nullptr;        // PSRAM-allocated 300-slot ring
+const uint16_t ANCHORAGE_RING_SIZE = 300;        // 300 minutes × 60s = 5 hr
+uint16_t anchorageRingHead = 0;                  // next write slot
+uint16_t anchorageRingCount = 0;                 // valid samples (up to ANCHORAGE_RING_SIZE)
+uint32_t lastAnchorageSampleMs = 0;              // last sample push time
 float AvgSOC = 0.0f;                             // % (session average state of charge, not currently used for anything)
 float AvgSOC_AllTime = 0.0f;                     // % (lifetime average state of charge)
 float AvgSpeed_AllTime = 0.0f;                   // kts (lifetime average speed)
@@ -1158,7 +1189,7 @@ bool isRegistered = false;  // Registration status
 
 // CLOUD FEATURES - STATIC BUFFERS// For ESP32-S3 with 16GB and OPI PSRAM
 const int PAYLOAD_BUFFER_SIZE = 4096;
-const int CONFIG_PAYLOAD_SIZE = 8192;
+const int CONFIG_PAYLOAD_SIZE = 32768;  // bumped 8KB → 32KB for step 4 picker spec (~190 fields)
 
 char *tempBuffer;
 
@@ -1200,10 +1231,18 @@ double LatitudePhone  = 0.0;
 double LongitudePhone = 0.0;
 time_t PhoneTimeEpoch = 0;  // Unix seconds the phone reported, anchored at lastPhoneTimeMs
 
+// Manually typed coordinates (Weather Mode "Override manually"). When
+// gpsManualActive is set, these win over BOTH boat NMEA and phone GPS and stick
+// until the user clears the override. Held separately so the resolver can
+// reassert them every tick without the auto-sources clobbering them. Persisted.
+double LatitudeManual  = 0.0;
+double LongitudeManual = 0.0;
+bool   gpsManualActive = false;
+
 // Which source the *effective* GPS position currently comes from. Resolved
 // every tick by resolveSources() in 4_functions.ino. Published in CSV2 slot
 // `currentGpsSource` for the dashboard's live source indicator.
-enum GpsSource { GPS_NONE, GPS_NMEA, GPS_PHONE };
+enum GpsSource { GPS_NONE, GPS_NMEA, GPS_PHONE, GPS_MANUAL };
 GpsSource currentGpsSource = GPS_NONE;
 
 // User override for the GPS+time priority chain. Default GTS_AUTO runs the
@@ -1644,6 +1683,14 @@ int32_t prev_AltOnTime_AllTime = 0;
 float prev_ChargeCycles_AllTime = 0;
 int32_t prev_TotalDist_AllTime = 0;
 int32_t prev_AvgSpeed_AllTime = 0;
+// Longest-trip persistence shadows. Distance scaled ×100 for 0.01-nm resolution.
+int32_t prev_LongestTrip_AT = 0;
+int32_t prev_CurrTripDist = 0;
+uint32_t prev_CurrTripEpoch = 0;
+// 24-hour max distance — watermark only (ring is session-only). Scaled ×100.
+int32_t prev_Max24hrDist_AT = 0;
+// Deepest anchorage — watermark only (ring is session-only). Scaled ×10 for 0.1-ft resolution.
+int32_t prev_DeepAnchor_AT = 0;
 double prev_spdAccum_AllTime = -1.0;
 uint32_t prev_spdTime_AllTime = 0;
 double prev_vltAccum_AllTime = -1.0;
@@ -3206,8 +3253,9 @@ enum DataIndex {
   IDX_TIME_TO_FULL_DISCHARGE,
   IDX_DYNAMIC_SHUNT_GAIN,
   IDX_IMU,                       // 34 - IMU (accel/gyro/derived angles)
+  IDX_WATER_DEPTH,               // 35 - NMEA2k WaterDepth (PGN 128267)
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 35
+  MAX_DATA_INDICES = 36
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -3503,6 +3551,10 @@ void setup() {
   baroPressureHistory = (uint16_t *)ps_malloc(BARO_HISTORY_SIZE * sizeof(uint16_t));
   if (!baroPressureHistory) Serial.println("FATAL: baroPressureHistory ps_malloc failed");
   else memset(baroPressureHistory, 0, BARO_HISTORY_SIZE * sizeof(uint16_t));
+  // Anchorage detection sliding-window ring (5 hr × 60 s = 300 slots × 24 B = ~7.2 KB).
+  anchorageRing = (AnchorageSample *)ps_malloc(ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
+  if (!anchorageRing) Serial.println("FATAL: anchorageRing ps_malloc failed");
+  else memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
   // CH1 interval ring — 30 KB to PSRAM

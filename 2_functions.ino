@@ -1749,291 +1749,265 @@ void clearSensorBuffer() {
 // ============================================
 // ESP32 CONFIG SNAPSHOT FUNCTIONS
 // ============================================
-// Build config snapshot JSON payload
+// Build config snapshot JSON payload.
+// Shape: { device_uid, token, snapshot_timestamp, settings: {…161 fields…}, state: {…28 fields…} }
+// Settings populate device_settings_snapshots (owner-visible only, never leaderboards).
+// State populates device_state_daily + UPSERTs lifetime fields into device_statistics.
+// Field names and grouping mirror configsnapshot_picker.html (locked 2026-05-27).
+// All checked-box fields included; "Not in HTML — JS-driven" picker notes are noted but
+// the firmware variables still exist and are emitted normally.
 bool buildConfigPayload() {
+  time_t now_ts = time(NULL);
+  const char *timestampStr = formatTimestamp(now_ts);
+
   int offset = snprintf(configPayloadBuffer, CONFIG_PAYLOAD_SIZE,
-                        "{\"device_uid\":\"%s\",\"token\":\"%s\",\"unix_time\":%lu",
-                        device_id_hex, authToken.c_str(), (unsigned long)time(NULL));
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"snapshot_timestamp\":\"%s\","
+    "\"settings\":{",
+    device_id_hex, authToken.c_str(), timestampStr);
+  if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
 
-  if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) {
-    //Serial.println("ERROR: Config payload buffer too small");
-    return false;
-  }
+  // ─── Settings ───────────────────────────────────────────────────────────────
 
-  // System Health
+  // Electrical sizing & sensor topology
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"current_partition_type\":%d,\"firmware_version_int\":%d"
-                     ",\"raw_free_heap\":%d,\"min_free_heap\":%d,\"free_internal_ram\":%d"
-                     ",\"heapfrag\":%d,\"cpu_load_core0\":%d,\"cpu_load_core1\":%d"
-                     ",\"cpu_load_core0_max\":%d,\"cpu_load_core1_max\":%d"
-                     ",\"loop_time\":%d,\"max_loop_time\":%d,\"wifi_strength\":%d"
-                     ",\"wifi_reconnects_total\":%d,\"wifi_disconnect_count\":%d",
-                     currentPartitionType, firmwareVersionInt, rawFreeHeap, MinFreeHeap,
-                     FreeInternalRam, Heapfrag, cpuLoadCore0, cpuLoadCore1,
-                     cpuLoadCore0Max, cpuLoadCore1Max, LoopTime,
-                     MaxLoopTime, WifiStrength, wifiReconnectsTotal, wifiDisconnectCount);
+    "\"BatteryCapacity_Ah\":%d,\"AlternatorNominalAmps\":%d,\"SolarWatts\":%d,"
+    "\"AmpSensorRange\":%d,\"ShuntResistanceMicroOhm\":%d,"
+    "\"BatteryVoltageSource\":%d,\"BatteryCurrentSource\":%d,"
+    "\"InvertAltAmps\":%d,\"InvertBattAmps\":%d,\"hardwarePresent\":%d",
+    BatteryCapacity_Ah, AlternatorNominalAmps, SolarWatts,
+    AmpSensorRange, ShuntResistanceMicroOhm,
+    BatteryVoltageSource, BatteryCurrentSource,
+    InvertAltAmps, InvertBattAmps, hardwarePresent);
 
-  // Session Stats
+  // Thermistor / temperature config
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"last_session_duration\":%lu,\"last_session_max_loop_time\":%d"
-                     ",\"last_session_min_heap\":%d,\"last_reset_reason\":%d"
-                     ",\"ancient_reset_reason\":%d,\"total_power_cycles\":%d",
-                     LastSessionDuration, LastSessionMaxLoopTime, lastSessionMinHeap,
-                     LastResetReason, ancientResetReason, totalPowerCycles);
+    ",\"TempSource\":%d,\"R_fixed\":%.2f,\"Beta\":%.2f,\"T0_C\":%.2f,"
+    "\"WindingTempOffset\":%.2f,\"displayTempUnit\":%d",
+    TempSource, R_fixed, Beta, T0_C, WindingTempOffset, displayTempUnit);
 
-  // Weather/Solar
+  // Mechanical
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"solar_watts\":%d,\"performance_ratio\":%.2f"
-                     ",\"weather_mode_enabled\":%d,\"current_weather_mode\":%d",
-                     SolarWatts, performanceRatio, weatherModeEnabled, currentWeatherMode);
+    ",\"FieldResistance\":%.2f,\"PulleyRatio\":%.3f,\"RPMScalingFactor\":%d,"
+    "\"SwitchingFrequency\":%.0f",
+    FieldResistance, PulleyRatio, RPMScalingFactor, SwitchingFrequency);
 
-  // Charge Settings
+  // Charge profile — voltage targets & stage timers
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"float_voltage\":%.2f,\"bulk_voltage\":%.2f"
-                     ",\"bulk_complete_time\":%lu,\"float_duration\":%lu"
-                     ",\"temperature_limit_f\":%.1f,\"force_float\":%d",
-                     FloatVoltage, BulkVoltage, absorptionCompleteTime, FLOAT_DURATION,
-                     TemperatureLimitF, MaintainMode);
+    ",\"BulkVoltage\":%.2f,\"AbsorptionVoltage\":%.2f,\"FloatVoltage\":%.2f,"
+    "\"TargetVoltageMode\":%d,\"TargetVoltageSetpoint\":%.2f,"
+    "\"MaintainMode\":%d,\"UseFloat\":%d,"
+    "\"absorptionCompleteTime\":%lu,\"AbsorptionTimeoutMs\":%lu,"
+    "\"bulkVoltageHoldMs\":%lu,\"FLOAT_DURATION\":%lu,\"MinFloatTime\":%lu,"
+    "\"ChargedVoltage\":%.2f,\"ChargedDetectionTime\":%d,"
+    "\"TailCurrent\":%.2f,\"TailCurrent_A\":%.2f,\"CurrentThreshold\":%.3f,"
+    "\"MaximumAllowedBatteryAmps\":%d,\"MinRPMForField\":%d",
+    BulkVoltage, AbsorptionVoltage, FloatVoltage,
+    TargetVoltageMode, TargetVoltageSetpoint,
+    MaintainMode, UseFloat,
+    (unsigned long)absorptionCompleteTime, (unsigned long)AbsorptionTimeoutMs,
+    (unsigned long)bulkVoltageHoldMs, (unsigned long)FLOAT_DURATION, (unsigned long)MinFloatTime,
+    ChargedVoltage_Scaled / 100.0, ChargedDetectionTime,
+    TailCurrent, TailCurrent_A, CurrentThreshold,
+    MaximumAllowedBatteryAmps, MinRPMForField);
 
-  // Control Switches
+  // Rebulk logic
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"on_off\":%d,\"ignition\":%d,\"ignition_override\":%d"
-                     ",\"hi_low\":%d,\"amp_sensor_range\":%d",
-                     OnOff, Ignition, IgnitionOverride, HiLow, AmpSensorRange);
+    ",\"RebulkVoltage\":%.2f,\"RebulkCurrent_A\":%.2f,\"rebulkDebounceTime\":%lu,"
+    "\"SOC_BlockRebulk_percent\":%d,\"SOC_AllowRebulk_percent\":%d",
+    RebulkVoltage, RebulkCurrent_A, (unsigned long)rebulkDebounceTime,
+    SOC_BlockRebulk_percent, SOC_AllowRebulk_percent);
 
-  // Field Control
+  // Safety / OV / OC / load dump / temp limits
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"duty_step\":%d,\"switching_frequency\":%.1f"
-                     ",\"max_duty\":%.2f,\"min_duty\":%.2f"
-                     ",\"manual_duty_target\":%d,\"freq\":%u",
-                     yyMin, SwitchingFrequency, MaxDuty, MinDuty,
-                     ManualDutyTarget, Freq);
+    ",\"AlternatorHardShutdownV\":%.2f,\"OvGroup1Enable\":%d,\"OvGroup2Enable\":%d,"
+    "\"OvMeasMarginV\":%.2f,\"OvPredMarginV\":%.2f,\"HardOCDebounceMs\":%lu,"
+    "\"LoadDumpDtThresh\":%.2f,\"LoadDumpDtThresh1\":%.2f,\"LoadDumpDtThresh3\":%.2f,"
+    "\"VoltageDisagreeThreshold\":%.2f,\"VoltageDisagreeTimeout\":%lu,"
+    "\"TemperatureLimitF\":%.2f,\"TempWarnExcess\":%.2f,\"TempCritExcess\":%.2f,"
+    "\"TempSustainedTimeout\":%lu,\"TempAlarm\":%d,\"TempAlarmLow\":%d,"
+    "\"VoltageAlarmHigh\":%.2f,\"VoltageAlarmLow\":%.2f,\"CurrentAlarmHigh\":%d,"
+    "\"AlarmActivate\":%d,\"AlarmLatchEnabled\":%d,"
+    "\"MaxDuty\":%.2f,\"MinDuty\":%.2f,\"MaxTableValue\":%.2f",
+    AlternatorHardShutdownV, OvGroup1Enable ? 1 : 0, OvGroup2Enable ? 1 : 0,
+    OvMeasMarginV, OvPredMarginV, (unsigned long)HardOCDebounceMs,
+    LoadDumpDtThresh, LoadDumpDtThresh1, LoadDumpDtThresh3,
+    VoltageDisagreeThreshold, (unsigned long)VoltageDisagreeTimeout,
+    TemperatureLimitF, TempWarnExcess, TempCritExcess,
+    (unsigned long)TempSustainedTimeout, TempAlarm, TempAlarmLow,
+    (float)VoltageAlarmHigh, (float)VoltageAlarmLow, CurrentAlarmHigh,
+    AlarmActivate, AlarmLatchEnabled,
+    MaxDuty, MinDuty, MaxTableValue);
 
-  // Hardware Specs
+  // IMU motion thresholds
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"field_resistance\":%.3f,\"r_fixed\":%.1f"
-                     ",\"beta\":%.0f,\"t0_c\":%.1f"
-                     ",\"temp_source\":%d,\"current_time_source\":%d",
-                     FieldResistance, R_fixed, Beta, T0_C,
-                     TempSource, (int)currentTimeSource);
+    ",\"CAPSIZE_THRESHOLD_DEG\":%.2f,\"PITCHPOLE_THRESHOLD_DEG\":%.2f,"
+    "\"SLAM_THRESHOLD_G\":%.2f",
+    CAPSIZE_THRESHOLD_DEG, PITCHPOLE_THRESHOLD_DEG, SLAM_THRESHOLD_G);
 
-  // Sensor Config
+  // Current PID (inner loop)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"sensor_upload_interval\":%lu,\"buffered_record_count\":%d"
-                     ",\"battery_capacity_ah\":%d,\"peukert_rated_current_a\":%.1f"
-                     ",\"soc_update_interval\":%d,\"fuel_efficiency_scaled\":%d"
-                     ",\"battery_voltage_source\":%d,\"battery_current_source\":%d",
-                     SENSOR_UPLOAD_INTERVAL, bufferedRecordCount, BatteryCapacity_Ah,
-                     PeukertRatedCurrent_A, SOCUpdateInterval, FuelEfficiency_scaled,
-                     BatteryVoltageSource, BatteryCurrentSource);
+    ",\"PidKp\":%.4f,\"PidKi\":%.4f,\"PidKd\":%.4f,\"PidSampleDivisor\":%d,"
+    "\"PIDTrackingGain\":%.4f,\"InputFilterTC\":%.2f,\"OutputPIDFilterTC\":%.2f,"
+    "\"OutputPIDMA_N\":%d,\"OutputPIDSigSrc\":%d",
+    PidKp, PidKi, PidKd, PidSampleDivisor,
+    PIDTrackingGain, InputFilterTC, OutputPIDFilterTC,
+    OutputPIDMA_N, OutputPIDSigSrc);
 
-  // Learning System Settings
-  // (learning_paused / learning_upward_enabled / learning_downward_enabled fields removed —
-  //  underlying vars were write-only with no consumer; deleted from firmware entirely.
-  //  learning_mode removed 2026-05-26 — also dead, no algorithmic consumer.)
+  // Voltage / CV protection loop
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"alternator_nominal_amps\":%d,\"learning_up_step\":%.2f"
-                     ",\"learning_down_step\":%.2f,\"ambient_temp_correction_factor\":%.3f"
-                     ",\"ambient_temp_baseline\":%.1f,\"min_learning_interval\":%lu"
-                     ",\"safe_operation_threshold\":%lu,\"last_significant_rpm_change\":%lu"
-                     ",\"last_stable_rpm\":%d,\"learning_settling_period\":%d"
-                     ",\"learning_rpm_change_threshold\":%d,\"learning_temp_hysteresis\":%d",
-                     AlternatorNominalAmps, LearningUpStep, LearningDownStep,
-                     AmbientTempCorrectionFactor, xTime, MinLearningInterval,
-                     SafeOperationThreshold, lastSignificantRPMChange, lastStableRPM,
-                     LearningSettlingPeriod, LearningRPMChangeThreshold, LearningTempHysteresis);
+    ",\"VoltageKp\":%.4f,\"VoltageKi\":%.4f,\"VoltageFilterTC\":%.2f,"
+    "\"VoltageLoopInterval\":%lu,\"VoltageTrimLimit\":%.2f,"
+    "\"IExcessK\":%.4f,\"IExcessN\":%d,\"IExcessKBleed\":%.4f,"
+    "\"IExcessArmMarginV\":%.2f,\"IExcessMA_N\":%d,\"IExcessSigSrc\":%d,"
+    "\"AwBleedRate\":%.4f,\"AwSeedProtectMs\":%lu,"
+    "\"FastSetpointRiseRate\":%.2f,\"FastSetpointRiseWindowMs\":%lu,"
+    "\"FastSetpointRiseHeadroomV\":%.2f,\"KHard\":%.4f,\"TdPred\":%.4f,"
+    "\"ReseedFrac\":%.4f,\"SlopeBleedThresh\":%.4f,\"SlopeBleedK\":%.4f,"
+    "\"SlopeBleedProxV\":%.2f,\"DvdtTC\":%.2f",
+    VoltageKp, VoltageKi, VoltageFilterTC,
+    (unsigned long)VoltageLoopInterval, VoltageTrimLimit,
+    IExcessK, IExcessN, IExcessKBleed,
+    IExcessArmMarginV, IExcessMA_N, IExcessSigSrc,
+    AwBleedRate, (unsigned long)AwSeedProtectMs,
+    FastSetpointRiseRate, (unsigned long)FastSetpointRiseWindowMs,
+    FastSetpointRiseHeadroomV, KHard, TdPred,
+    ReseedFrac, SlopeBleedThresh, SlopeBleedK,
+    SlopeBleedProxV, DvdtTC);
 
-  // PID Tuning
+  // Thermal PID
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"pid_kp\":%.3f,\"pid_ki\":%.3f,\"pid_kd\":%.3f"
-                     ",\"pid_sample_divisor\":%lu,\"max_penalty_percent\":%.1f"
-                     ",\"max_penalty_duration\":%lu",
-                     PidKp, PidKi, PidKd, PidSampleDivisor,
-                     MaxPenaltyPercent, MaxPenaltyDuration);
+    ",\"TempPIDKp\":%.4f,\"TempPIDKi\":%.4f,\"TempPIDIntervalMs\":%lu,"
+    "\"TempPIDFilterAlpha\":%.4f,\"ThermalLookaheadSec\":%.2f",
+    TempPIDKp, TempPIDKi, (unsigned long)TempPIDIntervalMs,
+    TempPIDFilterAlpha, ThermalLookaheadSec);
 
-  // Learning Diagnostics
-  // (enable_neighbor_learning / learning_dry_run_mode fields removed — underlying vars
-  //  were write-only with no consumer; deleted from firmware entirely.)
+  // Setpoint slew / ramp rates
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"neighbor_learning_factor\":%.2f,\"learning_rpm_spacing\":%d"
-                     ",\"learning_memory_duration\":%lu,\"ignore_learning_during_penalty\":%d"
-                     ",\"enable_ambient_correction\":%d"
-                     ",\"learning_failsafe_mode\":%d"
-                     // auto_save_learning_table and learning_table_save_interval — OBSOLETE REMOVE LATER
-                     ",\"clear_overheat_history\":%d,\"overheating_penalty_timer\":%lu"
-                     ",\"overheating_penalty_amps\":%.1f,\"total_learning_events\":%lu"
-                     ",\"total_overheats\":%lu,\"total_safe_hours\":%lu"
-                     ",\"average_table_value\":%.2f",
-                     NeighborLearningFactor, yyMax, LearningMemoryDuration,
-                     IgnoreLearningDuringPenalty, EnableAmbientCorrection,
-                     TuningMode, ClearOverheatHistory, overheatingPenaltyTimer,
-                     overheatingPenaltyAmps, totalLearningEvents, totalOverheats,
-                     totalSafeHours, averageTableValue);
+    ",\"SetpointRiseRate\":%.2f,\"SetpointFallRate\":%.2f,"
+    "\"SetpointRampRate\":%.2f,\"StartupRiseRate\":%.2f,\"WarmupRampRate\":%.2f,"
+    "\"DutyRampRate\":%.2f,\"DutySlowRampRate\":%.2f,"
+    "\"SettleTimeBeforeCut\":%lu,\"ShutdownPhase2HoldMs\":%lu,"
+    "\"FIELD_COLLAPSE_DELAY\":%lu,\"FieldAdjustmentInterval\":%.2f",
+    SetpointRiseRate, SetpointFallRate,
+    SetpointRampRate, StartupRiseRate, WarmupRampRate,
+    DutyRampRate, DutySlowRampRate,
+    (unsigned long)SettleTimeBeforeCut, (unsigned long)ShutdownPhase2HoldMs,
+    (unsigned long)FIELD_COLLAPSE_DELAY, FieldAdjustmentInterval);
 
-  // SOC Algorithm
+  // RPM / fuel / duty lookup tables (6 × 10-entry arrays expanded as JSON arrays)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"auto_shunt_gain_correction\":%d,\"dynamic_shunt_gain_factor\":%.4f"
-                     ",\"auto_alt_current_zero\":%d,\"dynamic_alt_current_zero\":%.2f"
-                     ",\"current_threshold\":%d,\"peukert_exponent_scaled\":%d"
-                     ",\"charge_efficiency_scaled\":%d,\"charged_voltage_scaled\":%d"
-                     ",\"tail_current\":%d,\"shunt_resistance_micro_ohm\":%d"
-                     ",\"charged_detection_time\":%d,\"ignore_temperature\":%d",
-                     AutoShuntGainCorrection, DynamicShuntGainFactor, AutoAltCurrentZero,
-                     DynamicAltCurrentZero, CurrentThreshold, PeukertExponent_scaled,
-                     ChargeEfficiency_scaled, ChargedVoltage_Scaled, (int)(TailCurrent * 10),
-                     ShuntResistanceMicroOhm, ChargedDetectionTime, IgnoreTemperature);
-
-  // BMS Integration
+    ",\"rpmTableRPMPoints\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]",
+    rpmTableRPMPoints[0], rpmTableRPMPoints[1], rpmTableRPMPoints[2], rpmTableRPMPoints[3], rpmTableRPMPoints[4],
+    rpmTableRPMPoints[5], rpmTableRPMPoints[6], rpmTableRPMPoints[7], rpmTableRPMPoints[8], rpmTableRPMPoints[9]);
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"bms_logic\":%d,\"bms_logic_level_off\":%d",
-                     bmsLogic, bmsLogicLevelOff);
-
-  // Alarm Settings
+    ",\"rpmCapCurrentTable\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+    rpmCapCurrentTable[0], rpmCapCurrentTable[1], rpmCapCurrentTable[2], rpmCapCurrentTable[3], rpmCapCurrentTable[4],
+    rpmCapCurrentTable[5], rpmCapCurrentTable[6], rpmCapCurrentTable[7], rpmCapCurrentTable[8], rpmCapCurrentTable[9]);
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"alarm_activate\":%d,\"temp_alarm\":%d"
-                     ",\"voltage_alarm_high\":%d,\"voltage_alarm_low\":%d"
-                     ",\"current_alarm_high\":%d,\"maximum_allowed_battery_amps\":%d",
-                     AlarmActivate, TempAlarm, VoltageAlarmHigh, VoltageAlarmLow,
-                     CurrentAlarmHigh, MaximumAllowedBatteryAmps);
-
-  // Calibration
+    ",\"rpmCapKW\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+    rpmCapPowerTable[0], rpmCapPowerTable[1], rpmCapPowerTable[2], rpmCapPowerTable[3], rpmCapPowerTable[4],
+    rpmCapPowerTable[5], rpmCapPowerTable[6], rpmCapPowerTable[7], rpmCapPowerTable[8], rpmCapPowerTable[9]);
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"four_way\":%d,\"rpm_scaling_factor\":%d"
-                     ",\"alternator_c_offset\":%.2f,\"battery_c_offset\":%.2f"
-                     ",\"time_to_full_charge_min\":%d,\"time_to_full_discharge_min\":%d",
-                     FourWay, RPMScalingFactor, AlternatorCOffset, BatteryCOffset,
-                     timeToFullChargeMin, timeToFullDischargeMin);
-
-  // Engine Tracking
+    ",\"rpmMinDutyTable\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
+    rpmMinDutyTable[0], rpmMinDutyTable[1], rpmMinDutyTable[2], rpmMinDutyTable[3], rpmMinDutyTable[4],
+    rpmMinDutyTable[5], rpmMinDutyTable[6], rpmMinDutyTable[7], rpmMinDutyTable[8], rpmMinDutyTable[9]);
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"engine_run_accumulator\":%lu,\"alternator_on_accumulator\":%lu",
-                     engineRunAccumulator, alternatorOnAccumulator);
-
-  // Temperature Sensor
+    ",\"fuelTableRPM\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]",
+    fuelTableRPM[0], fuelTableRPM[1], fuelTableRPM[2], fuelTableRPM[3], fuelTableRPM[4],
+    fuelTableRPM[5], fuelTableRPM[6], fuelTableRPM[7], fuelTableRPM[8], fuelTableRPM[9]);
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"winding_temp_offset\":%.2f,\"pulley_ratio\":%.2f",
-                     WindingTempOffset, PulleyRatio);
+    ",\"fuelTableGPH\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]",
+    fuelTableGPH[0], fuelTableGPH[1], fuelTableGPH[2], fuelTableGPH[3], fuelTableGPH[4],
+    fuelTableGPH[5], fuelTableGPH[6], fuelTableGPH[7], fuelTableGPH[8], fuelTableGPH[9]);
 
-  // Thermal Stress
+  // Calibration / auto-zero
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"cumulative_insulation_damage\":%.2f,\"cumulative_grease_damage\":%.2f"
-                     ",\"cumulative_brush_damage\":%.2f,\"insulation_life_percent\":%.1f"
-                     ",\"grease_life_percent\":%.1f,\"brush_life_percent\":%.1f"
-                     ",\"predicted_life_hours\":%.1f,\"life_indicator_color\":%d",
-                     CumulativeInsulationDamage, CumulativeGreaseDamage, CumulativeBrushDamage,
-                     InsulationLifePercent, GreaseLifePercent, BrushLifePercent,
-                     PredictedLifeHours, LifeIndicatorColor);
+    ",\"AlternatorCOffset\":%.2f,\"BatteryCOffset\":%.2f,"
+    "\"AutoAltCurrentZero\":%d,\"AutoShuntGainCorrection\":%d",
+    AlternatorCOffset, BatteryCOffset, AutoAltCurrentZero, AutoShuntGainCorrection);
 
-  // Timing Config
+  // Battery model — firmware stores scaled ints; descale to real values for the snapshot.
+  // PeukertExponent_scaled × 100 (e.g. 105 = 1.05).  ChargeEfficiency_scaled × 10 (e.g. 990 = 99.0%).
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"maximum_loop_time\":%d,\"rpm_threshold\":%d"
-                     ",\"ve_time\":%d,\"send_wifi_time\":%d"
-                     ",\"analog_read_time\":%d,\"analog_read_time2\":%d"
-                     ",\"web_gauges_interval\":%lu,\"plot_time_window\":%d"
-                     ",\"healthystuff_interval\":%lu",
-                     MaximumLoopTime, RPMThreshold, VeTime, SendWifiTime,
-                     AnalogReadTime, AnalogReadTime2, webgaugesinterval, plotTimeWindow,
-                     healthystuffinterval);
+    ",\"PeukertExponent\":%.3f,\"ChargeEfficiency\":%.3f",
+    PeukertExponent_scaled / 100.0, ChargeEfficiency_scaled / 10.0);
 
-  // Authentication (booleans as 1/0)
+  // Integrations & feature flags
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"is_registered\":%d,\"learning_table_updated\":%d"
-                     ",\"charging_enabled\":%d,\"bms_signal_active\":%d",
-                     isRegistered ? 1 : 0, learningTableUpdated ? 1 : 0,
-                     chargingEnabled ? 1 : 0, bmsSignalActive ? 1 : 0);
+    ",\"VeData\":%d,\"NMEA0183Data\":%d,\"NMEA2KData\":%d,"
+    "\"gpsTimeSourceMode\":%d,\"socInfoAvailable\":%d,"
+    "\"bmsLogic\":%d,\"bmsLogicLevelOff\":%d,"
+    "\"CloudFeatures\":%d,\"VMGUseTrueWind\":%d,"
+    "\"weatherModeEnabled\":%d,\"capLimitMode\":%d",
+    VeData, NMEA0183Data, NMEA2KData,
+    (int)gpsTimeSourceMode, socInfoAvailable ? 1 : 0,
+    bmsLogic, bmsLogicLevelOff,
+    CloudFeatures, VMGUseTrueWind,
+    weatherModeEnabled, (int)capLimitMode);
 
-  // RPM Current Table (10 values)
+  // Anomaly detection
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"rpm_current_table_0\":%.2f,\"rpm_current_table_1\":%.2f"
-                     ",\"rpm_current_table_2\":%.2f,\"rpm_current_table_3\":%.2f"
-                     ",\"rpm_current_table_4\":%.2f,\"rpm_current_table_5\":%.2f"
-                     ",\"rpm_current_table_6\":%.2f,\"rpm_current_table_7\":%.2f"
-                     ",\"rpm_current_table_8\":%.2f,\"rpm_current_table_9\":%.2f",
-                     rpmCurrentTable[0], rpmCurrentTable[1], rpmCurrentTable[2],
-                     rpmCurrentTable[3], rpmCurrentTable[4], rpmCurrentTable[5],
-                     rpmCurrentTable[6], rpmCurrentTable[7], rpmCurrentTable[8],
-                     rpmCurrentTable[9]);
+    ",\"anomalyAlarmEnable\":%d,\"anomalyAlarmThreshold\":%.3f,"
+    "\"anomalyMarginAmps\":%.3f,\"degradationThreshold\":%.3f",
+    anomalyAlarmEnable ? 1 : 0, anomalyAlarmThreshold,
+    anomalyMarginAmps, degradationThreshold);
 
-  // RPM Table Points (10 values)
+  // Weather / location
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"rpm_table_rpm_points_0\":%d,\"rpm_table_rpm_points_1\":%d"
-                     ",\"rpm_table_rpm_points_2\":%d,\"rpm_table_rpm_points_3\":%d"
-                     ",\"rpm_table_rpm_points_4\":%d,\"rpm_table_rpm_points_5\":%d"
-                     ",\"rpm_table_rpm_points_6\":%d,\"rpm_table_rpm_points_7\":%d"
-                     ",\"rpm_table_rpm_points_8\":%d,\"rpm_table_rpm_points_9\":%d",
-                     rpmTableRPMPoints[0], rpmTableRPMPoints[1], rpmTableRPMPoints[2],
-                     rpmTableRPMPoints[3], rpmTableRPMPoints[4], rpmTableRPMPoints[5],
-                     rpmTableRPMPoints[6], rpmTableRPMPoints[7], rpmTableRPMPoints[8],
-                     rpmTableRPMPoints[9]);
+    ",\"LatitudeNMEA\":%.6f,\"LongitudeNMEA\":%.6f,"
+    "\"performanceRatio\":%.3f,\"UVThresholdHigh\":%.2f",
+    LatitudeNMEA, LongitudeNMEA, performanceRatio, UVThresholdHigh);
 
-  // Fuel Table RPM (10 values)
+  // ─── State ─────────────────────────────────────────────────────────────────
+  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "},\"state\":{");
+
+  // Lifetime accumulators — every field also UPSERTs into device_statistics.
+  // eng_hrs / alt_hrs sent as RAW SECONDS (firmware-canonical).
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"fuel_table_rpm_0\":%.1f,\"fuel_table_rpm_1\":%.1f"
-                     ",\"fuel_table_rpm_2\":%.1f,\"fuel_table_rpm_3\":%.1f"
-                     ",\"fuel_table_rpm_4\":%.1f,\"fuel_table_rpm_5\":%.1f"
-                     ",\"fuel_table_rpm_6\":%.1f,\"fuel_table_rpm_7\":%.1f"
-                     ",\"fuel_table_rpm_8\":%.1f,\"fuel_table_rpm_9\":%.1f",
-                     fuelTableRPM[0], fuelTableRPM[1], fuelTableRPM[2],
-                     fuelTableRPM[3], fuelTableRPM[4], fuelTableRPM[5],
-                     fuelTableRPM[6], fuelTableRPM[7], fuelTableRPM[8],
-                     fuelTableRPM[9]);
+    "\"voltage_avg_lifetime\":%.4f,\"voltage_sample_time\":%lu,"
+    "\"soc_avg_lifetime\":%.4f,\"soc_sample_time\":%lu,"
+    "\"speed_avg_lifetime\":%.4f,\"speed_sample_time\":%lu,"
+    "\"eng_hrs\":%lu,\"alt_hrs\":%lu,\"eng_cycles\":%lu,"
+    "\"eng_fuel\":%.3f,\"alt_fuel\":%.3f,\"charge_cycles\":%u,"
+    "\"solar_kwh_alltime\":%.3f,\"charged_energy_alltime\":%.3f,"
+    "\"discharged_energy_alltime\":%.3f,\"alt_charged_energy_alltime\":%.3f,"
+    "\"total_dist_alltime\":%.3f,\"sailing_days_alltime\":%.3f,\"sailing_ratio\":%.3f,"
+    "\"total_overheats\":%lu,\"total_safe_hours\":%.3f,"
+    "\"longest_single_trip_nm_alltime\":%.3f,\"max_24hr_distance\":%.3f,"
+    "\"deepest_anchorage_ft\":%.2f",
+    AvgVoltage_AllTime, (unsigned long)totalVoltageSampleTime_AllTime,
+    AvgSOC_AllTime, (unsigned long)totalSocSampleTime_AllTime,
+    AvgSpeed_AllTime, (unsigned long)totalSpeedSampleTime_AllTime,
+    (unsigned long)EngineRunTime_AllTime, (unsigned long)AlternatorOnTime_AllTime, (unsigned long)EngineCycles_AllTime,
+    EngineFuelUsed_AllTime, AlternatorFuelUsed_AllTime, ChargeCycles_AllTime,
+    SolarChargedEnergy_AllTime / 1000.0, ChargedEnergy_AllTime / 1000.0,
+    DischargedEnergy_AllTime / 1000.0, AlternatorChargedEnergy_AllTime / 1000.0,
+    TotalDistance_AllTime, sailing_days_alltime, sailing_ratio,
+    (unsigned long)totalOverheats, (double)totalSafeHours,
+    LongestSingleTrip_Nm_AllTime, Max24hrDistance_AllTime,
+    DeepestAnchorage_Ft_AllTime);
 
-  // Fuel Table GPH (10 values)
+  // Session totals (point values at upload time; owner-visible only, no leaderboard)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"fuel_table_gph_0\":%.2f,\"fuel_table_gph_1\":%.2f"
-                     ",\"fuel_table_gph_2\":%.2f,\"fuel_table_gph_3\":%.2f"
-                     ",\"fuel_table_gph_4\":%.2f,\"fuel_table_gph_5\":%.2f"
-                     ",\"fuel_table_gph_6\":%.2f,\"fuel_table_gph_7\":%.2f"
-                     ",\"fuel_table_gph_8\":%.2f,\"fuel_table_gph_9\":%.2f",
-                     fuelTableGPH[0], fuelTableGPH[1], fuelTableGPH[2],
-                     fuelTableGPH[3], fuelTableGPH[4], fuelTableGPH[5],
-                     fuelTableGPH[6], fuelTableGPH[7], fuelTableGPH[8],
-                     fuelTableGPH[9]);
+    ",\"total_dist_session\":%.3f,\"solar_kwh_session\":%.3f,"
+    "\"charged_energy_session\":%.3f,\"discharged_energy_session\":%.3f,"
+    "\"alt_charged_energy_session\":%.3f",
+    TotalDistance, SolarChargedEnergy / 1000.0,
+    ChargedEnergy / 1000.0, DischargedEnergy / 1000.0,
+    AlternatorChargedEnergy / 1000.0);
 
-  // Overheat Count (10 values)
+  // Slow-changing runtime scalars
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"overheat_count_0\":%d,\"overheat_count_1\":%d"
-                     ",\"overheat_count_2\":%d,\"overheat_count_3\":%d"
-                     ",\"overheat_count_4\":%d,\"overheat_count_5\":%d"
-                     ",\"overheat_count_6\":%d,\"overheat_count_7\":%d"
-                     ",\"overheat_count_8\":%d,\"overheat_count_9\":%d",
-                     overheatCount[0], overheatCount[1], overheatCount[2],
-                     overheatCount[3], overheatCount[4], overheatCount[5],
-                     overheatCount[6], overheatCount[7], overheatCount[8],
-                     overheatCount[9]);
+    ",\"current_weather_mode\":%d,\"uv_today\":%.2f",
+    currentWeatherMode, UVToday);
 
-  // Last Overheat Time (10 values)
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"last_overheat_time_0\":%lu,\"last_overheat_time_1\":%lu"
-                     ",\"last_overheat_time_2\":%lu,\"last_overheat_time_3\":%lu"
-                     ",\"last_overheat_time_4\":%lu,\"last_overheat_time_5\":%lu"
-                     ",\"last_overheat_time_6\":%lu,\"last_overheat_time_7\":%lu"
-                     ",\"last_overheat_time_8\":%lu,\"last_overheat_time_9\":%lu",
-                     lastOverheatTime[0], lastOverheatTime[1], lastOverheatTime[2],
-                     lastOverheatTime[3], lastOverheatTime[4], lastOverheatTime[5],
-                     lastOverheatTime[6], lastOverheatTime[7], lastOverheatTime[8],
-                     lastOverheatTime[9]);
-
-  // Cumulative No Overheat Time (10 values)
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-                     ",\"cumulative_no_overheat_time_0\":%lu,\"cumulative_no_overheat_time_1\":%lu"
-                     ",\"cumulative_no_overheat_time_2\":%lu,\"cumulative_no_overheat_time_3\":%lu"
-                     ",\"cumulative_no_overheat_time_4\":%lu,\"cumulative_no_overheat_time_5\":%lu"
-                     ",\"cumulative_no_overheat_time_6\":%lu,\"cumulative_no_overheat_time_7\":%lu"
-                     ",\"cumulative_no_overheat_time_8\":%lu,\"cumulative_no_overheat_time_9\":%lu",
-                     cumulativeNoOverheatTime[0], cumulativeNoOverheatTime[1], cumulativeNoOverheatTime[2],
-                     cumulativeNoOverheatTime[3], cumulativeNoOverheatTime[4], cumulativeNoOverheatTime[5],
-                     cumulativeNoOverheatTime[6], cumulativeNoOverheatTime[7], cumulativeNoOverheatTime[8],
-                     cumulativeNoOverheatTime[9]);
-
-  // Close JSON
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "}");
+  // Close state, close root object
+  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "}}");
 
   if (offset >= CONFIG_PAYLOAD_SIZE - 1) {
-    //Serial.println("ERROR: Config payload truncated");
+    Serial.println("ERROR: Config payload truncated");
     return false;
   }
-  //Serial.printf("Config payload built: %d bytes\n", offset);
   return true;
 }
 bool executeUploadConfig(const char *payload) {

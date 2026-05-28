@@ -371,6 +371,16 @@ void WaterDepth(const tN2kMsg &N2kMsg) {
   double Offset;
 
   if (ParseN2kWaterDepth(N2kMsg, SID, DepthBelowTransducer, Offset)) {
+    // Store effective depth (transducer + offset if available; raw transducer otherwise).
+    // Offset > 0 = depth below waterline; Offset < 0 = depth below keel. Either way the sum is the
+    // physical water depth at the transducer position.
+    if (!N2kIsNA(DepthBelowTransducer)) {
+      double effectiveDepth_m = DepthBelowTransducer + (N2kIsNA(Offset) ? 0.0 : Offset);
+      if (effectiveDepth_m >= 0) {
+        WaterDepth_m = (float)effectiveDepth_m;
+        MARK_FRESH(IDX_WATER_DEPTH);
+      }
+    }
     if (N2kIsNA(Offset) || Offset == 0) {
       PrintLabelValWithConversionCheckUnDef("Depth below transducer", DepthBelowTransducer);
       if (N2kIsNA(Offset)) {
@@ -1003,7 +1013,15 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
   // DISTANCE CALCULATION - Using GPS position (Haversine)
   // ==========================================================================
 
-  if (!IS_STALE(IDX_LATITUDE_NMEA) && !IS_STALE(IDX_LONGITUDE_NMEA)) {
+  // gpsValid is shared with trip-tracking below — spec criteria: not stale,
+  // not NaN, not (0,0). Stricter than the old IS_STALE-only gate; the extra
+  // checks reject the "boot before first fix" sentinel.
+  bool gpsValid = !IS_STALE(IDX_LATITUDE_NMEA) && !IS_STALE(IDX_LONGITUDE_NMEA)
+                  && !isnan(LatitudeNMEA) && !isnan(LongitudeNMEA)
+                  && !(LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0);
+  float tripDistanceDelta_nm = 0.0f;  // jump-filtered delta for the trip accumulator
+
+  if (gpsValid) {
     static double lastLat = 0;
     static double lastLon = 0;
     static bool firstRun = true;
@@ -1030,12 +1048,107 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
           TotalDistance_AllTime += distanceAccumulator_AllTime;
           distanceAccumulator_AllTime = 0.0f;
         }
+
+        tripDistanceDelta_nm = (float)distanceDelta_nm;  // reuse jump-filtered delta for trip
       }
 
       lastLat = LatitudeNMEA;
       lastLon = LongitudeNMEA;
     }
   }
+
+  // ==========================================================================
+  // LONGEST SINGLE TRIP TRACKING
+  // Trip ends after 60 min continuous (a) GPS invalid OR (b) SOG < 1.5 kn.
+  // Either valid GPS + SOG >= 1.5 kn sample resets both timers.
+  // Boot recovery: if NVS had an in-progress trip, hold in stasis until time
+  // syncs, then resume (epoch < 1 hr old) or finalize (stale). 10-min fallback
+  // forces stale-finalize if time never syncs (e.g., no GPS / no NTP).
+  // ==========================================================================
+  {
+    if (tripPendingRecovery) {
+      if (timeIsSynced && timeBase > 0) {
+        uint32_t nowEpoch = timeBase + (millis() - timeBaseMillis) / 1000;
+        bool fresh = (currentTripLastUpdateEpoch > 0)
+                  && (nowEpoch >= currentTripLastUpdateEpoch)
+                  && ((nowEpoch - currentTripLastUpdateEpoch) < 3600UL);
+        if (fresh) {
+          tripActive = true;
+        } else {
+          if (currentTripDistanceNm > LongestSingleTrip_Nm_AllTime) LongestSingleTrip_Nm_AllTime = currentTripDistanceNm;
+          tripActive = false;
+          currentTripDistanceNm = 0.0f;
+          currentTripLastUpdateEpoch = 0;
+        }
+        tripPendingRecovery = false;
+      } else if (millis() > 600000UL) {
+        // 10 min since boot without a time sync — finalize conservatively so the saved trip isn't held in limbo forever.
+        if (currentTripDistanceNm > LongestSingleTrip_Nm_AllTime) LongestSingleTrip_Nm_AllTime = currentTripDistanceNm;
+        tripActive = false;
+        currentTripDistanceNm = 0.0f;
+        currentTripLastUpdateEpoch = 0;
+        tripPendingRecovery = false;
+      }
+    }
+
+    if (!tripPendingRecovery) {
+      bool sogValid = !IS_STALE(IDX_SOG_NMEA) && SOGNMEA >= 0;
+      float sog_kn = sogValid ? SOGNMEA : 0.0f;  // stale SOG counts as no motion
+
+      if (gpsValid && sog_kn >= 1.5f) {
+        timeSinceLastMotion = 0;
+        timeSinceLastValidGps = 0;
+        if (!tripActive) {
+          tripActive = true;
+          currentTripDistanceNm = 0.0f;
+        }
+        currentTripDistanceNm += tripDistanceDelta_nm;
+        // Stamp wall-clock epoch (project pattern, since GPS/phone time sources don't touch system clock).
+        // Leaving as 0 when time isn't synced means boot recovery conservatively finalizes the trip.
+        if (timeIsSynced) currentTripLastUpdateEpoch = timeBase + (millis() - timeBaseMillis) / 1000;
+      } else {
+        if (!gpsValid)     timeSinceLastValidGps += elapsedMillis;
+        else               timeSinceLastValidGps = 0;
+        if (sog_kn < 1.5f) timeSinceLastMotion   += elapsedMillis;
+        else               timeSinceLastMotion   = 0;
+
+        if (tripActive && (timeSinceLastMotion >= 3600000UL || timeSinceLastValidGps >= 3600000UL)) {
+          if (currentTripDistanceNm > LongestSingleTrip_Nm_AllTime) {
+            LongestSingleTrip_Nm_AllTime = currentTripDistanceNm;
+          }
+          tripActive = false;
+          currentTripDistanceNm = 0.0f;
+        }
+      }
+    }
+  }
+
+  // ==========================================================================
+  // ROLLING 24-HOUR MAX DISTANCE (lb-max-24hr leaderboard)
+  // Ring of 24 hourly buckets; bucket[head] = in-progress hour. Sum = approx
+  // last 24 hr of motion (~1 hr undercount at the leading edge).
+  // ==========================================================================
+  {
+    uint32_t now = millis();
+    if (distHourStartMs == 0) distHourStartMs = now;  // first-tick init
+    while ((uint32_t)(now - distHourStartMs) >= 3600000UL) {
+      distHourHead = (distHourHead + 1) % 24;
+      distHourBuckets[distHourHead] = 0.0f;
+      distHourStartMs += 3600000UL;
+    }
+    distHourBuckets[distHourHead] += tripDistanceDelta_nm;
+    float rollingSum = 0.0f;
+    for (uint8_t i = 0; i < 24; i++) rollingSum += distHourBuckets[i];
+    if (rollingSum > Max24hrDistance_AllTime) Max24hrDistance_AllTime = rollingSum;
+  }
+
+  // ==========================================================================
+  // ANCHORAGE DETECTION — sliding 5-hr window, deepest qualifying anchorage.
+  // Sample every 60 s into PSRAM ring; evaluate trailing valid span on each push.
+  // Qualifying = max swing < 100 yd AND depth changes by 2-100 ft over the window.
+  // Records average depth (ft) of the qualifying window as candidate watermark.
+  // ==========================================================================
+  UpdateAnchorageDetection(gpsValid);
 
   // ==========================================================================
   // SPEED CALCULATION - Using SOGNMEA (time-weighted average) - UNCHANGED
@@ -1061,6 +1174,81 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
   if (totalSpeedSampleTime_AllTime > 0) {
     AvgSpeed_AllTime = speedAccumulator_AllTime / (float)totalSpeedSampleTime_AllTime;
   }
+}
+
+// Anchorage detection — pushes one sample per minute into the PSRAM ring while GPS+depth are
+// both valid. Each push evaluates the trailing sliding 5-hr span; if continuous (no gaps > 10 min)
+// and qualifying (swing < 100 yd, depth varies 2-100 ft), updates DeepestAnchorage_Ft_AllTime
+// with the window's average depth.
+void UpdateAnchorageDetection(bool gpsValid) {
+  if (!anchorageRing) return;
+  const uint32_t SAMPLE_INTERVAL_MS  = 60000UL;            // 1-minute sample cadence
+  const uint32_t WINDOW_SPAN_MS      = 5UL * 3600UL * 1000UL; // 5 hours
+  const uint32_t GAP_TOLERANCE_MS    = 10UL * 60UL * 1000UL;  // 10 min reboot/dropout tolerance
+  const double   MAX_SWING_NM        = 0.0494;             // ~100 yards
+  const float    MIN_DEPTH_CHANGE_FT = 2.0f;
+  const float    MAX_DEPTH_CHANGE_FT = 100.0f;
+  uint32_t now = millis();
+  if ((uint32_t)(now - lastAnchorageSampleMs) < SAMPLE_INTERVAL_MS) return;
+  // Only sample when we have BOTH valid GPS AND fresh depth — otherwise the window can't qualify.
+  if (!gpsValid || IS_STALE(IDX_WATER_DEPTH)) {
+    lastAnchorageSampleMs = now;  // throttle gate; skip this sample (gap will be detected on resume)
+    return;
+  }
+  // Push sample.
+  anchorageRing[anchorageRingHead].sampleMs = now;
+  anchorageRing[anchorageRingHead].lat = LatitudeNMEA;
+  anchorageRing[anchorageRingHead].lon = LongitudeNMEA;
+  anchorageRing[anchorageRingHead].depth_ft = WaterDepth_m * 3.28084f;
+  anchorageRingHead = (anchorageRingHead + 1) % ANCHORAGE_RING_SIZE;
+  if (anchorageRingCount < ANCHORAGE_RING_SIZE) anchorageRingCount++;
+  lastAnchorageSampleMs = now;
+  // Evaluate trailing window. Walk backward from newest, collecting samples until we hit a
+  // gap > GAP_TOLERANCE_MS or run out of samples. Need at least WINDOW_SPAN_MS of contiguous coverage.
+  if (anchorageRingCount < 2) return;
+  uint16_t newestIdx = (anchorageRingHead + ANCHORAGE_RING_SIZE - 1) % ANCHORAGE_RING_SIZE;
+  uint32_t newestMs = anchorageRing[newestIdx].sampleMs;
+  uint16_t spanCount = 1;
+  uint16_t oldestValidIdx = newestIdx;
+  for (uint16_t step = 1; step < anchorageRingCount; step++) {
+    uint16_t prevIdx = (newestIdx + ANCHORAGE_RING_SIZE - step) % ANCHORAGE_RING_SIZE;
+    uint16_t laterIdx = (newestIdx + ANCHORAGE_RING_SIZE - step + 1) % ANCHORAGE_RING_SIZE;
+    uint32_t gap = (uint32_t)(anchorageRing[laterIdx].sampleMs - anchorageRing[prevIdx].sampleMs);
+    if (gap > GAP_TOLERANCE_MS) break;  // contiguous span ends here
+    oldestValidIdx = prevIdx;
+    spanCount++;
+  }
+  uint32_t spanMs = (uint32_t)(newestMs - anchorageRing[oldestValidIdx].sampleMs);
+  if (spanMs < WINDOW_SPAN_MS) return;  // not yet 5 contiguous hours
+  // Compute centroid + depth stats over the valid trailing span.
+  double sumLat = 0, sumLon = 0;
+  float depthMin = 1e9f, depthMax = -1e9f, depthSum = 0.0f;
+  for (uint16_t step = 0; step < spanCount; step++) {
+    uint16_t idx = (newestIdx + ANCHORAGE_RING_SIZE - step) % ANCHORAGE_RING_SIZE;
+    sumLat += anchorageRing[idx].lat;
+    sumLon += anchorageRing[idx].lon;
+    float d = anchorageRing[idx].depth_ft;
+    if (d < depthMin) depthMin = d;
+    if (d > depthMax) depthMax = d;
+    depthSum += d;
+  }
+  double centroidLat = sumLat / (double)spanCount;
+  double centroidLon = sumLon / (double)spanCount;
+  float depthAvg = depthSum / (float)spanCount;
+  float depthRange = depthMax - depthMin;
+  // Max distance from centroid (Haversine).
+  double maxSwingNm = 0;
+  for (uint16_t step = 0; step < spanCount; step++) {
+    uint16_t idx = (newestIdx + ANCHORAGE_RING_SIZE - step) % ANCHORAGE_RING_SIZE;
+    double d = calculateHaversineDistance(centroidLat, centroidLon,
+                                          anchorageRing[idx].lat, anchorageRing[idx].lon);
+    if (d > maxSwingNm) maxSwingNm = d;
+  }
+  // Apply qualifying criteria.
+  if (maxSwingNm > MAX_SWING_NM) return;
+  if (depthRange < MIN_DEPTH_CHANGE_FT || depthRange > MAX_DEPTH_CHANGE_FT) return;
+  // Qualifying anchorage — update lifetime watermark.
+  if (depthAvg > DeepestAnchorage_Ft_AllTime) DeepestAnchorage_Ft_AllTime = depthAvg;
 }
 
 void UpdateEngineRuntime(unsigned long elapsedMillis) {
@@ -1279,12 +1467,17 @@ float getFiltV() {
   return IBV_filtered;
 }
 
-int thermistorTempC(float V_thermistor) {
-  float Vcc = 5.0;
-  float R_thermistor = R_fixed * (V_thermistor / (Vcc - V_thermistor));
-  float T0_K = T0_C + 273.15;
-  float tempK = 1.0 / ((1.0 / T0_K) + (1.0 / Beta) * log(R_thermistor / R0));
-  return (int)(tempK - 273.15);  // Cast to int for whole degrees
+// Channel 3 topology per docs/hardware/analoginputsADS1115.md:
+//   3.3 V → Thermistor (R_NTC) → V_node → R_fixed (10 kΩ pulldown) → GND
+//   V_node = 3.3 × R_fixed / (R_fixed + R_NTC)  →  R_NTC = R_fixed × (Vcc - V) / V
+// Earlier firmware assumed the inverted topology with Vcc=5V and produced wrong R_NTC.
+float thermistorTempC(float V_node) {
+  const float Vcc = 3.3f;
+  if (V_node <= 0.0f || V_node >= Vcc) return -99.0f;  // unrecoverable: divide-by-zero or rail
+  float R_NTC = R_fixed * (Vcc - V_node) / V_node;
+  float T0_K = T0_C + 273.15f;
+  float tempK = 1.0f / ((1.0f / T0_K) + (1.0f / Beta) * log(R_NTC / R0));
+  return tempK - 273.15f;
 }
 
 //============================================================================
@@ -2399,19 +2592,31 @@ void _ReadAnalogInputs_inner() {
                            break;
 
                          case 3:
-                           Channel3V = Raw / 32768.0 * 6.144 * 833 * 2;
-                           temperatureThermistor = (int)(thermistorTempC(Channel3V) * 1.8f + 32.0f);  // convert °C to °F
+                           // Channel3V = voltage at the ADC pin. ADS1115 gain ±6.144V FSR;
+                           // real signal range is 0-3.3V per docs/hardware/analoginputsADS1115.md.
+                           // Previous formula (* 833 * 2) was a leftover scaler from an old PCB rev
+                           // and produced garbage values; the current scaling is plain volts at pin.
+                           Channel3V = Raw / 32768.0 * 6.144;
+
+                           // Disconnect detection: per the hardware doc, the lowest legitimate
+                           // V_node is 0.134V (NTC at -40°C). The board ships with a ground jumper
+                           // installed by default, so most units have Channel 3 tied to GND and
+                           // V_node = 0V. A 0.05V floor cleanly distinguishes "no usable sensor"
+                           // (grounded or floating-leakage) from any real reading.
+                           if (Channel3V < 0.05f) {
+                             temperatureThermistor = -99;
+                             break;
+                           }
+
+                           temperatureThermistor = (int)(thermistorTempC(Channel3V) * 1.8f + 32.0f);  // °C → °F
 
                            if (temperatureThermistor > 500) {
                              temperatureThermistor = -99;
                            }
-                           if (Channel3V > 150) {
-                             Channel3V = -99;
-                           }
-                           if (Channel3V > 0 && Channel3V < 100) {  // Sanity check for Channel3V
+                           if (Channel3V > 0 && Channel3V < 3.3f) {  // legitimate ADC range
                              MARK_FRESH(IDX_CHANNEL3V);
                            }
-                           if (temperatureThermistor > -58 && temperatureThermistor < 392) {  // Sanity check for temp (°F bounds)
+                           if (temperatureThermistor > -58 && temperatureThermistor < 392) {  // °F bounds
                              MARK_FRESH(IDX_THERMISTOR_TEMP);
 
                              // Track max thermistor temperature
@@ -3686,6 +3891,12 @@ void saveNVSDataFull() {
   // Watermarks (session + lifetime peaks) — load block at top of loadNVSData() previously had no matching writes (F-RES-03 fix).
   if (prev_MaxSpeed != MaxSpeed)                                            { nvs_set_blob(h, "MaxSpd",        &MaxSpeed,                          sizeof(float));    prev_MaxSpeed = MaxSpeed;                                            chg = true; }
   if (prev_MaxSpeed_AllTime != MaxSpeed_AllTime)                            { nvs_set_blob(h, "MaxSpd_AT",     &MaxSpeed_AllTime,                  sizeof(float));    prev_MaxSpeed_AllTime = MaxSpeed_AllTime;                            chg = true; }
+  // Longest single trip — distances stored ×100 for 0.01-nm resolution. Epoch is Unix seconds (0 = was unsynced).
+  if (prev_LongestTrip_AT != (int32_t)(LongestSingleTrip_Nm_AllTime * 100)) { nvs_set_i32(h, "LongTrip_AT",    (int32_t)(LongestSingleTrip_Nm_AllTime * 100));  prev_LongestTrip_AT = (int32_t)(LongestSingleTrip_Nm_AllTime * 100); chg = true; }
+  if (prev_CurrTripDist  != (int32_t)(currentTripDistanceNm * 100))         { nvs_set_i32(h, "CurrTripDist",   (int32_t)(currentTripDistanceNm * 100));         prev_CurrTripDist  = (int32_t)(currentTripDistanceNm * 100);         chg = true; }
+  if (prev_CurrTripEpoch != currentTripLastUpdateEpoch)                     { nvs_set_u32(h, "CurrTripEpch",   currentTripLastUpdateEpoch);                     prev_CurrTripEpoch = currentTripLastUpdateEpoch;                     chg = true; }
+  if (prev_Max24hrDist_AT != (int32_t)(Max24hrDistance_AllTime * 100))      { nvs_set_i32(h, "Max24h_AT",      (int32_t)(Max24hrDistance_AllTime * 100));       prev_Max24hrDist_AT = (int32_t)(Max24hrDistance_AllTime * 100);      chg = true; }
+  if (prev_DeepAnchor_AT != (int32_t)(DeepestAnchorage_Ft_AllTime * 10))    { nvs_set_i32(h, "DeepAnchor_AT",  (int32_t)(DeepestAnchorage_Ft_AllTime * 10));    prev_DeepAnchor_AT = (int32_t)(DeepestAnchorage_Ft_AllTime * 10);    chg = true; }
   if (prev_MeasAmpsMax != MeasuredAmpsMax)                                  { nvs_set_blob(h, "MAmpsMax",      &MeasuredAmpsMax,                   sizeof(float));    prev_MeasAmpsMax = MeasuredAmpsMax;                                  chg = true; }
   if (prev_MeasAmpsMax_AllTime != MeasuredAmpsMax_AllTime)                  { nvs_set_blob(h, "MAmpsMax_AT",   &MeasuredAmpsMax_AllTime,           sizeof(float));    prev_MeasAmpsMax_AllTime = MeasuredAmpsMax_AllTime;                  chg = true; }
   if (prev_RPMMax != RPMMax)                                                { nvs_set_blob(h, "RPMMax",        &RPMMax,                            sizeof(float));    prev_RPMMax = RPMMax;                                                chg = true; }
@@ -3828,6 +4039,14 @@ void loadNVSData() {
   // Lifetime Travel Statistics (_AllTime)
   if (nvs_get_i32(nvs_handle, "TotDist_AT", &temp_int32) == ESP_OK) TotalDistance_AllTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "AvgSpd_AT", &temp_int32) == ESP_OK) AvgSpeed_AllTime = temp_int32 / 100.0f;
+
+  // Longest single trip (lifetime + in-progress recovery). Boot recovery resolves once time syncs (see Step 4 hook).
+  if (nvs_get_i32(nvs_handle, "LongTrip_AT", &temp_int32) == ESP_OK) LongestSingleTrip_Nm_AllTime = temp_int32 / 100.0f;
+  if (nvs_get_i32(nvs_handle, "CurrTripDist", &temp_int32) == ESP_OK) currentTripDistanceNm = temp_int32 / 100.0f;
+  if (nvs_get_u32(nvs_handle, "CurrTripEpch", &temp_uint32) == ESP_OK) currentTripLastUpdateEpoch = temp_uint32;
+  if (currentTripDistanceNm > 0.0f || currentTripLastUpdateEpoch > 0) tripPendingRecovery = true;
+  if (nvs_get_i32(nvs_handle, "Max24h_AT", &temp_int32) == ESP_OK) Max24hrDistance_AllTime = temp_int32 / 100.0f;
+  if (nvs_get_i32(nvs_handle, "DeepAnchor_AT", &temp_int32) == ESP_OK) DeepestAnchorage_Ft_AllTime = temp_int32 / 10.0f;
 
   // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
   required_size = sizeof(double);
@@ -4080,6 +4299,11 @@ void initNVSCache() {
   prev_imu_min_stat_extreme    = imu_min_stat_extreme;
   prev_MaxSpeed             = MaxSpeed;
   prev_MaxSpeed_AllTime     = MaxSpeed_AllTime;
+  prev_LongestTrip_AT       = (int32_t)(LongestSingleTrip_Nm_AllTime * 100);
+  prev_CurrTripDist         = (int32_t)(currentTripDistanceNm * 100);
+  prev_CurrTripEpoch        = currentTripLastUpdateEpoch;
+  prev_Max24hrDist_AT       = (int32_t)(Max24hrDistance_AllTime * 100);
+  prev_DeepAnchor_AT        = (int32_t)(DeepestAnchorage_Ft_AllTime * 10);
   prev_MeasAmpsMax          = MeasuredAmpsMax;
   prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;
   prev_RPMMax               = RPMMax;
