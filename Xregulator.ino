@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.69";
+const char *FIRMWARE_VERSION = "0.0.70";
 
 String currentUID;
 
@@ -613,7 +613,6 @@ const unsigned long SENSOR_UPLOAD_INTERVAL = 120000;          // 2 min — TEST 
 const unsigned long BUFFER_UPLOAD_INTERVAL = 13000;  // 13 seconds
 // TODO TEST — temporarily 15 min to validate the warning banner/popup/graceful shutdown.
 // Revert to 43200000 (12 hr) for production. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min.)
-
 //const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
 const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
 
@@ -3107,6 +3106,7 @@ struct CvBinDLState {
 // ---------------------------------------------------------------------------
 
 static CvLogEntry *cvLog = nullptr;
+bool loggingActive = true;  // Stop/Start Logs: false freezes thermal/PID/CV ring buffers
 static int cvLogHead = 0;
 static int cvLogCount = 0;
 static bool cvLogReady = false;

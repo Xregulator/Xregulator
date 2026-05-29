@@ -3197,6 +3197,19 @@ input:checked+.slider:before {
     50%       { opacity: 0.6; }
 }
 
+/* ── Logging status pill (Plots → Download & Logging) ────── */
+.log-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.log-pill-on  { background: #1b5e20; color: #a5d6a7; }   /* recording */
+.log-pill-off { background: #5a4000; color: #ffe082; }   /* stopped / frozen */
+
 /* ── Anomaly banner (efficiency tab) ─────────────────────── */
 .eff-anomaly-banner {
     border-radius: 6px;

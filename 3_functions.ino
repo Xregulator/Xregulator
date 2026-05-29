@@ -489,8 +489,9 @@ enum Csv2Index {
   CSV2_restartRemainingSec,                        // seconds until scheduled reboot (0 = outside 10-min warning window)
   CSV2_currentGpsSource,                           // 0=none, 1=NMEA, 2=Phone, 3=Manual (GpsSource enum)
   CSV2_currentTimeSource,                          // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting (TimeSource enum)
+  CSV2_loggingActive,   // 1 if logging active, 0 if stopped (Stop/Start Logs)
 
-  CSV2_FIELD_COUNT  // = 439 (437 prior + currentGpsSource + currentTimeSource)
+  CSV2_FIELD_COUNT  // = 440 (439 prior + loggingActive)
 };
 
 enum Csv3Index {
@@ -2170,6 +2171,16 @@ void setupServer() {
     cvLogCount = 0;
     cvLogPaused = false;
     request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/stoplogs", HTTP_POST, [](AsyncWebServerRequest *request) {
+    loggingActive = false;
+    request->send(200, "text/plain", "Logging stopped");
+  });
+
+  server.on("/startlogs", HTTP_POST, [](AsyncWebServerRequest *request) {
+    loggingActive = true;
+    request->send(200, "text/plain", "Logging started");
   });
 
 
@@ -5574,8 +5585,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // restartRemainingSec + GPS/time source labels
-                               "%d,%d,%d",
+                               // restartRemainingSec + GPS/time source labels + loggingActive
+                               "%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -6011,7 +6022,8 @@ void SendWifiData() {
                                SafeInt(wmIgnSafe(wmIgn_ambient.lo), 1),  SafeInt(wmIgnSafe(wmIgn_ambient.hi), 1),
                                (int)restartRemainingSec,
                                (int)currentGpsSource,                    // 0=none 1=NMEA 2=Phone 3=Manual
-                               (int)currentTimeSource                    // 0=none 1=GPS 2=Phone 3=NTP 4=drifting
+                               (int)currentTimeSource,                   // 0=none 1=GPS 2=Phone 3=NTP 4=drifting
+                               (int)loggingActive                        // 1=logging, 0=stopped
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);

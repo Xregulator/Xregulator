@@ -8948,17 +8948,21 @@
       <div class="settings-card">
         <div class="form-row">
           <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Download Logs:</span>
+            <span>Download &amp; Logging:</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">
               ℹ️
               <span class="tooltip-box">Sends the last ~1 hour (133kb) of 2s interval data and the last ~1 minute
                 (21kb) of 100ms interval data to CSV files to the Downloads folder (pc) or Files (mobile
-                device). Logs are automatically cleared after download.</span>
+                device). Logs are automatically cleared after download. Stop Logs freezes the log buffer so
+                its size stays fixed; Start Logs resumes recording.</span>
             </span>
           </div>
-          <div class="form-input" style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <div class="form-input" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+            <span id="loggingStatusPill" class="log-pill log-pill-on">● LOGGING</span>
             <button type="button" class="btn-secondary" onclick="downloadLogs()">Download Logs</button>
             <button type="button" class="btn-secondary" onclick="resetLogs()">Reset Logs</button>
+            <button type="button" id="stopLogsBtn" class="btn-secondary" onclick="stopLogs()">Stop Logs</button>
+            <button type="button" id="startLogsBtn" class="btn-primary" onclick="startLogs()" style="display:none;">Start Logs</button>
           </div>
         </div>
       </div>
@@ -9207,7 +9211,7 @@
           <hr />
           <div class="form-row">
             <div class="form-label">Username <small style="color: #888; font-size: 11px;">(suggest using your boat
-                name)</small></div>
+                name — shown publicly on leaderboards)</small></div>
             <div class="form-input">
               <input type="text" id="profile-username" name="username" required minlength="3" maxlength="30"
                 placeholder="Enter username" style="width: 100%;" />
@@ -9225,6 +9229,17 @@
 
           <!-- Account Actions -->
           <div class="section-title">Account Management</div>
+          <hr />
+          <!-- Explicit public-data disclosure: registering is the consent moment. Spells out exactly
+               what becomes public so consent is informed, not inferred from the email "(kept private)" hint. -->
+          <div class="form-row">
+            <div class="form-input" style="grid-column: 1 / -1; font-size: 12px; color: #555; background: #f7f7f7; border: 1px solid #e0e0e0; border-radius: 4px; padding: 10px 12px; line-height: 1.5;">
+              <strong>What's public:</strong> Registering shows your username, boat type, and boat length on the
+              public leaderboards, visible to anyone. Your email and location are never shared.
+              You can leave at any time with <strong>Delete All Data</strong> below — your device keeps working fully
+              without the cloud.
+            </div>
+          </div>
           <hr />
           <div class="form-row">
             <div class="form-label"></div>

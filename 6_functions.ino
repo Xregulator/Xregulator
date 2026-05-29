@@ -4123,6 +4123,7 @@ void pidLog_init() {
 // complete outer→inner→duty pipeline for that tick.
 // NOT called during shutdown/fault paths — those are not the instability target.
 void pidLog_tick(uint32_t nowMs) {
+  if (!loggingActive) return;  // Stop Logs: skip append, freeze buffer
   if (!pidLogReady || !pidLog) return;
 
   // Pause watchdog: auto-resume if download stalled or was aborted
@@ -4239,6 +4240,7 @@ void thermalLog_init() {
 }
 
 void thermalLog_tick(uint32_t nowMs) {
+  if (!loggingActive) return;  // Stop Logs: skip append, freeze buffer
   if (!thermalLogReady || !thermalLog) return;
 
   // Watchdog: auto-unpause if download stalled/aborted

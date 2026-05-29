@@ -630,6 +630,7 @@ const CSV2_FIELDS = [
     "restartRemainingSec",                     // seconds until scheduled reboot (0 = banner hidden)
     "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone, 3=Manual
     "currentTimeSource",                       // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting
+    "loggingActive",                           // 439 — 1=logging active, 0=stopped (Stop/Start Logs)
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",
@@ -952,6 +953,12 @@ const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : '';
 // Alternative: Use mDNS hostname or fallback to IP
 // const API_BASE_URL = IS_CAPACITOR ? 'http://192.168.4.1' : ''; // For AP mode
 // const API_BASE_URL = IS_CAPACITOR ? 'http://alternator.local' : ''; // For Client mode with mDNS
+
+// Supabase project — used by the silent log-relay (pollLogRequest) to fulfil an
+// admin "pull" window. Public anon key (same one already shipped in firmware + Vercel).
+// Device-LAN calls use buildURL(); these cloud calls use the absolute URL on all platforms.
+const SUPABASE_URL = 'https://qnbekuaoweuteylitzvo.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFuYmVrdWFvd2V1dGV5bGl0enZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE5NzY1MzUsImV4cCI6MjA2NzU1MjUzNX0.k2S_kzkdAyN1Azs_7enxLun9LouB1bA_q7Sw8x1Cp0o';
 
 // ---------------------------------------------------------------
 // Biometric (Face ID / Touch ID) admin-password autofill — iOS Capacitor only
@@ -7671,6 +7678,13 @@ window.addEventListener("load", function () {
                 }
             } catch (err) { /* never let indicator break CSV2 dispatch */ }
 
+            // Logging status pill + Stop/Start toggle (CSV2 slot 439)
+            try {
+                if (data.loggingActive !== undefined) {
+                    updateLoggingStatus(data.loggingActive);
+                }
+            } catch (err) { /* never let pill logic break CSV2 dispatch */ }
+
             // Update GPS moving state for IMU mode graying (SOGNMEA is scaled ×100)
             if (data.SOGNMEA !== undefined) {
                 updateIMUMovingState(data.SOGNMEA);
@@ -10723,6 +10737,199 @@ function resetLogs() {
     fetch(buildURL('/resetlogs'), { method: 'POST' })
         .catch(() => { });
 }
+
+// Stop/Start Logs — freeze or resume the thermal/PID/CV ring buffers on the device.
+function stopLogs() {
+    fetch(buildURL('/stoplogs'), { method: 'POST' })
+        .catch(() => { });
+}
+function startLogs() {
+    fetch(buildURL('/startlogs'), { method: 'POST' })
+        .catch(() => { });
+}
+
+// Reflect live logging state (CSV2 slot 439) in the pill + which toggle button shows.
+function updateLoggingStatus(loggingActive) {
+    const pill = document.getElementById('loggingStatusPill');
+    const stopBtn = document.getElementById('stopLogsBtn');
+    const startBtn = document.getElementById('startLogsBtn');
+    if (!pill) return;
+    const on = Number(loggingActive) === 1;
+    pill.textContent = on ? '● LOGGING' : '⏸ STOPPED·frozen';
+    pill.className = 'log-pill ' + (on ? 'log-pill-on' : 'log-pill-off');
+    if (stopBtn) stopBtn.style.display = on ? '' : 'none';
+    if (startBtn) startBtn.style.display = on ? 'none' : '';
+}
+
+// ── Silent cloud log relay ────────────────────────────────────────────────
+// Fulfils an admin "pull" window. The admin opens a window by flagging the
+// device's cloud row (SQL). On its next poll this app fetches all logs from the
+// device over LAN, bundles + gzips them, and uploads to a private Supabase
+// Storage bucket via a signed URL. Fully silent, gated on cloud registration.
+// A failed upload leaves the window open → retried on the next poll.
+let g_cloudToken = null;
+let g_logRelayBusy = false;
+
+function cloudHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        'apikey': SUPABASE_ANON_KEY,
+    };
+}
+
+async function ensureCloudToken() {
+    if (g_cloudToken) return g_cloudToken;
+    const resp = await fetchWithTimeout(buildURL('/getAuthToken'), {}, 8000);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (!data.registered || !data.token) return null;  // not registered → feature off
+    g_cloudToken = data.token;
+    return g_cloudToken;
+}
+
+// Chunked base64 — avoids call-stack blowups on large (~300 KB) binary buffers.
+function arrayBufferToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+}
+
+async function fetchLogText(path) {
+    try {
+        const r = await fetchWithTimeout(buildURL(path), {}, 20000);
+        return r.ok ? await r.text() : null;
+    } catch (e) { return null; }
+}
+async function fetchLogJson(path) {
+    try {
+        const r = await fetchWithTimeout(buildURL(path), {}, 20000);
+        return r.ok ? await r.json() : null;
+    } catch (e) { return null; }
+}
+async function fetchLogBase64(path) {
+    try {
+        const r = await fetchWithTimeout(buildURL(path), {}, 20000);
+        if (!r.ok) return null;
+        const buf = await r.arrayBuffer();
+        return (buf && buf.byteLength) ? arrayBufferToBase64(buf) : null;
+    } catch (e) { return null; }
+}
+
+async function pollLogRequest() {
+    if (g_logRelayBusy) return;
+    try {
+        const token = await ensureCloudToken();
+        if (!token) return;
+
+        const checkResp = await fetch(`${SUPABASE_URL}/functions/v1/check-log-request`, {
+            method: 'POST', headers: cloudHeaders(), body: JSON.stringify({ token })
+        });
+        if (checkResp.status === 401) { g_cloudToken = null; return; }  // refresh token next poll
+        if (!checkResp.ok) return;
+        const check = await checkResp.json();
+        if (!check.pending) return;
+        const requestId = check.request_id;
+
+        g_logRelayBusy = true;
+
+        // Fetch every log from the device over LAN (tolerate individual failures).
+        const [thermal, pid, cvB64, systemid, tuning, cvtuning, thermaltuning] = await Promise.all([
+            fetchLogText('/thermallog.csv'),
+            fetchLogText('/pidlog.csv'),
+            fetchLogBase64('/cvlog.bin'),
+            fetchLogJson('/systemidlog'),
+            fetchLogJson('/tuninglog'),
+            fetchLogJson('/cvtuninglog'),
+            fetchLogJson('/thermaltuninglog'),
+        ]);
+
+        const logsIncluded = [];
+        const logs = {};
+        if (thermal != null) { logs.thermal = thermal; logsIncluded.push('thermal'); }
+        if (pid != null) { logs.pid = pid; logsIncluded.push('pid'); }
+        if (cvB64 != null) { logs.cv_base64 = cvB64; logsIncluded.push('cv'); }
+        if (systemid != null) { logs.systemid = systemid; logsIncluded.push('systemid'); }
+        if (tuning != null) { logs.tuning = tuning; logsIncluded.push('tuning'); }
+        if (cvtuning != null) { logs.cvtuning = cvtuning; logsIncluded.push('cvtuning'); }
+        if (thermaltuning != null) { logs.thermaltuning = thermaltuning; logsIncluded.push('thermaltuning'); }
+
+        const deviceUid = ((document.getElementById('profile-device-uid') || {}).textContent
+            || (document.getElementById('systemDeviceUID_ID') || {}).textContent || 'unknown').trim();
+        const fwVersion = ((document.getElementById('current-version-display') || {}).textContent || '').trim();
+        const tsLabel = getLogTimestamp();
+
+        // CompressionStream is absent on iOS WKWebView < 16.4 → uncompressed fallback.
+        const canGzip = (typeof CompressionStream !== 'undefined');
+
+        const bundle = {
+            meta: {
+                device_uid: deviceUid,
+                firmware_version: fwVersion,
+                submitted_at: new Date().toISOString(),
+                timestamp_label: tsLabel,
+                app_source: IS_CAPACITOR ? 'capacitor' : 'browser',
+                logs_included: logsIncluded,
+                compressed: canGzip,
+            },
+            config_echo: g_lastCsv3 || null,
+            logs: logs,
+        };
+        const jsonStr = JSON.stringify(bundle);
+
+        let blob, ext;
+        if (canGzip) {
+            const cs = new Blob([jsonStr]).stream().pipeThrough(new CompressionStream('gzip'));
+            blob = await new Response(cs).blob();
+            ext = 'json.gz';
+        } else {
+            blob = new Blob([jsonStr], { type: 'application/json' });
+            ext = 'json';
+        }
+        const filename = `${deviceUid}_${tsLabel}.${ext}`;
+
+        // Phase 1 — signed upload URL.
+        const urlResp = await fetch(`${SUPABASE_URL}/functions/v1/submit-logs`, {
+            method: 'POST', headers: cloudHeaders(),
+            body: JSON.stringify({ phase: 'url', token, request_id: requestId, filename })
+        });
+        if (!urlResp.ok) return;
+        const urlData = await urlResp.json();
+        if (!urlData.success || !urlData.upload_url) return;
+
+        // Upload. On failure, leave the window open so the next poll retries.
+        const putResp = await fetch(urlData.upload_url, {
+            method: 'PUT', body: blob,
+            headers: { 'Content-Type': canGzip ? 'application/gzip' : 'application/json' }
+        });
+        if (!putResp.ok) { console.warn('Log upload PUT failed:', putResp.status); return; }
+
+        // Phase 2 — confirm: records metadata + clears the window.
+        await fetch(`${SUPABASE_URL}/functions/v1/submit-logs`, {
+            method: 'POST', headers: cloudHeaders(),
+            body: JSON.stringify({
+                phase: 'confirm', token, request_id: requestId,
+                storage_path: urlData.storage_path, byte_size: blob.size,
+                logs_included: logsIncluded, firmware_version: fwVersion, compressed: canGzip
+            })
+        });
+        console.log(`Log bundle submitted (${logsIncluded.length} logs, ${blob.size} bytes).`);
+    } catch (err) {
+        console.warn('Log relay error (will retry):', err);
+    } finally {
+        g_logRelayBusy = false;
+    }
+}
+
+// Poll on a 60s cadence (matches the phone poster). First run after SSE settles.
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(pollLogRequest, 8000);
+    setTrackedInterval(pollLogRequest, 60000);
+});
 
 
 

@@ -1091,6 +1091,7 @@ void cvLog_init() {
 }
 
 void cvLog_tick(uint32_t nowMs) {
+  if (!loggingActive) return;  // Stop Logs: skip append, freeze buffer
   if (!cvLogReady || !cvLog) return;
   // if (sysMode != SYS_MODE_AUTO) return;  // this was dumb, probably remove later
 
