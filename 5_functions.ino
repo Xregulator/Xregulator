@@ -3424,29 +3424,58 @@ void calculateDerivedMetrics() {
     LeewayNMEA = NAN;
   }
 
-  // ===== VELOCITY MADE GOOD CALCULATION =====
-  if (!IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_COG_NMEA)) {
-    float targetBearing;
-    bool hasValidTarget = false;
+  // ===== VELOCITY MADE GOOD (two independent values, both always computed — no mode toggle) =====
+  // VMGNMEA   = VMG toward the manual target bearing: SOG·cos(targetBearing − COG).
+  // VMGUpwind = VMG to windward: SOG·cos(TWA). TrueWindAngleNMEA is boat-relative, so NO COG term.
+  if (!IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_COG_NMEA) && VMGTargetBearing >= 0) {
+    float bearingDiff = (VMGTargetBearing - COGNMEA) * PI / 180.0;
+    VMGNMEA = SOGNMEA * cos(bearingDiff);
+    MARK_FRESH(IDX_VMG);
+  } else {
+    VMGNMEA = NAN;  // no manual target set, or SOG/COG stale
+  }
+  if (!IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_TRUE_WIND_ANGLE)) {
+    VMGUpwind = SOGNMEA * cos(TrueWindAngleNMEA * PI / 180.0);
+  } else {
+    VMGUpwind = NAN;  // need boat speed + true wind angle
+  }
+  // Session min/max watermarks for both VMGs (dashboard ↑/↓ sidebars)
+  wmIgnUpdate(wmIgn_VMGman, VMGNMEA);
+  wmIgnUpdate(wmIgn_VMGup, VMGUpwind);
+  // Lifetime best upwind VMG — only while the engine is effectively off (sailing, RPM<50), so motoring can't pad the record.
+  if (isfinite(VMGUpwind) && RPM < 50.0f && VMGUpwind > best_upwind_vmg_alltime) {
+    best_upwind_vmg_alltime = VMGUpwind;
+  }
 
-    // Determine which bearing to use
-    if (VMGUseTrueWind == 1 && !IS_STALE(IDX_TRUE_WIND_ANGLE)) {
-      targetBearing = TrueWindAngleNMEA;  // Use true wind direction
-      hasValidTarget = true;
-    } else if (VMGTargetBearing >= 0) {
-      targetBearing = VMGTargetBearing;  // Use manual bearing
-      hasValidTarget = true;
-    }
-
-    if (hasValidTarget) {
-      float bearingDiff = (targetBearing - COGNMEA) * PI / 180.0;
-      VMGNMEA = SOGNMEA * cos(bearingDiff);
-      MARK_FRESH(IDX_VMG);
+  // ===== SUSTAINED TRUE WIND → BEAUFORT & GALE =====
+  // 2-min running average of true wind speed (US NWS "sustained wind" window). Time-aware EWMA so the
+  // window stays ~120 s regardless of call rate. This sustained value — NOT the instantaneous gust — is
+  // the basis for the Beaufort readout and the gale detector: a 34 kt gust isn't a gale, and a brief lull
+  // inside a 40 kt blow doesn't end one. When true wind is stale we can't confirm a gale, so the run ends.
+  if (!IS_STALE(IDX_TRUE_WIND_SPEED)) {
+    static uint32_t lastSustainedMs = 0;
+    uint32_t nowMs = millis();
+    if (isnan(sustainedTWS) || lastSustainedMs == 0) {
+      sustainedTWS = TrueWindSpeedNMEA;                 // seed on first valid sample (or after a data gap)
     } else {
-      VMGNMEA = NAN;  // No valid target
+      float dt = (nowMs - lastSustainedMs) / 1000.0f;   // seconds since last update
+      float alpha = dt / (120.0f + dt);                 // 120 s time constant
+      sustainedTWS += alpha * (TrueWindSpeedNMEA - sustainedTWS);
+    }
+    lastSustainedMs = nowMs;
+
+    if (sustainedTWS >= 34.0f) {                         // Beaufort 8 — gale, on the sustained average
+      if (!galeActive) { galeActive = true; galeStartMs = nowMs; }
+      currentGaleMinutes = (nowMs - galeStartMs) / 60000.0f;
+      float galeHrs = currentGaleMinutes / 60.0f;
+      if (galeHrs > longest_gale_duration_hours_alltime) longest_gale_duration_hours_alltime = galeHrs;
+    } else {
+      galeActive = false;
+      currentGaleMinutes = 0;
     }
   } else {
-    VMGNMEA = NAN;
+    galeActive = false;     // true wind unavailable — can't prove a gale; end the run, hold last sustainedTWS for display
+    currentGaleMinutes = 0;
   }
 }
 void saveFuelTableToNVS() {
@@ -3897,6 +3926,8 @@ void saveNVSDataFull() {
   if (prev_CurrTripEpoch != currentTripLastUpdateEpoch)                     { nvs_set_u32(h, "CurrTripEpch",   currentTripLastUpdateEpoch);                     prev_CurrTripEpoch = currentTripLastUpdateEpoch;                     chg = true; }
   if (prev_Max24hrDist_AT != (int32_t)(Max24hrDistance_AllTime * 100))      { nvs_set_i32(h, "Max24h_AT",      (int32_t)(Max24hrDistance_AllTime * 100));       prev_Max24hrDist_AT = (int32_t)(Max24hrDistance_AllTime * 100);      chg = true; }
   if (prev_DeepAnchor_AT != (int32_t)(DeepestAnchorage_Ft_AllTime * 10))    { nvs_set_i32(h, "DeepAnchor_AT",  (int32_t)(DeepestAnchorage_Ft_AllTime * 10));    prev_DeepAnchor_AT = (int32_t)(DeepestAnchorage_Ft_AllTime * 10);    chg = true; }
+  if (prev_BestUpVMG_AT != (int32_t)(best_upwind_vmg_alltime * 100))           { nvs_set_i32(h, "BestUpVMG_AT",   (int32_t)(best_upwind_vmg_alltime * 100));           prev_BestUpVMG_AT = (int32_t)(best_upwind_vmg_alltime * 100);           chg = true; }
+  if (prev_GaleHrs_AT != (int32_t)(longest_gale_duration_hours_alltime * 100)) { nvs_set_i32(h, "GaleHrs_AT",     (int32_t)(longest_gale_duration_hours_alltime * 100)); prev_GaleHrs_AT = (int32_t)(longest_gale_duration_hours_alltime * 100); chg = true; }
   if (prev_MeasAmpsMax != MeasuredAmpsMax)                                  { nvs_set_blob(h, "MAmpsMax",      &MeasuredAmpsMax,                   sizeof(float));    prev_MeasAmpsMax = MeasuredAmpsMax;                                  chg = true; }
   if (prev_MeasAmpsMax_AllTime != MeasuredAmpsMax_AllTime)                  { nvs_set_blob(h, "MAmpsMax_AT",   &MeasuredAmpsMax_AllTime,           sizeof(float));    prev_MeasAmpsMax_AllTime = MeasuredAmpsMax_AllTime;                  chg = true; }
   if (prev_RPMMax != RPMMax)                                                { nvs_set_blob(h, "RPMMax",        &RPMMax,                            sizeof(float));    prev_RPMMax = RPMMax;                                                chg = true; }
@@ -4047,6 +4078,8 @@ void loadNVSData() {
   if (currentTripDistanceNm > 0.0f || currentTripLastUpdateEpoch > 0) tripPendingRecovery = true;
   if (nvs_get_i32(nvs_handle, "Max24h_AT", &temp_int32) == ESP_OK) Max24hrDistance_AllTime = temp_int32 / 100.0f;
   if (nvs_get_i32(nvs_handle, "DeepAnchor_AT", &temp_int32) == ESP_OK) DeepestAnchorage_Ft_AllTime = temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "BestUpVMG_AT", &temp_int32) == ESP_OK) best_upwind_vmg_alltime = temp_int32 / 100.0f;
+  if (nvs_get_i32(nvs_handle, "GaleHrs_AT", &temp_int32) == ESP_OK) longest_gale_duration_hours_alltime = temp_int32 / 100.0f;
 
   // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
   required_size = sizeof(double);
@@ -4304,6 +4337,8 @@ void initNVSCache() {
   prev_CurrTripEpoch        = currentTripLastUpdateEpoch;
   prev_Max24hrDist_AT       = (int32_t)(Max24hrDistance_AllTime * 100);
   prev_DeepAnchor_AT        = (int32_t)(DeepestAnchorage_Ft_AllTime * 10);
+  prev_BestUpVMG_AT         = (int32_t)(best_upwind_vmg_alltime * 100);
+  prev_GaleHrs_AT           = (int32_t)(longest_gale_duration_hours_alltime * 100);
   prev_MeasAmpsMax          = MeasuredAmpsMax;
   prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;
   prev_RPMMax               = RPMMax;

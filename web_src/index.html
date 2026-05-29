@@ -6890,41 +6890,40 @@
               </span>
             </div>
             <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Velocity Made Good (VMG)
+              <span class="metric-label">VMG — Manual Bearing
                 <span class="tooltip" onclick="this.classList.toggle('active')">
                   ℹ️
                   <span class="tooltip-box">
-                    Speed toward target bearing. Positive = getting closer, Negative = getting farther away
+                    Speed made good toward your manual target bearing (set below). Positive = getting closer,
+                    negative = getting farther away.
                   </span>
                 </span>
               </span>
-              <span class="metric-value"><span id="VMGNMEA_ID">0</span> kts</span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="VMGNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="VMGNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="VMGNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Target Mode
+              <span class="metric-label">VMG — Upwind
                 <span class="tooltip" onclick="this.classList.toggle('active')">
                   ℹ️
                   <span class="tooltip-box">
-                    When ON, VMG automatically tracks true wind direction (useful for upwind sailing). Overrides
-                    manual
-                    bearing below.
+                    Speed made good to windward (toward the true wind). Positive = gaining ground upwind.
+                    This is the sailing-performance number; needs true wind angle + boat speed.
                   </span>
                 </span>
               </span>
-              <div style="display: flex; align-items: center;">
-                <form action="/get" method="GET" target="hidden-form"
-                  style="display: flex; align-items: center; gap: 0; margin: 0;">
-                  <input type="hidden" name="password" class="password_field">
-                  <span class="toggle-label" style="margin: 0 4px;">Manual</span>
-                  <label class="switch">
-                    <input id="VMGUseTrueWind_checkbox" type="checkbox"
-                      onchange="if(handleUserToggle('VMGUseTrueWind_checkbox', 'VMGUseTrueWind', 'VMGUseTrueWind')) { this.form.submit(); submitMessage(); }" />
-                    <span class="slider round"></span>
-                  </label>
-                  <span class="toggle-label" style="margin: 0 4px;">True Wind</span>
-                  <input id="VMGUseTrueWind" name="VMGUseTrueWind" type="number" value="" style="display:none;" />
-                </form>
-              </div>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="VMGUpwind_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="VMGUpwind_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="VMGUpwind_ID_lo">—</span></span>
+                </span>
+              </span>
             </div>
             <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
               <span class="metric-label">Manual Bearing (<span id="VMGTargetBearing_echo">-1</span>)°
@@ -7006,6 +7005,30 @@
                 </span>
               </span>
               <span class="metric-value"><span id="TrueWindAngleNMEA_ID">0</span>°</span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">Beaufort Scale
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Wind force on the Beaufort scale (0 Calm … 8 Gale … 12 Hurricane), from the 2-minute
+                    sustained true wind — not a single gust.
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="BeaufortID">—</span></span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">Gale Duration
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    How long the boat has been continuously in a gale (2-minute sustained true wind ≥ 34 kt).
+                    Shows 0 when not in a gale; brief lulls don't reset it.
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="GaleDurationID">0</span></span>
             </div>
           </div>
 
@@ -8951,11 +8974,12 @@
             <span>Download &amp; Logging:</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">
               ℹ️
-              <span class="tooltip-box">Sends the last ~1 hour (133kb) of 2s interval data and the last ~1 minute
-                (21kb) of 100ms interval data to CSV files to the Downloads folder (pc) or Files (mobile
-                device). Logs are automatically cleared after download. Pause Logs freezes the log buffer so
-                its size stays fixed; Resume Logs continues recording. Start Fresh Log clears the buffer and
-                begins a new log.</span>
+              <span class="tooltip-box">Downloads three diagnostic logs as CSV files to the Downloads folder (pc)
+                or Files (mobile device): a temperature log (up to the last ~2 hours at 1-second resolution), a
+                control-loop log (the last ~11 seconds at the full control-loop rate, ~200 Hz), and a
+                voltage-tuning log (the last ~28 seconds, also ~200 Hz). Logs are automatically cleared after
+                download. Pause Logs freezes the log buffers so their contents stay fixed; Resume Logs continues
+                recording. Start Fresh Log clears the buffers and begins a new log.</span>
             </span>
           </div>
           <!-- Option 3 layout: status+toggle bundled left, Download primary, Start Fresh isolated right -->

@@ -164,7 +164,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.71";
+const char *FIRMWARE_VERSION = "0.0.73";
 
 String currentUID;
 
@@ -1079,13 +1079,14 @@ int gpsBufferCount = 0;
 float TrueWindSpeedNMEA = NAN;  // True wind speed (knots)
 float TrueWindAngleNMEA = NAN;  // True wind angle (degrees)
 float LeewayNMEA = NAN;         // Leeway angle (degrees, + = drift to starboard)
-float VMGNMEA = NAN;            // Velocity made good toward target (knots)
+float VMGNMEA = NAN;            // VMG toward the manual target bearing (knots)
+float VMGUpwind = NAN;          // VMG to windward = SOG·cos(TWA), knots — always computed (no mode toggle)
 float VMGTargetBearing = -1;    // User-set target bearing for VMG (-1 = not set)
+float sustainedTWS = NAN;       // 2-min running avg of TrueWindSpeedNMEA (knots); basis for Beaufort + gale (not instantaneous)
+float currentGaleMinutes = 0;   // live: minutes continuously in a gale (sustainedTWS >= 34 kt), 0 when not
 // Duty cycle tracking
 //float IgnitionDutyCycle = 0;       // % of time ignition is on
 //float EngineRunningDutyCycle = 0;  // % of time engine RPM > 100
-//a setting
-int VMGUseTrueWind = 0;  // 0=use manual bearing, 1=track true wind angle
 
 // ADS1115
 int16_t Raw = 0;
@@ -1690,6 +1691,9 @@ uint32_t prev_CurrTripEpoch = 0;
 int32_t prev_Max24hrDist_AT = 0;
 // Deepest anchorage — watermark only (ring is session-only). Scaled ×10 for 0.1-ft resolution.
 int32_t prev_DeepAnchor_AT = 0;
+// Best upwind VMG (×100, 0.01 kt) + longest gale duration (×100, 0.01 hr) — leaderboard lifetime watermarks.
+int32_t prev_BestUpVMG_AT = 0;
+int32_t prev_GaleHrs_AT = 0;
 double prev_spdAccum_AllTime = -1.0;
 uint32_t prev_spdTime_AllTime = 0;
 double prev_vltAccum_AllTime = -1.0;
@@ -3171,6 +3175,11 @@ float board_temp_max_alltime = -999.0;        // Maximum board temperature (°F)
 float board_temp_min_alltime = 999.0;         // Minimum board temperature (°F)
 float baro_pressure_max_alltime = 0.0;        // Maximum barometric pressure (mbar)
 float baro_pressure_min_alltime = 9999.0;     // Minimum barometric pressure (mbar)
+float best_upwind_vmg_alltime = 0.0;          // leaderboard: lifetime best VMG to windward (kt), gated RPM<50
+float longest_gale_duration_hours_alltime = 0.0;  // leaderboard: lifetime longest continuous gale (sustained TWS>=34kt), hours
+// Gale detector runtime state (not persisted): the current continuous gale run
+bool galeActive = false;
+uint32_t galeStartMs = 0;
 
 // ─────────────────────────────────────────────────────────────────────
 // IGNITION-CYCLE WATERMARKS
@@ -3178,7 +3187,7 @@ float baro_pressure_min_alltime = 9999.0;     // Minimum barometric pressure (mb
 // *_AllTime / *Max / *_min systems above — those persist across boots
 // via NVS; these reset every boot. Initialized to NAN so the first valid
 // sample seeds both ends (see wmIgnUpdate).
-// 14 pairs × 8 bytes = 112 bytes, internal RAM, plain globals.
+// 16 pairs × 8 bytes = 128 bytes, internal RAM, plain globals.
 // ─────────────────────────────────────────────────────────────────────
 struct IgnWatermark { float lo; float hi; };
 
@@ -3196,6 +3205,8 @@ IgnWatermark wmIgn_pitch    = { NAN, NAN };   // imu_pitch_deg
 IgnWatermark wmIgn_vacc     = { NAN, NAN };   // imu_vertical_accel_g
 IgnWatermark wmIgn_baro     = { NAN, NAN };   // baroPressure (mbar)
 IgnWatermark wmIgn_ambient  = { NAN, NAN };   // ambientTemp (°F)
+IgnWatermark wmIgn_VMGman   = { NAN, NAN };   // VMGNMEA — VMG to manual bearing (knots)
+IgnWatermark wmIgn_VMGup    = { NAN, NAN };   // VMGUpwind — VMG to windward (knots)
 
 inline void wmIgnUpdate(IgnWatermark &w, float v) {
   if (!isfinite(v)) return;

@@ -129,7 +129,10 @@ function convertTempFormIfNeeded(form, inputName, isDelta) {
 }
 
 //  UPDATE LATER
-let isDeviceRegistered = false; // Tracks if device is registered for Cloud Features
+// Tracks if device is registered for Cloud Features. Hydrated from sessionStorage so a
+// page reload mid-session doesn't drop the flag and re-prompt for registration. Cleared
+// when the app/tab fully closes → a fresh session re-validates against the cloud.
+let isDeviceRegistered = (() => { try { return sessionStorage.getItem('deviceRegistered') === '1'; } catch (e) { return false; } })();
 //let isDeviceRegistered = true; // TEMP: bypass for local testing
 
 let source; // Declare at broader scope
@@ -631,6 +634,11 @@ const CSV2_FIELDS = [
     "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone, 3=Manual
     "currentTimeSource",                       // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting
     "loggingActive",                           // 439 — 1=logging active, 0=stopped (Stop/Start Logs)
+    "VMGUpwind",                               // VMG to windward, knots ×100
+    "sustainedTWS",                            // 2-min sustained true wind, knots ×10 (Beaufort + gale basis)
+    "currentGaleMinutes",                      // live minutes continuously in a gale (sustained ≥34kt), int
+    "wmIgn_VMGman_lo",   "wmIgn_VMGman_hi",    // VMG manual session min/max (knots ×10)
+    "wmIgn_VMGup_lo",    "wmIgn_VMGup_hi",     // VMG upwind session min/max (knots ×10)
 ];
 const CSV3_FIELDS = [
     "TemperatureLimitF",
@@ -900,7 +908,7 @@ const CSV3_FIELDS = [
     "Ymin4",
     "Ymax4",
     "LoadDumpDtThresh3",
-    "VMGUseTrueWind",                  // moved from CSV2
+    "reserved_VMGUseTrueWind_c3",      // dead slot — Target-mode toggle removed (firmware sends 0); kept to preserve CSV3 indices
     "hardwarePresent",                 // moved from CSV2
     "testProtectionsEnabled",         // runtime flag — not persisted, resets true (enabled) on boot
     "IExcessArmMarginV",              // raw float (%.3f) — iExcess voltage gate margin
@@ -3648,6 +3656,7 @@ async function initializeProfileTab() {
 
         if (data.registered && data.valid) {
             isDeviceRegistered = true; // Device already registered
+            try { sessionStorage.setItem('deviceRegistered', '1'); } catch (e) {} // cache for session — survives reloads
             populateProfileForm(data.profile);
             document.getElementById('profile-form').querySelector('input[type="submit"]').value = 'Update Profile';
         } else {
@@ -3874,6 +3883,7 @@ function handleProfileUpdate(event) {
                 messageDiv.style.color = '#2e7d32';
                 messageDiv.textContent = 'Profile saved successfully!';
                 isDeviceRegistered = true;
+                try { sessionStorage.setItem('deviceRegistered', '1'); } catch (e) {} // cache for session — survives reloads
             } else {
                 messageDiv.style.backgroundColor = '#ffebee';
                 messageDiv.style.color = '#c62828';
@@ -6720,7 +6730,6 @@ function updateTogglesFromData(data) {
         if (data.CloudFeatures !== undefined) {
             updateCloudFeaturesTabVisibility(data.CloudFeatures === 1);
         }
-        updateCheckbox("VMGUseTrueWind_checkbox", data.VMGUseTrueWind, "VMGUseTrueWind");
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
         updateCheckbox("OvGroup1Enable_checkbox", data.OvGroup1Enable, "OvGroup1Enable");
         updateCheckbox("OvGroup2Enable_checkbox", data.OvGroup2Enable, "OvGroup2Enable");
@@ -7636,6 +7645,41 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
 
+            // Beaufort scale + gale duration: derived from the 2-min SUSTAINED true wind (data.sustainedTWS,
+            // sent ×10) — never the instantaneous gust — so a gust isn't a gale and a lull doesn't end one.
+            try {
+                const twsKt = Number(data.sustainedTWS) / 10;
+                const bEl = document.getElementById('BeaufortID');
+                if (bEl) {
+                    if (Number.isFinite(twsKt) && twsKt > 0) {
+                        let n, nm;
+                        if (twsKt < 1) { n = 0; nm = 'Calm'; }
+                        else if (twsKt <= 3) { n = 1; nm = 'Light air'; }
+                        else if (twsKt <= 6) { n = 2; nm = 'Light breeze'; }
+                        else if (twsKt <= 10) { n = 3; nm = 'Gentle breeze'; }
+                        else if (twsKt <= 16) { n = 4; nm = 'Moderate breeze'; }
+                        else if (twsKt <= 21) { n = 5; nm = 'Fresh breeze'; }
+                        else if (twsKt <= 27) { n = 6; nm = 'Strong breeze'; }
+                        else if (twsKt <= 33) { n = 7; nm = 'Near gale'; }
+                        else if (twsKt <= 40) { n = 8; nm = 'Gale'; }
+                        else if (twsKt <= 47) { n = 9; nm = 'Strong gale'; }
+                        else if (twsKt <= 55) { n = 10; nm = 'Storm'; }
+                        else if (twsKt <= 63) { n = 11; nm = 'Violent storm'; }
+                        else { n = 12; nm = 'Hurricane'; }
+                        bEl.textContent = n + ' (' + nm + ')';
+                    } else {
+                        bEl.textContent = '—';
+                    }
+                }
+                const gEl = document.getElementById('GaleDurationID');
+                if (gEl) {
+                    const gm = Math.round(Number(data.currentGaleMinutes));
+                    if (!Number.isFinite(gm) || gm <= 0) gEl.textContent = '0';
+                    else if (gm < 60) gEl.textContent = gm + ' min';
+                    else gEl.textContent = Math.floor(gm / 60) + 'h ' + (gm % 60 < 10 ? '0' : '') + (gm % 60) + 'm';
+                }
+            } catch (e) { /* derived wind display is best-effort */ }
+
             // voltageTarget and Icv moved to CSV1 (fast stream) — cvPlotCache is updated in handleCSVData
 
             if (data.stateRevision !== undefined) {
@@ -7781,7 +7825,7 @@ window.addEventListener("load", function () {
                     // Values scaled by 100 on server (existing)
                     else if (["IBVMax", "ChargeCycles", "ChargeCycles_AllTime", "thermalPenaltyAmps", "MeasuredAmpsMax", "SOC_percent", "VictronCurrent", "performanceRatio", "UVThresholdHigh",
                         "PeakVoltage_AllTime", "MinVoltage", "MinVoltage_AllTime", "AvgSOC_AllTime", "AvgSpeed_AllTime", "InsulationLifePercent", "GreaseLifePercent",
-                        "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA",
+                        "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA", "VMGUpwind",
                         "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at"].includes(key)) {
                         // NOTE: ch1_worst_* and ina_worst_* are NOT in this list — firmware sends them as raw integer ms
                         // (only the matching *_avg_* values are scaled ×100). They fall through to the default integer render below.
@@ -7896,9 +7940,11 @@ window.addEventListener("load", function () {
                     else if (key.startsWith("safeHours")) {
                         newTextContent = (value / 3600).toFixed(2);
                     }
-                    // Ignition-cycle watermarks sent ×10 (1 decimal): IBV and vertical accel
+                    // Ignition-cycle watermarks sent ×10 (1 decimal): IBV, vertical accel, and both VMG sidebars
                     else if (key === "wmIgn_IBV_lo" || key === "wmIgn_IBV_hi"
-                          || key === "wmIgn_vacc_lo" || key === "wmIgn_vacc_hi") {
+                          || key === "wmIgn_vacc_lo" || key === "wmIgn_vacc_hi"
+                          || key === "wmIgn_VMGman_lo" || key === "wmIgn_VMGman_hi"
+                          || key === "wmIgn_VMGup_lo" || key === "wmIgn_VMGup_hi") {
                         newTextContent = (value / 10).toFixed(1);
                     }
                     // Default: display as integer
@@ -8050,6 +8096,7 @@ window.addEventListener("load", function () {
                 ["TrueWindAngleNMEA_ID", "TrueWindAngleNMEA"],
                 ["LeewayNMEA_ID", "LeewayNMEA"],
                 ["VMGNMEA_ID", "VMGNMEA"],
+                ["VMGUpwind_ID", "VMGUpwind"],
                 ["VMGTargetBearing_echo", "VMGTargetBearing"],
                 ["cpuLoadCore0_display", "cpuLoadCore0"],
                 ["cpuLoadCore0Max_display", "cpuLoadCore0Max"],
@@ -8350,6 +8397,8 @@ window.addEventListener("load", function () {
                 ["SOC_percentID_hi",             "wmIgn_SOC_hi"],      ["SOC_percentID_lo",             "wmIgn_SOC_lo"],
                 ["RPMID_hi",                     "wmIgn_RPM_hi"],      ["RPMID_lo",                     "wmIgn_RPM_lo"],
                 ["SOGNMEA_ID_hi",                "wmIgn_SOG_hi"],      ["SOGNMEA_ID_lo",                "wmIgn_SOG_lo"],
+                ["VMGNMEA_ID_hi",                "wmIgn_VMGman_hi"],   ["VMGNMEA_ID_lo",                "wmIgn_VMGman_lo"],
+                ["VMGUpwind_ID_hi",              "wmIgn_VMGup_hi"],    ["VMGUpwind_ID_lo",              "wmIgn_VMGup_lo"],
                 ["ApparentWindSpeedNMEA_ID_hi",  "wmIgn_AWS_hi"],      ["ApparentWindSpeedNMEA_ID_lo",  "wmIgn_AWS_lo"],
                 ["TrueWindSpeedNMEA_ID_hi",      "wmIgn_TWS_hi"],      ["TrueWindSpeedNMEA_ID_lo",      "wmIgn_TWS_lo"],
                 ["imu_heel_deg_ID_hi",           "wmIgn_heel_hi"],     ["imu_heel_deg_ID_lo",           "wmIgn_heel_lo"],
@@ -10758,6 +10807,7 @@ function startLogs() {
 function updateLoggingStatus(loggingActive) {
     const pill = document.getElementById('loggingStatusPill');
     const toggle = document.getElementById('logToggleBtn');
+    g_loggingActive = Number(loggingActive);  // remembered for the log-relay capture-state stamp
     if (!pill) return;
     const on = Number(loggingActive) === 1;
     pill.innerHTML = '<span class="log-dot"></span>' + (on ? 'Recording' : 'Paused');
@@ -10783,6 +10833,7 @@ function toggleLogs() {
 // A failed upload leaves the window open → retried on the next poll.
 let g_cloudToken = null;
 let g_logRelayBusy = false;
+let g_loggingActive = 1;  // last-known Stop/Start state (1=recording, 0=user-paused); stamped into bundles
 
 // Adaptive poll cadence: 60s baseline while the app is open, ramps to 10s once a
 // log request is seen, and stays fast until 1hr passes with no new request. Lets a
@@ -10907,6 +10958,7 @@ async function pollLogRequest() {
                 app_source: IS_CAPACITOR ? 'capacitor' : 'browser',
                 logs_included: logsIncluded,
                 compressed: canGzip,
+                logging_paused: (Number(g_loggingActive) !== 1),  // true = user froze logs (deliberate capture); false = live rolling window
             },
             config_echo: g_lastCsv3 || null,
             logs: logs,

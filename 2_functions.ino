@@ -1937,12 +1937,12 @@ bool buildConfigPayload() {
     ",\"VeData\":%d,\"NMEA0183Data\":%d,\"NMEA2KData\":%d,"
     "\"gpsTimeSourceMode\":%d,\"socInfoAvailable\":%d,"
     "\"bmsLogic\":%d,\"bmsLogicLevelOff\":%d,"
-    "\"CloudFeatures\":%d,\"VMGUseTrueWind\":%d,"
+    "\"CloudFeatures\":%d,"
     "\"weatherModeEnabled\":%d,\"capLimitMode\":%d",
     VeData, NMEA0183Data, NMEA2KData,
     (int)gpsTimeSourceMode, socInfoAvailable ? 1 : 0,
     bmsLogic, bmsLogicLevelOff,
-    CloudFeatures, VMGUseTrueWind,
+    CloudFeatures,
     weatherModeEnabled, (int)capLimitMode);
 
   // Anomaly detection
@@ -1974,7 +1974,8 @@ bool buildConfigPayload() {
     "\"total_dist_alltime\":%.3f,\"sailing_days_alltime\":%.3f,\"sailing_ratio\":%.3f,"
     "\"total_overheats\":%lu,\"total_safe_hours\":%.3f,"
     "\"longest_single_trip_nm_alltime\":%.3f,\"max_24hr_distance\":%.3f,"
-    "\"deepest_anchorage_ft\":%.2f",
+    "\"deepest_anchorage_ft\":%.2f,"
+    "\"best_upwind_vmg_alltime\":%.2f,\"longest_gale_duration_hours_alltime\":%.3f",
     AvgVoltage_AllTime, (unsigned long)totalVoltageSampleTime_AllTime,
     AvgSOC_AllTime, (unsigned long)totalSocSampleTime_AllTime,
     AvgSpeed_AllTime, (unsigned long)totalSpeedSampleTime_AllTime,
@@ -1985,7 +1986,8 @@ bool buildConfigPayload() {
     TotalDistance_AllTime, sailing_days_alltime, sailing_ratio,
     (unsigned long)totalOverheats, (double)totalSafeHours,
     LongestSingleTrip_Nm_AllTime, Max24hrDistance_AllTime,
-    DeepestAnchorage_Ft_AllTime);
+    DeepestAnchorage_Ft_AllTime,
+    best_upwind_vmg_alltime, longest_gale_duration_hours_alltime);
 
   // Session totals (point values at upload time; owner-visible only, no leaderboard)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,

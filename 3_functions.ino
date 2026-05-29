@@ -490,8 +490,13 @@ enum Csv2Index {
   CSV2_currentGpsSource,                           // 0=none, 1=NMEA, 2=Phone, 3=Manual (GpsSource enum)
   CSV2_currentTimeSource,                          // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting (TimeSource enum)
   CSV2_loggingActive,   // 1 if logging active, 0 if stopped (Stop/Start Logs)
+  CSV2_VMGUpwind,                                  // VMG to windward = SOG·cos(TWA), knots ×100
+  CSV2_sustainedTWS,                               // 2-min sustained true wind, knots ×10 (Beaufort + gale basis)
+  CSV2_currentGaleMinutes,                         // live minutes continuously in a gale (sustained ≥34kt), int
+  CSV2_wmIgn_VMGman_lo,   CSV2_wmIgn_VMGman_hi,    // VMG manual session min/max (knots ×10)
+  CSV2_wmIgn_VMGup_lo,    CSV2_wmIgn_VMGup_hi,     // VMG upwind session min/max (knots ×10)
 
-  CSV2_FIELD_COUNT  // = 440 (439 prior + loggingActive)
+  CSV2_FIELD_COUNT  // = 447 (440 prior + VMGUpwind + sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs)
 };
 
 enum Csv3Index {
@@ -766,7 +771,7 @@ enum Csv3Index {
   CSV3_Ymin4,
   CSV3_Ymax4,
   CSV3_LoadDumpDtThresh3,
-  CSV3_VMGUseTrueWind,   // moved from CSV2
+  CSV3_reserved_VMGUseTrueWind,   // dead slot — Target-mode toggle removed; kept to preserve CSV3 indices, sends 0
   CSV3_hardwarePresent,  // moved from CSV2
   CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets false on boot
   CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate (decoupled from OvMeasMarginV 2026-05-23)
@@ -2945,13 +2950,7 @@ void setupServer() {
       RebulkCurrent_A = inputMessage.toFloat();
       writeFile(LittleFS, "/RebulkCurrent_A.txt", String(RebulkCurrent_A).c_str());
     }
-    if (request->hasParam("VMGUseTrueWind")) {
-      foundParameter = true;
-      inputMessage = request->getParam("VMGUseTrueWind")->value();
-      writeFile(LittleFS, "/VMGUseTrueWind.txt", inputMessage.c_str());
-      VMGUseTrueWind = inputMessage.toInt();
-      queueConsoleMessageF("VMG uses true wind %s", VMGUseTrueWind ? "enabled" : "disabled");
-    }
+    // VMGUseTrueWind (Target-mode toggle) removed — both VMGs (manual + upwind) are now always computed.
     if (request->hasParam("gpsTimeSourceMode")) {
       foundParameter = true;
       inputMessage = request->getParam("gpsTimeSourceMode")->value();
@@ -4300,6 +4299,14 @@ void setupServer() {
       anchorageRingHead = 0;
       anchorageRingCount = 0;
       lastAnchorageSampleMs = 0;
+      // Best upwind VMG + longest gale duration — clear lifetime watermarks (same rationale as the others).
+      // Reset the in-progress gale run too, so a pre-reset gale can't keep extending the post-reset record.
+      best_upwind_vmg_alltime = 0.0f;
+      longest_gale_duration_hours_alltime = 0.0f;
+      galeActive = false;
+      currentGaleMinutes = 0;
+      prev_BestUpVMG_AT = 0;
+      prev_GaleHrs_AT = 0;
       // Stamp the reset moment. Dashboard reads CSV1 slot 28 = (millis()-this)/1000
       // and formats it as "last 12 min" / "last 1.4 hr" on all .session-window-label spans.
       perfCountersResetMs = millis();
@@ -4442,8 +4449,12 @@ void setupServer() {
       request->send(webFS, "/script.js", "application/javascript");
   });
   server.onNotFound([](AsyncWebServerRequest *request) {
-    if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
-      sendWifiConfigPortal(request);
+    if (currentMode == MODE_CONFIG) {
+      sendWifiConfigPortal(request);  // provisioning: captive probe → WiFi-setup page (correct for new users)
+    } else if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+      // Operational AP: answer the OS connectivity probe as "success" so NO captive
+      // browser sheet auto-pops — app-first. Browser only appears if user navigates there.
+      request->send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
     } else {
       request->send(404, "text/plain", "Not Found");
     }
@@ -5530,7 +5541,7 @@ void SendWifiData() {
     WifiStrength = cachedWiFiRSSI;
     ch1_compute_stats();
     static char *payload2 = nullptr;
-    static const size_t PAYLOAD2_SIZE = 3400;  // (436 fields + 1) × 7 = 3059, rounded up to 3400
+    static const size_t PAYLOAD2_SIZE = 3400;  // (447 fields + 1) × 7 = 3136, rounded up to 3400
     if (!payload2) {
       payload2 = (char *)ps_malloc(PAYLOAD2_SIZE);  // allocated to PSRAM
       if (!payload2) {
@@ -5586,7 +5597,9 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                // restartRemainingSec + GPS/time source labels + loggingActive
-                               "%d,%d,%d,%d",
+                               "%d,%d,%d,%d,"
+                               // VMGUpwind + sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs (lo/hi)
+                               "%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -6024,7 +6037,12 @@ void SendWifiData() {
                                (int)restartRemainingSec,
                                (int)currentGpsSource,                    // 0=none 1=NMEA 2=Phone 3=Manual
                                (int)currentTimeSource,                   // 0=none 1=GPS 2=Phone 3=NTP 4=drifting
-                               (int)loggingActive                        // 1=logging, 0=stopped
+                               (int)loggingActive,                       // 1=logging, 0=stopped
+                               SafeInt(VMGUpwind, 100),                  // VMG to windward, knots ×100
+                               SafeInt(sustainedTWS, 10),                // 2-min sustained TWS, knots ×10
+                               SafeInt(currentGaleMinutes, 1),           // live gale minutes (int)
+                               SafeInt(wmIgnSafe(wmIgn_VMGman.lo), 10),  SafeInt(wmIgnSafe(wmIgn_VMGman.hi), 10),
+                               SafeInt(wmIgnSafe(wmIgn_VMGup.lo), 10),   SafeInt(wmIgnSafe(wmIgn_VMGup.hi), 10)
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -6352,7 +6370,7 @@ void SendWifiData() {
                                SafeInt(Ymin4),
                                SafeInt(Ymax4),
                                SafeInt(LoadDumpDtThresh3),                       // A/s tier-3 threshold (3 consecutive)
-                               SafeInt(VMGUseTrueWind),                          // moved from CSV2
+                               SafeInt(0),                                      // reserved (was VMGUseTrueWind; toggle removed)
                                SafeInt(hardwarePresent),                         // moved from CSV2
                                (int)testProtectionsEnabled,                     // 0/1 — runtime flag, not persisted
                                IExcessArmMarginV,                               // %.3f — iExcess voltage gate margin

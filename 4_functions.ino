@@ -992,11 +992,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     hardwarePresent = readFile(LittleFS, "/hardwarePresent.txt").toInt();
   }
-  if (!fsExists("/VMGUseTrueWind.txt")) {
-    writeFile(LittleFS, "/VMGUseTrueWind.txt", String(VMGUseTrueWind).c_str());
-  } else {
-    VMGUseTrueWind = readFile(LittleFS, "/VMGUseTrueWind.txt").toInt();
-  }
+  // VMGUseTrueWind.txt removed — Target-mode toggle gone; both VMGs always computed. Stale file (if any) is ignored.
   if (!fsExists("/gpsTimeSourceMode.txt")) {
     writeFile(LittleFS, "/gpsTimeSourceMode.txt", String(gpsTimeSourceMode).c_str());
   } else {
