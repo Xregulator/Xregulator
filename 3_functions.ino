@@ -5709,6 +5709,7 @@ void SendWifiData() {
                                SafeInt(imu_gyro_x_raw, 100),
                                SafeInt(imu_gyro_y_raw, 100),
                                SafeInt(imu_gyro_z_raw, 100),
+                               // Time-weighted averages below cast valid_us to int64 before dividing — else the unsigned valid_us promotes the signed area and corrupts negative values.
                                SafeInt(imuWindow->accel_x_min),
                                SafeInt(imuWindow->accel_x_max),
                                SafeInt(imuWindow->accel_x_valid_us > 0 ? (int)((int64_t)imuWindow->accel_x_area_v_us / (int64_t)imuWindow->accel_x_valid_us) : 0),

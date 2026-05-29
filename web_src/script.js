@@ -1308,6 +1308,12 @@ function cleanupResources() {
         sseReconnectTimer = null;
     }
 
+    // Clear the adaptive log-relay poll timer (self-rescheduling, not in activeTimers)
+    if (g_logPollTimer) {
+        clearTimeout(g_logPollTimer);
+        g_logPollTimer = null;
+    }
+
     // Destroy plots
     if (typeof currentTempPlot !== 'undefined' && currentTempPlot) {
         currentTempPlot.destroy();
@@ -10748,17 +10754,25 @@ function startLogs() {
         .catch(() => { });
 }
 
-// Reflect live logging state (CSV2 slot 439) in the pill + which toggle button shows.
+// Reflect live logging state (CSV2 slot 439) in the status badge + single pause/resume toggle.
 function updateLoggingStatus(loggingActive) {
     const pill = document.getElementById('loggingStatusPill');
-    const stopBtn = document.getElementById('stopLogsBtn');
-    const startBtn = document.getElementById('startLogsBtn');
+    const toggle = document.getElementById('logToggleBtn');
     if (!pill) return;
     const on = Number(loggingActive) === 1;
-    pill.textContent = on ? '● LOGGING' : '⏸ STOPPED·frozen';
+    pill.innerHTML = '<span class="log-dot"></span>' + (on ? 'Recording' : 'Paused');
     pill.className = 'log-pill ' + (on ? 'log-pill-on' : 'log-pill-off');
-    if (stopBtn) stopBtn.style.display = on ? '' : 'none';
-    if (startBtn) startBtn.style.display = on ? 'none' : '';
+    if (toggle) {
+        toggle.className = 'btn-log-toggle ' + (on ? 'is-recording' : 'is-paused');
+        toggle.textContent = on ? '⏸ Pause Logs' : '▶ Resume Logs';
+        toggle.dataset.recording = on ? '1' : '0';   // remembered so toggleLogs() knows which call to make
+    }
+}
+
+// Single button toggles pause/resume based on the last-known state from updateLoggingStatus().
+function toggleLogs() {
+    const toggle = document.getElementById('logToggleBtn');
+    if (toggle && toggle.dataset.recording === '1') { stopLogs(); } else { startLogs(); }
 }
 
 // ── Silent cloud log relay ────────────────────────────────────────────────
@@ -10769,6 +10783,23 @@ function updateLoggingStatus(loggingActive) {
 // A failed upload leaves the window open → retried on the next poll.
 let g_cloudToken = null;
 let g_logRelayBusy = false;
+
+// Adaptive poll cadence: 60s baseline while the app is open, ramps to 10s once a
+// log request is seen, and stays fast until 1hr passes with no new request. Lets a
+// rare support session (5-6 back-to-back pulls) feel snappy without 24/7 fast polling.
+const LOG_POLL_SLOW_MS = 60000;           // baseline cadence
+const LOG_POLL_FAST_MS = 10000;           // burst cadence after a request is seen
+const LOG_POLL_FAST_WINDOW_MS = 3600000;  // stay fast until 1hr with no new request
+let g_logLastRequestSeenMs = 0;           // Date.now() of last pending request seen
+let g_logPollTimer = null;                // dedicated timer (not in activeTimers — self-reschedules)
+
+// Schedule the next poll at the adaptive cadence. Dedicated timer ref so the
+// self-rescheduling chain doesn't bloat activeTimers; cleared in cleanupResources.
+function scheduleNextLogPoll() {
+    const fast = g_logLastRequestSeenMs
+        && (Date.now() - g_logLastRequestSeenMs) < LOG_POLL_FAST_WINDOW_MS;
+    g_logPollTimer = setTimeout(pollLogRequest, fast ? LOG_POLL_FAST_MS : LOG_POLL_SLOW_MS);
+}
 
 function cloudHeaders() {
     return {
@@ -10833,6 +10864,7 @@ async function pollLogRequest() {
         if (!checkResp.ok) return;
         const check = await checkResp.json();
         if (!check.pending) return;
+        g_logLastRequestSeenMs = Date.now();  // mark activity → keep fast cadence for 1hr
         const requestId = check.request_id;
 
         g_logRelayBusy = true;
@@ -10922,13 +10954,13 @@ async function pollLogRequest() {
         console.warn('Log relay error (will retry):', err);
     } finally {
         g_logRelayBusy = false;
+        scheduleNextLogPoll();  // self-rescheduling chain at the adaptive cadence
     }
 }
 
-// Poll on a 60s cadence (matches the phone poster). First run after SSE settles.
+// First run after SSE settles; pollLogRequest reschedules itself adaptively thereafter.
 document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(pollLogRequest, 8000);
-    setTrackedInterval(pollLogRequest, 60000);
+    g_logPollTimer = setTimeout(pollLogRequest, 8000);
 });
 
 

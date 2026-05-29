@@ -568,6 +568,8 @@ void imuInit() {
 
 
   // COMPRESSION LATER
+  // Left OFF: the FIFO parser only decodes uncompressed tags, so enabling compression routes
+  // every compressed sample to the unknown-tag path and stalls the drain. Needs delta-decode first.
   // // Enable FIFO compression (bonus headroom, don't rely on it)
   // if (imu.Set_FIFO_Compression_Algo_Init(1) != LSM6DSOX_OK || imu.Set_FIFO_Compression_Algo_Enable(1) != LSM6DSOX_OK || imu.Set_FIFO_Compression_Algo_Real_Time_Set(1) != LSM6DSOX_OK) {
   //   Serial.println("WARNING: Failed to enable FIFO compression (continuing anyway)");
@@ -2385,7 +2387,7 @@ void updateAccelMetrics() {
     }
     cf_lastUpdate = s->timestamp_us;
 
-    imuWindow->lastGyroUpdateTime_us = now_us;  // separate from accel tracker
+    imuWindow->lastGyroUpdateTime_us = now_us;  // separate from accel tracker (a shared one would zero the gyro dt)
     imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
   }
 

@@ -8953,16 +8953,21 @@
               ℹ️
               <span class="tooltip-box">Sends the last ~1 hour (133kb) of 2s interval data and the last ~1 minute
                 (21kb) of 100ms interval data to CSV files to the Downloads folder (pc) or Files (mobile
-                device). Logs are automatically cleared after download. Stop Logs freezes the log buffer so
-                its size stays fixed; Start Logs resumes recording.</span>
+                device). Logs are automatically cleared after download. Pause Logs freezes the log buffer so
+                its size stays fixed; Resume Logs continues recording. Start Fresh Log clears the buffer and
+                begins a new log.</span>
             </span>
           </div>
-          <div class="form-input" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-            <span id="loggingStatusPill" class="log-pill log-pill-on">● LOGGING</span>
-            <button type="button" class="btn-secondary" onclick="downloadLogs()">Download Logs</button>
-            <button type="button" class="btn-secondary" onclick="resetLogs()">Reset Logs</button>
-            <button type="button" id="stopLogsBtn" class="btn-secondary" onclick="stopLogs()">Stop Logs</button>
-            <button type="button" id="startLogsBtn" class="btn-primary" onclick="startLogs()" style="display:none;">Start Logs</button>
+          <!-- Option 3 layout: status+toggle bundled left, Download primary, Start Fresh isolated right -->
+          <div class="form-input log-controls">
+            <div class="log-group">
+              <span id="loggingStatusPill" class="log-pill log-pill-on"><span class="log-dot"></span>Recording</span>
+              <button type="button" id="logToggleBtn" class="btn-log-toggle is-recording" onclick="toggleLogs()">⏸ Pause Logs</button>
+            </div>
+            <button type="button" class="btn-log-primary" onclick="downloadLogs()">⬇ Download Logs</button>
+            <div class="log-fresh-wrap">
+              <button type="button" class="btn-log-fresh" onclick="resetLogs()">↻ Start Fresh Log</button>
+            </div>
           </div>
         </div>
       </div>
@@ -9229,44 +9234,28 @@
 
           <!-- Account Actions -->
           <div class="section-title">Account Management</div>
-          <hr />
           <!-- Explicit public-data disclosure: registering is the consent moment. Spells out exactly
-               what becomes public so consent is informed, not inferred from the email "(kept private)" hint. -->
-          <div class="form-row">
-            <div class="form-input" style="grid-column: 1 / -1; font-size: 12px; color: #555; background: #f7f7f7; border: 1px solid #e0e0e0; border-radius: 4px; padding: 10px 12px; line-height: 1.5;">
-              <strong>What's public:</strong> Registering shows your username, boat type, and boat length on the
-              public leaderboards, visible to anyone. Your email and location are never shared.
-              You can leave at any time with <strong>Delete All Data</strong> below — your device keeps working fully
-              without the cloud.
-            </div>
-          </div>
+               what becomes public so consent is informed, not inferred from the email "(kept private)" hint.
+               Plain muted helper text (NOT a flex .form-input — that scrambled the paragraph into columns). -->
+          <p style="font-size: 12.5px; color: #777; line-height: 1.55; margin: 8px 0 4px; max-width: 660px;">
+            <strong style="color: #555;">What's public:</strong> Registering shows your username, boat type, and
+            boat length on the public leaderboards, visible to anyone. Your email and location are never shared.
+            You can leave at any time with <strong style="color: #555;">Delete All Cloud Data</strong> — your device
+            keeps working fully without the cloud.
+          </p>
+
           <hr />
-          <div class="form-row">
-            <div class="form-label"></div>
-            <div class="form-input">
-              <input type="submit" value="Save Profile Changes" class="btn-primary" />
-            </div>
+
+          <!-- Single right-aligned action bar: destructive Delete (ghost) sits left of the primary Save.
+               Delete is type=button + onclick so it never submits the profile form; its own JS confirm
+               (warning + type-DELETE prompt) carries the irreversibility warning. -->
+          <div style="display: flex; justify-content: flex-end; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <button type="button" onclick="handleDeleteAllData()" class="btn-danger-ghost" title="Permanently deletes all your cloud data (GDPR). Cannot be undone — your device keeps working locally.">Delete All Cloud Data</button>
+            <input type="submit" value="Save Profile Changes" class="btn-primary" />
           </div>
 
           <div id="profile-message" style="margin-top: 15px; padding: 10px; display: none; border-radius: 4px;"></div>
         </form>
-
-        <hr />
-
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Delete All My Data (GDPR)</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">This will permanently delete all your data from the cloud platform. This
-                action
-                cannot be undone. Your device will continue to work locally.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <button onclick="handleDeleteAllData()" class="btn-danger">Delete All Data</button>
-          </div>
-        </div>
       </div>
     </div>
 
