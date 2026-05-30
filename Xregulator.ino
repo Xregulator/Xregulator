@@ -169,7 +169,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.84";
+const char *FIRMWARE_VERSION = "0.0.85";
 
 String currentUID;
 
@@ -1454,7 +1454,7 @@ struct ImuSnapshot {
 // during sector erase. Pushes are microseconds. Uploads drain to httpsQueue
 // from the cloud-feature block (field-off gate) or via the "Upload Now" button.
 struct SensorSnapshot {
-  int32_t collectionTime;       // time_t — positive epoch if synced, negative-millis marker if not
+  int64_t collectionTime;       // time_t (64-bit, Y2038-safe) — positive epoch if synced, negative-millis marker if not
   SensorWindow window;          // accumulated min/max/area for this window
   ImuSnapshot imu;              // frozen IMU subset (resists imuWindow reset between roll and upload)
 };

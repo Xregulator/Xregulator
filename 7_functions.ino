@@ -281,7 +281,12 @@ static void selectReferenceBins() {
     uint32_t ss_seconds;
   };
 
-  static Candidate candidates[NUM_MATRIX_CELLS];
+  // PSRAM-resident — sized by NUM_MATRIX_CELLS, must not sit in internal RAM/.bss
+  static Candidate *candidates = nullptr;
+  if (!candidates) {
+    candidates = (Candidate *)ps_malloc(NUM_MATRIX_CELLS * sizeof(Candidate));
+    if (!candidates) return;
+  }
   int nCandidates = 0;
 
   for (int r = 0; r < NUM_RPM_BUCKETS; r++) {
@@ -313,7 +318,13 @@ static void selectReferenceBins() {
   // Greedy spread-first selection
   // selected[] tracks indices into candidates[]
   static int selected[NUM_REFERENCE_BINS];
-  bool used[NUM_MATRIX_CELLS] = {};
+  // PSRAM-resident, zeroed each call (was a NUM_MATRIX_CELLS-sized stack array)
+  static bool *used = nullptr;
+  if (!used) {
+    used = (bool *)ps_malloc(NUM_MATRIX_CELLS * sizeof(bool));
+    if (!used) return;
+  }
+  memset(used, 0, NUM_MATRIX_CELLS * sizeof(bool));
   int nSelected = 0;
 
   // Seed: highest SS-time bin

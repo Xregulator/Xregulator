@@ -1536,7 +1536,7 @@ void pushSensorSnapshot(time_t collectionTime) {
     sensorRingTail = (sensorRingTail + 1) % SENSOR_RING_SIZE;
     sensorRingCount--;
   }
-  sensorRing[sensorRingHead].collectionTime = (int32_t)collectionTime;
+  sensorRing[sensorRingHead].collectionTime = (int64_t)collectionTime;
   sensorRing[sensorRingHead].window = *currentWindow;  // struct copy from PSRAM to PSRAM
   // Freeze the IMU subset (caller resets imuWindow right after, so we capture
   // the closing window's values here before they get clobbered).
@@ -1594,7 +1594,7 @@ void popTailSnapshot() {
 // during the 30-min ignition-off window.
 #define SENSOR_RING_BACKUP_PATH  "/sensor_ring_backup.bin"
 #define SENSOR_RING_BACKUP_MAGIC 0x53524258u  // 'SRBX'
-#define SENSOR_RING_BACKUP_VER   1u
+#define SENSOR_RING_BACKUP_VER   2u  // v2: collectionTime int32→int64 (Y2038)
 
 struct SensorRingBackupHeader {
   uint32_t magic;
