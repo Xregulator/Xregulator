@@ -150,7 +150,7 @@ static bool checkPointValid(float amps, float battV, float &fieldVolts,
 // LittleFS — SAVE / LOAD
 // One binary file holds the entire PSRAM matrix + referenceFinalized.
 // Replaces the previous "effmat" NVS namespace, which couldn't fit the
-// ~12.5 KB matrix inside the 20 KB NVS partition. Saves only happen at
+// ~12.5 KB matrix inside the then-20 KB NVS partition. Saves only happen at
 // the field-off +13 s flush and the shutdown Phase 2 flush — both run
 // with the field already off, so the ~100–150 ms LittleFS write is safe.
 // History blobs (eff_hist, eff_cs) still live in NVS — they're tiny.

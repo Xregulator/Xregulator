@@ -3695,6 +3695,22 @@ void executeCheckForcedUpdate() {
           forcedFwVersionInt = major * 10000 + minor * 100 + patch;
         }
 
+        // Already running the forced version — the post-install clear POST must have
+        // failed (network blip before reboot). Drop the flag locally so no stale
+        // "Update Now" modal shows, and queue a clear to self-heal the DB row. Safe
+        // because versions are monotonic (downgrades refused), so equality is the
+        // only "already satisfied" case. Best-effort: a dropped clear retries next boot.
+        if (forcedFwVersionInt == firmwareVersionInt) {
+          Serial.println("FORCED_UPDATE: Already on forced version — clearing stale flag");
+          hasForcedUpdate = false;
+          forcedFwVersionInt = 0;
+          forcedUpdateDeadline = 0;
+          HttpsRequest clearReq = { .type = HTTPS_CLEAR_FORCED_UPDATE };
+          xQueueSend(httpsQueue, &clearReq, 0);
+          http.end();
+          return;
+        }
+
         if (deadline_str != nullptr && strlen(deadline_str) > 0) {
           String timestampStr = String(deadline_str);
 
@@ -3816,11 +3832,11 @@ void printPartitionInfo() {
 
   // Check specific expected partitions
   Serial.println("\n🔍 EXPECTED PARTITION VERIFICATION:");
-  checkExpectedPartition("factory", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, 0x400000);
-  checkExpectedPartition("ota_0", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, 0x400000);
-  checkExpectedPartition("factory_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x200000);
-  checkExpectedPartition("prod_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x200000);
-  checkExpectedPartition("userdata", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x3D0000);
+  checkExpectedPartition("factory", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, 0x280000);
+  checkExpectedPartition("ota_0", ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, 0x280000);
+  checkExpectedPartition("factory_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x100000);
+  checkExpectedPartition("prod_fs", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x100000);
+  checkExpectedPartition("userdata", ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_LITTLEFS, 0x8E0000);
 
   // OTA partition info
   Serial.println("\n🔄 OTA PARTITION STATUS:");
