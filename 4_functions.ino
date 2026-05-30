@@ -2730,33 +2730,6 @@ bool verifyPackageSignature(uint8_t *packageData, size_t packageSize, const Stri
     return false;
   }
 }
-UpdateInfo parseUpdateResponse(const String &jsonResponse) {
-  UpdateInfo info = { false, "", "", "", "", 0 };
-
-  DynamicJsonDocument doc(2048);
-  DeserializationError error = deserializeJson(doc, jsonResponse.c_str(), jsonResponse.length());
-
-  if (error) {
-    Serial.printf("JSON parse error: %s\n", error.c_str());
-    return info;
-  }
-
-  if (doc["hasUpdate"].as<bool>()) {
-    info.hasUpdate = true;
-    info.version = doc["version"].as<String>();
-    info.firmwareUrl = doc["firmwareUrl"].as<String>();
-    info.signatureUrl = doc["signatureUrl"].as<String>();
-    info.changelog = doc["changelog"].as<String>();
-    info.firmwareSize = doc["firmwareSize"].as<size_t>();
-
-    Serial.printf("🔄 UPDATE AVAILABLE: %s -> %s\n", FIRMWARE_VERSION, info.version.c_str());
-    Serial.printf("📦 Firmware size: %d bytes\n", info.firmwareSize);
-    Serial.printf("📝 Changelog: %s\n", info.changelog.c_str());
-  }
-
-  return info;
-}
-
 // Perform actual firmware download and install
 // Initialize streaming extractor
 bool initStreamingExtractor(StreamingExtractor *extractor) {
@@ -3156,9 +3129,13 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   otaHeapMark("AFTER WiFiClientSecure");
 
-  Serial.println("7. Setting CA cert...");
-  client.setCACert(server_root_ca);
-  otaHeapMark("AFTER setCACert");
+  // setInsecure() not setCACert(): downloads go through the ota.xengineering.net
+  // proxy, whose cert chain we don't pin (and it may change when re-homed). Transport
+  // auth is irrelevant here — the downloaded package is RSA-signature-verified below
+  // (mbedtls_pk_verify / OTA_PUBLIC_KEY), which is the real integrity guarantee.
+  Serial.println("7. Setting TLS (insecure transport; payload is signature-verified)...");
+  client.setInsecure();
+  otaHeapMark("AFTER setInsecure");
 
   // CRITICAL: Set matching timeouts BEFORE connection attempt
   client.setTimeout(30000);           // 30 seconds in milliseconds
@@ -3381,7 +3358,7 @@ void performOTAUpdate(const UpdateInfo &updateInfo) {
   prepareForOTA();
   // Download signature first
   WiFiClientSecure client;
-  client.setCACert(server_root_ca);
+  client.setInsecure();  // ota.xengineering.net proxy (unpinned chain); payload integrity comes from RSA verify, not TLS pinning
   HTTPClient http;
   Serial.printf("📥 Downloading signature from: %s\n", updateInfo.signatureUrl.c_str());
   // No 40K heap gate — see notes at firmware-download http.begin above.
@@ -3473,9 +3450,8 @@ void performOTAUpdateToVersion(const char *targetVersion) {
   // Called by: The /get handler when UpdateToVersion parameter is received
   //Purpose: Initiates a targeted version update
   //Action:
-  //1) Makes HTTP request to check.php
-  //2) Sends Target-Version as a URL parameter
-  //3) Calls performOTAUpdate() if version matches
+  //1) Builds the artifact URLs from OTA_BASE_URL (ota.xengineering.net proxy -> Supabase) for the target version (no check.php)
+  //2) Calls performOTAUpdate() which downloads, verifies signature, and installs
   // Rate limit ALL HTTPS operations system-wide
   unsigned long timeSinceLastHttps = millis() - lastHttpsOperationTime;
   if (timeSinceLastHttps < HTTPS_MIN_INTERVAL) {
@@ -3535,62 +3511,27 @@ void performOTAUpdateToVersion(const char *targetVersion) {
 
   esp_task_wdt_reset();
 
-  WiFiClientSecure client;  // LOCAL - fresh SSL state
-  client.setCACert(server_root_ca);
+  // No middleman: the target version is already known (forced-update from the
+  // cloud, or a user pick in the dashboard), so we build the artifact URLs directly
+  // from our stable OTA_BASE_URL (ota.xengineering.net proxy -> Supabase) instead of
+  // asking check.php to resolve them. A version that doesn't exist surfaces as an
+  // HTTP 404 inside performOTAUpdate(), which aborts safely (alternator stays off).
+  String otaBase = String(OTA_BASE_URL);
+  UpdateInfo updateInfo;
+  updateInfo.hasUpdate = true;
+  updateInfo.version = String(targetVersion);
+  updateInfo.firmwareUrl = otaBase + "/firmware_" + String(targetVersion) + ".tar";
+  updateInfo.signatureUrl = otaBase + "/firmware_" + String(targetVersion) + ".sig";
+  updateInfo.changelog = "";
+  updateInfo.firmwareSize = 0;  // unknown ahead of time; tar extractor streams to EOF
 
-  HTTPClient http;
+  Serial.printf("=== STARTING TARGETED UPDATE TO %s ===\n", targetVersion);
+  Serial.println("🌐 Firmware URL: " + updateInfo.firmwareUrl);
+  events.send("OTA: Beginning download of version " + String(targetVersion), "console", millis());
+  performOTAUpdate(updateInfo);
 
-  // Request specific version using Target-Version header (per your documentation)
-  String url = String(OTA_SERVER_URL) + "/api/firmware/check.php?requestedVersion=" + String(targetVersion);
-  Serial.println("🌐 Requesting specific version from: " + url);
-
-  // No 40K heap gate — see notes at firmware-download http.begin above.
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("User-Agent", "XRegulator/2.0");
-  http.addHeader("Device-ID", getDeviceId());
-  http.addHeader("Current-Version", FIRMWARE_VERSION);
-  http.addHeader("Hardware-Version", "ESP32-WROOM-32");
-  http.setTimeout(30000);
-
-  int httpCode = http.GET();
-  Serial.printf("📡 HTTP Response Code: %d\n", httpCode);
-
-  if (httpCode == 200) {
-    String response = http.getString();
-    Serial.println("📨 Server response: " + response);
-    UpdateInfo updateInfo = parseUpdateResponse(response);
-
-    if (updateInfo.hasUpdate && updateInfo.version == String(targetVersion)) {
-      Serial.printf("=== STARTING TARGETED UPDATE TO %s ===\n", targetVersion);
-      events.send("OTA: Beginning download of version " + String(targetVersion), "console", millis());
-      performOTAUpdate(updateInfo);  // ← THIS WAS MISSING
-    } else if (!updateInfo.hasUpdate) {
-      Serial.println("OTA: Server says no update available for version " + String(targetVersion));
-      events.send("OTA: Server says no update available for version " + String(targetVersion), "console", millis());
-    } else {
-      Serial.println("OTA: Version mismatch - requested " + String(targetVersion) + ", got " + updateInfo.version);
-      events.send("OTA: Version mismatch - requested " + String(targetVersion) + ", got " + updateInfo.version, "console", millis());
-    }
-  } else if (httpCode == 404) {
-    Serial.println("OTA: Version " + String(targetVersion) + " not found on server");
-    events.send("OTA: Version " + String(targetVersion) + " not found on server", "console", millis());
-  } else if (httpCode == 429) {
-    Serial.println("OTA: Rate limited - try again later");
-    events.send("OTA: Rate limited - try again later", "console", millis());
-  } else if (httpCode < 0) {
-    Serial.printf("OTA: Connection failed - %s\n", http.errorToString(httpCode).c_str());  // ← ADD ERROR STRING
-    events.send("OTA: Connection failed - check internet connection", "console", millis());
-  } else {
-    Serial.printf("OTA: Update request failed with HTTP code: %d (%s)\n",
-                  httpCode,
-                  http.errorToString(httpCode).c_str());  // ← ADD ERROR STRING
-    events.send("OTA: Update request failed - HTTP error " + String(httpCode), "console", millis());
-  }
-
-  http.end();
   lastHttpsOperationTime = millis();  // Update timestamp
-  Serial.println("HEAP AFTER http.end():");
+  Serial.println("HEAP AFTER OTA attempt:");
   Serial.printf("  Internal: %u free, %u largest\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));

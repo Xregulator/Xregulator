@@ -153,8 +153,13 @@ struct HttpsRequest {
   char payload[6144];
 };
 
-// OTA server configuration
-const char *OTA_SERVER_URL = "https://ota.xengineering.net";
+// OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
+// proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
+// firmware only ever knows this domain — to re-home OTA hosting later, we repoint the
+// proxy, no firmware/factory re-flash. URLs are built from OTA_BASE_URL in
+// performOTAUpdateToVersion(). (setInsecure on the download path; integrity is the
+// on-device RSA-4096 signature check, not TLS — see performOTAUpdate.)
+const char *OTA_BASE_URL = "https://ota.xengineering.net";
 // IMPORTANT: Firmware Version number MUST follow semantic versioning (x.y.z format)
 // - Only numeric digits and dots allowed (regex: ^\d+\.\d+\.\d+$)
 // - Examples: "1.0.0", "2.1.3", "10.5.22" ✅
@@ -164,7 +169,7 @@ const char *OTA_SERVER_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.73";
+const char *FIRMWARE_VERSION = "0.0.78";
 
 String currentUID;
 
@@ -1998,7 +2003,6 @@ FuncTiming ft_UpdateEngineRuntime;
 FuncTiming ft_UpdateEngineFuel;
 FuncTiming ft_UpdateBatterySOC;
 FuncTiming ft_UpdateTravelStatistics;
-FuncTiming ft_UpdateDistanceThisInterval;
 FuncTiming ft_UpdateBoardTempPressureMaximums;
 FuncTiming ft_handleSocGainReset;
 FuncTiming ft_handleAltZeroReset;
@@ -3168,7 +3172,6 @@ uint32_t g_currentStaleCount = 0;
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)
 float sailing_ratio = 0.0;                    // % of time spent sailing (calculated)
-float distance_this_interval = 0.0;           // Nautical miles traveled this interval
 float max_wind_speed_true_alltime = 0.0;      // Maximum true wind speed (knots)
 float max_wind_speed_apparent_alltime = 0.0;  // Maximum apparent wind speed (knots)
 float board_temp_max_alltime = -999.0;        // Maximum board temperature (°F)
@@ -3214,11 +3217,6 @@ inline void wmIgnUpdate(IgnWatermark &w, float v) {
   if (isnan(w.hi) || v > w.hi) w.hi = v;
 }
 inline float wmIgnSafe(float v) { return isnan(v) ? 0.0f : v; }
-
-// Helper variables for distance tracking
-double last_position_lat = 0.0;
-double last_position_lon = 0.0;
-bool first_distance_calc = true;
 
 // Universal data freshness tracking
 
@@ -3722,7 +3720,6 @@ void setup() {
   memset(&ft_UpdateEngineFuel, 0, sizeof(FuncTiming));
   memset(&ft_UpdateBatterySOC, 0, sizeof(FuncTiming));
   memset(&ft_UpdateTravelStatistics, 0, sizeof(FuncTiming));
-  memset(&ft_UpdateDistanceThisInterval, 0, sizeof(FuncTiming));
   memset(&ft_UpdateBoardTempPressureMaximums, 0, sizeof(FuncTiming));
   memset(&ft_handleSocGainReset, 0, sizeof(FuncTiming));
   memset(&ft_handleAltZeroReset, 0, sizeof(FuncTiming));
@@ -4000,7 +3997,6 @@ void loop() {
     TIMED_CALL(ft_UpdateEngineFuel, UpdateEngineFuel(elapsedMillis));  //
     TIMED_CALL(ft_UpdateBatterySOC, UpdateBatterySOC(elapsedMillis));
     TIMED_CALL(ft_UpdateTravelStatistics, UpdateTravelStatistics(elapsedMillis));       //
-    TIMED_CALL(ft_UpdateDistanceThisInterval, UpdateDistanceThisInterval());            // NEW
     TIMED_CALL(ft_UpdateBoardTempPressureMaximums, UpdateBoardTempPressureMaximums());  // NEW
     TIMED_CALL(ft_handleSocGainReset, handleSocGainReset());                            // do the dynamic updates
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
@@ -4354,7 +4350,6 @@ void loop() {
           TIMED_CALL(ft_UpdateSailingMetrics, UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL));
           lastSensorUploadTime = currentMillisz;
           TIMED_CALL(ft_uploadSensorHistory, uploadSensorHistory());
-          resetDistanceThisInterval();
           esp_task_wdt_reset();
         }
 
@@ -4449,7 +4444,6 @@ void loop() {
     ft_UpdateEngineFuel.worstWindow = 0;
     ft_UpdateBatterySOC.worstWindow = 0;
     ft_UpdateTravelStatistics.worstWindow = 0;
-    ft_UpdateDistanceThisInterval.worstWindow = 0;
     ft_UpdateBoardTempPressureMaximums.worstWindow = 0;
     ft_handleSocGainReset.worstWindow = 0;
     ft_handleAltZeroReset.worstWindow = 0;

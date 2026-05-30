@@ -1024,36 +1024,51 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
   if (gpsValid) {
     static double lastLat = 0;
     static double lastLon = 0;
+    static uint32_t lastFixMs = 0;
     static bool firstRun = true;
 
     if (firstRun) {
       lastLat = LatitudeNMEA;
       lastLon = LongitudeNMEA;
+      lastFixMs = millis();
       firstRun = false;
     } else {
       double distanceDelta_nm = calculateHaversineDistance(lastLat, lastLon, LatitudeNMEA, LongitudeNMEA);
 
-      if (distanceDelta_nm < 0.1) {
-        static float distanceAccumulator = 0.0f;
-        static float distanceAccumulator_AllTime = 0.0f;
+      // Only act when the fix actually moved. Position is re-read every 2 s but only
+      // refreshes every 60 s on phone GPS, so most ticks see an identical fix (delta 0).
+      if (distanceDelta_nm > 0.0) {
+        uint32_t nowMs = millis();
+        uint32_t dtMs = nowMs - lastFixMs;
+        float impliedKn = (dtMs > 0) ? (float)(distanceDelta_nm / (dtMs / 3600000.0)) : 9999.0f;
 
-        distanceAccumulator += (float)distanceDelta_nm;
-        distanceAccumulator_AllTime += (float)distanceDelta_nm;
+        // Implied-speed gate replaces the old fixed 0.1 nm jump filter, which dropped every
+        // step above ~6 kt on 60 s phone-GPS fixes (zeroing distance for fast boats). A
+        // <=5 min gap at <50 kt is real motion; anything else is a GPS teleport — rebaseline
+        // without polluting the odometer.
+        if (dtMs <= 300000UL && impliedKn < 50.0f) {
+          static float distanceAccumulator = 0.0f;
+          static float distanceAccumulator_AllTime = 0.0f;
 
-        if (distanceAccumulator >= 0.01f) {
-          TotalDistance += distanceAccumulator;
-          distanceAccumulator = 0.0f;
+          distanceAccumulator += (float)distanceDelta_nm;
+          distanceAccumulator_AllTime += (float)distanceDelta_nm;
+
+          if (distanceAccumulator >= 0.01f) {
+            TotalDistance += distanceAccumulator;
+            distanceAccumulator = 0.0f;
+          }
+          if (distanceAccumulator_AllTime >= 0.01f) {
+            TotalDistance_AllTime += distanceAccumulator_AllTime;
+            distanceAccumulator_AllTime = 0.0f;
+          }
+
+          tripDistanceDelta_nm = (float)distanceDelta_nm;  // reuse validated delta for trip
         }
-        if (distanceAccumulator_AllTime >= 0.01f) {
-          TotalDistance_AllTime += distanceAccumulator_AllTime;
-          distanceAccumulator_AllTime = 0.0f;
-        }
 
-        tripDistanceDelta_nm = (float)distanceDelta_nm;  // reuse jump-filtered delta for trip
+        lastLat = LatitudeNMEA;
+        lastLon = LongitudeNMEA;
+        lastFixMs = nowMs;
       }
-
-      lastLat = LatitudeNMEA;
-      lastLon = LongitudeNMEA;
     }
   }
 
@@ -1377,39 +1392,6 @@ void UpdateSailingMetrics(unsigned long elapsedMillis) {
     sailing_ratio = 0.0f;
   }
 }
-//UpdateDistanceThisInterval - Accumulate distance for this upload interval
-void UpdateDistanceThisInterval() {
-  // Only calculate if we have valid GPS data
-  if (IS_STALE(IDX_LATITUDE_NMEA) || IS_STALE(IDX_LONGITUDE_NMEA)) {
-    return;
-  }
-
-  // Get smoothed position
-  double smoothLat, smoothLon;
-  getSmoothedGPS(smoothLat, smoothLon);
-
-  // Initialize on first run
-  if (first_distance_calc) {
-    last_position_lat = smoothLat;
-    last_position_lon = smoothLon;
-    first_distance_calc = false;
-    return;
-  }
-
-  // Calculate distance using existing Haversine function
-  double distanceDelta_nm = calculateHaversineDistance(
-    last_position_lat, last_position_lon,
-    smoothLat, smoothLon);
-
-  // Sanity check: Ignore unrealistic jumps (same as TotalDistance logic)
-  if (distanceDelta_nm < 0.1) {
-    distance_this_interval += distanceDelta_nm;
-  }
-
-  // Update last position
-  last_position_lat = smoothLat;
-  last_position_lon = smoothLon;
-}
 void UpdateWindMaximums() {
   if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && ApparentWindSpeedNMEA > max_wind_speed_apparent_alltime) {
     max_wind_speed_apparent_alltime = ApparentWindSpeedNMEA;
@@ -1437,10 +1419,6 @@ void UpdateBoardTempPressureMaximums() {
   }
 }
 
-void resetDistanceThisInterval() {
-  distance_this_interval = 0.0;
-  // Note: Don't reset last_position - we want continuous tracking
-}
 
 float getBatteryCurrent() {
   // Return battery current from appropriate source

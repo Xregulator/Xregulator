@@ -3784,21 +3784,98 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
   justify-content: center;
   color: #fff;
   font-family: inherit;
+  overflow: hidden;
+  transition: opacity 0.45s ease;
   -webkit-user-select: none;
   user-select: none;
 }
-.wfr-inner { text-align: center; padding: 0 24px; }
-.wfr-spinner {
-  width: 48px;
-  height: 48px;
-  border: 4px solid rgba(255, 255, 255, 0.18);
-  border-top-color: #fff;
-  border-radius: 50%;
-  margin: 0 auto 20px;
-  animation: wfr-spin 1s linear infinite;
-}
-@keyframes wfr-spin { to { transform: rotate(360deg); } }
-.wfr-title { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
-.wfr-sub { font-size: 13px; opacity: 0.7; }
+#waiting-for-regulator.wfr-hiding { opacity: 0; pointer-events: none; }
+
+/* ── Boat loading scene — Capacitor cold-launch splash (themed dark/light) ──
+   Faithful port of the approved 300x600 prototype: a fixed-size design "stage"
+   reproduces every tuned px value, and the inline script scales it (--bl-scale)
+   to COVER the viewport, so it looks identical on any screen. ── */
+#waiting-for-regulator .bl-stage { position: absolute; left: 50%; top: 50%; width: 300px; height: 600px;
+  transform: translate(-50%, -50%) scale(var(--bl-scale, 1.45)); transform-origin: center center; }
+
+#waiting-for-regulator .bl-sky { position: absolute; inset: 0; z-index: 1; }
+#waiting-for-regulator .bl-boat { position: absolute; left: 50%; width: 166px; z-index: 30; transform-origin: 50% 100%; animation: bl-bob 6s ease-in-out infinite; }
+#waiting-for-regulator .bl-boat img, #waiting-for-regulator .bl-reflection img { width: 100%; display: block; }
+#waiting-for-regulator .bl-reflection { position: absolute; left: 50%; width: 166px; z-index: 16;
+  transform: translateX(-50%) scaleY(-1); filter: blur(1.4px);
+  -webkit-mask-image: linear-gradient(to top, #000 0%, transparent 60%); mask-image: linear-gradient(to top, #000 0%, transparent 60%);
+  animation: bl-refl 6s ease-in-out infinite; }
+#waiting-for-regulator .bl-sea { position: absolute; left: 0; right: 0; bottom: 0; z-index: 15; overflow: hidden; }
+#waiting-for-regulator .bl-shine { position: absolute; inset: 0; opacity: 0.4; }
+#waiting-for-regulator .bl-waterline { position: absolute; left: 0; right: 0; height: 2px; z-index: 20; }
+#waiting-for-regulator .bl-wake { position: absolute; left: 50%; transform: translateX(-50%); width: 150px; height: 16px; z-index: 22; border-radius: 50%; filter: blur(3px); animation: bl-wake 6s ease-in-out infinite; }
+#waiting-for-regulator .bl-sun { position: absolute; z-index: 5; }
+
+#waiting-for-regulator .bl-brand { position: absolute; top: 60px; left: 0; right: 0; z-index: 40; line-height: 1; display: flex; justify-content: center; align-items: baseline; }
+#waiting-for-regulator .bl-brand .wm-X { font-size: 30px; font-weight: 900; color: var(--accent); letter-spacing: -0.02em; }
+#waiting-for-regulator .bl-brand .wm-rest { font-size: 30px; font-weight: 300; letter-spacing: 0.02em; }
+
+#waiting-for-regulator .bl-load { position: absolute; bottom: 30px; left: 0; right: 0; text-align: center; z-index: 50; }
+#waiting-for-regulator .bl-text { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 10px; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+#waiting-for-regulator .bl-dots { display: flex; gap: 7px; justify-content: center; }
+#waiting-for-regulator .bl-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: bl-pulse 1.4s ease-in-out infinite; }
+#waiting-for-regulator .bl-dots span:nth-child(2) { animation-delay: 0.2s; }
+#waiting-for-regulator .bl-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+#waiting-for-regulator .bl-stars, #waiting-for-regulator .bl-clouds { display: none; }
+
+@keyframes bl-bob { 0%,100% { transform: translateX(-51%) translateY(0) rotate(-1deg); } 50% { transform: translateX(-49%) translateY(-4px) rotate(1deg); } }
+@keyframes bl-refl { 0%,100% { transform: translateX(-50%) scaleY(-1) skewX(2.5deg); } 50% { transform: translateX(-50%) scaleY(-1) skewX(-2.5deg); } }
+@keyframes bl-wake { 0%,100% { opacity: 0.55; width: 150px; } 50% { opacity: 0.8; width: 166px; } }
+@keyframes bl-pulse { 0%,100% { opacity: 0.25; transform: scale(0.7); } 50% { opacity: 1; transform: scale(1); } }
+@keyframes bl-twinkle { 0%,100% { opacity: 0.25; } 50% { opacity: 0.9; } }
+@keyframes bl-cloud { from { transform: translateX(0) scale(var(--s,1)); } to { transform: translateX(480px) scale(var(--s,1)); } }
+
+/* Dark "dusk ocean" */
+#waiting-for-regulator.wfr-dark { background: #06302e; }
+.wfr-dark .bl-sky { background: linear-gradient(#0a1f24 0%, #0e3b3a 50%, #1d6f6c 66%, #2b8a86 74%); }
+.wfr-dark .bl-boat { bottom: 196px; }
+.wfr-dark .bl-reflection { bottom: -30px; opacity: 0.16; }
+.wfr-dark .bl-sea { height: 208px; background: linear-gradient(#0c4d4a 0%, #06302e 55%, #041f1e 100%); }
+.wfr-dark .bl-shine { background: repeating-linear-gradient(180deg, transparent 0 10px, rgba(130,235,227,0.08) 10px 11px); }
+.wfr-dark .bl-waterline { bottom: 208px; background: linear-gradient(90deg, transparent, rgba(160,245,238,0.7) 30%, rgba(160,245,238,0.7) 70%, transparent); }
+.wfr-dark .bl-wake { bottom: 200px; background: radial-gradient(ellipse, rgba(200,250,245,0.7), rgba(200,250,245,0) 70%); }
+.wfr-dark .bl-sun { bottom: 206px; left: 50%; transform: translateX(-50%); width: 130px; height: 130px; border-radius: 50%; background: radial-gradient(circle, rgba(130,235,227,0.5), rgba(130,235,227,0) 70%); }
+.wfr-dark .bl-brand .wm-rest { color: #e9faf8; }
+.wfr-dark .bl-text { color: #cdfbf6; }
+.wfr-dark .bl-dots span { background: var(--accent-soft, #4fc4bd); }
+#waiting-for-regulator.wfr-dark .bl-stars { display: block; position: absolute; top: 0; left: 0; right: 0; height: 360px; z-index: 2; animation: bl-twinkle 4s ease-in-out infinite; background-repeat: no-repeat;
+  background-image:
+    radial-gradient(1.5px 1.5px at 18% 18%, #cfeeed, transparent),
+    radial-gradient(1.5px 1.5px at 62% 12%, #ffffff, transparent),
+    radial-gradient(1.5px 1.5px at 82% 26%, #bfe9e6, transparent),
+    radial-gradient(1.5px 1.5px at 38% 30%, #cfeeed, transparent),
+    radial-gradient(1.5px 1.5px at 73% 38%, #cfeeed, transparent),
+    radial-gradient(1.5px 1.5px at 28% 44%, #bfe9e6, transparent),
+    radial-gradient(1.5px 1.5px at 90% 16%, #ffffff, transparent); }
+
+/* Light "daylight ocean" */
+#waiting-for-regulator.wfr-light { background: #bfeae7; }
+.wfr-light .bl-sky { background: linear-gradient(180deg, #9fd3e6 0%, #c2e8ed 32%, #e0f5f2 58%, #eefbf7 76%); }
+.wfr-light .bl-boat { bottom: 192px; }
+.wfr-light .bl-reflection { bottom: -34px; opacity: 0.14; }
+.wfr-light .bl-sea { height: 204px; background: linear-gradient(#2ea7a0 0%, #14807a 55%, #0c5f5a 100%); }
+.wfr-light .bl-shine { background: repeating-linear-gradient(180deg, transparent 0 10px, rgba(255,255,255,0.16) 10px 11px); }
+.wfr-light .bl-waterline { bottom: 204px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.85) 30%, rgba(255,255,255,0.85) 70%, transparent); }
+.wfr-light .bl-wake { bottom: 196px; background: radial-gradient(ellipse, rgba(255,255,255,0.8), rgba(255,255,255,0) 70%); }
+.wfr-light .bl-sun { top: 104px; right: 48px; width: 54px; height: 54px; border-radius: 50%; background: radial-gradient(circle, #fff 32%, rgba(255,255,255,0.55) 58%, rgba(255,255,255,0) 76%); box-shadow: 0 0 60px 22px rgba(255,255,255,0.55); }
+.wfr-light .bl-brand .wm-rest { color: #1a4d4a; }
+.wfr-light .bl-text { color: #ffffff; }
+.wfr-light .bl-dots span { background: var(--accent-deep, #007a75); }
+#waiting-for-regulator.wfr-light .bl-clouds { display: block; }
+/* Soft, blurred multi-puff clouds (no hard edges) */
+.wfr-light .bl-clouds span { position: absolute; z-index: 6; width: 150px; height: 50px; filter: blur(6px); background-repeat: no-repeat;
+  background:
+    radial-gradient(38px 30px at 26% 58%, rgba(255,255,255,0.95), rgba(255,255,255,0) 70%),
+    radial-gradient(52px 42px at 48% 42%, #ffffff, rgba(255,255,255,0) 72%),
+    radial-gradient(42px 32px at 70% 56%, rgba(255,255,255,0.95), rgba(255,255,255,0) 70%),
+    radial-gradient(135px 24px at 50% 84%, rgba(255,255,255,0.85), rgba(255,255,255,0) 78%); }
+.wfr-light .bl-clouds span:nth-child(1) { top: 116px; left: 24px; --s: 1; opacity: 0.9; animation: bl-cloud 90s linear infinite; }
+.wfr-light .bl-clouds span:nth-child(2) { top: 172px; left: 150px; --s: 0.58; opacity: 0.6; animation: bl-cloud 120s linear infinite; }
 
 /* XREG_END */

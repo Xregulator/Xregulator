@@ -75,7 +75,7 @@
     background:radial-gradient(circle, rgba(130,235,227,.5), rgba(130,235,227,0) 70%); z-index:5; }
   .A .star{ position:absolute; width:2px; height:2px; background:#cfeeed; border-radius:50%; animation:twinkle 3s ease-in-out infinite; }
   @keyframes twinkle{ 0%,100%{opacity:.2;} 50%{opacity:1;} }
-  .A .boat{ bottom:208px; }                /* waterline at 208px from bottom */
+  .A .boat{ bottom:196px; }                /* sea top at 208px; boat seated ~12px into the water */
   .A .reflection{ bottom:-30px; opacity:.16; }
   .A .sea{ height:208px; background:linear-gradient(#0c4d4a 0%, #06302e 55%, #041f1e 100%); }
   .A .seaShine{ position:absolute; inset:0; opacity:.4;
@@ -88,17 +88,24 @@
   .A .loadrow{ position:absolute; bottom:30px; left:0; right:0; z-index:50; }
 
   /* ============ B — DAYLIGHT OCEAN (light) ============ */
-  .B .sky{ background:linear-gradient(#eafbfa 0%, #d6f3f1 42%, #bfeae7 60%); }
+  .B .sky{ background:linear-gradient(180deg, #9fd3e6 0%, #c2e8ed 32%, #e0f5f2 58%, #eefbf7 76%); }
   .B .wm-rest{ color:#1a4d4a; } .B .tagline{ color:var(--accent-deep); }
-  .B .sun{ position:absolute; top:118px; right:46px; width:42px; height:42px; border-radius:50%;
-    background:radial-gradient(circle,#fff,#bdeee9); box-shadow:0 0 26px 8px rgba(0,161,154,.25); z-index:5; }
-  .B .cloud{ position:absolute; height:14px; width:54px; background:#fff; border-radius:20px; opacity:.85; z-index:6; animation:cloud 20s linear infinite; }
-  .B .cloud::before,.B .cloud::after{ content:''; position:absolute; background:#fff; border-radius:50%; }
-  .B .cloud::before{ width:24px; height:24px; top:-11px; left:6px; }
-  .B .cloud::after{ width:30px; height:30px; top:-16px; left:22px; }
-  .B .cl1{ top:150px; left:-70px; } .B .cl2{ top:200px; left:-70px; transform:scale(.7); animation-delay:8s; }
-  @keyframes cloud{ from{ transform:translateX(0) scale(var(--s,1)); } to{ transform:translateX(380px) scale(var(--s,1)); } }
-  .B .boat{ bottom:204px; }
+  .B .sun{ position:absolute; top:104px; right:48px; width:54px; height:54px; border-radius:50%;
+    background:radial-gradient(circle, #fff 32%, rgba(255,255,255,.55) 58%, rgba(255,255,255,0) 76%);
+    box-shadow:0 0 60px 22px rgba(255,255,255,.55); z-index:5; }
+  /* Soft, blurred multi-puff clouds (no hard edges) */
+  .B .cloud{ position:absolute; z-index:6; width:150px; height:50px; filter:blur(6px); background-repeat:no-repeat;
+    background:
+      radial-gradient(38px 30px at 26% 58%, rgba(255,255,255,.95), rgba(255,255,255,0) 70%),
+      radial-gradient(52px 42px at 48% 42%, #ffffff, rgba(255,255,255,0) 72%),
+      radial-gradient(42px 32px at 70% 56%, rgba(255,255,255,.95), rgba(255,255,255,0) 70%),
+      radial-gradient(135px 24px at 50% 84%, rgba(255,255,255,.85), rgba(255,255,255,0) 78%);
+    animation:cloud 90s linear infinite; }
+  .B .cloud::before,.B .cloud::after{ content:none; }
+  .B .cl1{ top:116px; left:24px; --s:1; opacity:.9; }
+  .B .cl2{ top:172px; left:150px; --s:.58; opacity:.6; animation-duration:120s; }
+  @keyframes cloud{ from{ transform:translateX(0) scale(var(--s,1)); } to{ transform:translateX(480px) scale(var(--s,1)); } }
+  .B .boat{ bottom:192px; }                /* sea top at 204px; boat seated ~12px into the water */
   .B .reflection{ bottom:-34px; opacity:.14; }
   .B .sea{ height:204px; background:linear-gradient(#2ea7a0 0%, #14807a 55%, #0c5f5a 100%); }
   .B .seaShine{ position:absolute; inset:0; opacity:.4;

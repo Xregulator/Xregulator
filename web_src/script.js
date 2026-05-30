@@ -509,8 +509,6 @@ const CSV2_FIELDS = [
     "ft_UpdateBatterySOC_ses",
     "ft_UpdateTravelStatistics_win",
     "ft_UpdateTravelStatistics_ses",
-    "ft_UpdateDistanceThisInterval_win",
-    "ft_UpdateDistanceThisInterval_ses",
     "ft_UpdateBoardTempPressureMaximums_win",
     "ft_UpdateBoardTempPressureMaximums_ses",
     "ft_handleSocGainReset_win",
@@ -1090,10 +1088,18 @@ async function getPhoneLocation() {
         }
     }
     if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        // Browser geolocation requires a secure context (HTTPS / localhost). The
+        // ESP32 serves over plain HTTP on the LAN, so a desktop browser will always
+        // be refused — skip the call (and the guaranteed console error) outright.
+        // Capacitor uses the native plugin branch above and isn't affected.
+        if (typeof window !== 'undefined' && window.isSecureContext === false) {
+            diagLog('[PhoneGPS] insecure origin — skipping browser geolocation');
+            return null;
+        }
         return new Promise(resolve => {
             navigator.geolocation.getCurrentPosition(
                 pos => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
-                err => { console.warn('[PhoneGPS] navigator.geolocation failed:', err && err.message); resolve(null); },
+                err => { diagWarn('[PhoneGPS] navigator.geolocation failed:', err && err.message); resolve(null); },
                 { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
             );
         });
@@ -1577,6 +1583,10 @@ function enableDemoMode() {
 
     DEMO_MODE = true;
     console.log('[DEMO MODE] Enabled - Generating simulated data');
+
+    // Demo feeds handleCSVData() directly (bypassing the CSVData listener that
+    // normally hides the boat splash), so clear the splash here too.
+    hideWaitingForRegulator();
 
     // Add visual demo banner. padding-top includes env(safe-area-inset-top) so
     // the warning isn't hidden under the iPhone notch / Dynamic Island.
@@ -2159,7 +2169,9 @@ async function loadAvailableVersions() {
         const controller = new AbortController();
         const timeoutId = setTrackedTimeout(() => controller.abort(), 15000); // 15 second timeout
 
-        const response = await fetch('https://ota.xengineering.net/api/firmware/versions.php', {
+        // ota.xengineering.net is our stable proxy (forwards to the Supabase Storage
+        // OTA bucket); read-only mirror of versions.json. Deploys write to Supabase.
+        const response = await fetch('https://ota.xengineering.net/versions.json', {
             signal: controller.signal,
             cache: 'no-store'
         });
@@ -2304,9 +2316,11 @@ function showUpdateInProgressOverlay(versionStr) {
 }
 
 // When running inside the iOS (Capacitor) app, kick off a parallel download of
-// the matching web bundle from the OTA server. The device firmware update is
-// still triggered by the form submit; this just keeps the app's local web UI
-// in sync. Silently no-ops in a regular browser.
+// the matching web bundle. The LiveUpdate plugin fetches it via the stable
+// ota.xengineering.net proxy (otaBaseUrl in LiveUpdate.swift), which forwards to
+// the Supabase Storage OTA bucket. The device firmware update is still triggered
+// by the form submit; this just keeps the app's local web UI in sync. Silently
+// no-ops in a regular browser.
 async function kickOffAppWebUpdate(version) {
     if (!window.Capacitor || !window.Capacitor.isNativePlatform || !window.Capacitor.isNativePlatform()) {
         return;
@@ -4145,20 +4159,25 @@ function restartCVTest() {
         });
 }
 
-// Waiting-for-regulator overlay: show 5s after load if no CSV packet has arrived,
-// hide on first packet. hideWaitingForRegulator() is also called from the CSVData
-// listener below; both paths are idempotent.
+// Boat loading splash: the inline script in index.html shows it immediately on a
+// Capacitor cold launch (themed, flash-free). It hides on the first CSVData packet
+// (CSVData listener below) or when demo mode starts. hideWaitingForRegulator() is
+// idempotent and fades the overlay out. The safety timeout below guarantees it can
+// never stick if neither real nor demo telemetry ever arrives.
 window._firstCsvPacketReceived = false;
 function hideWaitingForRegulator() {
     const el = document.getElementById('waiting-for-regulator');
-    if (el) el.style.display = 'none';
+    if (!el || el._wfrHidden) return;
+    el._wfrHidden = true;
+    el.classList.add('wfr-hiding');
+    setTimeout(() => { el.style.display = 'none'; }, 480);
 }
 document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(() => {
-        if (window._firstCsvPacketReceived) return;
-        const el = document.getElementById('waiting-for-regulator');
-        if (el) el.style.display = 'flex';
-    }, 5000);
+    // The splash is visible by default (see index.html) and hides on the first
+    // CSVData packet or when demo mode starts. This safety net guarantees it can
+    // never stick if neither ever arrives. In a normal browser the page is served
+    // by the device, so the first packet clears it almost immediately.
+    setTimeout(() => { if (!window._firstCsvPacketReceived) hideWaitingForRegulator(); }, 20000);
 });
 
 // Poll while the tuning score section is open
@@ -8322,8 +8341,6 @@ window.addEventListener("load", function () {
                 ["ft_UpdateBatterySOC_ses_ID", "ft_UpdateBatterySOC_ses"],
                 ["ft_UpdateTravelStatistics_win_ID", "ft_UpdateTravelStatistics_win"],
                 ["ft_UpdateTravelStatistics_ses_ID", "ft_UpdateTravelStatistics_ses"],
-                ["ft_UpdateDistanceThisInterval_win_ID", "ft_UpdateDistanceThisInterval_win"],
-                ["ft_UpdateDistanceThisInterval_ses_ID", "ft_UpdateDistanceThisInterval_ses"],
                 ["ft_UpdateBoardTempPressureMaximums_win_ID", "ft_UpdateBoardTempPressureMaximums_win"],
                 ["ft_UpdateBoardTempPressureMaximums_ses_ID", "ft_UpdateBoardTempPressureMaximums_ses"],
                 ["ft_handleSocGainReset_win_ID", "ft_handleSocGainReset_win"],
@@ -8715,7 +8732,7 @@ window.addEventListener("load", function () {
             updatePidTuningConfiguration(data);  // ADD THIS LINE - Update PID plot config
 
             // Update test-active panel with sysid phase.
-            // systemIDActive is in CSV2_FIELDS (index 400), not CSV3 — read from DOM,
+            // systemIDActive is in CSV2_FIELDS, not CSV3 — read from DOM,
             // which CSV2 otherFields already keeps current via ["systemIDActive_ID", "systemIDActive"].
             const sysidPhaseNum = parseInt(getField("systemIDActive_ID") ?? 0);
             _testActiveCSV3 = sysidPhaseNum > 0 ? 'sysid' : null;
@@ -9440,8 +9457,10 @@ function showAltTab(group, panelId) {
 
 // Frozen page response stuff
 function showRecoveryOptions() {
-    // Don't show multiple recovery dialogs
-    if (document.getElementById('recoveryDialog')) return;
+    // Don't show multiple recovery dialogs.
+    // querySelector (not getElementById) so the load-time MISSING-ELEMENT debug
+    // shim doesn't false-flag this pre-creation existence check.
+    if (document.querySelector('#recoveryDialog')) return;
 
     const recoveryDiv = document.createElement('div');
     recoveryDiv.id = 'recoveryDialog';

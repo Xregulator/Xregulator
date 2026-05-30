@@ -55,17 +55,45 @@
 
 <body><iframe name="hidden-form" style="display:none"></iframe>
 
-  <!-- Waiting-for-regulator overlay. Hidden by default. JS shows it 5s after load
-       if no CSV packet has arrived (e.g. Capacitor app cold launch with no device
-       reachable), and hides it on first packet. Replace inner content with a
-       sailing-boat SVG animation later. -->
-  <div id="waiting-for-regulator" style="display:none;">
-    <div class="wfr-inner">
-      <div class="wfr-spinner"></div>
-      <div class="wfr-title">Waiting for regulator…</div>
-      <div class="wfr-sub">Checking connection</div>
-    </div>
+  <!-- Boat loading splash. Visible by default and themed by the inline script
+       below (saved dark-mode pref, falling back to the OS scheme) so a Capacitor
+       cold launch paints it instantly with no flash. Hidden on the first CSVData
+       packet (see hideWaitingForRegulator()) or when demo mode starts — no platform
+       check, so it works regardless of whether window.Capacitor is detected. In a
+       normal browser the device-served page connects instantly, so the first packet
+       clears it almost immediately (boat_loader.webp ships only in the app bundle,
+       so the browser may show a missing image for that instant). The boat's bottom
+       edge is its real waterline, so it floats. -->
+  <div id="waiting-for-regulator" class="wfr-light" style="display:block;">
+   <div class="bl-stage">
+    <div class="bl-sky"></div>
+    <div class="bl-stars"></div>
+    <div class="bl-sun"></div>
+    <div class="bl-clouds"><span></span><span></span></div>
+    <div class="bl-brand"><span class="wm-X">X</span><span class="wm-rest">Engineering</span></div>
+    <div class="bl-reflection"><img src="boat_loader.webp" alt=""></div>
+    <div class="bl-boat"><img src="boat_loader.webp" alt="Sailboat"></div>
+    <div class="bl-sea"><div class="bl-shine"></div></div>
+    <div class="bl-waterline"></div>
+    <div class="bl-wake"></div>
+    <div class="bl-load"><div class="bl-text">Connecting to regulator</div><div class="bl-dots"><span></span><span></span><span></span></div></div>
+   </div>
   </div>
+  <script>
+    // Theme the boat splash during parse (flash-free): switch to the dark scene if
+    // the saved dark-mode pref says so, else follow the OS scheme. Also scale the
+    // fixed 300x600 design stage to COVER the viewport so the tuned layout matches
+    // on any screen. The overlay is already visible (wfr-light by default).
+    (function () {
+      var el = document.getElementById('waiting-for-regulator');
+      if (!el) return;
+      var pref = localStorage.getItem('darkMode');
+      var dark = pref === '1' || (pref === null && window.matchMedia
+                 && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      if (dark) { el.classList.remove('wfr-light'); el.classList.add('wfr-dark'); }
+      el.style.setProperty('--bl-scale', Math.max(window.innerWidth / 300, window.innerHeight / 600));
+    })();
+  </script>
 
   <div class="permanent-header">
 
@@ -6880,7 +6908,16 @@
           <div class="card-group">
             <p class="card-group-title">Boat Speed</p>
             <div class="metric-row">
-              <span class="metric-label">Speed Over Ground (SOG)</span>
+              <span class="metric-label">Speed Over Ground (SOG)
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Your speed measured by GPS (speed over ground). It includes the push of current
+                    and tide — your true progress across the seabed, not speed through the water.
+                    There is no separate paddlewheel (through-water) speed on this system.
+                  </span>
+                </span>
+              </span>
               <span class="with-wm">
                 <span class="metric-value" style="font-size: 18px;"><span id="SOGNMEA_ID">0</span> kts</span>
                 <span class="wm-inline">
@@ -7081,7 +7118,16 @@
         <!-- Distance Traveled -->
         <hr />
         <div class="form-row">
-          <div class="form-label">Distance Traveled</div>
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Distance Traveled</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Distance actually traveled along your track, summed from GPS
+                position changes — not straight-line distance from where you started. A round trip
+                back to the same port still counts the full distance out and back. Lifetime keeps
+                accumulating; Session resets with the button.</span>
+            </span>
+          </div>
           <div class="form-input">
             <div class="dual-counter">
               <div class="dual-counter-row">
@@ -7110,7 +7156,10 @@
             <span>Speed</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">
               ℹ️
-              <span class="tooltip-box">Specify intervals for calculation later</span>
+              <span class="tooltip-box">Average is the mean of your GPS speed readings over time
+                (not distance ÷ time), so it can differ slightly from distance covered over many
+                hours. Maximum is the highest GPS speed seen. Both are speed over ground, so they
+                include current. Lifetime persists; Session resets with the button.</span>
             </span>
           </div>
           <div class="form-input">
@@ -8125,18 +8174,6 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_UpdateTravelStatistics_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Update Distance This Interval -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Distance Interval</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_UpdateDistanceThisInterval_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_UpdateDistanceThisInterval_ses_ID">0</span>
                 </div>
               </div>
 

@@ -362,8 +362,6 @@ enum Csv2Index {
   CSV2_ft_UpdateBatterySOC_ses,
   CSV2_ft_UpdateTravelStatistics_win,
   CSV2_ft_UpdateTravelStatistics_ses,
-  CSV2_ft_UpdateDistanceThisInterval_win,
-  CSV2_ft_UpdateDistanceThisInterval_ses,
   CSV2_ft_UpdateBoardTempPressureMaximums_win,
   CSV2_ft_UpdateBoardTempPressureMaximums_ses,
   CSV2_ft_handleSocGainReset_win,
@@ -496,7 +494,7 @@ enum Csv2Index {
   CSV2_wmIgn_VMGman_lo,   CSV2_wmIgn_VMGman_hi,    // VMG manual session min/max (knots ×10)
   CSV2_wmIgn_VMGup_lo,    CSV2_wmIgn_VMGup_hi,     // VMG upwind session min/max (knots ×10)
 
-  CSV2_FIELD_COUNT  // = 447 (440 prior + VMGUpwind + sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs)
+  CSV2_FIELD_COUNT  // = 445 (447 prior − UpdateDistanceThisInterval win/ses timer, removed with dead distance code)
 };
 
 enum Csv3Index {
@@ -4225,7 +4223,6 @@ void setupServer() {
       ft_UpdateEngineFuel.worstSession = 0;
       ft_UpdateBatterySOC.worstSession = 0;
       ft_UpdateTravelStatistics.worstSession = 0;
-      ft_UpdateDistanceThisInterval.worstSession = 0;
       ft_UpdateBoardTempPressureMaximums.worstSession = 0;
       ft_handleSocGainReset.worstSession = 0;
       ft_handleAltZeroReset.worstSession = 0;
@@ -5590,7 +5587,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"
                                // 28 ignition-cycle watermark fields (14 lo + 14 hi)
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -5912,8 +5909,6 @@ void SendWifiData() {
                                SafeInt(ft_UpdateBatterySOC.worstSession),
                                SafeInt(ft_UpdateTravelStatistics.worstWindow),
                                SafeInt(ft_UpdateTravelStatistics.worstSession),
-                               SafeInt(ft_UpdateDistanceThisInterval.worstWindow),
-                               SafeInt(ft_UpdateDistanceThisInterval.worstSession),
                                SafeInt(ft_UpdateBoardTempPressureMaximums.worstWindow),
                                SafeInt(ft_UpdateBoardTempPressureMaximums.worstSession),
                                SafeInt(ft_handleSocGainReset.worstWindow),
