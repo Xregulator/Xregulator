@@ -2921,6 +2921,14 @@ void setupServer() {
       queueConsoleMessage("ALARM LATCH: Reset requested from web interface NO FUNCTION!");
       inputMessage = "1";
     }
+
+    if (request->hasParam("RebootRegulator")) {
+      foundParameter = true;
+      rebootRequested = true;          // deferred — loop() does the actual restart after response flushes
+      rebootRequestedAt = millis();
+      queueConsoleMessage("REBOOT: requested from /get endpoint");
+      inputMessage = "1";
+    }
     if (request->hasParam("absorptionCompleteTime")) {
       foundParameter = true;
       inputMessage = request->getParam("absorptionCompleteTime")->value();

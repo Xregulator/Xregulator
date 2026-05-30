@@ -169,7 +169,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.78";
+const char *FIRMWARE_VERSION = "0.0.84";
 
 String currentUID;
 
@@ -2052,6 +2052,10 @@ uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before
 // Global variable to track ESP32 restart time
 unsigned long lastRestartTime = 0;
 bool systemShuttingDown = false;
+// Deferred reboot via /get?RebootRegulator — flag set in handler, restart done in loop()
+// so the HTTP response flushes first and we don't restart inside the async TCP callback
+volatile bool rebootRequested = false;
+unsigned long rebootRequestedAt = 0;
 // Scheduled-restart user warning. 0 = outside the 10-min warning window (dashboard hides banner).
 // Updated each loop tick by checkAndRestart(); published via CSV2.
 uint32_t restartRemainingSec = 0;
@@ -3904,6 +3908,12 @@ void setup() {
 void loop() {
 
   esp_task_wdt_reset();
+
+  // Deferred reboot from /get?RebootRegulator — wait 2s so the HTTP 200 reaches the caller
+  if (rebootRequested && millis() - rebootRequestedAt > 2000) {
+    Serial.println("=== REMOTE REBOOT (/get?RebootRegulator) ===");
+    ESP.restart();
+  }
   Ignition = !digitalRead(1);  // ! is for optocoupler
   if (IgnitionOverride == 1) {
     Ignition = 1;  // force ON  (bench testing, normal default)
