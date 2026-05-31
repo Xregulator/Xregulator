@@ -1865,6 +1865,11 @@ void pushLongTermRecord() {
   if (!longTermRing) return;
   LongTermRecord rec = {};  // zero-init: absent fields stay 0 with validMask bit clear
 
+  // Real epoch of THIS record (0 if unsynced) — drives the legit time axis + gap detection.
+  uint32_t nowEpoch = (timeIsSynced && timeBase > 0)
+                        ? (uint32_t)(timeBase + (millis() - timeBaseMillis) / 1000) : 0;
+  rec.timestamp = nowEpoch;
+
   LT_ENV(battVolt,    battVolt,    1,  0);
   LT_ENV(battCurr,    battCurr,    10, 1);
   LT_ENV(altCurr,     altCurr,     10, 2);
@@ -1877,16 +1882,16 @@ void pushLongTermRecord() {
   LT_ENV(tws,         tws,         1,  9);
   LT_ENV(vmg,         vmg,         1,  10);
   LT_ENV(aws,         aws,         1,  11);
-  LT_IMU(heel,        heel,        1,  12);
-  LT_IMU(pitch,       pitch,       1,  13);
+  LT_ENV(awa,         awa,         10, 12);   // moved avg-only → envelope (SensorWindow awa ×100 → ×10)
+  LT_ENV(twa,         twa,         10, 13);   // moved avg-only → envelope
+  LT_IMU(heel,        heel,        1,  14);
+  LT_IMU(pitch,       pitch,       1,  15);
 
-  LT_AVG(soc_avg,     soc,     10, 14);
-  LT_AVG(baro_avg,    baro,    10, 15);
-  LT_AVG(ambTemp_avg, ambTemp, 10, 16);
-  LT_AVG(cog_avg,     cog,     10, 17);
-  LT_AVG(heading_avg, heading, 10, 18);
-  LT_AVG(awa_avg,     awa,     10, 19);
-  LT_AVG(twa_avg,     twa,     10, 20);
+  LT_AVG(soc_avg,     soc,     10, 16);
+  LT_AVG(baro_avg,    baro,    10, 17);
+  LT_AVG(ambTemp_avg, ambTemp, 10, 18);
+  LT_AVG(cog_avg,     cog,     10, 19);
+  LT_AVG(heading_avg, heading, 10, 20);
   LT_AVG(leeway_avg,  leeway,  10, 21);
   LT_AVG(altZero_avg, altZero, 1,  22);
 
@@ -1901,9 +1906,8 @@ void pushLongTermRecord() {
   longTermRing[longTermHead] = rec;
   longTermHead = (longTermHead + 1) % LONGTERM_RING_SIZE;
   if (longTermCount < LONGTERM_RING_SIZE) longTermCount++;
-  // Epoch of this newest record (header anchor for the baro-style time derivation);
-  // left unchanged when unsynced so a later sync doesn't retro-misdate the ring.
-  if (timeIsSynced) longTermLastEpoch = timeBase + (millis() - timeBaseMillis) / 1000;
+  // Header anchor for the .bin (newest record's epoch); unchanged when unsynced.
+  if (nowEpoch) longTermLastEpoch = nowEpoch;
 }
 #undef LT_ENV
 #undef LT_AVG

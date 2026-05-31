@@ -4825,7 +4825,8 @@ const _brushState = {
     latestSample: null,
     stalenessTimerId: null,
     wired: false,
-    iframeReady: false
+    iframeReady: false,
+    nativeSink: null   // when set (Long Term native charts), range changes route here, not the iframe
 };
 
 function _brushEl(id) { return document.getElementById(id); }
@@ -4902,13 +4903,20 @@ function _brushSendRangeToIframe() {
     }, '*');
 }
 
+// Route the current brush range to whoever owns the brush: native LT charts if a
+// sink is registered, else the (legacy) iframe.
+function _brushEmit() {
+    if (_brushState.nativeSink) { _brushState.nativeSink(_brushState.from, _brushState.to); return; }
+    _brushSendRangeToIframe();
+}
+
 function _brushApplyRange(from, to, opts) {
     opts = opts || {};
     const c = _brushClamp(from, to);
     _brushState.from = c.from;
     _brushState.to = c.to;
     _brushUpdateSelectionUI();
-    if (!opts.skipIframe) _brushSendRangeToIframe();
+    if (!opts.skipIframe) _brushEmit();
 }
 
 function _brushWireDrag() {
@@ -4977,7 +4985,7 @@ function _brushWireDrag() {
         document.removeEventListener('mouseup', onUp);
         document.removeEventListener('touchmove', onMove);
         document.removeEventListener('touchend', onUp);
-        if (wasDragging) _brushSendRangeToIframe();
+        if (wasDragging) _brushEmit();
     };
 
     sel.addEventListener('mousedown', (e) => {
@@ -5084,6 +5092,7 @@ function _brushHandleMessage(e) {
     // Origin check matches the IFRAME_HEIGHT handler's allowed list
     if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
     if (!e.data || !e.data.type) return;
+    if (_brushState.nativeSink) return;   // native Long Term charts own the brush now
     if (e.data.type === 'BRUSH_DATA_RANGE') {
         _brushState.dataMin = Number(e.data.min);
         _brushState.dataMax = Number(e.data.max);
@@ -13933,7 +13942,6 @@ window.addEventListener('load', function () {
 
   let ltLoaded = false;   // session cache: fetch the ring once per session
   let ltData = null;      // { t:[], n, lastEpoch, interval, fields:{ key:{min,max,avg}|{avg} } }
-  const ltPlots = {};     // built uPlot instances by container id
 
   function getCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
   function hexAlpha(hex, a) {
@@ -13946,11 +13954,12 @@ window.addEventListener('load', function () {
   const ENV = [
     ['battVolt',100], ['battCurr',10], ['altCurr',10], ['victronCurr',10],
     ['rpm',1], ['duty',100], ['altTemp',10], ['tempTherm',10],
-    ['sog',100], ['tws',100], ['vmg',100], ['aws',100], ['heel',100], ['pitch',100]
+    ['sog',100], ['tws',100], ['vmg',100], ['aws',100],
+    ['awa',10], ['twa',10], ['heel',100], ['pitch',100]
   ];
   const AVG = [
     ['soc',10], ['baro',10], ['ambTemp',10], ['cog',10], ['heading',10],
-    ['awa',10], ['twa',10], ['leeway',10], ['altZero',100]
+    ['leeway',10], ['altZero',100]
   ];
 
   // Header (16 B LE): u16 head, u16 count, u16 capacity, u16 recordSize,
@@ -13969,16 +13978,29 @@ window.addEventListener('load', function () {
     const fields = {};
     ENV.forEach(([k]) => fields[k] = { min:[], max:[], avg:[] });
     AVG.forEach(([k]) => fields[k] = { avg:[] });
-    const t = [];
+    const t = [], isGap = [];
+    // Synthetic null entry to break the line across a real time gap (power-off period).
+    const pushGap = (gt) => {
+      t.push(gt); isGap.push(true);
+      ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); });
+      AVG.forEach(([k]) => fields[k].avg.push(null));
+    };
 
+    // Record layout (128 B): u32 timestamp @0, i32 lat @4, i32 lon @8, u32 validMask @12,
+    // envelope [min,max,avg]×16 from @16, avg-only ×7 after, u8 chargeStage + pad.
     const tail = (count < capacity) ? 0 : head;   // oldest record in chrono order
+    let prevTs = null;
     for (let i = 0; i < count; i++) {
       const base = 16 + ((tail + i) % capacity) * recSize;
-      const valid = dv.getUint32(base + 8, true);
-      // Newest record is i=count-1 (= lastEpoch); walk back by interval.
-      t.push(lastEpoch ? (lastEpoch - (count - 1 - i) * interval) : (i * interval));
+      const tsRaw = dv.getUint32(base, true);
+      const valid = dv.getUint32(base + 12, true);
+      // Use the record's real timestamp (legit axis); fall back to position-derived if unsynced.
+      const ts = tsRaw > 0 ? tsRaw : (lastEpoch ? lastEpoch - (count - 1 - i) * interval : i * interval);
+      if (prevTs != null && (ts - prevTs) > interval * 1.1) pushGap((prevTs + ts) / 2);  // gap → break
+      prevTs = ts;
 
-      let off = base + 12;   // envelope block: [min,max,avg] int16 each
+      t.push(ts); isGap.push(false);
+      let off = base + 16;   // envelope block: [min,max,avg] int16 each
       ENV.forEach(([k, scale], fi) => {
         const f = fields[k];
         if (valid & (1 << fi)) {
@@ -13988,42 +14010,185 @@ window.addEventListener('load', function () {
         } else { f.min.push(null); f.max.push(null); f.avg.push(null); }
         off += 6;
       });
-      let ao = base + 12 + ENV.length * 6;   // avg-only block: one int16 each
+      let ao = base + 16 + ENV.length * 6;   // avg-only block: one int16 each
       AVG.forEach(([k, scale], ai) => {
         fields[k].avg.push((valid & (1 << (ENV.length + ai))) ? dv.getInt16(ao, true) / scale : null);
         ao += 2;
       });
     }
-    return { t, n: count, lastEpoch, interval, fields };
+    return { t, n: t.length, lastEpoch, interval, fields, isGap };
   }
 
-  // Generic grouped chart. spec.scales = [{name,label,side,range?,fmt?}],
-  // spec.series = [{key,scale,color,label,band?}]. Renders an avg line per series
-  // plus an optional min/max envelope band (envelope fields only). drag-x = zoom.
-  function buildLtPlot(containerId, spec) {
-    const el = document.getElementById(containerId);
-    if (!el || typeof uPlot === 'undefined' || !ltData) return;
-    el.innerHTML = '';
-    if (ltPlots[containerId]) { try { ltPlots[containerId].destroy(); } catch (e) {} }
+  // ---- Decimation (ported from the cloud viewer's applyBinning) ----------------
+  const LT_MAX_BINS = 120;   // matches the viewer's cap: ≤120 points drawn per chart
+  const ltCharts = [];       // [{ id, plot, spec }] — built once, fed binned data
+  let ltFullRange = null;    // [minSec, maxSec] of the whole ring
+  let ltCurRange = null;     // [minSec, maxSec] currently rendered (for re-render after Y-axis edits)
+  let ltRendering = false;   // re-entrancy guard so our setScale doesn't re-fire the zoom hook
 
-    const data = [ ltData.t ];
-    const series = [ { label: 'Time' } ];
-    const bands = [];
-    const legend = [];
+  // Per-chart manual Y-axis overrides, persisted: { chartId: { scaleName: [min,max] } }.
+  // Enforced every render in ltRenderAll; absent → that axis auto-fits to visible data.
+  let ltYOverride = {};
+  try { ltYOverride = JSON.parse(localStorage.getItem('lt_yaxis') || '{}') || {}; } catch (e) { ltYOverride = {}; }
+  function ltSaveYOverride() { try { localStorage.setItem('lt_yaxis', JSON.stringify(ltYOverride)); } catch (e) {} }
+
+  // Equal-width bins over [fromSec,toSec], capped at maxBins, ENVELOPE-PRESERVING:
+  // bin min = min of mins, bin max = max of maxes, bin avg = avg of avgs (nulls skipped).
+  // Re-run per visible range so zoomed views show finer detail with bounded point count.
+  function ltBin(fromSec, toSec, maxBins) {
+    const t = ltData.t, N = ltData.n;
+    let lo = 0, hi = N;
+    while (lo < N && t[lo] < fromSec) lo++;
+    while (hi > lo && t[hi - 1] > toSec) hi--;
+    const out = { t: [], fields: {} };
+    ENV.forEach(([k]) => out.fields[k] = { min: [], max: [], avg: [] });
+    AVG.forEach(([k]) => out.fields[k] = { avg: [] });
+    const vis = hi - lo;
+    if (vis <= 0) return out;
+    const binSize = Math.max(1, Math.ceil(vis / maxBins));
+    const ig = ltData.isGap || [];
+    for (let i = lo; i < hi; i += binSize) {
+      const end = Math.min(i + binSize, hi);
+      out.t.push(t[i + ((end - i) >> 1)]);   // mid-bin timestamp
+      // A bin spanning a gap marker is nulled wholesale → the line breaks there.
+      let hasGap = false;
+      for (let j = i; j < end; j++) if (ig[j]) { hasGap = true; break; }
+      if (hasGap) {
+        ENV.forEach(([k]) => { const o = out.fields[k]; o.min.push(null); o.max.push(null); o.avg.push(null); });
+        AVG.forEach(([k]) => out.fields[k].avg.push(null));
+        continue;
+      }
+      ENV.forEach(([k]) => {
+        const f = ltData.fields[k], o = out.fields[k];
+        let mn = Infinity, mx = -Infinity, sum = 0, cnt = 0;
+        for (let j = i; j < end; j++) if (f.avg[j] != null) {
+          if (f.min[j] < mn) mn = f.min[j]; if (f.max[j] > mx) mx = f.max[j]; sum += f.avg[j]; cnt++;
+        }
+        o.min.push(cnt ? mn : null); o.max.push(cnt ? mx : null); o.avg.push(cnt ? sum / cnt : null);
+      });
+      AVG.forEach(([k]) => {
+        const f = ltData.fields[k], o = out.fields[k];
+        let sum = 0, cnt = 0;
+        for (let j = i; j < end; j++) if (f.avg[j] != null) { sum += f.avg[j]; cnt++; }
+        o.avg.push(cnt ? sum / cnt : null);
+      });
+    }
+    return out;
+  }
+
+  // Keep compass/wind angles continuous so a 360→0 wrap doesn't draw a vertical crash.
+  function unwrapAngles(arr) {
+    const out = []; let prev = null;
+    for (const v of arr) {
+      if (v == null) { out.push(null); prev = null; continue; }
+      let x = v;
+      if (prev != null) { while (x - prev > 180) x -= 360; while (x - prev < -180) x += 360; }
+      out.push(x); prev = x;
+    }
+    return out;
+  }
+
+  // Re-bin the ring to [fromSec,toSec] and push to every chart (synced X; Y auto-fits to
+  // the visible binned data). The guard stops our setScale from re-triggering the hook.
+  function ltRenderAll(fromSec, toSec) {
+    if (!ltData || !ltCharts.length) return;
+    ltRendering = true;
+    ltCurRange = [fromSec, toSec];
+    const b = ltBin(fromSec, toSec, LT_MAX_BINS);
+    ltCharts.forEach(c => {
+      const data = [ b.t ];
+      c.spec.series.forEach(s => {
+        const f = b.fields[s.key];
+        data.push(s.unwrap ? unwrapAngles(f.avg) : f.avg);
+        if (s.band) { data.push(f.max); data.push(f.min); }
+      });
+      c.plot.setData(data);                                  // auto-fits Y for auto scales
+      c.plot.setScale('x', { min: fromSec, max: toSec });
+      // Enforce manual Y overrides (auto=false pins them; setData above already
+      // re-fit the auto ones). Fixed-range scales (e.g. SOC% [0,100]) left untouched.
+      const ov = ltYOverride[c.id] || {};
+      c.spec.scales.forEach(sc => {
+        if (ov[sc.name]) { c.plot.scales[sc.name].auto = false; c.plot.setScale(sc.name, { min: ov[sc.name][0], max: ov[sc.name][1] }); }
+        else if (!sc.range) { c.plot.scales[sc.name].auto = true; }
+      });
+    });
+    ltRendering = false;
+    // Reflect the rendered range back onto the brush selection (keeps the brush in sync
+    // whether the range came from the brush itself or from a chart drag-zoom).
+    if (_brushState && _brushState.nativeSink) {
+      _brushState.from = fromSec * 1000; _brushState.to = toSec * 1000;
+      if (typeof _brushUpdateSelectionUI === 'function') _brushUpdateSelectionUI();
+    }
+  }
+  const ltZoomDebounced = debounce((min, max) => { if (min != null && max != null) ltRenderAll(min, max); }, 120);
+
+  // Hand the relocated dashboard-brush its data bounds + a sink into ltRenderAll, wire
+  // it once, and show it. Brush works in ms; ltRenderAll in seconds.
+  function ltInitBrush(minSec, maxSec, latestSec) {
+    if (typeof _brushState === 'undefined' || !_brushState) return;
+    _brushState.nativeSink = (fromMs, toMs) => ltRenderAll(fromMs / 1000, toMs / 1000);
+    _brushState.dataMin = minSec * 1000;
+    _brushState.dataMax = maxSec * 1000;
+    _brushState.latestSample = (latestSec || maxSec) * 1000;
+    _brushState.from = _brushState.dataMin;
+    _brushState.to = _brushState.dataMax;
+    if (!_brushState.wired) { _brushWireDrag(); _brushWireSnap(); _brushState.wired = true; }
+    const bEl = document.getElementById('dashboard-brush'); if (bEl) bEl.style.display = 'block';
+    const mn = document.getElementById('dashboard-brush-data-min'); if (mn) mn.textContent = _brushFormatTime(_brushState.dataMin);
+    const mx = document.getElementById('dashboard-brush-data-max'); if (mx) mx.textContent = _brushFormatTime(_brushState.dataMax);
+    _brushUpdateSelectionUI();
+    _brushUpdateStaleness();
+    if (_brushState.stalenessTimerId == null) {
+      _brushState.stalenessTimerId = (typeof setTrackedInterval === 'function' ? setTrackedInterval : setInterval)(_brushUpdateStaleness, 10000);
+    }
+    const clr = document.getElementById('dashboard-crosshair-clear');
+    if (clr && !clr._ltWired) { clr._ltWired = true; clr.addEventListener('click', () => { ltPinnedTime = null; ltRedrawMarkers(); ltUpdateCrosshairIndicator(); }); }
+  }
+
+  // ---- Markers: live-edge "now" line + a tap-to-pin crosshair synced across charts ----
+  let ltPinnedTime = null;   // pinned crosshair time (sec); null = none
+  function ltDrawMarkers(u) {
+    const ctx = u.ctx, xmin = u.scales.x.min, xmax = u.scales.x.max;
+    const vline = (tSec, color, dash) => {
+      if (tSec == null || !isFinite(tSec) || tSec < xmin || tSec > xmax) return;
+      const x = Math.round(u.valToPos(tSec, 'x', true)) + 0.5;
+      ctx.save();
+      ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(x, u.bbox.top); ctx.lineTo(x, u.bbox.top + u.bbox.height); ctx.stroke();
+      ctx.restore();
+    };
+    vline(Math.floor(Date.now() / 1000), 'rgba(244,67,54,0.55)', [4, 3]);   // live edge "now"
+    vline(ltPinnedTime, 'rgba(60,60,60,0.85)', []);                          // pinned crosshair
+  }
+  function ltRedrawMarkers() { ltCharts.forEach(c => { try { c.plot.redraw(false); } catch (e) {} }); }
+  function ltUpdateCrosshairIndicator() {
+    const ind = document.getElementById('dashboard-crosshair-indicator');
+    const txt = document.getElementById('dashboard-crosshair-time');
+    if (!ind || !txt) return;
+    if (ltPinnedTime == null) { ind.style.display = 'none'; txt.textContent = '—'; }
+    else { ind.style.display = 'inline-block'; txt.textContent = (typeof _brushFormatTime === 'function') ? _brushFormatTime(ltPinnedTime * 1000) : new Date(ltPinnedTime * 1000).toLocaleString(); }
+  }
+
+  // Build one chart ONCE (empty); ltRenderAll feeds it binned data. drag-x zoom →
+  // re-bins ALL charts (synced); dbl-click resets the range; click pins a crosshair.
+  // Bottom legend shows live values at the cursor (setCursor hook).
+  function buildLtChart(id, spec) {
+    const el = document.getElementById(id);
+    if (!el || typeof uPlot === 'undefined') return;
+    el.innerHTML = '';
+    const series = [ { label: 'Time' } ], bands = [], initData = [ [] ], avgIdx = [];
+    let di = 1;
     spec.series.forEach(s => {
-      const f = ltData.fields[s.key];
-      data.push(f.avg);
+      avgIdx.push(di);
       series.push({ label: s.label, scale: s.scale, stroke: s.color, width: 2, points: { show: false }, spanGaps: false });
-      legend.push({ label: s.label, color: s.color });
-      if (s.band && f.max && f.min) {
-        const maxIdx = data.length; data.push(f.max);
-        const minIdx = data.length; data.push(f.min);
-        series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
-        series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
+      initData.push([]); di++;
+      if (s.band) {
+        const maxIdx = series.length; series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
+        const minIdx = series.length; series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
         bands.push({ series: [maxIdx, minIdx], fill: hexAlpha(s.color, 0.14) });
+        initData.push([]); initData.push([]); di += 2;
       }
     });
-
     const scales = { x: { time: true } };
     const axes = [ { grid: { show: true } } ];
     spec.scales.forEach(sc => {
@@ -14032,37 +14197,167 @@ window.addEventListener('load', function () {
                   values: sc.fmt ? (u, ticks) => ticks.map(sc.fmt) : undefined });
     });
 
+    // Bottom legend with live value readouts (filled by the setCursor hook on hover).
+    const legendEl = document.createElement('div');
+    legendEl.style.cssText = 'display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;';
+    const valSpans = [];
+    spec.series.forEach(s => {
+      const item = document.createElement('span');
+      item.style.cssText = 'display:inline-flex;align-items:center;gap:5px;';
+      const sw = document.createElement('span');
+      sw.style.cssText = 'width:11px;height:11px;border-radius:2px;display:inline-block;background:' + s.color + ';';
+      const val = document.createElement('b');
+      item.appendChild(sw); item.appendChild(document.createTextNode(s.label + ': ')); item.appendChild(val);
+      legendEl.appendChild(item);
+      valSpans.push(val);
+    });
+
     const opts = {
-      width: Math.max(el.clientWidth, 320), height: 300,
+      title: spec.title, width: Math.max(el.clientWidth, 320), height: 300,
       series, scales, axes, bands, legend: { show: false },
-      cursor: { drag: { x: true, y: false } }   // drag-x to zoom (in-chart time brush)
+      cursor: { sync: { key: 'ltsync' }, y: false, drag: { x: true, y: false } },   // x crosshair synced across charts; no horizontal y line
+      hooks: {
+        setScale: [ (u, key) => { if (key === 'x' && !ltRendering) { const sx = u.scales.x; ltZoomDebounced(sx.min, sx.max); } } ],
+        setCursor: [ (u) => {
+          const idx = u.cursor.idx;
+          for (let i = 0; i < valSpans.length; i++) {
+            const arr = u.data[avgIdx[i]];
+            const v = (idx != null && arr) ? arr[idx] : null;
+            valSpans[i].textContent = (v == null) ? '—' : v.toFixed(Math.abs(v) >= 100 ? 0 : 1);
+          }
+        } ],
+        draw: [ (u) => ltDrawMarkers(u) ]
+      }
     };
-    const plot = new uPlot(opts, data, el);
-    ltPlots[containerId] = plot;
-    createCustomLegend(containerId, legend);
+    const plot = new uPlot(opts, initData, el);
+    el.appendChild(legendEl);
+    ltCharts.push({ id, plot, spec });
+
+    // Y-axis controls: per-scale manual Min/Max + Apply + Auto (reset). Persisted; absent
+    // → that axis auto-fits to the visible binned data (enforced in ltRenderAll).
+    const ctrl = document.createElement('div');
+    ctrl.style.cssText = 'display:flex;justify-content:center;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:11px;color:#888;';
+    ctrl.appendChild(document.createTextNode('Y-axis:'));
+    const saved = ltYOverride[id] || {};
+    const inputs = {};
+    spec.scales.forEach(sc => {
+      const wrap = document.createElement('span');
+      wrap.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
+      const lbl = document.createElement('span'); lbl.textContent = sc.label;
+      const mn = document.createElement('input'); mn.type = 'number'; mn.placeholder = 'min'; mn.style.width = '54px';
+      const mx = document.createElement('input'); mx.type = 'number'; mx.placeholder = 'max'; mx.style.width = '54px';
+      if (saved[sc.name]) { mn.value = saved[sc.name][0]; mx.value = saved[sc.name][1]; }
+      wrap.appendChild(lbl); wrap.appendChild(mn); wrap.appendChild(mx);
+      ctrl.appendChild(wrap);
+      inputs[sc.name] = { mn, mx };
+    });
+    const applyBtn = document.createElement('button'); applyBtn.textContent = 'Apply'; applyBtn.className = 'dashboard-brush-snap-btn';
+    const resetBtn = document.createElement('button'); resetBtn.textContent = '⤢ Auto'; resetBtn.className = 'dashboard-brush-snap-btn';
+    applyBtn.addEventListener('click', () => {
+      const ov = {};
+      spec.scales.forEach(sc => {
+        const a = parseFloat(inputs[sc.name].mn.value), b2 = parseFloat(inputs[sc.name].mx.value);
+        if (isFinite(a) && isFinite(b2) && b2 > a) ov[sc.name] = [a, b2];
+      });
+      if (Object.keys(ov).length) ltYOverride[id] = ov; else delete ltYOverride[id];
+      ltSaveYOverride();
+      if (ltCurRange) ltRenderAll(ltCurRange[0], ltCurRange[1]);
+    });
+    resetBtn.addEventListener('click', () => {
+      delete ltYOverride[id];
+      spec.scales.forEach(sc => { inputs[sc.name].mn.value = ''; inputs[sc.name].mx.value = ''; });
+      ltSaveYOverride();
+      if (ltCurRange) ltRenderAll(ltCurRange[0], ltCurRange[1]);
+    });
+    ctrl.appendChild(applyBtn); ctrl.appendChild(resetBtn);
+    el.appendChild(ctrl);
+
     if (document.body.classList.contains('dark-mode') && typeof updateUplotTheme === 'function') updateUplotTheme(plot);
+    plot.over.addEventListener('click', () => {   // tap to pin a crosshair time across all charts
+      const idx = plot.cursor.idx;
+      if (idx != null && plot.data[0]) { ltPinnedTime = plot.data[0][idx]; ltRedrawMarkers(); ltUpdateCrosshairIndicator(); }
+    });
+    el.addEventListener('dblclick', () => { if (ltFullRange) ltRenderAll(ltFullRange[0], ltFullRange[1]); });
     if (!el._ltRO) {
-      el._ltRO = new ResizeObserver(debounce(() => {
-        if (ltPlots[containerId]) ltPlots[containerId].setSize({ width: el.clientWidth, height: 300 });
-      }, 500));
+      el._ltRO = new ResizeObserver(debounce(() => plot.setSize({ width: el.clientWidth, height: 300 }), 500));
       el._ltRO.observe(el);
     }
   }
 
   function buildAllLtPlots() {
-    // First chart (vertical-slice): Voltage & SOC — battery V envelope + SOC line on a
-    // second axis. More grouped charts (currents, rpm/duty, temps, wind, IMU) replicate
-    // this same pattern once the pipeline is confirmed on-device.
-    buildLtPlot('lt-voltage-plot', {
+    if (!ltCharts.length) {
+    // Groupings mirror the cloud "My History" viewer minus the eliminated fields
+    // (u_target_amps, temp_margin, ign_duty, eng_duty). Envelope band on each group's
+    // primary metric; secondaries as avg lines. heel/pitch (Motion) is a local-only bonus.
+    buildLtChart('lt-current-plot', {
+      title: 'Currents (A)',
+      scales: [ { name:'A', label:'Amps', side:3 } ],
+      series: [ { key:'battCurr',    scale:'A', color:'#FF9800', label:'Battery (A)',       band:true },
+                { key:'altCurr',     scale:'A', color:'#4CAF50', label:'Alternator (A)',    band:true },
+                { key:'victronCurr', scale:'A', color:'#2196F3', label:'Victron/Solar (A)', band:true } ]
+    });
+    buildLtChart('lt-voltage-plot', {
+      title: 'Battery Voltage & SOC',
       scales: [ { name:'V', label:'Volts', side:3 },
                 { name:'pct', label:'SOC %', side:1, range:[0,100], fmt:v=>Math.round(v)+'%' } ],
       series: [ { key:'battVolt', scale:'V', color:'#4CAF50', label:'Battery (V)', band:true },
                 { key:'soc', scale:'pct', color:'#2196F3', label:'SOC (%)' } ]
     });
+    buildLtChart('lt-temp-plot', {
+      title: 'Temperatures & Barometric Pressure',
+      scales: [ { name:'F', label:'°F', side:3 },
+                { name:'mb', label:'mbar', side:1 } ],
+      series: [ { key:'altTemp',   scale:'F',  color:'#F44336', label:'Alternator (°F)', band:true },
+                { key:'tempTherm', scale:'F',  color:'#FF9800', label:'Thermistor (°F)', band:true },
+                { key:'ambTemp',   scale:'F',  color:'#2196F3', label:'Ambient (°F)' },
+                { key:'baro',      scale:'mb', color:'#9C27B0', label:'Baro (mbar)' } ]
+    });
+    buildLtChart('lt-rpm-plot', {
+      title: 'Engine RPM & Alternator Duty',
+      scales: [ { name:'rpm', label:'RPM', side:3 },
+                { name:'pct', label:'Duty %', side:1, range:[0,100], fmt:v=>Math.round(v)+'%' } ],
+      series: [ { key:'rpm',  scale:'rpm', color:'#9C27B0', label:'RPM', band:true },
+                { key:'duty', scale:'pct', color:'#9E9E9E', label:'Duty (%)' } ]
+    });
+    buildLtChart('lt-wind-plot', {
+      title: 'Speeds (kt)',
+      scales: [ { name:'kt', label:'Knots', side:3 } ],
+      series: [ { key:'sog', scale:'kt', color:'#4CAF50', label:'SOG (kt)',        band:true },
+                { key:'tws', scale:'kt', color:'#2196F3', label:'True Wind (kt)',  band:true },
+                { key:'vmg', scale:'kt', color:'#9C27B0', label:'VMG (kt)',        band:true },
+                { key:'aws', scale:'kt', color:'#00BCD4', label:'App. Wind (kt)',  band:true } ]
+    });
+    buildLtChart('lt-angles-plot', {
+      title: 'Angles (°)',
+      scales: [ { name:'deg', label:'Degrees', side:3 } ],
+      series: [ { key:'cog',     scale:'deg', color:'#2196F3', label:'COG (°)',     unwrap:true },
+                { key:'heading', scale:'deg', color:'#FF9800', label:'Heading (°)', unwrap:true },
+                { key:'awa',     scale:'deg', color:'#4CAF50', label:'AWA (°)',  band:true },
+                { key:'twa',     scale:'deg', color:'#E91E63', label:'TWA (°)',  band:true },
+                { key:'leeway',  scale:'deg', color:'#00BCD4', label:'Leeway (°)' } ]
+    });
+    buildLtChart('lt-motion-plot', {
+      title: 'Motion — Heel & Pitch (°)',
+      scales: [ { name:'deg', label:'Degrees', side:3 } ],
+      series: [ { key:'heel',  scale:'deg', color:'#3F51B5', label:'Heel (°)',  band:true },
+                { key:'pitch', scale:'deg', color:'#FF5722', label:'Pitch (°)', band:true } ]
+    });
+
+    }
+    ltFullRange = [ ltData.t[0], ltData.t[ltData.n - 1] ];
+    ltRenderAll(ltFullRange[0], ltFullRange[1]);
+    ltInitBrush(ltFullRange[0], ltFullRange[1], ltData.lastEpoch || ltFullRange[1]);
+  }
+
+  function ltStatus(msg) {
+    const status = document.getElementById('longterm-status');
+    if (!status) return;
+    const card = status.closest('.settings-card') || status;
+    if (msg) { status.textContent = msg; card.style.display = ''; }
+    else { card.style.display = 'none'; }   // hide the whole card, not just the text
   }
 
   window.initLongTermPlots = function () {
-    const status = document.getElementById('longterm-status');
     if (ltLoaded) { buildAllLtPlots(); return; }   // rebuild from session cache
     fetch('/longTermPlots.bin', { cache: 'no-cache' })
       .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
@@ -14070,13 +14365,67 @@ window.addEventListener('load', function () {
         ltData = parseLT(buf);
         if (!ltData) throw new Error('parse failed');
         ltLoaded = true;
-        if (status) {
-          if (ltData.n === 0) { status.textContent = 'No long-term data yet — records accumulate every ~10 min.'; return; }
-          status.style.display = 'none';
-        }
+        if (ltData.n === 0) { ltStatus('No long-term data yet — records accumulate every ~10 min.'); return; }
+        ltStatus(null);
         buildAllLtPlots();
       })
-      .catch(e => { if (status) status.textContent = 'Long-term history unavailable (' + e.message + ').'; });
+      .catch(e => ltStatus('Long-term history unavailable (' + e.message + ').'));
+  };
+
+  // DEV/TEST — synthesize N long-term records (real units, multi-scale structure so
+  // zoom reveals finer detail) and render, to exercise binning + zoom without waiting
+  // for real data. From the browser console: ltGenerateFake(4000)  // ~28 days @10min.
+  // Open Plots → Long Term first (so the containers exist), then call it. REMOVE for prod.
+  window.ltGenerateFake = function (n, gaps) {
+    n = n || 4000;
+    gaps = (gaps == null) ? 1 : gaps;        // # of synthetic 2-day power-off gaps to inject (0 = none)
+    const interval = 600;
+    const t = [], isGap = [], fields = {};
+    ENV.forEach(([k]) => fields[k] = { min: [], max: [], avg: [] });
+    AVG.forEach(([k]) => fields[k] = { avg: [] });
+    const env = (k, avg, spread) => { const f = fields[k]; f.min.push(avg - spread); f.max.push(avg + spread); f.avg.push(avg); };
+    const av = (k, v) => fields[k].avg.push(v);
+    const pushGap = (gt) => { t.push(gt); isGap.push(true); ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); }); AVG.forEach(([k]) => fields[k].avg.push(null)); };
+    const gapSet = new Set();                // gap positions spread evenly through the run
+    for (let g = 1; g <= gaps; g++) gapSet.add(Math.floor(n * g / (gaps + 1)));
+    let tsec = Math.floor(Date.now() / 1000) - (n - 1) * interval;
+    for (let i = 0; i < n; i++) {
+      if (gapSet.has(i)) { const before = tsec; tsec += 2 * 86400; pushGap((before + tsec) / 2); }   // simulate a 2-day power-off
+      const slow = Math.sin(i * 0.01), fast = Math.sin(i * 0.5);   // two scales → zoom shows detail
+      t.push(tsec); isGap.push(false);
+      env('battVolt', 13.5 + slow * 0.8 + fast * 0.3, 0.6);
+      env('battCurr', slow * 30 + fast * 8, 5);
+      env('altCurr', 20 + slow * 15 + fast * 6, 4);
+      env('victronCurr', slow * 10, 3);
+      env('rpm', 1500 + slow * 1200 + fast * 300, 200);
+      env('duty', 50 + slow * 40, 5);
+      env('altTemp', 120 + slow * 60, 10);
+      env('tempTherm', 110 + slow * 40, 8);
+      env('sog', 5 + Math.abs(fast) * 3, 1);
+      env('tws', 12 + slow * 6, 1.5);
+      env('vmg', 3 + fast * 2, 0.8);
+      env('aws', 15 + slow * 5, 1.5);
+      env('awa', fast * 45, 8);
+      env('twa', fast * 90, 12);
+      env('heel', fast * 15, 3);
+      env('pitch', slow * 5, 2);
+      av('soc', 50 + (i / n) * 50);
+      av('baro', 1013 + slow * 3);
+      av('ambTemp', 75 + slow * 5);
+      av('cog', (slow * 180 + 180 + i * 2) % 360);
+      av('heading', (slow * 180 + 170 + i * 2) % 360);
+      av('leeway', fast * 5);
+      av('altZero', fast * 0.2);
+      tsec += interval;
+    }
+    ltData = { t, n: t.length, lastEpoch: t[t.length - 1], interval, fields, isGap };
+    ltLoaded = true;
+    ltStatus(null);
+    ltCharts.length = 0;
+    ['lt-current-plot', 'lt-voltage-plot', 'lt-temp-plot', 'lt-rpm-plot', 'lt-wind-plot', 'lt-angles-plot', 'lt-motion-plot']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
+    buildAllLtPlots();
+    console.log('ltGenerateFake: ' + n + ' records + ' + gaps + ' gap(s) ≈ ' + (n * interval / 86400).toFixed(1) + ' days → binned to ≤' + LT_MAX_BINS);
   };
 })();
 

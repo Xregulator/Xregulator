@@ -169,7 +169,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.87";
+const char *FIRMWARE_VERSION = "0.0.93";
 
 String currentUID;
 
@@ -1488,10 +1488,11 @@ time_t          baroHistoryLastEpoch    = 0;                     // GPS/NTP epoc
 // cloud aggregate (1b stitch). recordSize is the scaffold layout guard — pinned below.
 struct LongTermRecord {                 // naturally aligned; see static_assert for true size
   // 4-byte block
+  uint32_t timestamp;                   // epoch seconds of THIS record (0 = unsynced) — legit time axis + gap detection
   int32_t  lat_avg, lon_avg;            // deg ×1e5
   uint32_t validMask;                   // 1 bit/field: had valid data this window
 
-  // ENVELOPE (min,max,avg) — 14 fields × 3 × int16
+  // ENVELOPE (min,max,avg) — 16 fields × 3 × int16
   int16_t battVolt[3];                  // V   ×100
   int16_t battCurr[3];                  // A   ×10
   int16_t altCurr[3];                   // A   ×10
@@ -1504,15 +1505,16 @@ struct LongTermRecord {                 // naturally aligned; see static_assert 
   int16_t tws[3];                       // kt  ×100
   int16_t vmg[3];                       // kt  ×100
   int16_t aws[3];                       // kt  ×100
+  int16_t awa[3];                       // deg ×10 (signed)
+  int16_t twa[3];                       // deg ×10 (signed)
   int16_t heel[3];                      // deg ×100 (signed, IMU)
   int16_t pitch[3];                     // deg ×100 (signed, IMU)
 
-  // AVG-ONLY — 9 fields × int16
+  // AVG-ONLY — 7 fields × int16
   int16_t soc_avg;                      // %   ×10
   int16_t baro_avg;                     // mbar×10
   int16_t ambTemp_avg;                  // °F  ×10
   int16_t cog_avg, heading_avg;         // deg ×10
-  int16_t awa_avg, twa_avg;             // deg ×10 (signed)
   int16_t leeway_avg;                   // deg ×10 (signed)
   int16_t altZero_avg;                  //     ×100
 
@@ -1520,10 +1522,10 @@ struct LongTermRecord {                 // naturally aligned; see static_assert 
   uint8_t chargeStage;                  // 0 off,1 bulk,2 absorption,3 float,4 manual,5 maintain,6 targetV,7 idle
   uint8_t _pad;
 };
-// int32 members force 4-byte struct alignment; 116 B of data is already a multiple
-// of 4, so there's no tail padding. Use sizeof() as recordSize everywhere; this
-// pins it so a layout edit can't silently desync the scaffold guard.
-static_assert(sizeof(LongTermRecord) == 116, "LongTermRecord layout changed — update the scaffold recordSize guard");
+// 16 (4-byte block) + 96 (16 envelope) + 14 (7 avg) + 2 (byte) = 128, a multiple of
+// 4 (no tail padding). Use sizeof() as recordSize everywhere; this pins it so a
+// layout edit can't silently desync the scaffold guard.
+static_assert(sizeof(LongTermRecord) == 128, "LongTermRecord layout changed — update the scaffold recordSize guard");
 
 const uint16_t LONGTERM_RING_SIZE = 4320;    // 30 d × 24 h × 6/h at 10-min cadence (~501 KB @ 116 B)
 LongTermRecord *longTermRing      = nullptr; // ps_malloc'd in setup()
@@ -1533,7 +1535,7 @@ uint16_t   prev_longTermHead      = 0xFFFF;  // shadow — persist only when hea
 time_t     longTermLastEpoch      = 0;       // epoch of newest record (0 = unsynced)
 #define LONGTERM_BACKUP_PATH  "/longterm_ring.bin"
 #define LONGTERM_BACKUP_MAGIC 0x4C54504Cu    // 'LTPL'
-#define LONGTERM_BACKUP_VER   1u
+#define LONGTERM_BACKUP_VER   2u    // v2: +timestamp, awa/twa → envelope (116→128 B)
 
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)

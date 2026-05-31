@@ -1924,6 +1924,10 @@ input:focus {
   margin-right: auto;
 }
 
+/* Long Term plots get roomier cards on wide screens (the brush above is full-width;
+   the charts a bit narrower). Shrinks responsively on mobile via the viewport cap. */
+#plots-longterm .settings-card { max-width: 1100px; }
+
 .section-title {
   background-color: #f0f0f0;
   color: var(--text-dark);
