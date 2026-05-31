@@ -9311,7 +9311,6 @@
     <!-- Cloud Features Sub-tabs -->
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('cloudfeatures', 'myprofile', event)">Registration</button>
-      <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'myhistory', event)">Long Term Plots</button>
       <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'leaderboards', event)">Leaderboards</button>
       <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'fleetstats', event)">Fleet Stats</button>
       <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'softwareupdate', event)">Software Update</button>
@@ -9389,16 +9388,9 @@
 
     <!-- My Dashboard Sub-tab -->
 
-    <!-- My History Sub-tab -->
-    <div id="cloudfeatures-myhistory" class="sub-tab-content">
-      <!-- Time-range brush relocated to Plots → Long Term (drives the native uPlot
-           charts) 2026-05-30. This iframe view is being retired. -->
-      <div class="history-container wide-card">
-        <iframe id="history-iframe"
-          style="width: 100%; border: none; display: block; height: 600px; overflow: hidden;"></iframe>
-        <p id="history-status">Loading historical data viewer...</p>
-      </div>
-    </div>
+    <!-- Long Term Plots is now native under Plots → Long Term (local ring + cloud stitch).
+         The old Cloud Features iframe view (cloudfeatures-myhistory / history-iframe) was
+         removed 2026-05-31. -->
 
     <!-- Leaderboards Sub-tab -->
     <div id="cloudfeatures-leaderboards" class="sub-tab-content">
@@ -9756,7 +9748,7 @@
         if (!h) return;
 
         // Apply to whichever iframe sent the message
-        const iframes = ['history-iframe', 'leaderboards-iframe', 'fleetstats-iframe'];
+        const iframes = ['leaderboards-iframe', 'fleetstats-iframe'];
         iframes.forEach(id => {
           const iframe = document.getElementById(id);
           if (iframe && iframe.contentWindow === e.source) {
@@ -9772,10 +9764,6 @@
         }
       }
 
-      document.getElementById('history-iframe')?.addEventListener('load', function () {
-        requestHeightFromIframe(this);
-        broadcastThemeToCloudIframes();
-      });
       document.getElementById('leaderboards-iframe')?.addEventListener('load', function () {
         requestHeightFromIframe(this);
         broadcastThemeToCloudIframes();

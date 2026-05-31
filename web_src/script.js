@@ -4752,65 +4752,8 @@ function resetTempTaskCounters() {
 
 
 // ============================================
-// CLOUD FEATURES - My History
-// ============================================
-async function redirectToHistory() {
-    const statusEl = document.getElementById('history-status');
-    const iframe = document.getElementById('history-iframe');
-
-    if (!iframe) {
-        diagError("history-iframe element not found");
-        return;
-    }
-
-    if (statusEl) statusEl.textContent = 'Retrieving authentication token...';
-
-    try {
-        const response = await fetchWithTimeout(buildURL('/getAuthToken'), {}, 8000);
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-        if (data.registered && data.token) {
-            if (statusEl) statusEl.textContent = 'Loading history viewer...';
-            // IMPORTANT: only set src if it hasn't been set to the history URL yet
-            const targetUrl = `https://supabase-nine-ashy.vercel.app/?token=${encodeURIComponent(data.token)}&dark=${cloudDarkParam()}`;
-            // iframe.src is always an absolute URL once set; handle initial about:blank
-            const currentSrc = iframe.getAttribute('src') || '';
-
-            if (
-                !currentSrc ||                       // empty
-                currentSrc === 'about:blank' ||      // default
-                currentSrc === '#'                   // any placeholder you might be using
-            ) {
-                iframe.src = targetUrl;
-            } else {
-            }
-
-            iframe.style.display = 'block';
-
-            iframe.onload = function () {
-                if (statusEl) statusEl.style.display = 'none';
-            };
-        } else {
-            if (statusEl) {
-                statusEl.innerHTML =
-                    'Device not registered. Please complete registration in <strong>My Profile</strong> tab first.';
-                statusEl.style.color = '#ff6b6b';
-            }
-        }
-
-    } catch (error) {
-        diagError('Error in redirectToHistory:', error);
-        if (statusEl) {
-            statusEl.textContent = 'Error: Could not connect to device';
-            statusEl.style.color = '#ff6b6b';
-        }
-    }
-}
-
-
+// CLOUD FEATURES - Long Term Plots is now native (Plots → Long Term); the old
+// iframe viewer + redirectToHistory() were removed 2026-05-31.
 // ============================================
 // LONG TERM PLOTS — Dashboard-hosted brush
 // Lives in parent (NOT in iframe) so it sticks naturally to dashboard viewport.
@@ -5150,7 +5093,7 @@ function cloudDarkParam() {
 }
 function broadcastThemeToCloudIframes() {
     const dark = document.body.classList.contains('dark-mode');
-    ['history-iframe', 'leaderboards-iframe', 'fleetstats-iframe'].forEach(id => {
+    ['leaderboards-iframe', 'fleetstats-iframe'].forEach(id => {
         const f = document.getElementById(id);
         if (f && f.contentWindow) {
             f.contentWindow.postMessage({ type: 'SET_THEME', dark }, 'https://supabase-nine-ashy.vercel.app');
@@ -9346,7 +9289,6 @@ function showSubTab(parentTab, subTabName, evt = null) {
     // 'mydashboard' (Statistics) was relocated to Live Data → Statistics; content is local data so the gate no longer applies.
     if (parentTab === 'cloudfeatures' && subTabName !== 'myprofile' && !isDeviceRegistered) {
         const featureNames = {
-            'myhistory': 'Long Term Plots',
             'leaderboards': 'Leaderboards',
             'fleetstats': 'Fleet Stats',
             'softwareupdate': 'Software Update'
@@ -9404,11 +9346,6 @@ function showSubTab(parentTab, subTabName, evt = null) {
         initLongTermPlots();
     }
 
-    // Redirect to Vercel for My History
-    if (parentTab === 'cloudfeatures' && subTabName === 'myhistory') {
-        redirectToHistory();
-    }
-
     // Redirect to Vercel for Fleet Stats
     if (parentTab === 'cloudfeatures' && subTabName === 'fleetstats') {
         loadFleetStatsInIframe();
@@ -9422,18 +9359,14 @@ function showSubTab(parentTab, subTabName, evt = null) {
     // Control sticky header for Cloud Features subtabs
     const header = document.querySelector('.permanent-header');
     if (header && parentTab === 'cloudfeatures') {
-        if (subTabName === 'myhistory') {
-            header.classList.remove('permanent-header-sticky');
-        } else {
-            header.classList.add('permanent-header-sticky');
-        }
+        header.classList.add('permanent-header-sticky');
     }
 
     updateFlushPillVisibility(parentTab, subTabName);
 }
 
-// Floating Cloud Upload pill — only visible on the three iframe sub-tabs.
-const FLUSH_PILL_TABS = new Set(['myhistory', 'leaderboards', 'fleetstats']);
+// Floating Cloud Upload pill — only visible on the cloud iframe sub-tabs.
+const FLUSH_PILL_TABS = new Set(['leaderboards', 'fleetstats']);
 function updateFlushPillVisibility(parentTab, subTabName) {
     const pill = document.getElementById('cloud-flush-pill');
     if (!pill) return;
@@ -13962,6 +13895,11 @@ window.addEventListener('load', function () {
     ['leeway',10], ['altZero',100]
   ];
 
+  // Only a genuine power-off should break the trace. Cadence jitter or a few missed
+  // samples must NOT insert a gap-marker — ltBin nulls a whole bin that contains one,
+  // so over-eager gaps blank the chart at low zoom. Break only on big gaps (≥ ~20 min).
+  function ltGapThreshold(interval) { return Math.max((interval || 600) * 4, 1200); }
+
   // Header (16 B LE): u16 head, u16 count, u16 capacity, u16 recordSize,
   // u32 lastEpoch, u32 intervalSec. Then capacity × recordSize raw records.
   function parseLT(buf) {
@@ -13973,7 +13911,9 @@ window.addEventListener('load', function () {
     const recSize   = dv.getUint16(6, true);
     const lastEpoch = dv.getUint32(8, true);
     const interval  = dv.getUint32(12, true) || 600;   // seconds between records
-    if (!capacity || !recSize || buf.byteLength < 16 + capacity * recSize) return null;
+    // Body is `count` records in chronological order (the endpoint no longer sends the
+    // whole ring), so the buffer is 16 + count*recSize.
+    if (!recSize || buf.byteLength < 16 + count * recSize) return null;
 
     const fields = {};
     ENV.forEach(([k]) => fields[k] = { min:[], max:[], avg:[] });
@@ -13988,15 +13928,15 @@ window.addEventListener('load', function () {
 
     // Record layout (128 B): u32 timestamp @0, i32 lat @4, i32 lon @8, u32 validMask @12,
     // envelope [min,max,avg]×16 from @16, avg-only ×7 after, u8 chargeStage + pad.
-    const tail = (count < capacity) ? 0 : head;   // oldest record in chrono order
+    // Records arrive in chronological order (oldest first), so read them linearly.
     let prevTs = null;
     for (let i = 0; i < count; i++) {
-      const base = 16 + ((tail + i) % capacity) * recSize;
+      const base = 16 + i * recSize;
       const tsRaw = dv.getUint32(base, true);
       const valid = dv.getUint32(base + 12, true);
       // Use the record's real timestamp (legit axis); fall back to position-derived if unsynced.
       const ts = tsRaw > 0 ? tsRaw : (lastEpoch ? lastEpoch - (count - 1 - i) * interval : i * interval);
-      if (prevTs != null && (ts - prevTs) > interval * 1.1) pushGap((prevTs + ts) / 2);  // gap → break
+      if (prevTs != null && (ts - prevTs) > ltGapThreshold(interval)) pushGap((prevTs + ts) / 2);  // gap → break
       prevTs = ts;
 
       t.push(ts); isGap.push(false);
@@ -14062,9 +14002,14 @@ window.addEventListener('load', function () {
         const f = ltData.fields[k], o = out.fields[k];
         let mn = Infinity, mx = -Infinity, sum = 0, cnt = 0;
         for (let j = i; j < end; j++) if (f.avg[j] != null) {
-          if (f.min[j] < mn) mn = f.min[j]; if (f.max[j] > mx) mx = f.max[j]; sum += f.avg[j]; cnt++;
+          const lo = f.min[j], hi = f.max[j];
+          if (lo != null && lo < mn) mn = lo;   // skip null min/max (sentinel-cleaned cloud rows)
+          if (hi != null && hi > mx) mx = hi;    // so Infinity never leaks into the band → uPlot scale
+          sum += f.avg[j]; cnt++;
         }
-        o.min.push(cnt ? mn : null); o.max.push(cnt ? mx : null); o.avg.push(cnt ? sum / cnt : null);
+        o.avg.push(cnt ? sum / cnt : null);
+        o.min.push(isFinite(mn) ? mn : null);    // finite-or-null only
+        o.max.push(isFinite(mx) ? mx : null);
       });
       AVG.forEach(([k]) => {
         const f = ltData.fields[k], o = out.fields[k];
@@ -14092,24 +14037,36 @@ window.addEventListener('load', function () {
   // the visible binned data). The guard stops our setScale from re-triggering the hook.
   function ltRenderAll(fromSec, toSec) {
     if (!ltData || !ltCharts.length) return;
+    // A zero/negative-width x-range makes uPlot null out its scales and draw nothing.
+    if (!(toSec > fromSec)) { const c = fromSec; fromSec = c - 1800; toSec = c + 1800; }
     ltRendering = true;
     ltCurRange = [fromSec, toSec];
     const b = ltBin(fromSec, toSec, LT_MAX_BINS);
     ltCharts.forEach(c => {
       const data = [ b.t ];
+      const scaleVals = {};   // scaleName → arrays feeding that scale (for explicit range calc)
       c.spec.series.forEach(s => {
         const f = b.fields[s.key];
-        data.push(s.unwrap ? unwrapAngles(f.avg) : f.avg);
-        if (s.band) { data.push(f.max); data.push(f.min); }
+        const avg = s.unwrap ? unwrapAngles(f.avg) : f.avg;
+        data.push(avg);
+        (scaleVals[s.scale] = scaleVals[s.scale] || []).push(avg);
+        if (s.band) { data.push(f.max); data.push(f.min); scaleVals[s.scale].push(f.max, f.min); }
       });
-      c.plot.setData(data);                                  // auto-fits Y for auto scales
+      c.plot.setData(data);          // rebuilds series paths (auto-scale may null out; we override below)
       c.plot.setScale('x', { min: fromSec, max: toSec });
-      // Enforce manual Y overrides (auto=false pins them; setData above already
-      // re-fit the auto ones). Fixed-range scales (e.g. SOC% [0,100]) left untouched.
+      // Set every Y-scale EXPLICITLY from the visible data. uPlot's own auto-range was
+      // intermittently leaving scales null (→ nothing drawn), so we compute min/max here.
       const ov = ltYOverride[c.id] || {};
       c.spec.scales.forEach(sc => {
-        if (ov[sc.name]) { c.plot.scales[sc.name].auto = false; c.plot.setScale(sc.name, { min: ov[sc.name][0], max: ov[sc.name][1] }); }
-        else if (!sc.range) { c.plot.scales[sc.name].auto = true; }
+        if (ov[sc.name]) { c.plot.setScale(sc.name, { min: ov[sc.name][0], max: ov[sc.name][1] }); return; }
+        if (sc.range) { c.plot.setScale(sc.name, { min: sc.range[0], max: sc.range[1] }); return; }  // fixed (e.g. SOC 0-100)
+        let mn = Infinity, mx = -Infinity;
+        (scaleVals[sc.name] || []).forEach(arr => { for (const v of arr) { if (v != null && isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; } } });
+        if (isFinite(mn) && isFinite(mx)) {
+          if (mn === mx) { mn -= 1; mx += 1; }
+          const pad = (mx - mn) * 0.05;
+          c.plot.setScale(sc.name, { min: mn - pad, max: mx + pad });
+        }
       });
     });
     ltRendering = false;
@@ -14119,6 +14076,7 @@ window.addEventListener('load', function () {
       _brushState.from = fromSec * 1000; _brushState.to = toSec * 1000;
       if (typeof _brushUpdateSelectionUI === 'function') _brushUpdateSelectionUI();
     }
+    ltCloudMaybePull(fromSec);   // brushed past the loaded edge → stitch in older cloud data
   }
   const ltZoomDebounced = debounce((min, max) => { if (min != null && max != null) ltRenderAll(min, max); }, 120);
 
@@ -14177,8 +14135,10 @@ window.addEventListener('load', function () {
     if (!el || typeof uPlot === 'undefined') return;
     el.innerHTML = '';
     const series = [ { label: 'Time' } ], bands = [], initData = [ [] ], avgIdx = [];
+    const seriesGroups = [];   // per spec-series: uPlot series indices (avg + band edges) to toggle together
     let di = 1;
     spec.series.forEach(s => {
+      const group = [di];
       avgIdx.push(di);
       series.push({ label: s.label, scale: s.scale, stroke: s.color, width: 2, points: { show: false }, spanGaps: false });
       initData.push([]); di++;
@@ -14187,7 +14147,9 @@ window.addEventListener('load', function () {
         const minIdx = series.length; series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
         bands.push({ series: [maxIdx, minIdx], fill: hexAlpha(s.color, 0.14) });
         initData.push([]); initData.push([]); di += 2;
+        group.push(maxIdx, minIdx);
       }
+      seriesGroups.push(group);
     });
     const scales = { x: { time: true } };
     const axes = [ { grid: { show: true } } ];
@@ -14201,13 +14163,20 @@ window.addEventListener('load', function () {
     const legendEl = document.createElement('div');
     legendEl.style.cssText = 'display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;';
     const valSpans = [];
-    spec.series.forEach(s => {
+    spec.series.forEach((s, i) => {
       const item = document.createElement('span');
-      item.style.cssText = 'display:inline-flex;align-items:center;gap:5px;';
+      item.style.cssText = 'display:inline-flex;align-items:center;gap:5px;cursor:pointer;user-select:none;';
+      item.title = 'Click to show/hide';
       const sw = document.createElement('span');
       sw.style.cssText = 'width:11px;height:11px;border-radius:2px;display:inline-block;background:' + s.color + ';';
       const val = document.createElement('b');
       item.appendChild(sw); item.appendChild(document.createTextNode(s.label + ': ')); item.appendChild(val);
+      // Click the legend item to toggle that series (and its envelope band) on/off.
+      item.addEventListener('click', () => {
+        const show = !plot.series[seriesGroups[i][0]].show;
+        seriesGroups[i].forEach(idx => plot.setSeries(idx, { show }));
+        item.style.opacity = show ? '1' : '0.4';
+      });
       legendEl.appendChild(item);
       valSpans.push(val);
     });
@@ -14344,9 +14313,40 @@ window.addEventListener('load', function () {
     });
 
     }
-    ltFullRange = [ ltData.t[0], ltData.t[ltData.n - 1] ];
-    ltRenderAll(ltFullRange[0], ltFullRange[1]);
-    ltInitBrush(ltFullRange[0], ltFullRange[1], ltData.lastEpoch || ltFullRange[1]);
+    // When the local ring holds little (< ~1h span — always true right after an OTA
+    // reboot until the field-off dump persists it), lean on cloud: anchor the view to the
+    // last 24h and auto-pull cloud history. Otherwise show the full local span.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const localSpan = (ltData.n >= 2) ? (ltData.t[ltData.n - 1] - ltData.t[0]) : 0;
+    const sparse = localSpan < 3600;
+    const oldestBoundary = (ltData.n > 0) ? ltData.t[0] : nowSec;   // cloud fills below this
+    const loSec = sparse ? (nowSec - 86400) : ltData.t[0];
+    const hiSec = sparse ? nowSec : ltData.t[ltData.n - 1];
+    ltFullRange = [loSec, hiSec];
+    // Order matters: brush (sets nativeSink) → cloud state (reach) → render. The render's
+    // ltCloudMaybePull then fires exactly ONE pull (loSec < oldest in the sparse case).
+    ltInitBrush(loSec, hiSec, sparse ? nowSec : (ltData.lastEpoch || hiSec));
+    ltCloudInit(oldestBoundary);
+    ltRenderAll(loSec, hiSec);
+    // Force each chart to its real container width + repaint. Charts can get stuck at
+    // the 320px fallback if first built before the sub-tab had laid out; the per-chart
+    // ResizeObserver never corrects it because `el` itself doesn't change size. Run on
+    // every open (idempotent) so a reopen also fixes any stale narrow sizing.
+    requestAnimationFrame(() => requestAnimationFrame(ltResizeAll));
+    setTimeout(ltResizeAll, 250);   // fallback for late layout (card width applied after activate)
+  }
+
+  function ltResizeAll() {
+    ltCharts.forEach(c => {
+      const el = document.getElementById(c.id);
+      if (!el) return;
+      // Size to the parent CARD's content width, not the .plot-container's — uPlot's root
+      // is `width: min-content`, so the container collapses to ~the canvas width (e.g. 324px)
+      // and reading it just re-pins the narrow size. The card is a full-width block.
+      const card = el.closest('.settings-card');
+      const w = Math.floor((card ? card.clientWidth : el.clientWidth)) - 22;  // minus card padding
+      if (w > 50) c.plot.setSize({ width: w, height: 300 });
+    });
   }
 
   function ltStatus(msg) {
@@ -14357,75 +14357,258 @@ window.addEventListener('load', function () {
     else { card.style.display = 'none'; }   // hide the whole card, not just the text
   }
 
+  // ======================================================================
+  // CLOUD STITCH — history older than the local ring (LOCAL_DATA_SYSTEMS_PLAN 1b).
+  // Lazy + cloud-gated: when Cloud Features is on and the device is registered,
+  // brushing past the oldest local record pulls a matching 10-min min/max/avg
+  // aggregate from Supabase (get-history, date-range) and PREPENDS it into ltData,
+  // so it renders as one continuous band+line across the SAME 7 charts. Pulled in
+  // 30-day chunks, each older than the last; reaching the loaded edge opens + fetches
+  // the next chunk. When cloud is off/unregistered the pre-ring region simply stays
+  // empty (one-line hint), never an error, and the in-ring month is never greyed.
+  // ======================================================================
+  const LT_CLOUD_CHUNK_S        = 30 * 86400;    // pull 30 days of older history per request
+  const LT_CLOUD_MAX_LOOKBACK_S = 365 * 86400;   // stop pulling beyond ~1 year back
+  // JS field key → sensor_history column prefix (envelope: _min/_max/_avg; avg-only: _avg).
+  const LT_CLOUD_COL = {
+    battVolt:'batt_volt', battCurr:'batt_curr', altCurr:'alt_curr', victronCurr:'victron_curr',
+    rpm:'rpm', duty:'duty_cycle', altTemp:'alt_temp', tempTherm:'temp_therm',
+    sog:'sog', tws:'tws', vmg:'vmg', aws:'aws', awa:'awa', twa:'twa',
+    heel:'imu_heel', pitch:'imu_pitch',
+    soc:'soc', baro:'baro', ambTemp:'amb_temp', cog:'cog', heading:'heading',
+    leeway:'leeway', altZero:'alt_zero'
+  };
+  let ltCloud = { avail: undefined, fetching: false, oldest: null, exhausted: false };
+
+  function ltCloudEnabled() {
+    // Source of truth is the checkbox — the settings echo (updateCheckbox) keeps
+    // CloudFeatures_checkbox.checked current but does NOT write the hidden
+    // #CloudFeatures input's .value (it stays "0"), so reading that gave false negatives.
+    const cb = document.getElementById('CloudFeatures_checkbox');
+    if (cb) return !!cb.checked;
+    const cf = document.getElementById('CloudFeatures');
+    return !!cf && cf.value === '1';
+  }
+  function ltIso(sec) { return new Date(sec * 1000).toISOString().replace(/\.\d+Z$/, 'Z'); }
+
+  // One-line note below the brush, shown when cloud history isn't available. mode:
+  //   'off' — Cloud Features off but available (Client mode) → tell them they can enable it
+  //   'ap'  — Access Point mode → Cloud Features can't be enabled, so don't suggest it
+  //   null  — cloud on → hide the note
+  function ltCloudHint(mode) {
+    let el = document.getElementById('lt-cloud-hint');
+    if (!el) {
+      const host = document.getElementById('dashboard-brush');
+      if (!host || !host.parentNode) return;
+      el = document.createElement('div');
+      el.id = 'lt-cloud-hint';
+      el.style.cssText = 'font-size:12px;opacity:0.7;margin:6px 2px;';
+      host.parentNode.insertBefore(el, host.nextSibling);
+    }
+    if (mode === 'off') el.textContent = 'Showing on-device history (~1 month). Enable Cloud Features in Settings to view older data.';
+    else if (mode === 'ap') el.textContent = 'Showing on-device history (~1 month). Older data needs Cloud Features, which is unavailable in Access Point mode.';
+    el.style.display = mode ? '' : 'none';
+  }
+
+  // Map get-history rows (must be ascending) into parallel arrays in ltData's field
+  // shape, dropping any overlap with already-loaded data and breaking the line where
+  // the 10-min cadence is interrupted (power-off period).
+  function ltCloudRowsToSlice(rows, interval, boundarySec) {
+    const t = [], isGap = [], fields = {};
+    ENV.forEach(([k]) => fields[k] = { min:[], max:[], avg:[] });
+    AVG.forEach(([k]) => fields[k] = { avg:[] });
+    const num = (v) => (v == null ? null : Number(v));
+    const pushGap = (gt) => {
+      t.push(gt); isGap.push(true);
+      ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); });
+      AVG.forEach(([k]) => fields[k].avg.push(null));
+    };
+    let prevTs = null;
+    for (const r of rows) {
+      const ts = Math.floor(Date.parse(r.timestamp) / 1000);
+      if (!isFinite(ts) || ts >= boundarySec) continue;   // drop overlap with loaded data
+      // Skip invalid/boot windows: a battery can't read 0 V, so batt_volt_avg<=0 means
+      // the device sampled before sensors were ready (each reboot leaves one). Bridge over
+      // it rather than letting every trace dive to 0. Legit zeros (SOG, VMG) are kept.
+      const bv = num(r.batt_volt_avg);
+      if (bv == null || bv <= 0) continue;
+      if (prevTs != null && (ts - prevTs) > ltGapThreshold(interval)) pushGap((prevTs + ts) / 2);
+      prevTs = ts;
+      t.push(ts); isGap.push(false);
+      // Fields where 0 means "no reading" (a battery/baro can't be 0): null the garbage so
+      // boot-window transients don't pull lines/bands to 0. Legit zeros (speeds, angles) kept.
+      const nz = (k, v) => ((k === 'battVolt' || k === 'baro') && v != null && v <= 0) ? null : v;
+      ENV.forEach(([k]) => {
+        const c = LT_CLOUD_COL[k], f = fields[k];
+        f.min.push(nz(k, num(r[c + '_min']))); f.max.push(nz(k, num(r[c + '_max']))); f.avg.push(nz(k, num(r[c + '_avg'])));
+      });
+      AVG.forEach(([k]) => fields[k].avg.push(nz(k, num(r[LT_CLOUD_COL[k] + '_avg']))));
+    }
+    return { t, fields, isGap, n: t.length };
+  }
+
+  // Reorder ltData strictly by ascending timestamp. A single out-of-order point makes
+  // uPlot draw a line segment that jumps backward across the chart (looks like an extra
+  // crossing line). Reorders all parallel arrays (t, isGap, every field) by one index map.
+  function ltSortData() {
+    if (!ltData || ltData.n < 2) return;
+    const ot = ltData.t;
+    // Sort by timestamp AND drop exact-duplicate timestamps (keep first). Dedup guards
+    // against any double-prepend; a backward-jumping point or duplicate both draw wrong.
+    const sortIdx = ot.map((_, i) => i).sort((a, b) => ot[a] - ot[b]);
+    const idx = []; let last = null;
+    for (const i of sortIdx) { if (ot[i] === last) continue; idx.push(i); last = ot[i]; }
+    if (idx.length === ot.length) {   // already sorted, no dups → nothing to do
+      let clean = true;
+      for (let j = 0; j < idx.length; j++) if (idx[j] !== j) { clean = false; break; }
+      if (clean) return;
+    }
+    const og = ltData.isGap || [];
+    ltData.t = idx.map(i => ot[i]);
+    ltData.isGap = idx.map(i => og[i]);
+    ENV.forEach(([k]) => { const f = ltData.fields[k], mn = f.min, mx = f.max, av = f.avg;
+      f.min = idx.map(i => mn[i]); f.max = idx.map(i => mx[i]); f.avg = idx.map(i => av[i]); });
+    AVG.forEach(([k]) => { const av = ltData.fields[k].avg; ltData.fields[k].avg = idx.map(i => av[i]); });
+    ltData.n = ltData.t.length;
+  }
+
+  // Prepend an older slice into ltData chronologically, breaking the line at the
+  // cloud↔local seam if the cadence gaps there.
+  function ltCloudPrepend(slice, interval) {
+    if (!slice.n) return;
+    const t = slice.t.slice(), isGap = slice.isGap.slice(), fields = {};
+    ENV.forEach(([k]) => fields[k] = { min: slice.fields[k].min.slice(), max: slice.fields[k].max.slice(), avg: slice.fields[k].avg.slice() });
+    AVG.forEach(([k]) => fields[k] = { avg: slice.fields[k].avg.slice() });
+    if (ltData.t.length && (ltData.t[0] - slice.t[slice.n - 1]) > ltGapThreshold(interval)) {
+      const gt = (slice.t[slice.n - 1] + ltData.t[0]) / 2;   // seam gap
+      t.push(gt); isGap.push(true);
+      ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); });
+      AVG.forEach(([k]) => fields[k].avg.push(null));
+    }
+    ltData.t = t.concat(ltData.t);
+    ltData.isGap = isGap.concat(ltData.isGap || []);
+    ENV.forEach(([k]) => {
+      ltData.fields[k].min = fields[k].min.concat(ltData.fields[k].min);
+      ltData.fields[k].max = fields[k].max.concat(ltData.fields[k].max);
+      ltData.fields[k].avg = fields[k].avg.concat(ltData.fields[k].avg);
+    });
+    AVG.forEach(([k]) => { ltData.fields[k].avg = fields[k].avg.concat(ltData.fields[k].avg); });
+    ltData.n = ltData.t.length;
+    ltSortData();   // guarantee strict monotonic order (no backward-jumping line segments)
+  }
+
+  // Open one chunk of reachable past so the brush can be dragged into cloud territory
+  // (the actual fetch stays lazy — triggered only when the view passes the loaded edge).
+  function ltCloudOldestSec() {   // oldest loaded boundary, valid even with an empty local ring
+    if (ltCloud.oldest != null) return ltCloud.oldest;
+    if (ltData && ltData.n > 0) return ltData.t[0];
+    return Math.floor(Date.now() / 1000);
+  }
+  function ltCloudExtendReach() {
+    if (!_brushState || !_brushState.nativeSink) return;
+    const reachMs = (ltCloudOldestSec() - LT_CLOUD_CHUNK_S) * 1000;
+    _brushState.dataMin = reachMs;
+    const mn = document.getElementById('dashboard-brush-data-min');
+    if (mn && typeof _brushFormatTime === 'function') mn.textContent = _brushFormatTime(reachMs);
+  }
+  function ltCloudClampReach() {   // exhausted: stop the brush at real data
+    if (!_brushState || !_brushState.nativeSink) return;
+    _brushState.dataMin = ltCloudOldestSec() * 1000;
+    const mn = document.getElementById('dashboard-brush-data-min');
+    if (mn && typeof _brushFormatTime === 'function') mn.textContent = _brushFormatTime(_brushState.dataMin);
+  }
+
+  // Pull the next older 30-day chunk (cloud-gated, deduped, bounded, chains while the
+  // brushed range still extends past the loaded edge).
+  async function ltCloudPull() {
+    if (!ltData || ltCloud.fetching || ltCloud.exhausted) return;
+    if (!ltCloudEnabled()) { ltCloud.avail = false; return; }
+    // local had little (≤1 pt or <1h span) → after the fill, show the whole loaded range
+    const wasSparse = (ltData.n < 2) || ((ltData.t[ltData.n - 1] - ltData.t[0]) < 3600);
+    const boundary = (ltCloud.oldest != null) ? ltCloud.oldest : ltData.t[0];
+    if (boundary <= Math.floor(Date.now() / 1000) - LT_CLOUD_MAX_LOOKBACK_S) { ltCloud.exhausted = true; ltCloudClampReach(); return; }
+    ltCloud.fetching = true;
+    try {
+      const token = await ensureCloudToken();
+      if (!token) { ltCloud.avail = false; ltCloudClampReach(); return; }  // not registered → no cloud tier
+      ltCloud.avail = true;
+      const startSec = boundary - LT_CLOUD_CHUNK_S;
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/get-history`, {
+        method: 'POST', headers: cloudHeaders(),
+        body: JSON.stringify({ token, start: ltIso(startSec), end: ltIso(boundary) })
+      });
+      if (!resp.ok) { if (resp.status === 401) g_cloudToken = null; return; }   // leave state → retry later
+      const json = await resp.json();
+      const rows = (json && json.data) ? json.data.slice() : [];
+      rows.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));   // ascending
+      const interval = ltData.interval || 600;
+      const slice = ltCloudRowsToSlice(rows, interval, boundary);
+      if (slice.n === 0) { ltCloud.exhausted = true; ltCloudClampReach(); return; }  // no older data
+      ltCloudPrepend(slice, interval);
+      ltCloud.oldest = slice.t[0];
+      ltFullRange = [ ltData.t[0], ltFullRange ? ltFullRange[1] : ltData.t[ltData.n - 1] ];
+      ltCloudExtendReach();
+    } catch (e) {
+      // Network/parse failure — leave state so a later brush retries.
+    } finally {
+      ltCloud.fetching = false;
+    }
+    // Re-render so the stitched data appears. If the ring was sparse (no real local
+    // span), show the whole freshly-loaded range; otherwise keep the current range (and
+    // if it still passes the new loaded edge, that re-triggers a pull → next chunk).
+    if (wasSparse && ltData.n >= 2 && ltData.t[ltData.n - 1] > ltData.t[0]) {
+      ltRenderAll(ltData.t[0], ltData.t[ltData.n - 1]);
+    } else if (ltCurRange) {
+      ltRenderAll(ltCurRange[0], ltCurRange[1]);
+    }
+  }
+
+  // Called from ltRenderAll: pull when the view passes the oldest loaded record.
+  function ltCloudMaybePull(fromSec) {
+    if (!ltData || ltCloud.exhausted || ltCloud.fetching || ltCloud.avail === false) return;
+    if (isFinite(fromSec) && fromSec < ltCloudOldestSec()) ltCloudPull();
+  }
+
+  // oldestSec = the boundary below which cloud fills (oldest local record, or `now` when
+  // the local ring is empty). No auto-pull here — the initial ltRenderAll's
+  // ltCloudMaybePull triggers exactly one pull when the view reaches past `oldest`
+  // (which it does in the sparse case, where loSec is well before oldest). Calling a pull
+  // here too caused a concurrent double-fetch (fetching flag was reset) → duplicate data.
+  function ltCloudInit(oldestSec) {
+    ltCloud = { avail: undefined, fetching: false, oldest: oldestSec, exhausted: false };
+    if (!ltCloudEnabled()) {
+      ltCloud.avail = false;
+      const apMode = (document.getElementById('currentModeID')?.value === '1');  // 1 = Access Point
+      ltCloudHint(apMode ? 'ap' : 'off');
+      return;
+    }
+    ltCloudHint(null);
+    ltCloudExtendReach();
+  }
+
+  // Re-fetch the on-device ring on EVERY tab open (the endpoint now sends only the
+  // populated records, so it's cheap) → the local portion is always current. Cloud stays
+  // lazy: re-stitched on brush-past-horizon. Charts are built once; subsequent opens
+  // refresh their data.
   window.initLongTermPlots = function () {
-    if (ltLoaded) { buildAllLtPlots(); return; }   // rebuild from session cache
     fetch('/longTermPlots.bin', { cache: 'no-cache' })
       .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
       .then(buf => {
         ltData = parseLT(buf);
         if (!ltData) throw new Error('parse failed');
+        ltSortData();   // strict monotonic order before any render
         ltLoaded = true;
-        if (ltData.n === 0) { ltStatus('No long-term data yet — records accumulate every ~10 min.'); return; }
+        // Empty local ring: if Cloud Features is on, still build the charts so the cloud
+        // stitch can fill the timeline; only show the "no data" notice when cloud is off.
+        if (ltData.n === 0 && !ltCloudEnabled()) {
+          ltStatus('No long-term data yet — records accumulate every ~10 min.');
+          return;
+        }
         ltStatus(null);
         buildAllLtPlots();
       })
-      .catch(e => ltStatus('Long-term history unavailable (' + e.message + ').'));
-  };
-
-  // DEV/TEST — synthesize N long-term records (real units, multi-scale structure so
-  // zoom reveals finer detail) and render, to exercise binning + zoom without waiting
-  // for real data. From the browser console: ltGenerateFake(4000)  // ~28 days @10min.
-  // Open Plots → Long Term first (so the containers exist), then call it. REMOVE for prod.
-  window.ltGenerateFake = function (n, gaps) {
-    n = n || 4000;
-    gaps = (gaps == null) ? 1 : gaps;        // # of synthetic 2-day power-off gaps to inject (0 = none)
-    const interval = 600;
-    const t = [], isGap = [], fields = {};
-    ENV.forEach(([k]) => fields[k] = { min: [], max: [], avg: [] });
-    AVG.forEach(([k]) => fields[k] = { avg: [] });
-    const env = (k, avg, spread) => { const f = fields[k]; f.min.push(avg - spread); f.max.push(avg + spread); f.avg.push(avg); };
-    const av = (k, v) => fields[k].avg.push(v);
-    const pushGap = (gt) => { t.push(gt); isGap.push(true); ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); }); AVG.forEach(([k]) => fields[k].avg.push(null)); };
-    const gapSet = new Set();                // gap positions spread evenly through the run
-    for (let g = 1; g <= gaps; g++) gapSet.add(Math.floor(n * g / (gaps + 1)));
-    let tsec = Math.floor(Date.now() / 1000) - (n - 1) * interval;
-    for (let i = 0; i < n; i++) {
-      if (gapSet.has(i)) { const before = tsec; tsec += 2 * 86400; pushGap((before + tsec) / 2); }   // simulate a 2-day power-off
-      const slow = Math.sin(i * 0.01), fast = Math.sin(i * 0.5);   // two scales → zoom shows detail
-      t.push(tsec); isGap.push(false);
-      env('battVolt', 13.5 + slow * 0.8 + fast * 0.3, 0.6);
-      env('battCurr', slow * 30 + fast * 8, 5);
-      env('altCurr', 20 + slow * 15 + fast * 6, 4);
-      env('victronCurr', slow * 10, 3);
-      env('rpm', 1500 + slow * 1200 + fast * 300, 200);
-      env('duty', 50 + slow * 40, 5);
-      env('altTemp', 120 + slow * 60, 10);
-      env('tempTherm', 110 + slow * 40, 8);
-      env('sog', 5 + Math.abs(fast) * 3, 1);
-      env('tws', 12 + slow * 6, 1.5);
-      env('vmg', 3 + fast * 2, 0.8);
-      env('aws', 15 + slow * 5, 1.5);
-      env('awa', fast * 45, 8);
-      env('twa', fast * 90, 12);
-      env('heel', fast * 15, 3);
-      env('pitch', slow * 5, 2);
-      av('soc', 50 + (i / n) * 50);
-      av('baro', 1013 + slow * 3);
-      av('ambTemp', 75 + slow * 5);
-      av('cog', (slow * 180 + 180 + i * 2) % 360);
-      av('heading', (slow * 180 + 170 + i * 2) % 360);
-      av('leeway', fast * 5);
-      av('altZero', fast * 0.2);
-      tsec += interval;
-    }
-    ltData = { t, n: t.length, lastEpoch: t[t.length - 1], interval, fields, isGap };
-    ltLoaded = true;
-    ltStatus(null);
-    ltCharts.length = 0;
-    ['lt-current-plot', 'lt-voltage-plot', 'lt-temp-plot', 'lt-rpm-plot', 'lt-wind-plot', 'lt-angles-plot', 'lt-motion-plot']
-      .forEach(id => { const el = document.getElementById(id); if (el) el.innerHTML = ''; });
-    buildAllLtPlots();
-    console.log('ltGenerateFake: ' + n + ' records + ' + gaps + ' gap(s) ≈ ' + (n * interval / 86400).toFixed(1) + ' days → binned to ≤' + LT_MAX_BINS);
+      // On a transient re-fetch failure, keep whatever's already on screen rather than blanking.
+      .catch(e => { if (!ltLoaded) ltStatus('Long-term history unavailable (' + e.message + ').'); });
   };
 })();
 

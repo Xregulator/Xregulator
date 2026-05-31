@@ -169,7 +169,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.93";
+const char *FIRMWARE_VERSION = "0.0.114";
 
 String currentUID;
 
@@ -1457,6 +1457,7 @@ struct SensorSnapshot {
   int64_t collectionTime;       // time_t (64-bit, Y2038-safe) — positive epoch if synced, negative-millis marker if not
   SensorWindow window;          // accumulated min/max/area for this window
   ImuSnapshot imu;              // frozen IMU subset (resists imuWindow reset between roll and upload)
+  uint8_t chargeStage;          // display code (0-7) captured at window roll — uploads are deferred so this can't read live state later
 };
 const uint16_t SENSOR_RING_SIZE = 1000;  // 1000 × ~820 B ≈ 820 KB PSRAM; ~83 hr at 5 min/sample
 SensorSnapshot *sensorRing = nullptr;    // ps_malloc'd in setup()
@@ -1536,6 +1537,12 @@ time_t     longTermLastEpoch      = 0;       // epoch of newest record (0 = unsy
 #define LONGTERM_BACKUP_PATH  "/longterm_ring.bin"
 #define LONGTERM_BACKUP_MAGIC 0x4C54504Cu    // 'LTPL'
 #define LONGTERM_BACKUP_VER   2u    // v2: +timestamp, awa/twa → envelope (116→128 B)
+// Periodic field-off dump interval. The rising-edge dump alone captures a nearly
+// empty ring on a bench (field never cycles), so accumulated records were lost on
+// reboot/power-loss. This re-dumps every interval WHILE field-off (only when the
+// ring actually changed). writePsramBlob writes just `count` records, so it's cheap
+// while the ring is small and bounded (~501 KB) when full.
+const unsigned long LONGTERM_DUMP_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
 
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
@@ -4094,14 +4101,19 @@ void loop() {
       }
     }
 
-    // Long-term plot ring → flash, once on the field-off-settled rising edge (the
-    // doc's "field-off edge"; shutdown does the final dump). Field-off only — never
-    // write ~500 KB while the control loop is live. prev_longTermHead guard skips a
-    // re-dump when nothing changed since the last one.
+    // Long-term plot ring → flash while field-off (the doc's "field-off edge"; shutdown
+    // does the final dump). Field-off only — never write while the control loop is live.
+    // Dumps on the field-off-settled rising edge AND periodically thereafter (so a long
+    // engine-off stretch keeps persisting new records, not just the first one). The
+    // prev_longTermHead guard skips a dump when nothing changed since the last one.
     static bool prevLongTermFieldOff = false;
+    static unsigned long lastLongTermDumpMs = 0;
     bool ltFieldOff = fieldOffSettled(0);
-    if (ltFieldOff && !prevLongTermFieldOff && prev_longTermHead != longTermHead) {
+    bool ltRisingEdge = (ltFieldOff && !prevLongTermFieldOff);
+    bool ltPeriodic   = (ltFieldOff && (millis() - lastLongTermDumpMs >= LONGTERM_DUMP_INTERVAL_MS));
+    if ((ltRisingEdge || ltPeriodic) && prev_longTermHead != longTermHead) {
       dumpLongTermRing();
+      lastLongTermDumpMs = millis();
     }
     prevLongTermFieldOff = ltFieldOff;
   }

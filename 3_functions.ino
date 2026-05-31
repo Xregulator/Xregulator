@@ -2176,7 +2176,8 @@ void setupServer() {
     struct LtDLState {
       uint8_t  header[16];
       int      headerPos;
-      uint32_t bytePos;   // into the raw ring array
+      uint32_t recIdx;      // which chronological record (0..count-1)
+      uint32_t recBytePos;  // byte offset within the current record
       bool     done;
     };
     LtDLState state;
@@ -2185,6 +2186,7 @@ void setupServer() {
     uint16_t capLE = LONGTERM_RING_SIZE, recLE = (uint16_t)sizeof(LongTermRecord);
     uint32_t epochLE = (uint32_t)longTermLastEpoch;
     uint32_t intervalLE = SENSOR_UPLOAD_INTERVAL / 1000UL;
+    uint16_t tail = (countLE < capLE) ? 0 : headLE;   // oldest record (chronological start)
     memcpy(state.header + 0,  &headLE,     2);
     memcpy(state.header + 2,  &countLE,    2);
     memcpy(state.header + 4,  &capLE,      2);
@@ -2192,10 +2194,13 @@ void setupServer() {
     memcpy(state.header + 8,  &epochLE,    4);
     memcpy(state.header + 12, &intervalLE, 4);
 
-    const uint32_t bodyBytes = (uint32_t)LONGTERM_RING_SIZE * sizeof(LongTermRecord);
+    // Body = `count` records in CHRONOLOGICAL order (oldest first), NOT the full ring.
+    // Sending the whole 4320-slot ring (~540 KB) made the async server truncate the
+    // chunked transfer (ERR_INCOMPLETE_CHUNKED_ENCODING); count×recSize stays small until
+    // the ring is genuinely full. JS reads records linearly (base = 16 + i*recSize).
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "application/octet-stream",
-      [state, bodyBytes](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      [state, countLE, tail, capLE, recLE](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
         if (state.done) return 0;
         size_t written = 0;
         while (written < maxLen) {
@@ -2206,14 +2211,14 @@ void setupServer() {
             state.headerPos += (int)canSend;
             continue;
           }
-          if (state.bytePos >= bodyBytes) {
-            state.done = true;
-            return written;
-          }
-          size_t canSend = min(maxLen - written, (size_t)(bodyBytes - state.bytePos));
-          memcpy(buf + written, ((uint8_t *)longTermRing) + state.bytePos, canSend);
+          if (state.recIdx >= countLE) { state.done = true; return written; }
+          uint32_t srcIdx = ((uint32_t)tail + state.recIdx) % capLE;   // ring → chronological
+          const uint8_t *src = (const uint8_t *)longTermRing + (size_t)srcIdx * recLE;
+          size_t canSend = min(maxLen - written, (size_t)(recLE - state.recBytePos));
+          memcpy(buf + written, src + state.recBytePos, canSend);
           written += canSend;
-          state.bytePos += (uint32_t)canSend;
+          state.recBytePos += (uint32_t)canSend;
+          if (state.recBytePos >= recLE) { state.recBytePos = 0; state.recIdx++; }
         }
         return written;
       });

@@ -1309,6 +1309,12 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"tws_min\":%.2f,\"tws_max\":%.2f,\"tws_avg\":%.2f,"
     "\"vmg_min\":%.2f,\"vmg_max\":%.2f,\"vmg_avg\":%.2f,"
     "\"leeway_min\":%.2f,\"leeway_max\":%.2f,\"leeway_avg\":%.2f,"
+    // Wind/heading angles + alt-zero + charge stage (long-term-plot stitch fields).
+    // awa/twa envelope; cog/heading/alt_zero avg-only; charge_stage categorical (0-7).
+    "\"awa_min\":%.2f,\"awa_max\":%.2f,\"awa_avg\":%.2f,"
+    "\"twa_min\":%.2f,\"twa_max\":%.2f,\"twa_avg\":%.2f,"
+    "\"cog_avg\":%.2f,\"heading_avg\":%.2f,\"alt_zero_avg\":%.2f,"
+    "\"charge_stage\":%d,"
     // IMU peak motion (per-window aggregates)
     "\"imu_heel_min\":%.2f,\"imu_heel_max\":%.2f,\"imu_heel_avg\":%.2f,"
     "\"imu_pitch_min\":%.2f,\"imu_pitch_max\":%.2f,\"imu_pitch_avg\":%.2f,"
@@ -1363,6 +1369,14 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     SAFE_AVG_100(snap.window.vmg_area_v_us, snap.window.vmg_valid_us),
     snap.window.leeway_min / 100.0, snap.window.leeway_max / 100.0,
     SAFE_AVG_100(snap.window.leeway_area_v_us, snap.window.leeway_valid_us),
+    snap.window.awa_min / 100.0, snap.window.awa_max / 100.0,
+    SAFE_AVG_100(snap.window.awa_area_v_us, snap.window.awa_valid_us),
+    snap.window.twa_min / 100.0, snap.window.twa_max / 100.0,
+    SAFE_AVG_100(snap.window.twa_area_v_us, snap.window.twa_valid_us),
+    SAFE_AVG_100(snap.window.cog_area_v_us, snap.window.cog_valid_us),
+    SAFE_AVG_100(snap.window.heading_area_v_us, snap.window.heading_valid_us),
+    SAFE_AVG_100(snap.window.altZero_area_v_us, snap.window.altZero_valid_us),
+    (int)snap.chargeStage,
     // IMU values read from the frozen ImuSnapshot — values matching the moment
     // the window was rolled, not whatever imuWindow currently holds at upload time.
     snap.imu.heel_min / 100.0, snap.imu.heel_max / 100.0,
@@ -1674,6 +1688,9 @@ void pushSensorSnapshot(time_t collectionTime) {
   is.wave_period               = imuWindow->wave_period;
   is.slam_count                = imuWindow->slam_count;
   is.slam_peak_max             = imuWindow->slam_peak_max;
+  // Charge stage at window-roll time (cloud upload is deferred minutes/hours, so
+  // we can't read live state at JSON-build time). Matches the LT-ring capture.
+  sensorRing[sensorRingHead].chargeStage = getChargeStageDisplayCode();
   sensorRingHead = (sensorRingHead + 1) % SENSOR_RING_SIZE;
   sensorRingCount++;
   bufferedRecordCount = sensorRingCount;  // dashboard mirror
@@ -1705,7 +1722,7 @@ void popTailSnapshot() {
 // during the 30-min ignition-off window.
 #define SENSOR_RING_BACKUP_PATH  "/sensor_ring_backup.bin"
 #define SENSOR_RING_BACKUP_MAGIC 0x53524258u  // 'SRBX'
-#define SENSOR_RING_BACKUP_VER   2u  // v2: collectionTime int32→int64 (Y2038)
+#define SENSOR_RING_BACKUP_VER   3u  // v3: + chargeStage byte (LT-plot cloud-stitch field)
 
 struct SensorRingBackupHeader {
   uint32_t magic;
