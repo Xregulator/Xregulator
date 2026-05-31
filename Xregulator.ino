@@ -169,7 +169,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.85";
+const char *FIRMWARE_VERSION = "0.0.87";
 
 String currentUID;
 
@@ -1477,6 +1477,63 @@ volatile uint16_t baroHistoryHead       = 0;                     // next write s
 uint16_t        prev_baroHistoryHead    = 0xFFFF;                // NVS shadow — write only when head moved
 unsigned long   lastBaroSampleMs        = 0;                     // millis() of last sample
 time_t          baroHistoryLastEpoch    = 0;                     // GPS/NTP epoch of newest sample (0 = unsynced — JS falls back to fixed sample spacing)
+
+// Long Term Plots — local fast tier for the history tab (Phase 1). ~1-month PSRAM
+// ring of min/max/avg envelopes at the SENSOR_UPLOAD_INTERVAL cadence (10 min in
+// prod), derived from the closing SensorWindow in uploadSensorHistory(). Served
+// from PSRAM via /longTermPlots.bin; persisted via the Phase-0 scaffold
+// (writePsramBlob/readPsramBlob) at field-off edge + shutdown; restored at boot.
+// No per-record timestamp: record N's time = lastEpoch − (newest − N) × interval
+// (the baro scheme); cadence is served in the .bin header. Brush past ~1 month →
+// cloud aggregate (1b stitch). recordSize is the scaffold layout guard — pinned below.
+struct LongTermRecord {                 // naturally aligned; see static_assert for true size
+  // 4-byte block
+  int32_t  lat_avg, lon_avg;            // deg ×1e5
+  uint32_t validMask;                   // 1 bit/field: had valid data this window
+
+  // ENVELOPE (min,max,avg) — 14 fields × 3 × int16
+  int16_t battVolt[3];                  // V   ×100
+  int16_t battCurr[3];                  // A   ×10
+  int16_t altCurr[3];                   // A   ×10
+  int16_t victronCurr[3];               // A   ×10
+  int16_t rpm[3];                       //     ×1   (×100 overflows int16 >327 RPM)
+  int16_t duty[3];                      // %   ×100  (this IS field drive; battVolt is stored too)
+  int16_t altTemp[3];                   // °F  ×10
+  int16_t tempTherm[3];                 // °F  ×10
+  int16_t sog[3];                       // kt  ×100
+  int16_t tws[3];                       // kt  ×100
+  int16_t vmg[3];                       // kt  ×100
+  int16_t aws[3];                       // kt  ×100
+  int16_t heel[3];                      // deg ×100 (signed, IMU)
+  int16_t pitch[3];                     // deg ×100 (signed, IMU)
+
+  // AVG-ONLY — 9 fields × int16
+  int16_t soc_avg;                      // %   ×10
+  int16_t baro_avg;                     // mbar×10
+  int16_t ambTemp_avg;                  // °F  ×10
+  int16_t cog_avg, heading_avg;         // deg ×10
+  int16_t awa_avg, twa_avg;             // deg ×10 (signed)
+  int16_t leeway_avg;                   // deg ×10 (signed)
+  int16_t altZero_avg;                  //     ×100
+
+  // byte block
+  uint8_t chargeStage;                  // 0 off,1 bulk,2 absorption,3 float,4 manual,5 maintain,6 targetV,7 idle
+  uint8_t _pad;
+};
+// int32 members force 4-byte struct alignment; 116 B of data is already a multiple
+// of 4, so there's no tail padding. Use sizeof() as recordSize everywhere; this
+// pins it so a layout edit can't silently desync the scaffold guard.
+static_assert(sizeof(LongTermRecord) == 116, "LongTermRecord layout changed — update the scaffold recordSize guard");
+
+const uint16_t LONGTERM_RING_SIZE = 4320;    // 30 d × 24 h × 6/h at 10-min cadence (~501 KB @ 116 B)
+LongTermRecord *longTermRing      = nullptr; // ps_malloc'd in setup()
+volatile uint16_t longTermHead    = 0;       // next write slot (circular)
+volatile uint16_t longTermCount   = 0;       // 0..LONGTERM_RING_SIZE
+uint16_t   prev_longTermHead      = 0xFFFF;  // shadow — persist only when head moved
+time_t     longTermLastEpoch      = 0;       // epoch of newest record (0 = unsynced)
+#define LONGTERM_BACKUP_PATH  "/longterm_ring.bin"
+#define LONGTERM_BACKUP_MAGIC 0x4C54504Cu    // 'LTPL'
+#define LONGTERM_BACKUP_VER   1u
 
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
@@ -3462,6 +3519,13 @@ const uint16_t adsMuxCodes[4] = {
 // Forward declarations (for WiFi functions)
 String readFile(fs::FS &fs, const char *path);
 bool writeFile(fs::FS &fs, const char *path, const char *message);
+// Versioned PSRAM-blob persistence (shared scaffold — see 2_functions.ino)
+uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
+                        uint32_t userWord, const void *base, size_t recordSize,
+                        uint32_t capacity, uint32_t startIdx, uint32_t count);
+uint32_t readPsramBlob(const char *path, uint32_t magic, uint32_t version,
+                       void *destBase, size_t recordSize, uint32_t destCapacity,
+                       uint32_t *userWordOut, bool deleteAfter);
 void setupWiFi();
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout);
 void setupAccessPoint();
@@ -3564,6 +3628,9 @@ void setup() {
   baroPressureHistory = (uint16_t *)ps_malloc(BARO_HISTORY_SIZE * sizeof(uint16_t));
   if (!baroPressureHistory) Serial.println("FATAL: baroPressureHistory ps_malloc failed");
   else memset(baroPressureHistory, 0, BARO_HISTORY_SIZE * sizeof(uint16_t));
+  longTermRing = (LongTermRecord *)ps_malloc(LONGTERM_RING_SIZE * sizeof(LongTermRecord));
+  if (!longTermRing) Serial.println("FATAL: longTermRing ps_malloc failed");
+  else memset(longTermRing, 0, LONGTERM_RING_SIZE * sizeof(LongTermRecord));
   // Anchorage detection sliding-window ring (5 hr × 60 s = 300 slots × 24 B = ~7.2 KB).
   anchorageRing = (AnchorageSample *)ps_malloc(ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
   if (!anchorageRing) Serial.println("FATAL: anchorageRing ps_malloc failed");
@@ -3701,6 +3768,7 @@ void setup() {
     // Restore PSRAM ring from LittleFS backup if Phase 4 dumped one before
     // last power-down. No-op if no backup file exists.
     restoreSensorRingFromLittleFS();
+    restoreLongTermRing();  // durable month-long plot cache → PSRAM
   }
   delay(50);
   checkWebFilesExist();
@@ -4023,6 +4091,17 @@ void loop() {
         if (timeIsSynced) baroHistoryLastEpoch = timeBase + (currentTime - timeBaseMillis) / 1000;
       }
     }
+
+    // Long-term plot ring → flash, once on the field-off-settled rising edge (the
+    // doc's "field-off edge"; shutdown does the final dump). Field-off only — never
+    // write ~500 KB while the control loop is live. prev_longTermHead guard skips a
+    // re-dump when nothing changed since the last one.
+    static bool prevLongTermFieldOff = false;
+    bool ltFieldOff = fieldOffSettled(0);
+    if (ltFieldOff && !prevLongTermFieldOff && prev_longTermHead != longTermHead) {
+      dumpLongTermRing();
+    }
+    prevLongTermFieldOff = ltFieldOff;
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   // Periodic NVS save removed: nvs_commit() can block Core 1 for hundreds of ms during
@@ -4175,6 +4254,7 @@ void loop() {
                             (unsigned)sensorRingCount);
               dumpSensorRingToLittleFS();
             }
+            dumpLongTermRing();  // durable month-long plot cache → flash (final)
             pendingShutdownFlush = false;
             shutdownNVSFlushDone = false;
             shutdownCloudDeadlineMs = 0;

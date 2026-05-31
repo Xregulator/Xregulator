@@ -2163,6 +2163,64 @@ void setupServer() {
     request->send(response);
   });
 
+  // Long Term Plots history download — header (16 B LE) + raw ring array. Lazy:
+  // dashboard fetches once on tab open. JS walks records in chrono order via head +
+  // count; record time = lastEpoch − (count−1−i) × intervalSec (no per-record stamp).
+  //   [0..1] u16 head  [2..3] u16 count  [4..5] u16 capacity  [6..7] u16 recordSize
+  //   [8..11] u32 lastEpoch  [12..15] u32 intervalSec
+  server.on("/longTermPlots.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!longTermRing) {
+      request->send(503, "application/octet-stream", "");
+      return;
+    }
+    struct LtDLState {
+      uint8_t  header[16];
+      int      headerPos;
+      uint32_t bytePos;   // into the raw ring array
+      bool     done;
+    };
+    LtDLState state;
+    memset(&state, 0, sizeof(state));
+    uint16_t headLE = longTermHead, countLE = longTermCount;
+    uint16_t capLE = LONGTERM_RING_SIZE, recLE = (uint16_t)sizeof(LongTermRecord);
+    uint32_t epochLE = (uint32_t)longTermLastEpoch;
+    uint32_t intervalLE = SENSOR_UPLOAD_INTERVAL / 1000UL;
+    memcpy(state.header + 0,  &headLE,     2);
+    memcpy(state.header + 2,  &countLE,    2);
+    memcpy(state.header + 4,  &capLE,      2);
+    memcpy(state.header + 6,  &recLE,      2);
+    memcpy(state.header + 8,  &epochLE,    4);
+    memcpy(state.header + 12, &intervalLE, 4);
+
+    const uint32_t bodyBytes = (uint32_t)LONGTERM_RING_SIZE * sizeof(LongTermRecord);
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/octet-stream",
+      [state, bodyBytes](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (state.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state.headerPos < 16) {
+            size_t canSend = min(maxLen - written, (size_t)(16 - state.headerPos));
+            memcpy(buf + written, state.header + state.headerPos, canSend);
+            written += canSend;
+            state.headerPos += (int)canSend;
+            continue;
+          }
+          if (state.bytePos >= bodyBytes) {
+            state.done = true;
+            return written;
+          }
+          size_t canSend = min(maxLen - written, (size_t)(bodyBytes - state.bytePos));
+          memcpy(buf + written, ((uint8_t *)longTermRing) + state.bytePos, canSend);
+          written += canSend;
+          state.bytePos += (uint32_t)canSend;
+        }
+        return written;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   server.on("/resetlogs", HTTP_POST, [](AsyncWebServerRequest *request) {
     thermalLogHead = 0;
     thermalLogCount = 0;

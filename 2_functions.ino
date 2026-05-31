@@ -171,6 +171,117 @@ void fsReleaseLock() {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Versioned PSRAM-blob persistence — the shared scaffold for "accumulate in
+// PSRAM, dump to a versioned LittleFS blob at field-off, restore at boot."
+// Built for the long-term-plot ring and the alternator/boat matrices so each
+// system stops re-hand-rolling the header, fsLock, chunked I/O, watchdog resets,
+// and layout-change guard. The sensor ring + eff matrix predate this and keep
+// their own copies; retrofit them onto this later. Field-off only (LittleFS
+// writes can stall a core ~300 ms — never on a live control loop).
+// ───────────────────────────────────────────────────────────────────────────
+struct PsramBlobHeader {
+  uint32_t magic;       // caller-chosen dataset id
+  uint32_t version;     // caller-chosen layout version (bump on record-layout change)
+  uint32_t count;       // records in body
+  uint32_t recordSize;  // sizeof(record) — layout-change guard
+  uint32_t userWord;    // caller flags (e.g. "reference finalized"); 0 if unused
+};
+
+// Dump `count` records to a versioned LittleFS blob. Records live in `base` as a
+// ring of `capacity` slots starting at `startIdx`, written in logical order so a
+// circular buffer dumps chronologically; a plain array passes startIdx=0,
+// count=capacity (no wrap). Body goes out in ≤2 contiguous spans. Removes the
+// partial file on any short write. Returns records written (0 on failure).
+uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
+                        uint32_t userWord, const void *base, size_t recordSize,
+                        uint32_t capacity, uint32_t startIdx, uint32_t count) {
+  if (!base || recordSize == 0 || capacity == 0) return 0;
+  if (count > capacity) count = capacity;
+
+  fsTakeLock();
+  File f = LittleFS.open(path, "w");
+  if (!f) {
+    fsReleaseLock();
+    Serial.printf("writePsramBlob: open failed (%s)\n", path);
+    return 0;
+  }
+
+  PsramBlobHeader hdr = { magic, version, count, (uint32_t)recordSize, userWord };
+  bool ok = (f.write((const uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr));
+
+  // Body in up to two contiguous spans: [startIdx..capacity) then wrap [0..rem).
+  const uint8_t *bytes = (const uint8_t *)base;
+  uint32_t remaining = count;
+  uint32_t idx = startIdx % capacity;
+  while (ok && remaining > 0) {
+    uint32_t span = capacity - idx;          // slots to end of buffer
+    if (span > remaining) span = remaining;
+    size_t spanBytes = (size_t)span * recordSize;
+    ok = (f.write(bytes + (size_t)idx * recordSize, spanBytes) == spanBytes);
+    remaining -= span;
+    idx = 0;                                 // wrapped span starts at buffer top
+    esp_task_wdt_reset();
+  }
+
+  f.close();
+  if (!ok) LittleFS.remove(path);            // drop the partial file
+  fsReleaseLock();
+  if (!ok) {
+    Serial.printf("writePsramBlob: short write (%s) — file removed\n", path);
+    return 0;
+  }
+  return count;
+}
+
+// Restore a writePsramBlob() blob into linear buffer `destBase` (`destCapacity`
+// slots). Validates magic/version/recordSize; on any mismatch or short read it
+// deletes the file and returns 0. Returns records restored (≤ destCapacity), and
+// the stored userWord via `userWordOut` if non-null. `deleteAfter` removes the
+// file post-restore (rings set true to avoid double-upload; grids set false).
+uint32_t readPsramBlob(const char *path, uint32_t magic, uint32_t version,
+                       void *destBase, size_t recordSize, uint32_t destCapacity,
+                       uint32_t *userWordOut, bool deleteAfter) {
+  if (!destBase || recordSize == 0 || destCapacity == 0) return 0;
+  if (!fsExists(path)) return 0;
+
+  fsTakeLock();
+  File f = LittleFS.open(path, "r");
+  if (!f) {
+    fsReleaseLock();
+    Serial.printf("readPsramBlob: open failed (%s)\n", path);
+    return 0;
+  }
+
+  PsramBlobHeader hdr;
+  bool ok = (f.readBytes((char *)&hdr, sizeof(hdr)) == sizeof(hdr)
+             && hdr.magic == magic
+             && hdr.version == version
+             && hdr.recordSize == (uint32_t)recordSize);
+  if (!ok) {
+    f.close();
+    LittleFS.remove(path);
+    fsReleaseLock();
+    Serial.printf("readPsramBlob: header mismatch (%s) — discarded\n", path);
+    return 0;
+  }
+
+  uint32_t toRead = (hdr.count > destCapacity) ? destCapacity : hdr.count;
+  size_t bodyBytes = (size_t)toRead * recordSize;
+  size_t bodyRead = f.readBytes((char *)destBase, bodyBytes);
+  esp_task_wdt_reset();
+  f.close();
+  if (deleteAfter) LittleFS.remove(path);
+  fsReleaseLock();
+
+  if (bodyRead != bodyBytes) {
+    Serial.printf("readPsramBlob: short body read (%u/%u) (%s)\n",
+                  (unsigned)bodyRead, (unsigned)bodyBytes, path);
+    return 0;
+  }
+  if (userWordOut) *userWordOut = hdr.userWord;
+  return toRead;
+}
 
 void performDeepFactoryReset() {
   Serial.println("\n=== DEEP FACTORY RESET INITIATED ===");
@@ -1710,8 +1821,100 @@ uint16_t restoreSensorRingFromLittleFS() {
 // LittleFS write path; this is microseconds and does not stall Core 1.
 // Actual upload to Supabase happens later from the cloud-feature block
 // (gated by field-off settle, or forced by the "Upload Now" button).
+// Rescale a SensorWindow ×100 value to a long-term record's target scale (divisor =
+// 100/targetScale: 1 for ×100, 10 for ×10, 100 for ×1) and clamp to int16.
+static inline int16_t ltScale(int32_t v100, int32_t divisor) {
+  int32_t s = v100 / divisor;
+  if (s > 32767) s = 32767;
+  if (s < -32768) s = -32768;
+  return (int16_t)s;
+}
+
+// Derive one LongTermRecord from the closing SensorWindow + ImuWindow and push it
+// into the month-long PSRAM ring. Called every SENSOR_UPLOAD_INTERVAL from
+// uploadSensorHistory() (both paths) so the fixed-cadence timeline never gaps within
+// a session. validMask bit per field (set only when that field had valid data):
+//   ENVELOPE 0..13: battVolt battCurr altCurr victronCurr rpm duty altTemp tempTherm
+//                   sog tws vmg aws heel pitch
+//   AVG-ONLY 14..22: soc baro ambTemp cog heading awa twa leeway altZero
+//   POSITION 23: lat/lon. (Mirror this order in the dashboard JS.)
+// envelope (min,max,avg) from currentWindow; avg = area/valid, then rescaled+clamped.
+#define LT_ENV(dst, field, divisor, bit) do { \
+  if (currentWindow->field##_valid_us > 0) { \
+    int32_t _a = (int32_t)(currentWindow->field##_area_v_us / (int64_t)currentWindow->field##_valid_us); \
+    rec.dst[0] = ltScale(currentWindow->field##_min, divisor); \
+    rec.dst[1] = ltScale(currentWindow->field##_max, divisor); \
+    rec.dst[2] = ltScale(_a, divisor); \
+    rec.validMask |= (1u << (bit)); \
+  } } while (0)
+#define LT_AVG(dst, field, divisor, bit) do { \
+  if (currentWindow->field##_valid_us > 0) { \
+    int32_t _a = (int32_t)(currentWindow->field##_area_v_us / (int64_t)currentWindow->field##_valid_us); \
+    rec.dst = ltScale(_a, divisor); \
+    rec.validMask |= (1u << (bit)); \
+  } } while (0)
+#define LT_IMU(dst, field, divisor, bit) do { \
+  if (imuWindow && imuWindow->field##_valid_us > 0) { \
+    int32_t _a = (int32_t)(imuWindow->field##_area_v_us / (int64_t)imuWindow->field##_valid_us); \
+    rec.dst[0] = ltScale(imuWindow->field##_min, divisor); \
+    rec.dst[1] = ltScale(imuWindow->field##_max, divisor); \
+    rec.dst[2] = ltScale(_a, divisor); \
+    rec.validMask |= (1u << (bit)); \
+  } } while (0)
+void pushLongTermRecord() {
+  if (!longTermRing) return;
+  LongTermRecord rec = {};  // zero-init: absent fields stay 0 with validMask bit clear
+
+  LT_ENV(battVolt,    battVolt,    1,  0);
+  LT_ENV(battCurr,    battCurr,    10, 1);
+  LT_ENV(altCurr,     altCurr,     10, 2);
+  LT_ENV(victronCurr, victronCurr, 10, 3);
+  LT_ENV(rpm,         rpm,         100,4);
+  LT_ENV(duty,        dutyCycle,   1,  5);
+  LT_ENV(altTemp,     altTemp,     10, 6);
+  LT_ENV(tempTherm,   tempTherm,   10, 7);
+  LT_ENV(sog,         sog,         1,  8);
+  LT_ENV(tws,         tws,         1,  9);
+  LT_ENV(vmg,         vmg,         1,  10);
+  LT_ENV(aws,         aws,         1,  11);
+  LT_IMU(heel,        heel,        1,  12);
+  LT_IMU(pitch,       pitch,       1,  13);
+
+  LT_AVG(soc_avg,     soc,     10, 14);
+  LT_AVG(baro_avg,    baro,    10, 15);
+  LT_AVG(ambTemp_avg, ambTemp, 10, 16);
+  LT_AVG(cog_avg,     cog,     10, 17);
+  LT_AVG(heading_avg, heading, 10, 18);
+  LT_AVG(awa_avg,     awa,     10, 19);
+  LT_AVG(twa_avg,     twa,     10, 20);
+  LT_AVG(leeway_avg,  leeway,  10, 21);
+  LT_AVG(altZero_avg, altZero, 1,  22);
+
+  // Position: smoothed lat/lon (deg ×1e5), valid only when GPS isn't stale.
+  if (!IS_STALE(IDX_LATITUDE_NMEA) && !IS_STALE(IDX_LONGITUDE_NMEA)) {
+    rec.lat_avg = (int32_t)(currentWindow->lat_current * 100000.0);
+    rec.lon_avg = (int32_t)(currentWindow->lon_current * 100000.0);
+    rec.validMask |= (1u << 23);
+  }
+  rec.chargeStage = getChargeStageDisplayCode();
+
+  longTermRing[longTermHead] = rec;
+  longTermHead = (longTermHead + 1) % LONGTERM_RING_SIZE;
+  if (longTermCount < LONGTERM_RING_SIZE) longTermCount++;
+  // Epoch of this newest record (header anchor for the baro-style time derivation);
+  // left unchanged when unsynced so a later sync doesn't retro-misdate the ring.
+  if (timeIsSynced) longTermLastEpoch = timeBase + (millis() - timeBaseMillis) / 1000;
+}
+#undef LT_ENV
+#undef LT_AVG
+#undef LT_IMU
+
 void uploadSensorHistory() {
   if (otaInProgress) return;
+
+  // Long-term plot record fires every interval regardless of charging state (so the
+  // fixed-cadence timeline stays gap-free); reads the closing window before reset.
+  pushLongTermRecord();
 
   if (currentWindow->battVolt_valid_us == 0) {  // no data collected this window
     resetSensorWindow();
@@ -1727,6 +1930,38 @@ void uploadSensorHistory() {
   resetSensorWindow();
   resetAccelWindow();
 }
+
+// Long-term plot ring persistence via the Phase-0 scaffold. Durable month-long
+// cache (NOT drained like the sensor ring), so restore keeps the file
+// (deleteAfter=false) and each dump overwrites it. lastEpoch rides in the scaffold
+// userWord (uint32 → good to 2106). Field-off only — called on the field-off-settled
+// edge + at shutdown.
+void dumpLongTermRing() {
+  if (!longTermRing || longTermCount == 0) return;
+  uint16_t startIdx = (longTermCount < LONGTERM_RING_SIZE) ? 0 : longTermHead;  // oldest record
+  uint32_t n = writePsramBlob(LONGTERM_BACKUP_PATH, LONGTERM_BACKUP_MAGIC, LONGTERM_BACKUP_VER,
+                              (uint32_t)longTermLastEpoch, longTermRing, sizeof(LongTermRecord),
+                              LONGTERM_RING_SIZE, startIdx, longTermCount);
+  if (n > 0) prev_longTermHead = longTermHead;  // mark dumped so the edge won't re-write unchanged
+  Serial.printf("dumpLongTermRing: wrote %u records\n", (unsigned)n);
+}
+
+// Boot restore. Unwraps the stored ring into linear order (tail=0, head=count) and
+// keeps the file as the durable copy. No-op if absent / layout-mismatched.
+void restoreLongTermRing() {
+  if (!longTermRing) return;
+  uint32_t epochU32 = 0;
+  uint32_t n = readPsramBlob(LONGTERM_BACKUP_PATH, LONGTERM_BACKUP_MAGIC, LONGTERM_BACKUP_VER,
+                             longTermRing, sizeof(LongTermRecord), LONGTERM_RING_SIZE,
+                             &epochU32, false);
+  if (n == 0) return;
+  longTermCount = (uint16_t)n;
+  longTermHead = (n >= LONGTERM_RING_SIZE) ? 0 : (uint16_t)n;
+  longTermLastEpoch = (time_t)epochU32;
+  prev_longTermHead = longTermHead;
+  Serial.printf("restoreLongTermRing: restored %u records\n", (unsigned)n);
+}
+
 // Dashboard "Clear" button handler. Empties the PSRAM ring and removes the
 // LittleFS shutdown-dump file so nothing comes back on next boot.
 void clearSensorBuffer() {

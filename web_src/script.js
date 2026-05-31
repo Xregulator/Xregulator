@@ -9390,6 +9390,11 @@ function showSubTab(parentTab, subTabName, evt = null) {
         }
     }
 
+    // Native Long Term Plots — lazy-init on first open of Plots → Long Term sub-tab.
+    if (parentTab === 'plots' && subTabName === 'longterm' && typeof initLongTermPlots === 'function') {
+        initLongTermPlots();
+    }
+
     // Redirect to Vercel for My History
     if (parentTab === 'cloudfeatures' && subTabName === 'myhistory') {
         redirectToHistory();
@@ -13913,6 +13918,166 @@ window.addEventListener('load', function () {
     const r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16);
     return `rgba(${r},${g},${b},${a})`;
   }
+})();
+
+// ========================================================================
+// LONG TERM PLOTS — native render of the on-device month-long ring.
+// Mirrors the barometer pattern: lazy fetch of a binary ring on tab open,
+// parse header + records, derive each record's time from a single lastEpoch +
+// ring position (no per-record timestamp), render with uPlot. Supabase data
+// tier (older than the local ring) stitches in later. Public: initLongTermPlots().
+// Record layout MUST match firmware LongTermRecord (116 B).
+// ========================================================================
+(function () {
+  'use strict';
+
+  let ltLoaded = false;   // session cache: fetch the ring once per session
+  let ltData = null;      // { t:[], n, lastEpoch, interval, fields:{ key:{min,max,avg}|{avg} } }
+  const ltPlots = {};     // built uPlot instances by container id
+
+  function getCss(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function hexAlpha(hex, a) {
+    if (!hex || !hex.startsWith('#')) return hex || '#888';
+    const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  // Envelope fields in struct order with the scale divisor to reach real units.
+  const ENV = [
+    ['battVolt',100], ['battCurr',10], ['altCurr',10], ['victronCurr',10],
+    ['rpm',1], ['duty',100], ['altTemp',10], ['tempTherm',10],
+    ['sog',100], ['tws',100], ['vmg',100], ['aws',100], ['heel',100], ['pitch',100]
+  ];
+  const AVG = [
+    ['soc',10], ['baro',10], ['ambTemp',10], ['cog',10], ['heading',10],
+    ['awa',10], ['twa',10], ['leeway',10], ['altZero',100]
+  ];
+
+  // Header (16 B LE): u16 head, u16 count, u16 capacity, u16 recordSize,
+  // u32 lastEpoch, u32 intervalSec. Then capacity × recordSize raw records.
+  function parseLT(buf) {
+    const dv = new DataView(buf);
+    if (buf.byteLength < 16) return null;
+    const head      = dv.getUint16(0, true);
+    const count     = dv.getUint16(2, true);
+    const capacity  = dv.getUint16(4, true);
+    const recSize   = dv.getUint16(6, true);
+    const lastEpoch = dv.getUint32(8, true);
+    const interval  = dv.getUint32(12, true) || 600;   // seconds between records
+    if (!capacity || !recSize || buf.byteLength < 16 + capacity * recSize) return null;
+
+    const fields = {};
+    ENV.forEach(([k]) => fields[k] = { min:[], max:[], avg:[] });
+    AVG.forEach(([k]) => fields[k] = { avg:[] });
+    const t = [];
+
+    const tail = (count < capacity) ? 0 : head;   // oldest record in chrono order
+    for (let i = 0; i < count; i++) {
+      const base = 16 + ((tail + i) % capacity) * recSize;
+      const valid = dv.getUint32(base + 8, true);
+      // Newest record is i=count-1 (= lastEpoch); walk back by interval.
+      t.push(lastEpoch ? (lastEpoch - (count - 1 - i) * interval) : (i * interval));
+
+      let off = base + 12;   // envelope block: [min,max,avg] int16 each
+      ENV.forEach(([k, scale], fi) => {
+        const f = fields[k];
+        if (valid & (1 << fi)) {
+          f.min.push(dv.getInt16(off, true) / scale);
+          f.max.push(dv.getInt16(off + 2, true) / scale);
+          f.avg.push(dv.getInt16(off + 4, true) / scale);
+        } else { f.min.push(null); f.max.push(null); f.avg.push(null); }
+        off += 6;
+      });
+      let ao = base + 12 + ENV.length * 6;   // avg-only block: one int16 each
+      AVG.forEach(([k, scale], ai) => {
+        fields[k].avg.push((valid & (1 << (ENV.length + ai))) ? dv.getInt16(ao, true) / scale : null);
+        ao += 2;
+      });
+    }
+    return { t, n: count, lastEpoch, interval, fields };
+  }
+
+  // Generic grouped chart. spec.scales = [{name,label,side,range?,fmt?}],
+  // spec.series = [{key,scale,color,label,band?}]. Renders an avg line per series
+  // plus an optional min/max envelope band (envelope fields only). drag-x = zoom.
+  function buildLtPlot(containerId, spec) {
+    const el = document.getElementById(containerId);
+    if (!el || typeof uPlot === 'undefined' || !ltData) return;
+    el.innerHTML = '';
+    if (ltPlots[containerId]) { try { ltPlots[containerId].destroy(); } catch (e) {} }
+
+    const data = [ ltData.t ];
+    const series = [ { label: 'Time' } ];
+    const bands = [];
+    const legend = [];
+    spec.series.forEach(s => {
+      const f = ltData.fields[s.key];
+      data.push(f.avg);
+      series.push({ label: s.label, scale: s.scale, stroke: s.color, width: 2, points: { show: false }, spanGaps: false });
+      legend.push({ label: s.label, color: s.color });
+      if (s.band && f.max && f.min) {
+        const maxIdx = data.length; data.push(f.max);
+        const minIdx = data.length; data.push(f.min);
+        series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
+        series.push({ scale: s.scale, stroke: 'transparent', width: 0, points: { show: false } });
+        bands.push({ series: [maxIdx, minIdx], fill: hexAlpha(s.color, 0.14) });
+      }
+    });
+
+    const scales = { x: { time: true } };
+    const axes = [ { grid: { show: true } } ];
+    spec.scales.forEach(sc => {
+      scales[sc.name] = sc.range ? { auto: false, range: sc.range } : { auto: true };
+      axes.push({ scale: sc.name, label: sc.label, side: sc.side, grid: { show: sc.side === 3 },
+                  values: sc.fmt ? (u, ticks) => ticks.map(sc.fmt) : undefined });
+    });
+
+    const opts = {
+      width: Math.max(el.clientWidth, 320), height: 300,
+      series, scales, axes, bands, legend: { show: false },
+      cursor: { drag: { x: true, y: false } }   // drag-x to zoom (in-chart time brush)
+    };
+    const plot = new uPlot(opts, data, el);
+    ltPlots[containerId] = plot;
+    createCustomLegend(containerId, legend);
+    if (document.body.classList.contains('dark-mode') && typeof updateUplotTheme === 'function') updateUplotTheme(plot);
+    if (!el._ltRO) {
+      el._ltRO = new ResizeObserver(debounce(() => {
+        if (ltPlots[containerId]) ltPlots[containerId].setSize({ width: el.clientWidth, height: 300 });
+      }, 500));
+      el._ltRO.observe(el);
+    }
+  }
+
+  function buildAllLtPlots() {
+    // First chart (vertical-slice): Voltage & SOC — battery V envelope + SOC line on a
+    // second axis. More grouped charts (currents, rpm/duty, temps, wind, IMU) replicate
+    // this same pattern once the pipeline is confirmed on-device.
+    buildLtPlot('lt-voltage-plot', {
+      scales: [ { name:'V', label:'Volts', side:3 },
+                { name:'pct', label:'SOC %', side:1, range:[0,100], fmt:v=>Math.round(v)+'%' } ],
+      series: [ { key:'battVolt', scale:'V', color:'#4CAF50', label:'Battery (V)', band:true },
+                { key:'soc', scale:'pct', color:'#2196F3', label:'SOC (%)' } ]
+    });
+  }
+
+  window.initLongTermPlots = function () {
+    const status = document.getElementById('longterm-status');
+    if (ltLoaded) { buildAllLtPlots(); return; }   // rebuild from session cache
+    fetch('/longTermPlots.bin', { cache: 'no-cache' })
+      .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+      .then(buf => {
+        ltData = parseLT(buf);
+        if (!ltData) throw new Error('parse failed');
+        ltLoaded = true;
+        if (status) {
+          if (ltData.n === 0) { status.textContent = 'No long-term data yet — records accumulate every ~10 min.'; return; }
+          status.style.display = 'none';
+        }
+        buildAllLtPlots();
+      })
+      .catch(e => { if (status) status.textContent = 'Long-term history unavailable (' + e.message + ').'; });
+  };
 })();
 
 /* XREG_END */

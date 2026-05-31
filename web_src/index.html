@@ -9000,6 +9000,7 @@
     <!-- Plots Sub-tabs -->
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('plots', 'displays', event)">Plots</button>
+      <button class="sub-tab" onclick="showSubTab('plots', 'longterm', event)">Long Term</button>
       <button class="sub-tab" onclick="showSubTab('plots', 'controls', event)">Plot Controls</button>
     </div>
 
@@ -9043,6 +9044,18 @@
       </div>
       <div class="settings-card">
         <div class="plot-container" id="voltage-plot"></div>
+      </div>
+    </div>
+
+    <!-- Long Term Plots Sub-tab — native render of the on-device month-long ring
+         (/longTermPlots.bin). Older-than-ring data stitches in from Supabase later.
+         Lazy: initLongTermPlots() runs on first open of this sub-tab. -->
+    <div id="plots-longterm" class="sub-tab-content">
+      <div class="settings-card">
+        <div id="longterm-status" style="text-align:center; padding:8px; font-size:13px;">Loading long-term history…</div>
+      </div>
+      <div class="settings-card">
+        <div class="plot-container" id="lt-voltage-plot"></div>
       </div>
     </div>
 
