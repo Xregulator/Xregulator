@@ -682,7 +682,7 @@ void updateEfficiencyRedDot() {
 // ============================================================
 
 void updateEfficiencyMatrix() {
-  if (!effMatrix || !effWindow) return;
+  if (!effMatrix || !effWindow || hardwarePresent != 1) return;   // sim mode (HardwarePresent=0): don't learn from fake data
 
   float battV = getBatteryVoltage();
   float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;

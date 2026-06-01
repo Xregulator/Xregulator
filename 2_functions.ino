@@ -1401,6 +1401,7 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
 
 void uploadBufferedRecords() {
   if (otaInProgress) return;
+  if (hardwarePresent != 1) return;   // sim mode (HardwarePresent=0): never upload fake data to the cloud
   if (ringIsEmpty()) return;
   if (!isRegistered || authToken.isEmpty()) {
     Serial.println("uploadBufferedRecords: skipping — not registered");
@@ -1933,6 +1934,14 @@ void pushLongTermRecord() {
 void uploadSensorHistory() {
   if (otaInProgress) return;
 
+  // Sim mode (HardwarePresent=0): live display only — no long-term ring, no cloud
+  // buffering. Still roll the window so it doesn't accumulate fake data unbounded.
+  if (hardwarePresent != 1) {
+    resetSensorWindow();
+    resetAccelWindow();
+    return;
+  }
+
   // Long-term plot record fires every interval regardless of charging state (so the
   // fixed-cadence timeline stays gap-free); reads the closing window before reset.
   pushLongTermRecord();
@@ -2028,11 +2037,11 @@ bool buildConfigPayload() {
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
     "\"BatteryCapacity_Ah\":%d,\"AlternatorNominalAmps\":%d,\"SolarWatts\":%d,"
     "\"AmpSensorRange\":%d,\"ShuntResistanceMicroOhm\":%d,"
-    "\"BatteryVoltageSource\":%d,\"BatteryCurrentSource\":%d,"
+    "\"BatteryCurrentSource\":%d,"
     "\"InvertAltAmps\":%d,\"InvertBattAmps\":%d,\"hardwarePresent\":%d",
     BatteryCapacity_Ah, AlternatorNominalAmps, SolarWatts,
     AmpSensorRange, ShuntResistanceMicroOhm,
-    BatteryVoltageSource, BatteryCurrentSource,
+    BatteryCurrentSource,
     InvertAltAmps, InvertBattAmps, hardwarePresent);
 
   // Thermistor / temperature config
@@ -2112,7 +2121,7 @@ bool buildConfigPayload() {
   // Voltage / CV protection loop
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
     ",\"VoltageKp\":%.4f,\"VoltageKi\":%.4f,\"VoltageFilterTC\":%.2f,"
-    "\"VoltageLoopInterval\":%lu,\"VoltageTrimLimit\":%.2f,"
+    "\"VoltageLoopInterval\":%lu,"
     "\"IExcessK\":%.4f,\"IExcessN\":%d,\"IExcessKBleed\":%.4f,"
     "\"IExcessArmMarginV\":%.2f,\"IExcessMA_N\":%d,\"IExcessSigSrc\":%d,"
     "\"AwBleedRate\":%.4f,\"AwSeedProtectMs\":%lu,"
@@ -2121,7 +2130,7 @@ bool buildConfigPayload() {
     "\"ReseedFrac\":%.4f,\"SlopeBleedThresh\":%.4f,\"SlopeBleedK\":%.4f,"
     "\"SlopeBleedProxV\":%.2f,\"DvdtTC\":%.2f",
     VoltageKp, VoltageKi, VoltageFilterTC,
-    (unsigned long)VoltageLoopInterval, VoltageTrimLimit,
+    (unsigned long)VoltageLoopInterval,
     IExcessK, IExcessN, IExcessKBleed,
     IExcessArmMarginV, IExcessMA_N, IExcessSigSrc,
     AwBleedRate, (unsigned long)AwSeedProtectMs,
@@ -2140,12 +2149,12 @@ bool buildConfigPayload() {
   // Setpoint slew / ramp rates
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
     ",\"SetpointRiseRate\":%.2f,\"SetpointFallRate\":%.2f,"
-    "\"SetpointRampRate\":%.2f,\"StartupRiseRate\":%.2f,\"WarmupRampRate\":%.2f,"
+    "\"StartupRiseRate\":%.2f,\"WarmupRampRate\":%.2f,"
     "\"DutyRampRate\":%.2f,\"DutySlowRampRate\":%.2f,"
     "\"SettleTimeBeforeCut\":%lu,\"ShutdownPhase2HoldMs\":%lu,"
     "\"FIELD_COLLAPSE_DELAY\":%lu,\"FieldAdjustmentInterval\":%.2f",
     SetpointRiseRate, SetpointFallRate,
-    SetpointRampRate, StartupRiseRate, WarmupRampRate,
+    StartupRiseRate, WarmupRampRate,
     DutyRampRate, DutySlowRampRate,
     (unsigned long)SettleTimeBeforeCut, (unsigned long)ShutdownPhase2HoldMs,
     (unsigned long)FIELD_COLLAPSE_DELAY, FieldAdjustmentInterval);

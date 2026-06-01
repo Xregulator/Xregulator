@@ -246,8 +246,8 @@ const CSV2_FIELDS = [
     "reserved_NMEA2KData",        // moved to CSV3
     "AlarmLatchState",
     "ResetAlarmLatch",
-    "ResetLearningTable",
-    "ClearOverheatHistory",
+    "reserved_ResetLearningTable",    // action-only, echo global removed
+    "reserved_ClearOverheatHistory",  // action-only, echo global removed
     "DynamicShuntGainFactor",
     "DynamicAltCurrentZero",
     "InsulationLifePercent",
@@ -660,7 +660,7 @@ const CSV3_FIELDS = [
     "bmsLogicLevelOff",
     "RPMScalingFactor",
     "MaximumAllowedBatteryAmps",
-    "BatteryVoltageSource",
+    "reserved_BatteryVoltageSource",  // obsolete setting removed — dead slot
     "AlternatorNominalAmps",
     "LearningUpStep",
     "LearningDownStep",
@@ -743,7 +743,7 @@ const CSV3_FIELDS = [
     "fuelTableGPH8",
     "fuelTableGPH9",
     "stateRevision",
-    "SetpointRampRate",
+    "reserved_SetpointRampRate",  // obsolete setting removed — dead slot
     "DutyRampRate",
     "SettleTimeBeforeCut",
     "TempWarnExcess",
@@ -807,7 +807,7 @@ const CSV3_FIELDS = [
     "rpmCapPowerTable7",
     "rpmCapPowerTable8",
     "rpmCapPowerTable9",
-    "VoltageTrimLimit",
+    "reserved_VoltageTrimLimit",  // obsolete setting removed — dead slot
     "InputFilterTC",
     "SystemIDStepAmplitude",
     "HardOCTripAmps",
@@ -1823,6 +1823,9 @@ let temperatureIndex = 0;
 
 // Pre-calculated X-axis arrays
 let xAxisData = [];
+
+const LIVE_BUFFER_SEC = 300;   // short-term ring always holds 5 min so changing the X window never loses history
+let liveWindowSec = 8;         // currently-visible X span (sec); driven by plotTimeWindow, applied via the x-scale range fn
 
 // Efficient circular buffer structure - no timestamps needed
 let currentTempData, voltageData, rpmData, temperatureData;
@@ -3054,14 +3057,11 @@ function updatePlotConfiguration(data) {
         configChanged = true;
     }
 
-    // Check for buffer size changes (requires fresh start)
-    if (data.plotTimeWindow !== cachedPlotTimeWindow ||
-        data.webgaugesinterval !== cachedWebgaugesInterval) {
-
-        cachedPlotTimeWindow = data.plotTimeWindow;
+    // Sample interval changed → re-grid the fixed 5-min buffer (point spacing changed) and rebuild plots.
+    if (data.webgaugesinterval !== cachedWebgaugesInterval) {
         cachedWebgaugesInterval = data.webgaugesinterval;
+        cachedPlotTimeWindow = data.plotTimeWindow;   // reinit captures liveWindowSec below
 
-        // Reinitialize plots with new timing parameters
         reinitializePlotsWithNewTiming(data);
 
         // Destroy and recreate all plots to fix X-axis labels
@@ -3070,6 +3070,14 @@ function updatePlotConfiguration(data) {
         if (rpmPlot) { rpmPlot.destroy(); initRPMPlot(); }
         if (temperaturePlot) { temperaturePlot.destroy(); initTemperaturePlot(); }
 
+        configChanged = true;
+    }
+
+    // Window changed → just slide the visible X range over the fixed buffer. No realloc, no data loss.
+    if (data.plotTimeWindow !== cachedPlotTimeWindow) {
+        cachedPlotTimeWindow = data.plotTimeWindow;
+        liveWindowSec = data.plotTimeWindow;
+        applyLiveWindowToPlots();
         configChanged = true;
     }
 
@@ -3119,10 +3127,18 @@ function updatePlotConfiguration(data) {
     }
 }
 
+// Re-apply the visible X window to all four short-term plots by re-running their x range fn (no data change).
+function applyLiveWindowToPlots() {
+    [currentTempPlot, voltagePlot, rpmPlot, temperaturePlot].forEach(p => {
+        if (p && p.data) { try { p.setData(p.data, true); } catch (e) {} }
+    });
+}
+
 // Function to reinitialize plots when timing parameters change
 function reinitializePlotsWithNewTiming(data) {
     // Calculate new buffer size
-    const newMaxPoints = Math.ceil((data.plotTimeWindow * 1000) / data.webgaugesinterval);
+    liveWindowSec = data.plotTimeWindow;                                  // visible span follows the setting
+    const newMaxPoints = Math.ceil((LIVE_BUFFER_SEC * 1000) / data.webgaugesinterval);   // buffer always 5 min
     const now = Math.floor(Date.now() / 1000);
     const intervalSec = data.webgaugesinterval / 1000;
 
@@ -3287,7 +3303,6 @@ function updateAllEchosOptimized(data) {
         { key: 'LoadDumpDtThresh',    id: 'LoadDumpDtThresh_echo',    transform: v => v },
         { key: 'LoadDumpDtThresh3',   id: 'LoadDumpDtThresh3_echo',   transform: v => v },
         { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
-        { key: 'BatteryVoltageSource', id: 'BatteryVoltageSource_echo', transform: v => v },
         { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
         { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
@@ -3322,14 +3337,6 @@ function updateAllEchosOptimized(data) {
         { key: 'gpsTimeSourceMode', id: 'gpsTimeSourceMode_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only', 3:'NTP time only'}[v] ?? '?') },
         { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
         { key: 'plotTimeWindow', id: 'plotTimeWindow_echo', transform: v => v },
-        { key: 'Ymin1', id: 'Ymin1_echo', transform: v => v },
-        { key: 'Ymax1', id: 'Ymax1_echo', transform: v => v },
-        { key: 'Ymin2', id: 'Ymin2_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'Ymax2', id: 'Ymax2_echo', transform: v => (v / 100).toFixed(2) },
-        { key: 'Ymin3', id: 'Ymin3_echo', transform: v => v },
-        { key: 'Ymax3', id: 'Ymax3_echo', transform: v => v },
-        { key: 'Ymin4', id: 'Ymin4_echo', transform: v => v },
-        { key: 'Ymax4', id: 'Ymax4_echo', transform: v => v },
         { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
         { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
@@ -4964,6 +4971,7 @@ function _brushWireSnap() {
             btn.classList.add('active');
             if (btn.getAttribute('data-all') === 'true') {
                 _brushApplyRange(_brushState.dataMin, _brushState.dataMax);
+                if (_brushState.ltSaveWindowPref) _brushState.ltSaveWindowPref({ all: true });   // persist choice (host localStorage)
                 return;
             }
             const hours = parseInt(btn.getAttribute('data-hours'), 10);
@@ -4973,6 +4981,7 @@ function _brushWireSnap() {
             const to = Math.min(_brushState.dataMax, nowMs);
             const from = Math.max(_brushState.dataMin, to - span);
             _brushApplyRange(from, to);
+            if (_brushState.ltSaveWindowPref) _brushState.ltSaveWindowPref({ hours: hours });   // persist choice (host localStorage)
         });
     });
 }
@@ -5394,8 +5403,8 @@ function markAllReadingsStale() {
 function initPlotDataStructures() {
     // Get actual values from ESP32 data, or use defaults
     const intervalMs = window._lastKnownInterval || 200;
-    const timeWindowSec = window._lastKnownTimeWindow || 8; // This is in SECONDS
-    const timeWindowMs = timeWindowSec * 1000; // Convert to milliseconds
+    liveWindowSec = window._lastKnownTimeWindow || 8; // visible span (SECONDS)
+    const timeWindowMs = LIVE_BUFFER_SEC * 1000; // buffer always 5 min
     // Calculate correct buffer size
     const maxPoints = Math.ceil(timeWindowMs / intervalMs);
     const intervalSec = intervalMs / 1000;
@@ -5483,15 +5492,11 @@ function initCurrentTempPlot() {
             }
         ],
         scales: useTimestamps ? {
-            x: { time: true },
+            x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
             current: { auto: false, range: [Ymin1, Ymax1] },
             pct: { auto: false, range: [0, 100] }
         } : {
-            x: {
-                time: false,
-                auto: false,
-                range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
-            },
+            x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
             current: { auto: false, range: [Ymin1, Ymax1] },
             pct: { auto: false, range: [0, 100] }
         },
@@ -5633,15 +5638,11 @@ function initVoltagePlot() {
             }
         ],
         scales: useTimestamps ? {
-            x: { time: true },
+            x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
             voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] },
             pct: { auto: false, range: [0, 100] }
         } : {
-            x: {
-                time: false,
-                auto: false,
-                range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
-            },
+            x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
             voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] },
             pct: { auto: false, range: [0, 100] }
         },
@@ -5775,15 +5776,11 @@ function initRPMPlot() {
             }
         ],
         scales: useTimestamps ? {
-            x: { time: true },
+            x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
             rpm: { auto: false, range: [Ymin3, Ymax3] },
             pct: { auto: false, range: [0, 100] }
         } : {
-            x: {
-                time: false,
-                auto: false,
-                range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
-            },
+            x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
             rpm: { auto: false, range: [Ymin3, Ymax3] },
             pct: { auto: false, range: [0, 100] }
         },
@@ -5917,15 +5914,11 @@ function initTemperaturePlot() {
             }
         ],
         scales: useTimestamps ? {
-            x: { time: true },
+            x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
             temperature: { auto: false, range: [Ymin4, Ymax4] },
             pct: { auto: false, range: [0, 100] }
         } : {
-            x: {
-                time: false,
-                auto: false,
-                range: [xAxisData[0], xAxisData[xAxisData.length - 1]]
-            },
+            x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
             temperature: { auto: false, range: [Ymin4, Ymax4] },
             pct: { auto: false, range: [0, 100] }
         },
@@ -13972,6 +13965,16 @@ window.addEventListener('load', function () {
   try { ltYOverride = JSON.parse(localStorage.getItem('lt_yaxis') || '{}') || {}; } catch (e) { ltYOverride = {}; }
   function ltSaveYOverride() { try { localStorage.setItem('lt_yaxis', JSON.stringify(ltYOverride)); } catch (e) {} }
 
+  // Persist the long-term time-window CHOICE (re-anchored to newest data on reload, not an absolute range).
+  let ltWindowPref = null;   // { hours: <n> } | { all: true } | null
+  try { ltWindowPref = JSON.parse(localStorage.getItem('lt_window') || 'null'); } catch (e) { ltWindowPref = null; }
+  function ltSaveWindowPref(p) { ltWindowPref = p; try { localStorage.setItem('lt_window', JSON.stringify(p)); } catch (e) {} }
+
+  // Persist per-chart legend series visibility: { chartId: { seriesKey: true } } where true = hidden.
+  let ltSeriesHidden = {};
+  try { ltSeriesHidden = JSON.parse(localStorage.getItem('lt_series_hidden') || '{}') || {}; } catch (e) { ltSeriesHidden = {}; }
+  function ltSaveSeriesHidden() { try { localStorage.setItem('lt_series_hidden', JSON.stringify(ltSeriesHidden)); } catch (e) {} }
+
   // Equal-width bins over [fromSec,toSec], capped at maxBins, ENVELOPE-PRESERVING:
   // bin min = min of mins, bin max = max of maxes, bin avg = avg of avgs (nulls skipped).
   // Re-run per visible range so zoomed views show finer detail with bounded point count.
@@ -14085,6 +14088,7 @@ window.addEventListener('load', function () {
   function ltInitBrush(minSec, maxSec, latestSec) {
     if (typeof _brushState === 'undefined' || !_brushState) return;
     _brushState.nativeSink = (fromMs, toMs) => ltRenderAll(fromMs / 1000, toMs / 1000);
+    _brushState.ltSaveWindowPref = ltSaveWindowPref;   // bridge: snap handler is top-level, can't see the IIFE-private fn
     _brushState.dataMin = minSec * 1000;
     _brushState.dataMax = maxSec * 1000;
     _brushState.latestSample = (latestSec || maxSec) * 1000;
@@ -14095,6 +14099,25 @@ window.addEventListener('load', function () {
     const mn = document.getElementById('dashboard-brush-data-min'); if (mn) mn.textContent = _brushFormatTime(_brushState.dataMin);
     const mx = document.getElementById('dashboard-brush-data-max'); if (mx) mx.textContent = _brushFormatTime(_brushState.dataMax);
     _brushUpdateSelectionUI();
+    // Re-anchored restore: apply the saved window choice relative to the NEWEST data, not an absolute old range.
+    if (ltWindowPref) {
+      let from = _brushState.dataMin, to = _brushState.dataMax;
+      if (ltWindowPref.hours) {
+        const t = Math.min(_brushState.dataMax, Date.now());
+        from = Math.max(_brushState.dataMin, t - ltWindowPref.hours * 3600 * 1000);
+        to = t;
+      }
+      // Reflect the active snap button visually if one matches the saved choice.
+      try {
+        document.querySelectorAll('.dashboard-brush-snap-btn').forEach(b => {
+          const isAll = b.getAttribute('data-all') === 'true';
+          const h = parseInt(b.getAttribute('data-hours'), 10);
+          const match = ltWindowPref.all ? isAll : (isFinite(h) && h === ltWindowPref.hours);
+          if (match) b.classList.add('active');
+        });
+      } catch (e) {}
+      _brushApplyRange(from, to);   // same path the snap buttons use → drives ltRenderAll
+    }
     _brushUpdateStaleness();
     if (_brushState.stalenessTimerId == null) {
       _brushState.stalenessTimerId = (typeof setTrackedInterval === 'function' ? setTrackedInterval : setInterval)(_brushUpdateStaleness, 10000);
@@ -14176,7 +14199,16 @@ window.addEventListener('load', function () {
         const show = !plot.series[seriesGroups[i][0]].show;
         seriesGroups[i].forEach(idx => plot.setSeries(idx, { show }));
         item.style.opacity = show ? '1' : '0.4';
+        // Persist visibility by stable series key (true = hidden).
+        ltSeriesHidden[id] = ltSeriesHidden[id] || {};
+        if (show) delete ltSeriesHidden[id][s.key]; else ltSeriesHidden[id][s.key] = true;
+        ltSaveSeriesHidden();
       });
+      // Restore persisted visibility (keyed by series key). Dim the legend item now;
+      // the matching plot.setSeries() runs after the plot is created (see below).
+      if (ltSeriesHidden[id] && ltSeriesHidden[id][s.key]) {
+        item.style.opacity = '0.4';
+      }
       legendEl.appendChild(item);
       valSpans.push(val);
     });
@@ -14201,6 +14233,13 @@ window.addEventListener('load', function () {
     const plot = new uPlot(opts, initData, el);
     el.appendChild(legendEl);
     ltCharts.push({ id, plot, spec });
+
+    // Apply persisted legend hides now that the plot exists (opacity was set in the loop above).
+    if (ltSeriesHidden[id]) {
+      spec.series.forEach((s, i) => {
+        if (ltSeriesHidden[id][s.key]) seriesGroups[i].forEach(idx => plot.setSeries(idx, { show: false }));
+      });
+    }
 
     // Y-axis controls: per-scale manual Min/Max + Apply + Auto (reset). Persisted; absent
     // → that axis auto-fits to the visible binned data (enforced in ltRenderAll).

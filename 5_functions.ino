@@ -3813,6 +3813,7 @@ void initializeNVS() {
 // Synchronous full write — for setup() and emergency use only.
 // Not safe to call from loop() — blocks for up to 200ms.
 void saveNVSDataFull() {
+  if (hardwarePresent != 1) return;   // sim mode (HardwarePresent=0): don't persist fake accumulators/extrema
   uint32_t _nvsT0 = millis();
   nvs_handle_t h;
   esp_err_t err = nvs_open("storage", NVS_READWRITE, &h);

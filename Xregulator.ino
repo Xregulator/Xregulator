@@ -27,7 +27,7 @@
 #include <OneWire.h>            // temp sensors
 #include <DallasTemperature.h>  // temp sensors
 //#include <SPI.h>                // display- removed to save connectors space
-//#include <U8g2lib.h>            // display- removed to save connectors space
+//#include <U8g2lib.h>            // display
 #include <ADS1115_lite.h>  // measuring 4 analog inputs
 ADS1115_lite adc(ADS1115_DEFAULT_ADDRESS);
 #include "VeDirectFrameHandler.h"  // for victron communication
@@ -137,8 +137,6 @@ TaskHandle_t httpsTaskHandle;
 
 SemaphoreHandle_t fsMutex = NULL;  // mutex protection for littlefs
 
-int FourWay = 0; // REMOVE OBSOLET
-
 enum HttpsRequestType {
   HTTPS_UPLOAD_PAYLOAD,
   HTTPS_UPLOAD_CONFIG,
@@ -169,7 +167,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.114";
+const char *FIRMWARE_VERSION = "0.0.120";
 
 String currentUID;
 
@@ -411,7 +409,7 @@ volatile bool settingsDirty = false;  // set by /get handler; triggers immediate
 unsigned long lastEventSourceSend = 0;
 
 
-// Ring buffers (static allocation, no heap). // OLD COMMENT, WAS THIS BS?
+// Ring buffers 
 struct ImuRingBuffer {
   IMUSample accel[ACCEL_RING_SIZE];
   IMUSample gyro[GYRO_RING_SIZE];
@@ -2127,11 +2125,8 @@ unsigned long rebootRequestedAt = 0;
 uint32_t restartRemainingSec = 0;
 const unsigned long RESTART_WARNING_WINDOW_MS = 600000UL;  // 10 minutes
 
-int BatteryVoltageSource = 0;  // OBSOLETE REMOVE LATER
 int BatteryCurrentSource = 0;  // 0=INA228, 1=NMEA2K Batt, 2=NMEA0183 Batt, 3=Victron Batt
 int timeAxisModeChanging = 0;  // toggle the time axis on and off in Plots.  Off = less janky but less info
-
-int RPMThreshold = -20000;  //below this, there will be no field output in auto mode (Update this if we have RPM at low speeds and no field, otherwise, depend on Ignition) Check this later
 
 int maxPoints;                 //number of points plotted per plot (X axis length)
 int Ymin1 = -10, Ymax1 = 50;    // Current plot
@@ -2507,7 +2502,6 @@ float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at whi
 // regardless of this flag.
 bool testProtectionsEnabled = true;
 // --- CV loop runtime state ---
-float VoltageTrimLimit = 5.0f;            // OBSOLETE DELETE LATER
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
 uint16_t g_voltLoopActualIntervalMs = 0;  // actual interval of last voltage loop fire (ms); 0 until second fire
 uint16_t voltLoopWorstInterval_5s = 0;    // worst voltage loop interval in rolling 5s window (ms)
@@ -2521,7 +2515,6 @@ uint32_t thermalScoreLastExternalMs = 0;  // last ms when voltageControlActive w
 // Table Bounds & Safety
 // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
 float MaxTableValue = 150.0;               // Maximum table entry (A)
-float MinTableValue = 0.0;                 // OBSOLETE REMOVE LATER
 float MaxPenaltyPercent = 15.0;            // Max penalty as % of nominal
 unsigned long MaxPenaltyDuration = 60000;  // Max penalty time (ms)
 
@@ -2571,15 +2564,9 @@ uint32_t fieldOffEdgeMs = 0;           // millis() captured at most recent field
 // an electrically stressed moment, so defer the periodic commit until things settle.
 uint32_t lastElectricalRecordMs = 0;
 
-// "Reset Peak Values" button window — millis() at the most recent reset (0 at boot,
-// which makes (millis() - perfCountersResetMs) = uptime since boot). CSV1 slot 28
-// carries (millis() - perfCountersResetMs)/1000 to the dashboard so all per-session
-// peak labels can display "Worst — last X min / X.X hr" relative to this timestamp.
+
 uint32_t perfCountersResetMs = 0;
 
-// Momentary Actions (Reset to 0 after execution)
-int ResetLearningTable = 0;    // OBSOLETE LEGACY EXTRA
-int ClearOverheatHistory = 0;  // OBSOLETE LEGACY EXTRA
 // ==================== ENUMS ====================
 enum FieldControlMode {
   MODE_CRITICAL_RAMP,             // Critical fault: ramp to 0, cut if fault persists
@@ -2663,7 +2650,6 @@ float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
 float StartupRiseRate  = 3.0f;   // A/sec — setpoint slew rate applied only on field turn-on (OFF/FAULT→AUTO); user-adjustable
 bool  inStartupRamp    = false;  // true from field turn-on until setpointLimited catches up to command
-float SetpointRampRate = 0.0f;   // THIS IS OBSOLETE AND NEEDS DELETING SOMEDAY LATER
 
 // --- Settle Time Before GPIO4 Cut ---
 uint32_t SettleTimeBeforeCut = 1000;  // ms - how long duty must be at 0% before GPIO4 goes LOW
@@ -2867,9 +2853,7 @@ float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=ra
 // ThermistorFilterAlpha removed — hardcoded 0.02f in tempPID_tick IIR filter, not user-configurable
 // Runtime state — expose via telemetry
 double tempPIDInput_d = 77.0;        // Projected temp (°F) = filtered + slope × lookahead; PID process variable
-double tempCapAmps_d = 9999.0;       // OBSOLETE
 double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
-float tempCapAmps = 9999.0f;         // OBSOLETE
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
 
@@ -3490,8 +3474,8 @@ tNMEA2000Handler NMEA2000Handlers[] = {
   { 130306L, &WindSpeed },
   { 0, 0 }
 };
-// Stream *OutputStream; // old, i think it worked at one point..
-Stream *OutputStream = &Serial;  // safe, correct
+
+Stream *OutputStream = &Serial;  
 
 //ADS1115 more pre-setup crap
 uint32_t adsI2CErrorCount = 0;
@@ -3762,9 +3746,8 @@ void setup() {
   Serial.print("Firmware Version Int: ");
   Serial.println(firmwareVersionInt);
   Serial.println();
-  printPartitionInfo();  // DELETE LATER, just used to prove the Custom scheme works
+  printPartitionInfo();  
   initializeNVS();
-  //RestoreLastSessionValues();  // just used for ESP32 stats from last session  REMOVED claimed to be redundant.
   loadFuelTableFromNVS();
 
   if (!ensureLittleFS()) {
@@ -3997,12 +3980,7 @@ void loop() {
   } else if (IgnitionOverride == 0) {
     Ignition = 0;  // force OFF (test shutdown sequence — change from 1 to 0 to trigger)
   }
-  // IgnitionOverride negative: real GPIO passthrough (no override)
-  // static DeviceMode lastMode = MODE_CONFIG;  //DEBUG REMOVE LATER
-  // if (currentMode != lastMode) {
-  //   Serial.printf("MODE CHANGED (0=CONFIG, 1= AP, 2 = CLIENT): %d -> %d\n", lastMode, currentMode);
-  //   lastMode = currentMode;
-  // }                                  //END DEBUG
+ 
   WiFiWakeButton = !digitalRead(5);  // Read WiFi wake button state. Active LOW (button pulls to ground)
 
   // Button press extends/starts timeout
@@ -4092,7 +4070,7 @@ void loop() {
     // Skipped if BMP388 hasn't reported (NAN). Wall-clock epoch stamped only if timeIsSynced
     // (NTP or GPS); on cold boot before sync, last-sample epoch stays at its loaded NVS value
     // so the JS can detect a power-off gap and grey out the affected slots.
-    if (baroPressureHistory && (currentTime - lastBaroSampleMs >= BARO_SAMPLE_INTERVAL_MS)) {
+    if (hardwarePresent == 1 && baroPressureHistory && (currentTime - lastBaroSampleMs >= BARO_SAMPLE_INTERVAL_MS)) {   // sim mode: no fake baro history
       lastBaroSampleMs = currentTime;
       if (!isnan(baroPressure)) {
         baroPressureHistory[baroHistoryHead] = (uint16_t)(baroPressure * 10.0f + 0.5f);
@@ -4478,8 +4456,9 @@ void loop() {
           }
         }
         
-        // Configuration Snapshot — requires field off for 70s
-        if (fieldOffSettled(10000) && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
+        // Configuration Snapshot — requires field off for 70s. Sim mode (HardwarePresent=0):
+        // skip — never push fake stats/state/leaderboard data to the cloud.
+        if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastConfigSnapshotTime >= CONFIG_SNAPSHOT_INTERVAL) {
           lastConfigSnapshotTime = millis();
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered) {
             if (WiFi.RSSI() >= -76) {
@@ -4592,7 +4571,6 @@ void loop() {
   }
 
   //TempTask Debug
-  // Temp debug status - print every 30 seconds
   static unsigned long lastTempDebugPrint = 0;
   if (millis() - lastTempDebugPrint >= 300000) {  //5 minutes
     lastTempDebugPrint = millis();

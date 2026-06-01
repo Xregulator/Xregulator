@@ -240,9 +240,6 @@ void analyzeWeatherMode() {
   if (otaInProgress) {
     return;  // Skip during OTA
   }
-  //Analyze weather data and decide alternator mode
-  // If weather mode is disabled or the weather data is invalid, it sets the mode to normal (0) and exits.
-  // Otherwise, it checks the UV index for today, tomorrow, and the next day.
   //If 2 or more days have a UV index above the configured threshold, it sets the mode to high UV mode (1), which disables the alternator.
   if (!weatherDataValid || !weatherModeEnabled) {  // if weather mode is not enabled, or weather data is invalid
     currentWeatherMode = 0;
@@ -668,7 +665,7 @@ void initializeHardware() {  // Helper function to organize hardware initializat
   // Force I2C initialization with correct pins
   Wire.end();  // End any existing I2C
   Wire.begin(9, 10);
-  Wire.setClock(800000);  // 800 kHz — current default. Out of spec for LSM6DSOX IMU (400 kHz max) and ADS1115 in Fast-mode, but verified stable: zero I²C errors / FIFO overruns / Unknown Tags across multiple sessions, ~15% faster IMU reads vs 400 kHz. Revert to 400000 if any of imu_i2c_error_count / imu_unknown_tag_count / adsI2CErrorCount ever go non-zero.
+  Wire.setClock(400000);  // 400 kHz — in-spec Fast-mode. Reverted from 800 kHz after ADS1115 declared disconnected (adsI2CErrorCount went non-zero — the documented tripwire for backing out the overclock). Was previously stable at 800 kHz; re-evaluate only if ADS1115/IMU I²C errors stay clean at 400 kHz.
   Wire.setTimeOut(15);   // Added as safety April 2026
   delay(100);
   Serial.println("I2C initialized on SDA=9, SCL=10");
@@ -699,9 +696,9 @@ Serial.println("BMP388 found");
 
 
   //Victron VeDirect and NMEA0183
-  Serial1.begin(19200, SERIAL_8N1, 7, -1, 1);  // This is the reading of Victron VEDirect
-  Serial2.begin(19200, SERIAL_8N1, 6, -1, 0);  // ... note the "0" at end for normal logic.  This is the reading of the combined NMEA0183 data from YachtDevices
-  Serial2.flush();                             // why don't i do this for Serial 1??
+  Serial1.begin(19200, SERIAL_8N1, 7, -1, 1);  // Victron VEDirect
+  Serial2.begin(19200, SERIAL_8N1, 6, -1, 0);  // ... note the "0" at end for normal logic.  This is combined NMEA0183 data from YachtDevices
+  Serial2.flush();              
 
   // INA228 Battery Voltage/Current Sensor
   if (!INA.begin()) {
@@ -1253,11 +1250,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     ManualLifePercentage = readFile(LittleFS, "/ManualLifePercentage.txt").toInt();
   }
-  if (!fsExists("/BatteryVoltageSource.txt")) {
-    writeFile(LittleFS, "/BatteryVoltageSource.txt", String(BatteryVoltageSource).c_str());
-  } else {
-    BatteryVoltageSource = readFile(LittleFS, "/BatteryVoltageSource.txt").toInt();
-  }
   if (!fsExists("/ShuntResistanceMicroOhm.txt")) {
     writeFile(LittleFS, "/ShuntResistanceMicroOhm.txt", String(ShuntResistanceMicroOhm).c_str());
   } else {
@@ -1434,10 +1426,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     CloudFeatures = readFile(LittleFS, "/CloudFeatures.txt").toInt();
   }
-  // AutoSaveLearningTable — OBSOLETE REMOVE LATER (LittleFS init removed)
-  // LearningPaused / LearningUpwardEnabled / LearningDownwardEnabled / EnableNeighborLearning /
-  // ShowLearningDebugMessages / LearningDryRunMode boot-init removed — vars deleted (write-only no-consumers).
-  // Existing on-disk /LearningX.txt files left as harmless orphans; no migration code (memory: no-unshipped-migration).
   if (!fsExists("/EnableAmbientCorrection.txt")) {
     writeFile(LittleFS, "/EnableAmbientCorrection.txt", String(EnableAmbientCorrection).c_str());
   } else {
@@ -1662,11 +1650,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     LearningMemoryDuration = readFile(LittleFS, "/LearningMemoryDuration.txt").toInt();
   }
   // LearningTableSaveInterval — OBSOLETE REMOVE LATER (LittleFS init removed)
-  if (!fsExists("/SetpointRampRate.txt")) {
-    writeFile(LittleFS, "/SetpointRampRate.txt", String(SetpointRampRate, 1).c_str());
-  } else {
-    SetpointRampRate = readFile(LittleFS, "/SetpointRampRate.txt").toFloat();
-  }
   if (!fsExists("/DutyRampRate.txt")) {
     writeFile(LittleFS, "/DutyRampRate.txt", String(DutyRampRate, 1).c_str());
   } else {
@@ -1899,11 +1882,6 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     writeFile(LittleFS, "/VoltageKp.txt", String(VoltageKp, 1).c_str());
   } else {
     VoltageKp = readFile(LittleFS, "/VoltageKp.txt").toFloat();
-  }
-  if (!fsExists("/VoltageTrimLimit.txt")) {
-    writeFile(LittleFS, "/VoltageTrimLimit.txt", String(VoltageTrimLimit, 1).c_str());
-  } else {
-    VoltageTrimLimit = readFile(LittleFS, "/VoltageTrimLimit.txt").toFloat();
   }
   if (!fsExists("/VoltageLoopInterval.txt")) {
     writeFile(LittleFS, "/VoltageLoopInterval.txt", String(VoltageLoopInterval).c_str());

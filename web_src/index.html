@@ -2365,7 +2365,7 @@
 
         <!-- Battery Settings Sub-tab -->
 
-        <!--         // NOTE: BatteryVoltageSource, BatteryCOffset, InvertBattAmps, socInfoAvailable,
+        <!--         // NOTE: BatteryCOffset, InvertBattAmps, socInfoAvailable,
         // and AutoShuntGainCorrection are routed through validateAndSubmitBatteryNumber /
         // validateAndSubmitBatteryToggle as a convenience but are not part of any cross-field
         // guard logic. The validator always passes for these fields. If the guard set ever
@@ -8999,9 +8999,8 @@
   <div id="plots" class="tab-content">
     <!-- Plots Sub-tabs -->
     <div class="sub-tabs">
-      <button class="sub-tab active" onclick="showSubTab('plots', 'displays', event)">Plots</button>
+      <button class="sub-tab active" onclick="showSubTab('plots', 'displays', event)">Short Term</button>
       <button class="sub-tab" onclick="showSubTab('plots', 'longterm', event)">Long Term</button>
-      <button class="sub-tab" onclick="showSubTab('plots', 'controls', event)">Plot Controls</button>
     </div>
 
     <!-- Plot Displays Sub-tab - This should be active by default -->
@@ -9033,6 +9032,27 @@
           </div>
         </div>
       </div>
+      <!-- X-axis time window — buttons set plotTimeWindow (seconds) for all four live plots.
+           Replaces the old Plot Controls numeric input. Y axis is set by dragging on a plot (double-click resets). -->
+      <div class="settings-card">
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Time Window (current: <span id="plotTimeWindow_echo">?</span> s):</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how many seconds of live data all four short-term plots show on the X axis. To zoom the Y axis, drag a box directly on a plot; double-click a plot to reset its zoom.</span></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <button name="plotTimeWindow" value="5" type="submit" onclick="submitMessage()" class="btn-primary">5S</button>
+              <button name="plotTimeWindow" value="10" type="submit" onclick="submitMessage()" class="btn-primary">10S</button>
+              <button name="plotTimeWindow" value="30" type="submit" onclick="submitMessage()" class="btn-primary">30S</button>
+              <button name="plotTimeWindow" value="60" type="submit" onclick="submitMessage()" class="btn-primary">60S</button>
+              <button name="plotTimeWindow" value="120" type="submit" onclick="submitMessage()" class="btn-primary">2M</button>
+              <button name="plotTimeWindow" value="300" type="submit" onclick="submitMessage()" class="btn-primary">5M</button>
+            </form>
+          </div>
+        </div>
+      </div>
       <div class="settings-card">
         <div class="plot-container" id="current-temp-plot"></div>
       </div>
@@ -9044,6 +9064,66 @@
       </div>
       <div class="settings-card">
         <div class="plot-container" id="voltage-plot"></div>
+      </div>
+
+      <!-- Plot display controls (moved here from the removed Plot Controls sub-tab) -->
+      <div class="settings-card">
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Time Axis Labels (<span id="timeAxisModeChanging_echo">?</span>):</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">
+                UNIX: Proper time labels, but slower<br>
+                Relative: "Seconds ago" labels, but smoother plotting
+              </span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <span class="toggle-label">Relative</span>
+              <label class="switch">
+                <input id="timeAxisModeChanging_checkbox" type="checkbox"
+                  onchange="if(handleUserToggle('timeAxisModeChanging_checkbox', 'timeAxisModeChanging', 'timeAxisModeChanging')) { this.form.submit(); submitMessage(); }" />
+                <span class="slider round"></span>
+              </label>
+              <span class="toggle-label">UNIX</span>
+              <input id="timeAxisModeChanging" name="timeAxisModeChanging" type="number" value=""
+                style="display:none;" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>GPS / Time Source (<span id="gpsTimeSourceMode_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">
+                Auto: NMEA wins when present, phone fills in when NMEA goes silent, NTP as last resort.<br>
+                NMEA only: ignore phone and NTP even if NMEA is dead.<br>
+                Phone only: ignore NMEA and NTP even if phone is offline.<br>
+                NTP time only: use internet time only; GPS still falls through Auto.<br>
+                Forcing a stale source still shows its last value (greyed) so you can diagnose.<br>
+                Note: a position typed manually in Weather Mode overrides every option here until you clear it there.
+              </span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <select id="gpsTimeSourceMode" name="gpsTimeSourceMode"
+                onchange="this.form.submit(); submitMessage();">
+                <option value="0">Auto (recommended)</option>
+                <option value="1">NMEA only</option>
+                <option value="2">Phone only</option>
+                <option value="3">NTP time only</option>
+              </select>
+            </form>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -9111,180 +9191,6 @@
       </div>
     </div>
 
-    <!-- Plot Controls Sub-tab -  -->
-    <div id="plots-controls" class="sub-tab-content">
-      <div class="settings-card">
-
-        <div class="form-row">
-          <div class="form-label">Plot Time Window (sec) (<span id="plotTimeWindow_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="plotTimeWindow" type="number" step="0.001" min=".001" max="600" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Time Axis Labels (<span id="timeAxisModeChanging_echo">?</span>):</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">
-                UNIX: Proper time labels, but slower<br>
-                Relative: "Seconds ago" labels, but smoother plotting
-              </span>
-            </span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <span class="toggle-label">Relative</span>
-              <label class="switch">
-                <input id="timeAxisModeChanging_checkbox" type="checkbox"
-                  onchange="if(handleUserToggle('timeAxisModeChanging_checkbox', 'timeAxisModeChanging', 'timeAxisModeChanging')) { this.form.submit(); submitMessage(); }" />
-                <span class="slider round"></span>
-              </label>
-              <span class="toggle-label">UNIX</span>
-              <input id="timeAxisModeChanging" name="timeAxisModeChanging" type="number" value=""
-                style="display:none;" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>GPS / Time Source (<span id="gpsTimeSourceMode_echo">?</span>) — live: <span id="liveSourceIndicator">?</span>:</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">
-                Auto: NMEA wins when present, phone fills in when NMEA goes silent, NTP as last resort.<br>
-                NMEA only: ignore phone and NTP even if NMEA is dead.<br>
-                Phone only: ignore NMEA and NTP even if phone is offline.<br>
-                NTP time only: use internet time only; GPS still falls through Auto.<br>
-                Forcing a stale source still shows its last value (greyed) so you can diagnose.<br>
-                Note: a position typed manually in Weather Mode overrides every option here until you clear it there.
-              </span>
-            </span>
-          </div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <select id="gpsTimeSourceMode" name="gpsTimeSourceMode"
-                onchange="this.form.submit(); submitMessage();">
-                <option value="0">Auto (recommended)</option>
-                <option value="1">NMEA only</option>
-                <option value="2">Phone only</option>
-                <option value="3">NTP time only</option>
-              </select>
-            </form>
-          </div>
-        </div>
-
-        <!-- Y-Axis Range Controls Section -->
-        <hr />
-        <div class="section-title" style="margin-top: 20px;">Y-Axis Ranges</div>
-
-        <div class="form-row">
-          <div class="form-label">Y Axis Min (Current) (<span id="Ymin1_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymin1" type="number" step=".1" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Max (Current) (<span id="Ymax1_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymax1" type="number" step=".1" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Min (Voltage) (<span id="Ymin2_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymin2" type="number" step=".01" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Max (Voltage) (<span id="Ymax2_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymax2" type="number" step=".01" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Min (RPM) (<span id="Ymin3_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymin3" type="number" step="1" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Max (RPM) (<span id="Ymax3_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymax3" type="number" step="1" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Min (Temperature) (<span id="Ymin4_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymin4" type="number" step="1" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Y Axis Max (Temperature) (<span id="Ymax4_echo">?</span>):</div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="Ymax4" type="number" step="1" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-
-      </div>
-    </div>
   </div>
 
 
@@ -9525,7 +9431,6 @@
     <span id="cvKOvershoot_echo" style="display:none;">0</span>
     <span id="cvConsecutiveReads_echo" style="display:none;">0</span>
     <span id="ManualSOCPoint_echo" style="display:none;">0</span>
-    <span id="BatteryVoltageSource_echo" style="display:none;">0</span>
     <span id="ShuntResistanceMicroOhm_echo" style="display:none;">0</span>
     <span id="InvertAltAmps_echo" style="display:none;">0</span>
     <span id="InvertBattAmps_echo" style="display:none;">0</span>
@@ -9669,7 +9574,6 @@
     <input type="hidden" name="ResetRPMMax" id="ResetRPMMax" value="0" />
     <input id="MaximumAllowedBatteryAmps" style="display:none;" value="0" />
     <input id="ManualSOCPoint" style="display:none;" value="0" />
-    <input id="BatteryVoltageSource" style="display:none;" value="0" />
     <input id="AmpSensorRange" style="display:none;" value="0" />
     <input id="ShuntResistanceMicroOhm" style="display:none;" value="0" />
     <input id="InvertAltAmps" name="InvertAltAmps" type="number" value style="display:none;" />

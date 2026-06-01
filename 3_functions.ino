@@ -98,8 +98,8 @@ enum Csv2Index {
   CSV2_reserved_NMEA2KData,        // moved to CSV3
   CSV2_AlarmLatchState,
   CSV2_ResetAlarmLatch,
-  CSV2_ResetLearningTable,
-  CSV2_ClearOverheatHistory,
+  CSV2_reserved_ResetLearningTable,    // was ResetLearningTable echo — action-only, global removed
+  CSV2_reserved_ClearOverheatHistory,  // was ClearOverheatHistory echo — action-only, global removed
   CSV2_DynamicShuntGainFactor,
   CSV2_DynamicAltCurrentZero,
   CSV2_InsulationLifePercent,
@@ -521,7 +521,7 @@ enum Csv3Index {
   CSV3_bmsLogicLevelOff,
   CSV3_RPMScalingFactor,
   CSV3_MaximumAllowedBatteryAmps,
-  CSV3_BatteryVoltageSource,
+  CSV3_reserved_BatteryVoltageSource,  // obsolete setting removed — dead slot, sends 0
   CSV3_AlternatorNominalAmps,
   CSV3_LearningUpStep,
   CSV3_LearningDownStep,
@@ -604,7 +604,7 @@ enum Csv3Index {
   CSV3_fuelTableGPH_8,
   CSV3_fuelTableGPH_9,
   CSV3_stateRevision,
-  CSV3_SetpointRampRate,
+  CSV3_reserved_SetpointRampRate,  // obsolete setting removed — dead slot, sends 0
   CSV3_DutyRampRate,
   CSV3_SettleTimeBeforeCut,
   CSV3_TempWarnExcess,
@@ -668,7 +668,7 @@ enum Csv3Index {
   CSV3_rpmCapPowerTable_7,
   CSV3_rpmCapPowerTable_8,
   CSV3_rpmCapPowerTable_9,
-  CSV3_VoltageTrimLimit,
+  CSV3_reserved_VoltageTrimLimit,  // obsolete setting removed — dead slot, sends 0
   CSV3_InputFilterTC,
   CSV3_SystemIDStepAmplitude,
   CSV3_HardOCTripAmps,
@@ -829,7 +829,7 @@ void loadCapCurrentTableFromNVS();
 void loadCapTablesForMode(int mode);
 
 int SafeInt(double f, int scale = 1) {
-  // where this is matters!!   Put utility functions like SafeInt() above setup() and loop() , according to ChatGPT.  And I proved it matters.
+  // where this is matters, don't move!!
   // Param widened to double so AllTime accumulators don't narrow at call sites; float callers promote implicitly.
   return isnan(f) || isinf(f) ? -1 : (int)round(f * scale);
 }
@@ -1000,7 +1000,7 @@ void setupWiFi() {  // Function to set up WiFi with new GPIO-based mode selectio
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout) {
 
   if (!ssid || strlen(ssid) == 0) {
-    Serial.println("ERROR: No SSID provided for WiFi connection");  // PRESERVES: Your error message style
+    Serial.println("ERROR: No SSID provided for WiFi connection");  
     return false;
   }
 
@@ -1478,7 +1478,8 @@ void setupServer() {
     static const uint8_t blank[] = { 0 };
     request->send(200, "image/x-icon", blank, sizeof(blank));
   });
-  //Factory Reset Logic
+
+
   server.on("/factoryReset", HTTP_POST, [](AsyncWebServerRequest *request) {
     if (!request->hasParam("password", true)) {
       request->send(400, "text/plain", "Missing password");
@@ -1489,27 +1490,23 @@ void setupServer() {
       request->send(403, "text/plain", "FAIL");
       return;
     }
-
     Serial.println("\n=== FACTORY RESET INITIATED FROM WEB ===");
     queueConsoleMessage("FACTORY RESET: Initiated from web interface");
-
     request->send(200, "text/plain", "OK");  // Respond before blocking restart
-
     performDeepFactoryReset();  // Unmounts+reformats LittleFS, erases all NVS, reinits, restarts
   });
-
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     AsyncWebServerResponse *response = request->beginResponse(webFS, "/index.html.gz", "text/html");
     response->addHeader("Content-Encoding", "gzip");
     request->send(response);
   });
+
   server.on("/thermallog.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!thermalLogReady || !thermalLog || thermalLogCount == 0) {
       request->send(200, "text/plain", "No thermal log data yet.");
       return;
     }
-
     ThermalDLState state;
     state.count = thermalLogCount;
     state.oldest = (thermalLogHead - thermalLogCount + THERMAL_LOG_SIZE) % THERMAL_LOG_SIZE;
@@ -1517,29 +1514,21 @@ void setupServer() {
     state.done = false;
     state.lineLen = 0;
     state.linePos = 0;
-
     thermalLogPaused = true;
     thermalLogPausedAtMs = millis();
-
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "text/csv",
       [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
         thermalLogPausedAtMs = millis();
-
         if (state.done) return 0;
-
         size_t written = 0;
-
         while (written < maxLen) {
-
           if (state.linePos >= state.lineLen) {
-
             if (state.row > state.count) {
               thermalLogPaused = false;
               state.done = true;
               return written;
             }
-
             if (state.row == 0) {
               // Header row — tempRaw and gains removed
               state.lineLen = snprintf(
@@ -1549,7 +1538,6 @@ void setupServer() {
                 "pidErr_A,pidOut_pct,duty_pct,RPM,battV,measAmps_A,"
                 "penaltyAmps_A,flags,chargeStageDisplay,"
                 "outerP,outerI,outerD,impliedPenalty,antiWindupFired,thermalSlope_F_sec\n");
-
             } else if (state.row == 1) {
               // Constants row — written once, Python detects via "CONST" in ts_ms field
               state.lineLen = snprintf(
@@ -1558,13 +1546,11 @@ void setupServer() {
                 TempPIDKp,
                 TempPIDKi,
                 ThermalLookaheadSec);
-
             } else {
               // Data rows — index offset by 2 (header + constants row)
               int idx = (state.oldest + state.row - 2) % THERMAL_LOG_SIZE;
               ThermalLogEntry e;
               memcpy(&e, &thermalLog[idx], 48);
-
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
@@ -1594,18 +1580,15 @@ void setupServer() {
                 (unsigned)e.antiWindupFired,
                 e.thermalSlope / 1000.0f);
             }
-
             state.linePos = 0;
             state.row++;
           }
-
           size_t canSend = min(maxLen - written,
                                (size_t)(state.lineLen - state.linePos));
           memcpy(buf + written, state.line + state.linePos, canSend);
           written += canSend;
           state.linePos += (int)canSend;
         }
-
         return written;
       });
 
@@ -1614,13 +1597,11 @@ void setupServer() {
     request->send(response);
   });
 
-
   server.on("/thermallog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!thermalLogReady || !thermalLog || thermalLogCount == 0) {
       request->send(200, "application/octet-stream", "");
       return;
     }
-
     ThermalBinDLState state;
     uint32_t cnt = (uint32_t)thermalLogCount;
     uint32_t intMs = THERMAL_LOG_INTERVAL_MS;
@@ -1633,18 +1614,14 @@ void setupServer() {
     state.done = false;
     state.entryLen = 0;
     state.entryPos = 0;
-
     thermalLogPaused = true;
     thermalLogPausedAtMs = millis();
-
     AsyncWebServerResponse *response = request->beginChunkedResponse(
       "application/octet-stream",
       [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
         thermalLogPausedAtMs = millis();
         if (state.done) return 0;
-
         size_t written = 0;
-
         while (written < maxLen) {
           // Phase 1: drain 8-byte header
           if (state.headerPos < 8) {
@@ -1654,7 +1631,6 @@ void setupServer() {
             state.headerPos += (int)canSend;
             continue;
           }
-
           // Phase 2: stream entries as raw struct bytes
           if (state.entryPos >= state.entryLen) {
             if (state.row >= state.count) {
@@ -1668,16 +1644,13 @@ void setupServer() {
             state.entryPos = 0;
             state.row++;
           }
-
           size_t canSend = min(maxLen - written, (size_t)(state.entryLen - state.entryPos));
           memcpy(buf + written, state.entryBuf + state.entryPos, canSend);
           written += canSend;
           state.entryPos += (int)canSend;
         }
-
         return written;
       });
-
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
   });
@@ -2929,13 +2902,6 @@ void setupServer() {
       AmpSensorRange = inputMessage.toInt();
       queueConsoleMessageF("AmpSensorRange changed to: %d", AmpSensorRange);
     }
-    if (request->hasParam("BatteryVoltageSource")) {
-      foundParameter = true;
-      inputMessage = request->getParam("BatteryVoltageSource")->value();
-      writeFile(LittleFS, "/BatteryVoltageSource.txt", inputMessage.c_str());
-      BatteryVoltageSource = inputMessage.toInt();
-      queueConsoleMessageF("Battery voltage source changed to: %d", BatteryVoltageSource);
-    }
     if (request->hasParam("R_fixed")) {
       foundParameter = true;
       inputMessage = request->getParam("R_fixed")->value();
@@ -3865,13 +3831,6 @@ void setupServer() {
       LearningMemoryDuration = inputMessage.toInt();
     }
     // LearningTableSaveInterval handler — OBSOLETE REMOVE LATER
-    if (request->hasParam("SetpointRampRate")) {
-      foundParameter = true;
-      inputMessage = request->getParam("SetpointRampRate")->value();
-      writeFile(LittleFS, "/SetpointRampRate.txt", inputMessage.c_str());
-      SetpointRampRate = inputMessage.toFloat();
-      queueConsoleMessageF("Setpoint ramp rate set to: %.1f A/sec", SetpointRampRate);
-    }
     if (request->hasParam("DutyRampRate")) {
       foundParameter = true;
       inputMessage = request->getParam("DutyRampRate")->value();
@@ -4253,12 +4212,6 @@ void setupServer() {
       writeFile(LittleFS, "/VoltageDisagreeTimeout.txt", String(temp).c_str());
       VoltageDisagreeTimeout = temp;
       queueConsoleMessageF("Voltage disagreement timeout set to: %d seconds", inputMessage.toInt());
-    }
-    if (request->hasParam("VoltageTrimLimit")) {
-      foundParameter = true;
-      inputMessage = request->getParam("VoltageTrimLimit")->value();
-      writeFile(LittleFS, "/VoltageTrimLimit.txt", inputMessage.c_str());
-      VoltageTrimLimit = inputMessage.toFloat();
     }
     if (request->hasParam("VoltageLoopInterval")) {
       foundParameter = true;
@@ -5492,7 +5445,6 @@ void checkWiFiConnection() {
 }
 void SendWifiData() {
   // Don't send WiFi data during HTTPS operations
-  //if (core0Busy) return; // from Claude: My guess: The check is overly defensive. EventSource sends are typically async and won't block HTTPS. But worth testing since WiFi radio is shared.
   unsigned long start66 = micros();
   // === THROTTLED WIFI CHECKS (every 2 seconds) ===
   static int cachedWiFiMode = WIFI_OFF;
@@ -5709,8 +5661,8 @@ void SendWifiData() {
                                0,                                                // reserved — moved to CSV3 (NMEA2KData)
                                SafeInt(alarmLatch ? 1 : 0),
                                SafeInt(ResetAlarmLatch),
-                               SafeInt(ResetLearningTable),
-                               SafeInt(ClearOverheatHistory),
+                               0,  // CSV2_reserved_ResetLearningTable — action-only, echo global removed
+                               0,  // CSV2_reserved_ClearOverheatHistory — action-only, echo global removed
                                SafeInt(DynamicShuntGainFactor, 1000),
                                SafeInt(DynamicAltCurrentZero, 1000),
                                SafeInt(InsulationLifePercent, 100),
@@ -6132,7 +6084,7 @@ void SendWifiData() {
         return;
       }
     }
-    /// ALL THIS SAFEINT STUFF WAS A HUGE WASTE OF TIME, BAD ADVICE, COULD HAVE JUST SENT ROUNDED FLOATS FOR 1 Byte (or bit?) xtra
+    /// ALL THIS SAFEINT STUFF MAY BE UNNECESSAREY BAD ADVICE, COULD HAVE JUST SENT ROUNDED FLOATS FOR 1 Byte (or bit?) xtra
     //WifiSendTime was 834uS before increasing csv3 payload size from 1100 to 1400     No change after.  Again, this separation into groups and worry about wifi packet size seems like AI nonsense.
 
     int payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
@@ -6188,7 +6140,7 @@ void SendWifiData() {
                                SafeInt(bmsLogicLevelOff),
                                SafeInt(RPMScalingFactor),
                                SafeInt(MaximumAllowedBatteryAmps),
-                               SafeInt(BatteryVoltageSource),
+                               0,  // CSV3_reserved_BatteryVoltageSource — obsolete setting removed
                                SafeInt(AlternatorNominalAmps),
                                SafeInt(LearningUpStep, 100),
                                SafeInt(LearningDownStep, 100),
@@ -6271,7 +6223,7 @@ void SendWifiData() {
                                SafeInt(fuelTableGPH[8], 100),
                                SafeInt(fuelTableGPH[9], 100),
                                SafeInt(stateRevision),
-                               SafeInt(SetpointRampRate, 100),
+                               0,  // CSV3_reserved_SetpointRampRate — obsolete setting removed
                                SafeInt(DutyRampRate, 100),
                                SafeInt(SettleTimeBeforeCut),
                                SafeInt(TempWarnExcess, 100),
@@ -6335,7 +6287,7 @@ void SendWifiData() {
                                (int)rpmCapPowerTable[7],
                                (int)rpmCapPowerTable[8],
                                (int)rpmCapPowerTable[9],
-                               SafeInt(VoltageTrimLimit, 100),
+                               0,  // CSV3_reserved_VoltageTrimLimit — obsolete setting removed
                                (int)InputFilterTC,
                                SafeInt(SystemIDStepAmplitude, 10),               // ×10, 1 decimal
                                SafeInt(HardOCTripAmps, 10),                      // ×10, 1 decimal
