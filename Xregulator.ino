@@ -171,176 +171,112 @@ const char *FIRMWARE_VERSION = "0.0.120";
 
 String currentUID;
 
-// ============================================================
-// ============================================================
-// EFFICIENCY MATRIX — CONFIG
-// To change bucket counts or ranges, edit ONLY this section.
-// If you change anything here, wipe NVS (Start Over button).
-// ============================================================
-
-// ── Session health history — persisted circular buffer ──────────
-// Each entry is the average (actual_amps / ref_avg_amps) ratio
-// for one power session. 1.0 = perfect, 0.85 = 15% degraded.
-// Committed to NVS at start of next session so power loss
-// during a session doesn't corrupt prior history.
-
-#define EFF_HISTORY_SESSIONS 30
-
-struct EffHistoryData {
-  float values[EFF_HISTORY_SESSIONS];
-  uint8_t head;
-  uint8_t count;
-} __attribute__((packed));
-
-static EffHistoryData effHistory = {};
-
-// Current session accumulator — saved to NVS every 2 min
-// so it survives unexpected power loss
-static float sessionHealthSum = 0.0f;
-static uint32_t sessionHealthCount = 0;
-
-// Set when history changes — triggers SSE resend
-static bool effHistoryDirty = false;
-
-// Set when a save was blocked by inCriticalZone() — retried every 20s when safe.
-// Only eff_cs (single-float session health, still in NVS) uses this path; the
-// matrix moved to LittleFS and saves only at field-off / shutdown, so no defer flag.
-static bool sessionHealthNeedsSave = false;
-
 #define FUNC_TIMING_WINDOW_MS 10000  // rolling window for per-function worst-case timing (ms)
 
 
-// --- Field-drive axis ---
-#define NUM_FIELD_BUCKETS 7
-#define EFF_FIELD_MIN 0.0f   // PLACEHOLDER: adjust if your alternator never goes below X
-#define EFF_FIELD_MAX 15.0f  // PLACEHOLDER: adjust if your field ever exceeds 15V
-
-static const float FIELD_BOUNDS[NUM_FIELD_BUCKETS + 1] = {
-  0.0f, 2.14f, 4.29f, 6.43f, 8.57f, 10.71f, 12.86f, 15.0f
-};
-static const char *FIELD_LABELS[NUM_FIELD_BUCKETS] = {
-  "0-2.1V", "2.1-4.3V", "4.3-6.4V", "6.4-8.6V",
-  "8.6-10.7V", "10.7-12.9V", "12.9-15V"
-};
-
-// --- RPM axis (unchanged from prior system) ---
-#define NUM_RPM_BUCKETS 8
-static const float RPM_BOUNDS[NUM_RPM_BUCKETS + 1] = {
-  0.0f, 500.0f, 1000.0f, 1500.0f, 2000.0f,
-  2500.0f, 3000.0f, 4000.0f, 99999.0f
-};
-static const char *RPM_LABELS[NUM_RPM_BUCKETS] = {
-  "0-500", "500-1k", "1k-1.5k", "1.5k-2k",
-  "2k-2.5k", "2.5k-3k", "3k-4k", "4k+"
-};
-
-// --- Temperature axis ---
-#define NUM_TEMP_BUCKETS 7
-static const float TEMP_BOUNDS[NUM_TEMP_BUCKETS + 1] = {
-  0.0f, 80.0f, 110.0f, 140.0f, 160.0f, 180.0f, 200.0f, 9999.0f
-};
-static const char *TEMP_LABELS[NUM_TEMP_BUCKETS] = {
-  "<80F", "80-110F", "110-140F", "140-160F", "160-180F", "180-200F", ">200F"
-};
-
-// --- Total matrix size ---
-#define NUM_MATRIX_CELLS (NUM_RPM_BUCKETS * NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS)
-// 8 × 3 × 7 = 168 cells
-
-// --- Reference bin selection criteria ---
-// DEV-INTERMEDIATE: relaxed from production so reference finalizes in ~10 min of runtime,
-// but tight enough that a 3-cell / 3-minute matrix CAN'T finalize (which caused false anomalies).
-// PRODUCTION values: NUM_REFERENCE_BINS=10, REF_MIN_SS_SECONDS=30, REF_FREEZE_TOTAL_SS=6000,
-//                    REF_SPREAD_TEMP_DEG=50.0f, REF_SPREAD_FIELD_VOLTS=3.75f, REF_SPREAD_RPM=1000.0f
-#define NUM_REFERENCE_BINS 3         // DEV-INTERMEDIATE — production value: 10
-#define REF_MIN_SS_SECONDS 15        // DEV-INTERMEDIATE — production value: 30
-#define REF_FREEZE_TOTAL_SS 180      // DEV-INTERMEDIATE (3 min) — production value: 6000 (100 min)
-#define REF_SPREAD_TEMP_DEG 10.0f    // DEV-INTERMEDIATE — production value: 50.0f
-#define REF_SPREAD_FIELD_VOLTS 1.0f  // DEV-INTERMEDIATE — production value: 3.75f
-#define REF_SPREAD_RPM 200.0f        // DEV-INTERMEDIATE — production value: 1000.0f
-
-// --- Anomaly detection — runtime, user-configurable via LittleFS ---
-float anomalyMarginAmps = 5.0f;   // Extra amps of tolerance beyond ref min/max (default: none)
-int anomalyAlarmThreshold = 5;    // Session error count before alarm fires
-bool anomalyAlarmEnable = false;  // Whether to trigger actual alarm output
-
-// --- Misc ---
-#define EFF_MIN_BATT_V 8.0f  // Minimum plausible battery voltage for field-volts computation
-
 // ============================================================
-// DATA STRUCTURES
+// ALTERNATOR HEALTH MODEL (Phase 2) — replaces the 3-D eff matrix above.
+// A_pred = base(rpm, excitation) × tempCorr(T) × busCorr(Vbus).
+// "excitation proxy" = temp-normalized field drive, NOT measured field current.
+// Built additively; the old eff* system is removed at cut-over.
+// Full design: LOCAL_DATA_SYSTEMS_PLAN.md Phase 2.
 // ============================================================
 
-struct MatrixCell {
-  // Everlasting layer — accumulates forever, never resets except manual wipe
-  uint32_t ss_seconds;  // Total steady-state seconds accumulated in this bin
-  float avg_amps;       // Time-weighted running average output amps
-  float min_amps;       // Observed minimum output amps
-  float max_amps;       // Observed maximum output amps
+// Base-map axes — fine on RPM (the output knee is steep); PSRAM is free.
+#define ALT_RPM_BINS  60          // 100-RPM bins over 0..6000
+#define ALT_RPM_MAX   6000.0f
+#define ALT_FI_BINS   24          // excitation proxy over 0..15 ("temp-comp volts")
+#define ALT_FI_MAX    15.0f
+#define ALT_NUM_CELLS (ALT_RPM_BINS * ALT_FI_BINS)   // 1440
 
-  // Reference layer — written once when freeze criteria are met; never modified after
-  float ref_avg_amps;
-  float ref_min_amps;
-  float ref_max_amps;
-  uint8_t is_reference_bin;  // 1 = finalized reference bin, 0 = not
+// 1-D correction axes (learned + applied from day 1).
+#define ALT_TEMP_BINS 12
+#define ALT_TEMP_MIN  0.0f
+#define ALT_TEMP_MAX  260.0f
+#define ALT_VBUS_BINS 10
+#define ALT_VBUS_MIN  10.0f
+#define ALT_VBUS_MAX  16.0f
+
+// Excitation-proxy temp normalization (copper seed; cloud refits α later).
+#define ALT_ALPHA_PER_C 0.00393f
+#define ALT_TREF_C      25.0f
+#define ALT_MIN_BATT_V  8.0f
+
+// Base-map cell: bin is a spatial hash; the cell stores the TRUE centroid of
+// its steady-state chunk-observations so quantization never smears the data.
+struct AltCell {
+  uint16_t nObs;        // independent chunk-observations binned here
+  float    sumW;        // Σ obs weight (coverage ceiling caps it)
+  float    sumW_A, sumW_A2;                    // → mean output + between-obs variance
+  float    sumW_rpm, sumW_fi, sumW_vbus, sumW_t;  // → per-input centroid = Σw·x / Σw
+  float    ref_amps, ref_rpm, ref_fi, ref_sigma;  // frozen reference (anchored at centroid)
+  uint8_t  ref_valid;   // 1 = graduated (else skip health here — no fabrication)
+  uint8_t  _pad[3];
+};  // 48 B → 1440 × 48 ≈ 67 KB PSRAM
+
+// 1-D learned multiplicative correction bin (tempCorr / busCorr).
+struct AltCorr {
+  uint16_t nObs;
+  float    sumW, sumW_ratio, value;  // value = applied factor (1.0 = none)
+  uint8_t  valid, _pad[1];
 };
 
-// Window accumulator — small fixed array, PSRAM, session only.
-// Tracks only bins active in the current 2-minute window.
-// MAX_ACTIVE_BINS_PER_WINDOW = 12 gives headroom for warmup transients.
-#define MAX_ACTIVE_BINS_PER_WINDOW 12
-
-struct WindowSlot {
-  int8_t r, t, f;       // Which bin (RPM, temp, field bucket indices)
-  uint32_t ss_seconds;  // SS seconds accumulated this window
-  float wt_avg_amps;    // Running weighted average amps this window
-  float min_amps;       // Min amps seen this window
-  float max_amps;       // Max amps seen this window
-  bool active;          // True if this slot is in use
+// Whole-alternator health monitor (one instance).
+struct AltHealthMon {
+  float    ewmaRatio;             // EWMA of A_actual/A_pred → health % (1.0 = 100% healthy)
+  float    cusumPos, cusumNeg;    // two-sided CUSUM on standardized residual z (drift flags)
+  uint32_t obsCount;
+  uint8_t  status;                // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
+  uint8_t  baselineFrozen;        // 1 once ≥1 cell graduated
+  uint8_t  _pad[2];
 };
 
-static WindowSlot *effWindow = nullptr;
+static AltCell     *altBase     = nullptr;  // [ALT_NUM_CELLS]
+static AltCorr     *altTempCorr = nullptr;  // [ALT_TEMP_BINS]
+static AltCorr     *altBusCorr  = nullptr;  // [ALT_VBUS_BINS]
+static AltHealthMon altHealth   = {};
 
-// Per-bin session stats — PSRAM, resets each power cycle.
-// Accumulates current session's readings for Tier 2 thermal-average comparison.
-// count >= 90 required before Tier 2 fires (matches ~90s thermal time constant).
-struct SessionBinStats {
-  float sum_amps;    // Running sum of qualifying amps this session
-  uint16_t count;    // Number of qualifying samples this session
-  bool trend_fired;  // True once Tier 2 has already fired for this bin this session
-};
-static SessionBinStats *sessionStats = nullptr;  // Allocated in PSRAM at init
+#define ALT_IDX(ri, fi)  ((ri) * ALT_FI_BINS + (fi))
+#define ALT_CELL(ri, fi) altBase[ALT_IDX(ri, fi)]
 
-// Tier 2 thermal average comparison threshold — user adjustable via LittleFS
-// 0.15 = alert if session average is more than 15% above or below reference average
-float degradationThreshold = 0.15f;
+// Steady-state detector state (per tick).
+static bool     altSteady       = false;  // AND of all per-parameter exit-band tests + min-dwell
+static uint32_t altSteadyStartMs = 0;     // episode start (first in-band tick)
+// Visit tracking — one observation per residency in a bin (exit + re-enter required for another).
+static int      altCurBin = -1;           // base-map cell currently occupied; -1 = none/invalid
+static uint32_t altVisitSteadyMs = 0;     // steady dwell accumulated this residency (vs min-dwell)
+static double   altVisit_w = 0.0;         // steady-sample count this visit
+static double   altVisit_A = 0.0, altVisit_A2 = 0.0;
+static double   altVisit_rpm = 0.0, altVisit_fi = 0.0, altVisit_vbus = 0.0, altVisit_t = 0.0;
+static float    altSS_rpmRef = 0, altSS_fiRef = 0, altSS_vbusRef = 0, altSS_tempRef = 0;  // exit-band anchors
+static uint32_t altThermInBandMs = 0;     // how long the thermal rate has stayed in-band
 
-// Separate error counters for each tier — summed for alarm threshold comparison
-static int sessionTier1Errors = 0;  // Instantaneous min/max violations
-static int sessionTier2Errors = 0;  // Thermal average drift violations
+// Live point for dashboard red dot / SSE.
+static float altLive_rpm = 0, altLive_fi = 0, altLive_amps = 0, altLive_pred = 0, altLive_z = 0;
+static bool  altLiveValid = false;
 
-// Matrix in PSRAM — allocated in initEfficiencyTracker()
-static MatrixCell *effMatrix = nullptr;
-
-bool effAnomalyAlarmActive = false;  // Set by checkAnomaly(), cleared on reset
-
-// Row-major index: [rpmBucket][tempBucket][fieldBucket]
-#define MATRIX_IDX(r, t, f) ((r)*NUM_TEMP_BUCKETS * NUM_FIELD_BUCKETS + (t)*NUM_FIELD_BUCKETS + (f))
-#define MATRIX_CELL(r, t, f) effMatrix[MATRIX_IDX(r, t, f)]
-#define WINDOW_ACCUM(r, t, f) effWindow[MATRIX_IDX(r, t, f)]
-
-// Reference finalization state (persisted in NVS alongside matrix)
-static bool referenceFinalized = false;
-
-// Active 3D bucket (updated every 1Hz tick)
-static int activeRPMBucket = -1;
-static int activeTempBucket = -1;
-static int activeFieldBucket = -1;
-
-// Red dot live state
-static float redDot_fieldVolts = 0.0f;
-static float redDot_amps = 0.0f;
-static bool redDotValid = false;
+// GUI-adjustable settings (Pattern B; build-then-tune). Electrical settle:
+float altElecSettleSec = 1.0f;   // electrical params must hold this long
+float altDutyTolPct    = 1.0f;   // excitation/duty stability band (% of duty)
+float altRpmTol        = 25.0f;  // RPM exit band (tight — knee)
+float altVbusTol       = 0.10f;  // bus-voltage exit band (V)
+// Thermal settle (model-free rate band):
+float altThermRateDegF = 5.0f;   // max temp change...
+float altThermRateMin  = 5.0f;   // ...over this many minutes
+float altThermDwellSec = 30.0f;  // rate must stay in-band this long
+// Visit:
+float altMinDwellSec = 5.0f;     // min steady dwell before a bin residency counts as one observation
+// Admission floors:
+float altMinAmps = 2.0f;
+float altMinDuty = 5.0f;
+// Freeze (graduation) — X = min separate visits before a bin freezes as reference:
+float altFreezeMinVisits = 6;    // headline knob ("X"); needs X separate residencies, not one long cruise
+float altFreezeMaxVisits = 40;   // hard cap — freeze by here regardless of spread
+float altFreezeSEM  = 1.0f;      // optional spread gate: also require visit-to-visit SEM (A) < this
+// Health monitor tuning (advisory only — no alarm):
+float altEwmaLambda = 0.01f;
+float altCusumK     = 0.5f;
+float altCusumH     = 5.0f;
 
 // Supabase configuration......similar stuff is locally defined in a few functions that upload sensor data, config snapshots to cloud
 const char *SUPABASE_URL = "https://qnbekuaoweuteylitzvo.supabase.co";
@@ -2082,7 +2018,7 @@ FuncTiming ft_rai_bmp_state;       // BMP388 state machine — cost per state st
 FuncTiming ft_rai_imu;             // IMU FIFO drain block
 FuncTiming ft_updateAccelMetrics;  // accel ring-buffer processing (updateAccelMetrics)
 FuncTiming ft_ReadVEData;
-FuncTiming ft_efficiencyTracker;
+FuncTiming ft_altHealth;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -2539,7 +2475,7 @@ volatile bool pendingSaveCVTuningLog = false;
 volatile bool pendingSaveTuningLog = false;
 volatile bool pendingSaveThermalTuningLog = false;
 volatile bool pendingSaveSystemIDLog = false;
-volatile bool pendingResetEfficiencyMatrix = false;
+volatile bool pendingResetAlternatorHealth = false;
 volatile bool pendingClearOverheatHistory = false;
 volatile bool pendingSaveUserTableEdits = false;
 volatile bool pendingSaveVesselInfo = false;
@@ -2550,7 +2486,7 @@ uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain wind
 
 // Field-off flush triggers — two staggered gates off the same field-off edge.
 // +5s:  saveNVSDataFull()      drains the storage namespace to NVS (heavy commit).
-// +13s: saveEfficiencyMatrix() writes /effmatrix.bin to LittleFS (~12.5 KB).
+// +13s: altHealthSave() writes the alt-health blobs (/altbase.bin + 3 more) to LittleFS (~67 KB).
 // Staggered so the LittleFS write doesn't pile onto the NVS commit's flash
 // relocation tail. Both re-arm on the next field-on edge. Independent of
 // fieldOffSettled() (which has a 60s baseline used by cloud/network callers).
@@ -3794,7 +3730,7 @@ void setup() {
   memset(&ft_checkTimeSync, 0, sizeof(FuncTiming));
   memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
-  memset(&ft_efficiencyTracker, 0, sizeof(FuncTiming));
+  memset(&ft_altHealth, 0, sizeof(FuncTiming));
   memset(&ft_rai_total, 0, sizeof(FuncTiming));
   memset(&ft_rai_ina228, 0, sizeof(FuncTiming));
   memset(&ft_rai_ads_state, 0, sizeof(FuncTiming));
@@ -3812,7 +3748,8 @@ void setup() {
   MaxLoopTime = 0;                       // reset for this session (persists to NVS on next save)
   totalPowerCycles++;
   saveNVSDataFull();  // Synchronous write — persists boot-time adjustments before loop() starts
-  initEfficiencyTracker();
+  initAlternatorHealth();
+  altSettingsLoad();
   setCpuFrequencyMhz(240);
   pinMode(4, OUTPUT);     // This pin is used to provide a high signal to Field Enable pin
   digitalWrite(4, LOW);   // Start with field off
@@ -4121,9 +4058,9 @@ void loop() {
       pendingSaveSystemIDLog = false;
       saveSystemIDLog();
     }
-    if (pendingResetEfficiencyMatrix) {
-      pendingResetEfficiencyMatrix = false;
-      resetEfficiencyMatrix();
+    if (pendingResetAlternatorHealth) {
+      pendingResetAlternatorHealth = false;
+      resetAlternatorHealth();
     }
     if (pendingClearOverheatHistory) {
       pendingClearOverheatHistory = false;
@@ -4190,8 +4127,7 @@ void loop() {
             // Phase 2: field just cut — flush NVS and save partial sensor window immediately
             setCpuFrequencyMhz(240);
             saveNVSDataFull();  // absolute latest values, no critical-zone gate
-            saveEfficiencyMatrix();
-            saveCurrentSessionHealth();
+            altHealthSave();
             uploadSensorHistory();  // save whatever is in the current window to local buffer
             if (pendingSaveCVTuningLog) {
               pendingSaveCVTuningLog = false;
@@ -4209,9 +4145,9 @@ void loop() {
               pendingSaveSystemIDLog = false;
               saveSystemIDLog();
             }
-            if (pendingResetEfficiencyMatrix) {
-              pendingResetEfficiencyMatrix = false;
-              resetEfficiencyMatrix();
+            if (pendingResetAlternatorHealth) {
+              pendingResetAlternatorHealth = false;
+              resetAlternatorHealth();
             }
             if (pendingClearOverheatHistory) {
               pendingClearOverheatHistory = false;
@@ -4363,7 +4299,7 @@ void loop() {
         TIMED_CALL(ft_updateWeatherMode, updateWeatherMode());
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
-      TIMED_CALL(ft_efficiencyTracker, efficiencyTracker_tick());
+      TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
 
       // Sync legacy display variables
@@ -4413,7 +4349,7 @@ void loop() {
         // the ~150 ms file write doesn't land on the NVS commit's relocation tail
         if (!fieldOffMatrixFlushDone && !pendingShutdownFlush && !fieldNowActive
             && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 13000UL) {
-          saveEfficiencyMatrix();
+          altHealthSave();
           fieldOffMatrixFlushDone = true;
         }
       }
@@ -4542,7 +4478,7 @@ void loop() {
     ft_rai_imu.worstWindow = 0;
     ft_updateAccelMetrics.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
-    ft_efficiencyTracker.worstWindow = 0;
+    ft_altHealth.worstWindow = 0;
     voltLoopWorstInterval_5s = 0;
 
     prev_millis7888 = millis();

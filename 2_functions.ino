@@ -2210,12 +2210,7 @@ bool buildConfigPayload() {
     CloudFeatures,
     weatherModeEnabled, (int)capLimitMode);
 
-  // Anomaly detection
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"anomalyAlarmEnable\":%d,\"anomalyAlarmThreshold\":%.3f,"
-    "\"anomalyMarginAmps\":%.3f,\"degradationThreshold\":%.3f",
-    anomalyAlarmEnable ? 1 : 0, anomalyAlarmThreshold,
-    anomalyMarginAmps, degradationThreshold);
+  // (Anomaly-detection config-snapshot fields removed with the old eff matrix.)
 
   // Weather / location
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,

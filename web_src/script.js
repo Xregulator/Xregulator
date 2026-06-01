@@ -390,7 +390,7 @@ const CSV2_FIELDS = [
     "voltageError",
     "cv_I",
     "inIdleStage",
-    "referenceFinalized",
+    "altBaselineFrozen",
     "ft_rai_total_win",
     "ft_rai_total_ses",
     "ft_rai_ina228_win",
@@ -595,8 +595,8 @@ const CSV2_FIELDS = [
     "systemIDFallDelay_2",
     "systemIDRiseAvg",
     "systemIDFallAvg",
-    "ft_efficiencyTracker_win",
-    "ft_efficiencyTracker_ses",
+    "ft_altHealth_win",
+    "ft_altHealth_ses",
     "systemIDActive",
     "systemIDResultsReady",
     "systemIDStepAmp_0",
@@ -637,7 +637,86 @@ const CSV2_FIELDS = [
     "currentGaleMinutes",                      // live minutes continuously in a gale (sustained ≥34kt), int
     "wmIgn_VMGman_lo",   "wmIgn_VMGman_hi",    // VMG manual session min/max (knots ×10)
     "wmIgn_VMGup_lo",    "wmIgn_VMGup_hi",     // VMG upwind session min/max (knots ×10)
+    "altHealthPct",        // health % ×10
+    "altHealthStatus",     // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
+    "altCoveragePct",      // frozen/with-data % ×10
+    "altObsCount",         // scored observations since freeze
 ];
+
+// ── Alternator-health (Phase 2): live + settings state, health card, plot ──
+const ALT_SETTING_KEYS = ["altElecSettleSec","altDutyTolPct","altRpmTol","altVbusTol",
+  "altThermRateDegF","altThermRateMin","altThermDwellSec","altMinDwellSec","altMinAmps","altMinDuty",
+  "altFreezeMinVisits","altFreezeMaxVisits","altFreezeSEM","altEwmaLambda","altCusumK","altCusumH"];
+let altSettings = {};
+let altLive = { valid:false, rpm:0, fi:0, amps:0, pred:0, z:0, status:0, steady:false,
+                healthPct:100, coveragePct:0, baselineFrozen:false, obsCount:0 };
+let altCells = [];
+let _altPlotPending = false, _altModelLastFetch = 0;
+const ALT_RPM_MAX = 6000, ALT_FI_MAX = 15;
+
+function updateAltHealth() {
+  const STATUS = ['Learning','Healthy','Drift: HIGH output','Drift: LOW output','Insufficient coverage'];
+  const pctEl = document.getElementById('alt-health-pct');
+  const statEl = document.getElementById('alt-health-status');
+  const covEl = document.getElementById('alt-coverage');
+  if (pctEl) pctEl.textContent = altLive.baselineFrozen ? Math.round(altLive.healthPct)+'%' : '\u2014';
+  if (statEl) {
+    statEl.textContent = altLive.baselineFrozen ? (STATUS[altLive.status]||'\u2014') : 'Learning';
+    statEl.style.color = (altLive.status===2||altLive.status===3) ? '#d9534f'
+                       : (altLive.baselineFrozen && altLive.status===1) ? '#5cb85c' : '#888';
+  }
+  if (covEl) covEl.textContent = Math.round(altLive.coveragePct)+'% of visited cells frozen \u00b7 '+altLive.obsCount+' checks';
+  const dot = document.getElementById('alt-steady-dot');
+  if (dot) { dot.style.background = altLive.steady ? '#5cb85c' : '#ccc'; dot.title = altLive.steady?'steady':'not steady'; }
+}
+
+function fetchAltModel() {
+  fetch('/altmodel.csv').then(r=>r.text()).then(txt=>{
+    const lines = txt.trim().split('\n'); altCells = [];
+    for (let i=1;i<lines.length;i++){
+      const c = lines[i].split(',');
+      if (c.length<9) continue;
+      if (+c[2]===0 && +c[3]===0) continue;
+      altCells.push({nObs:+c[2], valid:+c[3], mean:+c[4], ref:+c[5], rrpm:+c[6], rfi:+c[7],
+                     rpm:(+c[0]+0.5)*ALT_RPM_MAX/60, fi:(+c[1]+0.5)*ALT_FI_MAX/24});
+    }
+    drawAltPlot();
+  }).catch(()=>{});
+}
+
+function queueAltPlotUpdate() {
+  const now = Date.now();
+  if (now - _altModelLastFetch > 8000) { _altModelLastFetch = now; fetchAltModel(); }
+  if (_altPlotPending) return;
+  _altPlotPending = true;
+  requestAnimationFrame(()=>{ _altPlotPending = false; drawAltPlot(); });
+}
+
+function drawAltPlot() {
+  const cv = document.getElementById('alt-plot');
+  if (!cv || !cv.getContext) return;
+  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height, pad = 38;
+  ctx.clearRect(0,0,W,H);
+  const X = rpm => pad + (rpm/ALT_RPM_MAX)*(W-2*pad);
+  const Y = fi  => H-pad - (fi/ALT_FI_MAX)*(H-2*pad);
+  ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath();
+  ctx.moveTo(pad,pad); ctx.lineTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.stroke();
+  ctx.fillStyle='#888'; ctx.font='11px sans-serif';
+  ctx.fillText('RPM \u2192', W-pad-34, H-pad+22);
+  ctx.save(); ctx.translate(pad-22,pad+96); ctx.rotate(-Math.PI/2); ctx.fillText('Field drive \u2192',0,0); ctx.restore();
+  let maxA = 1; altCells.forEach(c=>{ const a=c.valid?c.ref:c.mean; if(a>maxA)maxA=a; });
+  altCells.forEach(c=>{
+    const a = c.valid ? c.ref : c.mean, t = Math.max(0,Math.min(1,a/maxA));
+    ctx.beginPath(); ctx.arc(X(c.valid?c.rrpm:c.rpm), Y(c.valid?c.rfi:c.fi), c.valid?5:3, 0, 6.2832);
+    if (c.valid){ ctx.fillStyle='rgb('+Math.round(220-150*t)+','+Math.round(90+140*t)+',90)'; ctx.fill(); }
+    else { ctx.strokeStyle='#ccc'; ctx.stroke(); }
+  });
+  if (altLive.valid){
+    ctx.beginPath(); ctx.arc(X(altLive.rpm), Y(altLive.fi), 6, 0, 6.2832);
+    ctx.fillStyle = altLive.steady ? '#d9534f' : 'rgba(217,83,79,0.4)';
+    ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+  }
+}
 const CSV3_FIELDS = [
     "TemperatureLimitF",
     "BulkVoltage",
@@ -875,10 +954,10 @@ const CSV3_FIELDS = [
     "TargetVoltageSetpoint",
     "RebulkCurrent_A",
     "UseFloat",
-    "anomalyMarginAmps",
-    "anomalyAlarmThreshold",
-    "anomalyAlarmEnable",
-    "degradationThreshold",
+    "altSpare0",
+    "altSpare1",
+    "altSpare2",
+    "altSpare3",
     "TempAlarmLow",
     "LoadDumpDtThresh",
     "LoadDumpDtThresh1",
@@ -1466,61 +1545,29 @@ function initializeEventSource() {
         }, false);
 
 
-        // ── SSE: EffMatrix ─────────────────────────────────────────────
-        // Payload: state,rBucket,tBucket,fBucket,rLabel,tLabel,fLabel,
-        //          ss_seconds,avg_amps,min_amps,max_amps,is_reference_bin,sessionErrorCount
-
-        source.addEventListener('EffMatrix', function (e) {
-            const parts = e.data.split(',');
-            if (parts.length < 13) return;
-
-            effMatrixState.state = parseInt(parts[0]);
-            effMatrixState.rBucket = parseInt(parts[1]);
-            effMatrixState.tBucket = parseInt(parts[2]);
-            effMatrixState.fBucket = parseInt(parts[3]);
-            effMatrixState.rLabel = parts[4];
-            effMatrixState.tLabel = parts[5];
-            effMatrixState.fLabel = parts[6];
-            effMatrixState.ss_seconds = parseInt(parts[7]);
-            effMatrixState.avg_amps = parseFloat(parts[8]);
-            effMatrixState.min_amps = parseFloat(parts[9]);
-            effMatrixState.max_amps = parseFloat(parts[10]);
-            effMatrixState.is_reference_bin = parseInt(parts[11]);
-            effMatrixState.sessionErrorCount = parseInt(parts[12]);
-
-            queueEffPlotUpdate();
-            updateEffAnomalyDisplay();
+        // \u2500\u2500 SSE: AltLive \u2500 alternator-health live point + summary \u2500\u2500
+        source.addEventListener('AltLive', function (e) {
+            const p = e.data.split(',').map(Number);
+            if (p.length < 12) return;
+            altLive.valid = p[0] === 1;
+            altLive.rpm = p[1]; altLive.fi = p[2]; altLive.amps = p[3];
+            altLive.pred = p[4]; altLive.z = p[5];
+            altLive.status = p[6]; altLive.steady = p[7] === 1;
+            altLive.healthPct = p[8]; altLive.coveragePct = p[9];
+            altLive.baselineFrozen = p[10] === 1; altLive.obsCount = p[11];
+            updateAltHealth();
+            queueAltPlotUpdate();
         }, false);
 
-        // ── SSE: EffRed ────────────────────────────────────────────────
-        // Payload: valid,fieldVolts,amps,rpmBucket,tempBucket,fieldBucket
-
-        source.addEventListener('EffRed', function (e) {
-            const parts = e.data.split(',').map(Number);
-            if (parts.length < 6) return;
-
-            effRedDot.valid = parts[0] === 1;
-            effRedDot.fieldVolts = parts[1];
-            effRedDot.amps = parts[2];
-            effRedDot.rpmBucket = parts[3];
-            effRedDot.tempBucket = parts[4];
-            effRedDot.fieldBucket = parts[5];
-
-            queueEffPlotUpdate();
-            updateEffAnomalyDisplay();
-        }, false);
-
-        source.addEventListener('EffHistory', function (e) {
-            const parts = e.data.split(',');
-            if (parts.length < 32) return;
-
-            effHistory.count = parseInt(parts[0]);
-            effHistory.head = parseInt(parts[1]);
-            for (let i = 0; i < 30; i++) {
-                effHistory.values[i] = parseFloat(parts[2 + i]) || 0;
-            }
-
-            renderEffSparkline();
+        // \u2500\u2500 SSE: AltSettings \u2500 16 GUI-tunable values \u2192 echo spans \u2500\u2500
+        source.addEventListener('AltSettings', function (e) {
+            const p = e.data.split(',').map(Number);
+            if (p.length < ALT_SETTING_KEYS.length) return;
+            ALT_SETTING_KEYS.forEach((k, i) => {
+                altSettings[k] = p[i];
+                const el = document.getElementById(k + '_echo');
+                if (el) el.textContent = (Math.round(p[i] * 1000) / 1000);
+            });
         }, false);
 
         source.addEventListener('error', function (e) {
@@ -1560,7 +1607,7 @@ function initializeEventSource() {
         }, false);
 
         // Re-bind stream listeners (CSVData/CSVData2/CSVData3/TimestampData/console)
-        // on every reconnect. Without this, only the open/EffMatrix/EffRed/EffHistory/error
+        // on every reconnect. Without this, only the open/AltLive/AltSettings/error
         // listeners survive a reconnect and the main telemetry streams go silent.
         // window.attachStreamListeners is defined inside the window 'load' callback,
         // so it is undefined on the very first call to initializeEventSource() — the
@@ -3415,10 +3462,6 @@ function updateAllEchosOptimized(data) {
         { key: 'AbsorptionTimeoutMs', id: 'AbsorptionTimeoutMs_echo', transform: v => Math.round(v / 60000) },
         { key: 'bulkVoltageHoldMs', id: 'bulkVoltageHoldMs_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'capLimitMode', id: 'capLimitMode_echo', transform: v => v },
-        { key: 'anomalyMarginAmps', id: 'anomalyMarginAmps_echo', transform: v => (v / 10).toFixed(1) },
-        { key: 'anomalyAlarmThreshold', id: 'anomalyAlarmThreshold_echo', transform: v => v },
-        { key: 'anomalyAlarmEnable', id: 'anomalyAlarmEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
-        { key: 'degradationThreshold', id: 'degradationThreshold_echo', transform: v => (v).toFixed(2) },
         { key: 'InputFilterTC', id: 'InputFilterTC_echo',      transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_ID',        transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_echo_grp3', transform: v => v },
@@ -6687,7 +6730,6 @@ function updateTogglesFromData(data) {
         updateCheckbox("UseFloat_checkbox", data.UseFloat, "UseFloat");
 
 
-        updateCheckbox("anomalyAlarmEnable_checkbox", data.anomalyAlarmEnable, "anomalyAlarmEnable");
         updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
@@ -7015,9 +7057,7 @@ window.addEventListener("load", function () {
     initPidTuningPlot();
     initCVTuningDataStructures();
     initCVTuningPlot();
-    initEffPlot();
     startInterpLoop();
-    //initEffPlotAxisListeners();
 
     // Add change listener for manual CloudFeatures toggle
     const cloudFeaturesCheckbox = document.getElementById("CloudFeatures_checkbox");
@@ -7722,9 +7762,6 @@ window.addEventListener("load", function () {
                     else if (key === "LastResetReason" || key === "ancientResetReason") {
                         newTextContent = resetReasonLookup[value] || `Unknown (${value})`;
                     }
-                    else if (["anomalyMarginAmps"].includes(key)) {
-                        newTextContent = (value / 10).toFixed(1);
-                    }
                     // Special handling for imuEnabled
                     else if (key === "imuEnabled") {
                         newTextContent = value === 1 ? "Enabled" : "Disabled";
@@ -8237,8 +8274,8 @@ window.addEventListener("load", function () {
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
                 ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
-                ["ft_efficiencyTracker_win_ID", "ft_efficiencyTracker_win"],
-                ["ft_efficiencyTracker_ses_ID", "ft_efficiencyTracker_ses"],
+                ["ft_altHealth_win_ID", "ft_altHealth_win"],
+                ["ft_altHealth_ses_ID", "ft_altHealth_ses"],
                 ["VeTime2_ID", "VeTime2"],
                 ["systemIDActive_ID", "systemIDActive"],
                 ["systemIDResultsReady_ID", "systemIDResultsReady"],
@@ -9014,7 +9051,6 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("admin_password").addEventListener("change", updatePasswordFields);
     document.getElementById("timeAxisModeChanging_checkbox").checked = (document.getElementById("timeAxisModeChanging").value === "1");
     document.getElementById("weatherModeEnabled_checkbox").checked = (document.getElementById("weatherModeEnabled").value === "1");
-    document.getElementById("anomalyAlarmEnable_checkbox").checked = (document.getElementById("anomalyAlarmEnable").value === "1");
     document.getElementById("TuningMode_checkbox").checked = (document.getElementById("TuningMode").value === "1");
     document.getElementById("socInfoAvailable_checkbox").checked = (document.getElementById("socInfoAvailable").value === "1");
     document.getElementById("CloudFeatures_checkbox").checked = (document.getElementById("CloudFeatures").value === "1");
@@ -9236,13 +9272,7 @@ function showMainTab(tabName) {
         }, 100);
     }
 
-    // Rebuild efficiency plot when Live Data tab becomes visible
     if (tabName === 'livedata') {
-        setTrackedTimeout(() => {
-            if (typeof initEffPlot === 'function') {
-                initEffPlot();
-            }
-        }, 0);
         // Ensure a sub-tab is always visible; on first visit none may be active yet
         if (!document.querySelector('#livedata .sub-tab-content.active')) {
             showSubTab('livedata', 'alternator');
@@ -9317,10 +9347,6 @@ function showSubTab(parentTab, subTabName, evt = null) {
         });
     }
 
-    // Refresh matrix stats whenever the Alternator live data tab is opened
-    if (parentTab === 'livedata' && subTabName === 'alternator') {
-        fetchMatrixStats();
-    }
 
     // Initialize / refresh the barometer panel whenever the Other tab is opened
     if (parentTab === 'livedata' && subTabName === 'other') {
@@ -10611,116 +10637,9 @@ function getLogTimestamp() {
 
 // ── Matrix stats summary (Live Data → Alternator card) ────────────────────
 
-// Returns a human-readable reason string if the fetch should be blocked,
-// or null if it is safe to proceed.
-// Whitelist: only Off/None (0), Idle, Bulk (not near target), and Manual are safe.
-function matrixStatsFetchBlockReason() {
-    const stage = gLastChargeStage;
 
-    // Off/None and Idle are always safe
-    if (stage === 0 || stage === CS_IDLE) return null;
 
-    // Manual: user accepts responsibility in this mode
-    if (stage === CS_MANUAL) return null;
 
-    // Bulk is safe unless battery is close to the bulk target
-    if (stage === CS_BULK) {
-        const battV = getLiveBatteryV();
-        const bulkV = getEchoNumber('BulkVoltage_echo');
-        const proxV = 0.5;  // formerly ProtectionProxGateV (removed 2026-05-22); 0.5V matches old default
-        if (!isNaN(bulkV) && battV >= bulkV - proxV) {
-            return `Battery voltage (${battV.toFixed(2)} V) is within ${proxV.toFixed(2)} V of `
-                 + `the bulk voltage target (${bulkV.toFixed(2)} V). Refresh blocked when near bulk.`;
-        }
-        return null; // Bulk but not near target — safe
-    }
-
-    // Everything else: Absorption, Float, Maintain, Target V
-    const names = {
-        [CS_ABSORPTION]: 'Absorption', [CS_FLOAT]: 'Float',
-        [CS_MAINTAIN]: 'Maintain',     [CS_TARGET_V]: 'Target Voltage'
-    };
-    return `System is in ${names[stage] || 'stage ' + stage} mode. `
-         + 'Matrix stats refresh is only allowed when Off, Idle, Manual, or in early Bulk charge.';
-}
-
-function renderMatrixBars(containerId, labels, values, color) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    const maxVal = Math.max(...values, 1);
-    container.innerHTML = labels.map((lbl, i) => {
-        const pct    = Math.round((values[i] / maxVal) * 100);
-        const hrs    = (values[i] / 3600).toFixed(1);
-        const dimmed = values[i] === 0 ? 'opacity:0.35;' : '';
-        return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px;${dimmed}">` +
-               `<div style="width:82px;font-size:10px;color:var(--text-muted);text-align:right;flex-shrink:0;white-space:nowrap;">${lbl}</div>` +
-               `<div style="flex:1;background:rgba(128,128,128,0.15);border-radius:3px;height:13px;overflow:hidden;">` +
-               `<div style="width:${pct}%;background:${color};height:100%;border-radius:3px;transition:width 0.4s ease;"></div></div>` +
-               `<div style="width:34px;font-size:10px;color:var(--text-muted);text-align:right;flex-shrink:0;">${hrs}h</div>` +
-               `</div>`;
-    }).join('');
-}
-
-// explicit=true  → called by the user clicking Refresh; shows alert on block.
-// explicit=false → called automatically (tab switch, page load); silently skips.
-function fetchMatrixStats(explicit = false) {
-    const blockReason = matrixStatsFetchBlockReason();
-    if (blockReason) {
-        if (explicit) {
-            alert('Matrix stats refresh blocked:\n\n' + blockReason
-                + '\n\nTry again when the system is in Float, Idle, or off.');
-        } else {
-            const el = document.getElementById('matrix-stats-age');
-            if (el) el.textContent = 'Skipped — charging active';
-        }
-        return;
-    }
-
-    fetch(buildURL('/effmatrixstats'))
-        .then(r => r.json())
-        .then(d => {
-            if (d.error) return;
-            const ss     = d.total_ss;
-            const ssStr  = `${Math.floor(ss / 3600)}h ${Math.floor((ss % 3600) / 60)}m`;
-            const popPct = d.total_cells > 0
-                ? ((d.pop_cells / d.total_cells) * 100).toFixed(1) : '0.0';
-
-            const el = id => document.getElementById(id);
-            if (el('matrix-stat-cells')) el('matrix-stat-cells').textContent = d.total_cells;
-            if (el('matrix-stat-pop'))   el('matrix-stat-pop').textContent   = `${d.pop_cells} (${popPct}%)`;
-            if (el('matrix-stat-ref'))   el('matrix-stat-ref').textContent   = d.ref_bins;
-            if (el('matrix-stat-ss'))    el('matrix-stat-ss').textContent    = ssStr;
-
-            renderMatrixBars('matrix-bar-rpm',   d.rpm_labels,   d.rpm_ss,   '#4a90d9');
-            renderMatrixBars('matrix-bar-temp',  d.temp_labels,  d.temp_ss,  '#e07b39');
-            const fieldCurrentLabels = d.field_min_amps
-                ? d.field_min_amps.map((minA, i) => {
-                    const maxA = d.field_max_amps[i];
-                    return (maxA < 0) ? '—' : `${Math.round(minA)}–${Math.round(maxA)}A`;
-                  })
-                : d.field_labels;
-            renderMatrixBars('matrix-bar-field', fieldCurrentLabels, d.field_ss, '#5aab61');
-
-            const now = new Date();
-            const ts  = now.getHours().toString().padStart(2, '0') + ':' +
-                        now.getMinutes().toString().padStart(2, '0');
-            if (el('matrix-stats-age')) el('matrix-stats-age').textContent = `Updated ${ts}`;
-        })
-        .catch(() => {
-            const el = document.getElementById('matrix-stats-age');
-            if (el) el.textContent = 'Load failed';
-        });
-}
-
-function downloadEffMatrix() {
-    const ts = getLogTimestamp();
-    const a = document.createElement('a');
-    a.href = '/effmatrix.csv';
-    a.download = `AltHealthMatrix_${ts}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-}
 
 function downloadLogs() {
     const ts = getLogTimestamp();
@@ -10973,413 +10892,6 @@ async function pollLogRequest() {
 document.addEventListener('DOMContentLoaded', () => {
     g_logPollTimer = setTimeout(pollLogRequest, 8000);
 });
-
-
-
-// ==================== EFFICIENCY MATRIX PLOT ====================
-//
-//   EffMatrix SSE → bin reference data (avg, min, max, state)
-//   EffRed    SSE → live operating point
-//
-//   Plot shows:
-//     Gray band   = reference min/max for active field bucket
-//     Gray line   = reference average
-//     Red dot     = live operating point
-//   Watermark shows active bin labels + SS seconds + confidence state.
-//   Anomaly banner shown when live point deviates from reference.
-// ================================================================
-
-// Field bucket boundaries — must match firmware FIELD_BOUNDS[]
-// If you change NUM_FIELD_BUCKETS or EFF_FIELD_MAX in firmware,
-// update this array to match and wipe the matrix.
-const EFF_FIELD_BOUNDS = [0, 2.14, 4.29, 6.43, 8.57, 10.71, 12.86, 15.0];
-const EFF_FIELD_MIN = 0;
-const EFF_FIELD_MAX = 15;
-const EFF_AMP_MIN = 0;
-const EFF_AMP_MAX = 150;
-
-let effPlot = null;
-let effPlotData = null;
-let effPlotResizeObserver = null;
-let effUpdateScheduled = false;
-
-
-// Current matrix state for active bin — populated by EffMatrix SSE
-let effMatrixState = {
-    state: 0,   // 0 = weak/empty, 1 = populated non-ref, 2 = reference bin
-    rBucket: -1,
-    tBucket: -1,
-    fBucket: -1,
-    rLabel: '--',
-    tLabel: '--',
-    fLabel: '--',
-    ss_seconds: 0,
-    avg_amps: 0,
-    min_amps: 0,
-    max_amps: 0,
-    is_reference_bin: 0,
-    sessionErrorCount: 0
-};
-
-// Live red dot state — populated by EffRed SSE
-let effRedDot = {
-    valid: false,
-    fieldVolts: 0,
-    amps: 0,
-    rpmBucket: -1,
-    tempBucket: -1,
-    fieldBucket: -1
-};
-
-// Session history — populated by EffHistory SSE
-let effHistory = {
-    count: 0,
-    head: 0,
-    values: new Array(30).fill(0)
-};
-
-
-
-// ── Plot Data Builder ──────────────────────────────────────────
-// Only the red dot is a uPlot series.
-// The reference band is drawn via canvas hook in drawEffReferenceBand().
-
-function buildEffPlotData() {
-    if (effRedDot.valid) {
-        effPlotData = [
-            [effRedDot.fieldVolts],
-            [effRedDot.amps]
-        ];
-    } else {
-        effPlotData = [[0], [null]];
-    }
-}
-
-// ── Reference Band Canvas Draw ─────────────────────────────────
-// Called from drawClear hook — runs before uPlot draws series.
-// Draws filled gray band (min/max) and avg line for active field bucket.
-// Full opacity when state=2 (reference), faded when state=1 (low confidence).
-// Nothing drawn when state=0 (no data).
-
-function drawEffReferenceBand(u) {
-    const state = effMatrixState.state;
-    if (state === 0 || effMatrixState.fBucket < 0) return;
-    if (effMatrixState.max_amps <= 0) return;   // Not yet populated
-
-    const f = effMatrixState.fBucket;
-    const ctx = u.ctx;
-    const isRef = (state === 2);
-
-    // X: field bucket bounds → canvas pixels
-    const xLeft = u.valToPos(EFF_FIELD_BOUNDS[f], 'x', true);
-    const xRight = u.valToPos(EFF_FIELD_BOUNDS[f + 1], 'x', true);
-
-    // Y: reference amps → canvas pixels (higher amps = lower pixel y)
-    const yBandTop = u.valToPos(effMatrixState.max_amps, 'y', true);
-    const yBandBot = u.valToPos(effMatrixState.min_amps, 'y', true);
-    const yAvg = u.valToPos(effMatrixState.avg_amps, 'y', true);
-
-    ctx.save();
-
-    // Filled min/max band
-    ctx.globalAlpha = isRef ? 0.22 : 0.08;
-    ctx.fillStyle = '#888888';
-    ctx.fillRect(xLeft, yBandTop, xRight - xLeft, yBandBot - yBandTop);
-
-    // Average line
-    ctx.globalAlpha = isRef ? 0.55 : 0.22;
-    ctx.strokeStyle = isRef ? '#555555' : '#888888';
-    ctx.lineWidth = 2;
-    ctx.setLineDash(isRef ? [] : [5, 4]);
-    ctx.beginPath();
-    ctx.moveTo(xLeft, yAvg);
-    ctx.lineTo(xRight, yAvg);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    ctx.restore();
-}
-
-// ── Watermark ─────────────────────────────────────────────────
-// Top-right overlay showing active bin identity, SS seconds, and confidence state.
-
-function drawEffWatermark(u) {
-    const state = effMatrixState.state;
-    const stateLabel = state === 2 ? 'Reference' :
-        state === 1 ? 'Low Confidence' : 'No Reference';
-    const ss_min = effMatrixState.ss_seconds > 0
-        ? Math.round(effMatrixState.ss_seconds / 60) + ' min SS'
-        : '0 min SS';
-
-    const lines = [
-        `RPM:   ${effMatrixState.rLabel}`,
-        `Temp:  ${effMatrixState.tLabel}`,
-        `Field: ${effMatrixState.fLabel}`,
-        ss_min,
-        stateLabel
-    ];
-
-    const ctx = u.ctx;
-    const x1 = u.bbox.left + u.bbox.width;
-    const y0 = u.bbox.top;
-
-    ctx.save();
-    ctx.globalAlpha = 0.28;
-    ctx.fillStyle = '#666';
-    ctx.font = 'bold 14px monospace';
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'right';
-    ctx.shadowColor = 'rgba(255,255,255,0.6)';
-    ctx.shadowBlur = 2;
-
-    let y = y0 + 10;
-    for (const line of lines) {
-        ctx.fillText(line, x1 - 14, y);
-        y += 20;
-    }
-    ctx.restore();
-}
-
-// ── Plot Init ─────────────────────────────────────────────────
-
-function initEffPlot() {
-    const plotEl = document.getElementById('eff-scatter-plot');
-    if (!plotEl) return;
-
-    buildEffPlotData();
-
-    const opts = {
-        width: Math.min(plotEl.clientWidth || 800, 800),
-        height: 400,
-        series: [
-            { label: null },
-            {
-                label: 'Live Operating Point',
-                stroke: '#FF4444',
-                width: 0,
-                points: { show: true, size: 18, fill: '#FF4444', stroke: '#FFFFFF' }
-            }
-        ],
-        scales: {
-            x: { time: false, auto: false, range: [EFF_FIELD_MIN, EFF_FIELD_MAX] },
-            y: { auto: false, range: [EFF_AMP_MIN, EFF_AMP_MAX] }
-        },
-        axes: [
-            { label: 'Field Volts (V)', grid: { show: true } },
-            { label: 'Output Current (A)', grid: { show: true }, side: 3 }
-        ],
-        legend: { show: false },
-        plugins: [{
-            hooks: {
-                init: [(u) => {
-                    createEffLegend();
-                    const resizePlot = debounce(() => {
-                        const el = document.getElementById('eff-scatter-plot');
-                        if (el && effPlot) effPlot.setSize({ width: el.clientWidth, height: 400 });
-                    }, 1000);
-                    if (effPlotResizeObserver) effPlotResizeObserver.disconnect();
-                    effPlotResizeObserver = new ResizeObserver(resizePlot);
-                    effPlotResizeObserver.observe(plotEl);
-                }],
-                // drawClear fires after canvas clear, before series draw.
-                // Band is drawn here so red dot renders on top of it.
-                drawClear: [(u) => {
-                    if (!u.root || u.root.offsetParent === null) return;
-                    drawEffReferenceBand(u);
-                    drawEffWatermark(u);
-                }]
-            }
-        }]
-    };
-
-    if (effPlot) effPlot.destroy();
-    effPlot = new uPlot(opts, effPlotData, plotEl);
-    if (document.body.classList.contains('dark-mode')) updateUplotTheme(effPlot);
-}
-
-// ── Legend ────────────────────────────────────────────────────
-
-function createEffLegend() {
-    const plotContainer = document.getElementById('eff-scatter-plot');
-    if (!plotContainer) return;
-    const existing = plotContainer.querySelector('.custom-legend');
-    if (existing) existing.remove();
-
-    const legendDiv = document.createElement('div');
-    legendDiv.className = 'custom-legend';
-    legendDiv.style.cssText = `display:flex;justify-content:center;gap:20px;margin-top:10px;flex-wrap:wrap;`;
-
-    const items = [
-        { label: 'Reference Range (min/max)', color: '#888888', shape: 'rect' },
-        { label: 'Reference Average', color: '#555555', shape: 'line' },
-        { label: 'Live Operating Point', color: '#FF4444', shape: 'dot' }
-    ];
-
-    items.forEach(item => {
-        const wrap = document.createElement('label');
-        wrap.style.cssText = `display:flex;align-items:center;gap:6px;font-size:12px;user-select:none;`;
-
-        let icon = document.createElement('div');
-        if (item.shape === 'dot') {
-            icon.style.cssText = `width:12px;height:12px;border-radius:50%;background:${item.color};`;
-        } else if (item.shape === 'line') {
-            icon.style.cssText = `width:22px;height:3px;background:${item.color};border-radius:2px;margin-top:1px;`;
-        } else {
-            // rect = band swatch
-            icon.style.cssText = `width:22px;height:10px;background:${item.color};opacity:0.35;border-radius:2px;`;
-        }
-
-        const span = document.createElement('span');
-        span.textContent = item.label;
-        span.style.cssText = `color:var(--text-dark);`;
-        wrap.appendChild(icon);
-        wrap.appendChild(span);
-        legendDiv.appendChild(wrap);
-    });
-
-    plotContainer.appendChild(legendDiv);
-}
-
-// ── Update Scheduler ──────────────────────────────────────────
-
-function queueEffPlotUpdate() {
-    if (effUpdateScheduled) return;
-    effUpdateScheduled = true;
-
-    requestAnimationFrame(() => {
-        effUpdateScheduled = false;
-        if (!effPlot) return;
-        buildEffPlotData();
-        // setData triggers full draw cycle, which fires drawClear hook,
-        // which redraws the reference band with current effMatrixState.
-        effPlot.setData(effPlotData);
-    });
-}
-
-// ── Anomaly Warning Display ───────────────────────────────────
-// Updates:
-//   #eff-anomaly-banner  — warning block on efficiency tab
-//   #eff-anomaly-message — detail text inside banner
-//   #eff-health-pct      — large health % number in settings card
-
-function updateEffAnomalyDisplay() {
-    const banner = document.getElementById('eff-anomaly-banner');
-    const msgEl = document.getElementById('eff-anomaly-message');
-
-    const state = effMatrixState.state;
-    const errCount = effMatrixState.sessionErrorCount;
-
-    // ── Health pct element ──
-    const healthEl = document.getElementById('eff-health-pct');
-    if (healthEl) {
-        const pct = getEffHealthPct();
-        const noData = effHistory.count === 0 && pct === null;
-        if (noData) {
-            // No history and no live reading — show demo value so the
-            // number isn't empty under the X overlay
-            healthEl.textContent = '92%';
-            healthEl.style.color = '#4CAF50';
-        } else if (pct === null) {
-            healthEl.textContent = '--';
-            healthEl.style.color = '#888';
-        } else {
-            healthEl.textContent = pct.toFixed(1) + '%';
-            healthEl.style.color = pct >= 95 ? '#4CAF50'
-                : pct >= 85 ? '#FFC107'
-                    : '#F44336';
-        }
-    }
-    renderEffSparkline();
-
-    if (!banner || !msgEl) return;
-
-    // Only show banner when: reference bin is active, errors exist,
-    // and live point is actually outside the reference band right now.
-    const liveOutside = effRedDot.valid &&
-        state === 2 &&
-        (effRedDot.amps < effMatrixState.min_amps ||
-            effRedDot.amps > effMatrixState.max_amps);
-
-    if (!liveOutside && errCount === 0) {
-        banner.style.display = 'none';
-        return;
-    }
-
-    banner.style.display = 'block';
-    banner.className = errCount >= 5
-        ? 'eff-anomaly-banner banner-red'
-        : 'eff-anomaly-banner banner-yellow';
-
-    if (!liveOutside && errCount > 0) {
-        // Errors accumulated earlier but live point currently normal
-        msgEl.innerHTML =
-            `<strong>Alternator anomalies recorded this session</strong><br>` +
-            `${errCount} out-of-range steady-state point${errCount > 1 ? 's' : ''} recorded. ` +
-            `Current operating point is within reference. Monitor for recurrence.`;
-        return;
-    }
-
-    // Live point is currently outside reference — give full detail
-    const avg = effMatrixState.avg_amps.toFixed(1);
-    const minA = effMatrixState.min_amps.toFixed(1);
-    const maxA = effMatrixState.max_amps.toFixed(1);
-    const actual = effRedDot.amps.toFixed(1);
-    const ss_min = Math.round(effMatrixState.ss_seconds / 60);
-    const isLow = effRedDot.amps < effMatrixState.min_amps;
-    const delta = isLow
-        ? (effMatrixState.min_amps - effRedDot.amps).toFixed(1)
-        : (effRedDot.amps - effMatrixState.max_amps).toFixed(1);
-
-    msgEl.innerHTML =
-        `<strong>⚠ Alternator output ${isLow ? 'below' : 'above'} reference</strong><br>` +
-        `Conditions: <strong>${effMatrixState.rLabel} RPM</strong> · ` +
-        `<strong>${effMatrixState.tLabel}</strong> · ` +
-        `<strong>${effMatrixState.fLabel}</strong> field drive<br>` +
-        `Reference: <strong>${avg}A avg</strong> &nbsp;` +
-        `(${minA}–${maxA}A range · ${ss_min} min of reference data)<br>` +
-        `Current output: <strong>${actual}A</strong> — ` +
-        `${delta}A ${isLow ? 'below minimum' : 'above maximum'}<br>` +
-        `Session anomaly count: <strong>${errCount}</strong>`;
-
-    const healthPct = getEffHealthPct();
-    if (healthPct !== null) {
-        msgEl.innerHTML +=
-            `<br>Live health: <strong>${healthPct.toFixed(1)}%</strong> of reference average`;
-    }
-}
-
-// ── Reset Button ──────────────────────────────────────────────
-
-document.getElementById('eff-reset-btn')?.addEventListener('click', () => {
-    if (!currentAdminPassword) {
-        alert("Please unlock settings first");
-        return;
-    }
-    if (!confirm(
-        'Clear ALL learned efficiency matrix data and reference bins?\n\n' +
-        'This cannot be undone. The system will need to re-learn from scratch.'
-    )) return;
-
-    const formData = new FormData();
-    formData.append("password", currentAdminPassword);
-    formData.append("ResetEfficiencyMatrix", "1");
-
-    fetchWithTimeout(buildURL("/get?" + new URLSearchParams(formData).toString()), {}, 5000)
-        .then(() => {
-            effMatrixState = {
-                state: 0, rBucket: -1, tBucket: -1, fBucket: -1,
-                rLabel: '--', tLabel: '--', fLabel: '--',
-                ss_seconds: 0, avg_amps: 0, min_amps: 0, max_amps: 0,
-                is_reference_bin: 0, sessionErrorCount: 0
-            };
-            effHistory = { count: 0, head: 0, values: new Array(30).fill(0) };
-            effRedDot = { valid: false, fieldVolts: 0, amps: 0, rpmBucket: -1, tempBucket: -1, fieldBucket: -1 };
-            queueEffPlotUpdate();
-            updateEffAnomalyDisplay();
-        })
-        .catch(err => diagError('Efficiency reset failed:', err));
-});
-
 // ── Voltage Mode Greyout (unchanged) ─────────────────────────
 // stage: 1=bulk, 2=absorption, 3=float, 4=manual, 5=maintain, 6=target voltage, 7=idle, 0/other=off
 
@@ -11390,161 +10902,9 @@ function updateVoltageModeGreyout(stage) {
     });
 }
 
-// ── Live Health Percentage ────────────────────────────────────
-// Computed from live SSE data — no firmware changes needed.
-// Only meaningful when in a finalized reference bin with valid red dot.
 
-function getEffHealthPct() {
-    if (!effRedDot.valid) return null;
-    if (effMatrixState.state !== 2) return null;
-    if (effMatrixState.avg_amps <= 0) return null;
-    return (effRedDot.amps / effMatrixState.avg_amps) * 100;
-}
 
-// ── Sparkline Renderer ────────────────────────────────────────
-// Draws session history as inline SVG in #eff-sparkline-container.
-// Each point = one power session's average health ratio × 100.
-// Green ≥ 95%, Yellow 85–95%, Red < 85%.
-// Reference line at 100%. Oldest left, newest right.
 
-function renderEffSparkline() {
-    const container = document.getElementById('eff-sparkline-container');
-    if (!container) return;
-
-    const W = container.clientWidth || 300;
-    const H = 84;
-    const PAD_L = 30, PAD_R = 8, PAD_T = 8, PAD_B = 14;
-    const plotW = W - PAD_L - PAD_R;
-    const plotH = H - PAD_T - PAD_B;
-    const Y_MIN = 80, Y_MAX = 112;
-
-    // Demo data shown when no real sessions exist yet
-    const DEMO_PTS = [
-        103, 105, 102, 104, 101, 100, 102, 99, 98, 100,
-        97, 99, 96, 95, 97, 94, 93, 92, 94, 91,
-        93, 90, 92, 89, 88, 90, 87, 86, 88, 92
-    ];
-
-    // Reconstruct chronological order from circular buffer
-    const ordered = [];
-    if (effHistory.count > 0) {
-        const oldest = effHistory.count < 30 ? 0 : effHistory.head;
-        for (let i = 0; i < effHistory.count; i++) {
-            const idx = (oldest + i) % 30;
-            const v = effHistory.values[idx];
-            if (v > 0.1) ordered.push(v * 100);
-        }
-    }
-
-    const livePct = getEffHealthPct();
-    const showLive = (effMatrixState.state === 2 && effRedDot.valid && livePct !== null);
-    const realPoints = showLive ? [...ordered, livePct] : ordered;
-    const noData = realPoints.length === 0;
-    const pts = noData ? DEMO_PTS : realPoints;
-    const nPts = pts.length;
-
-    function toPixelX(i, total) {
-        return PAD_L + (i / Math.max(total - 1, 1)) * plotW;
-    }
-    function toPixelY(v) {
-        const c = Math.max(Y_MIN, Math.min(Y_MAX, v));
-        return PAD_T + plotH - ((c - Y_MIN) / (Y_MAX - Y_MIN)) * plotH;
-    }
-    function colorFor(v) {
-        if (v >= 95) return '#4CAF50';
-        if (v >= 85) return '#FFC107';
-        return '#F44336';
-    }
-
-    // Catmull-Rom bezier path
-    function smoothPath(points, close) {
-        const tension = 0.35;
-        const px = points.map((v, i) => [toPixelX(i, points.length), toPixelY(v)]);
-        let d = `M${px[0][0].toFixed(1)},${px[0][1].toFixed(1)}`;
-        for (let i = 0; i < px.length - 1; i++) {
-            const p0 = px[Math.max(0, i - 1)];
-            const p1 = px[i];
-            const p2 = px[i + 1];
-            const p3 = px[Math.min(px.length - 1, i + 2)];
-            const cp1x = p1[0] + (p2[0] - p0[0]) * tension;
-            const cp1y = p1[1] + (p2[1] - p0[1]) * tension;
-            const cp2x = p2[0] - (p3[0] - p1[0]) * tension;
-            const cp2y = p2[1] - (p3[1] - p1[1]) * tension;
-            d += ` C${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
-        }
-        if (close) {
-            const last = px[px.length - 1];
-            const first = px[0];
-            const btm = (PAD_T + plotH).toFixed(1);
-            d += ` L${last[0].toFixed(1)},${btm} L${first[0].toFixed(1)},${btm} Z`;
-        }
-        return d;
-    }
-
-    const avg = pts.reduce((a, v) => a + v, 0) / pts.length;
-    const lineColor = colorFor(avg);
-
-    const refY = toPixelY(100).toFixed(1);
-    const refLine = `<line x1="${PAD_L}" y1="${refY}" x2="${W - PAD_R}" y2="${refY}" stroke="#aaa" stroke-width="1" stroke-dasharray="4,3" opacity="0.5"/>`;
-
-    const linePath = smoothPath(pts, false);
-    const areaPath = smoothPath(pts, true);
-
-    const yLabels = [85, 95, 100, 105].map(v => {
-        const y = toPixelY(v).toFixed(1);
-        const bold = v === 100;
-        return `<text x="${PAD_L - 4}" y="${y}" text-anchor="end" dominant-baseline="middle" font-size="9" fill="${bold ? '#999' : '#ccc'}" font-weight="${bold ? '600' : '400'}">${v}</text>`;
-    }).join('');
-
-    // Pick up to 6 evenly-spaced x-axis tick indices, always including first and last
-    const maxTicks = 6;
-    const tickIndices = new Set([0, nPts - 1]);
-    if (nPts > 2) {
-        const step = Math.max(1, Math.round((nPts - 1) / (maxTicks - 1)));
-        for (let i = step; i < nPts - 1; i += step) tickIndices.add(i);
-    }
-    const xLabels = [...tickIndices].sort((a, b) => a - b).map(i => {
-        const x = toPixelX(i, nPts).toFixed(1);
-        const lbl = i === nPts - 1 ? 'now' : `S${i + 1}`;
-        return `<line x1="${x}" y1="${(PAD_T + plotH).toFixed(1)}" x2="${x}" y2="${(PAD_T + plotH + 3).toFixed(1)}" stroke="#ddd"/>` +
-               `<text x="${x}" y="${H - 1}" text-anchor="middle" font-size="9" fill="#bbb">${lbl}</text>`;
-    }).join('');
-
-    const dots = pts.map((v, i) => {
-        const x = toPixelX(i, nPts).toFixed(1);
-        const y = toPixelY(v).toFixed(1);
-        const col = colorFor(v);
-        const isLiveDot = !noData && showLive && i === nPts - 1;
-        if (isLiveDot) {
-            return `<circle cx="${x}" cy="${y}" r="5" fill="${col}" opacity="0.2"/>` +
-                   `<circle cx="${x}" cy="${y}" r="3.5" fill="${col}"/>`;
-        }
-        return `<circle cx="${x}" cy="${y}" r="2.5" fill="${col}" stroke="white" stroke-width="1"/>`;
-    }).join('');
-
-    const defs = `<defs><linearGradient id="effSparkGrad" x1="0" y1="0" x2="0" y2="1">` +
-        `<stop offset="0%" stop-color="${lineColor}" stop-opacity="0.18"/>` +
-        `<stop offset="100%" stop-color="${lineColor}" stop-opacity="0"/>` +
-        `</linearGradient></defs>`;
-
-    container.innerHTML =
-        `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">` +
-        defs + refLine +
-        `<path d="${areaPath}" fill="url(#effSparkGrad)"/>` +
-        `<path d="${linePath}" fill="none" stroke="${lineColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>` +
-        dots + yLabels + xLabels +
-        `</svg>`;
-
-    // Show/hide demo overlay and update subtitle
-    const demoX    = document.getElementById('eff-demo-x');
-    const demoNote = document.getElementById('eff-demo-note');
-    const subtitle = document.getElementById('eff-history-subtitle');
-    if (demoX)    demoX.style.display    = noData ? 'block' : 'none';
-    if (demoNote) demoNote.style.display = noData ? 'flex'  : 'none';
-    if (subtitle) subtitle.textContent   = noData
-        ? '(no sessions yet · demo)'
-        : `(${effHistory.count} session${effHistory.count !== 1 ? 's' : ''})`;
-}
 
 // ==================== THERMAL LOG PLOTS ====================
 let _thermalStateArrays = {
@@ -13420,7 +12780,6 @@ function applySystemIDResults() {
 
 
 // Fetch matrix stats once on page load (also refreshes whenever Alternator tab is opened)
-document.addEventListener('DOMContentLoaded', () => fetchMatrixStats());
 
 // Auto-login via URL parameter for local automation (e.g. SwiftBar shortcut)
 window.addEventListener('load', function () {

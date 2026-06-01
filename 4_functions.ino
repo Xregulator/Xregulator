@@ -1849,34 +1849,7 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   } else {
     VoltageDisagreeTimeout = readFile(LittleFS, "/VoltageDisagreeTimeout.txt").toInt();
   }
-  // Anomaly margin amps
-  if (!fsExists("/anomalyMarginAmps.txt")) {
-    writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps, 4).c_str());
-  } else {
-    anomalyMarginAmps = readFile(LittleFS, "/anomalyMarginAmps.txt").toFloat();
-  }
-
-  if (!fsExists("/degradationThresh.txt")) {
-    writeFile(LittleFS, "/degradationThresh.txt",
-              String(degradationThreshold, 4).c_str());
-  } else {
-    degradationThreshold =
-      readFile(LittleFS, "/degradationThresh.txt").toFloat();
-  }
-
-  // Anomaly alarm threshold (session error count)
-  if (!fsExists("/anomalyAlarmThresh.txt")) {
-    writeFile(LittleFS, "/anomalyAlarmThresh.txt", String(anomalyAlarmThreshold).c_str());
-  } else {
-    anomalyAlarmThreshold = (int)readFile(LittleFS, "/anomalyAlarmThresh.txt").toInt();
-  }
-
-  // Anomaly alarm enable
-  if (!fsExists("/anomalyAlarmEnable.txt")) {
-    writeFile(LittleFS, "/anomalyAlarmEnable.txt", String((int)anomalyAlarmEnable).c_str());
-  } else {
-    anomalyAlarmEnable = (readFile(LittleFS, "/anomalyAlarmEnable.txt").toInt() != 0);
-  }
+  // (Old anomaly settings removed — alternator-health settings load via altSettingsLoad() in setup.)
 
   if (!fsExists("/VoltageKp.txt")) {
     writeFile(LittleFS, "/VoltageKp.txt", String(VoltageKp, 1).c_str());

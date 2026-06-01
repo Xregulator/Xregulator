@@ -1522,10 +1522,7 @@ void CheckAlarms() {
       lastTempLowAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
     }
 
-    if (anomalyAlarmEnable && effAnomalyAlarmActive) {
-      currentAlarmCondition = true;
-      alarmReason = "Alternator efficiency anomaly";
-    }
+    // (Alternator-health is advisory-only now — no audible alarm. See Phase 2 redesign.)
 
     float currentVoltage = getBatteryVoltage();
 

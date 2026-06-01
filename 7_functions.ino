@@ -16,1057 +16,492 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================
-// EFFICIENCY MATRIX TRACKER
-//
-//   3D matrix: RPM bucket × Temp bucket × Field-drive bucket
-//   Each cell stores time-weighted avg + min/max (everlasting)
-//   and a frozen reference snapshot (once criteria are met).
-//   Red dot = live operating point.
-//   Anomaly detection: new SS points checked against reference.
+// ALTERNATOR HEALTH MODEL (Phase 2) — replaces the old 3-D eff matrix.
+//   A_pred = base(rpm, excitation) × tempCorr(T) × busCorr(Vbus)
+//   excitation proxy = temp-normalized field drive (NOT measured field current).
+//   Data unit = ONE observation per bin VISIT (exit + re-enter required for another).
+//   Per-cell freeze after X separate visits; advisory health % + drift status, no alarm.
+//   Globals/structs are declared in Xregulator.ino. Full design: LOCAL_DATA_SYSTEMS_PLAN.md Phase 2.
 // ============================================================
 
+#define ALT_VER         1u
+#define ALT_BASE_MAGIC  0x414C5442u  // 'ALTB'
+#define ALT_TEMPC_MAGIC 0x414C5443u  // 'ALTC'
+#define ALT_BUSC_MAGIC  0x414C5455u  // 'ALTU'
+#define ALT_HLTH_MAGIC  0x414C5448u  // 'ALTH'
 
-// ============================================================
-// EFFICIENCY TRACKER DIAGNOSTICS — Serial-only, 30s cadence
-// Counters reset each print cycle. checkPointValid increments on rejection/pass.
-// ============================================================
-static uint32_t eff_reject_duty = 0;
-static uint32_t eff_reject_amps = 0;
-static uint32_t eff_reject_battNaN = 0;
-static uint32_t eff_reject_battLow = 0;
-static uint32_t eff_reject_rpmDelta = 0;
-static uint32_t eff_reject_bucket = 0;
-static uint32_t eff_pass = 0;
+#define ALT_CORR_FREEZE_N 40         // each tempCorr/busCorr bin freezes after N samples → can't mask later degradation
+static float altTempSlow = NAN;      // slow temp EMA for the model-free thermal-rate gate
 
-
-// ============================================================
-// BUCKET LOOKUP
-// ============================================================
-
-static int getRPMBucket(float rpm) {
+// ---- bin + axis helpers ----
+static inline int altRpmBin(float rpm) {
   if (isnan(rpm) || rpm < 0.0f) return -1;
-  for (int i = 0; i < NUM_RPM_BUCKETS; i++) {
-    if (rpm >= RPM_BOUNDS[i] && rpm < RPM_BOUNDS[i + 1]) return i;
-  }
-  return -1;
+  int b = (int)(rpm * ALT_RPM_BINS / ALT_RPM_MAX);
+  if (b < 0) return -1;
+  if (b >= ALT_RPM_BINS) b = ALT_RPM_BINS - 1;
+  return b;
+}
+static inline int altFiBin(float fi) {
+  if (isnan(fi) || fi < 0.0f) return -1;
+  int b = (int)(fi * ALT_FI_BINS / ALT_FI_MAX);
+  if (b < 0) return -1;
+  if (b >= ALT_FI_BINS) b = ALT_FI_BINS - 1;
+  return b;
+}
+static inline int altTempBin(float tF) {
+  if (isnan(tF)) return -1;
+  int b = (int)((tF - ALT_TEMP_MIN) * ALT_TEMP_BINS / (ALT_TEMP_MAX - ALT_TEMP_MIN));
+  if (b < 0) b = 0;
+  if (b >= ALT_TEMP_BINS) b = ALT_TEMP_BINS - 1;
+  return b;
+}
+static inline int altVbusBin(float v) {
+  if (isnan(v)) return -1;
+  int b = (int)((v - ALT_VBUS_MIN) * ALT_VBUS_BINS / (ALT_VBUS_MAX - ALT_VBUS_MIN));
+  if (b < 0) b = 0;
+  if (b >= ALT_VBUS_BINS) b = ALT_VBUS_BINS - 1;
+  return b;
+}
+// Temp-normalized field drive ("excitation proxy"): (dutyFrac × Vbus) / (1 + α(Tc − Tref)).
+static inline float altExcitation(float duty, float vbus, float tF) {
+  float tc = (tF - 32.0f) / 1.8f;
+  float denom = 1.0f + ALT_ALPHA_PER_C * (tc - ALT_TREF_C);
+  if (denom < 0.5f) denom = 0.5f;
+  return (duty / 100.0f) * vbus / denom;
+}
+static inline float altTempCorrAt(int bin) {
+  if (bin < 0 || !altTempCorr[bin].valid) return 1.0f;
+  float v = altTempCorr[bin].value;
+  if (v < 0.3f) v = 0.3f;
+  if (v > 3.0f) v = 3.0f;
+  return v;
+}
+static inline float altBusCorrAt(int bin) {
+  if (bin < 0 || !altBusCorr[bin].valid) return 1.0f;
+  float v = altBusCorr[bin].value;
+  if (v < 0.3f) v = 0.3f;
+  if (v > 3.0f) v = 3.0f;
+  return v;
 }
 
-static int getTempBucket(float tempF) {
-  if (IgnoreTemperature) return 1;
-  if (isnan(tempF)) return -1;
-  for (int i = 0; i < NUM_TEMP_BUCKETS; i++) {
-    if (tempF >= TEMP_BOUNDS[i] && tempF < TEMP_BOUNDS[i + 1]) return i;
+// ---- prediction (inverse-distance over graduated cells' centroids) ----
+static bool altIdwBase(float rpm, float fi, float *outA, float *outSig, int *nUsed, float *nearDist) {
+  int ri0 = altRpmBin(rpm), fb0 = altFiBin(fi);
+  if (ri0 < 0 || fb0 < 0) return false;
+  const float rw = ALT_RPM_MAX / ALT_RPM_BINS;
+  const float fw = ALT_FI_MAX / ALT_FI_BINS;
+  const int R = 3;
+  double sumW = 0, sumWA = 0, sumWS = 0;
+  int n = 0;
+  float nearest = 1e9f;
+  for (int dr = -R; dr <= R; dr++) {
+    int ri = ri0 + dr;
+    if (ri < 0 || ri >= ALT_RPM_BINS) continue;
+    for (int dfb = -R; dfb <= R; dfb++) {
+      int fb = fb0 + dfb;
+      if (fb < 0 || fb >= ALT_FI_BINS) continue;
+      AltCell &c = ALT_CELL(ri, fb);
+      if (!c.ref_valid) continue;
+      float ddr = (rpm - c.ref_rpm) / rw;
+      float ddf = (fi - c.ref_fi) / fw;
+      float d2 = ddr * ddr + ddf * ddf;
+      if (d2 < nearest) nearest = d2;
+      double w = 1.0 / (d2 + 0.05);
+      sumW += w;
+      sumWA += w * c.ref_amps;
+      sumWS += w * c.ref_sigma;
+      n++;
+    }
   }
-  return -1;
-}
-
-static int getFieldBucket(float fieldVolts) {
-  if (isnan(fieldVolts) || fieldVolts < 0.0f) return -1;
-  for (int i = 0; i < NUM_FIELD_BUCKETS; i++) {
-    if (fieldVolts >= FIELD_BOUNDS[i] && fieldVolts < FIELD_BOUNDS[i + 1]) return i;
-  }
-  // Clamp: at or above max goes in last bucket
-  if (fieldVolts >= FIELD_BOUNDS[NUM_FIELD_BUCKETS - 1]) return NUM_FIELD_BUCKETS - 1;
-  return -1;
-}
-
-
-// ============================================================
-// STEADY STATE DETECTION     POSSIBLY DELETE THIS LATER , IS IT USED??
-// Call at 1Hz. Returns true after REQUIRED consecutive stable passes.
-// PLACEHOLDER: all tolerances and REQUIRED count — tune for your alternator.
-// ============================================================
-
-// static bool checkSteadyState() {
-//   static float prevRPM = 0.0f;
-//   static float prevDuty = 0.0f;
-//   static float prevBattV = 0.0f;
-//   static float prevAmps = 0.0f;
-//   static float prevTempF = 0.0f;
-//   static int passes = 0;
-
-//   const float RPM_TOL = 75.0f;   // PLACEHOLDER
-//   const float DUTY_TOL = 2.0f;   // PLACEHOLDER
-//   const float BATTV_TOL = 0.1f;  // PLACEHOLDER
-//   const float AMPS_TOL = 2.0f;   // PLACEHOLDER
-//   const float TEMP_TOL = 2.0f;   // PLACEHOLDER
-//   const int REQUIRED = 3;        // PLACEHOLDER
-
-//   float battV = getBatteryVoltage();
-//   if (isnan(battV)) {
-//     passes = 0;
-//     return false;
-//   }
-
-//   float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
-//   float tempF = (IgnoreTemperature || isnan(TempToUse)) ? prevTempF : TempToUse;
-
-//   bool stable = (fabsf(RPM - prevRPM) < RPM_TOL && fabsf(dutyCycle - prevDuty) < DUTY_TOL && fabsf(battV - prevBattV) < BATTV_TOL && fabsf(amps - prevAmps) < AMPS_TOL && (IgnoreTemperature || fabsf(tempF - prevTempF) < TEMP_TOL));
-
-//   prevRPM = RPM;
-//   prevDuty = dutyCycle;
-//   prevBattV = battV;
-//   prevAmps = amps;
-//   prevTempF = tempF;
-
-//   if (stable) passes++;
-//   else passes = 0;
-
-//   return (passes >= REQUIRED);
-// }
-// ============================================================
-// UNIFIED POINT VALIDITY CHECK
-//
-// Single gate used for BOTH matrix accumulation AND anomaly
-// scoring. Deliberately loose — a degraded alternator must
-// still qualify, otherwise failures are invisible.
-// No consecutive-pass requirement. Single-sample RPM delta only.
-// ============================================================
-static bool checkPointValid(float amps, float battV, float &fieldVolts,
-                            int &rBucket, int &tBucket, int &fBucket) {
-  static float prevRPM = 0.0f;
-  float rpmDelta = fabsf(RPM - prevRPM);
-  prevRPM = RPM;
-
-  if (dutyCycle < 5.0f) { eff_reject_duty++; return false; }
-  if (amps < 2.0f) { eff_reject_amps++; return false; }
-  if (isnan(battV)) { eff_reject_battNaN++; return false; }
-  if (battV < EFF_MIN_BATT_V) { eff_reject_battLow++; return false; }
-  if (rpmDelta > 200.0f) { eff_reject_rpmDelta++; return false; }  // PLACEHOLDER: tune if too restrictive
-
-  rBucket = getRPMBucket(RPM);
-  tBucket = getTempBucket(TempToUse);
-  fieldVolts = dutyCycle * battV / 100.0f;
-  fBucket = getFieldBucket(fieldVolts);
-
-  if (rBucket < 0 || tBucket < 0 || fBucket < 0) { eff_reject_bucket++; return false; }
-
-  eff_pass++;
+  if (n == 0 || sumW <= 0) return false;
+  *outA = (float)(sumWA / sumW);
+  *outSig = (float)(sumWS / sumW);
+  *nUsed = n;
+  *nearDist = sqrtf(nearest);
   return true;
 }
+// Base prediction + local slopes (finite-difference on the IDW surface) for the error bar.
+static bool altPredict(float rpm, float fi, float *Apred, float *dAdr, float *dAdf,
+                       float *refSig, int *nUsed, float *nearDist) {
+  float a0, s0, nd;
+  int n;
+  if (!altIdwBase(rpm, fi, &a0, &s0, &n, &nd)) return false;
+  *Apred = a0;
+  *refSig = s0;
+  *nUsed = n;
+  *nearDist = nd;
+  const float hr = ALT_RPM_MAX / ALT_RPM_BINS;
+  const float hf = ALT_FI_MAX / ALT_FI_BINS;
+  float ap, am, sd, dnd;
+  int dn;
+  *dAdr = (altIdwBase(rpm + hr, fi, &ap, &sd, &dn, &dnd) &&
+           altIdwBase(rpm - hr, fi, &am, &sd, &dn, &dnd)) ? (ap - am) / (2 * hr) : 0.0f;
+  *dAdf = (altIdwBase(rpm, fi + hf, &ap, &sd, &dn, &dnd) &&
+           altIdwBase(rpm, fi - hf, &am, &sd, &dn, &dnd)) ? (ap - am) / (2 * hf) : 0.0f;
+  return true;
+}
+// Sensitivity-aware error bar: knee (big slope) → wide; flat/well-sampled → tight.
+static float altSigma(float ap, float dAdr, float dAdf, float fi, float refSig, float nearDist) {
+  float sr = dAdr * altRpmTol;
+  float sf = dAdf * fmaxf((altDutyTolPct / 100.0f) * fi, 0.05f);
+  float sT = 0.03f * ap;                  // case-vs-winding temp uncertainty (one lump term)
+  float sc = 0.05f * ap * nearDist;       // coverage: wider far from frozen data
+  float s2 = sr * sr + sf * sf + sT * sT + refSig * refSig + sc * sc;
+  return fmaxf(sqrtf(s2), 0.5f);
+}
+
+// ---- steady-state detector (electrical anchor band + model-free thermal rate band) ----
+static bool altSteadyUpdate(float rpm, float fi, float vbus, float tF, float dt, uint32_t nowMs) {
+  bool elecIn = fabsf(rpm - altSS_rpmRef) <= altRpmTol &&
+                fabsf(vbus - altSS_vbusRef) <= altVbusTol &&
+                fabsf(fi - altSS_fiRef) <= fmaxf((altDutyTolPct / 100.0f) * fmaxf(fi, 1.0f), 0.05f);
+  if (!elecIn) {
+    altSS_rpmRef = rpm;
+    altSS_fiRef = fi;
+    altSS_vbusRef = vbus;
+    altSteadyStartMs = nowMs;
+  }
+  bool elecSteady = (nowMs - altSteadyStartMs) >= (uint32_t)(altElecSettleSec * 1000.0f);
+
+  bool thermSteady;
+  if (IgnoreTemperature || isnan(tF)) {
+    thermSteady = true;
+    altThermInBandMs = (uint32_t)(altThermDwellSec * 1000.0f);
+  } else {
+    float tau = fmaxf(altThermRateMin * 60.0f, 1.0f);
+    if (isnan(altTempSlow)) altTempSlow = tF;
+    else altTempSlow += (tF - altTempSlow) * (dt / tau);
+    if (fabsf(tF - altTempSlow) <= altThermRateDegF) altThermInBandMs += (uint32_t)(dt * 1000.0f);
+    else altThermInBandMs = 0;
+    thermSteady = altThermInBandMs >= (uint32_t)(altThermDwellSec * 1000.0f);
+  }
+  return elecSteady && thermSteady;
+}
+
+// ---- visit accumulation / freeze / score ----
+static void altResetVisit() {
+  altVisit_w = 0;
+  altVisit_A = 0;
+  altVisit_A2 = 0;
+  altVisit_rpm = 0;
+  altVisit_fi = 0;
+  altVisit_vbus = 0;
+  altVisit_t = 0;
+  altVisitSteadyMs = 0;
+}
+static void altTryFreeze(int idx) {
+  AltCell &c = altBase[idx];
+  if (c.nObs < (uint16_t)altFreezeMinVisits) return;
+  float mean = (c.sumW > 0) ? c.sumW_A / c.sumW : 0.0f;
+  float var = (c.sumW > 0) ? (c.sumW_A2 / c.sumW - mean * mean) : 0.0f;
+  if (var < 0) var = 0;
+  float sem = (c.nObs > 1) ? sqrtf(var / (float)(c.nObs - 1)) : 1e6f;  // sample SEM (÷ n−1); n=1 → only the cap can freeze
+  if (sem > altFreezeSEM && c.nObs < (uint16_t)altFreezeMaxVisits) return;
+  c.ref_amps = mean;
+  c.ref_rpm = c.sumW_rpm / c.sumW;
+  c.ref_fi = c.sumW_fi / c.sumW;
+  c.ref_sigma = fmaxf(sem, 0.1f);
+  c.ref_valid = 1;
+  altHealth.baselineFrozen = 1;
+  queueConsoleMessageF("AltHealth froze cell rpm=%.0f fi=%.2f ref=%.1fA sem=%.2f n=%u",
+                       c.ref_rpm, c.ref_fi, c.ref_amps, sem, (unsigned)c.nObs);
+}
+// Learn the 1-D corrections from this visit's residual (only once base cells exist).
+static void altLearnCorr(float meanA, float rpm, float fi, float vbus, float tF) {
+  float ap, dr, df, rs, nd;
+  int nu;
+  if (!altPredict(rpm, fi, &ap, &dr, &df, &rs, &nu, &nd)) return;
+  if (ap < 0.5f) return;
+  if (nu < 3 || nd > 1.5f) return;       // only learn where the base map is well-supported (no 1-cell IDW garbage)
+  int tb = altTempBin(tF);
+  float tc = altTempCorrAt(tb);
+  // Each correction bin FREEZES after N samples so it can't later absorb (mask) real degradation.
+  if (tb >= 0 && altTempCorr[tb].nObs < ALT_CORR_FREEZE_N) {
+    AltCorr &c = altTempCorr[tb];
+    c.nObs++;
+    c.sumW += 1.0f;
+    c.sumW_ratio += meanA / ap;            // base-only residual → temp deviation
+    c.value = c.sumW_ratio / c.sumW;
+    c.valid = 1;
+  }
+  int vb = altVbusBin(vbus);
+  if (vb >= 0 && altBusCorr[vb].nObs < ALT_CORR_FREEZE_N) {
+    AltCorr &c = altBusCorr[vb];
+    c.nObs++;
+    c.sumW += 1.0f;
+    c.sumW_ratio += meanA / (ap * (tc > 0.1f ? tc : 1.0f));  // temp-corrected residual → Vbus deviation
+    c.value = c.sumW_ratio / c.sumW;
+    c.valid = 1;
+  }
+}
+static void altScore(float meanA, float rpm, float fi, float vbus, float tF) {
+  float ap, dr, df, rs, nd;
+  int nu;
+  if (!altPredict(rpm, fi, &ap, &dr, &df, &rs, &nu, &nd)) return;
+  float tc = altTempCorrAt(altTempBin(tF));
+  float bc = altBusCorrAt(altVbusBin(vbus));
+  float Apred = ap * tc * bc;
+  if (Apred < 0.5f) return;
+  float sig = altSigma(ap, dr, df, fi, rs, nd);
+  float z = (meanA - Apred) / sig;
+  float r = meanA / Apred;
+  altHealth.ewmaRatio += (r - altHealth.ewmaRatio) * altEwmaLambda;
+  altHealth.cusumPos = fmaxf(0.0f, altHealth.cusumPos + (z - altCusumK));
+  altHealth.cusumNeg = fmaxf(0.0f, altHealth.cusumNeg + (-z - altCusumK));
+  altHealth.obsCount++;
+  if (altHealth.cusumPos > altCusumH) altHealth.status = 2;
+  else if (altHealth.cusumNeg > altCusumH) altHealth.status = 3;
+  else altHealth.status = 1;
+}
+static void altFinalizeVisit() {
+  if (altCurBin < 0 || altVisit_w <= 0) return;
+  if (altVisitSteadyMs < (uint32_t)(altMinDwellSec * 1000.0f)) return;
+  float meanA = (float)(altVisit_A / altVisit_w);
+  float meanRpm = (float)(altVisit_rpm / altVisit_w);
+  float meanFi = (float)(altVisit_fi / altVisit_w);
+  float meanVbus = (float)(altVisit_vbus / altVisit_w);
+  float meanT = (float)(altVisit_t / altVisit_w);
+  AltCell &c = altBase[altCurBin];
+  if (!c.ref_valid) {
+    if (c.nObs < (uint16_t)altFreezeMaxVisits) {
+      c.nObs++;
+      c.sumW += 1.0f;
+      c.sumW_A += meanA;
+      c.sumW_A2 += meanA * meanA;
+      c.sumW_rpm += meanRpm;
+      c.sumW_fi += meanFi;
+      c.sumW_vbus += meanVbus;
+      c.sumW_t += meanT;
+    }
+    altTryFreeze(altCurBin);
+  } else {
+    altScore(meanA, meanRpm, meanFi, meanVbus, meanT);
+  }
+  altLearnCorr(meanA, meanRpm, meanFi, meanVbus, meanT);
+}
+
+// ---- per-1Hz sample ----
+static void altProcessSample(float dt, uint32_t nowMs) {
+  float battV = getBatteryVoltage();
+  float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
+  float tF = TempToUse;
+  float duty = dutyCycle;
+  float rpm = RPM;
+  float fi = altExcitation(duty, battV, tF);
+  int ri = altRpmBin(rpm), fb = altFiBin(fi);
+
+  // live point + prediction (drives the dashboard red dot / SSE) — computed in sim too
+  altLive_rpm = rpm;
+  altLive_fi = fi;
+  altLive_amps = amps;
+  altLiveValid = (ri >= 0 && fb >= 0 && !isnan(battV) && battV >= ALT_MIN_BATT_V);
+  {
+    float ap, drr, dff, rs, nd;
+    int nu;
+    if (altPredict(rpm, fi, &ap, &drr, &dff, &rs, &nu, &nd)) {
+      float tc = altTempCorrAt(altTempBin(tF));
+      float bc = altBusCorrAt(altVbusBin(battV));
+      altLive_pred = ap * tc * bc;
+      altLive_z = (altLive_pred > 0.5f) ? (amps - altLive_pred) / altSigma(ap, drr, dff, fi, rs, nd) : 0.0f;
+    } else {
+      altLive_pred = 0.0f;
+      altLive_z = 0.0f;
+    }
+  }
+
+  if (hardwarePresent != 1) {   // sim: display live only, never learn/score/persist
+    altSteady = false;
+    return;
+  }
+
+  bool admit = (!isnan(battV) && battV >= ALT_MIN_BATT_V &&
+                amps >= altMinAmps && duty >= altMinDuty && ri >= 0 && fb >= 0);
+  altSteady = admit && altSteadyUpdate(rpm, fi, battV, tF, dt, nowMs);
+
+  int bin = (ri >= 0 && fb >= 0) ? ALT_IDX(ri, fb) : -1;
+  if (bin != altCurBin) {       // left a bin → finalize its one visit-observation
+    altFinalizeVisit();
+    altCurBin = bin;
+    altResetVisit();
+  }
+  if (altSteady && bin >= 0) {
+    altVisit_w += 1.0;
+    altVisit_A += amps;
+    altVisit_A2 += (double)amps * amps;
+    altVisit_rpm += rpm;
+    altVisit_fi += fi;
+    altVisit_vbus += battV;
+    altVisit_t += tF;
+    altVisitSteadyMs += (uint32_t)(dt * 1000.0f);
+  }
+}
+
+// ---- live SSE: valid,rpm,fi,amps,pred,z,status,steady ----
+static void altSendLive() {
+  char buf[160];
+  // valid,rpm,fi,amps,pred,z,status,steady,healthPct,coveragePct,baselineFrozen,obsCount
+  snprintf(buf, sizeof(buf), "%d,%.0f,%.2f,%.1f,%.1f,%.2f,%d,%d,%.1f,%.0f,%d,%u",
+           (int)altLiveValid, altLive_rpm, altLive_fi, altLive_amps, altLive_pred,
+           altLive_z, (int)altHealth.status, (int)altSteady,
+           altHealthPct(), altCoveragePct(), (int)altHealth.baselineFrozen,
+           (unsigned)altHealth.obsCount);
+  events.send(buf, "AltLive");
+}
+
+// ---- persistence (Phase-0 scaffold; field-off-gated by caller) ----
+void altHealthSave() {
+  if (!altBase || hardwarePresent != 1) return;
+  writePsramBlob("/altbase.bin", ALT_BASE_MAGIC, ALT_VER, 0,
+                 altBase, sizeof(AltCell), ALT_NUM_CELLS, 0, ALT_NUM_CELLS);
+  writePsramBlob("/alttemp.bin", ALT_TEMPC_MAGIC, ALT_VER, 0,
+                 altTempCorr, sizeof(AltCorr), ALT_TEMP_BINS, 0, ALT_TEMP_BINS);
+  writePsramBlob("/altbus.bin", ALT_BUSC_MAGIC, ALT_VER, 0,
+                 altBusCorr, sizeof(AltCorr), ALT_VBUS_BINS, 0, ALT_VBUS_BINS);
+  writePsramBlob("/althealth.bin", ALT_HLTH_MAGIC, ALT_VER, 0,
+                 &altHealth, sizeof(AltHealthMon), 1, 0, 1);
+}
+static void altRecomputeFrozen() {
+  altHealth.baselineFrozen = 0;
+  for (int i = 0; i < ALT_NUM_CELLS; i++) {
+    if (altBase[i].ref_valid) { altHealth.baselineFrozen = 1; break; }
+  }
+}
+static void altLoad() {
+  uint32_t uw;
+  readPsramBlob("/altbase.bin", ALT_BASE_MAGIC, ALT_VER, altBase, sizeof(AltCell), ALT_NUM_CELLS, &uw, false);
+  readPsramBlob("/alttemp.bin", ALT_TEMPC_MAGIC, ALT_VER, altTempCorr, sizeof(AltCorr), ALT_TEMP_BINS, &uw, false);
+  readPsramBlob("/altbus.bin", ALT_BUSC_MAGIC, ALT_VER, altBusCorr, sizeof(AltCorr), ALT_VBUS_BINS, &uw, false);
+  uint32_t got = readPsramBlob("/althealth.bin", ALT_HLTH_MAGIC, ALT_VER, &altHealth, sizeof(AltHealthMon), 1, &uw, false);
+  if (got == 0) {
+    altHealth = AltHealthMon{};
+    altHealth.ewmaRatio = 1.0f;
+  }
+  altRecomputeFrozen();
+}
+
+// ---- lifecycle ----
+void initAlternatorHealth() {
+  altBase = (AltCell *)ps_malloc((size_t)ALT_NUM_CELLS * sizeof(AltCell));
+  altTempCorr = (AltCorr *)ps_malloc((size_t)ALT_TEMP_BINS * sizeof(AltCorr));
+  altBusCorr = (AltCorr *)ps_malloc((size_t)ALT_VBUS_BINS * sizeof(AltCorr));
+  if (!altBase || !altTempCorr || !altBusCorr) {
+    queueConsoleMessage("ERROR: AltHealth ps_malloc failed");
+    return;
+  }
+  memset(altBase, 0, (size_t)ALT_NUM_CELLS * sizeof(AltCell));
+  memset(altTempCorr, 0, (size_t)ALT_TEMP_BINS * sizeof(AltCorr));
+  memset(altBusCorr, 0, (size_t)ALT_VBUS_BINS * sizeof(AltCorr));
+  altHealth = AltHealthMon{};
+  altHealth.ewmaRatio = 1.0f;
+  altCurBin = -1;
+  altResetVisit();
+  altLoad();
+  int frozen = 0, withData = 0;
+  for (int i = 0; i < ALT_NUM_CELLS; i++) {
+    if (altBase[i].ref_valid) frozen++;
+    if (altBase[i].nObs) withData++;
+  }
+  queueConsoleMessageF("AltHealth init: %d cells, %d frozen, %d w/data, %.1fKB PSRAM",
+                       ALT_NUM_CELLS, frozen, withData,
+                       (float)((size_t)ALT_NUM_CELLS * sizeof(AltCell)) / 1024.0f);
+}
+void resetAlternatorHealth() {
+  if (!altBase) return;
+  memset(altBase, 0, (size_t)ALT_NUM_CELLS * sizeof(AltCell));
+  memset(altTempCorr, 0, (size_t)ALT_TEMP_BINS * sizeof(AltCorr));
+  memset(altBusCorr, 0, (size_t)ALT_VBUS_BINS * sizeof(AltCorr));
+  altHealth = AltHealthMon{};
+  altHealth.ewmaRatio = 1.0f;
+  altCurBin = -1;
+  altResetVisit();
+  altTempSlow = NAN;
+  altSS_rpmRef = 0; altSS_fiRef = 0; altSS_vbusRef = 0; altSS_tempRef = 0;  // clear steady-state anchors
+  altSteadyStartMs = 0; altThermInBandMs = 0;
+  fsTakeLock();
+  LittleFS.remove("/altbase.bin");
+  LittleFS.remove("/alttemp.bin");
+  LittleFS.remove("/altbus.bin");
+  LittleFS.remove("/althealth.bin");
+  fsReleaseLock();
+  queueConsoleMessage("AltHealth: full reset (Start Over)");
+}
+float altCoveragePct() {
+  if (!altBase) return 0.0f;
+  int frozen = 0, withData = 0;
+  for (int i = 0; i < ALT_NUM_CELLS; i++) {
+    if (altBase[i].nObs) withData++;
+    if (altBase[i].ref_valid) frozen++;
+  }
+  if (withData == 0) return 0.0f;
+  return 100.0f * (float)frozen / (float)withData;
+}
+float altHealthPct() {
+  float p = altHealth.ewmaRatio * 100.0f;
+  if (p < 0) p = 0;
+  if (p > 200) p = 200;
+  return p;
+}
+
+// ---- tick: ~1 Hz, call from loop() ----
+void altHealth_tick(uint32_t nowMs) {
+  static uint32_t lastMs = 0;
+  if (!altBase) return;
+  if (nowMs - lastMs < 1000) return;
+  float dt = (lastMs == 0) ? 1.0f : (nowMs - lastMs) / 1000.0f;
+  if (dt > 5.0f) dt = 5.0f;
+  lastMs = nowMs;
+  altProcessSample(dt, nowMs);
+  altSendLive();
+  static uint8_t settCtr = 0;          // resend settings ~every 5s so reconnects get echoes
+  if (++settCtr >= 5) { settCtr = 0; sendAltSettings(); }
+}
 
 
 // ============================================================
-// LittleFS — SAVE / LOAD
-// One binary file holds the entire PSRAM matrix + referenceFinalized.
-// Replaces the previous "effmat" NVS namespace, which couldn't fit the
-// ~12.5 KB matrix inside the then-20 KB NVS partition. Saves only happen at
-// the field-off +13 s flush and the shutdown Phase 2 flush — both run
-// with the field already off, so the ~100–150 ms LittleFS write is safe.
-// History blobs (eff_hist, eff_cs) still live in NVS — they're tiny.
+// ALTERNATOR HEALTH — GUI-adjustable settings (registry-driven)
+//   One float registry → one /get handler loop + one boot-load loop +
+//   one "AltSettings" SSE echo. Avoids 16× fragile CSV3 plumbing.
 // ============================================================
-
-#define EFFMATRIX_FILE_PATH  "/effmatrix.bin"
-#define EFFMATRIX_FILE_MAGIC 0x45464D58u  // 'EFMX'
-#define EFFMATRIX_FILE_VER   1u
-
-struct EffMatrixFileHeader {
-  uint32_t magic;
-  uint32_t version;
-  uint32_t cellCount;          // sanity guard against bucket-dim change
-  uint32_t cellSize;           // sanity guard against MatrixCell layout change
-  uint32_t referenceFinalized; // 0 or 1
+struct AltSetting { const char *name; float *ptr; };
+static AltSetting ALT_SETTINGS[] = {
+  {"altElecSettleSec", &altElecSettleSec}, {"altDutyTolPct", &altDutyTolPct},
+  {"altRpmTol", &altRpmTol}, {"altVbusTol", &altVbusTol},
+  {"altThermRateDegF", &altThermRateDegF}, {"altThermRateMin", &altThermRateMin},
+  {"altThermDwellSec", &altThermDwellSec}, {"altMinDwellSec", &altMinDwellSec},
+  {"altMinAmps", &altMinAmps}, {"altMinDuty", &altMinDuty},
+  {"altFreezeMinVisits", &altFreezeMinVisits}, {"altFreezeMaxVisits", &altFreezeMaxVisits},
+  {"altFreezeSEM", &altFreezeSEM},
+  {"altEwmaLambda", &altEwmaLambda}, {"altCusumK", &altCusumK}, {"altCusumH", &altCusumH},
 };
+static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTINGS[0]);
 
-static void saveEfficiencyMatrix() {
-  if (!effMatrix || hardwarePresent != 1) return;
-
-  const size_t bodySize = (size_t)NUM_MATRIX_CELLS * sizeof(MatrixCell);
-
-  fsTakeLock();
-  File f = LittleFS.open(EFFMATRIX_FILE_PATH, "w");
-  if (!f) {
-    fsReleaseLock();
-    queueConsoleMessage("EffMatrix: LittleFS open failed (save)");
-    return;
-  }
-
-  EffMatrixFileHeader hdr = {
-    EFFMATRIX_FILE_MAGIC,
-    EFFMATRIX_FILE_VER,
-    (uint32_t)NUM_MATRIX_CELLS,
-    (uint32_t)sizeof(MatrixCell),
-    (uint32_t)(referenceFinalized ? 1 : 0),
-  };
-  size_t hdrWritten = f.write((const uint8_t *)&hdr, sizeof(hdr));
-  size_t bodyWritten = 0;
-  if (hdrWritten == sizeof(hdr)) {
-    bodyWritten = f.write((const uint8_t *)effMatrix, bodySize);
-  }
-  f.close();
-  fsReleaseLock();
-
-  if (hdrWritten != sizeof(hdr) || bodyWritten != bodySize) {
-    queueConsoleMessageF(
-      "EffMatrix: short write — hdr %u/%u body %u/%u",
-      (unsigned)hdrWritten, (unsigned)sizeof(hdr),
-      (unsigned)bodyWritten, (unsigned)bodySize);
+void altSettingsLoad() {
+  for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
+    char path[48];
+    snprintf(path, sizeof(path), "/%s.txt", ALT_SETTINGS[i].name);
+    if (!fsExists(path)) writeFile(LittleFS, path, String(*ALT_SETTINGS[i].ptr, 4).c_str());
+    else *ALT_SETTINGS[i].ptr = readFile(LittleFS, path).toFloat();
   }
 }
-
-
-static void loadEfficiencyMatrix() {
-  if (!effMatrix) return;
-
-  if (!fsExists(EFFMATRIX_FILE_PATH)) {
-    loadEffHistory();  // history blobs still live in NVS
-    return;
-  }
-
-  const size_t bodySize = (size_t)NUM_MATRIX_CELLS * sizeof(MatrixCell);
-
-  fsTakeLock();
-  File f = LittleFS.open(EFFMATRIX_FILE_PATH, "r");
-  if (!f) {
-    fsReleaseLock();
-    queueConsoleMessage("EffMatrix: LittleFS open failed (load)");
-    loadEffHistory();
-    return;
-  }
-
-  EffMatrixFileHeader hdr;
-  size_t hdrRead = f.readBytes((char *)&hdr, sizeof(hdr));
-  bool hdrOK = (hdrRead == sizeof(hdr)
-                && hdr.magic == EFFMATRIX_FILE_MAGIC
-                && hdr.version == EFFMATRIX_FILE_VER
-                && hdr.cellCount == (uint32_t)NUM_MATRIX_CELLS
-                && hdr.cellSize == (uint32_t)sizeof(MatrixCell));
-
-  if (!hdrOK) {
-    f.close();
-    LittleFS.remove(EFFMATRIX_FILE_PATH);
-    fsReleaseLock();
-    queueConsoleMessageF(
-      "EffMatrix: header mismatch (magic=%08x ver=%u cells=%u sz=%u) — file discarded",
-      hdr.magic, (unsigned)hdr.version, (unsigned)hdr.cellCount, (unsigned)hdr.cellSize);
-    loadEffHistory();
-    return;
-  }
-
-  size_t bodyRead = f.readBytes((char *)effMatrix, bodySize);
-  f.close();
-  fsReleaseLock();
-
-  if (bodyRead != bodySize) {
-    memset(effMatrix, 0, bodySize);
-    queueConsoleMessageF(
-      "EffMatrix: short body read (%u/%u) — matrix reset",
-      (unsigned)bodyRead, (unsigned)bodySize);
-  } else {
-    referenceFinalized = (hdr.referenceFinalized != 0);
-  }
-
-  loadEffHistory();  // history blobs still live in NVS
-}
-
-
-// ============================================================
-// REFERENCE BIN SELECTION — greedy spread-first
-//
-// Selects NUM_REFERENCE_BINS from eligible candidates to
-// maximize coverage across temp/field/RPM space.
-// Seeds with highest SS-time bin, then greedily adds the
-// candidate that most expands spread, weighted by its SS time.
-// Logs which spread axis is blocking finalization if criteria
-// not yet met, to aid tuning.
-// Does nothing if referenceFinalized is already true.
-// ============================================================
-
-static void selectReferenceBins() {
-  if (!effMatrix || referenceFinalized) return;
-
-  // Build candidate list — all bins meeting minimum SS time
-  struct Candidate {
-    int idx, r, t, f;
-    uint32_t ss_seconds;
-  };
-
-  // PSRAM-resident — sized by NUM_MATRIX_CELLS, must not sit in internal RAM/.bss
-  static Candidate *candidates = nullptr;
-  if (!candidates) {
-    candidates = (Candidate *)ps_malloc(NUM_MATRIX_CELLS * sizeof(Candidate));
-    if (!candidates) return;
-  }
-  int nCandidates = 0;
-
-  for (int r = 0; r < NUM_RPM_BUCKETS; r++) {
-    for (int t = 0; t < NUM_TEMP_BUCKETS; t++) {
-      for (int f = 0; f < NUM_FIELD_BUCKETS; f++) {
-        MatrixCell &cell = MATRIX_CELL(r, t, f);
-        if (cell.ss_seconds >= REF_MIN_SS_SECONDS) {
-          candidates[nCandidates++] = {
-            MATRIX_IDX(r, t, f), r, t, f, cell.ss_seconds
-          };
-        }
-      }
+bool altSettingsHandle(AsyncWebServerRequest *request) {
+  bool handled = false;
+  for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
+    if (request->hasParam(ALT_SETTINGS[i].name)) {
+      *ALT_SETTINGS[i].ptr = request->getParam(ALT_SETTINGS[i].name)->value().toFloat();
+      char path[48];
+      snprintf(path, sizeof(path), "/%s.txt", ALT_SETTINGS[i].name);
+      writeFile(LittleFS, path, String(*ALT_SETTINGS[i].ptr, 4).c_str());
+      handled = true;
     }
   }
-
-  if (nCandidates < NUM_REFERENCE_BINS) return;
-
-  // Sort descending by SS time
-  for (int i = 1; i < nCandidates; i++) {
-    Candidate key = candidates[i];
-    int j = i - 1;
-    while (j >= 0 && candidates[j].ss_seconds < key.ss_seconds) {
-      candidates[j + 1] = candidates[j];
-      j--;
-    }
-    candidates[j + 1] = key;
-  }
-
-  // Greedy spread-first selection
-  // selected[] tracks indices into candidates[]
-  static int selected[NUM_REFERENCE_BINS];
-  // PSRAM-resident, zeroed each call (was a NUM_MATRIX_CELLS-sized stack array)
-  static bool *used = nullptr;
-  if (!used) {
-    used = (bool *)ps_malloc(NUM_MATRIX_CELLS * sizeof(bool));
-    if (!used) return;
-  }
-  memset(used, 0, NUM_MATRIX_CELLS * sizeof(bool));
-  int nSelected = 0;
-
-  // Seed: highest SS-time bin
-  selected[nSelected++] = 0;
-  used[0] = true;
-
-  // Track current span of selected set
-  float minTempLow = TEMP_BOUNDS[candidates[0].t];
-  float maxTempHigh = TEMP_BOUNDS[candidates[0].t + 1];
-  float minFLow = FIELD_BOUNDS[candidates[0].f];
-  float maxFHigh = FIELD_BOUNDS[candidates[0].f + 1];
-  float minRPMLow = RPM_BOUNDS[candidates[0].r];
-  float maxRPMHigh = RPM_BOUNDS[candidates[0].r + 1];
-
-  while (nSelected < NUM_REFERENCE_BINS) {
-    int bestCand = -1;
-    float bestScore = -1.0f;
-
-    for (int i = 0; i < nCandidates; i++) {
-      if (used[i]) continue;
-
-      const Candidate &c = candidates[i];
-
-      // How much does adding this bin expand the bounding box?
-      float newTempLow = fminf(minTempLow, TEMP_BOUNDS[c.t]);
-      float newTempHigh = fmaxf(maxTempHigh, TEMP_BOUNDS[c.t + 1]);
-      float newFLow = fminf(minFLow, FIELD_BOUNDS[c.f]);
-      float newFHigh = fmaxf(maxFHigh, FIELD_BOUNDS[c.f + 1]);
-      float newRPMLow = fminf(minRPMLow, RPM_BOUNDS[c.r]);
-      float newRPMHigh = fmaxf(maxRPMHigh, RPM_BOUNDS[c.r + 1]);
-
-      float spreadGain =
-        (newTempHigh - newTempLow - (maxTempHigh - minTempLow)) / 200.0f + (newFHigh - newFLow - (maxFHigh - minFLow)) / 15.0f + (newRPMHigh - newRPMLow - (maxRPMHigh - minRPMLow)) / 5000.0f;
-
-      // Weight by SS time so low-data bins don't win purely on spread
-      float score = spreadGain * logf((float)c.ss_seconds + 1.0f);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestCand = i;
-      }
-    }
-
-    if (bestCand < 0) break;  // Ran out of candidates
-
-    const Candidate &c = candidates[bestCand];
-    selected[nSelected++] = bestCand;
-    used[bestCand] = true;
-
-    // Update tracked span
-    minTempLow = fminf(minTempLow, TEMP_BOUNDS[c.t]);
-    maxTempHigh = fmaxf(maxTempHigh, TEMP_BOUNDS[c.t + 1]);
-    minFLow = fminf(minFLow, FIELD_BOUNDS[c.f]);
-    maxFHigh = fmaxf(maxFHigh, FIELD_BOUNDS[c.f + 1]);
-    minRPMLow = fminf(minRPMLow, RPM_BOUNDS[c.r]);
-    maxRPMHigh = fmaxf(maxRPMHigh, RPM_BOUNDS[c.r + 1]);
-  }
-
-  // Measure final spread
-  float tempSpread = maxTempHigh - minTempLow;
-  float fieldSpread = maxFHigh - minFLow;
-  float rpmSpread = maxRPMHigh - minRPMLow;
-
-  // Total SS across selected set
-  uint32_t totalSS = 0;
-  for (int i = 0; i < nSelected; i++) {
-    totalSS += candidates[selected[i]].ss_seconds;
-  }
-
-  bool spreadOK = (tempSpread >= REF_SPREAD_TEMP_DEG && fieldSpread >= REF_SPREAD_FIELD_VOLTS && rpmSpread >= REF_SPREAD_RPM);
-  bool ssOK = (totalSS >= REF_FREEZE_TOTAL_SS);
-
-  if (!spreadOK || !ssOK) {
-    // Log which axis is blocking — aids tuning
-    queueConsoleMessageF(
-      "EffMatrix: ref pending — "
-      "temp %.0fF/%.0F%s field %.1fV/%.1f%s RPM %.0f/%.0f%s SS %us/%us%s",
-      tempSpread, REF_SPREAD_TEMP_DEG, spreadOK || tempSpread >= REF_SPREAD_TEMP_DEG ? "" : "!",
-      fieldSpread, REF_SPREAD_FIELD_VOLTS, spreadOK || fieldSpread >= REF_SPREAD_FIELD_VOLTS ? "" : "!",
-      rpmSpread, REF_SPREAD_RPM, spreadOK || rpmSpread >= REF_SPREAD_RPM ? "" : "!",
-      totalSS, REF_FREEZE_TOTAL_SS, ssOK ? "" : "!");
-    return;
-  }
-
-  // Clear all existing reference flags
-  for (int i = 0; i < NUM_MATRIX_CELLS; i++) {
-    effMatrix[i].is_reference_bin = 0;
-  }
-
-  // Freeze reference layer for selected bins
-  for (int i = 0; i < nSelected; i++) {
-    MatrixCell &cell = effMatrix[candidates[selected[i]].idx];
-    cell.ref_avg_amps = cell.avg_amps;
-    cell.ref_min_amps = cell.min_amps;
-    cell.ref_max_amps = cell.max_amps;
-    cell.is_reference_bin = 1;
-
-    queueConsoleMessageF(
-      "EffMatrix: RefBin[%d] RPM=%s Temp=%s Field=%s avg=%.1fA [%.1f-%.1f] SS=%us",
-      i,
-      RPM_LABELS[candidates[selected[i]].r],
-      TEMP_LABELS[candidates[selected[i]].t],
-      FIELD_LABELS[candidates[selected[i]].f],
-      cell.ref_avg_amps, cell.ref_min_amps, cell.ref_max_amps,
-      candidates[selected[i]].ss_seconds);
-  }
-
-  referenceFinalized = true;
-  saveEfficiencyMatrix();
-
-  queueConsoleMessageF(
-    "EffMatrix: Reference FROZEN — %d bins "
-    "temp=%.0fF field=%.1fV RPM=%.0f totalSS=%us",
-    nSelected, tempSpread, fieldSpread, rpmSpread, totalSS);
+  return handled;
 }
-
-
-// ============================================================
-// 2-MINUTE WINDOW MERGE
-//
-// Winner-takes-all: the bin with the most SS seconds this window
-// is merged into the persistent matrix. All others discarded.
-// Window accumulators cleared after merge.
-// NVS save and reference re-evaluation happen here.
-// ============================================================
-
-static void mergeWindowIntoMatrix() {
-  if (!effMatrix || !effWindow) return;
-
-  int winnerIdx = -1;
-  uint32_t maxSS = 0;
-
-  for (int i = 0; i < MAX_ACTIVE_BINS_PER_WINDOW; i++) {
-    if (effWindow[i].active && effWindow[i].ss_seconds > maxSS) {
-      maxSS = effWindow[i].ss_seconds;
-      winnerIdx = i;
-    }
-  }
-
-  if (winnerIdx >= 0) {
-    WindowSlot &win = effWindow[winnerIdx];
-    MatrixCell &cell = MATRIX_CELL(win.r, win.t, win.f);
-
-    uint32_t oldSS = cell.ss_seconds;
-    uint32_t newSS = oldSS + win.ss_seconds;
-
-    if (newSS > 0) {
-      cell.avg_amps = (cell.avg_amps * (float)oldSS + win.wt_avg_amps * (float)win.ss_seconds) / (float)newSS;
-    }
-    cell.ss_seconds = newSS;
-
-    // min_amps: treat 0.0 in cell as "not yet set"
-    if (cell.min_amps == 0.0f || win.min_amps < cell.min_amps)
-      cell.min_amps = win.min_amps;
-    if (win.max_amps > cell.max_amps)
-      cell.max_amps = win.max_amps;
-
-    //Serial.printf("[EffMerge] bin[%d,%d,%d] +%lus => total=%lus avg=%.1fA min=%.1f max=%.1f (need %ds for eligible)\n",
-    //  (int)win.r, (int)win.t, (int)win.f,
-    //  (unsigned long)win.ss_seconds, (unsigned long)newSS,
-    //  cell.avg_amps, cell.min_amps, cell.max_amps,
-    //  REF_MIN_SS_SECONDS);
-
-    // No save here — matrix lives in PSRAM, persists to /effmatrix.bin at
-    // the field-off +13 s flush and at shutdown Phase 2 (field already off).
-    // selectReferenceBins() may still call saveEfficiencyMatrix() once on
-    // the freeze edge; that's a one-shot LittleFS write over the lifetime.
-    selectReferenceBins();
-  }
-  // Save current session health snapshot so it survives unexpected power loss
-  saveCurrentSessionHealth();
-  // Clear all window accumulators regardless of whether there was a winner
-  memset(effWindow, 0, (size_t)MAX_ACTIVE_BINS_PER_WINDOW * sizeof(WindowSlot));
-}
-
-// ============================================================
-// ANOMALY DETECTION — TWO TIERS
-//
-// Tier 1: Instantaneous — fires if current amps is outside
-//   (ref_min - margin) to (ref_max + margin).
-//   Catches sudden failures in both directions.
-//   Fires every qualifying tick.
-//
-// Tier 2: Thermal average — fires once per bin per session
-//   after count >= EFF_THERMAL_MIN_SAMPLES samples accumulated.
-//   Compares session average to reference average.
-//   Catches gradual degradation masked by thermal lag.
-//   Only fires once per bin per session to avoid flooding.
-//
-// Both tiers require referenceFinalized and is_reference_bin.
-// Total errors reported to UI = sessionTier1Errors + sessionTier2Errors combined.
-// PLACEHOLDER: EFF_THERMAL_MIN_SAMPLES = 90 — tune if thermal
-//   time constant differs from expected 1-2 minutes.
-// ============================================================
-
-#define EFF_THERMAL_MIN_SAMPLES 90  // PLACEHOLDER: ~90 seconds at 1Hz
-
-static void checkAnomaly(int r, int t, int f, float amps) {
-  if (!referenceFinalized) return;
-  if (!sessionStats) return;
-
-  MatrixCell &cell = MATRIX_CELL(r, t, f);
-  SessionBinStats &ss = sessionStats[MATRIX_IDX(r, t, f)];
-
-  if (!cell.is_reference_bin) return;
-  if (cell.ref_avg_amps <= 0) return;  // Reference not yet valid
-
-  // ── Accumulate session stats for this bin (both tiers use this) ──
-  ss.sum_amps += amps;
-  ss.count++;
-  // Accumulate session health ratio for sparkline history
-  sessionHealthSum += amps / cell.ref_avg_amps;
-  sessionHealthCount++;
-
-  // ── Tier 1: Instantaneous min/max check (both directions) ──
-  float effectiveMin = cell.ref_min_amps - anomalyMarginAmps;
-  float effectiveMax = cell.ref_max_amps + anomalyMarginAmps;
-
-  if (amps < effectiveMin || amps > effectiveMax) {
-    sessionTier1Errors++;
-    float delta = (amps < effectiveMin)
-                    ? (effectiveMin - amps)
-                    : (amps - effectiveMax);
-    const char *dir = (amps < effectiveMin) ? "LOW" : "HIGH";
-
-    queueConsoleMessageF(
-      "EffAnomaly T1: bin[%d,%d,%d] %s amps=%.1fA ref=[%.1f,%.1f] "
-      "margin=%.1f delta=%.1fA T1=%d T2=%d",
-      r, t, f, dir, amps,
-      cell.ref_min_amps, cell.ref_max_amps,
-      anomalyMarginAmps, delta,
-      sessionTier1Errors, sessionTier2Errors);
-  }
-
-  // ── Tier 2: Thermal average check — only after enough samples ──
-  if (!ss.trend_fired && ss.count >= EFF_THERMAL_MIN_SAMPLES) {
-    float sessionAvg = ss.sum_amps / (float)ss.count;
-    float refAvg = cell.ref_avg_amps;
-
-    float upperLimit = refAvg * (1.0f + degradationThreshold);
-    float lowerLimit = refAvg * (1.0f - degradationThreshold);
-
-    if (sessionAvg < lowerLimit || sessionAvg > upperLimit) {
-      ss.trend_fired = true;
-      sessionTier2Errors++;
-
-      float pctDelta = ((sessionAvg - refAvg) / refAvg) * 100.0f;
-      const char *dir = (sessionAvg < lowerLimit) ? "LOW" : "HIGH";
-
-      queueConsoleMessageF(
-        "EffAnomaly T2: bin[%d,%d,%d] thermal avg %s "
-        "session=%.1fA ref=%.1fA delta=%.1f%% threshold=%.0f%% "
-        "T1=%d T2=%d",
-        r, t, f, dir,
-        sessionAvg, refAvg, pctDelta,
-        degradationThreshold * 100.0f,
-        sessionTier1Errors, sessionTier2Errors);
-    }
-  }
-
-  // ── Combined alarm check ──
-  int totalErrors = sessionTier1Errors + sessionTier2Errors;
-  if (anomalyAlarmEnable && totalErrors >= anomalyAlarmThreshold) {
-    effAnomalyAlarmActive = true;
-    queueConsoleMessageF(
-      "EffAnomaly: ALARM — %d total errors (T1=%d T2=%d) threshold=%d",
-      totalErrors, sessionTier1Errors, sessionTier2Errors,
-      anomalyAlarmThreshold);
-  }
-}
-
-void initEfficiencyTracker() {
-  const size_t matrixSize = (size_t)NUM_MATRIX_CELLS * sizeof(MatrixCell);
-  const size_t windowSize = (size_t)MAX_ACTIVE_BINS_PER_WINDOW * sizeof(WindowSlot);
-  const size_t sessionSize = (size_t)NUM_MATRIX_CELLS * sizeof(SessionBinStats);
-
-  // Persistent matrix — PSRAM, loaded from NVS
-  effMatrix = (MatrixCell *)ps_malloc(matrixSize);
-  if (!effMatrix) {
-    queueConsoleMessage("ERROR: EffMatrix ps_malloc failed");
-    return;
-  }
-  memset(effMatrix, 0, matrixSize);
-
-  // Window accumulators — PSRAM, session only, never persisted
-  effWindow = (WindowSlot *)ps_malloc(windowSize);
-  if (!effWindow) {
-    queueConsoleMessage("ERROR: EffWindow ps_malloc failed");
-    return;
-  }
-  memset(effWindow, 0, windowSize);
-
-  // Session bin stats — PSRAM, session only, never persisted
-  sessionStats = (SessionBinStats *)ps_malloc(sessionSize);
-  if (!sessionStats) {
-    queueConsoleMessage("ERROR: EffSessionStats ps_malloc failed");
-    return;
-  }
-  memset(sessionStats, 0, sessionSize);
-
-  loadEfficiencyMatrix();
-
-  int populated = 0;
-  int refBins = 0;
-  uint32_t totalSS = 0;
-  for (int i = 0; i < NUM_MATRIX_CELLS; i++) {
-    if (effMatrix[i].ss_seconds > 0) populated++;
-    totalSS += effMatrix[i].ss_seconds;
-    if (effMatrix[i].is_reference_bin) refBins++;
-  }
-
-  queueConsoleMessageF(
-    "EffMatrix: %d/%d bins populated, %lu total SS sec, "
-    "%d ref bins, finalized=%d, matrix=%.1fKB session=%.1fKB",
-    populated, NUM_MATRIX_CELLS, (unsigned long)totalSS,
-    refBins, (int)referenceFinalized,
-    (float)matrixSize / 1024.0f,
-    (float)sessionSize / 1024.0f);
-
-  // Re-evaluate reference bins in case matrix grew but finalized flag was lost
-  if (!referenceFinalized) selectReferenceBins();
-}
-
-
-// ============================================================
-// RED DOT UPDATE — 1Hz
-// ============================================================
-
-void updateEfficiencyRedDot() {
-  if (!effMatrix) return;
-
-  float battV = getBatteryVoltage();
-  float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
-  float fieldVolts = dutyCycle * battV / 100.0f;
-
-  activeRPMBucket = getRPMBucket(RPM);
-  activeTempBucket = getTempBucket(TempToUse);
-  activeFieldBucket = getFieldBucket(fieldVolts);
-
-  redDotValid = (dutyCycle > 5.0f && amps > 2.0f && activeRPMBucket >= 0 && activeTempBucket >= 0 && activeFieldBucket >= 0 && !isnan(battV) && battV >= EFF_MIN_BATT_V);
-
-  if (redDotValid) {
-    redDot_fieldVolts = fieldVolts;
-    redDot_amps = amps;
-  }
-}
-
-
-// ============================================================
-// MATRIX UPDATE + ANOMALY SCORING — 1Hz
-//
-// Uses unified checkPointValid() gate for both accumulation
-// and anomaly scoring. Same criteria, same data, always.
-// Window accumulator updated here; merge happens on 2-min tick.
-// ============================================================
-
-void updateEfficiencyMatrix() {
-  if (!effMatrix || !effWindow || hardwarePresent != 1) return;   // sim mode (HardwarePresent=0): don't learn from fake data
-
-  float battV = getBatteryVoltage();
-  float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
-  float fieldVolts = 0.0f;
-  int r = -1, t = -1, f = -1;
-
-  if (!checkPointValid(amps, battV, fieldVolts, r, t, f)) return;
-
-  // ── Window accumulation (feeds permanent matrix on 2-min merge) ──
-  // Find existing slot for this bin or claim an empty one
-  int slotIdx = -1;
-  for (int i = 0; i < MAX_ACTIVE_BINS_PER_WINDOW; i++) {
-    if (effWindow[i].active && effWindow[i].r == r && effWindow[i].t == t && effWindow[i].f == f) {
-      slotIdx = i;
-      break;
-    }
-  }
-  if (slotIdx < 0) {
-    // Find empty slot
-    for (int i = 0; i < MAX_ACTIVE_BINS_PER_WINDOW; i++) {
-      if (!effWindow[i].active) {
-        slotIdx = i;
-        effWindow[i].r = (int8_t)r;
-        effWindow[i].t = (int8_t)t;
-        effWindow[i].f = (int8_t)f;
-        effWindow[i].min_amps = amps;
-        effWindow[i].max_amps = amps;
-        break;
-      }
-    }
-  }
-
-  if (slotIdx >= 0) {
-    WindowSlot &slot = effWindow[slotIdx];
-    uint32_t oldSS = slot.ss_seconds;
-    uint32_t newSS = oldSS + 1;
-    slot.wt_avg_amps = (slot.wt_avg_amps * (float)oldSS + amps) / (float)newSS;
-    slot.ss_seconds = newSS;
-    if (amps < slot.min_amps) slot.min_amps = amps;
-    if (amps > slot.max_amps) slot.max_amps = amps;
-    slot.active = true;
-  } else {
-    // All slots full — this window has unusually many active bins
-    // Point is not accumulated this window but anomaly check still runs
-    queueConsoleMessage("EffMatrix: window slots full — increase MAX_ACTIVE_BINS_PER_WINDOW");
-  }
-
-  // ── Anomaly scoring — runs regardless of slot availability ──
-  checkAnomaly(r, t, f, amps);
-}
-
-
-// ============================================================
-// RESET — wipes matrix, window, and reference state entirely
-// Called from "Start Over" / ResetEfficiencyMatrix HTTP handler
-// ============================================================
-
-void resetEfficiencyMatrix() {
-  if (effMatrix) {
-    memset(effMatrix, 0, (size_t)NUM_MATRIX_CELLS * sizeof(MatrixCell));
-    saveEfficiencyMatrix();
-  }
-  if (effWindow) {
-    memset(effWindow, 0, (size_t)MAX_ACTIVE_BINS_PER_WINDOW * sizeof(WindowSlot));
-  }
-  if (sessionStats) {
-    memset(sessionStats, 0, (size_t)NUM_MATRIX_CELLS * sizeof(SessionBinStats));
-  }
-
-  // Clear session history and trend data
-  memset(&effHistory, 0, sizeof(EffHistoryData));
-  sessionHealthSum = 0.0f;
-  sessionHealthCount = 0;
-  saveEffHistory();
-  effHistoryDirty = true;
-
-  referenceFinalized = false;
-  sessionTier1Errors = 0;
-  sessionTier2Errors = 0;
-  effAnomalyAlarmActive = false;
-
-  // Note: only L1+L2 counters exist now — legacy sessionErrorCount was removed
-  queueConsoleMessage("EffMatrix: Full reset — all matrix, reference, and history data cleared");
-}
-
-
-// ============================================================
-// SEND MATRIX STATE TO CLIENT — 5s cadence, change-triggered
-//
-// SSE event: "EffMatrix"
-// Payload:
-//   state, rBucket, tBucket, fBucket,
-//   rLabel, tLabel, fLabel,
-//   ss_seconds, avg_amps, min_amps, max_amps,
-//   is_reference_bin, totalErrors (= sessionTier1Errors + sessionTier2Errors)
-//
-// state: 0 = weak/empty (no reference data)
-//        1 = populated but not a reference bin (low confidence)
-//        2 = finalized reference bin (full anomaly scoring)
-// ============================================================
-
-void sendEfficiencyData() {
-  if (!effMatrix) return;
-  if (activeRPMBucket < 0 || activeTempBucket < 0 || activeFieldBucket < 0) return;
-
-  static int lastR = -1;
-  static int lastT = -1;
-  static int lastF = -1;
-  static uint32_t lastSS = 0xFFFFFFFF;
-  static int lastErr = -1;
-
-  MatrixCell &cell = MATRIX_CELL(activeRPMBucket, activeTempBucket, activeFieldBucket);
-
-  int currentErrors = sessionTier1Errors + sessionTier2Errors;
-  bool changed = (activeRPMBucket != lastR || activeTempBucket != lastT || activeFieldBucket != lastF || cell.ss_seconds != lastSS || currentErrors != lastErr);
-  if (!changed) return;
-
-  int state;
-  if (cell.is_reference_bin) {
-    state = 2;
-  } else if (cell.ss_seconds >= REF_MIN_SS_SECONDS) {
-    state = 1;
-  } else {
-    state = 0;
-  }
-
-  char buf[220];
-  snprintf(buf, sizeof(buf),
-           "%d,%d,%d,%d,%s,%s,%s,%lu,%.2f,%.2f,%.2f,%d,%d",
-           state,
-           activeRPMBucket, activeTempBucket, activeFieldBucket,
-           RPM_LABELS[activeRPMBucket],
-           TEMP_LABELS[activeTempBucket],
-           FIELD_LABELS[activeFieldBucket],
-           (unsigned long)cell.ss_seconds,
-           cell.avg_amps, cell.min_amps, cell.max_amps,
-           (int)cell.is_reference_bin,
-           sessionTier1Errors + sessionTier2Errors);
-
-  events.send(buf, "EffMatrix");
-
-  lastR = activeRPMBucket;
-  lastT = activeTempBucket;
-  lastF = activeFieldBucket;
-  lastSS = cell.ss_seconds;
-  lastErr = currentErrors;
-}
-
-void sendEfficiencyRedDot() {
-  char buf[80];
-  snprintf(buf, sizeof(buf), "%d,%.2f,%.2f,%d,%d,%d",
-           (int)redDotValid,
-           redDot_fieldVolts,
-           redDot_amps,
-           activeRPMBucket,
-           activeTempBucket,
-           activeFieldBucket);
-  events.send(buf, "EffRed");
-}
-
-
-// ============================================================
-// TICK — call from loop() every iteration, self-timed
-// ============================================================
-
-// ── 30s Serial diagnostic dump ──────────────────────────────
-// Prints checkPointValid rejection breakdown, active window slots,
-// matrix summary, referenceFinalized status, and sparkline state.
-// All eff_reject_* counters reset after each print.
-static void printEffDiagnostics() {
-  uint32_t total = eff_pass + eff_reject_duty + eff_reject_amps +
-                   eff_reject_battNaN + eff_reject_battLow +
-                   eff_reject_rpmDelta + eff_reject_bucket;
-  float fv = dutyCycle * getBatteryVoltage() / 100.0f;
-  //Serial.printf("[EffDiag] checkPoint: %lu pass / %lu total | duty<5%%=%lu amps<2A=%lu battNaN=%lu battLow=%lu rpmD>200=%lu bucket=-1=%lu\n",
-  //  (unsigned long)eff_pass, (unsigned long)total,
-  //  (unsigned long)eff_reject_duty, (unsigned long)eff_reject_amps,
-  //  (unsigned long)eff_reject_battNaN, (unsigned long)eff_reject_battLow,
-  //  (unsigned long)eff_reject_rpmDelta, (unsigned long)eff_reject_bucket);
-  //Serial.printf("[EffDiag]   live: RPM=%.0f duty=%.1f%% amps=%.1fA battV=%.2fV tempF=%.1f fieldV=%.2fV\n",
-  //  RPM, dutyCycle, isnan(MeasuredAmps) ? 0.0f : MeasuredAmps,
-  //  getBatteryVoltage(), TempToUse, fv);
-  //Serial.printf("[EffDiag]   buckets: r=%d t=%d f=%d | refFinalized=%d sessionHealthCnt=%lu\n",
-  //  activeRPMBucket, activeTempBucket, activeFieldBucket,
-  //  (int)referenceFinalized, (unsigned long)sessionHealthCount);
-  eff_pass = 0; eff_reject_duty = 0; eff_reject_amps = 0;
-  eff_reject_battNaN = 0; eff_reject_battLow = 0;
-  eff_reject_rpmDelta = 0; eff_reject_bucket = 0;
-
-  // Active window slots
-  int activeSlots = 0;
-  for (int i = 0; i < MAX_ACTIVE_BINS_PER_WINDOW; i++) {
-    if (!effWindow || !effWindow[i].active) continue;
-    activeSlots++;
-    //Serial.printf("[EffDiag]   window[%d]: bin[%d,%d,%d] ss=%lus avg=%.1fA\n",
-    //  i, (int)effWindow[i].r, (int)effWindow[i].t, (int)effWindow[i].f,
-    //  (unsigned long)effWindow[i].ss_seconds, effWindow[i].wt_avg_amps);
-  }
-  //if (activeSlots == 0) Serial.println("[EffDiag]   window: no active slots");
-
-  // Matrix summary
-  if (effMatrix) {
-    int populated = 0, eligible = 0, refBins = 0;
-    uint32_t totalSS = 0;
-    for (int i = 0; i < NUM_MATRIX_CELLS; i++) {
-      if (effMatrix[i].ss_seconds > 0) populated++;
-      if (effMatrix[i].ss_seconds >= REF_MIN_SS_SECONDS) eligible++;
-      if (effMatrix[i].is_reference_bin) refBins++;
-      totalSS += effMatrix[i].ss_seconds;
-    }
-    //Serial.printf("[EffDiag] matrix: %d/%d bins populated | %d eligible(>=%ds) | %d ref bins | totalSS=%lus\n",
-    //  populated, NUM_MATRIX_CELLS, eligible, REF_MIN_SS_SECONDS,
-    //  refBins, (unsigned long)totalSS);
-    //Serial.printf("[EffDiag]   need %d ref bins to finalize (have %d eligible) | finalized=%d\n",
-    //  NUM_REFERENCE_BINS, eligible, (int)referenceFinalized);
-  }
-
-  // Sparkline / session health
-  //Serial.printf("[EffDiag] sparkline: history=%d sessions stored | this session: healthCnt=%lu",
-  //  (int)effHistory.count, (unsigned long)sessionHealthCount);
-  //if (sessionHealthCount > 0)
-  //  Serial.printf(" ratio=%.3f (commits on next boot)\n", sessionHealthSum / (float)sessionHealthCount);
-  //else
-  //  Serial.println(" — no health yet (needs refFinalized + is_reference_bin)");
-}
-
-void efficiencyTracker_tick() {
-  static uint32_t last1Hz = 0;
-  static uint32_t last5s = 0;
-  static uint32_t last20s = 0;
-  static uint32_t last2min = 0;
-  static uint32_t last30s = 0;
-  uint32_t now = millis();
-
-  if (now - last1Hz >= 1000) {
-    last1Hz = now;
-    updateEfficiencyRedDot();
-    updateEfficiencyMatrix();
-  }
-
-  if (now - last20s >= 20000) {
-    last20s = now;
-    if (!inCriticalZone()) {
-      // Matrix save no longer rides this tick — it persists at the field-off
-      // +13 s flush (Xregulator.ino) and shutdown Phase 2. eff_cs (session
-      // health, single float) is still NVS-resident, so it keeps the retry.
-      if (sessionHealthNeedsSave) saveCurrentSessionHealth();
-    }
-  }
-
-  if (now - last5s >= 5000) {
-    last5s = now;
-    sendEfficiencyData();
-    sendEfficiencyRedDot();
-    sendEfficiencyHistory();
-  }
-
-  if (now - last2min >= 120000) {
-    last2min = now;
-    mergeWindowIntoMatrix();
-  }
-
-  if (now - last30s >= 30000) {
-    last30s = now;
-    printEffDiagnostics();
-  }
-}
-
-
-
-// ============================================================
-// SESSION HISTORY NVS — save/load
-//
-// "eff_hist" blob  = EffHistoryData struct (committed sessions)
-// "eff_cs"   blob  = single float (current session health,
-//                    updated every 2 min, committed on next boot)
-// ============================================================
-
-static void saveEffHistory() {
-  nvs_handle_t handle;
-  if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) {
-    queueConsoleMessage("EffHistory: NVS open failed (save)");
-    return;
-  }
-  nvs_set_blob(handle, "eff_hist", &effHistory, sizeof(EffHistoryData));
-  nvs_commit(handle);
-  nvs_close(handle);
-}
-
-static void saveCurrentSessionHealth() {
-  if (sessionHealthCount == 0 || hardwarePresent != 1) return;
-  if (inCriticalZone()) {
-    sessionHealthNeedsSave = true;
-    return;
-  }
-  float ratio = sessionHealthSum / (float)sessionHealthCount;
-
-  nvs_handle_t handle;
-  if (nvs_open("effmat", NVS_READWRITE, &handle) != ESP_OK) return;
-  nvs_set_blob(handle, "eff_cs", &ratio, sizeof(float));
-  nvs_commit(handle);
-  nvs_close(handle);
-  sessionHealthNeedsSave = false;
-}
-
-static void loadEffHistory() {
-  nvs_handle_t handle;
-  if (nvs_open("effmat", NVS_READONLY, &handle) != ESP_OK) return;
-
-  // Load committed history
-  size_t sz = sizeof(EffHistoryData);
-  nvs_get_blob(handle, "eff_hist", &effHistory, &sz);
-
-  // Commit previous session if one was saved
-  float prevSessionRatio = 0.0f;
-  size_t fsz = sizeof(float);
-  esp_err_t err = nvs_get_blob(handle, "eff_cs", &prevSessionRatio, &fsz);
-  nvs_close(handle);
-
-  //Serial.printf("[EffHistory] boot load: count=%d head=%d | eff_cs err=%d ratio=%.3f\n",
-  //  effHistory.count, effHistory.head, (int)err, prevSessionRatio);
-
-  if (err == ESP_OK && prevSessionRatio > 0.1f && prevSessionRatio < 3.0f) {
-    // Valid previous session — commit it to history
-    effHistory.values[effHistory.head] = prevSessionRatio;
-    effHistory.head = (effHistory.head + 1) % EFF_HISTORY_SESSIONS;
-    if (effHistory.count < EFF_HISTORY_SESSIONS) effHistory.count++;
-    saveEffHistory();
-
-    // Clear committed session marker
-    nvs_handle_t h2;
-    if (nvs_open("effmat", NVS_READWRITE, &h2) == ESP_OK) {
-      float zero = 0.0f;
-      nvs_set_blob(h2, "eff_cs", &zero, sizeof(float));
-      nvs_commit(h2);
-      nvs_close(h2);
-    }
-
-    queueConsoleMessageF(
-      "EffHistory: committed previous session health=%.2f (%d sessions stored)",
-      prevSessionRatio, effHistory.count);
-    //Serial.printf("[EffHistory] committed ratio=%.3f -> history now %d sessions\n",
-    //  prevSessionRatio, effHistory.count);
-
-    effHistoryDirty = true;
-  } else {
-    //Serial.printf("[EffHistory] no previous session committed (ratio=%.3f out of [0.1,3.0] or err=%d)\n",
-    //  prevSessionRatio, (int)err);
-  }
-}
-
-
-// ============================================================
-// SEND SESSION HISTORY TO CLIENT
-//
-// SSE event: "EffHistory"
-// Payload: count,head,v0,v1,v2,...,v29
-//   count = number of valid entries
-//   head  = index of oldest entry (for correct ordering in JS)
-//   v0..v29 = all 30 slots in raw array order
-//             (JS reconstructs chronological order using head/count)
-// Sent when effHistoryDirty is set, then flag cleared.
-// Also sent on first call after boot via boot_sent flag.
-// ============================================================
-
-void sendEfficiencyHistory() {
-  static bool bootSent = false;
-  if (!effHistoryDirty && bootSent) return;
-
-  char buf[300];
-  int offset = snprintf(buf, sizeof(buf), "%d,%d",
-                        (int)effHistory.count,
-                        (int)effHistory.head);
-
-  for (int i = 0; i < EFF_HISTORY_SESSIONS; i++) {
-    int remaining = (int)sizeof(buf) - offset;
-    if (remaining < 12) break;
-    offset += snprintf(buf + offset, remaining, ",%.3f",
-                       effHistory.values[i]);
-  }
-
-  events.send(buf, "EffHistory");
-  effHistoryDirty = false;
-  bootSent = true;
+void sendAltSettings() {
+  char buf[320];
+  int off = 0;
+  for (size_t i = 0; i < ALT_SETTING_COUNT; i++)
+    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *ALT_SETTINGS[i].ptr);
+  events.send(buf, "AltSettings");
 }
 
 

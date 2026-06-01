@@ -242,7 +242,7 @@ enum Csv2Index {
   CSV2_voltageError,
   CSV2_cv_I,
   CSV2_inIdleStage,
-  CSV2_referenceFinalized,
+  CSV2_altBaselineFrozen,
   CSV2_ft_rai_total_win,
   CSV2_ft_rai_total_ses,
   CSV2_ft_rai_ina228_win,
@@ -449,8 +449,8 @@ enum Csv2Index {
   CSV2_systemIDFallDelay_2,
   CSV2_systemIDRiseAvg,
   CSV2_systemIDFallAvg,
-  CSV2_ft_efficiencyTracker_win,
-  CSV2_ft_efficiencyTracker_ses,
+  CSV2_ft_altHealth_win,
+  CSV2_ft_altHealth_ses,
   CSV2_systemIDActive,
   CSV2_systemIDResultsReady,
   CSV2_systemIDStepAmp_0,
@@ -494,7 +494,13 @@ enum Csv2Index {
   CSV2_wmIgn_VMGman_lo,   CSV2_wmIgn_VMGman_hi,    // VMG manual session min/max (knots ×10)
   CSV2_wmIgn_VMGup_lo,    CSV2_wmIgn_VMGup_hi,     // VMG upwind session min/max (knots ×10)
 
-  CSV2_FIELD_COUNT  // = 445 (447 prior − UpdateDistanceThisInterval win/ses timer, removed with dead distance code)
+  // Alternator health summary (Phase 2)
+  CSV2_altHealthPct,        // health % ×10
+  CSV2_altHealthStatus,     // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
+  CSV2_altCoveragePct,      // frozen / with-data % ×10
+  CSV2_altObsCount,         // scored observations since freeze
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health fields = 449
 };
 
 enum Csv3Index {
@@ -737,10 +743,10 @@ enum Csv3Index {
   CSV3_TargetVoltageSetpoint,
   CSV3_RebulkCurrent_A,
   CSV3_UseFloat,
-  CSV3_anomalyMarginAmps,
-  CSV3_anomalyAlarmThreshold,
-  CSV3_anomalyAlarmEnable,
-  CSV3_degradationThreshold,
+  CSV3_altSpare0,   // reserved (was anomalyMarginAmps; alt-health settings now via AltSettings SSE)
+  CSV3_altSpare1,   // reserved (was anomalyAlarmThreshold)
+  CSV3_altSpare2,   // reserved (was anomalyAlarmEnable)
+  CSV3_altSpare3,   // reserved (was degradationThreshold)
   CSV3_TempAlarmLow,
   CSV3_LoadDumpDtThresh,
   CSV3_LoadDumpDtThresh1,
@@ -1843,26 +1849,21 @@ void setupServer() {
     request->send(response);
   });
 
-  // ── Efficiency matrix export ──────────────────────────────────────────────
-  server.on("/effmatrix.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!effMatrix) {
-      request->send(200, "text/plain", "Efficiency matrix not initialized.");
+  // ── Alternator-health model export (base-map cells + centroids) ───────────
+  server.on("/altmodel.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!altBase) {
+      request->send(200, "text/plain", "Alternator health model not initialized.");
       return;
     }
-
-    struct EffMatExportState {
-      int r, t, f;
+    struct AltExportState {
+      int idx;
       bool header;
       bool done;
-      char line[256];
-      int lineLen;
-      int linePos;
+      char line[200];
+      int lineLen, linePos;
     };
-
-    EffMatExportState state;
-    state.r = 0; state.t = 0; state.f = 0;
-    state.header = true;
-    state.done = false;
+    AltExportState state;
+    state.idx = 0; state.header = true; state.done = false;
     state.lineLen = 0; state.linePos = 0;
 
     AsyncWebServerResponse *response = request->beginChunkedResponse(
@@ -1874,29 +1875,19 @@ void setupServer() {
           if (state.linePos >= state.lineLen) {
             if (state.header) {
               state.lineLen = snprintf(state.line, sizeof(state.line),
-                "rpm_bucket,rpm_label,temp_bucket,temp_label,field_bucket,field_label,"
-                "ss_seconds,avg_amps,min_amps,max_amps,"
-                "ref_avg_amps,ref_min_amps,ref_max_amps,is_reference_bin\n");
+                "rpm_bin,fi_bin,nObs,ref_valid,mean_amps,ref_amps,ref_rpm,ref_fi,ref_sigma\n");
               state.header = false;
             } else {
-              if (state.r >= NUM_RPM_BUCKETS) {
-                state.done = true;
-                return written;
-              }
-              MatrixCell &cell = MATRIX_CELL(state.r, state.t, state.f);
+              if (state.idx >= ALT_NUM_CELLS) { state.done = true; return written; }
+              AltCell &c = altBase[state.idx];
+              int ri = state.idx / ALT_FI_BINS;
+              int fb = state.idx % ALT_FI_BINS;
+              float mean = (c.sumW > 0) ? c.sumW_A / c.sumW : 0.0f;
               state.lineLen = snprintf(state.line, sizeof(state.line),
-                "%d,%s,%d,%s,%d,%s,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d\n",
-                state.r, RPM_LABELS[state.r],
-                state.t, TEMP_LABELS[state.t],
-                state.f, FIELD_LABELS[state.f],
-                (unsigned long)cell.ss_seconds,
-                cell.avg_amps, cell.min_amps, cell.max_amps,
-                cell.ref_avg_amps, cell.ref_min_amps, cell.ref_max_amps,
-                (int)cell.is_reference_bin);
-              // Advance indices: field → temp → rpm
-              state.f++;
-              if (state.f >= NUM_FIELD_BUCKETS) { state.f = 0; state.t++; }
-              if (state.t >= NUM_TEMP_BUCKETS)  { state.t = 0; state.r++; }
+                "%d,%d,%u,%d,%.2f,%.2f,%.1f,%.2f,%.2f\n",
+                ri, fb, (unsigned)c.nObs, (int)c.ref_valid,
+                mean, c.ref_amps, c.ref_rpm, c.ref_fi, c.ref_sigma);
+              state.idx++;
             }
             state.linePos = 0;
           }
@@ -1908,94 +1899,18 @@ void setupServer() {
         return written;
       });
 
-    char effTs[20] = "export";
+    char altTs[20] = "export";
     if (timeIsSynced) {
-      time_t effNow = time(nullptr);
-      struct tm effTm;
-      localtime_r(&effNow, &effTm);
-      strftime(effTs, sizeof(effTs), "%Y%m%d_%H%M%S", &effTm);
+      time_t altNow = time(nullptr);
+      struct tm altTm;
+      localtime_r(&altNow, &altTm);
+      strftime(altTs, sizeof(altTs), "%Y%m%d_%H%M%S", &altTm);
     }
-    char effDisp[80];
-    snprintf(effDisp, sizeof(effDisp), "attachment; filename=\"AltHealthMatrix_%s.csv\"", effTs);
-    response->addHeader("Content-Disposition", effDisp);
+    char altDisp[80];
+    snprintf(altDisp, sizeof(altDisp), "attachment; filename=\"AltHealthModel_%s.csv\"", altTs);
+    response->addHeader("Content-Disposition", altDisp);
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
-  });
-
-  // ── Efficiency matrix bucket summary (JSON) ───────────────────────────────
-  // Aggregates SS time per RPM / temp / field bucket. Small payload (~600 B).
-  // Used by the Live Data → Alternator card summary bars.
-  server.on("/effmatrixstats", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!effMatrix) {
-      request->send(200, "application/json", "{\"error\":\"not_ready\"}");
-      return;
-    }
-
-    uint32_t rpm_ss[NUM_RPM_BUCKETS]    = {0};
-    uint32_t temp_ss[NUM_TEMP_BUCKETS]  = {0};
-    uint32_t field_ss[NUM_FIELD_BUCKETS]= {0};
-    float field_min_amps[NUM_FIELD_BUCKETS];
-    float field_max_amps[NUM_FIELD_BUCKETS];
-    for (int f = 0; f < NUM_FIELD_BUCKETS; f++) { field_min_amps[f] = 9999.0f; field_max_amps[f] = -1.0f; }
-    uint32_t total_ss = 0;
-    int pop_cells = 0, ref_bins = 0;
-
-    for (int r = 0; r < NUM_RPM_BUCKETS; r++)
-      for (int t = 0; t < NUM_TEMP_BUCKETS; t++)
-        for (int f = 0; f < NUM_FIELD_BUCKETS; f++) {
-          MatrixCell &c = MATRIX_CELL(r, t, f);
-          rpm_ss[r]   += c.ss_seconds;
-          temp_ss[t]  += c.ss_seconds;
-          field_ss[f] += c.ss_seconds;
-          total_ss    += c.ss_seconds;
-          if (c.ss_seconds > 0) {
-            pop_cells++;
-            if (c.min_amps < field_min_amps[f]) field_min_amps[f] = c.min_amps;
-            if (c.max_amps > field_max_amps[f]) field_max_amps[f] = c.max_amps;
-          }
-          if (c.is_reference_bin)  ref_bins++;
-        }
-
-    char *buf = (char *)ps_malloc(2048);
-    if (!buf) { request->send(500, "application/json", "{\"error\":\"oom\"}"); return; }
-
-    int off = 0;
-    off += snprintf(buf + off, 2048 - off,
-      "{\"total_cells\":%d,\"pop_cells\":%d,\"ref_bins\":%d,\"total_ss\":%lu",
-      NUM_MATRIX_CELLS, pop_cells, ref_bins, (unsigned long)total_ss);
-
-    off += snprintf(buf + off, 2048 - off, ",\"rpm_ss\":[");
-    for (int r = 0; r < NUM_RPM_BUCKETS; r++)
-      off += snprintf(buf + off, 2048 - off, "%s%lu", r ? "," : "", (unsigned long)rpm_ss[r]);
-    off += snprintf(buf + off, 2048 - off, "],\"rpm_labels\":[");
-    for (int r = 0; r < NUM_RPM_BUCKETS; r++)
-      off += snprintf(buf + off, 2048 - off, "%s\"%s\"", r ? "," : "", RPM_LABELS[r]);
-
-    off += snprintf(buf + off, 2048 - off, "],\"temp_ss\":[");
-    for (int t = 0; t < NUM_TEMP_BUCKETS; t++)
-      off += snprintf(buf + off, 2048 - off, "%s%lu", t ? "," : "", (unsigned long)temp_ss[t]);
-    off += snprintf(buf + off, 2048 - off, "],\"temp_labels\":[");
-    for (int t = 0; t < NUM_TEMP_BUCKETS; t++)
-      off += snprintf(buf + off, 2048 - off, "%s\"%s\"", t ? "," : "", TEMP_LABELS[t]);
-
-    off += snprintf(buf + off, 2048 - off, "],\"field_ss\":[");
-    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
-      off += snprintf(buf + off, 2048 - off, "%s%lu", f ? "," : "", (unsigned long)field_ss[f]);
-    off += snprintf(buf + off, 2048 - off, "],\"field_labels\":[");
-    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
-      off += snprintf(buf + off, 2048 - off, "%s\"%s\"", f ? "," : "", FIELD_LABELS[f]);
-
-    off += snprintf(buf + off, 2048 - off, "],\"field_min_amps\":[");
-    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
-      off += snprintf(buf + off, 2048 - off, "%s%.1f", f ? "," : "", field_max_amps[f] < 0 ? -1.0f : field_min_amps[f]);
-    off += snprintf(buf + off, 2048 - off, "],\"field_max_amps\":[");
-    for (int f = 0; f < NUM_FIELD_BUCKETS; f++)
-      off += snprintf(buf + off, 2048 - off, "%s%.1f", f ? "," : "", field_max_amps[f]);
-
-    off += snprintf(buf + off, 2048 - off, "]}");
-
-    request->send(200, "application/json", buf);
-    free(buf);
   });
 
   server.on("/cvlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2525,31 +2440,14 @@ void setupServer() {
       queueConsoleMessage("Upload buffer manually cleared from web");
       inputMessage = "1";
     }
-    else if (request->hasParam("degradationThreshold")) {
+    else if (request->hasParam("ResetAlternatorHealth")) {
       foundParameter = true;
-      inputMessage = request->getParam("degradationThreshold")->value();
-      // UI sends integer percent (e.g. 15), store as float fraction (0.15)
-      degradationThreshold = inputMessage.toFloat() / 100.0f;
-      writeFile(LittleFS, "/degradationThresh.txt",
-                String(degradationThreshold, 4).c_str());
-    } else if (request->hasParam("anomalyMarginAmps")) {
+      pendingResetAlternatorHealth = true;  // deferred to Core 1 to avoid SSE gap
+    }
+    // Alternator-health steady-state / freeze settings (registry-driven, 16 params)
+    if (altSettingsHandle(request)) {
       foundParameter = true;
-      inputMessage = request->getParam("anomalyMarginAmps")->value();
-      anomalyMarginAmps = inputMessage.toFloat();
-      writeFile(LittleFS, "/anomalyMarginAmps.txt", String(anomalyMarginAmps, 4).c_str());
-    } else if (request->hasParam("anomalyAlarmThreshold")) {
-      foundParameter = true;
-      inputMessage = request->getParam("anomalyAlarmThreshold")->value();
-      anomalyAlarmThreshold = (int)inputMessage.toInt();
-      writeFile(LittleFS, "/anomalyAlarmThresh.txt", String(anomalyAlarmThreshold).c_str());
-    } else if (request->hasParam("anomalyAlarmEnable")) {
-      foundParameter = true;
-      inputMessage = request->getParam("anomalyAlarmEnable")->value();
-      anomalyAlarmEnable = (inputMessage.toInt() != 0);
-      writeFile(LittleFS, "/anomalyAlarmEnable.txt", String((int)anomalyAlarmEnable).c_str());
-    } else if (request->hasParam("ResetEfficiencyMatrix")) {
-      foundParameter = true;
-      pendingResetEfficiencyMatrix = true;  // deferred to Core 1 to avoid SSE gap
+      sendAltSettings();
     }
 
     if (request->hasParam("ManualDutyTarget")) {
@@ -4262,7 +4160,7 @@ void setupServer() {
       ft_rai_imu.worstSession = 0;
       ft_updateAccelMetrics.worstSession = 0;
       ft_ReadVEData.worstSession = 0;
-      ft_efficiencyTracker.worstSession = 0;
+      ft_altHealth.worstSession = 0;
       VeTime2 = 0;
       // CPU load maxes
       cpuLoadCore0Max = 0;
@@ -5619,7 +5517,7 @@ void SendWifiData() {
                                // restartRemainingSec + GPS/time source labels + loggingActive
                                "%d,%d,%d,%d,"
                                // VMGUpwind + sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs (lo/hi)
-                               "%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -5812,7 +5710,7 @@ void SendWifiData() {
                                SafeInt((ChargingVoltageTarget - getBatteryVoltage()) * 100),
                                SafeInt(cv_I * 100),
                                SafeInt(inIdleStage),
-                               SafeInt(referenceFinalized),
+                               (int)altHealth.baselineFrozen,
                                SafeInt(ft_rai_total.worstWindow),
                                SafeInt(ft_rai_total.worstSession),
                                SafeInt(ft_rai_ina228.worstWindow),
@@ -6019,8 +5917,8 @@ void SendWifiData() {
                                (int)systemIDFallDelay_ms[2],
                                (int)systemIDRiseAvg_ms,
                                (int)systemIDFallAvg_ms,
-                               SafeInt(ft_efficiencyTracker.worstWindow),
-                               SafeInt(ft_efficiencyTracker.worstSession),
+                               SafeInt(ft_altHealth.worstWindow),
+                               SafeInt(ft_altHealth.worstSession),
                                (int)systemIDActive,
                                (int)systemIDResultsReady,
                                (int)(systemIDStepAmp_A[0] * 10),
@@ -6060,7 +5958,11 @@ void SendWifiData() {
                                SafeInt(sustainedTWS, 10),                // 2-min sustained TWS, knots ×10
                                SafeInt(currentGaleMinutes, 1),           // live gale minutes (int)
                                SafeInt(wmIgnSafe(wmIgn_VMGman.lo), 10),  SafeInt(wmIgnSafe(wmIgn_VMGman.hi), 10),
-                               SafeInt(wmIgnSafe(wmIgn_VMGup.lo), 10),   SafeInt(wmIgnSafe(wmIgn_VMGup.hi), 10)
+                               SafeInt(wmIgnSafe(wmIgn_VMGup.lo), 10),   SafeInt(wmIgnSafe(wmIgn_VMGup.hi), 10),
+                               SafeInt(altHealthPct(), 10),              // CSV2_altHealthPct
+                               (int)altHealth.status,                    // CSV2_altHealthStatus
+                               SafeInt(altCoveragePct(), 10),            // CSV2_altCoveragePct
+                               (int)altHealth.obsCount                   // CSV2_altObsCount
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -6356,10 +6258,10 @@ void SendWifiData() {
                                SafeInt(TargetVoltageSetpoint, 100),
                                SafeInt(RebulkCurrent_A, 100),
                                SafeInt(UseFloat),
-                               SafeInt(anomalyMarginAmps, 10),                   // 1 decimal, divide by 10 in JS
-                               SafeInt(anomalyAlarmThreshold),
-                               SafeInt(anomalyAlarmEnable),
-                               SafeInt(degradationThreshold, 100),
+                               SafeInt(0),   // CSV3_altSpare0 (reserved)
+                               SafeInt(0),   // CSV3_altSpare1 (reserved)
+                               SafeInt(0),   // CSV3_altSpare2 (reserved)
+                               SafeInt(0),   // CSV3_altSpare3 (reserved)
                                SafeInt(TempAlarmLow),
                                SafeInt(LoadDumpDtThresh),                        // A/s tier-2 threshold (2 consecutive)
                                SafeInt(LoadDumpDtThresh1),                       // A/s tier-1 threshold (1 sample)
