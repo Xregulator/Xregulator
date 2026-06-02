@@ -852,6 +852,24 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
     Serial.println("Vessel info: /vessel_info.json missing");
   }
 
+  // Load IMU zero/level calibration (separate from vessel_info so a profile
+  // re-save from the cloud never clobbers physical-mount calibration)
+  if (LittleFS.exists("/imu_zero.json")) {
+    File zf = LittleFS.open("/imu_zero.json", "r");
+    if (zf) {
+      DynamicJsonDocument zdoc(256);
+      if (!deserializeJson(zdoc, zf)) {
+        imuHeelOffsetDeg = zdoc["heel_offset_deg"] | 0.0f;
+        imuPitchOffsetDeg = zdoc["pitch_offset_deg"] | 0.0f;
+        imuGxBias = zdoc["gx_bias"] | 0.0f;
+        imuGyBias = zdoc["gy_bias"] | 0.0f;
+        imuGzBias = zdoc["gz_bias"] | 0.0f;
+        Serial.println("IMU zero calibration loaded");
+      }
+      zf.close();
+    }
+  }
+
   if (!fsExists("/BatteryCapacity_Ah.txt")) {
     writeFile(LittleFS, "/BatteryCapacity_Ah.txt", String(BatteryCapacity_Ah).c_str());
   } else {
@@ -2040,8 +2058,8 @@ void resetAccelStats() {
 void complementaryFilter(float ax, float ay, float az, float gx, float gy, float dt) {
   // Complementary filter for heel and pitch estimation
   // Accel-derived angles (noisy but no drift)
-  float accel_heel = atan2(ay, sqrt(ax * ax + az * az)) * 180.0f / PI;
-  float accel_pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / PI;
+  float accel_heel = atan2(ay, sqrt(ax * ax + az * az)) * 180.0f / PI - imuHeelOffsetDeg;
+  float accel_pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / PI - imuPitchOffsetDeg;
 
   // Integrate gyro (smooth but drifts)
   cf_heel += gy * dt;
@@ -2090,6 +2108,12 @@ void updateAccelMetrics() {
     float ax = raw_a[r.src[0]] * ACCEL_SCALE * r.sign[0];  // vessel forward
     float ay = raw_a[r.src[1]] * ACCEL_SCALE * r.sign[1];  // vessel starboard
     float az = raw_a[r.src[2]] * ACCEL_SCALE * r.sign[2];  // vessel up
+
+    // IMU zero capture — accumulate at-rest accel for level reference
+    if (imuZeroInProgress && imuZeroAccelN < IMU_ZERO_TARGET) {
+      imuZeroAxSum += ax; imuZeroAySum += ay; imuZeroAzSum += az;
+      imuZeroAccelN++;
+    }
 
     // Scale to integers (1.234g → 1234)
     int32_t ax_scaled = (int32_t)(ax * 1000.0f);
@@ -2280,6 +2304,14 @@ void updateAccelMetrics() {
     float gy = raw_g[r.src[4]] * GYRO_SCALE * r.sign[4];  // vessel heel rate
     float gz = raw_g[r.src[5]] * GYRO_SCALE * r.sign[5];  // vessel yaw rate
 
+    // IMU zero capture — accumulate raw (pre-bias) gyro to measure rest bias
+    if (imuZeroInProgress && imuZeroGyroN < IMU_ZERO_TARGET) {
+      imuZeroGxSum += gx; imuZeroGySum += gy; imuZeroGzSum += gz;
+      imuZeroGyroN++;
+    }
+    // Apply stored rest bias to live gyro
+    gx -= imuGxBias; gy -= imuGyBias; gz -= imuGzBias;
+
     // Scale to integers (12.34 dps → 1234)
     int32_t gx_scaled = (int32_t)(gx * 100.0f);
     int32_t gy_scaled = (int32_t)(gy * 100.0f);
@@ -2336,6 +2368,32 @@ void updateAccelMetrics() {
 
     imuWindow->lastGyroUpdateTime_us = now_us;  // separate from accel tracker (a shared one would zero the gyro dt)
     imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
+  }
+
+  // Finalize IMU zero once both accel + gyro windows are full
+  if (imuZeroInProgress && imuZeroAccelN >= IMU_ZERO_TARGET && imuZeroGyroN >= IMU_ZERO_TARGET) {
+    float ax0 = imuZeroAxSum / imuZeroAccelN;
+    float ay0 = imuZeroAySum / imuZeroAccelN;
+    float az0 = imuZeroAzSum / imuZeroAccelN;
+    imuHeelOffsetDeg = atan2(ay0, sqrt(ax0 * ax0 + az0 * az0)) * 180.0f / PI;
+    imuPitchOffsetDeg = atan2(-ax0, sqrt(ay0 * ay0 + az0 * az0)) * 180.0f / PI;
+    imuGxBias = imuZeroGxSum / imuZeroGyroN;
+    imuGyBias = imuZeroGySum / imuZeroGyroN;
+    imuGzBias = imuZeroGzSum / imuZeroGyroN;
+
+    DynamicJsonDocument zdoc(256);
+    zdoc["heel_offset_deg"] = imuHeelOffsetDeg;
+    zdoc["pitch_offset_deg"] = imuPitchOffsetDeg;
+    zdoc["gx_bias"] = imuGxBias;
+    zdoc["gy_bias"] = imuGyBias;
+    zdoc["gz_bias"] = imuGzBias;
+    File zf = LittleFS.open("/imu_zero.json", "w");
+    if (zf) { serializeJson(zdoc, zf); zf.close(); }
+
+    cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
+    imuZeroInProgress = false;
+    queueConsoleMessage("IMU ZERO: captured (heel " + String(imuHeelOffsetDeg, 1) +
+                        "°, pitch " + String(imuPitchOffsetDeg, 1) + "°)");
   }
 
   // Update current display values

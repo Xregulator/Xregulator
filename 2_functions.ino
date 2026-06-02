@@ -664,7 +664,7 @@ void httpsTask(void *param) {
     if (xQueueReceive(httpsQueue, &request, pdMS_TO_TICKS(1000))) {
 
       // VERIFY PAYLOAD BEFORE PROCESSING
-      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG) {
+      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF) {
         size_t payloadLen = strlen(request.payload);
         // Serial.printf("DEBUG: Received payload, length=%d bytes\n", payloadLen);
 
@@ -690,6 +690,9 @@ void httpsTask(void *param) {
           break;
         case HTTPS_UPLOAD_CONFIG:
           opSuccess = executeUploadConfig(request.payload);
+          break;
+        case HTTPS_UPLOAD_BOATPERF:
+          opSuccess = executeUploadBoatPerf(request.payload);
           break;
         case HTTPS_FETCH_WEATHER:
           executeFetchWeatherData();
@@ -2404,6 +2407,100 @@ done_headers_cfg:
     queueConsoleMessage(messageBuffer);
   }
 
+  return success;
+}
+
+// Mirrors executeUploadConfig() exactly (proven HTTPS pattern) — only the endpoint + log labels
+// differ. Uploads the boat-performance aggregates to the update-boat-performance edge function.
+bool executeUploadBoatPerf(const char *payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.RSSI() < -76) return false;
+  if (!isRegistered || authToken.isEmpty()) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+
+  uint32_t start = millis();
+  esp_task_wdt_reset();
+
+  if (!client.connect(host, port, CONNECT_TIMEOUT)) {
+    Serial.println("BoatPerf: Connect fail");
+    client.stop();
+    return false;
+  }
+  if (millis() - start > GLOBAL_TIMEOUT) {
+    client.stop();
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  client.printf(
+    "POST /functions/v1/update-boat-performance HTTP/1.1\r\n"
+    "Host: %s\r\n"
+    "Content-Type: application/json\r\n"
+    "Authorization: Bearer %s\r\n"
+    "Connection: close\r\n"
+    "Content-Length: %u\r\n\r\n",
+    host, SUPABASE_ANON_KEY, (unsigned)strlen(payload));
+
+  size_t payloadLen = strlen(payload);
+  if (client.write((const uint8_t *)payload, payloadLen) != payloadLen) {
+    Serial.println("BoatPerf: Payload send fail");
+    client.stop();
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  int httpCode = 0;
+  uint32_t readStart = millis();
+  char statusBuf[64];
+  size_t statusLen = 0;
+  while (client.connected() && (millis() - readStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
+      if (c == '\n') {
+        statusBuf[statusLen] = '\0';
+        if (strncmp(statusBuf, "HTTP/", 5) == 0) {
+          const char *sp = strchr(statusBuf, ' ');
+          if (sp) httpCode = atoi(sp + 1);
+        }
+        goto drain_headers_bp;
+      }
+    }
+    if (millis() - start > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+drain_headers_bp:
+  {
+    uint32_t drainStart = millis();
+    uint8_t state = 0;
+    while (client.connected() && (millis() - drainStart < READ_TIMEOUT)) {
+      esp_task_wdt_reset();
+      while (client.available()) {
+        char c = (char)client.read();
+        if (state == 0 && c == '\r') state = 1;
+        else if (state == 1 && c == '\n') state = 2;
+        else if (state == 2 && c == '\r') state = 3;
+        else if (state == 3 && c == '\n') goto done_headers_bp;
+        else state = 0;
+      }
+      if (millis() - start > GLOBAL_TIMEOUT) break;
+      delay(1);
+    }
+  }
+done_headers_bp:
+  client.stop();
+  esp_task_wdt_reset();
+
+  bool success = (httpCode == 200);
+  if (success) queueConsoleMessage("Boat performance uploaded");
+  else if (httpCode > 0) {
+    snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "BoatPerf upload failed HTTP %d", httpCode);
+    queueConsoleMessage(messageBuffer);
+  }
   return success;
 }
 

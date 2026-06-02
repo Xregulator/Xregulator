@@ -505,6 +505,710 @@ void sendAltSettings() {
 }
 
 
+// ============================================================
+// BOAT PERFORMANCE — sailing polar engine (Phase 3).
+//   Globals/structs in Xregulator.ino. Design: BOAT_PERFORMANCE_MATRIX_PLAN.md.
+//   Sliding ~60s windows → one observation; per-cell dual-source best-ever (top-K);
+//   1-D pitch derate (sea state = 60s std of pitch); fouling/current CUSUM;
+//   sticky Pause; Clear-all reset. Motoring map + web dashboard are follow-up slices.
+//   No struct types in signatures (Arduino auto-prototype hoist) — indices/floats only.
+// ============================================================
+#define PERF_VER          1u
+#define PERF_SAIL_MAGIC   0x50455253u  // 'PERS'
+#define PERF_PITCH_MAGIC  0x50455250u  // 'PERP'
+#define PERF_MON_MAGIC    0x5045524Du  // 'PERM'
+#define PERF_MOTOR_MAGIC  0x504D5452u  // 'PMTR'  motoring base map
+#define PERF_MWIND_MAGIC  0x504D5752u  // 'PMWR'  motoring windCorr
+#define PERF_MPITCH_MAGIC 0x504D5052u  // 'PMPR'  motoring pitchDerate
+#define PERF_MMON_MAGIC   0x504D4D4Eu  // 'PMMN'  motoring monitor
+
+// ---- bin + axis helpers ----
+static inline int perfWsBin(float ws) {
+  if (isnan(ws) || ws < 0) return -1;
+  int b = (int)(ws * PERF_WS_BINS / PERF_WS_MAX);
+  if (b < 0) return -1;
+  if (b >= PERF_WS_BINS) b = PERF_WS_BINS - 1;
+  return b;
+}
+static inline float perfFoldAngle(float wa) {   // symmetric: mirror port/stbd → 0..180
+  while (wa < 0) wa += 360.0f;
+  while (wa >= 360.0f) wa -= 360.0f;
+  if (perfSymmetric >= 0.5f && wa > 180.0f) wa = 360.0f - wa;
+  return wa;
+}
+static inline int perfWaBin(float wa) {
+  if (isnan(wa)) return -1;
+  float a = perfFoldAngle(wa);
+  int b = (int)(a * PERF_WA_BINS / PERF_WA_MAX);
+  if (b < 0) b = 0;
+  if (b >= PERF_WA_BINS) b = PERF_WA_BINS - 1;
+  return b;
+}
+static inline int perfPitchBin(float p) {
+  if (isnan(p) || p < 0) p = 0;
+  int b = (int)(p * PERF_PITCH_BINS / PERF_PITCH_MAX);
+  if (b < 0) b = 0;
+  if (b >= PERF_PITCH_BINS) b = PERF_PITCH_BINS - 1;
+  return b;
+}
+static inline float perfPitchDerateAt(int bin) {
+  if (bin < 0 || !perfSailPitch[bin].valid) return 1.0f;
+  float v = perfSailPitch[bin].value;
+  if (v < 0.3f) v = 0.3f;
+  if (v > 1.2f) v = 1.2f;
+  return v;
+}
+
+// best-ever reference for a cell+source = min of the top-K once full, else 0 (not trustable).
+// Non-static: also called from the /perfmodel.csv export in 3_functions.ino.
+float perfCellRef(int idx, int src) {   // src: 1=STW, 2=SOG
+  float *k = (src == 1) ? perfSail[idx].bestSTW : perfSail[idx].bestSOG;
+  uint16_t n = (src == 1) ? perfSail[idx].nSTW : perfSail[idx].nSOG;
+  if (n < PERF_TOPK) return 0.0f;
+  float m = k[0];
+  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < m) m = k[i];
+  return m;
+}
+// insert a window-mean into a cell's per-source top-K (keep the K largest).
+static void perfInsertBest(int idx, int src, float v) {
+  float *k = (src == 1) ? perfSail[idx].bestSTW : perfSail[idx].bestSOG;
+  int mi = 0;
+  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < k[mi]) mi = i;
+  if (v > k[mi]) k[mi] = v;
+  if (src == 1) { if (perfSail[idx].nSTW < 60000) perfSail[idx].nSTW++; }
+  else          { if (perfSail[idx].nSOG < 60000) perfSail[idx].nSOG++; }
+}
+// best-ever at a condition with 1-ring neighbor fallback (no fabrication if nothing valid).
+static float perfBestAt(int wsb, int wab, int src) {
+  if (wsb < 0 || wab < 0) return 0.0f;
+  float best = perfCellRef(PERF_SIDX(wsb, wab), src);
+  if (best > 0) return best;
+  for (int dw = -1; dw <= 1; dw++)
+    for (int da = -1; da <= 1; da++) {
+      int w = wsb + dw, a = wab + da;
+      if (w < 0 || w >= PERF_WS_BINS || a < 0 || a >= PERF_WA_BINS) continue;
+      float r = perfCellRef(PERF_SIDX(w, a), src);
+      if (r > best) best = r;
+    }
+  return best;
+}
+
+// circular resultant length (1 = steady direction, →0 = scattered) + tol→threshold.
+static inline float perfResultant(double S, double C, double n) {
+  if (n <= 0) return 0.0f;
+  return (float)(sqrt(S * S + C * C) / n);
+}
+static inline float perfRthresh(float tolDeg) {   // small-angle: R ≈ exp(−σ²/2)
+  float s = tolDeg * (float)PI / 180.0f;
+  return expf(-0.5f * s * s);
+}
+
+// learn the 1-D pitch derate from this window: achievable ÷ flat-water best (≈1 flat, <1 in seas).
+static void perfLearnPitch(float winSpeed, float cellBest, int pitchBin) {
+  if (cellBest <= 0.1f || pitchBin < 0) return;
+  if (perfSailPitch[pitchBin].nWin >= 200) return;   // light cap so it can't drift forever
+  perfSailPitch[pitchBin].nWin++;
+  perfSailPitch[pitchBin].sumW += 1.0f;
+  perfSailPitch[pitchBin].sumW_ratio += winSpeed / cellBest;
+  perfSailPitch[pitchBin].value = perfSailPitch[pitchBin].sumW_ratio / perfSailPitch[pitchBin].sumW;
+  perfSailPitch[pitchBin].valid = 1;
+}
+// fouling / current: one-sided CUSUM on sustained shortfall vs pitch-corrected best.
+static void perfScore(float winSpeed, float pred) {
+  if (pred <= 0.1f) return;
+  float scalar = winSpeed / pred;          // 1.0 = at best
+  perfSailMon.foulingScalar = scalar;
+  float d = 1.0f - scalar;                  // positive = slower than best
+  perfSailMon.cusumNeg = fmaxf(0.0f, perfSailMon.cusumNeg + (d - perfCusumK));
+  perfSailMon.winCount++;
+  perfSailMon.status = (perfSailMon.cusumNeg > perfCusumH) ? 2 : 1;
+}
+
+float perfCoveragePct() {
+  if (!perfSail) return 0.0f;
+  int valid = 0, withData = 0;
+  for (int i = 0; i < PERF_SAIL_CELLS; i++) {
+    if (perfSail[i].nWin) withData++;
+    if (perfSail[i].valid) valid++;
+  }
+  if (withData == 0) return 0.0f;
+  return 100.0f * (float)valid / (float)withData;
+}
+
+// ---- motoring map helpers (1-D RPM base × windCorr × pitchDerate; mirrors the sailing helpers) ----
+static inline int perfRpmBin(float rpm) {
+  if (isnan(rpm) || rpm < 0) return -1;
+  int b = (int)(rpm * PERF_RPM_BINS / PERF_RPM_MAX);
+  if (b < 0) return -1;
+  if (b >= PERF_RPM_BINS) b = PERF_RPM_BINS - 1;
+  return b;
+}
+static inline int perfWindcBin(float hw) {
+  if (isnan(hw)) return -1;
+  int b = (int)((hw - PERF_WINDC_MIN) * PERF_WINDC_BINS / (PERF_WINDC_MAX - PERF_WINDC_MIN));
+  if (b < 0) b = 0;
+  if (b >= PERF_WINDC_BINS) b = PERF_WINDC_BINS - 1;
+  return b;
+}
+static inline float perfMotorPitchAt(int bin) {
+  if (bin < 0 || !perfMotorPitch[bin].valid) return 1.0f;
+  float v = perfMotorPitch[bin].value;
+  if (v < 0.3f) v = 0.3f;
+  if (v > 1.2f) v = 1.2f;
+  return v;
+}
+static inline float perfWindCorrAt(int bin) {
+  if (bin < 0 || !perfMotorWind[bin].valid) return 1.0f;
+  float v = perfMotorWind[bin].value;
+  if (v < 0.3f) v = 0.3f;
+  if (v > 1.7f) v = 1.7f;
+  return v;
+}
+float perfMotorCellRef(int idx, int src) {   // non-static: also used by /motormodel.csv export
+  float *k = (src == 1) ? perfMotor[idx].bestSTW : perfMotor[idx].bestSOG;
+  uint16_t n = (src == 1) ? perfMotor[idx].nSTW : perfMotor[idx].nSOG;
+  if (n < PERF_TOPK) return 0.0f;
+  float m = k[0];
+  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < m) m = k[i];
+  return m;
+}
+static void perfMotorInsertBest(int idx, int src, float v) {
+  float *k = (src == 1) ? perfMotor[idx].bestSTW : perfMotor[idx].bestSOG;
+  int mi = 0;
+  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < k[mi]) mi = i;
+  if (v > k[mi]) k[mi] = v;
+  if (src == 1) { if (perfMotor[idx].nSTW < 60000) perfMotor[idx].nSTW++; }
+  else          { if (perfMotor[idx].nSOG < 60000) perfMotor[idx].nSOG++; }
+}
+static float perfMotorBestAt(int rb, int src) {   // 1-D neighbor fallback
+  if (rb < 0) return 0.0f;
+  float best = perfMotorCellRef(rb, src);
+  if (best > 0) return best;
+  for (int d = -1; d <= 1; d++) {
+    int r = rb + d;
+    if (r < 0 || r >= PERF_RPM_BINS) continue;
+    float x = perfMotorCellRef(r, src);
+    if (x > best) best = x;
+  }
+  return best;
+}
+static void perfMotorLearn(float winSpeed, float cellBest, int hwBin, int pitchBin) {
+  if (cellBest <= 0.1f) return;
+  if (hwBin >= 0 && perfMotorWind[hwBin].nWin < 200) {
+    perfMotorWind[hwBin].nWin++;
+    perfMotorWind[hwBin].sumW += 1.0f;
+    perfMotorWind[hwBin].sumW_ratio += winSpeed / cellBest;
+    perfMotorWind[hwBin].value = perfMotorWind[hwBin].sumW_ratio / perfMotorWind[hwBin].sumW;
+    perfMotorWind[hwBin].valid = 1;
+  }
+  float wc = perfWindCorrAt(hwBin);   // isolate pitch on the wind-corrected residual
+  if (pitchBin >= 0 && perfMotorPitch[pitchBin].nWin < 200) {
+    perfMotorPitch[pitchBin].nWin++;
+    perfMotorPitch[pitchBin].sumW += 1.0f;
+    perfMotorPitch[pitchBin].sumW_ratio += winSpeed / (cellBest * (wc > 0.1f ? wc : 1.0f));
+    perfMotorPitch[pitchBin].value = perfMotorPitch[pitchBin].sumW_ratio / perfMotorPitch[pitchBin].sumW;
+    perfMotorPitch[pitchBin].valid = 1;
+  }
+}
+static void perfMotorScore(float winSpeed, float pred) {
+  if (pred <= 0.1f) return;
+  float scalar = winSpeed / pred;
+  perfMotorMon.foulingScalar = scalar;
+  float d = 1.0f - scalar;
+  perfMotorMon.cusumNeg = fmaxf(0.0f, perfMotorMon.cusumNeg + (d - perfCusumK));
+  perfMotorMon.winCount++;
+  perfMotorMon.status = (perfMotorMon.cusumNeg > perfCusumH) ? 2 : 1;
+}
+float perfMotorCoveragePct() {
+  if (!perfMotor) return 0.0f;
+  int valid = 0, withData = 0;
+  for (int i = 0; i < PERF_RPM_BINS; i++) {
+    if (perfMotor[i].nWin) withData++;
+    if (perfMotor[i].valid) valid++;
+  }
+  if (withData == 0) return 0.0f;
+  return 100.0f * (float)valid / (float)withData;
+}
+
+// ---- sliding window ----
+static void perfResetWindow(uint32_t nowMs) {
+  perfWinStartMs = nowMs;
+  perfWin_n = 0;
+  perfWin_ws = perfWin_ws2 = 0;
+  perfWin_waS = perfWin_waC = 0;
+  perfWin_pitch = perfWin_pitch2 = 0;
+  perfWin_stw = 0; perfWin_nstw = 0;
+  perfWin_sog = 0; perfWin_nsog = 0;
+  perfWin_hdgS = perfWin_hdgC = 0;
+  perfWin_rpm = perfWin_rpm2 = 0;
+}
+static void perfFinalizeWindow() {
+  double n = perfWin_n;
+  if (n < 5) return;                         // data dropout → discard
+  float wsMean = (float)(perfWin_ws / n);
+  float wsVar = (float)(perfWin_ws2 / n - (perfWin_ws / n) * (perfWin_ws / n));
+  if (wsVar < 0) wsVar = 0;
+  float wsStd = sqrtf(wsVar);
+  float waMean = (float)(atan2(perfWin_waS, perfWin_waC) * 180.0 / PI);
+  if (waMean < 0) waMean += 360.0f;
+  float pMean = (float)(perfWin_pitch / n);
+  float pVar = (float)(perfWin_pitch2 / n - pMean * pMean);
+  if (pVar < 0) pVar = 0;
+  float pitchStd = sqrtf(pVar);              // sea-state metric (locked: 60s std of pitch)
+  float rpmMean = (float)(perfWin_rpm / n);
+  float rpmVar = (float)(perfWin_rpm2 / n - (perfWin_rpm / n) * (perfWin_rpm / n));
+  if (rpmVar < 0) rpmVar = 0;
+  float rpmStd = sqrtf(rpmVar);
+  float headwind = wsMean * cosf(waMean * (float)PI / 180.0f);   // fore-aft wind component (+ = headwind)
+
+  float waR = perfResultant(perfWin_waS, perfWin_waC, n);
+  float hdgR = perfResultant(perfWin_hdgS, perfWin_hdgC, n);
+  bool windHdgSteady = (wsStd <= perfWsTol) &&
+                       (waR >= perfRthresh(perfWaTol)) &&
+                       (hdgR >= perfRthresh(perfHdgTol));
+
+  // pick active speed source per the selector (Both prefers STW)
+  bool haveStw = perfWin_nstw >= (int)(n * 0.5);
+  bool haveSog = perfWin_nsog >= (int)(n * 0.5);
+  float stwMean = haveStw ? (float)(perfWin_stw / perfWin_nstw) : NAN;
+  float sogMean = haveSog ? (float)(perfWin_sog / perfWin_nsog) : NAN;
+  int src = 0; float spd = 0;
+  if (perfSpeedSrc == 1) { if (haveStw) { src = 1; spd = stwMean; } }
+  else if (perfSpeedSrc == 2) { if (haveSog) { src = 2; spd = sogMean; } }
+  else { if (haveStw) { src = 1; spd = stwMean; } else if (haveSog) { src = 2; spd = sogMean; } }
+
+  bool motoring = (rpmMean > perfRpmFloor);   // engine on (incl. motorsailing) → RPM map
+
+  if (motoring) {
+    // ---- MOTORING: speed = base(RPM) × windCorr(headwind) × pitchDerate ----
+    int rb = perfRpmBin(rpmMean), hwb = perfWindcBin(headwind), pb = perfPitchBin(pitchStd);
+    perfLiveValid = false;        // sailing dot off while motoring
+    motorLiveValid = false;
+    if (src != 0 && rb >= 0) {
+      float best = perfMotorBestAt(rb, src);
+      float pred = best * perfWindCorrAt(hwb) * perfMotorPitchAt(pb);
+      motorLive_rpm = rpmMean; motorLive_hw = headwind; motorLive_spd = spd;
+      motorLive_best = pred; motorLiveSrc = (uint8_t)src;
+      motorLive_pct = (pred > 0.1f) ? (spd / pred * 100.0f) : 0.0f;
+      motorLiveValid = (best > 0);
+    }
+    if (perfPaused >= 0.5f || (hardwarePresent != 1 && perfSimMode < 0.5f)) return;
+    if (!windHdgSteady || rpmStd > perfRpmTol || src == 0) return;
+    if (spd < perfMinBoatSpeed || rb < 0) return;
+    perfMotor[rb].nWin++;
+    perfMotor[rb].sumW += 1.0f;
+    perfMotor[rb].sumW_ws += rpmMean;     // centroid: RPM
+    perfMotor[rb].sumW_wa += headwind;    // centroid: headwind
+    perfMotor[rb].sumW_pitch += pitchStd;
+    if (haveStw) perfMotorInsertBest(rb, 1, stwMean);
+    if (haveSog) perfMotorInsertBest(rb, 2, sogMean);
+    if (perfMotorCellRef(rb, src) > 0) perfMotor[rb].valid = 1;
+    float cellBest = perfMotorBestAt(rb, src);
+    if (cellBest > 0) {
+      perfMotorLearn(spd, cellBest, hwb, pb);
+      perfMotorScore(spd, cellBest * perfWindCorrAt(hwb) * perfMotorPitchAt(pb));
+    }
+    return;
+  }
+
+  // ---- SAILING: V_best(windspeed, windangle) × pitchDerate ----
+  int wsb = perfWsBin(wsMean), wab = perfWaBin(waMean);
+  motorLiveValid = false;        // motoring dot off while sailing
+  perfLiveValid = false;
+  if (src != 0 && wsb >= 0 && wab >= 0 && wsMean >= perfMinWindSpeed) {
+    float best = perfBestAt(wsb, wab, src);
+    float pred = best * perfPitchDerateAt(perfPitchBin(pitchStd));
+    perfLive_ws = wsMean; perfLive_wa = waMean; perfLive_spd = spd;
+    perfLive_pitch = pitchStd; perfLive_best = pred; perfLiveSrc = (uint8_t)src;
+    perfLive_pct = (pred > 0.1f) ? (spd / pred * 100.0f) : 0.0f;
+    perfLiveValid = (best > 0);
+  }
+  if (perfPaused >= 0.5f || (hardwarePresent != 1 && perfSimMode < 0.5f)) return;   // sticky pause / sim-device = display-only (bench simulator overrides)
+  if (!windHdgSteady || src == 0) return;
+  if (wsMean < perfMinWindSpeed || spd < perfMinBoatSpeed) return;
+  if (wsb < 0 || wab < 0) return;
+
+  int idx = PERF_SIDX(wsb, wab);
+  perfSail[idx].nWin++;
+  perfSail[idx].sumW += 1.0f;
+  perfSail[idx].sumW_ws += wsMean;
+  perfSail[idx].sumW_wa += waMean;
+  perfSail[idx].sumW_pitch += pitchStd;
+  if (haveStw) perfInsertBest(idx, 1, stwMean);
+  if (haveSog) perfInsertBest(idx, 2, sogMean);
+  if (perfCellRef(idx, src) > 0) perfSail[idx].valid = 1;
+
+  float cellBest = perfBestAt(wsb, wab, src);
+  if (cellBest > 0) {
+    perfLearnPitch(spd, cellBest, perfPitchBin(pitchStd));
+    perfScore(spd, cellBest * perfPitchDerateAt(perfPitchBin(pitchStd)));
+  }
+}
+// ---- NMEA SIMULATOR (bench testing, no boat) ----
+// Writes ONLY to dedicated perfSim* vars (never the real NMEA/RPM/IMU globals) so it can't
+// touch the control loop or other subsystems. Sweeps a small set of operating points and
+// computes a synthetic STW from a physics model (sailing polar / speed-vs-RPM) × sea-state
+// derate × a slow fouling ramp + noise — so the maps converge and the fouling CUSUM trips.
+static float perfSimTws = 0, perfSimTwa = 0, perfSimStw = 0, perfSimSog = 0;
+static float perfSimHdg = 90, perfSimPitch = 0, perfSimRpm = 0;
+static int   perfSimIdx = 0, perfSimLoops = 0;
+static uint32_t perfSimPtStartMs = 0;
+static float perfSimFoul = 1.0f;
+struct PerfSimPt { uint8_t motor; float tws; float twa; float rpm; float sea; };
+static const PerfSimPt PERF_SIM_PTS[] = {
+  {0, 10,  45, 0, 0.8f}, {0, 10,  75, 0, 1.0f}, {0, 10, 105, 0, 1.5f}, {0, 10, 135, 0, 2.0f},
+  {0, 15,  65, 0, 1.5f}, {0, 15, 110, 0, 3.0f}, {0, 16, 150, 0, 4.0f},
+  {1,  6,  40, 1500, 1.0f}, {1, 10, 30, 2300, 2.5f}, {1, 5, 20, 3200, 1.5f},
+};
+#define PERF_SIM_NPTS (int)(sizeof(PERF_SIM_PTS) / sizeof(PERF_SIM_PTS[0]))
+
+static void perfSimTick(uint32_t nowMs) {
+  uint32_t hold = (uint32_t)(5.0f * perfWindowSec * 1000.0f);   // ~5 windows per point → cells graduate
+  if (hold < 20000) hold = 20000;
+  if (perfSimPtStartMs == 0) perfSimPtStartMs = nowMs;
+  if (nowMs - perfSimPtStartMs >= hold) {
+    perfSimPtStartMs = nowMs;
+    if (++perfSimIdx >= PERF_SIM_NPTS) { perfSimIdx = 0; perfSimLoops++; }
+  }
+  const PerfSimPt &p = PERF_SIM_PTS[perfSimIdx];
+  float headwind = p.tws * cosf(p.twa * (float)PI / 180.0f);
+  float v;
+  if (p.motor) {
+    v = 7.0f * (1.0f - expf(-p.rpm / 1500.0f)) - 0.02f * headwind;
+  } else {
+    float pa = p.twa; if (pa > 180) pa = 360 - pa;
+    float eff = sinf((float)PI * (pa - 20.0f) / 160.0f); if (eff < 0) eff = 0;  // peaks ~100°, 0 at 20°/180°
+    v = p.tws * 0.55f * eff;
+    if (v > 7.5f) v = 7.5f;                                   // hull-speed cap
+  }
+  float seaStd = p.sea / 1.414f;
+  v *= (1.0f - 0.025f * seaStd);                             // rougher seas → slower
+  if (perfSimLoops >= 2) perfSimFoul -= 0.0005f;             // after 2 full sweeps, ramp fouling
+  if (perfSimFoul < 0.85f) perfSimFoul = 0.85f;
+  v *= perfSimFoul;
+  v *= 1.0f + (float)random(-30, 31) / 1000.0f;             // ±3% noise
+  if (v < 0.2f) v = 0.2f;
+  perfSimPitch = p.sea * sinf(2.0f * (float)PI * (float)(nowMs % 4000) / 4000.0f);  // wave-like pitch
+  perfSimTws = p.tws; perfSimTwa = p.twa; perfSimHdg = 90.0f;
+  perfSimRpm = p.motor ? p.rpm : 0.0f;
+  perfSimStw = v; perfSimSog = v;                            // no current; SOG == STW
+}
+
+static void perfProcessSample(uint32_t nowMs) {
+  float ws, wa, hdg, pitch, rpm, stw, sog;
+  bool haveStw, haveSog;
+  if (perfSimMode >= 0.5f) {                                 // bench simulator: read the sim vars
+    ws = perfSimTws; wa = perfSimTwa; hdg = perfSimHdg; pitch = perfSimPitch; rpm = perfSimRpm;
+    stw = perfSimStw; sog = perfSimSog; haveStw = true; haveSog = true;
+  } else {
+    // axis wind = TRUE wind (locked), apparent fallback
+    if (!IS_STALE(IDX_TRUE_WIND_SPEED) && !isnan(TrueWindSpeedNMEA)) {
+      ws = TrueWindSpeedNMEA; wa = TrueWindAngleNMEA;
+    } else if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && !isnan(ApparentWindSpeedNMEA)) {
+      ws = ApparentWindSpeedNMEA; wa = ApparentWindAngleNMEA;
+    } else return;
+    if (isnan(ws) || isnan(wa)) return;
+    hdg = HeadingNMEA; pitch = imu_pitch_deg; rpm = RPM;
+    haveStw = (!IS_STALE(IDX_STW_NMEA) && !isnan(STWNMEA)); stw = STWNMEA;
+    haveSog = (!IS_STALE(IDX_SOG_NMEA)); sog = SOGNMEA;
+  }
+
+  float waRad = wa * (float)PI / 180.0f;
+  float hdgRad = hdg * (float)PI / 180.0f;
+  perfWin_n += 1.0;
+  perfWin_ws += ws; perfWin_ws2 += (double)ws * ws;
+  perfWin_waS += sin(waRad); perfWin_waC += cos(waRad);
+  perfWin_pitch += pitch; perfWin_pitch2 += (double)pitch * pitch;
+  perfWin_hdgS += sin(hdgRad); perfWin_hdgC += cos(hdgRad);
+  perfWin_rpm += rpm; perfWin_rpm2 += (double)rpm * rpm;
+  if (haveStw) { perfWin_stw += stw; perfWin_nstw++; }
+  if (haveSog) { perfWin_sog += sog; perfWin_nsog++; }
+
+  if (nowMs - perfWinStartMs >= (uint32_t)(perfWindowSec * 1000.0f)) {
+    perfFinalizeWindow();
+    perfResetWindow(nowMs);
+  }
+}
+
+// ---- live telemetry registry (PILOT: single source of truth for payload + schema) ----
+// One {name, getter} table builds BOTH the PerfLive payload AND the /perfschema field list,
+// so the firmware↔dashboard field contract cannot desync (no hand-kept parallel JS array,
+// no format-string/count drift). Adding a field = add ONE row. All values sent as floats.
+struct PerfLiveField { const char *name; float (*get)(); };
+static float plf_valid()    { return (float)perfLiveValid; }
+static float plf_ws()       { return perfLive_ws; }
+static float plf_wa()       { return perfLive_wa; }
+static float plf_spd()      { return perfLive_spd; }
+static float plf_best()     { return perfLive_best; }
+static float plf_pct()      { return perfLive_pct; }
+static float plf_pitchStd() { return perfLive_pitch; }
+static float plf_src()      { return (float)perfLiveSrc; }
+static float plf_status()   { return (float)perfSailMon.status; }
+static float plf_fouling()  { return perfSailMon.foulingScalar; }
+static float plf_coverage() { return perfCoveragePct(); }
+static float plf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
+static float plf_winCount() { return (float)perfSailMon.winCount; }
+static float plf_tickWin()  { return (float)ft_boatPerf.worstWindow; }   // µs — Core-1 cost diagnostic
+static float plf_tickSes()  { return (float)ft_boatPerf.worstSession; }  // µs since last Reset Peak Values
+static float plf_sim()      { return (perfSimMode >= 0.5f) ? 1.0f : 0.0f; }
+static PerfLiveField PERF_LIVE[] = {
+  {"valid", plf_valid}, {"ws", plf_ws}, {"wa", plf_wa}, {"spd", plf_spd},
+  {"best", plf_best}, {"pct", plf_pct}, {"pitchStd", plf_pitchStd}, {"src", plf_src},
+  {"status", plf_status}, {"fouling", plf_fouling}, {"coverage", plf_coverage},
+  {"paused", plf_paused}, {"winCount", plf_winCount},
+  {"tickWinUs", plf_tickWin}, {"tickSesUs", plf_tickSes}, {"sim", plf_sim},
+};
+static const size_t PERF_LIVE_COUNT = sizeof(PERF_LIVE) / sizeof(PERF_LIVE[0]);
+
+static void perfSendLive() {
+  char buf[224];
+  int off = 0;
+  for (size_t i = 0; i < PERF_LIVE_COUNT; i++)
+    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_LIVE[i].get());
+  events.send(buf, "PerfLive");
+}
+
+// Motoring live registry (same {name,getter} pattern; schema served alongside under "motorLive").
+static float pmlf_valid()    { return (float)motorLiveValid; }
+static float pmlf_rpm()      { return motorLive_rpm; }
+static float pmlf_headwind() { return motorLive_hw; }
+static float pmlf_spd()      { return motorLive_spd; }
+static float pmlf_best()     { return motorLive_best; }
+static float pmlf_pct()      { return motorLive_pct; }
+static float pmlf_src()      { return (float)motorLiveSrc; }
+static float pmlf_status()   { return (float)perfMotorMon.status; }
+static float pmlf_fouling()  { return perfMotorMon.foulingScalar; }
+static float pmlf_coverage() { return perfMotorCoveragePct(); }
+static float pmlf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
+static float pmlf_winCount() { return (float)perfMotorMon.winCount; }
+static PerfLiveField PERF_MOTOR_LIVE[] = {
+  {"valid", pmlf_valid}, {"rpm", pmlf_rpm}, {"headwind", pmlf_headwind}, {"spd", pmlf_spd},
+  {"best", pmlf_best}, {"pct", pmlf_pct}, {"src", pmlf_src}, {"status", pmlf_status},
+  {"fouling", pmlf_fouling}, {"coverage", pmlf_coverage}, {"paused", pmlf_paused}, {"winCount", pmlf_winCount},
+};
+static const size_t PERF_MOTOR_LIVE_COUNT = sizeof(PERF_MOTOR_LIVE) / sizeof(PERF_MOTOR_LIVE[0]);
+static void perfSendMotorLive() {
+  char buf[224];
+  int off = 0;
+  for (size_t i = 0; i < PERF_MOTOR_LIVE_COUNT; i++)
+    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), PERF_MOTOR_LIVE[i].get());
+  events.send(buf, "MotorLive");
+}
+
+// ---- persistence (Phase-0 scaffold; field-off-gated by caller) ----
+void boatPerfSave() {
+  if (!perfSail || hardwarePresent != 1) return;
+  writePsramBlob("/perfsail.bin", PERF_SAIL_MAGIC, PERF_VER, 0,
+                 perfSail, sizeof(PerfCell), PERF_SAIL_CELLS, 0, PERF_SAIL_CELLS);
+  writePsramBlob("/perfpitch.bin", PERF_PITCH_MAGIC, PERF_VER, 0,
+                 perfSailPitch, sizeof(PerfCorr), PERF_PITCH_BINS, 0, PERF_PITCH_BINS);
+  writePsramBlob("/perfmon.bin", PERF_MON_MAGIC, PERF_VER, 0,
+                 &perfSailMon, sizeof(PerfMonitor), 1, 0, 1);
+  if (perfMotor) {
+    writePsramBlob("/motorbase.bin", PERF_MOTOR_MAGIC, PERF_VER, 0,
+                   perfMotor, sizeof(PerfCell), PERF_RPM_BINS, 0, PERF_RPM_BINS);
+    writePsramBlob("/motorwind.bin", PERF_MWIND_MAGIC, PERF_VER, 0,
+                   perfMotorWind, sizeof(PerfCorr), PERF_WINDC_BINS, 0, PERF_WINDC_BINS);
+    writePsramBlob("/motorpitch.bin", PERF_MPITCH_MAGIC, PERF_VER, 0,
+                   perfMotorPitch, sizeof(PerfCorr), PERF_PITCH_BINS, 0, PERF_PITCH_BINS);
+    writePsramBlob("/motormon.bin", PERF_MMON_MAGIC, PERF_VER, 0,
+                   &perfMotorMon, sizeof(PerfMonitor), 1, 0, 1);
+  }
+}
+// ---- cloud upload: build a compact JSON of populated cells (capped to the queue buffer) ----
+// Schema: {device_uid,token,ts, sail_bins, motor_bins,
+//          sail:[[wsb,wab,nWin,valid,bestStw,bestSog,cenWs,cenWa,cenPitch], ...],
+//          motor:[[rb,nWin,valid,bestStw,bestSog,cenRpm,cenHw,cenPitch], ...],
+//          sail_fouling, motor_fouling, trunc}.  Cloud fits the surface + cross-boat compare.
+bool buildBoatPerfPayload(char *buf, size_t size) {
+  if (!perfSail || authToken.isEmpty()) return false;
+  time_t now_ts = time(NULL);
+  int off = snprintf(buf, size,
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\","
+    "\"sail_bins\":[%d,%d],\"motor_bins\":%d,\"sail\":[",
+    device_id_hex, authToken.c_str(), formatTimestamp(now_ts),
+    PERF_WS_BINS, PERF_WA_BINS, PERF_RPM_BINS);
+  if (off < 0 || (size_t)off >= size) return false;
+
+  int trunc = 0;
+  bool first = true;
+  for (int i = 0; i < PERF_SAIL_CELLS; i++) {
+    if (!perfSail[i].nWin) continue;
+    if (size - (size_t)off < 110) { trunc = 1; break; }   // keep margin for the closers
+    int wsb = i / PERF_WA_BINS, wab = i % PERF_WA_BINS;
+    float inv = 1.0f / (float)perfSail[i].nWin;
+    off += snprintf(buf + off, size - off, "%s[%d,%d,%u,%d,%.2f,%.2f,%.1f,%.0f,%.2f]",
+                    first ? "" : ",", wsb, wab, (unsigned)perfSail[i].nWin, (int)perfSail[i].valid,
+                    perfCellRef(i, 1), perfCellRef(i, 2),
+                    perfSail[i].sumW_ws * inv, perfSail[i].sumW_wa * inv, perfSail[i].sumW_pitch * inv);
+    first = false;
+  }
+  off += snprintf(buf + off, size - off, "],\"motor\":[");
+  first = true;
+  for (int i = 0; perfMotor && i < PERF_RPM_BINS; i++) {
+    if (!perfMotor[i].nWin) continue;
+    if (size - (size_t)off < 96) { trunc = 1; break; }
+    float inv = 1.0f / (float)perfMotor[i].nWin;
+    off += snprintf(buf + off, size - off, "%s[%d,%u,%d,%.2f,%.2f,%.0f,%.1f,%.2f]",
+                    first ? "" : ",", i, (unsigned)perfMotor[i].nWin, (int)perfMotor[i].valid,
+                    perfMotorCellRef(i, 1), perfMotorCellRef(i, 2),
+                    perfMotor[i].sumW_ws * inv, perfMotor[i].sumW_wa * inv, perfMotor[i].sumW_pitch * inv);
+    first = false;
+  }
+  off += snprintf(buf + off, size - off, "],\"sail_fouling\":%.3f,\"motor_fouling\":%.3f,\"trunc\":%d}",
+                  perfSailMon.foulingScalar, perfMotorMon.foulingScalar, trunc);
+  if (off < 0 || (size_t)off >= size - 1) return false;
+  return true;
+}
+
+static void boatPerfLoad() {
+  uint32_t uw;
+  readPsramBlob("/perfsail.bin", PERF_SAIL_MAGIC, PERF_VER, perfSail, sizeof(PerfCell), PERF_SAIL_CELLS, &uw, false);
+  readPsramBlob("/perfpitch.bin", PERF_PITCH_MAGIC, PERF_VER, perfSailPitch, sizeof(PerfCorr), PERF_PITCH_BINS, &uw, false);
+  uint32_t got = readPsramBlob("/perfmon.bin", PERF_MON_MAGIC, PERF_VER, &perfSailMon, sizeof(PerfMonitor), 1, &uw, false);
+  if (got == 0) perfSailMon = PerfMonitor{};
+  if (perfMotor) {
+    readPsramBlob("/motorbase.bin", PERF_MOTOR_MAGIC, PERF_VER, perfMotor, sizeof(PerfCell), PERF_RPM_BINS, &uw, false);
+    readPsramBlob("/motorwind.bin", PERF_MWIND_MAGIC, PERF_VER, perfMotorWind, sizeof(PerfCorr), PERF_WINDC_BINS, &uw, false);
+    readPsramBlob("/motorpitch.bin", PERF_MPITCH_MAGIC, PERF_VER, perfMotorPitch, sizeof(PerfCorr), PERF_PITCH_BINS, &uw, false);
+    uint32_t mgot = readPsramBlob("/motormon.bin", PERF_MMON_MAGIC, PERF_VER, &perfMotorMon, sizeof(PerfMonitor), 1, &uw, false);
+    if (mgot == 0) perfMotorMon = PerfMonitor{};
+  }
+}
+
+// ---- lifecycle ----
+void initBoatPerformance() {
+  perfSail = (PerfCell *)ps_malloc((size_t)PERF_SAIL_CELLS * sizeof(PerfCell));
+  perfSailPitch = (PerfCorr *)ps_malloc((size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
+  perfMotor = (PerfCell *)ps_malloc((size_t)PERF_RPM_BINS * sizeof(PerfCell));
+  perfMotorWind = (PerfCorr *)ps_malloc((size_t)PERF_WINDC_BINS * sizeof(PerfCorr));
+  perfMotorPitch = (PerfCorr *)ps_malloc((size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
+  if (!perfSail || !perfSailPitch || !perfMotor || !perfMotorWind || !perfMotorPitch) {
+    queueConsoleMessage("ERROR: BoatPerf ps_malloc failed");
+    return;
+  }
+  memset(perfSail, 0, (size_t)PERF_SAIL_CELLS * sizeof(PerfCell));
+  memset(perfSailPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
+  memset(perfMotor, 0, (size_t)PERF_RPM_BINS * sizeof(PerfCell));
+  memset(perfMotorWind, 0, (size_t)PERF_WINDC_BINS * sizeof(PerfCorr));
+  memset(perfMotorPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
+  perfSailMon = PerfMonitor{};
+  perfMotorMon = PerfMonitor{};
+  perfResetWindow(millis());
+  boatPerfLoad();
+  int valid = 0, withData = 0;
+  for (int i = 0; i < PERF_SAIL_CELLS; i++) {
+    if (perfSail[i].valid) valid++;
+    if (perfSail[i].nWin) withData++;
+  }
+  queueConsoleMessageF("BoatPerf init: sail %d cells (%d valid, %d w/data) + motor %d, %.1fKB PSRAM",
+                       PERF_SAIL_CELLS, valid, withData, PERF_RPM_BINS,
+                       (float)((size_t)(PERF_SAIL_CELLS + PERF_RPM_BINS) * sizeof(PerfCell)) / 1024.0f);
+}
+void resetBoatPerformance() {
+  if (!perfSail) return;
+  memset(perfSail, 0, (size_t)PERF_SAIL_CELLS * sizeof(PerfCell));
+  memset(perfSailPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
+  perfSailMon = PerfMonitor{};
+  if (perfMotor) {
+    memset(perfMotor, 0, (size_t)PERF_RPM_BINS * sizeof(PerfCell));
+    memset(perfMotorWind, 0, (size_t)PERF_WINDC_BINS * sizeof(PerfCorr));
+    memset(perfMotorPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
+    perfMotorMon = PerfMonitor{};
+  }
+  perfResetWindow(millis());
+  fsTakeLock();
+  LittleFS.remove("/perfsail.bin");
+  LittleFS.remove("/perfpitch.bin");
+  LittleFS.remove("/perfmon.bin");
+  LittleFS.remove("/motorbase.bin");
+  LittleFS.remove("/motorwind.bin");
+  LittleFS.remove("/motorpitch.bin");
+  LittleFS.remove("/motormon.bin");
+  fsReleaseLock();
+  queueConsoleMessage("BoatPerf: full reset (Clear all data)");
+}
+
+// ---- tick: ~1 Hz, call from loop() ----
+void boatPerf_tick(uint32_t nowMs) {
+  static uint32_t lastMs = 0;
+  if (!perfSail) return;
+  if (nowMs - lastMs < 1000) return;
+  lastMs = nowMs;
+  if (perfSimMode >= 0.5f) perfSimTick(nowMs);   // bench simulator feeds the sim vars first
+  perfProcessSample(nowMs);
+  perfSendLive();
+  perfSendMotorLive();
+  static uint8_t sc = 0;
+  if (++sc >= 5) { sc = 0; sendPerfSettings(); }
+}
+
+// ============================================================
+// BOAT PERFORMANCE — GUI-adjustable settings (registry-driven, like AltSettings).
+// ============================================================
+struct PerfSetting { const char *name; float *ptr; };
+static PerfSetting PERF_SETTINGS[] = {
+  {"perfWindowSec", &perfWindowSec}, {"perfWsTol", &perfWsTol}, {"perfWaTol", &perfWaTol},
+  {"perfHdgTol", &perfHdgTol}, {"perfMinBoatSpeed", &perfMinBoatSpeed}, {"perfMinWindSpeed", &perfMinWindSpeed},
+  {"perfRpmFloor", &perfRpmFloor}, {"perfRpmTol", &perfRpmTol}, {"perfCusumK", &perfCusumK},
+  {"perfCusumH", &perfCusumH}, {"perfSymmetric", &perfSymmetric}, {"perfSpeedSrc", &perfSpeedSrc},
+  {"perfPaused", &perfPaused},
+};
+static const size_t PERF_SETTING_COUNT = sizeof(PERF_SETTINGS) / sizeof(PERF_SETTINGS[0]);
+
+void perfSettingsLoad() {
+  for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
+    char path[48];
+    snprintf(path, sizeof(path), "/%s.txt", PERF_SETTINGS[i].name);
+    if (!fsExists(path)) writeFile(LittleFS, path, String(*PERF_SETTINGS[i].ptr, 4).c_str());
+    else *PERF_SETTINGS[i].ptr = readFile(LittleFS, path).toFloat();
+  }
+}
+bool perfSettingsHandle(AsyncWebServerRequest *request) {
+  bool handled = false;
+  for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
+    if (request->hasParam(PERF_SETTINGS[i].name)) {
+      *PERF_SETTINGS[i].ptr = request->getParam(PERF_SETTINGS[i].name)->value().toFloat();
+      char path[48];
+      snprintf(path, sizeof(path), "/%s.txt", PERF_SETTINGS[i].name);
+      writeFile(LittleFS, path, String(*PERF_SETTINGS[i].ptr, 4).c_str());
+      handled = true;
+    }
+  }
+  return handled;
+}
+void sendPerfSettings() {
+  char buf[256];
+  int off = 0;
+  for (size_t i = 0; i < PERF_SETTING_COUNT; i++)
+    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *PERF_SETTINGS[i].ptr);
+  events.send(buf, "PerfSettings");
+}
+
+// Self-describing schema (served at /perfschema). The dashboard fetches this ONCE on load
+// and zips these names against the PerfLive / PerfSettings payload values — so it never keeps
+// its own field array and can't fall out of sync with the firmware tables above.
+String perfSchemaJson() {
+  String s = "{\"live\":[";
+  for (size_t i = 0; i < PERF_LIVE_COUNT; i++) {
+    if (i) s += ",";
+    s += "\""; s += PERF_LIVE[i].name; s += "\"";
+  }
+  s += "],\"motorLive\":[";
+  for (size_t i = 0; i < PERF_MOTOR_LIVE_COUNT; i++) {
+    if (i) s += ",";
+    s += "\""; s += PERF_MOTOR_LIVE[i].name; s += "\"";
+  }
+  s += "],\"settings\":[";
+  for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
+    if (i) s += ",";
+    s += "\""; s += PERF_SETTINGS[i].name; s += "\"";
+  }
+  s += "]}";
+  return s;
+}
+
+
 // ===========================================================================
 // VOLTAGE MODE SUPPORT FUNCTIONS
 // ===========================================================================

@@ -140,6 +140,7 @@ SemaphoreHandle_t fsMutex = NULL;  // mutex protection for littlefs
 enum HttpsRequestType {
   HTTPS_UPLOAD_PAYLOAD,
   HTTPS_UPLOAD_CONFIG,
+  HTTPS_UPLOAD_BOATPERF,
   HTTPS_FETCH_WEATHER,
   HTTPS_UPDATE_FW_VERSION,
   HTTPS_CHECK_FORCED_UPDATE,
@@ -167,7 +168,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.120";
+const char *FIRMWARE_VERSION = "0.0.5";
 
 String currentUID;
 
@@ -277,6 +278,102 @@ float altFreezeSEM  = 1.0f;      // optional spread gate: also require visit-to-
 float altEwmaLambda = 0.01f;
 float altCusumK     = 0.5f;
 float altCusumH     = 5.0f;
+
+// ============================================================
+// BOAT PERFORMANCE — sailing polar (Phase 3). Pitch-corrected best-ever speed map.
+//   V_best(windspeed, windangle) × pitchDerate(pitch_std).  Predict STW (fallback SOG).
+//   Learning unit = sliding ~60 s windows; per-cell best-ever = robust top-K of window means.
+//   Fouling/current = one-sided CUSUM on recent ÷ best-ever.  Manual Pause (sticky) + Reset.
+//   Motoring map + web dashboard = follow-up slices. Full design: BOAT_PERFORMANCE_MATRIX_PLAN.md.
+// ============================================================
+#define PERF_WS_BINS    16         // wind-speed bands 0..40 kt
+#define PERF_WS_MAX     40.0f
+#define PERF_WA_BINS    36         // wind-angle bins 0..360° (symmetric fold uses 0..180 → first 18)
+#define PERF_WA_MAX     360.0f
+#define PERF_PITCH_BINS 6          // sea-state (pitch-std) bands for the 1-D derate
+#define PERF_PITCH_MAX  12.0f      // pitch std (deg) full scale
+#define PERF_SAIL_CELLS (PERF_WS_BINS * PERF_WA_BINS)   // 576
+#define PERF_TOPK       4          // best-ever = K best window-means; reference = min(topK) (robust high pct)
+
+// One sailing-polar cell: centroid of windows binned here + dual per-source best-ever top-K.
+struct PerfCell {
+  uint16_t nWin;                              // accepted windows binned here
+  float    sumW, sumW_ws, sumW_wa, sumW_pitch;  // → per-input centroid = Σx / nWin
+  float    bestSTW[PERF_TOPK];                // K best STW window-means (reference = min of these)
+  float    bestSOG[PERF_TOPK];                // K best SOG window-means
+  uint16_t nSTW, nSOG;                        // windows contributing per source
+  uint8_t  valid;                             // 1 = ≥1 source has a full top-K (trustable reference)
+  uint8_t  _pad;
+};
+
+// 1-D multiplicative correction (pitch derate): achievable-in-seas ÷ flat-water best.
+struct PerfCorr { uint16_t nWin; float sumW, sumW_ratio, value; uint8_t valid, _pad[1]; };
+
+struct PerfMonitor {               // one per map
+  float    foulingScalar;          // recent achievable ÷ best-ever (1.0 = at best)
+  float    cusumNeg;               // one-sided CUSUM on sustained decline
+  uint32_t winCount;
+  uint8_t  status;                 // 0 learning,1 at-best,2 fouling/current-drift,3 low-coverage
+  uint8_t  _pad[3];
+};
+
+static PerfCell    *perfSail      = nullptr;  // [PERF_SAIL_CELLS]
+static PerfCorr    *perfSailPitch = nullptr;  // [PERF_PITCH_BINS]
+static PerfMonitor  perfSailMon   = {};
+
+#define PERF_SIDX(wsb, wab)  ((wsb) * PERF_WA_BINS + (wab))
+
+// Sliding-window accumulator (one window in progress).
+static uint32_t perfWinStartMs = 0;
+static double   perfWin_n = 0;
+static double   perfWin_ws = 0, perfWin_ws2 = 0;          // wind speed sum, sumsq → mean + std gate
+static double   perfWin_waS = 0, perfWin_waC = 0;         // wind angle circular accum (sin/cos)
+static double   perfWin_pitch = 0, perfWin_pitch2 = 0;    // pitch sum, sumsq → window std (sea state)
+static double   perfWin_stw = 0;  int perfWin_nstw = 0;   // STW speed sum + fresh-sample count
+static double   perfWin_sog = 0;  int perfWin_nsog = 0;   // SOG speed sum + fresh-sample count
+static double   perfWin_hdgS = 0, perfWin_hdgC = 0;       // heading circular accum (tack reject)
+
+// Live point for the dashboard (polar red dot + % gauge), via PerfLive SSE.
+static float perfLive_ws = 0, perfLive_wa = 0, perfLive_spd = 0, perfLive_best = 0;
+static float perfLive_pitch = 0, perfLive_pct = 0;
+static bool  perfLiveValid = false;
+static uint8_t perfLiveSrc = 0;     // 0 none, 1 STW, 2 SOG
+
+// GUI-adjustable settings (registry-driven; build-then-tune). 0/1 flags carried as floats.
+float perfWindowSec   = 60.0f;      // sliding-window length
+float perfWsTol       = 2.0f;       // wind-speed std band over the window (kt) — anti-smear
+float perfWaTol       = 12.0f;      // wind-angle spread band over the window (deg)
+float perfHdgTol      = 15.0f;      // heading spread band (deg) — bigger spread = tack/maneuver → reject
+float perfMinBoatSpeed = 0.5f;      // admission floor (kt)
+float perfMinWindSpeed = 2.0f;      // admission floor (kt)
+float perfRpmFloor    = 50.0f;      // RPM ≤ this = engine off = sailing (above = motoring → deferred map)
+float perfCusumK      = 0.05f;      // fouling CUSUM slack (fraction slow per window)
+float perfCusumH      = 1.0f;       // fouling CUSUM alarm threshold
+float perfSymmetric   = 1.0f;       // 1 = fold port/stbd by |angle| (default); 0 = keep both tacks
+float perfSpeedSrc    = 0.0f;       // 0 = Both, 1 = STW only, 2 = SOG only
+float perfPaused      = 0.0f;       // 1 = halt learning/persist (sticky across reboot); live display still updates
+float perfRpmTol      = 100.0f;     // RPM steadiness band over the window (motoring map)
+float perfSimMode     = 0.0f;       // 1 = inject synthetic wind/speed/RPM/pitch for bench testing (no boat); NOT persisted
+
+// Motoring map — speed = base(RPM) × windCorr(headwind) × pitchDerate(pitch_std). Same RPM
+// signal as the alt map; engine RPM > perfRpmFloor = motoring (motorsailing counts as motoring).
+#define PERF_RPM_BINS   30          // 0..6000 RPM, 200-RPM bins
+#define PERF_RPM_MAX    6000.0f
+#define PERF_WINDC_BINS 12          // headwind component (1-D correction)
+#define PERF_WINDC_MIN  -40.0f      // tailwind
+#define PERF_WINDC_MAX   40.0f      // headwind
+
+static PerfCell    *perfMotor      = nullptr;  // [PERF_RPM_BINS]; centroid: sumW_ws=RPM, sumW_wa=headwind, sumW_pitch=pitch
+static PerfCorr    *perfMotorWind  = nullptr;  // [PERF_WINDC_BINS]
+static PerfCorr    *perfMotorPitch = nullptr;  // [PERF_PITCH_BINS]
+static PerfMonitor  perfMotorMon   = {};
+
+static double perfWin_rpm = 0, perfWin_rpm2 = 0;   // window RPM sum + sumsq (mean + std gate)
+
+// Motoring live point (speed-vs-RPM dashboard).
+static float motorLive_rpm = 0, motorLive_hw = 0, motorLive_spd = 0, motorLive_best = 0, motorLive_pct = 0;
+static bool  motorLiveValid = false;
+static uint8_t motorLiveSrc = 0;
 
 // Supabase configuration......similar stuff is locally defined in a few functions that upload sensor data, config snapshots to cloud
 const char *SUPABASE_URL = "https://qnbekuaoweuteylitzvo.supabase.co";
@@ -512,6 +609,20 @@ float cf_heel = 0;   // Filtered heel angle
 float cf_pitch = 0;  // Filtered pitch angle
 unsigned long cf_lastUpdate = 0;
 
+// --- IMU ZERO / LEVEL CALIBRATION (captured at rest, persisted to /imu_zero.json) ---
+float imuHeelOffsetDeg = 0;   // accel-derived heel at rest; subtracted from filter
+float imuPitchOffsetDeg = 0;  // accel-derived pitch at rest; subtracted from filter
+float imuGxBias = 0;          // gyro pitch-rate bias at rest (dps, vessel frame)
+float imuGyBias = 0;          // gyro heel-rate bias at rest (dps)
+float imuGzBias = 0;          // gyro yaw-rate bias at rest (dps)
+
+// Zero-capture state machine (averages ~2s of samples before storing)
+volatile bool imuZeroInProgress = false;
+double imuZeroAxSum = 0, imuZeroAySum = 0, imuZeroAzSum = 0;  // accel sums
+double imuZeroGxSum = 0, imuZeroGySum = 0, imuZeroGzSum = 0;  // gyro sums
+uint16_t imuZeroAccelN = 0, imuZeroGyroN = 0;
+const uint16_t IMU_ZERO_TARGET = 200;  // ~2s of accel samples at 104 Hz
+
 // --- WAVE PERIOD DETECTION STATE ---
 float wave_decimated_buffer[100];  // Circular buffer for decimated samples
 uint16_t wave_decim_head = 0;
@@ -550,6 +661,8 @@ const unsigned long CONFIG_SNAPSHOT_INTERVAL = 300000;    // 5 min — TEST (pro
 // SENSOR_UPLOAD_INTERVAL is firmware-only (no UI, no LittleFS) — edit + reflash to change.
 const unsigned long SENSOR_UPLOAD_INTERVAL = 120000;          // 2 min — TEST (production: 600000 = 10 min)
 const unsigned long BUFFER_UPLOAD_INTERVAL = 13000;  // 13 seconds
+const unsigned long BOATPERF_UPLOAD_INTERVAL = 600000;  // 10 min — TEST (production: 3600000 = 1 hr); field-off gated
+unsigned long lastBoatPerfUploadTime = 0;
 // TODO TEST — temporarily 15 min to validate the warning banner/popup/graceful shutdown.
 // Revert to 43200000 (12 hr) for production. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min.)
 //const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
@@ -1001,6 +1114,7 @@ float VictronCurrent = 0;              // battery Current (careful, can also be 
 float HeadingNMEA = 0;                 // Just here to test NMEA functionality
 float COGNMEA = 0;                     // Course Over Ground from NMEA2K (degrees)
 float SOGNMEA = 0;                     // Speed Over Ground from NMEA2K (knots)
+float STWNMEA = NAN;                   // Speed Through Water (SOW) from NMEA2K PGN 128259 (knots); NAN = no log
 double LatitudeNMEA = 0;               // from own ship AIS FIX LATER
 double LongitudeNMEA = 0;              // from own ship AIS FIX LATER
 float ApparentWindSpeedNMEA = 0;       // Apparent wind speed from NMEA2K (knots)
@@ -2019,6 +2133,7 @@ FuncTiming ft_rai_imu;             // IMU FIFO drain block
 FuncTiming ft_updateAccelMetrics;  // accel ring-buffer processing (updateAccelMetrics)
 FuncTiming ft_ReadVEData;
 FuncTiming ft_altHealth;
+FuncTiming ft_boatPerf;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -2476,6 +2591,7 @@ volatile bool pendingSaveTuningLog = false;
 volatile bool pendingSaveThermalTuningLog = false;
 volatile bool pendingSaveSystemIDLog = false;
 volatile bool pendingResetAlternatorHealth = false;
+volatile bool pendingResetBoatPerformance = false;
 volatile bool pendingClearOverheatHistory = false;
 volatile bool pendingSaveUserTableEdits = false;
 volatile bool pendingSaveVesselInfo = false;
@@ -3253,8 +3369,9 @@ enum DataIndex {
   IDX_DYNAMIC_SHUNT_GAIN,
   IDX_IMU,                       // 34 - IMU (accel/gyro/derived angles)
   IDX_WATER_DEPTH,               // 35 - NMEA2k WaterDepth (PGN 128267)
+  IDX_STW_NMEA,                  // 36 - Speed Through Water / SOW (PGN 128259) for the boat-performance polar
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 36
+  MAX_DATA_INDICES = 37
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -3731,6 +3848,7 @@ void setup() {
   memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
   memset(&ft_altHealth, 0, sizeof(FuncTiming));
+  memset(&ft_boatPerf, 0, sizeof(FuncTiming));
   memset(&ft_rai_total, 0, sizeof(FuncTiming));
   memset(&ft_rai_ina228, 0, sizeof(FuncTiming));
   memset(&ft_rai_ads_state, 0, sizeof(FuncTiming));
@@ -3750,6 +3868,8 @@ void setup() {
   saveNVSDataFull();  // Synchronous write — persists boot-time adjustments before loop() starts
   initAlternatorHealth();
   altSettingsLoad();
+  initBoatPerformance();
+  perfSettingsLoad();
   setCpuFrequencyMhz(240);
   pinMode(4, OUTPUT);     // This pin is used to provide a high signal to Field Enable pin
   digitalWrite(4, LOW);   // Start with field off
@@ -4062,6 +4182,10 @@ void loop() {
       pendingResetAlternatorHealth = false;
       resetAlternatorHealth();
     }
+    if (pendingResetBoatPerformance) {
+      pendingResetBoatPerformance = false;
+      resetBoatPerformance();
+    }
     if (pendingClearOverheatHistory) {
       pendingClearOverheatHistory = false;
       clearOverheatHistoryAction();
@@ -4128,6 +4252,7 @@ void loop() {
             setCpuFrequencyMhz(240);
             saveNVSDataFull();  // absolute latest values, no critical-zone gate
             altHealthSave();
+            boatPerfSave();
             uploadSensorHistory();  // save whatever is in the current window to local buffer
             if (pendingSaveCVTuningLog) {
               pendingSaveCVTuningLog = false;
@@ -4148,6 +4273,10 @@ void loop() {
             if (pendingResetAlternatorHealth) {
               pendingResetAlternatorHealth = false;
               resetAlternatorHealth();
+            }
+            if (pendingResetBoatPerformance) {
+              pendingResetBoatPerformance = false;
+              resetBoatPerformance();
             }
             if (pendingClearOverheatHistory) {
               pendingClearOverheatHistory = false;
@@ -4300,6 +4429,7 @@ void loop() {
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
       TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
+      TIMED_CALL(ft_boatPerf, boatPerf_tick(millis()));   // Phase 3 boat performance (timing exposed via PerfLive registry)
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
 
       // Sync legacy display variables
@@ -4350,6 +4480,7 @@ void loop() {
         if (!fieldOffMatrixFlushDone && !pendingShutdownFlush && !fieldNowActive
             && fieldOffEdgeMs > 0 && (millis() - fieldOffEdgeMs) >= 13000UL) {
           altHealthSave();
+          boatPerfSave();
           fieldOffMatrixFlushDone = true;
         }
       }
@@ -4408,6 +4539,20 @@ void loop() {
                 if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
                   queueConsoleMessage("Config snapshot: HTTPS queue full, will retry next interval");
                 }
+              }
+            }
+          }
+        }
+
+        // Boat-performance aggregates → cloud (field-off gated; sim never uploads).
+        if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastBoatPerfUploadTime >= BOATPERF_UPLOAD_INTERVAL) {
+          lastBoatPerfUploadTime = millis();
+          if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
+            HttpsRequest req = {};
+            req.type = HTTPS_UPLOAD_BOATPERF;
+            if (buildBoatPerfPayload(req.payload, sizeof(req.payload))) {
+              if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                queueConsoleMessage("BoatPerf upload: HTTPS queue full, will retry next interval");
               }
             }
           }
@@ -4479,6 +4624,7 @@ void loop() {
     ft_updateAccelMetrics.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
     ft_altHealth.worstWindow = 0;
+    ft_boatPerf.worstWindow = 0;
     voltLoopWorstInterval_5s = 0;
 
     prev_millis7888 = millis();

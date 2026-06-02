@@ -500,7 +500,11 @@ enum Csv2Index {
   CSV2_altCoveragePct,      // frozen / with-data % ×10
   CSV2_altObsCount,         // scored observations since freeze
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health fields = 449
+  // IMU zero/level calibration echo (Phase 2 IMU zero button)
+  CSV2_imuHeelOffset,       // captured rest heel offset (deg ×100)
+  CSV2_imuPitchOffset,      // captured rest pitch offset (deg ×100)
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health fields = 449; +2 imu-zero = 451
 };
 
 enum Csv3Index {
@@ -1913,6 +1917,144 @@ void setupServer() {
     request->send(response);
   });
 
+  // Boat-performance telemetry schema — the dashboard fetches this once and zips the names
+  // against the PerfLive/PerfSettings SSE values, so no field array is hand-kept in JS.
+  server.on("/perfschema", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", perfSchemaJson());
+  });
+
+  // Boat-performance sailing-polar model export (cells: centroid + dual-source best-ever).
+  server.on("/perfmodel.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!perfSail) {
+      request->send(200, "text/plain", "Boat performance model not initialized.");
+      return;
+    }
+    struct PerfExportState {
+      int idx;
+      bool header;
+      bool done;
+      char line[200];
+      int lineLen, linePos;
+    };
+    PerfExportState state;
+    state.idx = 0; state.header = true; state.done = false;
+    state.lineLen = 0; state.linePos = 0;
+
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "text/csv",
+      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (state.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state.linePos >= state.lineLen) {
+            if (state.header) {
+              state.lineLen = snprintf(state.line, sizeof(state.line),
+                "ws_bin,wa_bin,nWin,valid,best_stw,best_sog,cen_ws,cen_wa,cen_pitch\n");
+              state.header = false;
+            } else {
+              if (state.idx >= PERF_SAIL_CELLS) { state.done = true; return written; }
+              PerfCell &c = perfSail[state.idx];
+              int wsb = state.idx / PERF_WA_BINS;
+              int wab = state.idx % PERF_WA_BINS;
+              float bStw = perfCellRef(state.idx, 1);
+              float bSog = perfCellRef(state.idx, 2);
+              float cws = (c.nWin > 0) ? c.sumW_ws / c.nWin : 0.0f;
+              float cwa = (c.nWin > 0) ? c.sumW_wa / c.nWin : 0.0f;
+              float cp  = (c.nWin > 0) ? c.sumW_pitch / c.nWin : 0.0f;
+              state.lineLen = snprintf(state.line, sizeof(state.line),
+                "%d,%d,%u,%d,%.2f,%.2f,%.1f,%.0f,%.2f\n",
+                wsb, wab, (unsigned)c.nWin, (int)c.valid, bStw, bSog, cws, cwa, cp);
+              state.idx++;
+            }
+            state.linePos = 0;
+          }
+          size_t toWrite = min((size_t)(state.lineLen - state.linePos), maxLen - written);
+          memcpy(buf + written, state.line + state.linePos, toWrite);
+          written += toWrite;
+          state.linePos += (int)toWrite;
+        }
+        return written;
+      });
+
+    char perfTs[20] = "export";
+    if (timeIsSynced) {
+      time_t pNow = time(nullptr);
+      struct tm pTm;
+      localtime_r(&pNow, &pTm);
+      strftime(perfTs, sizeof(perfTs), "%Y%m%d_%H%M%S", &pTm);
+    }
+    char perfDisp[80];
+    snprintf(perfDisp, sizeof(perfDisp), "attachment; filename=\"BoatPerfModel_%s.csv\"", perfTs);
+    response->addHeader("Content-Disposition", perfDisp);
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // Boat-performance motoring model export (1-D RPM cells: centroid + dual-source best-ever).
+  server.on("/motormodel.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!perfMotor) {
+      request->send(200, "text/plain", "Motoring model not initialized.");
+      return;
+    }
+    struct MotorExportState {
+      int idx;
+      bool header;
+      bool done;
+      char line[200];
+      int lineLen, linePos;
+    };
+    MotorExportState state;
+    state.idx = 0; state.header = true; state.done = false;
+    state.lineLen = 0; state.linePos = 0;
+
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "text/csv",
+      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (state.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (state.linePos >= state.lineLen) {
+            if (state.header) {
+              state.lineLen = snprintf(state.line, sizeof(state.line),
+                "rpm_bin,nWin,valid,best_stw,best_sog,cen_rpm,cen_headwind,cen_pitch\n");
+              state.header = false;
+            } else {
+              if (state.idx >= PERF_RPM_BINS) { state.done = true; return written; }
+              PerfCell &c = perfMotor[state.idx];
+              float bStw = perfMotorCellRef(state.idx, 1);
+              float bSog = perfMotorCellRef(state.idx, 2);
+              float crpm = (c.nWin > 0) ? c.sumW_ws / c.nWin : 0.0f;   // sumW_ws holds RPM centroid
+              float chw  = (c.nWin > 0) ? c.sumW_wa / c.nWin : 0.0f;   // sumW_wa holds headwind centroid
+              float cp   = (c.nWin > 0) ? c.sumW_pitch / c.nWin : 0.0f;
+              state.lineLen = snprintf(state.line, sizeof(state.line),
+                "%d,%u,%d,%.2f,%.2f,%.0f,%.1f,%.2f\n",
+                state.idx, (unsigned)c.nWin, (int)c.valid, bStw, bSog, crpm, chw, cp);
+              state.idx++;
+            }
+            state.linePos = 0;
+          }
+          size_t toWrite = min((size_t)(state.lineLen - state.linePos), maxLen - written);
+          memcpy(buf + written, state.line + state.linePos, toWrite);
+          written += toWrite;
+          state.linePos += (int)toWrite;
+        }
+        return written;
+      });
+
+    char mTs[20] = "export";
+    if (timeIsSynced) {
+      time_t mNow = time(nullptr);
+      struct tm mTm;
+      localtime_r(&mNow, &mTm);
+      strftime(mTs, sizeof(mTs), "%Y%m%d_%H%M%S", &mTm);
+    }
+    char mDisp[80];
+    snprintf(mDisp, sizeof(mDisp), "attachment; filename=\"MotoringModel_%s.csv\"", mTs);
+    response->addHeader("Content-Disposition", mDisp);
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   server.on("/cvlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!cvLogReady || !cvLog || cvLogCount == 0) {
       request->send(200, "application/octet-stream", "");
@@ -2449,6 +2591,19 @@ void setupServer() {
       foundParameter = true;
       sendAltSettings();
     }
+    else if (request->hasParam("ResetBoatPerformance")) {
+      foundParameter = true;
+      pendingResetBoatPerformance = true;  // deferred to Core 1 to avoid SSE gap (Clear all data)
+    }
+    else if (request->hasParam("perfSimMode")) {
+      foundParameter = true;
+      perfSimMode = request->getParam("perfSimMode")->value().toFloat();  // bench NMEA simulator (not persisted)
+    }
+    // Boat-performance polar settings (registry-driven, incl. sticky Pause + speed-source selector)
+    if (perfSettingsHandle(request)) {
+      foundParameter = true;
+      sendPerfSettings();
+    }
 
     if (request->hasParam("ManualDutyTarget")) {
       foundParameter = true;
@@ -2846,6 +3001,30 @@ void setupServer() {
       foundParameter = true;
       ResetAlarmLatch = 1;  // Set the flag - don't save to file as it's momentary
       queueConsoleMessage("ALARM LATCH: Reset requested from web interface NO FUNCTION!");
+      inputMessage = "1";
+    }
+    if (request->hasParam("ZeroIMU")) {
+      foundParameter = true;
+      if (!imuEnabled) {
+        queueConsoleMessage("IMU ZERO: rejected — IMU not enabled");
+      } else if (imuZeroInProgress) {
+        queueConsoleMessage("IMU ZERO: already in progress");
+      } else {
+        // Start a fresh capture window; offsets are written when N samples collected
+        imuZeroAxSum = imuZeroAySum = imuZeroAzSum = 0;
+        imuZeroGxSum = imuZeroGySum = imuZeroGzSum = 0;
+        imuZeroAccelN = imuZeroGyroN = 0;
+        imuZeroInProgress = true;
+        queueConsoleMessage("IMU ZERO: hold still ~2s, capturing level reference");
+      }
+      inputMessage = "1";
+    }
+    if (request->hasParam("ClearIMUZero")) {
+      foundParameter = true;
+      imuHeelOffsetDeg = imuPitchOffsetDeg = 0;
+      imuGxBias = imuGyBias = imuGzBias = 0;
+      LittleFS.remove("/imu_zero.json");
+      queueConsoleMessage("IMU ZERO: calibration cleared");
       inputMessage = "1";
     }
 
@@ -4161,6 +4340,7 @@ void setupServer() {
       ft_updateAccelMetrics.worstSession = 0;
       ft_ReadVEData.worstSession = 0;
       ft_altHealth.worstSession = 0;
+      ft_boatPerf.worstSession = 0;
       VeTime2 = 0;
       // CPU load maxes
       cpuLoadCore0Max = 0;
@@ -5517,7 +5697,8 @@ void SendWifiData() {
                                // restartRemainingSec + GPS/time source labels + loggingActive
                                "%d,%d,%d,%d,"
                                // VMGUpwind + sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs (lo/hi)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               // ...4 alt-health + 2 imu-zero offsets
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -5962,7 +6143,9 @@ void SendWifiData() {
                                SafeInt(altHealthPct(), 10),              // CSV2_altHealthPct
                                (int)altHealth.status,                    // CSV2_altHealthStatus
                                SafeInt(altCoveragePct(), 10),            // CSV2_altCoveragePct
-                               (int)altHealth.obsCount                   // CSV2_altObsCount
+                               (int)altHealth.obsCount,                  // CSV2_altObsCount
+                               SafeInt(imuHeelOffsetDeg, 100),           // CSV2_imuHeelOffset
+                               SafeInt(imuPitchOffsetDeg, 100)           // CSV2_imuPitchOffset
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);

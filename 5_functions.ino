@@ -288,6 +288,12 @@ void Speed(const tN2kMsg &N2kMsg) {
   tN2kSpeedWaterReferenceType SWRT;
 
   if (ParseN2kBoatSpeed(N2kMsg, SID, SOW, SOG, SWRT)) {
+    // Surface speed-through-water (SOW) for the boat-performance polar — removes current,
+    // unlike SOG. SOG stays sourced from the COG/SOG rapid PGN (its canonical source).
+    if (!N2kIsNA(SOW)) {
+      STWNMEA = SOW * 1.94384;      // m/s → knots
+      MARK_FRESH(IDX_STW_NMEA);
+    }
     OutputStream->print("Boat speed:");
     PrintLabelValWithConversionCheckUnDef(" SOW:", N2kIsNA(SOW) ? SOW : msToKnots(SOW));
     PrintLabelValWithConversionCheckUnDef(", SOG:", N2kIsNA(SOG) ? SOG : msToKnots(SOG));
@@ -3354,7 +3360,7 @@ void calculateDerivedMetrics() {
   // it from a True_North / Magnetic / True_boat reference). Only derive from apparent
   // when no upstream true source is available.
   if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && !IS_STALE(IDX_APPARENT_WIND_ANGLE) &&
-      !IS_STALE(IDX_SOG_NMEA) && !IS_STALE(IDX_HEADING_NMEA) &&
+      (!IS_STALE(IDX_STW_NMEA) || !IS_STALE(IDX_SOG_NMEA)) && !IS_STALE(IDX_HEADING_NMEA) &&
       IS_STALE(IDX_TRUE_WIND_SPEED)) {
 
     // Convert apparent wind angle to radians for calculation
@@ -3365,9 +3371,12 @@ void calculateDerivedMetrics() {
     float awsX = ApparentWindSpeedNMEA * sin(awaRad);  // Apparent wind X component
     float awsY = ApparentWindSpeedNMEA * cos(awaRad);  // Apparent wind Y component
 
-    // Subtract boat speed (boat speed is in direction of heading, so Y component)
+    // Subtract boat speed (boat speed is in direction of heading, so Y component).
+    // Prefer speed-through-water (STW) — it removes current so true wind isn't contaminated;
+    // fall back to SOG when no water-speed log is present.
+    float boatSpeedTW = (!IS_STALE(IDX_STW_NMEA) && !isnan(STWNMEA)) ? STWNMEA : SOGNMEA;
     float twsX = awsX;
-    float twsY = awsY - SOGNMEA;
+    float twsY = awsY - boatSpeedTW;
 
     // Calculate true wind speed and angle
     TrueWindSpeedNMEA = sqrt(twsX * twsX + twsY * twsY);

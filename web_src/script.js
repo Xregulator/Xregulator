@@ -641,6 +641,8 @@ const CSV2_FIELDS = [
     "altHealthStatus",     // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
     "altCoveragePct",      // frozen/with-data % ×10
     "altObsCount",         // scored observations since freeze
+    "imuHeelOffset",       // IMU zero rest heel offset (deg ×100)
+    "imuPitchOffset",      // IMU zero rest pitch offset (deg ×100)
 ];
 
 // ── Alternator-health (Phase 2): live + settings state, health card, plot ──
@@ -692,10 +694,23 @@ function queueAltPlotUpdate() {
   requestAnimationFrame(()=>{ _altPlotPending = false; drawAltPlot(); });
 }
 
+// Hi-DPI canvas: size the backing store to the on-screen CSS box × devicePixelRatio, then
+// map a fixed logical coordinate space (W×H) onto it. Kills the blurry/greyed "retina" look
+// while letting every draw fn keep its existing W/H-based layout math unchanged.
+function hidpiCtx(cv, W, H) {
+  const dpr = window.devicePixelRatio || 1;
+  const dispW = cv.clientWidth || W, dispH = cv.clientHeight || H;
+  cv.width = Math.round(dispW * dpr);
+  cv.height = Math.round(dispH * dpr);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+  return ctx;
+}
+
 function drawAltPlot() {
   const cv = document.getElementById('alt-plot');
   if (!cv || !cv.getContext) return;
-  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height, pad = 38;
+  const W = 520, H = 300, pad = 38, ctx = hidpiCtx(cv, W, H);
   ctx.clearRect(0,0,W,H);
   const X = rpm => pad + (rpm/ALT_RPM_MAX)*(W-2*pad);
   const Y = fi  => H-pad - (fi/ALT_FI_MAX)*(H-2*pad);
@@ -715,6 +730,186 @@ function drawAltPlot() {
     ctx.beginPath(); ctx.arc(X(altLive.rpm), Y(altLive.fi), 6, 0, 6.2832);
     ctx.fillStyle = altLive.steady ? '#d9534f' : 'rgba(217,83,79,0.4)';
     ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+  }
+}
+
+// ── Boat performance (Phase 3): schema-driven live + settings, sailing polar plot ──
+// PILOT of the self-describing telemetry pattern: fetch /perfschema ONCE and zip the
+// returned field names against the PerfLive / PerfSettings payloads — no hardcoded array,
+// so this can't fall out of sync with the firmware tables.
+let perfSchema = null;
+let perfLive = { valid:false, pct:0, spd:0, wa:0, ws:0, best:0, pitchStd:0, src:0,
+                 status:0, fouling:1, coverage:0, paused:0, winCount:0 };
+let perfSettings = {};
+let perfCells = [];
+let _perfPlotPending = false, _perfModelLastFetch = 0;
+
+function fetchPerfSchema(){ return fetch('/perfschema').then(r=>r.json()).then(j=>{ perfSchema=j; }).catch(()=>{}); }
+
+function perfSet(key, val){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&'+key+'='+val),{},5000).catch(()=>{});
+}
+
+function updatePerf(){
+  const STATUS=['Learning','At / near your best','Slower than best (fouling or current)'];
+  const pctEl=document.getElementById('perf-pct'), statEl=document.getElementById('perf-status');
+  if(pctEl) pctEl.textContent = perfLive.valid ? Math.round(perfLive.pct)+'%' : '—';
+  if(statEl){
+    statEl.textContent = (perfLive.winCount>0) ? (STATUS[perfLive.status]||'—') : 'Learning';
+    statEl.style.color = perfLive.status===2 ? '#d9534f' : (perfLive.status===1 ? '#5cb85c' : '#888');
+  }
+  const covEl=document.getElementById('perf-coverage');
+  if(covEl) covEl.textContent = Math.round(perfLive.coverage)+'% of cells graduated · '+(perfLive.winCount|0)+' windows';
+  const foulEl=document.getElementById('perf-fouling');
+  if(foulEl) foulEl.textContent = (perfLive.valid && perfLive.fouling>0) ? Math.round(perfLive.fouling*100)+'% of best' : '—';
+  const pitchEl=document.getElementById('perf-pitch');
+  if(pitchEl) pitchEl.textContent = (perfLive.pitchStd||0).toFixed(1)+'°';
+  const srcEl=document.getElementById('perf-src');
+  if(srcEl) srcEl.textContent = ['—','water (STW)','GPS (SOG)'][perfLive.src|0] || '—';
+  const paused=perfLive.paused===1;
+  const sw=document.getElementById('perf-learn-switch');
+  if(sw) sw.checked = !paused;                      // checked = learning active
+  const lbl=document.getElementById('perf-learn-label');
+  if(lbl){ lbl.textContent = paused?'(paused)':'(active)'; lbl.style.color = paused?'#d9534f':'#5cb85c'; }
+  const tickEl=document.getElementById('perf-tick');
+  if(tickEl) tickEl.textContent='tick '+Math.round(perfLive.tickWinUs||0)+'µs (peak '+Math.round(perfLive.tickSesUs||0)+'µs)';
+  const simBtn=document.getElementById('perf-sim-btn');
+  if(simBtn){ const on=perfLive.sim===1; simBtn.value=on?'Simulator: ON':'Simulator: off'; simBtn.className=on?'btn-primary':'btn-secondary'; }
+}
+function setSeg(ids, activeIdx){
+  ids.forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.classList.toggle('cap-mode-active', i===activeIdx); });
+}
+function updatePerfControls(){
+  const s=perfSettings;
+  if(s.perfSpeedSrc!=null) setSeg(['perf-src-0','perf-src-1','perf-src-2'], s.perfSpeedSrc|0);
+  if(s.perfSymmetric!=null) setSeg(['perf-sym-1','perf-sym-0'], (s.perfSymmetric>=0.5)?0:1);
+}
+
+function fetchPerfModel(){
+  fetch('/perfmodel.csv').then(r=>r.text()).then(txt=>{
+    const lines=txt.trim().split('\n'); perfCells=[];
+    for(let i=1;i<lines.length;i++){ const c=lines[i].split(','); if(c.length<9) continue;
+      if(+c[2]===0) continue;  // no windows binned here
+      perfCells.push({nWin:+c[2], valid:+c[3], bestStw:+c[4], bestSog:+c[5], ws:+c[6], wa:+c[7], pitch:+c[8]});
+    }
+    drawPerfPlot();
+  }).catch(()=>{});
+}
+function queuePerfPlotUpdate(){
+  const now=Date.now();
+  if(now-_perfModelLastFetch>8000){ _perfModelLastFetch=now; fetchPerfModel(); }
+  if(_perfPlotPending) return;
+  _perfPlotPending=true;
+  requestAnimationFrame(()=>{ _perfPlotPending=false; drawPerfPlot(); });
+}
+function drawPerfPlot(){
+  const cv=document.getElementById('perf-plot'); if(!cv||!cv.getContext) return;
+  const W=360, H=360, ctx=hidpiCtx(cv, W, H);
+  ctx.clearRect(0,0,W,H);
+  const cx=W/2, cy=H*0.54, R=Math.min(W,H)*0.42;
+  const srcSel = perfSettings.perfSpeedSrc|0;     // 0 Both, 1 STW, 2 SOG
+  const cellSpeed = c => srcSel===2 ? c.bestSog : (srcSel===1 ? c.bestStw : Math.max(c.bestStw,c.bestSog));
+  let maxS=4;
+  perfCells.forEach(c=>{ const b=cellSpeed(c); if(b>maxS)maxS=b; });
+  if(perfLive.valid && perfLive.spd>maxS) maxS=perfLive.spd;
+  maxS=Math.ceil(maxS);
+  const P=(ang,s)=>{ const r=(s/maxS)*R, a=ang*Math.PI/180; return [cx+r*Math.sin(a), cy-r*Math.cos(a)]; };
+  // speed rings
+  ctx.lineWidth=1; ctx.font='10px sans-serif';
+  for(let k=1;k<=4;k++){ const r=R*k/4; ctx.strokeStyle='#ddd'; ctx.beginPath(); ctx.arc(cx,cy,r,0,6.2832); ctx.stroke();
+    ctx.fillStyle='#aaa'; ctx.fillText(Math.round(maxS*k/4)+'kt', cx+3, cy-r+11); }
+  // angle spokes (both sides)
+  ctx.strokeStyle='#eee';
+  [0,45,90,135,180].forEach(d=>{ let p=P(d,maxS); ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(p[0],p[1]); ctx.stroke();
+    let q=P(-d,maxS); ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(q[0],q[1]); ctx.stroke(); });
+  ctx.fillStyle='#888'; ctx.fillText('0° into wind', cx-26, cy-R-3); ctx.fillText('180°', cx-11, cy+R+13);
+  // learned cells (color = wind speed; mirror to port when symmetric)
+  const symFold = (perfSettings.perfSymmetric==null) ? true : (perfSettings.perfSymmetric>=0.5);
+  perfCells.forEach(c=>{
+    const s=cellSpeed(c); if(s<=0) return;
+    const hue=210 - 210*Math.min(1, c.ws/30);
+    const draw=(ang)=>{ let p=P(ang,s); ctx.beginPath(); ctx.arc(p[0],p[1], c.valid?4:2.5, 0,6.2832);
+      if(c.valid){ ctx.fillStyle='hsl('+hue+',70%,48%)'; ctx.fill(); } else { ctx.strokeStyle='#ccc'; ctx.stroke(); } };
+    draw(c.wa);
+    if(symFold && c.wa>0 && c.wa<180) draw(-c.wa);
+  });
+  // live point + best ring
+  if(perfLive.valid){
+    let p=P(perfLive.wa, perfLive.spd); ctx.beginPath(); ctx.arc(p[0],p[1],6,0,6.2832);
+    ctx.fillStyle = perfLive.pct>=95 ? '#5cb85c' : (perfLive.pct>=80 ? '#f0ad4e' : '#d9534f'); ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+    if(perfLive.best>0){ let b=P(perfLive.wa, perfLive.best); ctx.beginPath(); ctx.arc(b[0],b[1],4,0,6.2832); ctx.strokeStyle='#333'; ctx.lineWidth=1; ctx.stroke(); }
+  }
+}
+
+// ── Motoring map (Phase 3): speed-vs-RPM, schema-driven (MotorLive) ──
+let motorLive = { valid:false, rpm:0, headwind:0, spd:0, best:0, pct:0, src:0,
+                  status:0, fouling:1, coverage:0, paused:0, winCount:0 };
+let motorCells = [];
+let _motorPlotPending = false, _motorModelLastFetch = 0;
+
+function updateMotor(){
+  const STATUS=['Learning','At / near your best','Slower than best (fouling or current)'];
+  const pctEl=document.getElementById('motor-pct'), statEl=document.getElementById('motor-status');
+  if(pctEl) pctEl.textContent = motorLive.valid ? Math.round(motorLive.pct)+'%' : '—';
+  if(statEl){
+    statEl.textContent = (motorLive.winCount>0) ? (STATUS[motorLive.status]||'—') : 'Learning';
+    statEl.style.color = motorLive.status===2 ? '#d9534f' : (motorLive.status===1 ? '#5cb85c' : '#888');
+  }
+  const covEl=document.getElementById('motor-coverage');
+  if(covEl) covEl.textContent = Math.round(motorLive.coverage)+'% of RPM bins graduated · '+(motorLive.winCount|0)+' windows';
+  const foulEl=document.getElementById('motor-fouling');
+  if(foulEl) foulEl.textContent = (motorLive.valid && motorLive.fouling>0) ? Math.round(motorLive.fouling*100)+'% of best' : '—';
+  const hwEl=document.getElementById('motor-hw');
+  if(hwEl) hwEl.textContent = (motorLive.headwind||0).toFixed(0)+' kt';
+  const srcEl=document.getElementById('motor-src');
+  if(srcEl) srcEl.textContent = ['—','water (STW)','GPS (SOG)'][motorLive.src|0] || '—';
+}
+function fetchMotorModel(){
+  fetch('/motormodel.csv').then(r=>r.text()).then(txt=>{
+    const lines=txt.trim().split('\n'); motorCells=[];
+    for(let i=1;i<lines.length;i++){ const c=lines[i].split(','); if(c.length<8) continue;
+      if(+c[1]===0) continue;
+      motorCells.push({nWin:+c[1], valid:+c[2], bestStw:+c[3], bestSog:+c[4], rpm:+c[5], hw:+c[6], pitch:+c[7]});
+    }
+    drawMotorPlot();
+  }).catch(()=>{});
+}
+function queueMotorPlotUpdate(){
+  const now=Date.now();
+  if(now-_motorModelLastFetch>8000){ _motorModelLastFetch=now; fetchMotorModel(); }
+  if(_motorPlotPending) return;
+  _motorPlotPending=true;
+  requestAnimationFrame(()=>{ _motorPlotPending=false; drawMotorPlot(); });
+}
+function drawMotorPlot(){
+  const cv=document.getElementById('motor-plot'); if(!cv||!cv.getContext) return;
+  const W=520, H=300, pad=38, ctx=hidpiCtx(cv, W, H);
+  ctx.clearRect(0,0,W,H);
+  const srcSel=perfSettings.perfSpeedSrc|0;
+  const cs=c=> srcSel===2 ? c.bestSog : (srcSel===1 ? c.bestStw : Math.max(c.bestStw,c.bestSog));
+  let maxR=1000, maxS=4;
+  motorCells.forEach(c=>{ if(c.rpm>maxR)maxR=c.rpm; const b=cs(c); if(b>maxS)maxS=b; });
+  if(motorLive.valid){ if(motorLive.rpm>maxR)maxR=motorLive.rpm; if(motorLive.spd>maxS)maxS=motorLive.spd; }
+  maxR=Math.ceil(maxR/500)*500; maxS=Math.ceil(maxS);
+  const X=r=>pad+(r/maxR)*(W-2*pad), Y=s=>H-pad-(s/maxS)*(H-2*pad);
+  ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.stroke();
+  ctx.fillStyle='#888'; ctx.font='11px sans-serif';
+  ctx.fillText('RPM →', W-pad-34, H-pad+22);
+  ctx.save(); ctx.translate(pad-22,pad+90); ctx.rotate(-Math.PI/2); ctx.fillText('Boat speed →',0,0); ctx.restore();
+  // best-ever envelope through graduated cells
+  const vp=motorCells.filter(c=>c.valid && cs(c)>0).map(c=>({x:X(c.rpm),y:Y(cs(c))})).sort((a,b)=>a.x-b.x);
+  if(vp.length>1){ ctx.strokeStyle='rgba(58,123,213,0.5)'; ctx.lineWidth=1.5; ctx.beginPath(); vp.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.stroke(); }
+  // cells
+  motorCells.forEach(c=>{ const s=cs(c); if(s<=0) return; ctx.beginPath(); ctx.arc(X(c.rpm),Y(s), c.valid?4:2.5, 0,6.2832);
+    if(c.valid){ ctx.fillStyle='#3a7bd5'; ctx.fill(); } else { ctx.strokeStyle='#ccc'; ctx.stroke(); } });
+  // live dot + best ring
+  if(motorLive.valid){
+    ctx.beginPath(); ctx.arc(X(motorLive.rpm),Y(motorLive.spd),6,0,6.2832);
+    ctx.fillStyle = motorLive.pct>=95 ? '#5cb85c' : (motorLive.pct>=80 ? '#f0ad4e' : '#d9534f'); ctx.fill();
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+    if(motorLive.best>0){ ctx.beginPath(); ctx.arc(X(motorLive.rpm),Y(motorLive.best),4,0,6.2832); ctx.strokeStyle='#333'; ctx.lineWidth=1; ctx.stroke(); }
   }
 }
 const CSV3_FIELDS = [
@@ -1569,6 +1764,33 @@ function initializeEventSource() {
                 if (el) el.textContent = (Math.round(p[i] * 1000) / 1000);
             });
         }, false);
+
+        // \u2500\u2500 SSE: PerfLive / PerfSettings \u2500 schema-driven (names from /perfschema; no hardcoded array) \u2500\u2500
+        source.addEventListener('PerfLive', function (e) {
+            if (!perfSchema || !perfSchema.live) { if (!perfSchema) fetchPerfSchema(); return; }
+            const v = e.data.split(',').map(Number);
+            perfSchema.live.forEach((k, i) => { perfLive[k] = v[i]; });
+            perfLive.valid = perfLive.valid === 1;
+            updatePerf(); queuePerfPlotUpdate();
+        }, false);
+        source.addEventListener('PerfSettings', function (e) {
+            if (!perfSchema || !perfSchema.settings) { if (!perfSchema) fetchPerfSchema(); return; }
+            const v = e.data.split(',').map(Number);
+            perfSchema.settings.forEach((k, i) => {
+                perfSettings[k] = v[i];
+                const el = document.getElementById(k + '_echo');
+                if (el) el.textContent = (Math.round(v[i] * 1000) / 1000);
+            });
+            updatePerfControls(); queuePerfPlotUpdate(); queueMotorPlotUpdate();
+        }, false);
+        source.addEventListener('MotorLive', function (e) {
+            if (!perfSchema || !perfSchema.motorLive) { if (!perfSchema) fetchPerfSchema(); return; }
+            const v = e.data.split(',').map(Number);
+            perfSchema.motorLive.forEach((k, i) => { motorLive[k] = v[i]; });
+            motorLive.valid = motorLive.valid === 1;
+            updateMotor(); queueMotorPlotUpdate();
+        }, false);
+        fetchPerfSchema();
 
         source.addEventListener('error', function (e) {
             const state = this.readyState;
@@ -7648,6 +7870,18 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
+
+            // IMU zero/level calibration status (offsets sent deg ×100)
+            try {
+                const hOff = Number(data.imuHeelOffset) / 100;
+                const pOff = Number(data.imuPitchOffset) / 100;
+                const el = document.getElementById("imuZeroStatus_ID");
+                if (el) {
+                    el.textContent = (Number.isFinite(hOff) && Number.isFinite(pOff) && (hOff !== 0 || pOff !== 0))
+                        ? `heel ${hOff.toFixed(1)}° / pitch ${pOff.toFixed(1)}°`
+                        : "not set";
+                }
+            } catch (e) { }
 
             // Beaufort scale + gale duration: derived from the 2-min SUSTAINED true wind (data.sustainedTWS,
             // sent ×10) — never the instantaneous gust — so a gust isn't a gale and a lull doesn't end one.
