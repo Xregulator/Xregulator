@@ -2562,6 +2562,9 @@ void AdjustFieldLearnMode() {
   // All temperature loop, output current PID, and duty pipeline state is now final for this tick.
   // Called only in the normal-mode path — shutdown/fault paths do not log here.
   pidLog_tick(currentMillis);
+  // Best-Ever Front: fold one alternator-health sample per control tick (~200 Hz). Live only —
+  // bench-sim folds at 1 Hz from altHealth_tick instead. Off/fault/shutdown early-return above this.
+  if (altSimMode < 0.5f) altFold_tick(currentMillis);
   prevMode = mode;
 }
 

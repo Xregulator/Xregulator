@@ -222,6 +222,7 @@
       <button class="sub-tab" onclick="showSubTab('settings', 'alarms', event)">Alarms</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'batterymonitor', event)">Battery Monitor</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'engine', event)">Engine</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'vessel-performance', event)">Vessel Performance</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'system', event)">System</button>
     </div>
 
@@ -1226,7 +1227,7 @@
                     <span>Shutdown Slow Ramp Rate (%/s) (<span id="DutySlowRampRate_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at
                         which field duty ramps from minimum to 0% during Phase 3 shutdown. Lower = slower, gentler on
-                        LM2907 tach signal. Default 1%/s takes ~5s from 5% to 0.</span></span>
+                        LM2907 tach signal.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -1269,7 +1270,7 @@
                       ℹ️
                       <span class="tooltip-box">Maximum safe temperature at the sensor location. The temperature
                         PID begins reducing current as temperature approaches this value — intervention starts
-                        at (Limit − Temp PID Margin), defaulting to 15°F below. Hard warning and critical shutdowns
+                        at (Limit − Temp PID Margin). Hard warning and critical shutdowns
                         trigger above it. Sensors often read 20–30°F cooler than true winding temperature; account for
                         this offset when setting this value.</span>
                     </span>
@@ -1287,7 +1288,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp Warning Excess (<span class="temp-unit-label">°F</span>) (<span id="TempWarnExcess_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers WARNING. Duty ramps to zero and lockout starts. If temperature stays above warning for TempSustainedTimeout, escalates to TEMP_SUSTAINED and GPIO4 cuts after duty settles. Compares raw sensor temperature (not projected). Default: 2°F.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above the alternator temperature limit that triggers a WARNING. Field output ramps to zero and a lockout starts. If temperature stays above the warning level for the Temp Sustained Timeout, it escalates to a sustained-temperature shutdown and the field is cut once the output settles. Compares the raw sensor temperature, not the projected value.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempWarnExcess',true)">
@@ -1302,7 +1303,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp Critical Excess (<span class="temp-unit-label">°F</span>) (<span id="TempCritExcess_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above TemperatureLimit that triggers an immediate field cut (GPIO4 LOW, no ramp, no settle wait). Compares raw sensor temperature (not projected). Highest-priority thermal protection event. Default: 10°F.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">°F above the alternator temperature limit that triggers an immediate field cut (no ramp, no settle wait). Compares the raw sensor temperature, not the projected value. Highest-priority thermal protection event.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempCritExcess',true)">
@@ -1317,7 +1318,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp Sustained Timeout (s) (<span id="TempSustainedTimeout_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to TEMP_SUSTAINED, which ramps duty to zero then cuts GPIO4. Timer resets if temp drops below the warning threshold. Enter in seconds — stored internally as milliseconds. Default: 120s.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;&#65039;<span class="tooltip-box">Seconds of continuous WARNING temperature before escalating to a sustained-temperature shutdown, which ramps field output to zero then cuts the field. Timer resets if temperature drops below the warning threshold. Enter in seconds.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -1621,29 +1622,7 @@
                   All steady-state definitions are tunable (build it, then tune live). Values echo live.
                 </div>
                 <div class="form-row">
-                  <div class="form-label"><span>Electrical settle window (s) (<span id="altElecSettleSec_echo">?</span>):</span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altElecSettleSec" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Excitation/duty stability band (%) (<span id="altDutyTolPct_echo">?</span>):</span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altDutyTolPct" type="number" step="0.1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>RPM exit band (RPM) (<span id="altRpmTol_echo">?</span>):</span></div>
+                  <div class="form-label"><span>RPM band (RPM) (<span id="altRpmTol_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -1654,7 +1633,40 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Bus-voltage exit band (V) (<span id="altVbusTol_echo">?</span>):</span></div>
+                  <div class="form-label"><span>RPM steady time (s) (<span id="altRpmSec_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRpmSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Field-duty band (%) (<span id="altDutyTolPct_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altDutyTolPct" type="number" step="0.1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Field-duty steady time (s) (<span id="altDutySec_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altDutySec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Bus-voltage band (V) (<span id="altVbusTol_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -1665,44 +1677,33 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Thermal: max temp change (&deg;F) (<span id="altThermRateDegF_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Bus-voltage steady time (s) (<span id="altVbusSec_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altThermRateDegF" type="number" step="0.5" />
+                      <input name="altVbusSec" type="number" step="0.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Thermal: over window (min) (<span id="altThermRateMin_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Temperature band (&deg;F) (<span id="altThermDegF_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altThermRateMin" type="number" step="0.5" />
+                      <input name="altThermDegF" type="number" step="0.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Thermal dwell (s) (<span id="altThermDwellSec_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Temperature steady time (s) (<span id="altThermSec_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altThermDwellSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>Min steady dwell per visit (s) (<span id="altMinDwellSec_echo">?</span>):</span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altMinDwellSec" type="number" step="1" />
+                      <input name="altThermSec" type="number" step="1" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -1731,68 +1732,51 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Freeze: min visits (X) (<span id="altFreezeMinVisits_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Safety margin (A, biases toward keep) (<span id="altSafetyMargin_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altFreezeMinVisits" type="number" step="1" />
+                      <input name="altSafetyMargin" type="number" step="0.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Freeze: max visits (cap) (<span id="altFreezeMaxVisits_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Interpolation power (IDW) (<span id="altIdwPower_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altFreezeMaxVisits" type="number" step="1" />
+                      <input name="altIdwPower" type="number" step="0.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Freeze: spread-gate SEM (A) (<span id="altFreezeSEM_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Prune neighbors (k, cloud) (<span id="altPruneK_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altFreezeSEM" type="number" step="0.1" />
+                      <input name="altPruneK" type="number" step="1" min="5" max="20" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Health EWMA &lambda; (<span id="altEwmaLambda_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Reference mode (<span id="alt-mode-label">?</span>):</span></div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altEwmaLambda" type="number" step="0.001" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
+                    <input type="button" value="LEARNED (resume)" class="btn-secondary" onclick="altSetSource(0)" />
+                    <input type="button" value="FIXED (freeze)" class="btn-secondary" onclick="altSetSource(1)" />
                   </div>
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>CUSUM slack k (&sigma;) (<span id="altCusumK_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Saved front file:</span></div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altCusumK" type="number" step="0.1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label"><span>CUSUM threshold h (&sigma;) (<span id="altCusumH_echo">?</span>):</span></div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altCusumH" type="number" step="0.5" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
+                    <input type="button" value="Save current" class="btn-secondary" onclick="altSaveFront()" />
+                    <input type="button" value="Load saved (→ FIXED)" class="btn-secondary" onclick="altLoadFront()" />
                   </div>
                 </div>
                 <hr>
@@ -1925,7 +1909,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span>
                       TdPred — Prediction Horizon (s) (<span id="TdPred_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (seconds) the predicted voltage is projected: <strong>predicted = measured battery voltage + TdPred × voltage rate-of-rise</strong>. Used only by Group 1. <strong>Only the rising component of rate-of-rise is used — falling voltage is ignored.</strong> Default 0.045 s (45 ms).</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far ahead (seconds) the predicted voltage is projected: <strong>predicted = measured battery voltage + Prediction Horizon × voltage rate-of-rise</strong>. Used only by Group 1. <strong>Only the rising component of rate-of-rise is used — falling voltage is ignored.</strong></span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -1941,7 +1925,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span>
                       dvdt EMA TC (ms) (<span id="DvdtTC_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time constant for the EMA smoothing applied to the raw voltage rate-of-rise signal before it enters the Group 1 prediction. Larger TC = smoother but laggier; smaller TC = faster response, noisier. The filter is dt-aware, so behavior stays consistent across INA228 sample-cadence jitter. Default 58 ms. <strong>Constraint: do not lower TC below ~25 ms without retesting false-fire rate at idle — the 16 mV noise margin is thin.</strong></span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time constant for the EMA smoothing applied to the raw voltage rate-of-rise signal before it enters the Group 1 prediction. Larger TC = smoother but laggier; smaller TC = faster response, noisier. The filter is dt-aware, so behavior stays consistent across INA228 sample-cadence jitter. <strong>Constraint: do not lower TC below ~25 ms without retesting false-fire rate at idle — the 16 mV noise margin is thin.</strong></span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -1977,7 +1961,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g2">G2</span>
                       OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must exceed the active charge target before Group 2 engages. Default 0.100 V (100 mV). Lowering = more sensitive (fires sooner above target); raising = relaxed. <strong>Watch your steady-state ripple amplitude — set this meaningfully above your peak-to-peak ripple to avoid false fires.</strong> Note: as of 2026-05-23 this no longer affects Group 3 (iExcess) — see Group 3's own Arming Margin knob.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must exceed the active charge target before Group 2 engages. Lowering = more sensitive (fires sooner above target); raising = relaxed. <strong>Watch your steady-state ripple amplitude — set this meaningfully above your peak-to-peak ripple to avoid false fires.</strong> This does not affect Group 3 — see Group 3's own Arming Margin.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2031,7 +2015,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Arming Margin — V below target (<span id="IExcessArmMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close to the active charge target the measured battery voltage must be before Group 3 is allowed to fire. The gate opens when <em>battV &gt; target − ArmingMargin</em>. Default 0.500 V. Larger values arm earlier in the ramp (more aggressive); smaller values restrict iExcess to near-target only. <strong>Big-bank installs</strong> where voltage barely deflects above target can set this large (e.g. 1.0–5.0 V) so iExcess remains the primary current-overshoot detector. Decoupled from OvMeasMargin (Group 2's trigger) on 2026-05-23 so the two settings move independently.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close to the active charge target the measured battery voltage must be before Group 3 is allowed to fire. The gate opens when <em>measured voltage &gt; target − this margin</em>. Larger values arm earlier in the ramp (more aggressive); smaller values restrict Group 3 to near-target only. <strong>Big-bank installs</strong> where voltage barely deflects above target can set this large (e.g. 1.0–5.0 V) so Group 3 remains the primary current-overshoot detector. This moves independently of the Group 2 Trigger Margin.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2047,7 +2031,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       K_excess — Threshold (A above setpoint) (<span id="IExcessK_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk. Default 5.0 A.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND the iExcess Arming Margin (set above) is satisfied. <strong>Target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike.</strong></span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND the iExcess Arming Margin (set above) is satisfied. <strong>Target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike.</strong></span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2130,7 +2114,7 @@
                   <p data-intro="cl">The field drive FET is powered off and the field collapses through the coil's natural time constant. Hardware-level cut — no adjustable parameter, and none of the integrator-bleed actions used by the other protections apply here.</p>
                   <p data-intro="g1"><strong>KHard — Response Slope</strong> sets how aggressively the current cap is trimmed per volt of overshoot — applied every tick, cumulative across the overshoot duration. Shared with Measured OV. <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while any of the other protections is clamping, scaled to alternator size via Command Limit.</p>
                   <p data-intro="g2">Same <strong>KHard — Response Slope</strong> cap-trim mechanism as Predictive OV (shared parameter). <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while the clamp is active.</p>
-                  <p data-intro="g3"><strong>K_bleed — Integrator Bleed Mode</strong> drains the voltage integrator during the event — 0 means snap to zero every tick (default, maximum response); &gt; 0 walks the integrator down proportionally to the amount of excess. <strong>AW Bleed Rate</strong> also drains continuously while active.</p>
+                  <p data-intro="g3">Trims the current cap by the measured amount of excess each tick — the same cap-trim action the OV groups apply, but driven by current overshoot rather than voltage. <strong>K_bleed — Integrator Bleed Mode</strong> additionally drains the voltage integrator during the event — 0 means snap to zero every tick (maximum response); &gt; 0 walks the integrator down proportionally to the amount of excess. <strong>AW Bleed Rate</strong> also drains continuously while active.</p>
                   <p data-intro="g4">The voltage integrator is snapped to 0 instantly on the rising edge of the trip — hardcoded, no adjustable parameter for the snap itself. <strong>AW Bleed Rate</strong> also drains continuously while active.</p>
                 </div>
 
@@ -2155,7 +2139,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how the voltage loop integrator is driven down <em>during</em> a Group 3 event, on top of the Shared Action bleed:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response, default).<br>• <strong>&gt; 0</strong> = each tick, subtract (K_bleed × amps-of-excess × tick-duration). Walks the integrator down gradually instead of pinning it.<br><br>Proportional mode is gentler and lowers undershoot risk after the event clears. <strong>Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.</strong> Recovery is always handled by the Shared Recovery block regardless of mode.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how the voltage loop integrator is driven down <em>during</em> a Group 3 event, on top of the Shared Action bleed:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response).<br>• <strong>&gt; 0</strong> = each tick, subtract (K_bleed × amps-of-excess × tick-duration). Walks the integrator down gradually instead of pinning it.<br><br>Proportional mode is gentler and lowers undershoot risk after the event clears. <strong>Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.</strong> Recovery is always handled by the Shared Recovery block regardless of mode.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2171,7 +2155,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at which the voltage loop integrator is bled toward zero while ANY protection group is asserted. Expressed as a fraction of the Alternator Current Limit per second, so the proportional aggression stays the same regardless of alternator size. <strong>Default 2.0 → at a 150 A current limit gives 300 A/s. A 100 ms protection event at default bleeds ~30 A of integrator value.</strong></span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at which the voltage loop integrator is bled toward zero while ANY protection group is asserted. Expressed as a fraction of the Alternator Current Limit per second, so the proportional aggression stays the same regardless of alternator size. <strong>Example: a value of 2.0 at a 150 A current limit gives 300 A/s, so a 100 ms protection event bleeds ~30 A of integrator value.</strong></span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2219,7 +2203,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after either of these two events during which the AW Bleed Rate is suppressed:<br><br>• A <strong>CV-entry bumpless seed</strong> fires (when CV mode first activates),<br>• A <strong>protection-release reseed</strong> fires (when every protection clears).<br><br>Prevents the just-seeded integrator from being immediately bled back to zero if a brief new protection event fires right after the seed. 0 = disabled. Default 150 ms.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after either of these two events during which the AW Bleed Rate is suppressed:<br><br>• A <strong>CV-entry bumpless seed</strong> fires (when CV mode first activates),<br>• A <strong>protection-release reseed</strong> fires (when every protection clears).<br><br>Prevents the just-seeded integrator from being immediately bled back to zero if a brief new protection event fires right after the seed. 0 = disabled.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2235,7 +2219,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Fast Setpoint Rise Rate (×) (<span id="FastSetpointRiseRate_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Multiplier applied to the normal Setpoint Rise Rate (set in Tuning) during the recovery window after any protection releases, while battery voltage is still comfortably under the active charge target. Lets the slewed current setpoint cross the alternator's deadband and start producing current again quickly. Default 8×. Window length and the headroom gate are the two knobs below. Range 1–50.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Multiplier applied to the normal Setpoint Rise Rate (set in Tuning) during the recovery window after any protection releases, while battery voltage is still comfortably under the active charge target. Lets the slewed current setpoint cross the alternator's deadband and start producing current again quickly. Window length and the headroom gate are the two knobs below. Range 1–50.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2251,7 +2235,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Fast Rise Window (ms) (<span id="FastSetpointRiseWindowMs_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard upper bound on how long the fast-rise window stays open after any protection releases. The window normally closes earlier — as soon as battery voltage climbs into the headroom band below target — but this cap stops fast-rise from running indefinitely if the battery never catches up (very heavy load). Default 5000 ms. Range 500–30000.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard upper bound on how long the fast-rise window stays open after any protection releases. The window normally closes earlier — as soon as battery voltage climbs into the headroom band below target — but this cap stops fast-rise from running indefinitely if the battery never catches up (very heavy load). Range 500–30000.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2267,7 +2251,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Fast Rise Headroom (V) (<span id="FastSetpointRiseHeadroomV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts below the active charge target at which fast-rise is allowed to fire. The fast-rise gate stays open while <em>battV &lt; target − Headroom</em>; the moment battV climbs back into the target band, the gate closes and the slew falls back to the normal Setpoint Rise Rate. Default 0.2 V — inside the Group 3 iExcess Arming Margin (0.5 V) so iExcess can still arm during fast-rise. Range 0.05–2.0 V.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts below the active charge target at which fast-rise is allowed to fire. The fast-rise gate stays open while <em>battV &lt; target − Headroom</em>; the moment battV climbs back into the target band, the gate closes and the slew falls back to the normal Setpoint Rise Rate. Keep it inside the Group 3 iExcess Arming Margin so iExcess can still arm during fast-rise. Range 0.05–2.0 V.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2782,8 +2766,7 @@
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Voltage Disagree Timeout (s) (<span id="VoltageDisagreeTimeout_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long
-                      voltage disagreement must persist before triggering warning. Filters transient differences.
-                      Default: 10s.</span></span>
+                      voltage disagreement must persist before triggering warning. Filters transient differences.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -2801,12 +2784,12 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                       class="tooltip-box">Lockout/cooldown duration after a fault that triggered the slow ramp-down
                       path. Once a qualifying fault fires, charging will not restart until this time elapses, even if
-                      the fault clears. <strong>Triggered by:</strong> alternator hard-shutdown (AlternatorHardShutdownV
+                      the fault clears. <strong>Triggered by:</strong> alternator hard-shutdown (Alternator Hard Shutdown Voltage
                       exceeded), voltage sensor disagreement (warning or critical), both voltage sensors implausible,
                       temperature warning/sustained, temperature data stale, alternator current data stale.
                       <strong>NOT triggered by</strong> immediate-cut faults (INA228 hardware overvoltage, hard
                       overcurrent, temperature critical, RPM below minimum) — those just cut the field and re-enable
-                      as soon as the condition clears, no cooldown. Default: 30s.</span></span>
+                      as soon as the condition clears, no cooldown.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form"
@@ -3042,7 +3025,7 @@
                 <p style="margin: 10px 0 0 0;">
                   <strong>Bulk:</strong> The system pushes the maximum thermally- (and otherwise-) allowed current
                   from the RPM Cap Table. Bulk ends once battery voltage has remained continuously at or above
-                  <strong>Bulk Voltage</strong> for <strong>Bulk Voltage Debounce Time</strong> (default 0.25 sec).
+                  <strong>Bulk Voltage</strong> for <strong>Bulk Voltage Debounce Time</strong>.
                 </p>
                 <p style="margin: 10px 0 0 0;">
                   <strong>Absorption:</strong> The voltage loop holds the battery at <strong>Absorption
@@ -3862,8 +3845,8 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
                     <span class="tooltip-box">How often this dashboard / phone app receives fresh sensor data
-                      from the regulator, in milliseconds. Default is 100 ms (about 10 updates per second), which
-                      is right for almost everyone.
+                      from the regulator, in milliseconds. About 10 updates per second is right for almost
+                      everyone.
                       <br><br>
                       <b>Lower values</b> (e.g. 50 ms) make gauges and plots feel snappier but increase the
                       regulator's WiFi and CPU load. Going much below 50 ms can start to crowd out the regulator's
@@ -4102,7 +4085,7 @@
                     <span>Min RPM For Field (RPM) (<span id="MinRPMForField_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">
                       ℹ️
-                      <span class="tooltip-box">Field is cut immediately when RPM falls below this threshold. Default 200 RPM. Set to 0 to disable (not recommended — use Ignore RPM instead).</span>
+                      <span class="tooltip-box">Field is cut immediately when RPM falls below this threshold. Set to 0 to disable (not recommended — use Ignore RPM instead).</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -4217,6 +4200,245 @@
           </div>
         </div>
 
+        <!-- Vessel Performance Sub-tab — boat-performance settings moved here from
+             Live Data → GPS/Travel/Wind. The live polar/motoring display, the
+             Sailing/Motoring toggle, the Learning switch and Download CSV stay on
+             the Live Data side; everything configurable lives here. -->
+        <div id="settings-vessel-performance" class="sub-tab-content">
+          <div class="settings-card">
+            <p class="card-group-title">Boat Performance
+              <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Settings for the best-ever boat-speed learning system. The live polar / motoring display is under Live Data &rarr; GPS/Travel/Wind.</span></span>
+            </p>
+            <hr />
+
+            <!-- speed source -->
+            <div class="form-row">
+              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Speed source</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Which boat-speed to learn from. Water (STW, from a paddlewheel/log) removes current. GPS (SOG) is always available but a current makes you read fast or slow. Switching source wipes all learned data (same as Clear All).</span></span>
+              </div>
+              <div class="form-input">
+                <div class="cap-mode-toggle">
+                  <button type="button" id="perf-src-1" class="cap-mode-btn cap-mode-active" onclick="perfSetSpeedSrc(1)">Water (STW)</button>
+                  <button type="button" id="perf-src-2" class="cap-mode-btn" onclick="perfSetSpeedSrc(2)">GPS (SOG)</button>
+                </div>
+              </div>
+            </div>
+            <hr />
+
+            <!-- polar symmetry (sailing only) -->
+            <div class="form-row" id="perf-sym-row">
+              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Polar symmetry</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Symmetric folds port and starboard together (|wind angle|) at display + scoring time — fills the polar twice as fast and assumes the boat sails the same on both tacks. Both tacks keeps them separate (for a lopsided rig or instrument offset). Raw both-sided data is always stored either way.</span></span>
+              </div>
+              <div class="form-input">
+                <div class="cap-mode-toggle">
+                  <button type="button" id="perf-sym-1" class="cap-mode-btn cap-mode-active" onclick="perfSet('perfFoldSymmetric',1)">Symmetric</button>
+                  <button type="button" id="perf-sym-0" class="cap-mode-btn" onclick="perfSet('perfFoldSymmetric',0)">Both tacks</button>
+                </div>
+              </div>
+            </div>
+            <hr />
+
+            <!-- reference mode (now a segmented toggle to match the other choices) -->
+            <div class="form-row">
+              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Reference mode</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">LEARNED keeps updating the best-ever reference as conditions are sailed. FIXED freezes the current (or loaded) reference so it stops changing — useful to hold a known-good baseline while comparing.</span></span>
+              </div>
+              <div class="form-input">
+                <div class="cap-mode-toggle">
+                  <button type="button" id="perf-ref-0" class="cap-mode-btn" onclick="perfSetSource(0)">LEARNED (resume)</button>
+                  <button type="button" id="perf-ref-1" class="cap-mode-btn" onclick="perfSetSource(1)">FIXED (freeze)</button>
+                </div>
+              </div>
+            </div>
+            <hr />
+
+            <!-- saved front file (actions, stay as buttons) -->
+            <div class="form-row">
+              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Saved front file</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Save current writes the live best-ever maps (sailing polar + motoring curve) to a file on the device. Load saved reads them back and switches to FIXED so they stop changing — handy for keeping a known-good baseline or restoring after a Clear All.</span></span>
+              </div>
+              <div class="form-input" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <input type="button" value="Save current" class="btn-secondary" onclick="perfSaveFront()" />
+                <input type="button" value="Load saved (&rarr; FIXED)" class="btn-secondary" onclick="perfLoadFront()" />
+              </div>
+            </div>
+            <hr />
+
+            <!-- simulator (now a segmented toggle to match the other choices) -->
+            <div class="form-row">
+              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Simulator</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Injects synthetic sailing/motoring data for bench testing without a boat. Leave off on the water.</span></span>
+              </div>
+              <div class="form-input">
+                <div class="cap-mode-toggle">
+                  <button type="button" id="perf-sim-off" class="cap-mode-btn" onclick="perfSet('perfSimMode',0)">Off</button>
+                  <button type="button" id="perf-sim-on" class="cap-mode-btn" onclick="perfSet('perfSimMode',1)">On</button>
+                </div>
+              </div>
+            </div>
+            <hr />
+
+            <!-- clear all (danger action) -->
+            <div class="form-row">
+              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                <span>Learned data</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Clear All erases every learned point in both the sailing and motoring maps and zeroes the front-points and hours counters. Use after a major rig, sail, or propeller change. Cannot be undone.</span></span>
+              </div>
+              <div class="form-input">
+                <input type="button" value="Clear All" class="btn-danger-ghost" onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned boat-performance data? This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetBoatPerformance=1'),{},5000).then(()=>{perfCells=[];motorCells=[];drawPerfPlot();drawMotorPlot();}).catch(()=>{});}" />
+              </div>
+            </div>
+            <hr />
+
+            <!-- tuning -->
+            <details>
+              <summary class="alt-summary-nested">Tuning</summary>
+              <p style="font-size:12px;color:var(--text-muted);margin:6px 2px 8px;">A reading is only banked when conditions hold steady. Most inputs below come as a pair: a <b>band</b> (how much that value may drift) and a <b>steady time</b> (how long it must stay inside the band before the reading counts). Tighter bands and longer times give fewer but cleaner points.</p>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Wind-speed band (kt) (<span id="perfWsTol_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Max apparent-wind-speed spread allowed within a steady run. Wider accepts more data but blurs the map.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfWsTol" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Wind-speed steady time (s) (<span id="perfWsSec_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How long the apparent wind speed must stay within its band (above) before the run is banked.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfWsSec" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Wind-angle band (&deg;) (<span id="perfWaTol_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Max change in apparent wind angle allowed within a steady run. Wider accepts more data but blurs the polar.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfWaTol" type="number" step="1" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Wind-angle steady time (s) (<span id="perfWaSec_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How long the apparent wind angle must stay within its band before the run is banked.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfWaSec" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Sea-state band (&deg; pitch std) (<span id="perfSeaTol_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Max change in sea-state (pitch standard deviation) allowed within a steady run.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfSeaTol" type="number" step="0.1" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Sea-state steady time (s) (<span id="perfSeaSec_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How long the sea state must stay within its band before the run is banked.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfSeaSec" type="number" step="1" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Sea-state window (s) (<span id="perfSeaWinSec_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Rolling window the pitch-standard-deviation NUMBER is computed over (default 20 s — long enough to span many wave cycles). Different from the steady time above.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfSeaWinSec" type="number" step="1" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Motoring RPM band (<span id="perfRpmTol_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Max change in engine RPM allowed within a steady motoring run. Wider accepts more data but blurs the speed-vs-RPM curve.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfRpmTol" type="number" step="10" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Motoring RPM steady time (s) (<span id="perfRpmSec_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How long the engine RPM must stay within its band before a motoring run is banked.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfRpmSec" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Headwind band (kt) (<span id="perfHwTol_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Motoring: max change in the apparent headwind component (wind speed &times; cos angle) within a steady run.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfHwTol" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Headwind steady time (s) (<span id="perfHwSec_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How long the headwind must stay within its band before a motoring run is banked.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfHwSec" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Min boat speed (kt) (<span id="perfMinBoatSpeed_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Below this speed the boat isn't really under way, so nothing is learned — keeps drifting and maneuvering out of the maps.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfMinBoatSpeed" type="number" step="0.1" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Min wind speed (kt) (<span id="perfMinWindSpeed_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Below this apparent wind speed, sailing data is ignored — too little wind to learn a meaningful polar.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfMinWindSpeed" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Engine-off RPM threshold (<span id="perfRpmFloor_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Below this alternator RPM = sailing; above = motoring. Splits which front a run feeds.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfRpmFloor" type="number" step="10" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Safety margin (kt) (<span id="perfSafetyMargin_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Biases the keep test toward keeping a point — a kept non-best is pruned by the cloud, a wrongly-discarded best is lost until it recurs.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfSafetyMargin" type="number" step="0.1" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Interpolation power (IDW) (<span id="perfIdwPower_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How the maps estimate speed between learned points (inverse-distance weighting). Higher = the nearest points dominate (sharper, more local); lower = smoother blending across conditions.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfIdwPower" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Prune neighbors (k, cloud) (<span id="perfPruneK_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How many nearby points the cloud checks when deciding to drop a redundant one. Higher keeps the maps denser; lower trims more aggressively. Applied in the cloud, not on the device.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfPruneK" type="number" step="1" min="5" max="20" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+            </details>
+          </div>
+        </div>
+
       </div>
     </div>
   </div>
@@ -4235,20 +4457,13 @@
     <div id="tuning-plant-delay" class="sub-tab-content active">
       <div class="settings-card">
 
-        <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:0 0 16px 0;font-size:13px;line-height:1.55;">
-          <strong>Plant Delay</strong> — the measured electrical lag between a field duty command and the resulting current response.
-          The two <strong>current</strong> filters (excess current detection, output PID feedback) sit inside control paths, so their sensor filter wants to be roughly <strong>1/3 of the plant delay</strong>. Setting them equal to the plant stacks two equal lags in series and erodes phase margin — the controller ends up reacting to where the current <em>was</em> rather than where it <em>is</em>. Faster than 1/3 starts feeding sensor noise into Kp/Kd without buying much.
-          The <strong>voltage</strong> filter is different — its main consumer is the slope-bleed dV/dt, which is computed once per voltage loop tick (default 100 ms, set by the Voltage Loop Interval). Filtering at roughly the full plant delay is in the textbook range relative to that differencing interval.
-          Run the test at a steady speed somewhere within your normal operating range. When the test finishes, the modal shows the measured plant delay and a "Set All Filters" button that writes <strong>plant/3</strong> to the two current filters and the <strong>full plant delay</strong> to the voltage filter. You can also set the three filters individually.
-        </div>
-
         <p class="card-group-title" style="margin:0 0 10px 0;">Test Parameters</p>
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Step Test Amplitude (% duty) (<span id="SystemIDStepAmplitude_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Duty cycle step size used during the plant delay measurement test. Larger steps produce a cleaner current signal above noise but disturb the system more. Default: 6%. Must be large enough that the current response is clearly visible above the baseline noise floor.</span>
+              <span class="tooltip-box">Duty cycle step size used during the plant delay measurement test. Larger steps produce a cleaner current signal above noise but disturb the system more. Must be large enough that the current response is clearly visible above the baseline noise floor.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4265,7 +4480,7 @@
           <div class="form-row" style="margin-bottom:0;">
             <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
               <span>⚠️ Protections:</span>
-              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and AlternatorHardShutdownV normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
             </div>
             <div class="form-input">
               <form action="/get" method="GET" target="hidden-form">
@@ -4382,7 +4597,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal used by the Group 3 excess-current (overcurrent trip) detector. Set All Filters writes <strong>plant/3</strong> here. The detector also stacks an <code>IExcessN</code> persist counter on top of this EMA, so the effective trip lag is roughly <code>N × loop_tick + 3τ</code>. Filtering at the full plant delay would make the trip too sluggish to catch real transients before the fastOV supervisor has to clean them up; <code>plant/3</code> gives the detector a clear view of current dynamics in the plant's response band while still rejecting noise above it. <strong>Only active when Group 3 signal source is set to EMA(TC) — has no effect in MA(N) (default) or Raw modes.</strong> Echoed read-only in Current tab → OV Protection Group 3. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal used by the Group 3 excess-current (overcurrent trip) detector. Set All Filters writes <strong>plant/3</strong> here. The detector also stacks a persistence counter on top of this filter, so the effective trip lag is roughly the persistence count plus a few filter time constants. Filtering at the full plant delay would make the trip too sluggish to catch real transients before the fast-overvoltage supervisor has to clean them up; <strong>plant/3</strong> gives the detector a clear view of current dynamics in the plant's response band while still rejecting noise above it. <strong>Only active when Group 3 signal source is set to EMA(TC) — has no effect in MA(N) (default) or Raw modes.</strong> Echoed read-only in Current tab → OV Protection Group 3.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4399,7 +4614,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID. Set All Filters writes <strong>plant/3</strong> here. The plant (field coil L/R) is already a first-order low-pass inside the loop; setting the sensor filter equal to it stacks two equal lags in series, which costs ~45° of phase margin at crossover and forces lower Kp than you'd otherwise get away with. A filter at roughly <code>plant/3</code> lets the controller see current dynamics in close to real time without feeding raw sensor noise into Kp/Kd. Independent from the Group 3 excess-current filter. <strong>Mostly inert when the Output PID signal source is MA(N) or Raw, but the same EMA is also used unconditionally to seed the CV integrator on the AUTO→CV handoff.</strong> Echoed read-only in Current tab → Output Current Controller. Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID. Set All Filters writes <strong>plant/3</strong> here. The plant (field coil L/R) is already a first-order low-pass inside the loop; setting the sensor filter equal to it stacks two equal lags in series, which costs ~45° of phase margin at crossover and forces lower Kp than you'd otherwise get away with. A filter at roughly <code>plant/3</code> lets the controller see current dynamics in close to real time without feeding raw sensor noise into Kp/Kd. Independent from the Group 3 excess-current filter. <strong>Mostly inert when the Output PID signal source is MA(N) or Raw, but the same EMA is also used unconditionally to seed the CV integrator on the AUTO→CV handoff.</strong> Echoed read-only in Current tab → Output Current Controller.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4416,7 +4631,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant applied to the measured battery voltage. Set All Filters writes the <strong>full plant delay</strong> here (not plant/3) because this filter isn't inside a control path — its dominant consumer is the slope-bleed dV/dt, computed as a backward difference of the filtered voltage over the ~200 ms voltage-loop tick. Filtering at roughly half the differencing interval is the standard balance: slower and the slope reacts too late, faster and the slope gets noisy. Also used by the charging stage machine (Bulk → Absorption hold timer), where the timescale is seconds and the filter TC barely matters. Voltage Loop Kp/Ki and the Group 1/2 voltage comparisons all use raw battery voltage instead — this setting doesn't affect them. Group 1's voltage rate-of-change uses its own separate EMA (dvdt EMA TC). Default: 100 ms.</span>
+              <span class="tooltip-box">EMA time constant applied to the measured battery voltage. Set All Filters writes the <strong>full plant delay</strong> here (not plant/3) because this filter isn't inside a control path — its dominant consumer is the slope-bleed dV/dt, computed as a backward difference of the filtered voltage over the voltage-loop tick. Filtering at roughly half the differencing interval is the standard balance: slower and the slope reacts too late, faster and the slope gets noisy. Also used by the charging stage machine (Bulk → Absorption hold timer), where the timescale is seconds and the filter TC barely matters. Voltage Loop Kp/Ki and the Group 1/2 voltage comparisons all use raw battery voltage instead — this setting doesn't affect them. Group 1's voltage rate-of-change uses its own separate EMA (dvdt EMA TC).</span>
             </span>
           </div>
           <div class="form-input">
@@ -4426,6 +4641,12 @@
               <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
             </form>
           </div>
+        </div>
+
+        <hr />
+        <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:16px 0 0 0;font-size:13px;line-height:1.55;">
+          <strong>Plant Delay</strong> — the measured electrical lag between a field duty command and the resulting current response. Run the test at a steady speed within your normal operating range.
+          The two <strong>current</strong> filters sit inside control loops, so they want roughly <strong>1/3 of the plant delay</strong> — matching the full delay would stack two equal lags and erode phase margin. The <strong>voltage</strong> filter isn't in a control path, so it takes the <strong>full plant delay</strong>. See each filter's tooltip above for the full reasoning.
         </div>
 
 
@@ -4570,7 +4791,7 @@
                   <div class="form-row" style="margin-bottom:0;">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>⚠️ Protections:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and AlternatorHardShutdownV normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -4883,7 +5104,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>MA Window — N samples (<span id="OutputPIDMA_N_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal fed into the Output Current PID. Each sample is ~7 ms apart, so N=2 ≈ 14 ms window. Independent from the Group 3 MA window. Default 2.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal fed into the Output Current PID. Each sample is ~7 ms apart, so N=2 ≈ 14 ms window. Independent from the Group 3 MA window.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -5039,7 +5260,7 @@
                   <div class="form-row" style="margin-bottom:0;">
                     <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                       <span>⚠️ Protections:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and AlternatorHardShutdownV normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -5125,7 +5346,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Overshoot Penalty (K) (<span id="cvKOvershoot_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Multiplier applied to overshoot (battery voltage above target) in the HIGH-phase ISE scoring formula used by both the live spans at the top of the CV Tuning Score Log and each committed log entry. Approach below target is weighted ×1. Higher values penalize overshoot more harshly relative to undershoot — useful for batteries that are very sensitive to overvoltage. Each committed record stores the K it was scored with, so comparing entries across different K values requires reading that column. Default: 10.</span>
+                      <span class="tooltip-box">Multiplier applied to overshoot (battery voltage above target) in the HIGH-phase ISE scoring formula used by both the live spans at the top of the CV Tuning Score Log and each committed log entry. Approach below target is weighted ×1. Higher values penalize overshoot more harshly relative to undershoot — useful for batteries that are very sensitive to overvoltage. Each committed record stores the K it was scored with, so comparing entries across different K values requires reading that column.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -5144,7 +5365,7 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Settling Consecutive Reads (<span id="cvConsecutiveReads_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">How many readings in a row the battery voltage must stay within ±0.10V of the test target before the system calls it "settled" and stops the settling-time timer. Each reading happens about every 100ms (the voltage loop rate), so 10 readings ≈ 1 second of being on-target. Higher = stricter, more honest settling-time numbers, but tests take longer. Lower = looser, could be fooled by a brief lucky moment. Default 10 (~1 second); 8–12 is a reasonable starting range.</span>
+                      <span class="tooltip-box">How many readings in a row the battery voltage must stay within ±0.10V of the test target before the system calls it "settled" and stops the settling-time timer. Each reading happens about every 100ms (the voltage loop rate), so 10 readings ≈ 1 second of being on-target. Higher = stricter, more honest settling-time numbers, but tests take longer. Lower = looser, could be fooled by a brief lucky moment. 8–12 is a reasonable starting range.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -5303,7 +5524,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Slope bleed threshold (V/s) (<span id="SlopeBleedThresh_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">Voltage rise rate above which the voltage loop integrator begins to drain. The rise rate is computed from the smoothed voltage signal (set by "Voltage sensor smoothing filter" in Tuning → Plant Delay), not from the voltage rate-of-change EMA used by Group 1 prediction. Below this threshold the integrator is unaffected. Setting too low causes false drains during normal charging; too high and it never fires in time. Default: 0.50 V/s.</span>
+                      <span class="tooltip-box">Voltage rise rate above which the voltage loop integrator begins to drain. The rise rate is computed from the smoothed voltage signal (set by "Voltage sensor smoothing filter" in Tuning → Plant Delay), not from the voltage rate-of-change EMA used by Group 1 prediction. Below this threshold the integrator is unaffected. Setting too low causes false drains during normal charging; too high and it never fires in time.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -5320,7 +5541,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Slope bleed gain (A per V/s) (<span id="SlopeBleedK_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                      <span class="tooltip-box">How aggressively to drain the voltage loop integrator when slope exceeds the threshold. At 50 with 0.2 V/s excess slope, drains 1A per 100ms tick. Higher = more aggressive preemptive wind-down. Default: 50.</span>
+                      <span class="tooltip-box">How aggressively to drain the voltage loop integrator when slope exceeds the threshold. At 50 with 0.2 V/s excess slope, drains 1A per 100ms tick. Higher = more aggressive preemptive wind-down.</span>
                     </span>
                   </div>
                   <div class="form-input">
@@ -5363,7 +5584,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Interval (ms) (<span id="VoltageLoopInterval_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the voltage loop's <strong>integrator</strong> (the slow-correction term) updates. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. The <strong>proportional response</strong> (the fast-correction term — Voltage Loop Kp × voltage error) runs every output PID tick (~5ms) regardless of this setting, so the loop reacts to voltage changes immediately; only the integral build-up cadence is controlled here. Default: 100 ms. Shorter values make the integrator more responsive but can amplify noise; longer values make it smoother but slower to correct steady-state error.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the voltage loop's <strong>integrator</strong> (the slow-correction term) updates. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. The <strong>proportional response</strong> (the fast-correction term — Voltage Loop Kp × voltage error) runs every output PID tick (~5ms) regardless of this setting, so the loop reacts to voltage changes immediately; only the integral build-up cadence is controlled here. Shorter values make the integrator more responsive but can amplify noise; longer values make it smoother but slower to correct steady-state error.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5629,7 +5850,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>K Overshoot (<span id="thermalKOvershoot_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Penalty multiplier on integrated temperature above the high setpoint (°F·s). Higher = more harshly penalised overshoot. Default: 4.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Penalty multiplier on integrated temperature above the high setpoint (°F·s). Higher = more harshly penalised overshoot.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5644,7 +5865,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>K Undershoot (<span id="thermalKUndershoot_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Penalty multiplier on integrated temperature below the high setpoint (°F·s) after the loop has settled — penalises unnecessary conservatism. Default: 1.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Penalty multiplier on integrated temperature below the high setpoint (°F·s) after the loop has settled — penalises unnecessary conservatism.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5659,7 +5880,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Settle Threshold (°F) (<span id="thermalSettleThreshF_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Temperature must be within ±this value of the high setpoint for N consecutive reads to declare settled. Default: 2°F.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Temperature must be within ±this value of the high setpoint for N consecutive reads to declare settled.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5674,7 +5895,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Consecutive Reads (<span id="thermalConsecutiveReads_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of consecutive temperature readings within the settle band required to declare settled. Default: 3.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of consecutive temperature readings within the settle band required to declare settled.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5764,7 +5985,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain (A per °F of projected temperature error). Error is projectedTemp − setpoint. Higher values derate current more aggressively as projected temperature approaches the limit. Default: 0.5.</span></span>
+                        class="tooltip-box">Proportional gain (A per °F of projected temperature error). The error is the projected temperature minus the temperature limit. Higher values derate current more aggressively as projected temperature approaches the limit.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5779,7 +6000,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while projected temperature stays above setpoint. Bounded by the penalty output limits (0 to MaxTableValue). Default: 0.05.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while projected temperature stays above the limit. Bounded by the penalty output limits (0 up to the cap-table maximum).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5794,7 +6015,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. projectedTemp = tempNow + slope × ThermalLookaheadSec, where tempNow is the raw sensor reading (DS18B20) or IIR-filtered reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Clamped to 0–300s. Default: 90.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. Projected temperature = current temperature + rate of rise × this lookahead, where the current temperature is the raw sensor reading (DS18B20) or the smoothed reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Clamped to 0–300s.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5809,7 +6030,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the temperature PID runs and the slope buffer is updated. Also sets the slope window: 12 intervals × this value (default 12 × 5000ms = 60s). Independent of the output current loop rate. Default: 5000ms.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the temperature PID runs and the slope buffer is updated. Also sets the slope window: 12 intervals × this value. Independent of the output current loop rate.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5824,7 +6045,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Filter Alpha (<span id="TempPIDFilterAlpha_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">IIR smoothing coefficient for tempFiltered. For DS18B20, tempFiltered is computed but the PID lookahead and slope buffer both use the raw sensor reading directly — this alpha affects the logged/plotted filtered value but does not affect the PID input. For thermistor, alpha is hardcoded to 0.02 regardless of this setting. Default: 0.2.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Smoothing strength for the filtered temperature value. For DS18B20 sensors, the filtered value is computed but the lookahead and rate-of-rise both use the raw sensor reading directly — so this only affects the logged and plotted filtered value, not the control input. For thermistors, the smoothing is fixed regardless of this setting.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5876,7 +6097,7 @@
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Forecasted Thermal Penalty:</strong> The temperature controller does not act on the current
                   temperature reading. It acts on a projected temperature — current filtered temperature plus the
-                  measured rate of rise multiplied by the Thermal Lookahead horizon (default 90 seconds). This is
+                  measured rate of rise multiplied by the Thermal Lookahead horizon. This is
                   what lets the loop pull current down <em>before</em> the alternator actually reaches the limit. The
                   setpoint is the real damage limit (Alternator Temp Limit) and the output is a penalty in amps: zero
                   means no restriction, higher numbers mean more current pulled away from what the RPM Cap Table
@@ -5925,8 +6146,9 @@
                   three-loop cascade and act on raw sensor readings without filter lag. <em>Fast OV</em> (Groups 1
                   and 2) caps current immediately when raw battery voltage runs above a margin below the charging
                   target. <em>Load Dump</em> protection caps current when a sustained battery-current rise rate is
-                  detected, catching FET disconnect or load drop events. <em>Group 3 (iExcess)</em> bleeds the
-                  voltage-loop integrator if current overshoots, killing the cause rather than just the symptom. None
+                  detected, catching FET disconnect or load drop events. <em>Group 3 (iExcess)</em> caps the
+                  current ceiling when measured alternator current overshoots the commanded setpoint, and collapses
+                  the voltage-loop integrator at the same time so it can't immediately re-demand the excess. None
                   of these depend on the control loops being active — they are always armed.
                 </p>
                 <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
@@ -5978,7 +6200,7 @@
                   Re-enable the actuator slew limiter by setting <em>Duty Ramp Rate</em> to a realistic value (typically
                   10–30 %/s). Keep setpoint slew limiters high (1000 A/s). Run tuning mode again and watch for
                   overshoot after transitions. If you see overshoot once the duty ramp catches up, increase
-                  <em>PID Tracking Gain</em> from its default until the overshoot disappears. This is the
+                  <em>PID Tracking Gain</em> until the overshoot disappears. This is the
                   back-calculation gain that bleeds the integrator down whenever the duty output is rate-limited.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
@@ -5996,10 +6218,7 @@
                   harsh.
                 </p>
                 <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Current Defaults:</strong> Kp = 0.5, Ki = 2.0, Kd = 0.01, PID Tracking Gain = 4.0, Duty
-                  Ramp Rate = 50 %/s, Setpoint Rise Rate = 30 A/s, Setpoint Fall Rate = 50 A/s. These are sensible
-                  starting points but every installation is different — always verify with a step test in your own
-                  setup.
+                  Every installation is different — always verify with a step test in your own setup.
                 </p>
               </div>
 
@@ -6067,20 +6286,6 @@
           </div>
 
         </div> <!-- closes first .grid (Current + Temperature) -->
-
-        <!-- Alternator health summary (Phase 2) -->
-        <div style="display:flex;align-items:center;gap:18px;margin:10px 0;flex-wrap:wrap;">
-          <div style="min-width:96px;text-align:center;flex-shrink:0;">
-            <div style="font-size:11px;color:var(--text-muted);">Charging-System Health</div>
-            <div id="alt-health-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
-            <div id="alt-health-status" style="font-size:12px;color:#888;">Learning</div>
-          </div>
-          <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
-            <div><span id="alt-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture</div>
-            <div id="alt-coverage">0% of visited cells frozen</div>
-            <div style="opacity:0.7;">Advisory only — drift from the baseline learned at install. Reflects alternator + regulator + field circuit + sensors + belt.</div>
-          </div>
-        </div>
 
         <div class="grid" style="margin-top:10px;">
 
@@ -6281,9 +6486,8 @@
             <span>Wear Rate</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">
               ℹ️
-              <span class="tooltip-box">How long a NEW alterantor would last at the present
-                speed and temperature.
-                This one is an indication of instantaneous wear rate, not accumulated damage.</span>
+              <span class="tooltip-box">How long a new alternator would last if it ran continuously at the present
+                speed and temperature. This is an instantaneous wear rate, not accumulated damage.</span>
             </span>
           </div>
           <div class="form-input">
@@ -6345,82 +6549,46 @@
         </div>
       </div> <!-- closes .settings-card -->
       <div class="settings-card" style="margin-top:16px;">
-        <p class="card-group-title">Field Drive (excitation) vs RPM — learned model + live point</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px 0;">
-          Filled dots = frozen reference cells (green = higher output). Hollow = still learning.
-          Red dot = live operating point (solid when steady). Steady-state tuning lives in
-          <strong>Settings &rarr; Alternator &rarr; Alternator Health — Steady-State Tuning</strong>.
+        <!-- Charging-system health summary (v2) — sits directly above the trend plot -->
+        <div style="display:flex;align-items:center;gap:18px;margin:4px 0 10px;flex-wrap:wrap;">
+          <div style="min-width:96px;text-align:center;flex-shrink:0;">
+            <div style="font-size:11px;color:var(--text-muted);">Charging-System Health <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions.</span></span></div>
+            <div id="alt-health-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
+            <div id="alt-health-status" style="font-size:12px;color:#888;">Learning</div>
+          </div>
+          <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
+            <div><span id="alt-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture</div>
+            <div id="alt-coverage" style="font-size:10px;">no front points yet</div>
+          </div>
+        </div>
+        <hr />
+        <p class="card-group-title" style="display:flex;align-items:center;justify-content:space-between;">
+          <span>Charging-System Health vs Engine Hours</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
         </p>
-        <canvas id="alt-plot" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
+        <canvas id="alt-trend" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
+        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>worst</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid rgba(58,123,213,.45);"></i>average</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px dashed #bbccdd;"></i>best</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#5cb85c;"></i>now</span>
+        </div>
         <hr />
         <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
-          <input type="button" value="Download Model CSV" class="btn-secondary"
-            onclick="window.location='/altmodel.csv'"
-            title="Download the learned alternator-health model (all cells) as CSV" />
-          <input type="button" value="Start Over (wipe model)" class="btn-danger"
-            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned alternator-health data and start over? This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altCells=[];drawAltPlot();}).catch(()=>{});}" />
+          <input type="button" value="Download Records CSV" class="btn-secondary"
+            onclick="window.location='/altrecords.csv'"
+            title="Download the banked best-ever operating-point records as CSV" />
+          <input type="button" value="Download Curve CSV" class="btn-secondary"
+            onclick="window.location='/altcurve.csv'"
+            title="Download the held cloud-fitted curve as CSV" />
+          <input type="button" id="alt-sim-btn" value="Simulator: off" class="btn-secondary"
+            onclick="altToggleSim()"
+            title="Bench simulator — inject synthetic operating points so the curve fills and the trend declines (no engine needed)" />
+          <input type="button" value="Start Over (new baseline)" class="btn-danger"
+            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned alternator-health data and restart the trend at engine-hour 0? Do this after replacing the alternator, regulator, or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}" />
         </span>
       </div>
 
-
-      <!-- DS18B20 Sensor Health -->
-      <div class="settings-card" style="margin-top:16px;">
-        <p class="card-group-title">DS18B20 Temperature Sensor Health</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
-        <div class="sensor-health-grid">
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Read Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">CRC Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempCrcFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">CRC Recovered (retry)</span>
-          <span class="metric-value telemetry-value"><span id="tempCrcRecoveredCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">All-0xFF Reads</span>
-          <span class="metric-value telemetry-value"><span id="tempAllFFCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Power-On 85°C Reads</span>
-          <span class="metric-value telemetry-value"><span id="tempPowerOn85CountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Out of Range Reads</span>
-          <span class="metric-value telemetry-value"><span id="tempOutOfRangeCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Request Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempRequestFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Connected Check Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempConnectedFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Resolution Auto-Fixes</span>
-          <span class="metric-value telemetry-value"><span id="tempResolutionFixCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Re-read Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempRereadFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Resolution Fix CRC Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempResolutionFixCrcFailCountID">?</span></span>
-        </div>
-        <div class="metric-row telemetry-row">
-          <span class="metric-label telemetry-label">Enumerate Failures</span>
-          <span class="metric-value telemetry-value"><span id="tempEnumerateFailCountID">?</span></span>
-        </div>
-        </div>
-        <div style="margin-top:10px;">
-          <button onclick="resetTempTaskCounters()" class="btn-secondary">Reset Sensor Health Counters</button>
-        </div>
-      </div>
 
       <!-- Live Tuning Scores -->
       <div class="settings-card" style="margin-top:16px;">
@@ -6535,6 +6703,55 @@
             <div class="metric-row">
               <span class="metric-label">Victron Battery Current</span>
               <span class="metric-value"><span id="VictronCurrentID">0</span> A</span>
+            </div>
+          </div>
+
+          <div class="card-group">
+            <p class="card-group-title">Solar (Victron MPPT)</p>
+            <div class="metric-row">
+              <span class="metric-label">Solar Power
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">Live solar panel power from a Victron MPPT over VE.Direct (PPV). Available if VE.Direct Data is turned on in Settings→System.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="VictronSolarPowerID">0</span> W</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Solar Voltage</span>
+              <span class="metric-value"><span id="VictronSolarVoltageID">0</span> V</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Solar Current</span>
+              <span class="metric-value"><span id="VictronSolarCurrentID">0</span> A</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Charge State</span>
+              <span class="metric-value"><span id="VictronChargeStateID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Tracker Mode</span>
+              <span class="metric-value"><span id="VictronMPPTModeID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Charger Error</span>
+              <span class="metric-value"><span id="VictronErrorID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Yield Today</span>
+              <span class="metric-value"><span id="VictronYieldTodayID">0</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Max Power Today</span>
+              <span class="metric-value"><span id="VictronMaxPowerTodayID">0</span> W</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Yield Yesterday</span>
+              <span class="metric-value"><span id="VictronYieldYesterdayID">0</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Max Power Yesterday</span>
+              <span class="metric-value"><span id="VictronMaxPowerYesterdayID">0</span> W</span>
             </div>
           </div>
 
@@ -6838,229 +7055,74 @@
 
     <!-- GPS/Travel/Wind Live Data Sub-tab -->
     <div id="livedata-gps" class="sub-tab-content">
-      <!-- Boat Performance — Sailing Polar (Phase 3) -->
+      <!-- Boat Performance (Phase 3) — unified sailing/motoring -->
       <div class="settings-card" style="margin-top:16px;">
-        <p class="card-group-title">Boat Performance — Sailing Polar (pitch-corrected)</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px 0;">
-          Your best-ever boat speed versus the wind, corrected for sea state (how much the boat is
-          pitching). It predicts speed through the water, falling back to GPS speed when no
-          water-speed log is present. Dots = learned best at each wind condition (color = wind
-          speed). Red dot = you right now (green &ge;95%, amber &ge;80%, red below). Black ring =
-          your best at this exact condition.
-        </p>
-
-        <!-- headline gauge + hull/fouling -->
-        <div style="display:flex;align-items:center;gap:18px;margin:10px 0;flex-wrap:wrap;">
-          <div style="min-width:96px;text-align:center;flex-shrink:0;">
-            <div style="font-size:11px;color:var(--text-muted);">% of Your Best</div>
-            <div id="perf-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
-            <div id="perf-status" style="font-size:12px;color:#888;">Learning</div>
-          </div>
-          <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
-            <div>Hull: <span id="perf-fouling">—</span> &middot; sea state <span id="perf-pitch">—</span> &middot; source <span id="perf-src">—</span></div>
-            <div id="perf-coverage">0% of cells graduated</div>
-            <div id="perf-tick" style="opacity:0.6;font-size:11px;">tick —</div>
-            <div style="opacity:0.7;">Advisory. A sustained drop below your best = dirty bottom (with a water-speed log) or adverse current (GPS only).</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+          <p class="card-group-title" style="margin:0;padding:0;border:0;white-space:normal;">Boat Speed
+            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Best-ever boat speed versus the wind (Sailing) or engine RPM (Motoring), corrected for sea state — how much the boat pitches. Predicts speed through the water, or GPS speed if no log. Curve = learned best; green dot = now; black ring = best at this exact condition. A sustained drop below best = dirty bottom or adverse current.</span></span>
+          </p>
+          <div class="cap-mode-toggle">
+            <button type="button" id="perf-view-sail" class="cap-mode-btn cap-mode-active" onclick="setPerfView(0)">Sailing</button>
+            <button type="button" id="perf-view-motor" class="cap-mode-btn" onclick="setPerfView(1)">Motoring</button>
           </div>
         </div>
-
-        <canvas id="perf-plot" width="360" height="360" style="width:100%;max-width:420px;aspect-ratio:1/1;display:block;margin:0 auto;"></canvas>
         <hr />
 
-        <!-- speed source — segmented control -->
+        <!-- 4-quadrant live frame: conditions top, % + data-maturity bottom, plot centered -->
+        <div style="display:grid;grid-template-columns:minmax(64px,1fr) auto minmax(64px,1fr);grid-template-rows:auto 1fr auto;gap:4px 8px;align-items:start;">
+          <!-- TL: conditions (apparent wind / engine RPM) -->
+          <div style="grid-column:1;grid-row:1;text-align:left;">
+            <div id="perf-condL-label" style="font-size:12px;color:var(--text-muted);">Apparent wind</div>
+            <div id="perf-condL-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
+            <div id="perf-condL-sub" style="font-size:13px;color:var(--text-muted);"></div>
+          </div>
+          <!-- center: plot (one of the two is shown per view) -->
+          <div style="grid-column:2;grid-row:1 / span 3;align-self:center;">
+            <canvas id="perf-plot" width="360" height="360" style="width:100%;max-width:260px;aspect-ratio:1/1;display:block;margin:0 auto;"></canvas>
+            <canvas id="motor-plot" width="520" height="300" style="width:100%;max-width:300px;aspect-ratio:520/300;display:none;margin:0 auto;"></canvas>
+          </div>
+          <!-- TR: sea state -->
+          <div style="grid-column:3;grid-row:1;text-align:right;">
+            <div style="font-size:12px;color:var(--text-muted);">Sea state</div>
+            <div id="perf-sea-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
+            <div id="perf-sea-sub" style="font-size:13px;color:var(--text-muted);"></div>
+          </div>
+          <!-- BL: % of best -->
+          <div style="grid-column:1;grid-row:3;text-align:left;align-self:end;">
+            <div><span id="perf-pct" style="font-size:30px;font-weight:800;">&mdash;</span></div>
+            <div style="font-size:12px;color:var(--text-muted);">of best</div>
+          </div>
+          <!-- BR: data maturity (front points + sailing/motoring hours) -->
+          <div style="grid-column:3;grid-row:3;text-align:right;align-self:end;">
+            <div id="perf-pts" style="font-size:20px;font-weight:700;line-height:1.05;">&mdash;</div>
+            <div style="font-size:12px;color:var(--text-muted);">front points</div>
+            <div id="perf-hours-val" style="font-size:20px;font-weight:700;line-height:1.05;margin-top:4px;">&mdash;</div>
+            <div id="perf-hours-label" style="font-size:12px;color:var(--text-muted);">sailing hours</div>
+          </div>
+        </div>
+        <!-- legend -->
+        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i><span id="perf-legend-curve">best polar</span></span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#5cb85c;"></i>now</span>
+        </div>
+        <div style="text-align:center;margin-top:6px;font-size:12px;color:var(--text-muted);">
+          <span id="perf-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture
+        </div>
+        <hr />
+
+        <!-- learning switch + download (live display only; config/tuning live in Settings → Vessel Performance) -->
         <div class="form-row">
-          <div class="form-label"><span>Speed source:</span></div>
-          <div class="form-input">
-            <div class="cap-mode-toggle">
-              <button type="button" id="perf-src-0" class="cap-mode-btn" onclick="perfSet('perfSpeedSrc',0)">Both</button>
-              <button type="button" id="perf-src-1" class="cap-mode-btn" onclick="perfSet('perfSpeedSrc',1)">Water</button>
-              <button type="button" id="perf-src-2" class="cap-mode-btn" onclick="perfSet('perfSpeedSrc',2)">GPS</button>
-            </div>
+          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>Learning <span id="perf-learn-label" style="color:var(--text-muted);">&mdash;</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Turn off to stop learning while under tow, or in strong current with no water-speed log, so bad data can't poison the map. Stays off across reboots.</span></span>
+          </div>
+          <div class="form-input" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <label class="switch"><input id="perf-learn-switch" type="checkbox" onchange="perfSet('perfPaused', this.checked?0:1)" /><span class="slider"></span></label>
+            <input type="button" id="perf-dl-btn" value="Download CSV" class="btn-secondary" onclick="window.location=(perfView?'/motormodel.csv':'/perfmodel.csv')" />
           </div>
         </div>
         <hr />
-        <!-- polar symmetry — segmented control -->
-        <div class="form-row">
-          <div class="form-label"><span>Polar symmetry:</span></div>
-          <div class="form-input">
-            <div class="cap-mode-toggle">
-              <button type="button" id="perf-sym-1" class="cap-mode-btn" onclick="perfSet('perfSymmetric',1)">Symmetric</button>
-              <button type="button" id="perf-sym-0" class="cap-mode-btn" onclick="perfSet('perfSymmetric',0)">Both tacks</button>
-            </div>
-          </div>
-        </div>
-        <hr />
-        <!-- learning switch + actions -->
-        <div class="form-row">
-          <div class="form-label"><span>Learning <span id="perf-learn-label" style="color:var(--text-muted);">—</span></span></div>
-          <div class="form-input" style="display:flex;align-items:center;gap:12px;">
-            <label class="switch" title="Pause while under tow, or in strong current with no water-speed log, so bad data can't poison the polar. Sticky across reboot.">
-              <input id="perf-learn-switch" type="checkbox" onchange="perfSet('perfPaused', this.checked?0:1)" />
-              <span class="slider"></span>
-            </label>
-            <input type="button" id="perf-sim-btn" value="Simulator: off" class="btn-secondary"
-              onclick="perfSet('perfSimMode', (perfLive.sim===1)?0:1)"
-              title="Bench testing without a boat: injects synthetic wind/speed/RPM/pitch so the maps fill in. Tip: set Window length to ~10s for a fast fill. Turn off and Clear All when done." />
-            <input type="button" value="Download CSV" class="btn-secondary"
-              onclick="window.location='/perfmodel.csv'"
-              title="Download the learned sailing-polar model (all cells) as CSV" />
-            <input type="button" value="Clear All" class="btn-danger-ghost"
-              onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned boat-performance data and start over? This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetBoatPerformance=1'),{},5000).then(()=>{perfCells=[];drawPerfPlot();}).catch(()=>{});}" />
-          </div>
-        </div>
-        <hr />
-
-        <!-- tuning (collapsible) -->
-        <details>
-          <summary class="alt-summary-nested">Sailing Polar — Tuning</summary>
-          <div style="font-size:12px;color:var(--text-muted);margin:6px 0;">
-            Window length + steady-state definitions. Build it, then tune live. Values echo live.
-          </div>
-          <div class="form-row">
-            <div class="form-label"><span>Window length (s) (<span id="perfWindowSec_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfWindowSec" type="number" step="5" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Wind-speed steadiness band (kt) (<span id="perfWsTol_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfWsTol" type="number" step="0.5" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Wind-angle steadiness band (&deg;) (<span id="perfWaTol_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfWaTol" type="number" step="1" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Heading steadiness band &mdash; tack reject (&deg;) (<span id="perfHdgTol_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfHdgTol" type="number" step="1" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Min boat speed (kt) (<span id="perfMinBoatSpeed_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfMinBoatSpeed" type="number" step="0.1" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Min wind speed (kt) (<span id="perfMinWindSpeed_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfMinWindSpeed" type="number" step="0.5" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Engine-off RPM threshold (sailing) (<span id="perfRpmFloor_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfRpmFloor" type="number" step="10" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Fouling sensitivity k (<span id="perfCusumK_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfCusumK" type="number" step="0.01" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-          <hr>
-          <div class="form-row">
-            <div class="form-label"><span>Fouling alarm threshold h (<span id="perfCusumH_echo">?</span>):</span></div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <input name="perfCusumH" type="number" step="0.1" />
-                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-              </form>
-            </div>
-          </div>
-        </details>
       </div>
-
-      <!-- Boat Performance — Motoring (Phase 3) -->
-      <div class="settings-card" style="margin-top:16px;">
-        <p class="card-group-title">Boat Performance — Motoring (speed vs RPM)</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px 0;">
-          Your best-ever boat speed at each engine RPM, corrected for headwind and sea state. A
-          sustained drop below your best at a given RPM = dirty bottom (with a water-speed log) or
-          adverse current (GPS only). Blue dots = learned best per RPM; line = best-ever envelope.
-          Red dot = you now (green &ge;95%, amber &ge;80%, red below); black ring = your best at this
-          RPM. Shares the speed source, Pause, and Clear-all controls with the sailing polar above.
-        </p>
-
-        <div style="display:flex;align-items:center;gap:18px;margin:10px 0;flex-wrap:wrap;">
-          <div style="min-width:96px;text-align:center;flex-shrink:0;">
-            <div style="font-size:11px;color:var(--text-muted);">% of Your Best</div>
-            <div id="motor-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
-            <div id="motor-status" style="font-size:12px;color:#888;">Learning</div>
-          </div>
-          <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
-            <div>Hull: <span id="motor-fouling">—</span> &middot; headwind <span id="motor-hw">—</span> &middot; source <span id="motor-src">—</span></div>
-            <div id="motor-coverage">0% of RPM bins graduated</div>
-            <div style="opacity:0.7;">Engine on (incl. motorsailing). Advisory only.</div>
-          </div>
-        </div>
-
-        <canvas id="motor-plot" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
-        <hr />
-        <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
-          <input type="button" value="Download Motoring CSV" class="btn-secondary"
-            onclick="window.location='/motormodel.csv'"
-            title="Download the learned speed-vs-RPM model as CSV" />
-        </span>
-        <hr />
-        <div class="form-row">
-          <div class="form-label"><span>RPM steadiness band (<span id="perfRpmTol_echo">?</span>):</span></div>
-          <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="perfRpmTol" type="number" step="10" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
-          </div>
-        </div>
-      </div>
-
       <div class="settings-card">
         <div class="grid">
 
@@ -8900,6 +8962,65 @@
           </div>
         </div>
       </div>
+
+      <!-- DS18B20 Sensor Health -->
+      <div class="settings-card" style="margin-top:16px;">
+        <p class="card-group-title">DS18B20 Temperature Sensor Health</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;">Counts since boot. One read failure on startup is normal. Persistent failures need attention; occasional CRC recoveries are fine.</p>
+        <div class="sensor-health-grid">
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Read Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempReadFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">CRC Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempCrcFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">CRC Recovered (retry)</span>
+          <span class="metric-value telemetry-value"><span id="tempCrcRecoveredCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">All-0xFF Reads</span>
+          <span class="metric-value telemetry-value"><span id="tempAllFFCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Power-On 85°C Reads</span>
+          <span class="metric-value telemetry-value"><span id="tempPowerOn85CountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Out of Range Reads</span>
+          <span class="metric-value telemetry-value"><span id="tempOutOfRangeCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Request Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempRequestFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Connected Check Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempConnectedFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Resolution Auto-Fixes</span>
+          <span class="metric-value telemetry-value"><span id="tempResolutionFixCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Re-read Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempRereadFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Resolution Fix CRC Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempResolutionFixCrcFailCountID">?</span></span>
+        </div>
+        <div class="metric-row telemetry-row">
+          <span class="metric-label telemetry-label">Enumerate Failures</span>
+          <span class="metric-value telemetry-value"><span id="tempEnumerateFailCountID">?</span></span>
+        </div>
+        </div>
+        <div style="margin-top:10px;">
+          <button onclick="resetTempTaskCounters()" class="btn-secondary">Reset Sensor Health Counters</button>
+        </div>
+      </div>
     </div>
 
     <!-- Protection Events Live Data Sub-tab -->
@@ -9328,6 +9449,13 @@
           </span>
         </div>
       </div>
+      <!-- Charge-stage color bar: one strip x-aligned to the plots showing which charge
+           stage the regulator was in over time (in place of per-chart background shading). -->
+      <div class="settings-card" id="lt-stage-card">
+        <div style="font-size:12px; font-weight:600; margin-bottom:4px;">Charge Stage</div>
+        <canvas id="lt-stage-bar" style="width:100%; height:18px; display:block; border-radius:3px;"></canvas>
+        <div id="lt-stage-legend" style="display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin-top:6px; font-size:11px;"></div>
+      </div>
       <div class="settings-card">
         <div class="plot-container" id="lt-voltage-plot"></div>
       </div>
@@ -9460,7 +9588,7 @@
 
     <!-- Leaderboards Sub-tab -->
     <div id="cloudfeatures-leaderboards" class="sub-tab-content">
-      <div class="history-container wide-card">
+      <div class="history-container">
         <iframe id="leaderboards-iframe"
           style="width: 100%; border: none; display: none; height: 600px; overflow: hidden;"></iframe>
         <p id="leaderboards-status" style="margin: 15px; color: #666;">Loading leaderboards...</p>
@@ -9469,7 +9597,7 @@
 
     <!-- Fleet Stats Sub-tab -->
     <div id="cloudfeatures-fleetstats" class="sub-tab-content">
-      <div class="history-container wide-card">
+      <div class="history-container">
         <iframe id="fleetstats-iframe"
           style="width: 100%; border: none; display: none; height: 600px; overflow: hidden;"></iframe>
         <p id="fleetstats-status" style="margin: 15px; color: #666;">Loading fleet statistics...</p>

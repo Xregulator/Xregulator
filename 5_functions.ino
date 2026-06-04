@@ -485,13 +485,34 @@ void ReadVEData() {
         solarPower_W = atof(myve.veValue[i]);             // PPV is already in Watts
         if (solarPower_W >= 0 && solarPower_W < 10000) {  // Sanity check (0-10kW)
           dataReceived = true;
+          VictronSolarPower_W = solarPower_W;             // expose live for dashboard + leaderboard
+          MARK_FRESH(IDX_VICTRON_SOLAR);
+          if (solarPower_W > solar_power_max_alltime_w) solar_power_max_alltime_w = solarPower_W;  // leaderboard: peak solar power
         } else {
           solarPower_W = 0.0f;  // Invalid reading, set to zero
         }
       }
+      if (strcmp(myve.veName[i], "VPV") == 0) {
+        float vpv = atof(myve.veValue[i]) / 1000.0f;      // VPV is in mV -> V
+        if (vpv >= 0 && vpv < 400) {                      // Sanity check (0-400V panel array)
+          VictronSolarVoltage_V = vpv;
+          dataReceived = true;
+        }
+      }
+      // MPPT status + daily-yield fields (all free from the same VE.Direct frame)
+      if (strcmp(myve.veName[i], "CS") == 0)   { VictronChargeState = atoi(myve.veValue[i]); dataReceived = true; }
+      if (strcmp(myve.veName[i], "MPPT") == 0) { VictronMPPTMode    = atoi(myve.veValue[i]); dataReceived = true; }
+      if (strcmp(myve.veName[i], "ERR") == 0)  { VictronError       = atoi(myve.veValue[i]); dataReceived = true; }
+      if (strcmp(myve.veName[i], "H20") == 0)  { VictronYieldToday_kWh     = atof(myve.veValue[i]) / 100.0f; dataReceived = true; }  // 0.01 kWh units
+      if (strcmp(myve.veName[i], "H21") == 0)  { VictronMaxPowerToday_W    = atof(myve.veValue[i]);          dataReceived = true; }
+      if (strcmp(myve.veName[i], "H22") == 0)  { VictronYieldYesterday_kWh = atof(myve.veValue[i]) / 100.0f; dataReceived = true; }  // 0.01 kWh units
+      if (strcmp(myve.veName[i], "H23") == 0)  { VictronMaxPowerYesterday_W = atof(myve.veValue[i]);         dataReceived = true; }
     }
     yield();  // Allow other processes to run
   }
+
+  // Panel current derived from power / voltage (VE.Direct MPPTs report PPV + VPV, not panel A)
+  VictronSolarCurrent_A = (VictronSolarVoltage_V > 1.0f) ? (VictronSolarPower_W / VictronSolarVoltage_V) : 0.0f;
 
   // Calculate solar energy if we got valid power data
   if (dataReceived && lastSolarEnergyUpdate > 0) {
@@ -899,6 +920,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
     static float alternatorEnergyAccumulator = 0.0f;
     static float alternatorEnergyAccumulator_AllTime = 0.0f;
     float alternatorPower_W = (currentBatteryVoltage * MeasuredAmps);
+    if (alternatorPower_W > alt_power_max_alltime_w) alt_power_max_alltime_w = alternatorPower_W;  // leaderboard: peak alt power
     float altEnergyDelta_Wh = (alternatorPower_W * elapsedSeconds) / 3600.0f;
 
     if (altEnergyDelta_Wh > 0) {
@@ -1055,9 +1077,11 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
         if (dtMs <= 300000UL && impliedKn < 50.0f) {
           static float distanceAccumulator = 0.0f;
           static float distanceAccumulator_AllTime = 0.0f;
+          static float sailingDistAccumulator_AllTime = 0.0f;  // engine-off miles (leaderboard)
 
           distanceAccumulator += (float)distanceDelta_nm;
           distanceAccumulator_AllTime += (float)distanceDelta_nm;
+          if (RPM < 50 && Ignition == 0) sailingDistAccumulator_AllTime += (float)distanceDelta_nm;  // under sail = engine off (matches sailing_days gate)
 
           if (distanceAccumulator >= 0.01f) {
             TotalDistance += distanceAccumulator;
@@ -1066,6 +1090,10 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
           if (distanceAccumulator_AllTime >= 0.01f) {
             TotalDistance_AllTime += distanceAccumulator_AllTime;
             distanceAccumulator_AllTime = 0.0f;
+          }
+          if (sailingDistAccumulator_AllTime >= 0.01f) {
+            sailing_dist_alltime += sailingDistAccumulator_AllTime;
+            sailingDistAccumulator_AllTime = 0.0f;
           }
 
           tripDistanceDelta_nm = (float)distanceDelta_nm;  // reuse validated delta for trip
@@ -3000,6 +3028,16 @@ void ReadAnalogInputs_Fake() {
       float elapsedSeconds = 2.0;  // 2 second update interval
       float solarEnergyDelta_Wh = (fakeSolarPower * elapsedSeconds) / 3600.0f;
 
+      // Mirror the fake solar onto the live dashboard fields + leaderboard watermark
+      VictronSolarPower_W = fakeSolarPower;
+      VictronSolarVoltage_V = 18.0f + (random(-200, 200) / 100.0f);
+      VictronSolarCurrent_A = (VictronSolarVoltage_V > 1.0f) ? (VictronSolarPower_W / VictronSolarVoltage_V) : 0.0f;
+      VictronChargeState = 3; VictronMPPTMode = 2; VictronError = 0;   // Bulk / Active MPPT / OK
+      VictronYieldToday_kWh += solarEnergyDelta_Wh / 1000.0f;
+      if (fakeSolarPower > VictronMaxPowerToday_W) VictronMaxPowerToday_W = fakeSolarPower;
+      MARK_FRESH(IDX_VICTRON_SOLAR);
+      if (VictronSolarPower_W > solar_power_max_alltime_w) solar_power_max_alltime_w = VictronSolarPower_W;
+
       static float solarEnergyAccumulator = 0.0f;
       static float solarEnergyAccumulator_AllTime = 0.0f;
 
@@ -3849,6 +3887,8 @@ void saveNVSDataFull() {
   if (prev_EngineCycles != (int32_t)EngineCycles)                           { nvs_set_i32(h, "EngineCycles",   (int32_t)EngineCycles);                         prev_EngineCycles = (int32_t)EngineCycles;                           chg = true; }
   if (prev_AltOnTime != (int32_t)AlternatorOnTime)                          { nvs_set_i32(h, "AltOnTime",      (int32_t)AlternatorOnTime);                     prev_AltOnTime = (int32_t)AlternatorOnTime;                          chg = true; }
   if (prev_EngineRunTime_AllTime != (int32_t)EngineRunTime_AllTime)         { nvs_set_i32(h, "EngRunTime_AT",  (int32_t)EngineRunTime_AllTime);                prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime;         chg = true; }
+  if (prev_perfSailSeconds != (int32_t)perfSailSeconds)                     { nvs_set_i32(h, "PerfSailSec",    (int32_t)perfSailSeconds);                      prev_perfSailSeconds = (int32_t)perfSailSeconds;                     chg = true; }
+  if (prev_perfMotorSeconds != (int32_t)perfMotorSeconds)                   { nvs_set_i32(h, "PerfMotorSec",   (int32_t)perfMotorSeconds);                     prev_perfMotorSeconds = (int32_t)perfMotorSeconds;                   chg = true; }
   if (prev_EngineCycles_AllTime != (int32_t)EngineCycles_AllTime)           { nvs_set_i32(h, "EngCycles_AT",   (int32_t)EngineCycles_AllTime);                 prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;           chg = true; }
   if (prev_AltOnTime_AllTime != (int32_t)AlternatorOnTime_AllTime)          { nvs_set_i32(h, "AltOnTime_AT",   (int32_t)AlternatorOnTime_AllTime);             prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;          chg = true; }
   if (prev_ChargeCycles != (int32_t)ChargeCycles)                           { nvs_set_i32(h, "ChrgCycles",     (int32_t)ChargeCycles);                         prev_ChargeCycles = (int32_t)ChargeCycles;                           chg = true; }
@@ -3883,6 +3923,9 @@ void saveNVSDataFull() {
   if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime)                      { nvs_set_u32(h, "LastZeroTime",   (uint32_t)lastAutoZeroTime);                    prev_LastZeroTime = (uint32_t)lastAutoZeroTime;                      chg = true; }
   if (prev_LastZeroTemp != lastAutoZeroTemp)                                 { nvs_set_blob(h, "LastZeroTemp",  &lastAutoZeroTemp,           sizeof(float));     prev_LastZeroTemp = lastAutoZeroTemp;                                chg = true; }
   if (prev_sailing_days_alltime != sailing_days_alltime)                    { nvs_set_blob(h, "SailDays_AT",   &sailing_days_alltime,       sizeof(float));     prev_sailing_days_alltime = sailing_days_alltime;                    chg = true; }
+  if (prev_sailing_dist_alltime != sailing_dist_alltime)                    { nvs_set_blob(h, "SailDist_AT",   &sailing_dist_alltime,       sizeof(float));     prev_sailing_dist_alltime = sailing_dist_alltime;                    chg = true; }
+  if (prev_alt_power_max_alltime_w != alt_power_max_alltime_w)              { nvs_set_blob(h, "AltPwrMax_AT",  &alt_power_max_alltime_w,    sizeof(float));     prev_alt_power_max_alltime_w = alt_power_max_alltime_w;              chg = true; }
+  if (prev_solar_power_max_alltime_w != solar_power_max_alltime_w)          { nvs_set_blob(h, "SolPwrMax_AT",  &solar_power_max_alltime_w,  sizeof(float));     prev_solar_power_max_alltime_w = solar_power_max_alltime_w;          chg = true; }
   // IMU
   if (prev_imu_capsize_count != imu_capsize_count)                          { nvs_set_u32(h,  "IMU_Capsize",   imu_capsize_count);                              prev_imu_capsize_count = imu_capsize_count;                          chg = true; }
   if (prev_imu_pitchpole_count != imu_pitchpole_count)                      { nvs_set_u32(h,  "IMU_Pitchpol",  imu_pitchpole_count);                           prev_imu_pitchpole_count = imu_pitchpole_count;                      chg = true; }
@@ -4039,6 +4082,8 @@ void loadNVSData() {
 
   // Lifetime Runtime Tracking (_AllTime)
   if (nvs_get_i32(nvs_handle, "EngRunTime_AT", &temp_int32) == ESP_OK) EngineRunTime_AllTime = temp_int32;
+  if (nvs_get_i32(nvs_handle, "PerfSailSec", &temp_int32) == ESP_OK) perfSailSeconds = temp_int32;
+  if (nvs_get_i32(nvs_handle, "PerfMotorSec", &temp_int32) == ESP_OK) perfMotorSeconds = temp_int32;
   if (nvs_get_i32(nvs_handle, "EngCycles_AT", &temp_int32) == ESP_OK) EngineCycles_AllTime = temp_int32;
   if (nvs_get_i32(nvs_handle, "AltOnTime_AT", &temp_int32) == ESP_OK) AlternatorOnTime_AllTime = temp_int32;
 
@@ -4076,6 +4121,12 @@ void loadNVSData() {
   // NEW: Sailing metrics (add after other _AllTime loads)
   required_size = sizeof(float);  // ✅ Just assign, don't declare
   nvs_get_blob(nvs_handle, "SailDays_AT", &sailing_days_alltime, &required_size);
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "SailDist_AT", &sailing_dist_alltime, &required_size);
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "AltPwrMax_AT", &alt_power_max_alltime_w, &required_size);
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "SolPwrMax_AT", &solar_power_max_alltime_w, &required_size);
 
 
   // Average SOC (Session)
@@ -4261,6 +4312,8 @@ void initNVSCache() {
   prev_AltFuelUsed_AllTime = (int32_t)(AlternatorFuelUsed_AllTime * 10);
   prev_EngineFuel_AllTime = (int32_t)(EngineFuelUsed_AllTime * 10);
   prev_EngineRunTime_AllTime = (int32_t)EngineRunTime_AllTime;
+  prev_perfSailSeconds = (int32_t)perfSailSeconds;
+  prev_perfMotorSeconds = (int32_t)perfMotorSeconds;
   prev_EngineCycles_AllTime = (int32_t)EngineCycles_AllTime;
   prev_AltOnTime_AllTime = (int32_t)AlternatorOnTime_AllTime;
   prev_ChargeCycles_AllTime = (int32_t)ChargeCycles_AllTime;
@@ -4298,6 +4351,9 @@ void initNVSCache() {
 
   // Sailing metrics cached
   prev_sailing_days_alltime = sailing_days_alltime;
+  prev_sailing_dist_alltime = sailing_dist_alltime;
+  prev_alt_power_max_alltime_w = alt_power_max_alltime_w;
+  prev_solar_power_max_alltime_w = solar_power_max_alltime_w;
 
   // IMU cache
   prev_imu_capsize_count = imu_capsize_count;

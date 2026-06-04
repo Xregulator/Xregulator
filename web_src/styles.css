@@ -2479,9 +2479,11 @@ input:checked+.slider:before {
   color: #666;
 }
 
-/* Center the Leaderboards iframe container on screen (matches the 900px
-   max-width of the Vercel-hosted leaderboards.html content). */
-#cloudfeatures-leaderboards .history-container {
+/* Center the Leaderboards and Fleet Stats iframe containers on screen (matches the
+   900px max-width of the Vercel-hosted leaderboards.html / fleet-stats.html content).
+   Without this they'd inherit full body width and the 900px content sits left. */
+#cloudfeatures-leaderboards .history-container,
+#cloudfeatures-fleetstats .history-container {
   max-width: 900px;
   margin-left: auto;
   margin-right: auto;

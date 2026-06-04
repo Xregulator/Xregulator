@@ -16,52 +16,18 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================
-// ALTERNATOR HEALTH MODEL (Phase 2) — replaces the old 3-D eff matrix.
-//   A_pred = base(rpm, excitation) × tempCorr(T) × busCorr(Vbus)
-//   excitation proxy = temp-normalized field drive (NOT measured field current).
-//   Data unit = ONE observation per bin VISIT (exit + re-enter required for another).
-//   Per-cell freeze after X separate visits; advisory health % + drift status, no alarm.
-//   Globals/structs are declared in Xregulator.ino. Full design: LOCAL_DATA_SYSTEMS_PLAN.md Phase 2.
+// ALTERNATOR HEALTH — Best-Ever Front (device side). Folds one sample per control tick (~200 Hz,
+//   via the pidLog hook) into the Episode detector; an emitted steady-run average pushes the sparse
+//   best-ever output-amps front (FrontStore). The cloud prunes dominated points + retains raw
+//   history. Surface axes {RPM, excitation, Vbus, temp}; excitation derived from run-average
+//   duty/Vbus/temp. Generic engine + globals: Xregulator.ino. Design:
+//   BEST_EVER_FRONT_SPEC.md / BEST_EVER_IMPLEMENTATION_PLAN.md.
 // ============================================================
 
-#define ALT_VER         1u
-#define ALT_BASE_MAGIC  0x414C5442u  // 'ALTB'
-#define ALT_TEMPC_MAGIC 0x414C5443u  // 'ALTC'
-#define ALT_BUSC_MAGIC  0x414C5455u  // 'ALTU'
-#define ALT_HLTH_MAGIC  0x414C5448u  // 'ALTH'
+#define ALT_VER          4u
+#define ALT_FRONT_MAGIC  0x414C4652u  // 'ALFR' — best-ever front point blob
+#define ALT_TREND_MAGIC  0x414C5452u  // 'ALTR'
 
-#define ALT_CORR_FREEZE_N 40         // each tempCorr/busCorr bin freezes after N samples → can't mask later degradation
-static float altTempSlow = NAN;      // slow temp EMA for the model-free thermal-rate gate
-
-// ---- bin + axis helpers ----
-static inline int altRpmBin(float rpm) {
-  if (isnan(rpm) || rpm < 0.0f) return -1;
-  int b = (int)(rpm * ALT_RPM_BINS / ALT_RPM_MAX);
-  if (b < 0) return -1;
-  if (b >= ALT_RPM_BINS) b = ALT_RPM_BINS - 1;
-  return b;
-}
-static inline int altFiBin(float fi) {
-  if (isnan(fi) || fi < 0.0f) return -1;
-  int b = (int)(fi * ALT_FI_BINS / ALT_FI_MAX);
-  if (b < 0) return -1;
-  if (b >= ALT_FI_BINS) b = ALT_FI_BINS - 1;
-  return b;
-}
-static inline int altTempBin(float tF) {
-  if (isnan(tF)) return -1;
-  int b = (int)((tF - ALT_TEMP_MIN) * ALT_TEMP_BINS / (ALT_TEMP_MAX - ALT_TEMP_MIN));
-  if (b < 0) b = 0;
-  if (b >= ALT_TEMP_BINS) b = ALT_TEMP_BINS - 1;
-  return b;
-}
-static inline int altVbusBin(float v) {
-  if (isnan(v)) return -1;
-  int b = (int)((v - ALT_VBUS_MIN) * ALT_VBUS_BINS / (ALT_VBUS_MAX - ALT_VBUS_MIN));
-  if (b < 0) b = 0;
-  if (b >= ALT_VBUS_BINS) b = ALT_VBUS_BINS - 1;
-  return b;
-}
 // Temp-normalized field drive ("excitation proxy"): (dutyFrac × Vbus) / (1 + α(Tc − Tref)).
 static inline float altExcitation(float duty, float vbus, float tF) {
   float tc = (tF - 32.0f) / 1.8f;
@@ -69,388 +35,416 @@ static inline float altExcitation(float duty, float vbus, float tF) {
   if (denom < 0.5f) denom = 0.5f;
   return (duty / 100.0f) * vbus / denom;
 }
-static inline float altTempCorrAt(int bin) {
-  if (bin < 0 || !altTempCorr[bin].valid) return 1.0f;
-  float v = altTempCorr[bin].value;
-  if (v < 0.3f) v = 0.3f;
-  if (v > 3.0f) v = 3.0f;
-  return v;
-}
-static inline float altBusCorrAt(int bin) {
-  if (bin < 0 || !altBusCorr[bin].valid) return 1.0f;
-  float v = altBusCorr[bin].value;
-  if (v < 0.3f) v = 0.3f;
-  if (v > 3.0f) v = 3.0f;
-  return v;
-}
 
-// ---- prediction (inverse-distance over graduated cells' centroids) ----
-static bool altIdwBase(float rpm, float fi, float *outA, float *outSig, int *nUsed, float *nearDist) {
-  int ri0 = altRpmBin(rpm), fb0 = altFiBin(fi);
-  if (ri0 < 0 || fb0 < 0) return false;
-  const float rw = ALT_RPM_MAX / ALT_RPM_BINS;
-  const float fw = ALT_FI_MAX / ALT_FI_BINS;
-  const int R = 3;
-  double sumW = 0, sumWA = 0, sumWS = 0;
-  int n = 0;
-  float nearest = 1e9f;
-  for (int dr = -R; dr <= R; dr++) {
-    int ri = ri0 + dr;
-    if (ri < 0 || ri >= ALT_RPM_BINS) continue;
-    for (int dfb = -R; dfb <= R; dfb++) {
-      int fb = fb0 + dfb;
-      if (fb < 0 || fb >= ALT_FI_BINS) continue;
-      AltCell &c = ALT_CELL(ri, fb);
-      if (!c.ref_valid) continue;
-      float ddr = (rpm - c.ref_rpm) / rw;
-      float ddf = (fi - c.ref_fi) / fw;
-      float d2 = ddr * ddr + ddf * ddf;
-      if (d2 < nearest) nearest = d2;
-      double w = 1.0 / (d2 + 0.05);
-      sumW += w;
-      sumWA += w * c.ref_amps;
-      sumWS += w * c.ref_sigma;
-      n++;
-    }
+// ---- Best-Ever Front engine instance (alternator 4-D) ----
+// Steadiness/averaging axes: {RPM, field-duty %, Vbus, tempF}. Defined here (before every function
+// that references them) so the rest of the module can use the front. Generic engine: Xregulator.ino.
+#define ALT_NAXIS        4
+#define ALT_FRONT_CAP    256      // sparse support points (tens–low-hundreds typical)
+#define ALT_EP_RING_CAP  8192     // reseed look-back (~40 s of 200 Hz folds); PSRAM
+#define ALT_PENDING_CAP  128      // accepted points buffered for the next 15-min upload
+
+static Episode<ALT_NAXIS>     altEpisode;
+static FrontStore<ALT_NAXIS>  altFront2;
+static RawSample<ALT_NAXIS>  *altEpRing   = nullptr;
+static FrontPoint<ALT_NAXIS> *altFrontBuf = nullptr;
+static FrontPoint<ALT_NAXIS> *altPending  = nullptr;   // accepted-since-last-upload (raw points out)
+static int altPendingCount   = 0;
+static int altFrontEmitCount = 0;        // episode points emitted (whether or not they pushed the front)
+
+// Per-axis steady-time knobs + front/eval knobs (registry-wired below; per-axis tol + floors are in
+// Xregulator.ino). altPruneK is echoed to the cloud but applied cloud-side.
+float altRpmSec       = 3.0f;    // RPM steady time (s)
+float altDutySec      = 3.0f;    // field-duty % steady time (s)
+float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
+float altThermDegF    = 5.0f;    // temperature deviation bound (°F)
+float altThermSec     = 30.0f;   // temperature steady time (s)
+float altSafetyMargin = 3.0f;    // amps — keep-bias on the device gate (errs toward keep)
+float altIdwPower     = 2.0f;    // IDW power for front_eval
+float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied cloud-side)
+
+// ---- performance-vs-engine-hours trend (engine-hour buckets: average + worst output-%) ----
+// Each emitted steady episode adds its output-% (amps ÷ best-ever-front) to the current engine-hour
+// bucket; the bucket's average + worst (min) are committed to the ring when the hour index advances.
+// Engine-hours measured since the last "Start Over". NO clamp — % may exceed 100 vs a stale front.
+static float altEngineHoursSinceBaseline() {
+  double s = EngineRunTime_AllTime - altTrendBaselineSec;
+  if (s < 0) s = 0;
+  return (float)(s / 3600.0);
+}
+static void altCommitTrendBucket() {
+  if (altCurEngHour < 0 || altBucket_n < 1 || !altTrend) return;
+  float overall = (float)(altBucket_sum / altBucket_n) * 100.0f;
+  float worst   = altBucket_worst * 100.0f;
+  if (altTrendCount >= ALT_TREND_CAP) {  // ring full → drop oldest
+    memmove(altTrend, altTrend + 1, (ALT_TREND_CAP - 1) * sizeof(AltTrendPt));
+    altTrendCount = ALT_TREND_CAP - 1;
   }
-  if (n == 0 || sumW <= 0) return false;
-  *outA = (float)(sumWA / sumW);
-  *outSig = (float)(sumWS / sumW);
-  *nUsed = n;
-  *nearDist = sqrtf(nearest);
-  return true;
+  AltTrendPt &p = altTrend[altTrendCount++];
+  p.engHour = (uint16_t)altCurEngHour;
+  p.worstPct = (int16_t)lroundf(worst * 10.0f);
+  p.overallPct = (int16_t)lroundf(overall * 10.0f);
 }
-// Base prediction + local slopes (finite-difference on the IDW surface) for the error bar.
-static bool altPredict(float rpm, float fi, float *Apred, float *dAdr, float *dAdf,
-                       float *refSig, int *nUsed, float *nearDist) {
-  float a0, s0, nd;
-  int n;
-  if (!altIdwBase(rpm, fi, &a0, &s0, &n, &nd)) return false;
-  *Apred = a0;
-  *refSig = s0;
-  *nUsed = n;
-  *nearDist = nd;
-  const float hr = ALT_RPM_MAX / ALT_RPM_BINS;
-  const float hf = ALT_FI_MAX / ALT_FI_BINS;
-  float ap, am, sd, dnd;
-  int dn;
-  *dAdr = (altIdwBase(rpm + hr, fi, &ap, &sd, &dn, &dnd) &&
-           altIdwBase(rpm - hr, fi, &am, &sd, &dn, &dnd)) ? (ap - am) / (2 * hr) : 0.0f;
-  *dAdf = (altIdwBase(rpm, fi + hf, &ap, &sd, &dn, &dnd) &&
-           altIdwBase(rpm, fi - hf, &am, &sd, &dn, &dnd)) ? (ap - am) / (2 * hf) : 0.0f;
-  return true;
-}
-// Sensitivity-aware error bar: knee (big slope) → wide; flat/well-sampled → tight.
-static float altSigma(float ap, float dAdr, float dAdf, float fi, float refSig, float nearDist) {
-  float sr = dAdr * altRpmTol;
-  float sf = dAdf * fmaxf((altDutyTolPct / 100.0f) * fi, 0.05f);
-  float sT = 0.03f * ap;                  // case-vs-winding temp uncertainty (one lump term)
-  float sc = 0.05f * ap * nearDist;       // coverage: wider far from frozen data
-  float s2 = sr * sr + sf * sf + sT * sT + refSig * refSig + sc * sc;
-  return fmaxf(sqrtf(s2), 0.5f);
-}
-
-// ---- steady-state detector (electrical anchor band + model-free thermal rate band) ----
-static bool altSteadyUpdate(float rpm, float fi, float vbus, float tF, float dt, uint32_t nowMs) {
-  bool elecIn = fabsf(rpm - altSS_rpmRef) <= altRpmTol &&
-                fabsf(vbus - altSS_vbusRef) <= altVbusTol &&
-                fabsf(fi - altSS_fiRef) <= fmaxf((altDutyTolPct / 100.0f) * fmaxf(fi, 1.0f), 0.05f);
-  if (!elecIn) {
-    altSS_rpmRef = rpm;
-    altSS_fiRef = fi;
-    altSS_vbusRef = vbus;
-    altSteadyStartMs = nowMs;
+static void altTrendAdd(float perfFrac) {
+  int eh = (int)altEngineHoursSinceBaseline();
+  if (altCurEngHour < 0) altCurEngHour = eh;
+  if (eh != altCurEngHour) {             // engine-hour bucket advanced → commit + reset
+    altCommitTrendBucket();
+    altBucket_sum = 0; altBucket_n = 0; altBucket_worst = perfFrac;
+    altCurEngHour = eh;
   }
-  bool elecSteady = (nowMs - altSteadyStartMs) >= (uint32_t)(altElecSettleSec * 1000.0f);
+  if (altBucket_n < 1 || perfFrac < altBucket_worst) altBucket_worst = perfFrac;
+  altBucket_sum += perfFrac; altBucket_n += 1;
+  altOverallPctLive = (float)(altBucket_sum / altBucket_n) * 100.0f;
+  altWorstPctLive   = altBucket_worst * 100.0f;
+  // status: healthy if worst within ~8% of best-ever; drifting if it has fallen further.
+  altStatusCode = (altFront2.count < 4) ? 0 : (altWorstPctLive >= 92.0f ? 1 : 2);
+}
 
-  bool thermSteady;
-  if (IgnoreTemperature || isnan(tF)) {
-    thermSteady = true;
-    altThermInBandMs = (uint32_t)(altThermDwellSec * 1000.0f);
+// ---- NMEA-style bench simulator (no engine) ----
+// Sweeps RPM × excitation points, synthesizes amps from a near-deterministic model × a slow
+// degradation ramp + noise so the curve fills and the trend declines. Writes only alt sim vars.
+static float altSimRpm = 0, altSimExc = 0, altSimT = 80, altSimV = 13.6f, altSimAmps = 0;
+static float altSimDuty = 50.0f;   // synthetic field duty % consistent with altSimExc (spreads the front's excitation axis)
+static int   altSimIdx = 0, altSimLoops = 0;
+static uint32_t altSimPtStartMs = 0;
+static float altSimDeg = 1.0f;
+#define ALT_SIM_NRPM 8
+#define ALT_SIM_NEXC 5
+#define ALT_SIM_NPTS (ALT_SIM_NRPM * ALT_SIM_NEXC)
+#define ALT_SIM_HOLD_MS 40000u    // hold each point > max steady time (altThermSec=30 s) so a run forms + emits
+static void altSimTick(uint32_t nowMs) {
+  uint32_t hold = ALT_SIM_HOLD_MS;
+  if (altSimPtStartMs == 0) altSimPtStartMs = nowMs;
+  if (nowMs - altSimPtStartMs >= hold) {
+    altSimPtStartMs = nowMs;
+    if (++altSimIdx >= ALT_SIM_NPTS) { altSimIdx = 0; altSimLoops++; }
+  }
+  int ri = altSimIdx / ALT_SIM_NEXC, ei = altSimIdx % ALT_SIM_NEXC;
+  float rpm = 800.0f + ri * 400.0f;             // 800..3600
+  float exc = 3.0f + ei * 2.5f;                 // 3..13
+  float tF = 80.0f + 0.02f * rpm;               // hotter at higher RPM
+  float vbus = 13.6f;
+  float a = 1.4f * exc * (1.0f - expf(-rpm / 1200.0f));   // rises with rpm knee + excitation
+  a *= 1.0f - 0.0008f * (tF - 77.0f);                     // derate with temp
+  if (altSimLoops >= 2) altSimDeg -= 0.0006f;             // after 2 full sweeps, degrade
+  if (altSimDeg < 0.80f) altSimDeg = 0.80f;
+  a *= altSimDeg;
+  a *= 1.0f + (float)random(-20, 21) / 1000.0f;          // ±2% noise
+  if (a < 0.5f) a = 0.5f;
+  altSimRpm = rpm; altSimExc = exc; altSimT = tF; altSimV = vbus; altSimAmps = a;
+  altSimDuty = exc * 100.0f / vbus;             // invert excitation → duty so the duty axis tracks exc
+}
+
+// Per-axis tol from the deviation-bound knobs, steady time from the *Sec knobs. Resynced every
+// fold so live knob edits take effect immediately.
+static void altEpisodeSyncCfg() {
+  altEpisode.cfg[0] = { altRpmTol,     altRpmSec  };   // RPM
+  altEpisode.cfg[1] = { altDutyTolPct, altDutySec };   // field duty % (absolute % points)
+  altEpisode.cfg[2] = { altVbusTol,    altVbusSec };   // Vbus (V)
+  altEpisode.cfg[3] = { altThermDegF,  altThermSec };  // temp (°F)
+}
+
+// ---- per-control-tick fold (THE canonical cadence) ----
+// Live: called from the pidLog hook (~200 Hz). Bench-sim: called at 1 Hz from altHealth_tick.
+// Reads the final control state, updates the live output-%, feeds the Episode detector, and on a
+// steady-run emit derives the excitation surface coord, gates against the front, pushes if it
+// beats best-ever, and feeds the engine-hour trend. The off/fault/shutdown paths early-return
+// before the live pidLog hook, so field-off cases exclude themselves with no mode check.
+void altFold_tick(uint32_t nowMs) {
+  if (!altFrontBuf || !altEpRing) return;
+
+  // IgnoreTemperature → the ENTIRE alt-health system is disabled: no live, no points, no trend.
+  if (IgnoreTemperature) { altLiveValid = false; altSteady = false; altStatusCode = 3; return; }
+
+  float rpm, exc, tF, vbus, amps, duty;
+  if (altSimMode >= 0.5f) {
+    rpm = altSimRpm; exc = altSimExc; tF = altSimT; vbus = altSimV; amps = altSimAmps; duty = altSimDuty;
   } else {
-    float tau = fmaxf(altThermRateMin * 60.0f, 1.0f);
-    if (isnan(altTempSlow)) altTempSlow = tF;
-    else altTempSlow += (tF - altTempSlow) * (dt / tau);
-    if (fabsf(tF - altTempSlow) <= altThermRateDegF) altThermInBandMs += (uint32_t)(dt * 1000.0f);
-    else altThermInBandMs = 0;
-    thermSteady = altThermInBandMs >= (uint32_t)(altThermDwellSec * 1000.0f);
-  }
-  return elecSteady && thermSteady;
-}
-
-// ---- visit accumulation / freeze / score ----
-static void altResetVisit() {
-  altVisit_w = 0;
-  altVisit_A = 0;
-  altVisit_A2 = 0;
-  altVisit_rpm = 0;
-  altVisit_fi = 0;
-  altVisit_vbus = 0;
-  altVisit_t = 0;
-  altVisitSteadyMs = 0;
-}
-static void altTryFreeze(int idx) {
-  AltCell &c = altBase[idx];
-  if (c.nObs < (uint16_t)altFreezeMinVisits) return;
-  float mean = (c.sumW > 0) ? c.sumW_A / c.sumW : 0.0f;
-  float var = (c.sumW > 0) ? (c.sumW_A2 / c.sumW - mean * mean) : 0.0f;
-  if (var < 0) var = 0;
-  float sem = (c.nObs > 1) ? sqrtf(var / (float)(c.nObs - 1)) : 1e6f;  // sample SEM (÷ n−1); n=1 → only the cap can freeze
-  if (sem > altFreezeSEM && c.nObs < (uint16_t)altFreezeMaxVisits) return;
-  c.ref_amps = mean;
-  c.ref_rpm = c.sumW_rpm / c.sumW;
-  c.ref_fi = c.sumW_fi / c.sumW;
-  c.ref_sigma = fmaxf(sem, 0.1f);
-  c.ref_valid = 1;
-  altHealth.baselineFrozen = 1;
-  queueConsoleMessageF("AltHealth froze cell rpm=%.0f fi=%.2f ref=%.1fA sem=%.2f n=%u",
-                       c.ref_rpm, c.ref_fi, c.ref_amps, sem, (unsigned)c.nObs);
-}
-// Learn the 1-D corrections from this visit's residual (only once base cells exist).
-static void altLearnCorr(float meanA, float rpm, float fi, float vbus, float tF) {
-  float ap, dr, df, rs, nd;
-  int nu;
-  if (!altPredict(rpm, fi, &ap, &dr, &df, &rs, &nu, &nd)) return;
-  if (ap < 0.5f) return;
-  if (nu < 3 || nd > 1.5f) return;       // only learn where the base map is well-supported (no 1-cell IDW garbage)
-  int tb = altTempBin(tF);
-  float tc = altTempCorrAt(tb);
-  // Each correction bin FREEZES after N samples so it can't later absorb (mask) real degradation.
-  if (tb >= 0 && altTempCorr[tb].nObs < ALT_CORR_FREEZE_N) {
-    AltCorr &c = altTempCorr[tb];
-    c.nObs++;
-    c.sumW += 1.0f;
-    c.sumW_ratio += meanA / ap;            // base-only residual → temp deviation
-    c.value = c.sumW_ratio / c.sumW;
-    c.valid = 1;
-  }
-  int vb = altVbusBin(vbus);
-  if (vb >= 0 && altBusCorr[vb].nObs < ALT_CORR_FREEZE_N) {
-    AltCorr &c = altBusCorr[vb];
-    c.nObs++;
-    c.sumW += 1.0f;
-    c.sumW_ratio += meanA / (ap * (tc > 0.1f ? tc : 1.0f));  // temp-corrected residual → Vbus deviation
-    c.value = c.sumW_ratio / c.sumW;
-    c.valid = 1;
-  }
-}
-static void altScore(float meanA, float rpm, float fi, float vbus, float tF) {
-  float ap, dr, df, rs, nd;
-  int nu;
-  if (!altPredict(rpm, fi, &ap, &dr, &df, &rs, &nu, &nd)) return;
-  float tc = altTempCorrAt(altTempBin(tF));
-  float bc = altBusCorrAt(altVbusBin(vbus));
-  float Apred = ap * tc * bc;
-  if (Apred < 0.5f) return;
-  float sig = altSigma(ap, dr, df, fi, rs, nd);
-  float z = (meanA - Apred) / sig;
-  float r = meanA / Apred;
-  altHealth.ewmaRatio += (r - altHealth.ewmaRatio) * altEwmaLambda;
-  altHealth.cusumPos = fmaxf(0.0f, altHealth.cusumPos + (z - altCusumK));
-  altHealth.cusumNeg = fmaxf(0.0f, altHealth.cusumNeg + (-z - altCusumK));
-  altHealth.obsCount++;
-  if (altHealth.cusumPos > altCusumH) altHealth.status = 2;
-  else if (altHealth.cusumNeg > altCusumH) altHealth.status = 3;
-  else altHealth.status = 1;
-}
-static void altFinalizeVisit() {
-  if (altCurBin < 0 || altVisit_w <= 0) return;
-  if (altVisitSteadyMs < (uint32_t)(altMinDwellSec * 1000.0f)) return;
-  float meanA = (float)(altVisit_A / altVisit_w);
-  float meanRpm = (float)(altVisit_rpm / altVisit_w);
-  float meanFi = (float)(altVisit_fi / altVisit_w);
-  float meanVbus = (float)(altVisit_vbus / altVisit_w);
-  float meanT = (float)(altVisit_t / altVisit_w);
-  AltCell &c = altBase[altCurBin];
-  if (!c.ref_valid) {
-    if (c.nObs < (uint16_t)altFreezeMaxVisits) {
-      c.nObs++;
-      c.sumW += 1.0f;
-      c.sumW_A += meanA;
-      c.sumW_A2 += meanA * meanA;
-      c.sumW_rpm += meanRpm;
-      c.sumW_fi += meanFi;
-      c.sumW_vbus += meanVbus;
-      c.sumW_t += meanT;
-    }
-    altTryFreeze(altCurBin);
-  } else {
-    altScore(meanA, meanRpm, meanFi, meanVbus, meanT);
-  }
-  altLearnCorr(meanA, meanRpm, meanFi, meanVbus, meanT);
-}
-
-// ---- per-1Hz sample ----
-static void altProcessSample(float dt, uint32_t nowMs) {
-  float battV = getBatteryVoltage();
-  float amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
-  float tF = TempToUse;
-  float duty = dutyCycle;
-  float rpm = RPM;
-  float fi = altExcitation(duty, battV, tF);
-  int ri = altRpmBin(rpm), fb = altFiBin(fi);
-
-  // live point + prediction (drives the dashboard red dot / SSE) — computed in sim too
-  altLive_rpm = rpm;
-  altLive_fi = fi;
-  altLive_amps = amps;
-  altLiveValid = (ri >= 0 && fb >= 0 && !isnan(battV) && battV >= ALT_MIN_BATT_V);
-  {
-    float ap, drr, dff, rs, nd;
-    int nu;
-    if (altPredict(rpm, fi, &ap, &drr, &dff, &rs, &nu, &nd)) {
-      float tc = altTempCorrAt(altTempBin(tF));
-      float bc = altBusCorrAt(altVbusBin(battV));
-      altLive_pred = ap * tc * bc;
-      altLive_z = (altLive_pred > 0.5f) ? (amps - altLive_pred) / altSigma(ap, drr, dff, fi, rs, nd) : 0.0f;
-    } else {
-      altLive_pred = 0.0f;
-      altLive_z = 0.0f;
-    }
+    vbus = getBatteryVoltage();
+    amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
+    tF = TempToUse; duty = dutyCycle; rpm = RPM;
+    exc = altExcitation(duty, vbus, tF);
   }
 
-  if (hardwarePresent != 1) {   // sim: display live only, never learn/score/persist
-    altSteady = false;
-    return;
-  }
+  // Live point + best-ever reference (dashboard gauge/dot). % is NOT clamped (spec §1/§6).
+  float surf[ALT_NAXIS] = { rpm, exc, vbus, tF };
+  altLive_rpm = rpm; altLive_exc = exc; altLive_amps = amps;
+  altLive_pred = altFront2.eval(surf, altIdwPower);
+  altLive_pct  = (altLive_pred > 0.1f) ? (amps / altLive_pred * 100.0f) : 0.0f;
+  altLiveValid = (!isnan(rpm) && !isnan(exc) && !isnan(vbus) && vbus >= ALT_MIN_BATT_V);
 
-  bool admit = (!isnan(battV) && battV >= ALT_MIN_BATT_V &&
-                amps >= altMinAmps && duty >= altMinDuty && ri >= 0 && fb >= 0);
-  altSteady = admit && altSteadyUpdate(rpm, fi, battV, tF, dt, nowMs);
+  if (hardwarePresent != 1 && altSimMode < 0.5f) { altSteady = false; return; }    // display only
+  if (altPaused >= 0.5f || altFront2.source == 1) { altSteady = false; return; }   // FIXED/paused: no learning
 
-  int bin = (ri >= 0 && fb >= 0) ? ALT_IDX(ri, fb) : -1;
-  if (bin != altCurBin) {       // left a bin → finalize its one visit-observation
-    altFinalizeVisit();
-    altCurBin = bin;
-    altResetVisit();
-  }
-  if (altSteady && bin >= 0) {
-    altVisit_w += 1.0;
-    altVisit_A += amps;
-    altVisit_A2 += (double)amps * amps;
-    altVisit_rpm += rpm;
-    altVisit_fi += fi;
-    altVisit_vbus += battV;
-    altVisit_t += tF;
-    altVisitSteadyMs += (uint32_t)(dt * 1000.0f);
+  // Feed the Episode detector (steadiness/averaging axes {RPM, duty %, Vbus, tempF}).
+  altEpisodeSyncCfg();
+  bool eligible = (!isnan(vbus) && vbus >= ALT_MIN_BATT_V && amps >= altMinAmps && duty >= altMinDuty && rpm >= 0);
+  RawSample<ALT_NAXIS> s;
+  s.x[0] = rpm; s.x[1] = duty; s.x[2] = vbus; s.x[3] = tF; s.out = amps; s.tMs = nowMs;
+  s.ex[0] = duty; s.ex[1] = 0;   // retain raw duty (excitation is derived from it) for cloud diagnosis
+  FrontPoint<ALT_NAXIS> ep;
+  bool emitted = altEpisode.feed(eligible, s, &ep);
+  altSteady = (altEpisode.count > 0);
+  if (!emitted) return;
+
+  // Steady run completed → build the surface point (excitation derived from run averages).
+  altFrontEmitCount++;
+  FrontPoint<ALT_NAXIS> sp;
+  sp.x[0] = ep.x[0];                                    // RPM
+  sp.x[1] = altExcitation(ep.x[1], ep.x[2], ep.x[3]);  // excitation
+  sp.x[2] = ep.x[2];                                    // Vbus
+  sp.x[3] = ep.x[3];                                    // tempF
+  sp.ex[0] = ep.x[1];                                   // raw run-avg duty (retained for cloud diagnosis)
+  sp.ex[1] = 0;
+  sp.y = ep.y; sp.nSamp = ep.nSamp; sp.tEmit = ep.tEmit;
+
+  float yref = altFront2.eval(sp.x, altIdwPower);                       // pre-add reference (trend %)
+  if (yref > 0.1f) altTrendAdd(sp.y / yref);                           // engine-hour trend (no clamp)
+  if (!altFront2.pushes(sp.x, sp.y, altSafetyMargin, altIdwPower)) return;  // didn't beat the front
+  if (altFront2.add(sp)) {                                              // optimistic local front (cloud re-prunes)
+    if (altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;  // queue for upload
+    queueConsoleMessageF("AltFront +pt #%d rpm=%.0f exc=%.2f V=%.2f T=%.0f amps=%.1f (ref=%.1f n=%u)",
+      altFront2.count, sp.x[0], sp.x[1], sp.x[2], sp.x[3], sp.y, yref, sp.nSamp);
   }
 }
 
-// ---- live SSE: valid,rpm,fi,amps,pred,z,status,steady ----
+// ---- live telemetry registry (schema-driven: one source for the AltLive payload + /altschema) ----
+// One {name, getter} table builds BOTH the AltLive SSE payload AND the /altschema field list, so
+// the firmware↔dashboard contract can't desync. Adding a field = add ONE row. All values floats.
+struct AltLiveField { const char *name; float (*get)(); };
+static float alf_valid()     { return (float)altLiveValid; }
+static float alf_rpm()       { return altLive_rpm; }
+static float alf_exc()       { return altLive_exc; }
+static float alf_amps()      { return altLive_amps; }
+static float alf_pred()      { return altLive_pred; }
+static float alf_pct()       { return altLive_pct; }
+static float alf_worst()     { return altWorstPctLive; }
+static float alf_overall()   { return altOverallPctLive; }
+static float alf_status()    { return (float)altStatusCode; }
+static float alf_steady()    { return (float)altSteady; }
+static float alf_engHours()  { return altEngineHoursSinceBaseline(); }
+static float alf_coverage()  { return altFrontBuf ? (100.0f * (float)altFront2.count / (float)ALT_FRONT_CAP) : 0.0f; }
+static float alf_haveCurve() { return (float)(altFront2.count > 0 ? 1 : 0); }   // have a usable front
+static float alf_ptCount()   { return (float)altFront2.count; }                 // front support points
+static float alf_source()    { return (float)altFront2.source; }                // 0 LEARNED, 1 FIXED
+static float alf_paused()    { return (altPaused >= 0.5f) ? 1.0f : 0.0f; }
+static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
+static float alf_tickWin()   { return (float)ft_altHealth.worstWindow; }   // µs — Core-1 cost diagnostic
+static float alf_tickSes()   { return (float)ft_altHealth.worstSession; }  // µs since last Reset Peak Values
+static AltLiveField ALT_LIVE[] = {
+  {"valid", alf_valid}, {"rpm", alf_rpm}, {"exc", alf_exc}, {"amps", alf_amps},
+  {"pred", alf_pred}, {"pct", alf_pct}, {"worstPct", alf_worst}, {"overallPct", alf_overall},
+  {"status", alf_status}, {"steady", alf_steady}, {"engHours", alf_engHours},
+  {"coverage", alf_coverage}, {"haveCurve", alf_haveCurve}, {"ptCount", alf_ptCount},
+  {"source", alf_source}, {"paused", alf_paused},
+  {"sim", alf_sim}, {"tickWinUs", alf_tickWin}, {"tickSesUs", alf_tickSes},
+};
+static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
-  char buf[160];
-  // valid,rpm,fi,amps,pred,z,status,steady,healthPct,coveragePct,baselineFrozen,obsCount
-  snprintf(buf, sizeof(buf), "%d,%.0f,%.2f,%.1f,%.1f,%.2f,%d,%d,%.1f,%.0f,%d,%u",
-           (int)altLiveValid, altLive_rpm, altLive_fi, altLive_amps, altLive_pred,
-           altLive_z, (int)altHealth.status, (int)altSteady,
-           altHealthPct(), altCoveragePct(), (int)altHealth.baselineFrozen,
-           (unsigned)altHealth.obsCount);
+  char buf[224];
+  int off = 0;
+  for (size_t i = 0; i < ALT_LIVE_COUNT; i++)
+    off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
   events.send(buf, "AltLive");
 }
 
-// ---- persistence (Phase-0 scaffold; field-off-gated by caller) ----
-void altHealthSave() {
-  if (!altBase || hardwarePresent != 1) return;
-  writePsramBlob("/altbase.bin", ALT_BASE_MAGIC, ALT_VER, 0,
-                 altBase, sizeof(AltCell), ALT_NUM_CELLS, 0, ALT_NUM_CELLS);
-  writePsramBlob("/alttemp.bin", ALT_TEMPC_MAGIC, ALT_VER, 0,
-                 altTempCorr, sizeof(AltCorr), ALT_TEMP_BINS, 0, ALT_TEMP_BINS);
-  writePsramBlob("/altbus.bin", ALT_BUSC_MAGIC, ALT_VER, 0,
-                 altBusCorr, sizeof(AltCorr), ALT_VBUS_BINS, 0, ALT_VBUS_BINS);
-  writePsramBlob("/althealth.bin", ALT_HLTH_MAGIC, ALT_VER, 0,
-                 &altHealth, sizeof(AltHealthMon), 1, 0, 1);
-}
-static void altRecomputeFrozen() {
-  altHealth.baselineFrozen = 0;
-  for (int i = 0; i < ALT_NUM_CELLS; i++) {
-    if (altBase[i].ref_valid) { altHealth.baselineFrozen = 1; break; }
+// ---- coverage / status helpers (CSV2 + dashboard) ----
+float altCoveragePct() { return altFrontBuf ? (100.0f * (float)altFront2.count / (float)ALT_FRONT_CAP) : 0.0f; }
+float altWorstPct()    { return altWorstPctLive; }
+int   altStatus()      { return (int)altStatusCode; }
+int   altHaveFront()   { return (altFront2.count > 0) ? 1 : 0; }   // CSV2: have a usable best-ever front
+int   altFrontCount()  { return altFront2.count; }                 // CSV2: front support-point count
+void  altClearPending() { altPendingCount = 0; }                   // cloud accepted the batch → drop pending
+
+// ---- front CSV (the artifact): BEFRONT1,<sys>,<naxis>,<source>,<units…> then x0..xN,y,nSamp,tEmit ----
+// Serves /altcurve.csv (dashboard), the cloud sync-back, and Save/Load to file (spec §2.2/§8).
+String altCurveCsv() {
+  String s = "BEFRONT1,ALT,"; s += String(ALT_NAXIS); s += ","; s += String(altFront2.source);
+  s += ",rpm,exc,V,F,amps\n";
+  for (int i = 0; i < altFront2.count; i++) {
+    FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
+    s += String(p.x[0], 0); s += ","; s += String(p.x[1], 3); s += ","; s += String(p.x[2], 2); s += ",";
+    s += String(p.x[3], 1); s += ","; s += String(p.y, 2); s += ","; s += String(p.nSamp); s += ",";
+    s += String(p.tEmit); s += "\n";
   }
+  return s;
+}
+// Plain front-points table for the dashboard scatter view (/altrecords.csv). Distinct from the
+// BEFRONT1 artifact above; small (≤ ALT_FRONT_CAP), so returned whole.
+String altFrontRecordsCsv() {
+  String s = "rpm,exc,vbus,tF,amps,nSamp\n";
+  if (!altFrontBuf) return s;
+  for (int i = 0; i < altFront2.count; i++) {
+    FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
+    s += String(p.x[0], 0); s += ","; s += String(p.x[1], 3); s += ","; s += String(p.x[2], 2); s += ",";
+    s += String(p.x[3], 1); s += ","; s += String(p.y, 2); s += ","; s += String(p.nSamp); s += "\n";
+  }
+  return s;
+}
+// Parse a BEFRONT1 CSV (the cloud's pruned front, or a saved file) into altFront2, replacing it.
+bool altIngestFrontCsv(char *body) {
+  char *p = strstr(body, "BEFRONT1");
+  if (!p) return false;
+  char *nl = strchr(p, '\n');
+  if (!nl) return false;
+  uint8_t newSource = 0;
+  { char saved = *nl; *nl = '\0';                       // header: BEFRONT1,sys,naxis,source,units…
+    char *t = strtok(p, ",");                           // BEFRONT1
+    t = strtok(NULL, ",");                              // sys
+    t = strtok(NULL, ",");                              // naxis
+    t = strtok(NULL, ",");                              // source
+    if (t) newSource = (uint8_t)atoi(t);
+    *nl = saved; }
+  int newCount = 0;
+  char *line = nl + 1;
+  while (line && *line && newCount < ALT_FRONT_CAP) {
+    char *eol = strchr(line, '\n');
+    if (eol) *eol = '\0';
+    float x0, x1, x2, x3, y; unsigned ns = 0, te = 0;
+    if (*line && sscanf(line, "%f,%f,%f,%f,%f,%u,%u", &x0, &x1, &x2, &x3, &y, &ns, &te) >= 5) {
+      FrontPoint<ALT_NAXIS> q;
+      q.x[0] = x0; q.x[1] = x1; q.x[2] = x2; q.x[3] = x3; q.y = y;
+      q.ex[0] = 0; q.ex[1] = 0;   // raw extras live in the cloud table, not the front CSV
+      q.nSamp = (uint32_t)ns; q.tEmit = (uint32_t)te;
+      altFrontBuf[newCount++] = q;
+    }
+    if (!eol) break;
+    line = eol + 1;
+  }
+  altFront2.count = newCount;
+  altFront2.source = newSource;
+  return true;
+}
+
+// ---- persistence (field-off-gated by caller) — front + trend survive reboot (cloud authoritative) ----
+void altHealthSave() {
+  if (!altFrontBuf || hardwarePresent != 1) return;
+  uint32_t uw = ((uint32_t)altFront2.source << 8) | (uint32_t)ALT_NAXIS;   // stash source + naxis
+  writePsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, uw, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, 0, altFront2.count);
+  if (altTrend)
+    writePsramBlob("/alttrend.bin", ALT_TREND_MAGIC, ALT_VER, 0, altTrend, sizeof(AltTrendPt), ALT_TREND_CAP, 0, altTrendCount);
+  writeFile(LittleFS, "/altbaseSec.txt", String(altTrendBaselineSec, 1).c_str());   // trend X-axis origin
 }
 static void altLoad() {
-  uint32_t uw;
-  readPsramBlob("/altbase.bin", ALT_BASE_MAGIC, ALT_VER, altBase, sizeof(AltCell), ALT_NUM_CELLS, &uw, false);
-  readPsramBlob("/alttemp.bin", ALT_TEMPC_MAGIC, ALT_VER, altTempCorr, sizeof(AltCorr), ALT_TEMP_BINS, &uw, false);
-  readPsramBlob("/altbus.bin", ALT_BUSC_MAGIC, ALT_VER, altBusCorr, sizeof(AltCorr), ALT_VBUS_BINS, &uw, false);
-  uint32_t got = readPsramBlob("/althealth.bin", ALT_HLTH_MAGIC, ALT_VER, &altHealth, sizeof(AltHealthMon), 1, &uw, false);
-  if (got == 0) {
-    altHealth = AltHealthMon{};
-    altHealth.ewmaRatio = 1.0f;
+  uint32_t uw = 0;
+  if (altFrontBuf) {
+    altFront2.count = (int)readPsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, &uw, false);
+    altFront2.source = (uint8_t)((uw >> 8) & 0xFF);
   }
-  altRecomputeFrozen();
+  if (altTrend)
+    altTrendCount = (int)readPsramBlob("/alttrend.bin", ALT_TREND_MAGIC, ALT_VER, altTrend, sizeof(AltTrendPt), ALT_TREND_CAP, &uw, false);
+  if (fsExists("/altbaseSec.txt")) altTrendBaselineSec = readFile(LittleFS, "/altbaseSec.txt").toFloat();
+}
+
+// ---- Save / Load the active front to a LittleFS file (spec §4/§8) ----
+bool altFrontSaveFile() {
+  if (!altFrontBuf) return false;
+  String csv = altCurveCsv();
+  writeFile(LittleFS, "/altfront_saved.csv", csv.c_str());
+  queueConsoleMessageF("AltFront: saved %d pts to /altfront_saved.csv", altFront2.count);
+  return true;
+}
+bool altFrontLoadFile() {
+  if (!altFrontBuf || !fsExists("/altfront_saved.csv")) return false;
+  String csv = readFile(LittleFS, "/altfront_saved.csv");
+  if (csv.length() < 8) return false;
+  char *body = strdup(csv.c_str());
+  if (!body) return false;
+  bool ok = altIngestFrontCsv(body);
+  free(body);
+  if (ok) { altFront2.source = 1; altPaused = 1.0f; writeFile(LittleFS, "/altPaused.txt", "1.0000"); }  // FIXED + paused
+  queueConsoleMessageF("AltFront: loaded %d pts (FIXED, paused)", altFront2.count);
+  return ok;
+}
+
+// ---- cloud upload: batch of accepted episode points since the last upload (raw out; pruned front in) ----
+// Schema: {device_uid,token,ts,sys,pruneK,idwPower, pts:[[rpm,exc,vbus,tF,amps,nSamp], ...]}.
+// Pending cleared on a successful response (executeUploadAltHealth → altIngestFrontCsv).
+bool buildAltHealthPayload(char *buf, size_t size) {
+  if (!altPending || altPendingCount == 0 || authToken.isEmpty()) return false;
+  time_t now_ts = time(NULL);
+  int off = snprintf(buf, size,
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"ALT\",\"pruneK\":%d,\"idwPower\":%.2f,\"pts\":[",
+    device_id_hex, authToken.c_str(), formatTimestamp(now_ts), (int)altPruneK, altIdwPower);
+  if (off < 0 || (size_t)off >= size) return false;
+  bool first = true;
+  for (int k = 0; k < altPendingCount; k++) {
+    if (size - (size_t)off < 80) break;   // margin for the closer
+    FrontPoint<ALT_NAXIS> &p = altPending[k];
+    off += snprintf(buf + off, size - off, "%s[%.0f,%.3f,%.2f,%.1f,%.2f,%u,%.1f]",
+                    first ? "" : ",", p.x[0], p.x[1], p.x[2], p.x[3], p.y, p.nSamp, p.ex[0]);  // ex[0]=raw duty
+    first = false;
+  }
+  off += snprintf(buf + off, size - off, "]}");
+  if (off < 0 || (size_t)off >= size - 1) return false;
+  return true;
 }
 
 // ---- lifecycle ----
 void initAlternatorHealth() {
-  altBase = (AltCell *)ps_malloc((size_t)ALT_NUM_CELLS * sizeof(AltCell));
-  altTempCorr = (AltCorr *)ps_malloc((size_t)ALT_TEMP_BINS * sizeof(AltCorr));
-  altBusCorr = (AltCorr *)ps_malloc((size_t)ALT_VBUS_BINS * sizeof(AltCorr));
-  if (!altBase || !altTempCorr || !altBusCorr) {
-    queueConsoleMessage("ERROR: AltHealth ps_malloc failed");
-    return;
-  }
-  memset(altBase, 0, (size_t)ALT_NUM_CELLS * sizeof(AltCell));
-  memset(altTempCorr, 0, (size_t)ALT_TEMP_BINS * sizeof(AltCorr));
-  memset(altBusCorr, 0, (size_t)ALT_VBUS_BINS * sizeof(AltCorr));
-  altHealth = AltHealthMon{};
-  altHealth.ewmaRatio = 1.0f;
-  altCurBin = -1;
-  altResetVisit();
-  altLoad();
-  int frozen = 0, withData = 0;
-  for (int i = 0; i < ALT_NUM_CELLS; i++) {
-    if (altBase[i].ref_valid) frozen++;
-    if (altBase[i].nObs) withData++;
-  }
-  queueConsoleMessageF("AltHealth init: %d cells, %d frozen, %d w/data, %.1fKB PSRAM",
-                       ALT_NUM_CELLS, frozen, withData,
-                       (float)((size_t)ALT_NUM_CELLS * sizeof(AltCell)) / 1024.0f);
+  altTrend = (AltTrendPt *)ps_malloc((size_t)ALT_TREND_CAP * sizeof(AltTrendPt));
+  if (!altTrend) { queueConsoleMessage("ERROR: AltHealth trend ps_malloc failed"); return; }
+  memset(altTrend, 0, (size_t)ALT_TREND_CAP * sizeof(AltTrendPt));
+  altTrendCount = 0; altCurEngHour = -1;
+  altFrontInit();          // ps_malloc front + episode ring + pending; init the engine instance
+  altLoad();               // restore front + trend + baseline (after the buffers exist)
+  queueConsoleMessageF("AltHealth init: %d front pts (%s), %d trend pts",
+                       altFront2.count, altFront2.source ? "FIXED" : "LEARNED", altTrendCount);
 }
 void resetAlternatorHealth() {
-  if (!altBase) return;
-  memset(altBase, 0, (size_t)ALT_NUM_CELLS * sizeof(AltCell));
-  memset(altTempCorr, 0, (size_t)ALT_TEMP_BINS * sizeof(AltCorr));
-  memset(altBusCorr, 0, (size_t)ALT_VBUS_BINS * sizeof(AltCorr));
-  altHealth = AltHealthMon{};
-  altHealth.ewmaRatio = 1.0f;
-  altCurBin = -1;
-  altResetVisit();
-  altTempSlow = NAN;
-  altSS_rpmRef = 0; altSS_fiRef = 0; altSS_vbusRef = 0; altSS_tempRef = 0;  // clear steady-state anchors
-  altSteadyStartMs = 0; altThermInBandMs = 0;
+  if (!altFrontBuf) return;
+  altFront2.count = 0; altFront2.source = 0;
+  altPendingCount = 0; altFrontEmitCount = 0;
+  altEpisode.clearRun(); altEpisode.ringHead = 0; altEpisode.ringCount = 0;
+  altTrendCount = 0;
+  altBucket_sum = 0; altBucket_n = 0; altBucket_worst = 0; altCurEngHour = -1;
+  altWorstPctLive = 0; altOverallPctLive = 0; altStatusCode = 0; altLive_pct = 0;
+  altTrendBaselineSec = EngineRunTime_AllTime;   // new baseline → trend X-axis restarts at 0
   fsTakeLock();
-  LittleFS.remove("/altbase.bin");
-  LittleFS.remove("/alttemp.bin");
-  LittleFS.remove("/altbus.bin");
-  LittleFS.remove("/althealth.bin");
+  LittleFS.remove("/altfront.bin");
+  LittleFS.remove("/alttrend.bin");
   fsReleaseLock();
+  writeFile(LittleFS, "/altbaseSec.txt", String(altTrendBaselineSec, 1).c_str());
   queueConsoleMessage("AltHealth: full reset (Start Over)");
 }
-float altCoveragePct() {
-  if (!altBase) return 0.0f;
-  int frozen = 0, withData = 0;
-  for (int i = 0; i < ALT_NUM_CELLS; i++) {
-    if (altBase[i].nObs) withData++;
-    if (altBase[i].ref_valid) frozen++;
-  }
-  if (withData == 0) return 0.0f;
-  return 100.0f * (float)frozen / (float)withData;
-}
-float altHealthPct() {
-  float p = altHealth.ewmaRatio * 100.0f;
-  if (p < 0) p = 0;
-  if (p > 200) p = 200;
-  return p;
+
+// ---- engine allocation (PSRAM): front points + episode reseed ring + pending-upload buffer ----
+void altFrontInit() {
+  altEpRing   = (RawSample<ALT_NAXIS>  *)ps_malloc((size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
+  altFrontBuf = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
+  altPending  = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
+  if (!altEpRing || !altFrontBuf || !altPending) { queueConsoleMessage("ERROR: AltFront ps_malloc failed"); return; }
+  memset(altEpRing,   0, (size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
+  memset(altFrontBuf, 0, (size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
+  memset(altPending,  0, (size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
+  altPendingCount = 0;
+  altEpisode.init(altEpRing, ALT_EP_RING_CAP);
+  altEpisodeSyncCfg();
+  altFront2.init(altFrontBuf, ALT_FRONT_CAP);
+  // axisScale ≈ each surface axis's characteristic span (plan §8: start at the axis tol).
+  altFront2.axisScale[0] = 25.0f;   // RPM
+  altFront2.axisScale[1] = 0.5f;    // excitation (temp-normalized field volts)
+  altFront2.axisScale[2] = 0.1f;    // Vbus
+  altFront2.axisScale[3] = 5.0f;    // tempF
+  queueConsoleMessageF("AltFront init: cap %d pts, ring %d, %.1fKB PSRAM",
+    ALT_FRONT_CAP, ALT_EP_RING_CAP,
+    (float)((size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>) +
+            (size_t)(ALT_FRONT_CAP + ALT_PENDING_CAP) * sizeof(FrontPoint<ALT_NAXIS>)) / 1024.0f);
 }
 
-// ---- tick: ~1 Hz, call from loop() ----
+// ---- 1 Hz housekeeping tick (NOT the fold) — sends live telemetry + settings echo. In bench-sim
+//      it also advances the simulator and folds at 1 Hz; live, the fold runs in the ~200 Hz pidLog
+//      hook (altFold_tick is called from there). ----
 void altHealth_tick(uint32_t nowMs) {
   static uint32_t lastMs = 0;
-  if (!altBase) return;
+  if (!altFrontBuf) return;
   if (nowMs - lastMs < 1000) return;
-  float dt = (lastMs == 0) ? 1.0f : (nowMs - lastMs) / 1000.0f;
-  if (dt > 5.0f) dt = 5.0f;
   lastMs = nowMs;
-  altProcessSample(dt, nowMs);
+  if (altSimMode >= 0.5f) {           // bench simulator: advance synthetic point + fold at 1 Hz
+    altSimTick(nowMs);
+    altFold_tick(nowMs);
+  }
   altSendLive();
   static uint8_t settCtr = 0;          // resend settings ~every 5s so reconnects get echoes
   if (++settCtr >= 5) { settCtr = 0; sendAltSettings(); }
@@ -464,14 +458,13 @@ void altHealth_tick(uint32_t nowMs) {
 // ============================================================
 struct AltSetting { const char *name; float *ptr; };
 static AltSetting ALT_SETTINGS[] = {
-  {"altElecSettleSec", &altElecSettleSec}, {"altDutyTolPct", &altDutyTolPct},
-  {"altRpmTol", &altRpmTol}, {"altVbusTol", &altVbusTol},
-  {"altThermRateDegF", &altThermRateDegF}, {"altThermRateMin", &altThermRateMin},
-  {"altThermDwellSec", &altThermDwellSec}, {"altMinDwellSec", &altMinDwellSec},
+  {"altRpmTol", &altRpmTol},   {"altRpmSec", &altRpmSec},
+  {"altDutyTolPct", &altDutyTolPct}, {"altDutySec", &altDutySec},
+  {"altVbusTol", &altVbusTol}, {"altVbusSec", &altVbusSec},
+  {"altThermDegF", &altThermDegF}, {"altThermSec", &altThermSec},
   {"altMinAmps", &altMinAmps}, {"altMinDuty", &altMinDuty},
-  {"altFreezeMinVisits", &altFreezeMinVisits}, {"altFreezeMaxVisits", &altFreezeMaxVisits},
-  {"altFreezeSEM", &altFreezeSEM},
-  {"altEwmaLambda", &altEwmaLambda}, {"altCusumK", &altCusumK}, {"altCusumH", &altCusumH},
+  {"altSafetyMargin", &altSafetyMargin}, {"altIdwPower", &altIdwPower}, {"altPruneK", &altPruneK},
+  {"altPaused", &altPaused},
 };
 static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTINGS[0]);
 
@@ -494,6 +487,16 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
       handled = true;
     }
   }
+  // Actions (not float knobs): Save / Load the front file + LEARNED↔FIXED source toggle (spec §4).
+  if (request->hasParam("altSaveFront")) { altFrontSaveFile(); handled = true; }
+  if (request->hasParam("altLoadFront")) { altFrontLoadFile(); handled = true; }
+  if (request->hasParam("altSource")) {   // 1 = FIXED (freeze + pause), 0 = LEARNED (resume)
+    int src = request->getParam("altSource")->value().toInt();
+    altFront2.source = (uint8_t)(src ? 1 : 0);
+    altPaused = src ? 1.0f : 0.0f;
+    writeFile(LittleFS, "/altPaused.txt", String(altPaused, 4).c_str());
+    handled = true;
+  }
   return handled;
 }
 void sendAltSettings() {
@@ -504,431 +507,262 @@ void sendAltSettings() {
   events.send(buf, "AltSettings");
 }
 
+// Self-describing schema (served at /altschema). The dashboard fetches this ONCE and zips these
+// names against the AltLive / AltSettings payload values — so it never keeps its own field array.
+String altSchemaJson() {
+  String s = "{\"live\":[";
+  for (size_t i = 0; i < ALT_LIVE_COUNT; i++) { if (i) s += ","; s += "\""; s += ALT_LIVE[i].name; s += "\""; }
+  s += "],\"settings\":[";
+  for (size_t i = 0; i < ALT_SETTING_COUNT; i++) { if (i) s += ","; s += "\""; s += ALT_SETTINGS[i].name; s += "\""; }
+  s += "]}";
+  return s;
+}
+
+
 
 // ============================================================
-// BOAT PERFORMANCE — sailing polar engine (Phase 3).
-//   Globals/structs in Xregulator.ino. Design: BOAT_PERFORMANCE_MATRIX_PLAN.md.
-//   Sliding ~60s windows → one observation; per-cell dual-source best-ever (top-K);
-//   1-D pitch derate (sea state = 60s std of pitch); fouling/current CUSUM;
-//   sticky Pause; Clear-all reset. Motoring map + web dashboard are follow-up slices.
-//   No struct types in signatures (Arduino auto-prototype hoist) — indices/floats only.
+// BOAT PERFORMANCE — Best-Ever Front engine instances (sail 3-D + motor 3-D). Mirrors the
+//   alternator module. Folds on a fast internal tick (~10 Hz, from boatPerf_tick). Sail axes
+//   {AWS, AWA, sea-state}; motor axes {RPM, headwind = AWS·cosAWA, sea-state}. Best-ever output =
+//   the user-selected STW or SOG. Generic engine (Episode/FrontStore): top of Xregulator.ino.
 // ============================================================
-#define PERF_VER          1u
-#define PERF_SAIL_MAGIC   0x50455253u  // 'PERS'
-#define PERF_PITCH_MAGIC  0x50455250u  // 'PERP'
-#define PERF_MON_MAGIC    0x5045524Du  // 'PERM'
-#define PERF_MOTOR_MAGIC  0x504D5452u  // 'PMTR'  motoring base map
-#define PERF_MWIND_MAGIC  0x504D5752u  // 'PMWR'  motoring windCorr
-#define PERF_MPITCH_MAGIC 0x504D5052u  // 'PMPR'  motoring pitchDerate
-#define PERF_MMON_MAGIC   0x504D4D4Eu  // 'PMMN'  motoring monitor
+#define PERF_VER         3u
+#define PERF_SAILF_MAGIC 0x50534652u  // 'PSFR' sail front blob
+#define PERF_MOTF_MAGIC  0x504D4652u  // 'PMFR' motor front blob
+#define PERF_NAXIS       3
+#define PERF_FRONT_CAP   256
+#define PERF_EP_RING_CAP 2048    // reseed look-back (~200 s at 10 Hz); PSRAM
+#define PERF_PENDING_CAP 128
 
-// ---- bin + axis helpers ----
-static inline int perfWsBin(float ws) {
-  if (isnan(ws) || ws < 0) return -1;
-  int b = (int)(ws * PERF_WS_BINS / PERF_WS_MAX);
-  if (b < 0) return -1;
-  if (b >= PERF_WS_BINS) b = PERF_WS_BINS - 1;
-  return b;
-}
-static inline float perfFoldAngle(float wa) {   // symmetric: mirror port/stbd → 0..180
-  while (wa < 0) wa += 360.0f;
-  while (wa >= 360.0f) wa -= 360.0f;
-  if (perfSymmetric >= 0.5f && wa > 180.0f) wa = 360.0f - wa;
-  return wa;
-}
-static inline int perfWaBin(float wa) {
-  if (isnan(wa)) return -1;
-  float a = perfFoldAngle(wa);
-  int b = (int)(a * PERF_WA_BINS / PERF_WA_MAX);
-  if (b < 0) b = 0;
-  if (b >= PERF_WA_BINS) b = PERF_WA_BINS - 1;
-  return b;
-}
-static inline int perfPitchBin(float p) {
-  if (isnan(p) || p < 0) p = 0;
-  int b = (int)(p * PERF_PITCH_BINS / PERF_PITCH_MAX);
-  if (b < 0) b = 0;
-  if (b >= PERF_PITCH_BINS) b = PERF_PITCH_BINS - 1;
-  return b;
-}
-static inline float perfPitchDerateAt(int bin) {
-  if (bin < 0 || !perfSailPitch[bin].valid) return 1.0f;
-  float v = perfSailPitch[bin].value;
-  if (v < 0.3f) v = 0.3f;
-  if (v > 1.2f) v = 1.2f;
-  return v;
+static Episode<PERF_NAXIS>    sailEpisode,  motorEpisode;
+static FrontStore<PERF_NAXIS> sailFront,    motorFront;
+static RawSample<PERF_NAXIS>  *sailRing = nullptr,     *motorRing = nullptr;
+static FrontPoint<PERF_NAXIS> *sailFrontBuf = nullptr, *motorFrontBuf = nullptr;
+static FrontPoint<PERF_NAXIS> *sailPending = nullptr,  *motorPending = nullptr;
+static int sailPendingCount = 0, motorPendingCount = 0;
+
+// Steady-time + sea-state-window + headwind + front/eval + cloud-prune knobs (registry-wired below;
+// per-axis deviation bounds + floors + mode flags are in Xregulator.ino).
+float perfWsSec  = 3.0f;     // AWS steady time (s)
+float perfWaSec  = 3.0f;     // AWA steady time (s)
+float perfSeaTol = 1.0f;     // sea-state (pitch-std) deviation band (deg)
+float perfSeaSec = 5.0f;     // sea-state steady time (s)
+float perfSeaWinSec = 20.0f; // rolling window the pitch-std NUMBER is computed over (≠ perfSeaSec)
+float perfRpmSec = 3.0f;     // motoring RPM steady time (s)
+float perfHwTol  = 2.0f;     // headwind deviation band (kt)
+float perfHwSec  = 3.0f;     // headwind steady time (s)
+float perfSafetyMargin = 0.2f;  // kt — keep-bias on the device gate (errs toward keep)
+float perfIdwPower     = 2.0f;  // IDW power for front eval
+float perfPruneK       = 6.0f;  // cloud prune neighbor count (echoed; applied cloud-side)
+
+// Coverage / count accessors (CSV2 + dashboard).
+float perfCoveragePct()      { return sailFrontBuf  ? (100.0f * (float)sailFront.count  / (float)PERF_FRONT_CAP) : 0.0f; }
+float perfMotorCoveragePct() { return motorFrontBuf ? (100.0f * (float)motorFront.count / (float)PERF_FRONT_CAP) : 0.0f; }
+int   perfSailCount()  { return sailFront.count; }
+int   perfMotorCount() { return motorFront.count; }
+void  perfClearPending() { sailPendingCount = 0; motorPendingCount = 0; }   // cloud accepted the batch
+
+// Fold |AWA| to [0,180] when symmetric (eval/display only — raw AWA is stored to pending/cloud).
+static inline float perfFoldAwa(float a) {
+  if (perfFoldSymmetric < 0.5f) return a;
+  float pa = a; while (pa < 0) pa += 360.0f; while (pa >= 360.0f) pa -= 360.0f;
+  if (pa > 180.0f) pa = 360.0f - pa;
+  return pa;
 }
 
-// best-ever reference for a cell+source = min of the top-K once full, else 0 (not trustable).
-// Non-static: also called from the /perfmodel.csv export in 3_functions.ino.
-float perfCellRef(int idx, int src) {   // src: 1=STW, 2=SOG
-  float *k = (src == 1) ? perfSail[idx].bestSTW : perfSail[idx].bestSOG;
-  uint16_t n = (src == 1) ? perfSail[idx].nSTW : perfSail[idx].nSOG;
-  if (n < PERF_TOPK) return 0.0f;
-  float m = k[0];
-  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < m) m = k[i];
-  return m;
+// ---- rolling sea-state: pitch standard deviation over the last perfSeaWinSec (default 20 s) ----
+#define PERF_PITCH_RING 256
+static float    perfPitchVal[PERF_PITCH_RING];
+static uint32_t perfPitchMs[PERF_PITCH_RING];
+static int      perfPitchHead = 0, perfPitchCount = 0;
+static void perfPitchPush(float pitch, uint32_t nowMs) {
+  perfPitchVal[perfPitchHead] = pitch; perfPitchMs[perfPitchHead] = nowMs;
+  perfPitchHead = (perfPitchHead + 1) % PERF_PITCH_RING;
+  if (perfPitchCount < PERF_PITCH_RING) perfPitchCount++;
 }
-// insert a window-mean into a cell's per-source top-K (keep the K largest).
-static void perfInsertBest(int idx, int src, float v) {
-  float *k = (src == 1) ? perfSail[idx].bestSTW : perfSail[idx].bestSOG;
-  int mi = 0;
-  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < k[mi]) mi = i;
-  if (v > k[mi]) k[mi] = v;
-  if (src == 1) { if (perfSail[idx].nSTW < 60000) perfSail[idx].nSTW++; }
-  else          { if (perfSail[idx].nSOG < 60000) perfSail[idx].nSOG++; }
-}
-// best-ever at a condition with 1-ring neighbor fallback (no fabrication if nothing valid).
-static float perfBestAt(int wsb, int wab, int src) {
-  if (wsb < 0 || wab < 0) return 0.0f;
-  float best = perfCellRef(PERF_SIDX(wsb, wab), src);
-  if (best > 0) return best;
-  for (int dw = -1; dw <= 1; dw++)
-    for (int da = -1; da <= 1; da++) {
-      int w = wsb + dw, a = wab + da;
-      if (w < 0 || w >= PERF_WS_BINS || a < 0 || a >= PERF_WA_BINS) continue;
-      float r = perfCellRef(PERF_SIDX(w, a), src);
-      if (r > best) best = r;
-    }
-  return best;
-}
-
-// circular resultant length (1 = steady direction, →0 = scattered) + tol→threshold.
-static inline float perfResultant(double S, double C, double n) {
-  if (n <= 0) return 0.0f;
-  return (float)(sqrt(S * S + C * C) / n);
-}
-static inline float perfRthresh(float tolDeg) {   // small-angle: R ≈ exp(−σ²/2)
-  float s = tolDeg * (float)PI / 180.0f;
-  return expf(-0.5f * s * s);
-}
-
-// learn the 1-D pitch derate from this window: achievable ÷ flat-water best (≈1 flat, <1 in seas).
-static void perfLearnPitch(float winSpeed, float cellBest, int pitchBin) {
-  if (cellBest <= 0.1f || pitchBin < 0) return;
-  if (perfSailPitch[pitchBin].nWin >= 200) return;   // light cap so it can't drift forever
-  perfSailPitch[pitchBin].nWin++;
-  perfSailPitch[pitchBin].sumW += 1.0f;
-  perfSailPitch[pitchBin].sumW_ratio += winSpeed / cellBest;
-  perfSailPitch[pitchBin].value = perfSailPitch[pitchBin].sumW_ratio / perfSailPitch[pitchBin].sumW;
-  perfSailPitch[pitchBin].valid = 1;
-}
-// fouling / current: one-sided CUSUM on sustained shortfall vs pitch-corrected best.
-static void perfScore(float winSpeed, float pred) {
-  if (pred <= 0.1f) return;
-  float scalar = winSpeed / pred;          // 1.0 = at best
-  perfSailMon.foulingScalar = scalar;
-  float d = 1.0f - scalar;                  // positive = slower than best
-  perfSailMon.cusumNeg = fmaxf(0.0f, perfSailMon.cusumNeg + (d - perfCusumK));
-  perfSailMon.winCount++;
-  perfSailMon.status = (perfSailMon.cusumNeg > perfCusumH) ? 2 : 1;
-}
-
-float perfCoveragePct() {
-  if (!perfSail) return 0.0f;
-  int valid = 0, withData = 0;
-  for (int i = 0; i < PERF_SAIL_CELLS; i++) {
-    if (perfSail[i].nWin) withData++;
-    if (perfSail[i].valid) valid++;
+static float perfSeaState(uint32_t nowMs) {
+  uint32_t win = (uint32_t)(perfSeaWinSec * 1000.0f);
+  double s = 0, s2 = 0; int n = 0;
+  for (int k = 0; k < perfPitchCount; k++) {
+    int idx = ((perfPitchHead - 1 - k) % PERF_PITCH_RING + PERF_PITCH_RING) % PERF_PITCH_RING;
+    if ((uint32_t)(nowMs - perfPitchMs[idx]) > win) break;       // older than the window → stop
+    s += perfPitchVal[idx]; s2 += (double)perfPitchVal[idx] * perfPitchVal[idx]; n++;
   }
-  if (withData == 0) return 0.0f;
-  return 100.0f * (float)valid / (float)withData;
+  if (n < 2) return 0.0f;
+  double var = s2 / n - (s / n) * (s / n);
+  return (var > 0) ? (float)sqrt(var) : 0.0f;
 }
 
-// ---- motoring map helpers (1-D RPM base × windCorr × pitchDerate; mirrors the sailing helpers) ----
-static inline int perfRpmBin(float rpm) {
-  if (isnan(rpm) || rpm < 0) return -1;
-  int b = (int)(rpm * PERF_RPM_BINS / PERF_RPM_MAX);
-  if (b < 0) return -1;
-  if (b >= PERF_RPM_BINS) b = PERF_RPM_BINS - 1;
-  return b;
-}
-static inline int perfWindcBin(float hw) {
-  if (isnan(hw)) return -1;
-  int b = (int)((hw - PERF_WINDC_MIN) * PERF_WINDC_BINS / (PERF_WINDC_MAX - PERF_WINDC_MIN));
-  if (b < 0) b = 0;
-  if (b >= PERF_WINDC_BINS) b = PERF_WINDC_BINS - 1;
-  return b;
-}
-static inline float perfMotorPitchAt(int bin) {
-  if (bin < 0 || !perfMotorPitch[bin].valid) return 1.0f;
-  float v = perfMotorPitch[bin].value;
-  if (v < 0.3f) v = 0.3f;
-  if (v > 1.2f) v = 1.2f;
-  return v;
-}
-static inline float perfWindCorrAt(int bin) {
-  if (bin < 0 || !perfMotorWind[bin].valid) return 1.0f;
-  float v = perfMotorWind[bin].value;
-  if (v < 0.3f) v = 0.3f;
-  if (v > 1.7f) v = 1.7f;
-  return v;
-}
-float perfMotorCellRef(int idx, int src) {   // non-static: also used by /motormodel.csv export
-  float *k = (src == 1) ? perfMotor[idx].bestSTW : perfMotor[idx].bestSOG;
-  uint16_t n = (src == 1) ? perfMotor[idx].nSTW : perfMotor[idx].nSOG;
-  if (n < PERF_TOPK) return 0.0f;
-  float m = k[0];
-  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < m) m = k[i];
-  return m;
-}
-static void perfMotorInsertBest(int idx, int src, float v) {
-  float *k = (src == 1) ? perfMotor[idx].bestSTW : perfMotor[idx].bestSOG;
-  int mi = 0;
-  for (int i = 1; i < PERF_TOPK; i++) if (k[i] < k[mi]) mi = i;
-  if (v > k[mi]) k[mi] = v;
-  if (src == 1) { if (perfMotor[idx].nSTW < 60000) perfMotor[idx].nSTW++; }
-  else          { if (perfMotor[idx].nSOG < 60000) perfMotor[idx].nSOG++; }
-}
-static float perfMotorBestAt(int rb, int src) {   // 1-D neighbor fallback
-  if (rb < 0) return 0.0f;
-  float best = perfMotorCellRef(rb, src);
-  if (best > 0) return best;
-  for (int d = -1; d <= 1; d++) {
-    int r = rb + d;
-    if (r < 0 || r >= PERF_RPM_BINS) continue;
-    float x = perfMotorCellRef(r, src);
-    if (x > best) best = x;
-  }
-  return best;
-}
-static void perfMotorLearn(float winSpeed, float cellBest, int hwBin, int pitchBin) {
-  if (cellBest <= 0.1f) return;
-  if (hwBin >= 0 && perfMotorWind[hwBin].nWin < 200) {
-    perfMotorWind[hwBin].nWin++;
-    perfMotorWind[hwBin].sumW += 1.0f;
-    perfMotorWind[hwBin].sumW_ratio += winSpeed / cellBest;
-    perfMotorWind[hwBin].value = perfMotorWind[hwBin].sumW_ratio / perfMotorWind[hwBin].sumW;
-    perfMotorWind[hwBin].valid = 1;
-  }
-  float wc = perfWindCorrAt(hwBin);   // isolate pitch on the wind-corrected residual
-  if (pitchBin >= 0 && perfMotorPitch[pitchBin].nWin < 200) {
-    perfMotorPitch[pitchBin].nWin++;
-    perfMotorPitch[pitchBin].sumW += 1.0f;
-    perfMotorPitch[pitchBin].sumW_ratio += winSpeed / (cellBest * (wc > 0.1f ? wc : 1.0f));
-    perfMotorPitch[pitchBin].value = perfMotorPitch[pitchBin].sumW_ratio / perfMotorPitch[pitchBin].sumW;
-    perfMotorPitch[pitchBin].valid = 1;
-  }
-}
-static void perfMotorScore(float winSpeed, float pred) {
-  if (pred <= 0.1f) return;
-  float scalar = winSpeed / pred;
-  perfMotorMon.foulingScalar = scalar;
-  float d = 1.0f - scalar;
-  perfMotorMon.cusumNeg = fmaxf(0.0f, perfMotorMon.cusumNeg + (d - perfCusumK));
-  perfMotorMon.winCount++;
-  perfMotorMon.status = (perfMotorMon.cusumNeg > perfCusumH) ? 2 : 1;
-}
-float perfMotorCoveragePct() {
-  if (!perfMotor) return 0.0f;
-  int valid = 0, withData = 0;
-  for (int i = 0; i < PERF_RPM_BINS; i++) {
-    if (perfMotor[i].nWin) withData++;
-    if (perfMotor[i].valid) valid++;
-  }
-  if (withData == 0) return 0.0f;
-  return 100.0f * (float)valid / (float)withData;
+// Per-axis tol from the deviation-bound knobs, steady time from the *Sec knobs. Resynced each fold.
+static void perfEpisodeSyncCfg() {
+  sailEpisode.cfg[0]  = { perfWsTol,  perfWsSec  };   // AWS
+  sailEpisode.cfg[1]  = { perfWaTol,  perfWaSec  };   // AWA (raw, band-checked)
+  sailEpisode.cfg[2]  = { perfSeaTol, perfSeaSec };   // sea-state
+  motorEpisode.cfg[0] = { perfRpmTol, perfRpmSec };   // RPM
+  motorEpisode.cfg[1] = { perfHwTol,  perfHwSec  };   // headwind
+  motorEpisode.cfg[2] = { perfSeaTol, perfSeaSec };   // sea-state
 }
 
-// ---- sliding window ----
-static void perfResetWindow(uint32_t nowMs) {
-  perfWinStartMs = nowMs;
-  perfWin_n = 0;
-  perfWin_ws = perfWin_ws2 = 0;
-  perfWin_waS = perfWin_waC = 0;
-  perfWin_pitch = perfWin_pitch2 = 0;
-  perfWin_stw = 0; perfWin_nstw = 0;
-  perfWin_sog = 0; perfWin_nsog = 0;
-  perfWin_hdgS = perfWin_hdgC = 0;
-  perfWin_rpm = perfWin_rpm2 = 0;
-}
-static void perfFinalizeWindow() {
-  double n = perfWin_n;
-  if (n < 5) return;                         // data dropout → discard
-  float wsMean = (float)(perfWin_ws / n);
-  float wsVar = (float)(perfWin_ws2 / n - (perfWin_ws / n) * (perfWin_ws / n));
-  if (wsVar < 0) wsVar = 0;
-  float wsStd = sqrtf(wsVar);
-  float waMean = (float)(atan2(perfWin_waS, perfWin_waC) * 180.0 / PI);
-  if (waMean < 0) waMean += 360.0f;
-  float pMean = (float)(perfWin_pitch / n);
-  float pVar = (float)(perfWin_pitch2 / n - pMean * pMean);
-  if (pVar < 0) pVar = 0;
-  float pitchStd = sqrtf(pVar);              // sea-state metric (locked: 60s std of pitch)
-  float rpmMean = (float)(perfWin_rpm / n);
-  float rpmVar = (float)(perfWin_rpm2 / n - (perfWin_rpm / n) * (perfWin_rpm / n));
-  if (rpmVar < 0) rpmVar = 0;
-  float rpmStd = sqrtf(rpmVar);
-  float headwind = wsMean * cosf(waMean * (float)PI / 180.0f);   // fore-aft wind component (+ = headwind)
-
-  float waR = perfResultant(perfWin_waS, perfWin_waC, n);
-  float hdgR = perfResultant(perfWin_hdgS, perfWin_hdgC, n);
-  bool windHdgSteady = (wsStd <= perfWsTol) &&
-                       (waR >= perfRthresh(perfWaTol)) &&
-                       (hdgR >= perfRthresh(perfHdgTol));
-
-  // pick active speed source per the selector (Both prefers STW)
-  bool haveStw = perfWin_nstw >= (int)(n * 0.5);
-  bool haveSog = perfWin_nsog >= (int)(n * 0.5);
-  float stwMean = haveStw ? (float)(perfWin_stw / perfWin_nstw) : NAN;
-  float sogMean = haveSog ? (float)(perfWin_sog / perfWin_nsog) : NAN;
-  int src = 0; float spd = 0;
-  if (perfSpeedSrc == 1) { if (haveStw) { src = 1; spd = stwMean; } }
-  else if (perfSpeedSrc == 2) { if (haveSog) { src = 2; spd = sogMean; } }
-  else { if (haveStw) { src = 1; spd = stwMean; } else if (haveSog) { src = 2; spd = sogMean; } }
-
-  bool motoring = (rpmMean > perfRpmFloor);   // engine on (incl. motorsailing) → RPM map
-
-  if (motoring) {
-    // ---- MOTORING: speed = base(RPM) × windCorr(headwind) × pitchDerate ----
-    int rb = perfRpmBin(rpmMean), hwb = perfWindcBin(headwind), pb = perfPitchBin(pitchStd);
-    perfLiveValid = false;        // sailing dot off while motoring
-    motorLiveValid = false;
-    if (src != 0 && rb >= 0) {
-      float best = perfMotorBestAt(rb, src);
-      float pred = best * perfWindCorrAt(hwb) * perfMotorPitchAt(pb);
-      motorLive_rpm = rpmMean; motorLive_hw = headwind; motorLive_spd = spd;
-      motorLive_best = pred; motorLiveSrc = (uint8_t)src;
-      motorLive_pct = (pred > 0.1f) ? (spd / pred * 100.0f) : 0.0f;
-      motorLiveValid = (best > 0);
-    }
-    if (perfPaused >= 0.5f || (hardwarePresent != 1 && perfSimMode < 0.5f)) return;
-    if (!windHdgSteady || rpmStd > perfRpmTol || src == 0) return;
-    if (spd < perfMinBoatSpeed || rb < 0) return;
-    perfMotor[rb].nWin++;
-    perfMotor[rb].sumW += 1.0f;
-    perfMotor[rb].sumW_ws += rpmMean;     // centroid: RPM
-    perfMotor[rb].sumW_wa += headwind;    // centroid: headwind
-    perfMotor[rb].sumW_pitch += pitchStd;
-    if (haveStw) perfMotorInsertBest(rb, 1, stwMean);
-    if (haveSog) perfMotorInsertBest(rb, 2, sogMean);
-    if (perfMotorCellRef(rb, src) > 0) perfMotor[rb].valid = 1;
-    float cellBest = perfMotorBestAt(rb, src);
-    if (cellBest > 0) {
-      perfMotorLearn(spd, cellBest, hwb, pb);
-      perfMotorScore(spd, cellBest * perfWindCorrAt(hwb) * perfMotorPitchAt(pb));
-    }
-    return;
-  }
-
-  // ---- SAILING: V_best(windspeed, windangle) × pitchDerate ----
-  int wsb = perfWsBin(wsMean), wab = perfWaBin(waMean);
-  motorLiveValid = false;        // motoring dot off while sailing
-  perfLiveValid = false;
-  if (src != 0 && wsb >= 0 && wab >= 0 && wsMean >= perfMinWindSpeed) {
-    float best = perfBestAt(wsb, wab, src);
-    float pred = best * perfPitchDerateAt(perfPitchBin(pitchStd));
-    perfLive_ws = wsMean; perfLive_wa = waMean; perfLive_spd = spd;
-    perfLive_pitch = pitchStd; perfLive_best = pred; perfLiveSrc = (uint8_t)src;
-    perfLive_pct = (pred > 0.1f) ? (spd / pred * 100.0f) : 0.0f;
-    perfLiveValid = (best > 0);
-  }
-  if (perfPaused >= 0.5f || (hardwarePresent != 1 && perfSimMode < 0.5f)) return;   // sticky pause / sim-device = display-only (bench simulator overrides)
-  if (!windHdgSteady || src == 0) return;
-  if (wsMean < perfMinWindSpeed || spd < perfMinBoatSpeed) return;
-  if (wsb < 0 || wab < 0) return;
-
-  int idx = PERF_SIDX(wsb, wab);
-  perfSail[idx].nWin++;
-  perfSail[idx].sumW += 1.0f;
-  perfSail[idx].sumW_ws += wsMean;
-  perfSail[idx].sumW_wa += waMean;
-  perfSail[idx].sumW_pitch += pitchStd;
-  if (haveStw) perfInsertBest(idx, 1, stwMean);
-  if (haveSog) perfInsertBest(idx, 2, sogMean);
-  if (perfCellRef(idx, src) > 0) perfSail[idx].valid = 1;
-
-  float cellBest = perfBestAt(wsb, wab, src);
-  if (cellBest > 0) {
-    perfLearnPitch(spd, cellBest, perfPitchBin(pitchStd));
-    perfScore(spd, cellBest * perfPitchDerateAt(perfPitchBin(pitchStd)));
-  }
-}
-// ---- NMEA SIMULATOR (bench testing, no boat) ----
-// Writes ONLY to dedicated perfSim* vars (never the real NMEA/RPM/IMU globals) so it can't
-// touch the control loop or other subsystems. Sweeps a small set of operating points and
-// computes a synthetic STW from a physics model (sailing polar / speed-vs-RPM) × sea-state
-// derate × a slow fouling ramp + noise — so the maps converge and the fouling CUSUM trips.
+// ---- per-tick fold (fast internal cadence, ~10 Hz from boatPerf_tick) ----
+// Snapshots the latest axis values, updates the live %, feeds the SAIL or MOTOR Episode (the other
+// is fed an ineligible break so a run can't span a sail↔motor transition), and on a steady-run emit
+// derives the surface point, gates against the front, pushes if best-ever, and queues it for upload.
+// Wind axes are APPARENT; AWA is stored RAW (both-sided) to the front/pending — folded to |AWA| only
+// for eval + the device front when perfFoldSymmetric. Speed = STW or SOG per perfSpeedSrc.
+// Bench simulator state (perfSim* — written ONLY by perfSimTick, never the real NMEA/IMU globals).
 static float perfSimTws = 0, perfSimTwa = 0, perfSimStw = 0, perfSimSog = 0;
 static float perfSimHdg = 90, perfSimPitch = 0, perfSimRpm = 0;
 static int   perfSimIdx = 0, perfSimLoops = 0;
 static uint32_t perfSimPtStartMs = 0;
 static float perfSimFoul = 1.0f;
-struct PerfSimPt { uint8_t motor; float tws; float twa; float rpm; float sea; };
-static const PerfSimPt PERF_SIM_PTS[] = {
-  {0, 10,  45, 0, 0.8f}, {0, 10,  75, 0, 1.0f}, {0, 10, 105, 0, 1.5f}, {0, 10, 135, 0, 2.0f},
-  {0, 15,  65, 0, 1.5f}, {0, 15, 110, 0, 3.0f}, {0, 16, 150, 0, 4.0f},
-  {1,  6,  40, 1500, 1.0f}, {1, 10, 30, 2300, 2.5f}, {1, 5, 20, 3200, 1.5f},
-};
-#define PERF_SIM_NPTS (int)(sizeof(PERF_SIM_PTS) / sizeof(PERF_SIM_PTS[0]))
 
+void perfFold_tick(uint32_t nowMs) {
+  if (!sailFrontBuf || !motorFrontBuf) return;
+
+  // elapsed since last tick — for sailing/motoring hour accumulators (added once gated, below)
+  static uint32_t perfHoursLastMs = 0;
+  uint32_t perfDtMs = (perfHoursLastMs == 0) ? 0 : (nowMs - perfHoursLastMs);
+  perfHoursLastMs = nowMs;
+  if (perfDtMs > 2000) perfDtMs = 0;   // skip gaps (backgrounded tab, reboot, stalls)
+
+  float aws, awa, pitch, rpm, spd; bool haveSpd;
+  if (perfSimMode >= 0.5f) {
+    aws = perfSimTws; awa = perfSimTwa; pitch = perfSimPitch; rpm = perfSimRpm;
+    spd = (perfSpeedSrc >= 1.5f) ? perfSimSog : perfSimStw; haveSpd = true;
+  } else {
+    if (IS_STALE(IDX_APPARENT_WIND_SPEED) || isnan(ApparentWindSpeedNMEA) || isnan(ApparentWindAngleNMEA)) { perfSteady = false; return; }
+    aws = ApparentWindSpeedNMEA; awa = ApparentWindAngleNMEA;
+    pitch = imu_pitch_deg; rpm = RPM;
+    if (perfSpeedSrc >= 1.5f) { haveSpd = !IS_STALE(IDX_SOG_NMEA); spd = SOGNMEA; }
+    else                     { haveSpd = (!IS_STALE(IDX_STW_NMEA) && !isnan(STWNMEA)); spd = STWNMEA; }
+    if (!haveSpd || isnan(spd)) spd = 0;
+  }
+  perfPitchPush(pitch, nowMs);
+  float sea = perfSeaState(nowMs);
+  perfEpisodeSyncCfg();
+  uint8_t src = (perfSpeedSrc >= 1.5f) ? 2 : 1;
+  float headwind = aws * cosf(awa * (float)PI / 180.0f);   // fore-aft apparent component (+ = headwind)
+  bool motoring = (rpm > perfRpmFloor);
+
+  // ── live display (NO clamp; % may exceed 100 vs a stale front) ──
+  if (motoring) {
+    float surf[PERF_NAXIS] = { rpm, headwind, sea };
+    float best = motorFront.eval(surf, perfIdwPower);
+    motorLive_rpm = rpm; motorLive_hw = headwind; motorLive_spd = spd; motorLive_pitch = sea;
+    motorLive_best = best; motorLive_pct = (best > 0.1f) ? (spd / best * 100.0f) : 0.0f;
+    motorLiveSrc = src; motorLiveValid = (best > 0.1f && haveSpd); perfLiveValid = false;
+  } else {
+    float surf[PERF_NAXIS] = { aws, perfFoldAwa(awa), sea };
+    float best = sailFront.eval(surf, perfIdwPower);
+    perfLive_ws = aws; perfLive_wa = awa; perfLive_spd = spd; perfLive_pitch = sea;
+    perfLive_best = best; perfLive_pct = (best > 0.1f) ? (spd / best * 100.0f) : 0.0f;
+    perfLiveSrc = src; perfLiveValid = (best > 0.1f && haveSpd && aws >= perfMinWindSpeed); motorLiveValid = false;
+  }
+
+  if (hardwarePresent != 1 && perfSimMode < 0.5f) { perfSteady = false; return; }   // display only
+  if (perfPaused >= 0.5f) { perfSteady = false; return; }                           // paused: no learning
+
+  // ── data-maturity hours: time spent actually moving in each mode (only while learning) ──
+  if (perfDtMs > 0 && spd >= perfMinBoatSpeed) {
+    if (motoring) perfMotorSeconds += perfDtMs / 1000.0;
+    else          perfSailSeconds  += perfDtMs / 1000.0;
+  }
+
+  // ── feed both Episodes; the inactive one gets an ineligible break so runs don't span a mode change ──
+  FrontPoint<PERF_NAXIS> ep;
+
+  // SAIL
+  bool sailLearn = (sailFront.source != 1);
+  bool sailElig = sailLearn && !motoring && haveSpd && spd >= perfMinBoatSpeed && aws >= perfMinWindSpeed;
+  RawSample<PERF_NAXIS> ss; ss.x[0] = aws; ss.x[1] = awa; ss.x[2] = sea; ss.out = spd; ss.tMs = nowMs;
+  ss.ex[0] = 0; ss.ex[1] = 0;   // sail keeps raw AWS/AWA as surface axes x0/x1 already — no extras needed
+  if (sailEpisode.feed(sailElig, ss, &ep)) {
+    FrontPoint<PERF_NAXIS> raw = ep;                                  // raw both-sided AWA → cloud
+    if (sailPending && sailPendingCount < PERF_PENDING_CAP) sailPending[sailPendingCount++] = raw;
+    FrontPoint<PERF_NAXIS> sp = ep; sp.x[1] = perfFoldAwa(ep.x[1]);   // device front: folded AWA
+    if (sailFront.pushes(sp.x, sp.y, perfSafetyMargin, perfIdwPower)) {
+      if (sailFront.add(sp))
+        queueConsoleMessageF("SailFront +pt #%d aws=%.1f awa=%.0f sea=%.2f spd=%.2f n=%u",
+          sailFront.count, sp.x[0], sp.x[1], sp.x[2], sp.y, sp.nSamp);
+    }
+  }
+
+  // MOTOR
+  bool motorLearn = (motorFront.source != 1);
+  bool motorElig = motorLearn && motoring && haveSpd && spd >= perfMinBoatSpeed;
+  RawSample<PERF_NAXIS> ms; ms.x[0] = rpm; ms.x[1] = headwind; ms.x[2] = sea; ms.out = spd; ms.tMs = nowMs;
+  ms.ex[0] = aws; ms.ex[1] = awa;   // retain raw AWS/AWA (headwind is derived from them) for cloud diagnosis
+  if (motorEpisode.feed(motorElig, ms, &ep)) {
+    if (motorPending && motorPendingCount < PERF_PENDING_CAP) motorPending[motorPendingCount++] = ep;
+    if (motorFront.pushes(ep.x, ep.y, perfSafetyMargin, perfIdwPower)) {
+      if (motorFront.add(ep))
+        queueConsoleMessageF("MotorFront +pt #%d rpm=%.0f hw=%.1f sea=%.2f spd=%.2f n=%u",
+          motorFront.count, ep.x[0], ep.x[1], ep.x[2], ep.y, ep.nSamp);
+    }
+  }
+
+  // steady-run indicator: the active mode's Episode is currently accumulating eligible samples
+  perfSteady = motoring ? (motorEpisode.count > 0) : (sailEpisode.count > 0);
+}
+// ---- NMEA SIMULATOR (bench testing, no boat) ----
+// Writes ONLY to dedicated perfSim* vars (never the real NMEA/RPM/IMU globals) so it can't
+// touch the control loop or other subsystems. Sweeps a small set of operating points and
+// computes a synthetic STW from a physics model (sailing polar / speed-vs-RPM) × sea-state
+// derate × a slow fouling ramp + noise — so the maps converge. (perfSim* vars declared above the fold.)
+// Fine grid so the polar (and RPM curve) fill SMOOTHLY: sailing = 3 wind speeds × 14 wind angles
+// (30..160° every 10°), then motoring = 12 RPM steps. Hold each point a few windows so the step's
+// transition window is rejected and the next steady window banks a record.
+#define PERF_SIM_NTWA  14
+#define PERF_SIM_NTWS  3
+#define PERF_SIM_NSAIL (PERF_SIM_NTWS * PERF_SIM_NTWA)    // 42
+#define PERF_SIM_NRPM  12
+#define PERF_SIM_NPTS  (PERF_SIM_NSAIL + PERF_SIM_NRPM)   // 54
+
+#define PERF_SIM_HOLD_MS 12000u    // hold each point > max steady time so a run forms + emits
 static void perfSimTick(uint32_t nowMs) {
-  uint32_t hold = (uint32_t)(5.0f * perfWindowSec * 1000.0f);   // ~5 windows per point → cells graduate
-  if (hold < 20000) hold = 20000;
+  uint32_t hold = PERF_SIM_HOLD_MS;
   if (perfSimPtStartMs == 0) perfSimPtStartMs = nowMs;
   if (nowMs - perfSimPtStartMs >= hold) {
     perfSimPtStartMs = nowMs;
     if (++perfSimIdx >= PERF_SIM_NPTS) { perfSimIdx = 0; perfSimLoops++; }
   }
-  const PerfSimPt &p = PERF_SIM_PTS[perfSimIdx];
-  float headwind = p.tws * cosf(p.twa * (float)PI / 180.0f);
+  uint8_t motor; float tws, twa, rpm, sea;
+  if (perfSimIdx < PERF_SIM_NSAIL) {            // sailing sweep
+    motor = 0;
+    int ti = perfSimIdx / PERF_SIM_NTWA, ai = perfSimIdx % PERF_SIM_NTWA;
+    tws = (ti == 0) ? 8.0f : (ti == 1) ? 12.0f : 16.0f;
+    twa = 30.0f + ai * 10.0f;                   // 30..160°
+    rpm = 0; sea = 0.5f + 0.3f * ti;            // a bit more chop in more wind
+  } else {                                      // motoring sweep
+    motor = 1;
+    int ri = perfSimIdx - PERF_SIM_NSAIL;
+    rpm = 1000.0f + ri * 220.0f;                // 1000..3420
+    tws = 8.0f; twa = 30.0f; sea = 1.0f;
+  }
+  float headwind = tws * cosf(twa * (float)PI / 180.0f);
   float v;
-  if (p.motor) {
-    v = 7.0f * (1.0f - expf(-p.rpm / 1500.0f)) - 0.02f * headwind;
+  if (motor) {
+    v = 7.0f * (1.0f - expf(-rpm / 1500.0f)) - 0.02f * headwind;
   } else {
-    float pa = p.twa; if (pa > 180) pa = 360 - pa;
+    float pa = twa; if (pa > 180) pa = 360 - pa;
     float eff = sinf((float)PI * (pa - 20.0f) / 160.0f); if (eff < 0) eff = 0;  // peaks ~100°, 0 at 20°/180°
-    v = p.tws * 0.55f * eff;
+    v = tws * 0.55f * eff;
     if (v > 7.5f) v = 7.5f;                                   // hull-speed cap
   }
-  float seaStd = p.sea / 1.414f;
+  float seaStd = sea / 1.414f;
   v *= (1.0f - 0.025f * seaStd);                             // rougher seas → slower
   if (perfSimLoops >= 2) perfSimFoul -= 0.0005f;             // after 2 full sweeps, ramp fouling
   if (perfSimFoul < 0.85f) perfSimFoul = 0.85f;
   v *= perfSimFoul;
   v *= 1.0f + (float)random(-30, 31) / 1000.0f;             // ±3% noise
   if (v < 0.2f) v = 0.2f;
-  perfSimPitch = p.sea * sinf(2.0f * (float)PI * (float)(nowMs % 4000) / 4000.0f);  // wave-like pitch
-  perfSimTws = p.tws; perfSimTwa = p.twa; perfSimHdg = 90.0f;
-  perfSimRpm = p.motor ? p.rpm : 0.0f;
+  perfSimPitch = sea * sinf(2.0f * (float)PI * (float)(nowMs % 4000) / 4000.0f);  // wave-like pitch
+  perfSimTws = tws; perfSimTwa = twa; perfSimHdg = 90.0f;
+  perfSimRpm = motor ? rpm : 0.0f;
   perfSimStw = v; perfSimSog = v;                            // no current; SOG == STW
 }
 
-static void perfProcessSample(uint32_t nowMs) {
-  float ws, wa, hdg, pitch, rpm, stw, sog;
-  bool haveStw, haveSog;
-  if (perfSimMode >= 0.5f) {                                 // bench simulator: read the sim vars
-    ws = perfSimTws; wa = perfSimTwa; hdg = perfSimHdg; pitch = perfSimPitch; rpm = perfSimRpm;
-    stw = perfSimStw; sog = perfSimSog; haveStw = true; haveSog = true;
-  } else {
-    // axis wind = TRUE wind (locked), apparent fallback
-    if (!IS_STALE(IDX_TRUE_WIND_SPEED) && !isnan(TrueWindSpeedNMEA)) {
-      ws = TrueWindSpeedNMEA; wa = TrueWindAngleNMEA;
-    } else if (!IS_STALE(IDX_APPARENT_WIND_SPEED) && !isnan(ApparentWindSpeedNMEA)) {
-      ws = ApparentWindSpeedNMEA; wa = ApparentWindAngleNMEA;
-    } else return;
-    if (isnan(ws) || isnan(wa)) return;
-    hdg = HeadingNMEA; pitch = imu_pitch_deg; rpm = RPM;
-    haveStw = (!IS_STALE(IDX_STW_NMEA) && !isnan(STWNMEA)); stw = STWNMEA;
-    haveSog = (!IS_STALE(IDX_SOG_NMEA)); sog = SOGNMEA;
-  }
-
-  float waRad = wa * (float)PI / 180.0f;
-  float hdgRad = hdg * (float)PI / 180.0f;
-  perfWin_n += 1.0;
-  perfWin_ws += ws; perfWin_ws2 += (double)ws * ws;
-  perfWin_waS += sin(waRad); perfWin_waC += cos(waRad);
-  perfWin_pitch += pitch; perfWin_pitch2 += (double)pitch * pitch;
-  perfWin_hdgS += sin(hdgRad); perfWin_hdgC += cos(hdgRad);
-  perfWin_rpm += rpm; perfWin_rpm2 += (double)rpm * rpm;
-  if (haveStw) { perfWin_stw += stw; perfWin_nstw++; }
-  if (haveSog) { perfWin_sog += sog; perfWin_nsog++; }
-
-  if (nowMs - perfWinStartMs >= (uint32_t)(perfWindowSec * 1000.0f)) {
-    perfFinalizeWindow();
-    perfResetWindow(nowMs);
-  }
-}
+// (perfProcessSample removed — the fold (perfFold_tick) reads the latest axis values directly.)
 
 // ---- live telemetry registry (PILOT: single source of truth for payload + schema) ----
 // One {name, getter} table builds BOTH the PerfLive payload AND the /perfschema field list,
@@ -943,20 +777,22 @@ static float plf_best()     { return perfLive_best; }
 static float plf_pct()      { return perfLive_pct; }
 static float plf_pitchStd() { return perfLive_pitch; }
 static float plf_src()      { return (float)perfLiveSrc; }
-static float plf_status()   { return (float)perfSailMon.status; }
-static float plf_fouling()  { return perfSailMon.foulingScalar; }
 static float plf_coverage() { return perfCoveragePct(); }
+static float plf_ptCount()  { return (float)sailFront.count; }
+static float plf_source()   { return (float)sailFront.source; }    // 0 LEARNED, 1 FIXED
 static float plf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
-static float plf_winCount() { return (float)perfSailMon.winCount; }
 static float plf_tickWin()  { return (float)ft_boatPerf.worstWindow; }   // µs — Core-1 cost diagnostic
 static float plf_tickSes()  { return (float)ft_boatPerf.worstSession; }  // µs since last Reset Peak Values
 static float plf_sim()      { return (perfSimMode >= 0.5f) ? 1.0f : 0.0f; }
+static float plf_sailHours(){ return (float)(perfSailSeconds / 3600.0); }   // data-maturity hours
+static float plf_steady()   { return (float)perfSteady; }                   // in a steady-run right now
 static PerfLiveField PERF_LIVE[] = {
   {"valid", plf_valid}, {"ws", plf_ws}, {"wa", plf_wa}, {"spd", plf_spd},
   {"best", plf_best}, {"pct", plf_pct}, {"pitchStd", plf_pitchStd}, {"src", plf_src},
-  {"status", plf_status}, {"fouling", plf_fouling}, {"coverage", plf_coverage},
-  {"paused", plf_paused}, {"winCount", plf_winCount},
+  {"coverage", plf_coverage}, {"ptCount", plf_ptCount}, {"source", plf_source},
+  {"paused", plf_paused},
   {"tickWinUs", plf_tickWin}, {"tickSesUs", plf_tickSes}, {"sim", plf_sim},
+  {"sailHours", plf_sailHours}, {"steady", plf_steady},
 };
 static const size_t PERF_LIVE_COUNT = sizeof(PERF_LIVE) / sizeof(PERF_LIVE[0]);
 
@@ -976,15 +812,19 @@ static float pmlf_spd()      { return motorLive_spd; }
 static float pmlf_best()     { return motorLive_best; }
 static float pmlf_pct()      { return motorLive_pct; }
 static float pmlf_src()      { return (float)motorLiveSrc; }
-static float pmlf_status()   { return (float)perfMotorMon.status; }
-static float pmlf_fouling()  { return perfMotorMon.foulingScalar; }
 static float pmlf_coverage() { return perfMotorCoveragePct(); }
+static float pmlf_ptCount()  { return (float)motorFront.count; }
+static float pmlf_source()   { return (float)motorFront.source; }
 static float pmlf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
-static float pmlf_winCount() { return (float)perfMotorMon.winCount; }
+static float pmlf_pitchStd() { return motorLive_pitch; }
+static float pmlf_motorHours() { return (float)(perfMotorSeconds / 3600.0); }   // data-maturity hours
+static float pmlf_steady()     { return (float)perfSteady; }                    // in a steady-run right now
 static PerfLiveField PERF_MOTOR_LIVE[] = {
   {"valid", pmlf_valid}, {"rpm", pmlf_rpm}, {"headwind", pmlf_headwind}, {"spd", pmlf_spd},
-  {"best", pmlf_best}, {"pct", pmlf_pct}, {"src", pmlf_src}, {"status", pmlf_status},
-  {"fouling", pmlf_fouling}, {"coverage", pmlf_coverage}, {"paused", pmlf_paused}, {"winCount", pmlf_winCount},
+  {"best", pmlf_best}, {"pct", pmlf_pct}, {"src", pmlf_src},
+  {"coverage", pmlf_coverage}, {"ptCount", pmlf_ptCount}, {"source", pmlf_source}, {"paused", pmlf_paused},
+  {"pitchStd", pmlf_pitchStd},
+  {"motorHours", pmlf_motorHours}, {"steady", pmlf_steady},
 };
 static const size_t PERF_MOTOR_LIVE_COUNT = sizeof(PERF_MOTOR_LIVE) / sizeof(PERF_MOTOR_LIVE[0]);
 static void perfSendMotorLive() {
@@ -997,150 +837,184 @@ static void perfSendMotorLive() {
 
 // ---- persistence (Phase-0 scaffold; field-off-gated by caller) ----
 void boatPerfSave() {
-  if (!perfSail || hardwarePresent != 1) return;
-  writePsramBlob("/perfsail.bin", PERF_SAIL_MAGIC, PERF_VER, 0,
-                 perfSail, sizeof(PerfCell), PERF_SAIL_CELLS, 0, PERF_SAIL_CELLS);
-  writePsramBlob("/perfpitch.bin", PERF_PITCH_MAGIC, PERF_VER, 0,
-                 perfSailPitch, sizeof(PerfCorr), PERF_PITCH_BINS, 0, PERF_PITCH_BINS);
-  writePsramBlob("/perfmon.bin", PERF_MON_MAGIC, PERF_VER, 0,
-                 &perfSailMon, sizeof(PerfMonitor), 1, 0, 1);
-  if (perfMotor) {
-    writePsramBlob("/motorbase.bin", PERF_MOTOR_MAGIC, PERF_VER, 0,
-                   perfMotor, sizeof(PerfCell), PERF_RPM_BINS, 0, PERF_RPM_BINS);
-    writePsramBlob("/motorwind.bin", PERF_MWIND_MAGIC, PERF_VER, 0,
-                   perfMotorWind, sizeof(PerfCorr), PERF_WINDC_BINS, 0, PERF_WINDC_BINS);
-    writePsramBlob("/motorpitch.bin", PERF_MPITCH_MAGIC, PERF_VER, 0,
-                   perfMotorPitch, sizeof(PerfCorr), PERF_PITCH_BINS, 0, PERF_PITCH_BINS);
-    writePsramBlob("/motormon.bin", PERF_MMON_MAGIC, PERF_VER, 0,
-                   &perfMotorMon, sizeof(PerfMonitor), 1, 0, 1);
-  }
+  if (!sailFrontBuf || hardwarePresent != 1) return;
+  uint32_t suw = ((uint32_t)sailFront.source  << 8) | (uint32_t)PERF_NAXIS;
+  uint32_t muw = ((uint32_t)motorFront.source << 8) | (uint32_t)PERF_NAXIS;
+  writePsramBlob("/sailfront.bin",  PERF_SAILF_MAGIC, PERF_VER, suw, sailFrontBuf,  sizeof(FrontPoint<PERF_NAXIS>), PERF_FRONT_CAP, 0, sailFront.count);
+  writePsramBlob("/motorfront.bin", PERF_MOTF_MAGIC,  PERF_VER, muw, motorFrontBuf, sizeof(FrontPoint<PERF_NAXIS>), PERF_FRONT_CAP, 0, motorFront.count);
 }
-// ---- cloud upload: build a compact JSON of populated cells (capped to the queue buffer) ----
-// Schema: {device_uid,token,ts, sail_bins, motor_bins,
-//          sail:[[wsb,wab,nWin,valid,bestStw,bestSog,cenWs,cenWa,cenPitch], ...],
-//          motor:[[rb,nWin,valid,bestStw,bestSog,cenRpm,cenHw,cenPitch], ...],
-//          sail_fouling, motor_fouling, trunc}.  Cloud fits the surface + cross-boat compare.
+static void boatPerfLoad() {
+  uint32_t uw = 0;
+  if (sailFrontBuf)  { sailFront.count  = (int)readPsramBlob("/sailfront.bin",  PERF_SAILF_MAGIC, PERF_VER, sailFrontBuf,  sizeof(FrontPoint<PERF_NAXIS>), PERF_FRONT_CAP, &uw, false); sailFront.source  = (uint8_t)((uw >> 8) & 0xFF); }
+  if (motorFrontBuf) { motorFront.count = (int)readPsramBlob("/motorfront.bin", PERF_MOTF_MAGIC,  PERF_VER, motorFrontBuf, sizeof(FrontPoint<PERF_NAXIS>), PERF_FRONT_CAP, &uw, false); motorFront.source = (uint8_t)((uw >> 8) & 0xFF); }
+}
+
+// ---- front CSV (the artifact). A boat "curve" = the PAIR of sail + motor BEFRONT1 blocks, mode-
+//      tagged. target: 0 = sail, 1 = motor. (int target, not a template-typed param — keeps
+//      Arduino's auto-prototype pass from referencing FrontStore<3> before PERF_NAXIS is defined.) ----
+static String perfFrontBlock(int target) {
+  FrontStore<PERF_NAXIS> &f = target ? motorFront : sailFront;
+  FrontPoint<PERF_NAXIS> *buf = target ? motorFrontBuf : sailFrontBuf;
+  String s = "BEFRONT1,"; s += target ? "MOTOR" : "SAIL"; s += ","; s += String(PERF_NAXIS); s += ",";
+  s += String(f.source); s += ","; s += target ? "rpm,hw,sea,spd" : "aws,awa,sea,spd"; s += "\n";
+  for (int i = 0; i < f.count; i++) {
+    FrontPoint<PERF_NAXIS> &p = buf[i];
+    s += String(p.x[0], target ? 0 : 2); s += ","; s += String(p.x[1], 1); s += ","; s += String(p.x[2], 3); s += ",";
+    s += String(p.y, 2); s += ","; s += String(p.nSamp); s += ","; s += String(p.tEmit); s += "\n";
+  }
+  return s;
+}
+String perfCurveCsv()  { return perfFrontBlock(0) + perfFrontBlock(1); }   // /perfcurve.csv
+String perfRecordsCsv() {                                                  // /perfrecords.csv — scatter table
+  String s = "mode,a0,a1,sea,spd,nSamp\n";
+  if (sailFrontBuf)  for (int i = 0; i < sailFront.count;  i++) { FrontPoint<PERF_NAXIS> &p = sailFrontBuf[i];  s += "sail,"  + String(p.x[0],2)+","+String(p.x[1],1)+","+String(p.x[2],3)+","+String(p.y,2)+","+String(p.nSamp)+"\n"; }
+  if (motorFrontBuf) for (int i = 0; i < motorFront.count; i++) { FrontPoint<PERF_NAXIS> &p = motorFrontBuf[i]; s += "motor," + String(p.x[0],0)+","+String(p.x[1],1)+","+String(p.x[2],3)+","+String(p.y,2)+","+String(p.nSamp)+"\n"; }
+  return s;
+}
+// Parse one BEFRONT1 block (starting at p) into the sail (target 0) or motor (target 1) front.
+static int perfIngestBlock(char *p, int target) {
+  FrontStore<PERF_NAXIS> &f = target ? motorFront : sailFront;
+  FrontPoint<PERF_NAXIS> *buf = target ? motorFrontBuf : sailFrontBuf;
+  char *nl = strchr(p, '\n'); if (!nl) return 0;
+  uint8_t src = 0;
+  { char saved = *nl; *nl = '\0'; char *t = strtok(p, ",");   // BEFRONT1
+    t = strtok(NULL, ","); t = strtok(NULL, ","); t = strtok(NULL, ",");   // sys, naxis, source
+    if (t) src = (uint8_t)atoi(t); *nl = saved; }
+  int n = 0; char *line = nl + 1;
+  while (line && *line && n < PERF_FRONT_CAP) {
+    if (strncmp(line, "BEFRONT1", 8) == 0) break;             // next block begins
+    char *eol = strchr(line, '\n'); if (eol) *eol = '\0';
+    float x0, x1, x2, y; unsigned ns = 0, te = 0;
+    if (*line && sscanf(line, "%f,%f,%f,%f,%u,%u", &x0, &x1, &x2, &y, &ns, &te) >= 4) {
+      FrontPoint<PERF_NAXIS> q; q.x[0] = x0; q.x[1] = x1; q.x[2] = x2; q.y = y;
+      q.ex[0] = 0; q.ex[1] = 0;   // raw extras live in the cloud table, not the front CSV
+      q.nSamp = (uint32_t)ns; q.tEmit = (uint32_t)te;
+      buf[n++] = q;
+    }
+    if (!eol) break;
+    line = eol + 1;
+  }
+  f.count = n; f.source = src;
+  return n;
+}
+// The cloud reply (or a saved file) carries both blocks (SAIL then MOTOR). Replace both held fronts.
+bool perfIngestFrontCsv(char *body) {
+  char *sp = strstr(body, "BEFRONT1,SAIL");
+  char *mp = strstr(body, "BEFRONT1,MOTOR");
+  if (sp) perfIngestBlock(sp, 0);
+  if (mp) perfIngestBlock(mp, 1);
+  return (sp || mp);
+}
+
+// ---- cloud upload: batch of accepted points since last upload (sail + motor); pruned fronts back ----
+// Schema: {device_uid,token,ts,sys:"BOAT",speedSrc,foldSym,pruneK,idwPower,
+//          sail:[[aws,awa,sea,spd,nSamp]...], motor:[[rpm,hw,sea,spd,nSamp,aws,awa]...]}. AWA raw both-sided;
+//          motor also carries raw AWS/AWA (headwind is derived from them) for cloud diagnosis.
+// Pending cleared on a successful response (executeUploadBoatPerf → perfIngestFrontCsv → perfClearPending).
 bool buildBoatPerfPayload(char *buf, size_t size) {
-  if (!perfSail || authToken.isEmpty()) return false;
+  if ((sailPendingCount == 0 && motorPendingCount == 0) || authToken.isEmpty()) return false;
   time_t now_ts = time(NULL);
   int off = snprintf(buf, size,
-    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\","
-    "\"sail_bins\":[%d,%d],\"motor_bins\":%d,\"sail\":[",
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"BOAT\",\"speedSrc\":%d,\"foldSym\":%d,\"pruneK\":%d,\"idwPower\":%.2f,\"sail\":[",
     device_id_hex, authToken.c_str(), formatTimestamp(now_ts),
-    PERF_WS_BINS, PERF_WA_BINS, PERF_RPM_BINS);
+    (int)perfSpeedSrc, (perfFoldSymmetric >= 0.5f) ? 1 : 0, (int)perfPruneK, perfIdwPower);
   if (off < 0 || (size_t)off >= size) return false;
-
-  int trunc = 0;
   bool first = true;
-  for (int i = 0; i < PERF_SAIL_CELLS; i++) {
-    if (!perfSail[i].nWin) continue;
-    if (size - (size_t)off < 110) { trunc = 1; break; }   // keep margin for the closers
-    int wsb = i / PERF_WA_BINS, wab = i % PERF_WA_BINS;
-    float inv = 1.0f / (float)perfSail[i].nWin;
-    off += snprintf(buf + off, size - off, "%s[%d,%d,%u,%d,%.2f,%.2f,%.1f,%.0f,%.2f]",
-                    first ? "" : ",", wsb, wab, (unsigned)perfSail[i].nWin, (int)perfSail[i].valid,
-                    perfCellRef(i, 1), perfCellRef(i, 2),
-                    perfSail[i].sumW_ws * inv, perfSail[i].sumW_wa * inv, perfSail[i].sumW_pitch * inv);
+  for (int k = 0; k < sailPendingCount; k++) {
+    if (size - (size_t)off < 64) break;
+    FrontPoint<PERF_NAXIS> &p = sailPending[k];
+    off += snprintf(buf + off, size - off, "%s[%.2f,%.1f,%.3f,%.2f,%u]", first ? "" : ",", p.x[0], p.x[1], p.x[2], p.y, p.nSamp);
     first = false;
   }
   off += snprintf(buf + off, size - off, "],\"motor\":[");
   first = true;
-  for (int i = 0; perfMotor && i < PERF_RPM_BINS; i++) {
-    if (!perfMotor[i].nWin) continue;
-    if (size - (size_t)off < 96) { trunc = 1; break; }
-    float inv = 1.0f / (float)perfMotor[i].nWin;
-    off += snprintf(buf + off, size - off, "%s[%d,%u,%d,%.2f,%.2f,%.0f,%.1f,%.2f]",
-                    first ? "" : ",", i, (unsigned)perfMotor[i].nWin, (int)perfMotor[i].valid,
-                    perfMotorCellRef(i, 1), perfMotorCellRef(i, 2),
-                    perfMotor[i].sumW_ws * inv, perfMotor[i].sumW_wa * inv, perfMotor[i].sumW_pitch * inv);
+  for (int k = 0; k < motorPendingCount; k++) {
+    if (size - (size_t)off < 64) break;
+    FrontPoint<PERF_NAXIS> &p = motorPending[k];
+    off += snprintf(buf + off, size - off, "%s[%.0f,%.1f,%.3f,%.2f,%u,%.2f,%.1f]",
+                    first ? "" : ",", p.x[0], p.x[1], p.x[2], p.y, p.nSamp, p.ex[0], p.ex[1]);  // ex=raw AWS,AWA
     first = false;
   }
-  off += snprintf(buf + off, size - off, "],\"sail_fouling\":%.3f,\"motor_fouling\":%.3f,\"trunc\":%d}",
-                  perfSailMon.foulingScalar, perfMotorMon.foulingScalar, trunc);
+  off += snprintf(buf + off, size - off, "]}");
   if (off < 0 || (size_t)off >= size - 1) return false;
   return true;
 }
 
-static void boatPerfLoad() {
-  uint32_t uw;
-  readPsramBlob("/perfsail.bin", PERF_SAIL_MAGIC, PERF_VER, perfSail, sizeof(PerfCell), PERF_SAIL_CELLS, &uw, false);
-  readPsramBlob("/perfpitch.bin", PERF_PITCH_MAGIC, PERF_VER, perfSailPitch, sizeof(PerfCorr), PERF_PITCH_BINS, &uw, false);
-  uint32_t got = readPsramBlob("/perfmon.bin", PERF_MON_MAGIC, PERF_VER, &perfSailMon, sizeof(PerfMonitor), 1, &uw, false);
-  if (got == 0) perfSailMon = PerfMonitor{};
-  if (perfMotor) {
-    readPsramBlob("/motorbase.bin", PERF_MOTOR_MAGIC, PERF_VER, perfMotor, sizeof(PerfCell), PERF_RPM_BINS, &uw, false);
-    readPsramBlob("/motorwind.bin", PERF_MWIND_MAGIC, PERF_VER, perfMotorWind, sizeof(PerfCorr), PERF_WINDC_BINS, &uw, false);
-    readPsramBlob("/motorpitch.bin", PERF_MPITCH_MAGIC, PERF_VER, perfMotorPitch, sizeof(PerfCorr), PERF_PITCH_BINS, &uw, false);
-    uint32_t mgot = readPsramBlob("/motormon.bin", PERF_MMON_MAGIC, PERF_VER, &perfMotorMon, sizeof(PerfMonitor), 1, &uw, false);
-    if (mgot == 0) perfMotorMon = PerfMonitor{};
-  }
+// ---- Save / Load the active fronts (the PAIR) to a LittleFS file (→ FIXED + paused) (spec §4) ----
+bool perfFrontSaveFile() {
+  if (!sailFrontBuf) return false;
+  String csv = perfCurveCsv();
+  writeFile(LittleFS, "/perffront_saved.csv", csv.c_str());
+  queueConsoleMessageF("PerfFront: saved sail %d + motor %d pts", sailFront.count, motorFront.count);
+  return true;
+}
+bool perfFrontLoadFile() {
+  if (!sailFrontBuf || !fsExists("/perffront_saved.csv")) return false;
+  String csv = readFile(LittleFS, "/perffront_saved.csv");
+  if (csv.length() < 8) return false;
+  char *bodyc = strdup(csv.c_str()); if (!bodyc) return false;
+  bool ok = perfIngestFrontCsv(bodyc);
+  free(bodyc);
+  if (ok) { sailFront.source = 1; motorFront.source = 1; perfPaused = 1.0f; writeFile(LittleFS, "/perfPaused.txt", "1.0000"); }
+  queueConsoleMessageF("PerfFront: loaded sail %d + motor %d (FIXED, paused)", sailFront.count, motorFront.count);
+  return ok;
 }
 
 // ---- lifecycle ----
 void initBoatPerformance() {
-  perfSail = (PerfCell *)ps_malloc((size_t)PERF_SAIL_CELLS * sizeof(PerfCell));
-  perfSailPitch = (PerfCorr *)ps_malloc((size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
-  perfMotor = (PerfCell *)ps_malloc((size_t)PERF_RPM_BINS * sizeof(PerfCell));
-  perfMotorWind = (PerfCorr *)ps_malloc((size_t)PERF_WINDC_BINS * sizeof(PerfCorr));
-  perfMotorPitch = (PerfCorr *)ps_malloc((size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
-  if (!perfSail || !perfSailPitch || !perfMotor || !perfMotorWind || !perfMotorPitch) {
-    queueConsoleMessage("ERROR: BoatPerf ps_malloc failed");
-    return;
+  sailRing      = (RawSample<PERF_NAXIS>  *)ps_malloc((size_t)PERF_EP_RING_CAP * sizeof(RawSample<PERF_NAXIS>));
+  motorRing     = (RawSample<PERF_NAXIS>  *)ps_malloc((size_t)PERF_EP_RING_CAP * sizeof(RawSample<PERF_NAXIS>));
+  sailFrontBuf  = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_FRONT_CAP   * sizeof(FrontPoint<PERF_NAXIS>));
+  motorFrontBuf = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_FRONT_CAP   * sizeof(FrontPoint<PERF_NAXIS>));
+  sailPending   = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_PENDING_CAP * sizeof(FrontPoint<PERF_NAXIS>));
+  motorPending  = (FrontPoint<PERF_NAXIS> *)ps_malloc((size_t)PERF_PENDING_CAP * sizeof(FrontPoint<PERF_NAXIS>));
+  if (!sailRing || !motorRing || !sailFrontBuf || !motorFrontBuf || !sailPending || !motorPending) {
+    queueConsoleMessage("ERROR: BoatPerf ps_malloc failed"); return;
   }
-  memset(perfSail, 0, (size_t)PERF_SAIL_CELLS * sizeof(PerfCell));
-  memset(perfSailPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
-  memset(perfMotor, 0, (size_t)PERF_RPM_BINS * sizeof(PerfCell));
-  memset(perfMotorWind, 0, (size_t)PERF_WINDC_BINS * sizeof(PerfCorr));
-  memset(perfMotorPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
-  perfSailMon = PerfMonitor{};
-  perfMotorMon = PerfMonitor{};
-  perfResetWindow(millis());
+  memset(sailFrontBuf,  0, (size_t)PERF_FRONT_CAP * sizeof(FrontPoint<PERF_NAXIS>));
+  memset(motorFrontBuf, 0, (size_t)PERF_FRONT_CAP * sizeof(FrontPoint<PERF_NAXIS>));
+  sailEpisode.init(sailRing, PERF_EP_RING_CAP);
+  motorEpisode.init(motorRing, PERF_EP_RING_CAP);
+  perfEpisodeSyncCfg();
+  sailFront.init(sailFrontBuf, PERF_FRONT_CAP);
+  motorFront.init(motorFrontBuf, PERF_FRONT_CAP);
+  sailFront.axisScale[0]  = 2.0f;   sailFront.axisScale[1]  = 12.0f; sailFront.axisScale[2]  = 1.0f;  // AWS, AWA, sea
+  motorFront.axisScale[0] = 100.0f; motorFront.axisScale[1] = 2.0f;  motorFront.axisScale[2] = 1.0f;  // RPM, headwind, sea
+  sailPendingCount = motorPendingCount = 0;
   boatPerfLoad();
-  int valid = 0, withData = 0;
-  for (int i = 0; i < PERF_SAIL_CELLS; i++) {
-    if (perfSail[i].valid) valid++;
-    if (perfSail[i].nWin) withData++;
-  }
-  queueConsoleMessageF("BoatPerf init: sail %d cells (%d valid, %d w/data) + motor %d, %.1fKB PSRAM",
-                       PERF_SAIL_CELLS, valid, withData, PERF_RPM_BINS,
-                       (float)((size_t)(PERF_SAIL_CELLS + PERF_RPM_BINS) * sizeof(PerfCell)) / 1024.0f);
+  queueConsoleMessageF("BoatPerf init: sail %d pts (%s), motor %d pts (%s)",
+                       sailFront.count, sailFront.source ? "FIXED" : "LEARNED",
+                       motorFront.count, motorFront.source ? "FIXED" : "LEARNED");
 }
 void resetBoatPerformance() {
-  if (!perfSail) return;
-  memset(perfSail, 0, (size_t)PERF_SAIL_CELLS * sizeof(PerfCell));
-  memset(perfSailPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
-  perfSailMon = PerfMonitor{};
-  if (perfMotor) {
-    memset(perfMotor, 0, (size_t)PERF_RPM_BINS * sizeof(PerfCell));
-    memset(perfMotorWind, 0, (size_t)PERF_WINDC_BINS * sizeof(PerfCorr));
-    memset(perfMotorPitch, 0, (size_t)PERF_PITCH_BINS * sizeof(PerfCorr));
-    perfMotorMon = PerfMonitor{};
-  }
-  perfResetWindow(millis());
+  if (!sailFrontBuf) return;
+  sailFront.count = 0; sailFront.source = 0; motorFront.count = 0; motorFront.source = 0;
+  sailPendingCount = motorPendingCount = 0;
+  sailEpisode.clearRun();  sailEpisode.ringHead = 0;  sailEpisode.ringCount = 0;
+  motorEpisode.clearRun(); motorEpisode.ringHead = 0; motorEpisode.ringCount = 0;
+  perfPitchHead = 0; perfPitchCount = 0;
+  perfSailSeconds = 0.0; perfMotorSeconds = 0.0;   // data-maturity hours reset with the learned data
+  perfLiveValid = false; motorLiveValid = false; perfLive_pct = 0; motorLive_pct = 0;
   fsTakeLock();
-  LittleFS.remove("/perfsail.bin");
-  LittleFS.remove("/perfpitch.bin");
-  LittleFS.remove("/perfmon.bin");
-  LittleFS.remove("/motorbase.bin");
-  LittleFS.remove("/motorwind.bin");
-  LittleFS.remove("/motorpitch.bin");
-  LittleFS.remove("/motormon.bin");
+  LittleFS.remove("/sailfront.bin");
+  LittleFS.remove("/motorfront.bin");
   fsReleaseLock();
-  queueConsoleMessage("BoatPerf: full reset (Clear all data)");
+  queueConsoleMessage("BoatPerf: full reset (Clear All)");
 }
 
-// ---- tick: ~1 Hz, call from loop() ----
+// ---- tick (call from loop()): fold at ~10 Hz, send live telemetry + settings echo at ~1 Hz ----
 void boatPerf_tick(uint32_t nowMs) {
-  static uint32_t lastMs = 0;
-  if (!perfSail) return;
-  if (nowMs - lastMs < 1000) return;
-  lastMs = nowMs;
-  if (perfSimMode >= 0.5f) perfSimTick(nowMs);   // bench simulator feeds the sim vars first
-  perfProcessSample(nowMs);
-  perfSendLive();
-  perfSendMotorLive();
-  static uint8_t sc = 0;
-  if (++sc >= 5) { sc = 0; sendPerfSettings(); }
+  static uint32_t lastFold = 0, lastSse = 0;
+  if (!sailFrontBuf) return;
+  if (perfSimMode >= 0.5f) perfSimTick(nowMs);          // bench simulator feeds the sim vars first
+  if ((uint32_t)(nowMs - lastFold) >= 100) { lastFold = nowMs; perfFold_tick(nowMs); }   // ~10 Hz fold
+  if ((uint32_t)(nowMs - lastSse) >= 1000) {                                              // ~1 Hz SSE + echo
+    lastSse = nowMs;
+    perfSendLive();
+    perfSendMotorLive();
+    static uint8_t sc = 0;
+    if (++sc >= 5) { sc = 0; sendPerfSettings(); }
+  }
 }
 
 // ============================================================
@@ -1148,11 +1022,15 @@ void boatPerf_tick(uint32_t nowMs) {
 // ============================================================
 struct PerfSetting { const char *name; float *ptr; };
 static PerfSetting PERF_SETTINGS[] = {
-  {"perfWindowSec", &perfWindowSec}, {"perfWsTol", &perfWsTol}, {"perfWaTol", &perfWaTol},
-  {"perfHdgTol", &perfHdgTol}, {"perfMinBoatSpeed", &perfMinBoatSpeed}, {"perfMinWindSpeed", &perfMinWindSpeed},
-  {"perfRpmFloor", &perfRpmFloor}, {"perfRpmTol", &perfRpmTol}, {"perfCusumK", &perfCusumK},
-  {"perfCusumH", &perfCusumH}, {"perfSymmetric", &perfSymmetric}, {"perfSpeedSrc", &perfSpeedSrc},
-  {"perfPaused", &perfPaused},
+  {"perfWsTol", &perfWsTol}, {"perfWsSec", &perfWsSec},
+  {"perfWaTol", &perfWaTol}, {"perfWaSec", &perfWaSec},
+  {"perfSeaTol", &perfSeaTol}, {"perfSeaSec", &perfSeaSec}, {"perfSeaWinSec", &perfSeaWinSec},
+  {"perfRpmTol", &perfRpmTol}, {"perfRpmSec", &perfRpmSec},
+  {"perfHwTol", &perfHwTol}, {"perfHwSec", &perfHwSec},
+  {"perfMinBoatSpeed", &perfMinBoatSpeed}, {"perfMinWindSpeed", &perfMinWindSpeed},
+  {"perfRpmFloor", &perfRpmFloor},
+  {"perfSafetyMargin", &perfSafetyMargin}, {"perfIdwPower", &perfIdwPower}, {"perfPruneK", &perfPruneK},
+  {"perfSpeedSrc", &perfSpeedSrc}, {"perfFoldSymmetric", &perfFoldSymmetric}, {"perfPaused", &perfPaused},
 };
 static const size_t PERF_SETTING_COUNT = sizeof(PERF_SETTINGS) / sizeof(PERF_SETTINGS[0]);
 
@@ -1166,6 +1044,7 @@ void perfSettingsLoad() {
 }
 bool perfSettingsHandle(AsyncWebServerRequest *request) {
   bool handled = false;
+  float oldSpeedSrc = perfSpeedSrc;
   for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
     if (request->hasParam(PERF_SETTINGS[i].name)) {
       *PERF_SETTINGS[i].ptr = request->getParam(PERF_SETTINGS[i].name)->value().toFloat();
@@ -1174,6 +1053,22 @@ bool perfSettingsHandle(AsyncWebServerRequest *request) {
       writeFile(LittleFS, path, String(*PERF_SETTINGS[i].ptr, 4).c_str());
       handled = true;
     }
+  }
+  // Changing the speed source (STW↔SOG) invalidates every learned point → Clear-All (spec §1/§4;
+  // the dashboard warns first). Both fronts + raw history reset.
+  if (request->hasParam("perfSpeedSrc") && perfSpeedSrc != oldSpeedSrc) {
+    resetBoatPerformance();
+    queueConsoleMessage("BoatPerf: speed source changed → Clear All (front reset)");
+  }
+  // Actions (not float knobs): Save / Load the front pair + LEARNED↔FIXED source toggle (spec §4).
+  if (request->hasParam("perfSaveFront")) { perfFrontSaveFile(); handled = true; }
+  if (request->hasParam("perfLoadFront")) { perfFrontLoadFile(); handled = true; }
+  if (request->hasParam("perfSource")) {   // 1 = FIXED (freeze + pause), 0 = LEARNED (resume)
+    int src = request->getParam("perfSource")->value().toInt();
+    sailFront.source = motorFront.source = (uint8_t)(src ? 1 : 0);
+    perfPaused = src ? 1.0f : 0.0f;
+    writeFile(LittleFS, "/perfPaused.txt", String(perfPaused, 4).c_str());
+    handled = true;
   }
   return handled;
 }

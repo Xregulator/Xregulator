@@ -664,7 +664,7 @@ void httpsTask(void *param) {
     if (xQueueReceive(httpsQueue, &request, pdMS_TO_TICKS(1000))) {
 
       // VERIFY PAYLOAD BEFORE PROCESSING
-      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF) {
+      if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH) {
         size_t payloadLen = strlen(request.payload);
         // Serial.printf("DEBUG: Received payload, length=%d bytes\n", payloadLen);
 
@@ -693,6 +693,9 @@ void httpsTask(void *param) {
           break;
         case HTTPS_UPLOAD_BOATPERF:
           opSuccess = executeUploadBoatPerf(request.payload);
+          break;
+        case HTTPS_UPLOAD_ALTHEALTH:
+          opSuccess = executeUploadAltHealth(request.payload);
           break;
         case HTTPS_FETCH_WEATHER:
           executeFetchWeatherData();
@@ -1283,6 +1286,9 @@ size_t buildSnapshotJson(const SensorSnapshot &snap) {
     "\"token\":\"%s\","
     "\"timestamp\":\"%s\","
     "\"firmware_version_int\":%d,"
+    // payload_v = ingest payload schema version; bump when this body's shape changes.
+    // Edge fn inserts an explicit column whitelist, so it safely ignores this. See CLOUD_PLATFORM.md §3a.
+    "\"payload_v\":1,"
     "\"current_time_source\":%d,"
     // Battery
     "\"batt_volt_min\":%.2f,\"batt_volt_max\":%.2f,\"batt_volt_avg\":%.2f,"
@@ -2030,6 +2036,9 @@ bool buildConfigPayload() {
 
   int offset = snprintf(configPayloadBuffer, CONFIG_PAYLOAD_SIZE,
     "{\"device_uid\":\"%s\",\"token\":\"%s\",\"snapshot_timestamp\":\"%s\","
+    // payload_v = ingest payload schema version; bump when this body's shape changes.
+    // Edge fn destructures named keys so it ignores this; present for version tracing.
+    "\"payload_v\":1,"
     "\"settings\":{",
     device_id_hex, authToken.c_str(), timestampStr);
   if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
@@ -2238,7 +2247,8 @@ bool buildConfigPayload() {
     "\"total_overheats\":%lu,\"total_safe_hours\":%.3f,"
     "\"longest_single_trip_nm_alltime\":%.3f,\"max_24hr_distance\":%.3f,"
     "\"deepest_anchorage_ft\":%.2f,"
-    "\"best_upwind_vmg_alltime\":%.2f,\"longest_gale_duration_hours_alltime\":%.3f",
+    "\"best_upwind_vmg_alltime\":%.2f,\"longest_gale_duration_hours_alltime\":%.3f,"
+    "\"sailing_dist_alltime\":%.3f,\"alt_power_max_alltime_w\":%.3f,\"solar_power_max_alltime_w\":%.3f",
     AvgVoltage_AllTime, (unsigned long)totalVoltageSampleTime_AllTime,
     AvgSOC_AllTime, (unsigned long)totalSocSampleTime_AllTime,
     AvgSpeed_AllTime, (unsigned long)totalSpeedSampleTime_AllTime,
@@ -2250,7 +2260,8 @@ bool buildConfigPayload() {
     (unsigned long)totalOverheats, (double)totalSafeHours,
     LongestSingleTrip_Nm_AllTime, Max24hrDistance_AllTime,
     DeepestAnchorage_Ft_AllTime,
-    best_upwind_vmg_alltime, longest_gale_duration_hours_alltime);
+    best_upwind_vmg_alltime, longest_gale_duration_hours_alltime,
+    sailing_dist_alltime, alt_power_max_alltime_w, solar_power_max_alltime_w);
 
   // Session totals (point values at upload time; owner-visible only, no leaderboard)
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
@@ -2492,16 +2503,149 @@ drain_headers_bp:
     }
   }
 done_headers_bp:
-  client.stop();
+  // Read the response BODY (the BPCURVE2 curve CSV) — assumed to arrive in one chunk (~1.4 KB).
+  {
+    static char bpBody[6144];   // static (not stack) — worker task only; holds both pruned front blocks
+    size_t bl = 0;
+    uint32_t bodyStart = millis();
+    while (client.connected() && bl < sizeof(bpBody) - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      while (client.available() && bl < sizeof(bpBody) - 1) bpBody[bl++] = (char)client.read();
+      if (millis() - start > GLOBAL_TIMEOUT) break;
+      delay(1);
+    }
+    bpBody[bl] = '\0';
+    client.stop();
+    esp_task_wdt_reset();
+
+    bool success = (httpCode == 200);
+    if (success) {
+      perfClearPending();   // cloud accepted the batch (raw history) → drop the pending points
+      if (perfIngestFrontCsv(bpBody)) {
+        boatPerfSave();   // persist the cloud's pruned fronts
+        queueConsoleMessage("Boat performance: fronts updated from cloud");
+      } else {
+        queueConsoleMessage("Boat performance uploaded (no front in response)");
+      }
+    } else if (httpCode > 0) {
+      snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "BoatPerf upload failed HTTP %d", httpCode);
+      queueConsoleMessage(messageBuffer);
+    }
+    return success;
+  }
+}
+
+// Alternator (charging-system) health v2 upload — clone of executeUploadBoatPerf. POST the
+// best-ever record batch, read the fitted ALTCURVE1 curve from the HTTP response BODY, and
+// persist it. Same WiFiClientSecure raw-write + manual-read pattern (low internal RAM).
+bool executeUploadAltHealth(const char *payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.RSSI() < -76) return false;
+  if (!isRegistered || authToken.isEmpty()) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setHandshakeTimeout(HANDSHAKE_TIMEOUT);
+
+  uint32_t start = millis();
   esp_task_wdt_reset();
 
-  bool success = (httpCode == 200);
-  if (success) queueConsoleMessage("Boat performance uploaded");
-  else if (httpCode > 0) {
-    snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "BoatPerf upload failed HTTP %d", httpCode);
-    queueConsoleMessage(messageBuffer);
+  if (!client.connect(host, port, CONNECT_TIMEOUT)) {
+    Serial.println("AltHealth: Connect fail");
+    client.stop();
+    return false;
   }
-  return success;
+  if (millis() - start > GLOBAL_TIMEOUT) {
+    client.stop();
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  client.printf(
+    "POST /functions/v1/update-alt-health HTTP/1.1\r\n"
+    "Host: %s\r\n"
+    "Content-Type: application/json\r\n"
+    "Authorization: Bearer %s\r\n"
+    "Connection: close\r\n"
+    "Content-Length: %u\r\n\r\n",
+    host, SUPABASE_ANON_KEY, (unsigned)strlen(payload));
+
+  size_t payloadLen = strlen(payload);
+  if (client.write((const uint8_t *)payload, payloadLen) != payloadLen) {
+    Serial.println("AltHealth: Payload send fail");
+    client.stop();
+    return false;
+  }
+  esp_task_wdt_reset();
+
+  int httpCode = 0;
+  uint32_t readStart = millis();
+  char statusBuf[64];
+  size_t statusLen = 0;
+  while (client.connected() && (millis() - readStart < READ_TIMEOUT)) {
+    esp_task_wdt_reset();
+    while (client.available()) {
+      char c = (char)client.read();
+      if (statusLen < sizeof(statusBuf) - 1) statusBuf[statusLen++] = c;
+      if (c == '\n') {
+        statusBuf[statusLen] = '\0';
+        if (strncmp(statusBuf, "HTTP/", 5) == 0) {
+          const char *sp = strchr(statusBuf, ' ');
+          if (sp) httpCode = atoi(sp + 1);
+        }
+        goto drain_headers_ah;
+      }
+    }
+    if (millis() - start > GLOBAL_TIMEOUT) break;
+    delay(1);
+  }
+drain_headers_ah:
+  {
+    uint32_t drainStart = millis();
+    uint8_t state = 0;
+    while (client.connected() && (millis() - drainStart < READ_TIMEOUT)) {
+      esp_task_wdt_reset();
+      while (client.available()) {
+        char c = (char)client.read();
+        if (state == 0 && c == '\r') state = 1;
+        else if (state == 1 && c == '\n') state = 2;
+        else if (state == 2 && c == '\r') state = 3;
+        else if (state == 3 && c == '\n') goto done_headers_ah;
+        else state = 0;
+      }
+      if (millis() - start > GLOBAL_TIMEOUT) break;
+      delay(1);
+    }
+  }
+done_headers_ah:
+  // Read the response BODY (the pruned BEFRONT1 front CSV) — assumed to arrive in one chunk.
+  {
+    static char ahBody[4096];   // static (not stack) — worker task only
+    size_t bl = 0;
+    uint32_t bodyStart = millis();
+    while (client.connected() && bl < sizeof(ahBody) - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      while (client.available() && bl < sizeof(ahBody) - 1) ahBody[bl++] = (char)client.read();
+      if (millis() - start > GLOBAL_TIMEOUT) break;
+      delay(1);
+    }
+    ahBody[bl] = '\0';
+    client.stop();
+    esp_task_wdt_reset();
+
+    bool success = (httpCode == 200);
+    if (success) {
+      altClearPending();   // cloud accepted the batch (raw history) → drop the pending points
+      if (altIngestFrontCsv(ahBody)) {
+        altHealthSave();   // persist the cloud's pruned front
+        queueConsoleMessage("Alternator health: front updated from cloud");
+      } else {
+        queueConsoleMessage("Alternator health uploaded (no front in response)");
+      }
+    } else if (httpCode > 0) {
+      snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "AltHealth upload failed HTTP %d", httpCode);
+      queueConsoleMessage(messageBuffer);
+    }
+    return success;
+  }
 }
 
 void syncTimeFromNTP() {

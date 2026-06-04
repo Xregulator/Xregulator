@@ -643,55 +643,101 @@ const CSV2_FIELDS = [
     "altObsCount",         // scored observations since freeze
     "imuHeelOffset",       // IMU zero rest heel offset (deg ×100)
     "imuPitchOffset",      // IMU zero rest pitch offset (deg ×100)
+    // Victron VE.Direct solar/MPPT live block (10 fields)
+    "VictronSolarPower_W",        // PPV panel power (W ×1)
+    "VictronSolarVoltage_V",      // VPV panel voltage (V ×100)
+    "VictronSolarCurrent_A",      // derived panel current (A ×100)
+    "VictronChargeState",         // CS code (×1)
+    "VictronMPPTMode",            // MPPT tracker code (×1)
+    "VictronError",               // ERR code (×1)
+    "VictronYieldToday_kWh",      // H20 yield today (kWh ×100)
+    "VictronMaxPowerToday_W",     // H21 max power today (W ×1)
+    "VictronYieldYesterday_kWh",  // H22 yield yesterday (kWh ×100)
+    "VictronMaxPowerYesterday_W", // H23 max power yesterday (W ×1)
 ];
 
-// ── Alternator-health (Phase 2): live + settings state, health card, plot ──
-const ALT_SETTING_KEYS = ["altElecSettleSec","altDutyTolPct","altRpmTol","altVbusTol",
-  "altThermRateDegF","altThermRateMin","altThermDwellSec","altMinDwellSec","altMinAmps","altMinDuty",
-  "altFreezeMinVisits","altFreezeMaxVisits","altFreezeSEM","altEwmaLambda","altCusumK","altCusumH"];
+// ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
+// Schema-driven (fetch /altschema ONCE, zip names against AltLive/AltSettings) — no hardcoded array.
+let altSchema = null;
 let altSettings = {};
-let altLive = { valid:false, rpm:0, fi:0, amps:0, pred:0, z:0, status:0, steady:false,
-                healthPct:100, coveragePct:0, baselineFrozen:false, obsCount:0 };
-let altCells = [];
-let _altPlotPending = false, _altModelLastFetch = 0;
-const ALT_RPM_MAX = 6000, ALT_FI_MAX = 15;
+let altLive = { valid:false, rpm:0, exc:0, amps:0, pred:0, pct:0, worstPct:0, overallPct:0,
+                status:0, steady:false, engHours:0, coverage:0, haveCurve:0, ptCount:0,
+                source:0, paused:0, sim:0 };
+let altTrend = [];     // committed trend points: [{eng, worst, overall}]
+let _altTrendPending = false, _altTrendLastFetch = 0;
+
+function fetchAltSchema(){ return fetch('/altschema').then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
 
 function updateAltHealth() {
-  const STATUS = ['Learning','Healthy','Drift: HIGH output','Drift: LOW output','Insufficient coverage'];
+  // Status codes from firmware: 0 learning/insufficient, 1 healthy, 2 drifting, 3 disabled (Ignore Temp).
+  const STATUS = ['Learning','Healthy (flat trend)','Drifting down','Disabled (Ignore Temperature)'];
   const pctEl = document.getElementById('alt-health-pct');
   const statEl = document.getElementById('alt-health-status');
   const covEl = document.getElementById('alt-coverage');
-  if (pctEl) pctEl.textContent = altLive.baselineFrozen ? Math.round(altLive.healthPct)+'%' : '\u2014';
+  const have = altLive.haveCurve >= 1;          // a usable best-ever front exists
+  // Headline = worst-bucket output % vs best-ever (NO clamp \u2014 can read > 100 vs a stale front).
+  if (pctEl) pctEl.textContent = (have && altLive.worstPct>0) ? Math.round(altLive.worstPct)+'%' : '\u2014';
   if (statEl) {
-    statEl.textContent = altLive.baselineFrozen ? (STATUS[altLive.status]||'\u2014') : 'Learning';
-    statEl.style.color = (altLive.status===2||altLive.status===3) ? '#d9534f'
-                       : (altLive.baselineFrozen && altLive.status===1) ? '#5cb85c' : '#888';
+    const fixed = altLive.source >= 1;
+    // Only show the status word when it's worth flagging \u2014 healthy/learning is obvious from the plot.
+    statEl.textContent = altLive.status===3 ? 'Disabled (Ignore Temperature)'
+                       : fixed ? 'FIXED (loaded curve)'
+                       : altLive.paused>=1 ? 'Paused'
+                       : altLive.status===2 ? 'Drifting down'
+                       : '';
+    statEl.style.color = altLive.status===2 ? '#d9534f' : '#888';
   }
-  if (covEl) covEl.textContent = Math.round(altLive.coveragePct)+'% of visited cells frozen \u00b7 '+altLive.obsCount+' checks';
+  // Front size + engine-hours of data gathered (no live "now %": the plot's dot already shows it).
+  if (covEl) {
+    covEl.textContent = (altLive.ptCount>0)
+      ? (Math.round(altLive.ptCount)+' front points \u00b7 '+Math.round(altLive.engHours)+' engine-hr')
+      : 'no front points yet';
+  }
   const dot = document.getElementById('alt-steady-dot');
-  if (dot) { dot.style.background = altLive.steady ? '#5cb85c' : '#ccc'; dot.title = altLive.steady?'steady':'not steady'; }
+  if (dot) { dot.style.background = altLive.steady ? '#5cb85c' : '#ccc'; dot.title = altLive.steady?'in a steady run (folding)':'not steady'; }
+  const modeLbl = document.getElementById('alt-mode-label');
+  if (modeLbl) modeLbl.textContent = altLive.source>=1 ? 'FIXED' : (altLive.paused>=1 ? 'LEARNED (paused)' : 'LEARNED');
+  const simBtn = document.getElementById('alt-sim-btn');
+  if (simBtn){ const on=altLive.sim>=1; simBtn.value = on?'Simulator: ON':'Simulator: off'; simBtn.className = on?'btn-primary':'btn-secondary'; }
 }
 
-function fetchAltModel() {
-  fetch('/altmodel.csv').then(r=>r.text()).then(txt=>{
-    const lines = txt.trim().split('\n'); altCells = [];
-    for (let i=1;i<lines.length;i++){
-      const c = lines[i].split(',');
-      if (c.length<9) continue;
-      if (+c[2]===0 && +c[3]===0) continue;
-      altCells.push({nObs:+c[2], valid:+c[3], mean:+c[4], ref:+c[5], rrpm:+c[6], rfi:+c[7],
-                     rpm:(+c[0]+0.5)*ALT_RPM_MAX/60, fi:(+c[1]+0.5)*ALT_FI_MAX/24});
-    }
-    drawAltPlot();
+function altToggleSim(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  const next = altLive.sim>=1 ? 0 : 1;
+  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSimMode='+next),{},5000).catch(()=>{});
+}
+// LEARNED↔FIXED reference toggle: FIXED (1) freezes + pauses learning; LEARNED (0) resumes.
+function altSetSource(src){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSource='+(src?1:0)),{},5000).catch(()=>{});
+}
+// Save the active front to a LittleFS file; Load it back (→ FIXED + paused). Spec §4/§8.
+function altSaveFront(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSaveFront=1'),{},5000)
+    .then(()=>{ alert('Front saved to /altfront_saved.csv'); }).catch(()=>{});
+}
+function altLoadFront(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if(!confirm('Load the saved front? This replaces the live reference and switches to FIXED (learning paused).')) return;
+  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altLoadFront=1'),{},5000).catch(()=>{});
+}
+
+function fetchAltTrend() {
+  fetch('/alttrend.csv').then(r=>r.text()).then(txt=>{
+    const ln = txt.trim().split('\n'); altTrend = [];
+    for (let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<3) continue;
+      altTrend.push({eng:+c[0], worst:+c[1], overall:+c[2]}); }
+    drawAltTrend();
   }).catch(()=>{});
 }
 
-function queueAltPlotUpdate() {
+function queueAltTrendUpdate() {
   const now = Date.now();
-  if (now - _altModelLastFetch > 8000) { _altModelLastFetch = now; fetchAltModel(); }
-  if (_altPlotPending) return;
-  _altPlotPending = true;
-  requestAnimationFrame(()=>{ _altPlotPending = false; drawAltPlot(); });
+  if (now - _altTrendLastFetch > 15000) { _altTrendLastFetch = now; fetchAltTrend(); }
+  if (_altTrendPending) return;
+  _altTrendPending = true;
+  requestAnimationFrame(()=>{ _altTrendPending = false; drawAltTrend(); });
 }
 
 // Hi-DPI canvas: size the backing store to the on-screen CSS box × devicePixelRatio, then
@@ -707,30 +753,57 @@ function hidpiCtx(cv, W, H) {
   return ctx;
 }
 
-function drawAltPlot() {
-  const cv = document.getElementById('alt-plot');
+// Performance-%-vs-engine-hours trend. Bold line = worst operating region (early warning);
+// faint line = overall. Live in-progress bucket appended as a dot. Empty \u2192 "awaiting first cloud fit".
+function drawAltTrend() {
+  const cv = document.getElementById('alt-trend');
   if (!cv || !cv.getContext) return;
-  const W = 520, H = 300, pad = 38, ctx = hidpiCtx(cv, W, H);
+  const W = 520, H = 300, padL = 56, padR = 18, padT = 16, padB = 40, ctx = hidpiCtx(cv, W, H);
   ctx.clearRect(0,0,W,H);
-  const X = rpm => pad + (rpm/ALT_RPM_MAX)*(W-2*pad);
-  const Y = fi  => H-pad - (fi/ALT_FI_MAX)*(H-2*pad);
-  ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath();
-  ctx.moveTo(pad,pad); ctx.lineTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.stroke();
-  ctx.fillStyle='#888'; ctx.font='11px sans-serif';
-  ctx.fillText('RPM \u2192', W-pad-34, H-pad+22);
-  ctx.save(); ctx.translate(pad-22,pad+96); ctx.rotate(-Math.PI/2); ctx.fillText('Field drive \u2192',0,0); ctx.restore();
-  let maxA = 1; altCells.forEach(c=>{ const a=c.valid?c.ref:c.mean; if(a>maxA)maxA=a; });
-  altCells.forEach(c=>{
-    const a = c.valid ? c.ref : c.mean, t = Math.max(0,Math.min(1,a/maxA));
-    ctx.beginPath(); ctx.arc(X(c.valid?c.rrpm:c.rpm), Y(c.valid?c.rfi:c.fi), c.valid?5:3, 0, 6.2832);
-    if (c.valid){ ctx.fillStyle='rgb('+Math.round(220-150*t)+','+Math.round(90+140*t)+',90)'; ctx.fill(); }
-    else { ctx.strokeStyle='#ccc'; ctx.stroke(); }
-  });
-  if (altLive.valid){
-    ctx.beginPath(); ctx.arc(X(altLive.rpm), Y(altLive.fi), 6, 0, 6.2832);
-    ctx.fillStyle = altLive.steady ? '#d9534f' : 'rgba(217,83,79,0.4)';
-    ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+  const pts = altTrend.slice();
+  if (altLive.haveCurve>=1 && altLive.worstPct>0)
+    pts.push({eng:altLive.engHours, worst:altLive.worstPct, overall:altLive.overallPct, live:true});
+  if (pts.length === 0){
+    ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('awaiting first cloud fit', W/2, H/2); ctx.textAlign='left'; return;
   }
+  let maxE = 0; pts.forEach(p=>{ if(p.eng>maxE)maxE=p.eng; }); if(maxE<1)maxE=1;
+  let minY = 70; const maxY = 105;
+  pts.forEach(p=>{ if(p.worst<minY)minY=Math.max(0,Math.floor(p.worst/5)*5); });
+  const X = e => padL + (e/maxE)*(W-padL-padR);
+  const Y = v => H-padB - ((v-minY)/(maxY-minY))*(H-padT-padB);
+  // Y gridlines + % labels
+  ctx.font='10px sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
+  for (let v=Math.ceil(minY/10)*10; v<=maxY; v+=10){
+    const y=Y(v); ctx.strokeStyle='#eee'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke();
+    ctx.fillStyle='#999'; ctx.fillText(v+'%', padL-7, y);
+  }
+  if (100>=minY && 100<=maxY){ const y=Y(100); ctx.strokeStyle='#cde'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke(); ctx.setLineDash([]); }
+  // X gridlines + engine-hour labels
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  for (let k=0;k<=4;k++){ const e=maxE*k/4, x=X(e);
+    ctx.strokeStyle='#f3f3f3'; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,H-padB); ctx.stroke();
+    ctx.fillStyle='#999'; ctx.fillText(Math.round(e), x, H-padB+5); }
+  // axes
+  ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,H-padB); ctx.lineTo(W-padR,H-padB); ctx.stroke();
+  // axis titles \u2014 centered, no arrows, clear of the % tick labels
+  ctx.fillStyle='#888'; ctx.font='11px sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.fillText('engine-hours', (padL+W-padR)/2, H-6);
+  ctx.save(); ctx.translate(13,(padT+H-padB)/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('% of best-ever',0,0); ctx.restore();
+  // lines \u2014 break across engine-hour gaps > GAP so missing data (e.g. engine on but alternator off) shows
+  //         as a gap rather than a misleading slide toward 0. Firmware never commits 0-points (eligibility gate).
+  const GAP = 3;
+  const line=(key,color,width)=>{ ctx.strokeStyle=color; ctx.lineWidth=width; ctx.beginPath();
+    let pen=false, prevE=0;
+    pts.forEach(p=>{ const x=X(p.eng), y=Y(Math.max(minY,Math.min(maxY,p[key])));
+      if(pen && (p.eng-prevE)<=GAP) ctx.lineTo(x,y); else ctx.moveTo(x,y); pen=true; prevE=p.eng; }); ctx.stroke(); };
+  line('overall','rgba(58,123,213,0.35)',1.5);   // faint overall
+  line('worst','#3a7bd5',2.2);                    // bold worst-region
+  const last = pts[pts.length-1];
+  if (last.live){ const x=X(last.eng), y=Y(Math.max(minY,Math.min(maxY,last.worst)));
+    ctx.beginPath(); ctx.arc(x,y,5,0,6.2832);
+    ctx.fillStyle = '#5cb85c'; ctx.fill();   // single fixed colour (no performance bands)
+    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); }
 }
 
 // ── Boat performance (Phase 3): schema-driven live + settings, sailing polar plot ──
@@ -739,7 +812,7 @@ function drawAltPlot() {
 // so this can't fall out of sync with the firmware tables.
 let perfSchema = null;
 let perfLive = { valid:false, pct:0, spd:0, wa:0, ws:0, best:0, pitchStd:0, src:0,
-                 status:0, fouling:1, coverage:0, paused:0, winCount:0 };
+                 coverage:0, ptCount:0, source:0, paused:0, tickWinUs:0, sim:0 };
 let perfSettings = {};
 let perfCells = [];
 let _perfPlotPending = false, _perfModelLastFetch = 0;
@@ -751,165 +824,206 @@ function perfSet(key, val){
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&'+key+'='+val),{},5000).catch(()=>{});
 }
 
-function updatePerf(){
-  const STATUS=['Learning','At / near your best','Slower than best (fouling or current)'];
-  const pctEl=document.getElementById('perf-pct'), statEl=document.getElementById('perf-status');
-  if(pctEl) pctEl.textContent = perfLive.valid ? Math.round(perfLive.pct)+'%' : '—';
-  if(statEl){
-    statEl.textContent = (perfLive.winCount>0) ? (STATUS[perfLive.status]||'—') : 'Learning';
-    statEl.style.color = perfLive.status===2 ? '#d9534f' : (perfLive.status===1 ? '#5cb85c' : '#888');
+let perfView = 0;   // 0 = sailing, 1 = motoring (client-side display toggle)
+function setTxt(id, t){ const el=document.getElementById(id); if(el) el.textContent=t; }
+function seaWord(s){ return s<0.5?'calm':s<1.5?'slight':s<3?'choppy':s<5?'rough':'very rough'; }
+function setPerfView(v){
+  perfView = v;
+  const a=document.getElementById('perf-view-sail'), b=document.getElementById('perf-view-motor');
+  if(a) a.classList.toggle('cap-mode-active', v===0);
+  if(b) b.classList.toggle('cap-mode-active', v===1);
+  const pp=document.getElementById('perf-plot'), mp=document.getElementById('motor-plot');
+  if(pp) pp.style.display = v===0?'block':'none';
+  if(mp) mp.style.display = v===1?'block':'none';
+  const symRow=document.getElementById('perf-sym-row'); if(symRow) symRow.style.display = v===0?'':'none';
+  renderPerf();
+  if(v===0) queuePerfPlotUpdate(); else queueMotorPlotUpdate();
+}
+// Unified gauge/conditions updater — reads the active view's live object.
+function renderPerf(){
+  const L = perfView ? motorLive : perfLive;
+  setTxt('perf-pct', (L.valid && L.best>0.1) ? Math.round(L.pct)+'%' : '—');   // % vs best-ever, NO clamp
+  // data maturity (bottom-right quadrant): learned front points + hours spent moving in this mode
+  setTxt('perf-pts', (L.ptCount|0));
+  const hrs = perfView ? (motorLive.motorHours||0) : (perfLive.sailHours||0);
+  setTxt('perf-hours-val', hrs>=10 ? Math.round(hrs) : hrs.toFixed(1));
+  setTxt('perf-hours-label', perfView ? 'motoring hours' : 'sailing hours');
+  setTxt('perf-legend-curve', perfView ? 'best curve' : 'best polar');
+  // flanking conditions
+  if(perfView){
+    setTxt('perf-condL-label','Engine RPM');
+    setTxt('perf-condL-val', L.valid ? Math.round(L.rpm) : '—');
+    setTxt('perf-condL-sub', Math.round(L.headwind||0)+' kt headwind');
+  } else {
+    setTxt('perf-condL-label','Apparent wind');
+    setTxt('perf-condL-val', L.valid ? Math.round(L.ws||0)+' kt' : '—');
+    setTxt('perf-condL-sub', Math.round(L.wa||0)+'°');
   }
-  const covEl=document.getElementById('perf-coverage');
-  if(covEl) covEl.textContent = Math.round(perfLive.coverage)+'% of cells graduated · '+(perfLive.winCount|0)+' windows';
-  const foulEl=document.getElementById('perf-fouling');
-  if(foulEl) foulEl.textContent = (perfLive.valid && perfLive.fouling>0) ? Math.round(perfLive.fouling*100)+'% of best' : '—';
-  const pitchEl=document.getElementById('perf-pitch');
-  if(pitchEl) pitchEl.textContent = (perfLive.pitchStd||0).toFixed(1)+'°';
-  const srcEl=document.getElementById('perf-src');
-  if(srcEl) srcEl.textContent = ['—','water (STW)','GPS (SOG)'][perfLive.src|0] || '—';
+  const sea=L.pitchStd||0;
+  setTxt('perf-sea-val', sea.toFixed(1)+'°'); setTxt('perf-sea-sub', seaWord(sea));
+  // steady-state capture light (green only while a steady run is actively banking data)
+  const sdot=document.getElementById('perf-steady-dot');
+  if(sdot) sdot.style.background = (L.steady>=0.5) ? '#5cb85c' : '#ccc';
+  // Learning switch (Live Data) + simulator/reference segmented toggles (Settings → Vessel Performance).
+  // All driven by perfLive, which always carries paused+sim+source.
   const paused=perfLive.paused===1;
-  const sw=document.getElementById('perf-learn-switch');
-  if(sw) sw.checked = !paused;                      // checked = learning active
+  const sw=document.getElementById('perf-learn-switch'); if(sw) sw.checked = !paused;
   const lbl=document.getElementById('perf-learn-label');
   if(lbl){ lbl.textContent = paused?'(paused)':'(active)'; lbl.style.color = paused?'#d9534f':'#5cb85c'; }
-  const tickEl=document.getElementById('perf-tick');
-  if(tickEl) tickEl.textContent='tick '+Math.round(perfLive.tickWinUs||0)+'µs (peak '+Math.round(perfLive.tickSesUs||0)+'µs)';
-  const simBtn=document.getElementById('perf-sim-btn');
-  if(simBtn){ const on=perfLive.sim===1; simBtn.value=on?'Simulator: ON':'Simulator: off'; simBtn.className=on?'btn-primary':'btn-secondary'; }
+  setSeg(['perf-sim-off','perf-sim-on'], perfLive.sim===1?1:0);
+  setSeg(['perf-ref-0','perf-ref-1'], (L.source>=1)?1:0);
 }
+function updatePerf(){ renderPerf(); }
+function updateMotor(){ renderPerf(); }
 function setSeg(ids, activeIdx){
   ids.forEach((id,i)=>{ const el=document.getElementById(id); if(el) el.classList.toggle('cap-mode-active', i===activeIdx); });
 }
 function updatePerfControls(){
   const s=perfSettings;
-  if(s.perfSpeedSrc!=null) setSeg(['perf-src-0','perf-src-1','perf-src-2'], s.perfSpeedSrc|0);
-  if(s.perfSymmetric!=null) setSeg(['perf-sym-1','perf-sym-0'], (s.perfSymmetric>=0.5)?0:1);
+  if(s.perfSpeedSrc!=null) setSeg(['perf-src-1','perf-src-2'], (s.perfSpeedSrc>=1.5)?1:0);   // <1.5 Water, ≥1.5 GPS (matches firmware threshold; never blank)
+  if(s.perfFoldSymmetric!=null) setSeg(['perf-sym-1','perf-sym-0'], (s.perfFoldSymmetric>=0.5)?0:1);
 }
+// Switching STW↔SOG invalidates every learned point → the firmware does a Clear-All. Warn first.
+function perfSetSpeedSrc(v){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  if((perfSettings.perfSpeedSrc|0) === v) return;
+  if(!confirm('Switching speed source (STW ↔ SOG) clears ALL learned boat-performance data — same as Clear All. Continue?')) return;
+  perfSet('perfSpeedSrc', v);
+}
+// LEARNED↔FIXED reference toggle + Save/Load the boat front pair (spec §4).
+function perfSetSource(src){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } perfSet('perfSource', src?1:0); }
+function perfSaveFront(){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } perfSet('perfSaveFront',1); setTimeout(()=>alert('Boat fronts saved to /perffront_saved.csv'),300); }
+function perfLoadFront(){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } if(!confirm('Load the saved boat fronts? Replaces the live reference and switches to FIXED (learning paused).')) return; perfSet('perfLoadFront',1); }
 
-function fetchPerfModel(){
-  fetch('/perfmodel.csv').then(r=>r.text()).then(txt=>{
-    const lines=txt.trim().split('\n'); perfCells=[];
-    for(let i=1;i<lines.length;i++){ const c=lines[i].split(','); if(c.length<9) continue;
-      if(+c[2]===0) continue;  // no windows binned here
-      perfCells.push({nWin:+c[2], valid:+c[3], bestStw:+c[4], bestSog:+c[5], ws:+c[6], wa:+c[7], pitch:+c[8]});
-    }
-    drawPerfPlot();
-  }).catch(()=>{});
+// ── v2 curve-driven render: the polar is the cloud-fitted curve sliced at the CURRENT wind speed +
+//    sea state, with faint record dots over it. (Bin scatter retired.) ──
+let perfCurve = null, perfRecs = [];
+let _perfCurveLastFetch = 0, _perfRecLastFetch = 0;
+function chopDer(a, chop){ if(!a||a.length<6) return 1; const st=12/5; let f=chop/st,i=Math.floor(f); if(i<0){i=0;f=0;} if(i>=5){i=4;f=5;} const t=f-i; return Math.max(0.3,Math.min(1.05,a[i]*(1-t)+a[i+1]*t)); }
+function windDer(a, hw){ if(!a||a.length<9) return 1; const st=80/8; let f=(hw+40)/st,i=Math.floor(f); if(i<0){i=0;f=0;} if(i>=8){i=7;f=8;} const t=f-i; return Math.max(0.3,Math.min(1.7,a[i]*(1-t)+a[i+1]*t)); }
+function evalSailCurve(c, tws, twa, chop){
+  if(!c||!c.sailValid) return 0;
+  let pa=((twa%360)+360)%360; if(pa>180)pa=360-pa;
+  let fs=pa/10, j=Math.floor(fs); if(j<0){j=0;fs=0;} if(j>=18){j=17;fs=18;} const tj=fs-j;
+  let a=0; while(a<5 && c.tws[a+1]<tws)a++; const b=a<5?a+1:a;
+  const ta=(b>a&&c.tws[b]>c.tws[a])?Math.max(0,Math.min(1,(tws-c.tws[a])/(c.tws[b]-c.tws[a]))):0;
+  const sa=c.spd[a][j]*(1-tj)+c.spd[a][j+1]*tj, sb=c.spd[b][j]*(1-tj)+c.spd[b][j+1]*tj;
+  return (sa*(1-ta)+sb*ta)*chopDer(c.chop,chop);
 }
+function evalMotorCurve(c, rpm, hw, chop){
+  if(!c||!c.motorValid) return 0;
+  let a=0; while(a<c.mrpm.length-1 && c.mrpm[a+1]<rpm)a++; const b=a<c.mrpm.length-1?a+1:a;
+  const ta=(b>a&&c.mrpm[b]>c.mrpm[a])?Math.max(0,Math.min(1,(rpm-c.mrpm[a])/(c.mrpm[b]-c.mrpm[a]))):0;
+  return (c.mspd[a]*(1-ta)+c.mspd[b]*ta)*windDer(c.mwind,hw)*chopDer(c.mchop,chop);
+}
+function parseCurveCsv(txt){
+  const t=txt.trim().split(','); if(t[0]!=='BPCURVE2') return null;
+  let i=1; const num=n=>{ const a=t.slice(i,i+n).map(Number); i+=n; return a; };
+  const c={};
+  c.sailValid=+t[i++]; c.sailFit=+t[i++]; c.tws=num(6); c.spd=[]; for(let a=0;a<6;a++)c.spd.push(num(19)); c.chop=num(6);
+  c.motorValid=+t[i++]; c.motorFit=+t[i++]; c.mrpm=num(8); c.mspd=num(8); c.mwind=num(9); c.mchop=num(6);
+  return c;
+}
+function fetchPerfCurve(){ fetch('/perfcurve.csv').then(r=>r.text()).then(txt=>{ const c=parseCurveCsv(txt); if(c) perfCurve=c; drawPerfPlot(); drawMotorPlot(); }).catch(()=>{}); }
+function fetchPerfRecords(){ fetch('/perfrecords.csv').then(r=>r.text()).then(txt=>{ const ln=txt.trim().split('\n'); perfRecs=[]; for(let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<8)continue; perfRecs.push({mode:+c[0],tws:+c[1],twa:+c[2],chop:+c[3],rpm:+c[4],hw:+c[5],stw:+c[6],sog:+c[7]}); } }).catch(()=>{}); }
 function queuePerfPlotUpdate(){
   const now=Date.now();
-  if(now-_perfModelLastFetch>8000){ _perfModelLastFetch=now; fetchPerfModel(); }
+  if(now-_perfCurveLastFetch>8000){ _perfCurveLastFetch=now; fetchPerfCurve(); }
+  if(now-_perfRecLastFetch>15000){ _perfRecLastFetch=now; fetchPerfRecords(); }
   if(_perfPlotPending) return;
   _perfPlotPending=true;
   requestAnimationFrame(()=>{ _perfPlotPending=false; drawPerfPlot(); });
 }
 function drawPerfPlot(){
   const cv=document.getElementById('perf-plot'); if(!cv||!cv.getContext) return;
-  const W=360, H=360, ctx=hidpiCtx(cv, W, H);
-  ctx.clearRect(0,0,W,H);
+  const W=360, H=360, ctx=hidpiCtx(cv, W, H); ctx.clearRect(0,0,W,H);
   const cx=W/2, cy=H*0.54, R=Math.min(W,H)*0.42;
-  const srcSel = perfSettings.perfSpeedSrc|0;     // 0 Both, 1 STW, 2 SOG
-  const cellSpeed = c => srcSel===2 ? c.bestSog : (srcSel===1 ? c.bestStw : Math.max(c.bestStw,c.bestSog));
+  const tws=perfLive.ws||0, chop=perfLive.pitchStd||0;
+  const haveCurve = perfCurve && perfCurve.sailValid;
+  const symFold = (perfSettings.perfFoldSymmetric==null) ? true : (perfSettings.perfFoldSymmetric>=0.5);
   let maxS=4;
-  perfCells.forEach(c=>{ const b=cellSpeed(c); if(b>maxS)maxS=b; });
+  if(haveCurve) for(let twa=0;twa<=180;twa+=10){ const v=evalSailCurve(perfCurve,tws,twa,chop); if(v>maxS)maxS=v; }
+  perfRecs.forEach(r=>{ if(r.mode===0){ const sp=r.stw>0?r.stw:r.sog; if(sp>maxS)maxS=sp; } });
   if(perfLive.valid && perfLive.spd>maxS) maxS=perfLive.spd;
   maxS=Math.ceil(maxS);
   const P=(ang,s)=>{ const r=(s/maxS)*R, a=ang*Math.PI/180; return [cx+r*Math.sin(a), cy-r*Math.cos(a)]; };
-  // speed rings
   ctx.lineWidth=1; ctx.font='10px sans-serif';
   for(let k=1;k<=4;k++){ const r=R*k/4; ctx.strokeStyle='#ddd'; ctx.beginPath(); ctx.arc(cx,cy,r,0,6.2832); ctx.stroke();
     ctx.fillStyle='#aaa'; ctx.fillText(Math.round(maxS*k/4)+'kt', cx+3, cy-r+11); }
-  // angle spokes (both sides)
   ctx.strokeStyle='#eee';
   [0,45,90,135,180].forEach(d=>{ let p=P(d,maxS); ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(p[0],p[1]); ctx.stroke();
     let q=P(-d,maxS); ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(q[0],q[1]); ctx.stroke(); });
   ctx.fillStyle='#888'; ctx.fillText('0° into wind', cx-26, cy-R-3); ctx.fillText('180°', cx-11, cy+R+13);
-  // learned cells (color = wind speed; mirror to port when symmetric)
-  const symFold = (perfSettings.perfSymmetric==null) ? true : (perfSettings.perfSymmetric>=0.5);
-  perfCells.forEach(c=>{
-    const s=cellSpeed(c); if(s<=0) return;
-    const hue=210 - 210*Math.min(1, c.ws/30);
-    const draw=(ang)=>{ let p=P(ang,s); ctx.beginPath(); ctx.arc(p[0],p[1], c.valid?4:2.5, 0,6.2832);
-      if(c.valid){ ctx.fillStyle='hsl('+hue+',70%,48%)'; ctx.fill(); } else { ctx.strokeStyle='#ccc'; ctx.stroke(); } };
-    draw(c.wa);
-    if(symFold && c.wa>0 && c.wa<180) draw(-c.wa);
-  });
-  // live point + best ring
+  // faint record dots near current TWS
+  perfRecs.forEach(r=>{ if(r.mode!==0) return; if(Math.abs(r.tws-tws)>3) return; const sp=r.stw>0?r.stw:r.sog; if(sp<=0)return;
+    const d=(ang)=>{ let p=P(ang,sp); ctx.beginPath(); ctx.arc(p[0],p[1],1.6,0,6.2832); ctx.fillStyle='rgba(58,123,213,0.28)'; ctx.fill(); };
+    d(r.twa); if(symFold && r.twa>0 && r.twa<180) d(-r.twa); });
+  // fitted polar at current conditions (bold), mirrored when symmetric
+  if(haveCurve){
+    const drawCurve=(sign)=>{ ctx.strokeStyle='#3a7bd5'; ctx.lineWidth=2.2; ctx.beginPath();
+      for(let twa=0;twa<=180;twa+=3){ const v=evalSailCurve(perfCurve,tws,twa,chop); const p=P(sign*twa,v); twa===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]); } ctx.stroke(); };
+    drawCurve(1); if(symFold) drawCurve(-1);
+  } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('awaiting first cloud fit', cx, cy); ctx.textAlign='left'; }
+  // live dot ("now") — single fixed colour (no performance bands; the blue curve already IS best)
   if(perfLive.valid){
     let p=P(perfLive.wa, perfLive.spd); ctx.beginPath(); ctx.arc(p[0],p[1],6,0,6.2832);
-    ctx.fillStyle = perfLive.pct>=95 ? '#5cb85c' : (perfLive.pct>=80 ? '#f0ad4e' : '#d9534f'); ctx.fill();
+    ctx.fillStyle = '#5cb85c'; ctx.fill();
     ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
-    if(perfLive.best>0){ let b=P(perfLive.wa, perfLive.best); ctx.beginPath(); ctx.arc(b[0],b[1],4,0,6.2832); ctx.strokeStyle='#333'; ctx.lineWidth=1; ctx.stroke(); }
   }
 }
 
 // ── Motoring map (Phase 3): speed-vs-RPM, schema-driven (MotorLive) ──
 let motorLive = { valid:false, rpm:0, headwind:0, spd:0, best:0, pct:0, src:0,
-                  status:0, fouling:1, coverage:0, paused:0, winCount:0 };
+                  coverage:0, ptCount:0, source:0, paused:0, pitchStd:0 };
 let motorCells = [];
 let _motorPlotPending = false, _motorModelLastFetch = 0;
 
-function updateMotor(){
-  const STATUS=['Learning','At / near your best','Slower than best (fouling or current)'];
-  const pctEl=document.getElementById('motor-pct'), statEl=document.getElementById('motor-status');
-  if(pctEl) pctEl.textContent = motorLive.valid ? Math.round(motorLive.pct)+'%' : '—';
-  if(statEl){
-    statEl.textContent = (motorLive.winCount>0) ? (STATUS[motorLive.status]||'—') : 'Learning';
-    statEl.style.color = motorLive.status===2 ? '#d9534f' : (motorLive.status===1 ? '#5cb85c' : '#888');
-  }
-  const covEl=document.getElementById('motor-coverage');
-  if(covEl) covEl.textContent = Math.round(motorLive.coverage)+'% of RPM bins graduated · '+(motorLive.winCount|0)+' windows';
-  const foulEl=document.getElementById('motor-fouling');
-  if(foulEl) foulEl.textContent = (motorLive.valid && motorLive.fouling>0) ? Math.round(motorLive.fouling*100)+'% of best' : '—';
-  const hwEl=document.getElementById('motor-hw');
-  if(hwEl) hwEl.textContent = (motorLive.headwind||0).toFixed(0)+' kt';
-  const srcEl=document.getElementById('motor-src');
-  if(srcEl) srcEl.textContent = ['—','water (STW)','GPS (SOG)'][motorLive.src|0] || '—';
-}
-function fetchMotorModel(){
-  fetch('/motormodel.csv').then(r=>r.text()).then(txt=>{
-    const lines=txt.trim().split('\n'); motorCells=[];
-    for(let i=1;i<lines.length;i++){ const c=lines[i].split(','); if(c.length<8) continue;
-      if(+c[1]===0) continue;
-      motorCells.push({nWin:+c[1], valid:+c[2], bestStw:+c[3], bestSog:+c[4], rpm:+c[5], hw:+c[6], pitch:+c[7]});
-    }
-    drawMotorPlot();
-  }).catch(()=>{});
-}
+// updateMotor() is defined above as a thin wrapper → renderPerf() (unified card).
+function fetchMotorModel(){ fetchPerfCurve(); }   // one curve covers both views
 function queueMotorPlotUpdate(){
   const now=Date.now();
-  if(now-_motorModelLastFetch>8000){ _motorModelLastFetch=now; fetchMotorModel(); }
+  if(now-_perfCurveLastFetch>8000){ _perfCurveLastFetch=now; fetchPerfCurve(); }
+  if(now-_perfRecLastFetch>15000){ _perfRecLastFetch=now; fetchPerfRecords(); }
   if(_motorPlotPending) return;
   _motorPlotPending=true;
   requestAnimationFrame(()=>{ _motorPlotPending=false; drawMotorPlot(); });
 }
 function drawMotorPlot(){
   const cv=document.getElementById('motor-plot'); if(!cv||!cv.getContext) return;
-  const W=520, H=300, pad=38, ctx=hidpiCtx(cv, W, H);
-  ctx.clearRect(0,0,W,H);
-  const srcSel=perfSettings.perfSpeedSrc|0;
-  const cs=c=> srcSel===2 ? c.bestSog : (srcSel===1 ? c.bestStw : Math.max(c.bestStw,c.bestSog));
-  let maxR=1000, maxS=4;
-  motorCells.forEach(c=>{ if(c.rpm>maxR)maxR=c.rpm; const b=cs(c); if(b>maxS)maxS=b; });
+  const W=520, H=300, pad=38, ctx=hidpiCtx(cv, W, H); ctx.clearRect(0,0,W,H);
+  const hw=motorLive.headwind||0, chop=motorLive.pitchStd||0;
+  const haveCurve = perfCurve && perfCurve.motorValid;
+  let maxR=3600, maxS=4;
+  if(haveCurve){ maxR=Math.max(maxR, perfCurve.mrpm[perfCurve.mrpm.length-1]); for(let r=0;r<=maxR;r+=200){ const v=evalMotorCurve(perfCurve,r,hw,chop); if(v>maxS)maxS=v; } }
+  perfRecs.forEach(r=>{ if(r.mode===1){ if(r.rpm>maxR)maxR=r.rpm; const sp=r.stw>0?r.stw:r.sog; if(sp>maxS)maxS=sp; } });
   if(motorLive.valid){ if(motorLive.rpm>maxR)maxR=motorLive.rpm; if(motorLive.spd>maxS)maxS=motorLive.spd; }
   maxR=Math.ceil(maxR/500)*500; maxS=Math.ceil(maxS);
   const X=r=>pad+(r/maxR)*(W-2*pad), Y=s=>H-pad-(s/maxS)*(H-2*pad);
   ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.stroke();
+  ctx.font='10px sans-serif';
+  const rStep=Math.max(500, Math.ceil(maxR/6/500)*500);
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  for(let r=0;r<=maxR+1;r+=rStep){ const x=X(r); ctx.strokeStyle='#eee'; ctx.beginPath(); ctx.moveTo(x,pad); ctx.lineTo(x,H-pad); ctx.stroke(); ctx.fillStyle='#999'; ctx.fillText(r,x,H-pad+5); }
+  const sStep=Math.max(1, Math.ceil(maxS/5));
+  ctx.textAlign='right'; ctx.textBaseline='middle';
+  for(let s=0;s<=maxS+0.01;s+=sStep){ const y=Y(s); ctx.strokeStyle='#eee'; ctx.beginPath(); ctx.moveTo(pad,y); ctx.lineTo(W-pad,y); ctx.stroke(); ctx.fillStyle='#999'; ctx.fillText(s+'kt',pad-4,y); }
   ctx.fillStyle='#888'; ctx.font='11px sans-serif';
-  ctx.fillText('RPM →', W-pad-34, H-pad+22);
-  ctx.save(); ctx.translate(pad-22,pad+90); ctx.rotate(-Math.PI/2); ctx.fillText('Boat speed →',0,0); ctx.restore();
-  // best-ever envelope through graduated cells
-  const vp=motorCells.filter(c=>c.valid && cs(c)>0).map(c=>({x:X(c.rpm),y:Y(cs(c))})).sort((a,b)=>a.x-b.x);
-  if(vp.length>1){ ctx.strokeStyle='rgba(58,123,213,0.5)'; ctx.lineWidth=1.5; ctx.beginPath(); vp.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.stroke(); }
-  // cells
-  motorCells.forEach(c=>{ const s=cs(c); if(s<=0) return; ctx.beginPath(); ctx.arc(X(c.rpm),Y(s), c.valid?4:2.5, 0,6.2832);
-    if(c.valid){ ctx.fillStyle='#3a7bd5'; ctx.fill(); } else { ctx.strokeStyle='#ccc'; ctx.stroke(); } });
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.fillText('RPM', W/2, H-pad+24);
+  ctx.save(); ctx.translate(pad-26,H/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center'; ctx.fillText('boat speed',0,0); ctx.restore();
+  // faint record dots
+  perfRecs.forEach(r=>{ if(r.mode!==1) return; const sp=r.stw>0?r.stw:r.sog; if(sp<=0)return; ctx.beginPath(); ctx.arc(X(r.rpm),Y(sp),1.6,0,6.2832); ctx.fillStyle='rgba(58,123,213,0.28)'; ctx.fill(); });
+  // fitted speed-vs-RPM curve at current headwind + sea state
+  if(haveCurve){
+    ctx.strokeStyle='#3a7bd5'; ctx.lineWidth=2.2; ctx.beginPath(); let started=false;
+    for(let r=Math.max(0,perfCurve.mrpm[0]); r<=maxR; r+=50){ const v=evalMotorCurve(perfCurve,r,hw,chop); if(started) ctx.lineTo(X(r),Y(v)); else { ctx.moveTo(X(r),Y(v)); started=true; } }
+    ctx.stroke();
+  } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('awaiting first cloud fit',W/2,H/2); ctx.textAlign='left'; }
   // live dot + best ring
   if(motorLive.valid){
     ctx.beginPath(); ctx.arc(X(motorLive.rpm),Y(motorLive.spd),6,0,6.2832);
-    ctx.fillStyle = motorLive.pct>=95 ? '#5cb85c' : (motorLive.pct>=80 ? '#f0ad4e' : '#d9534f'); ctx.fill();
+    ctx.fillStyle = '#5cb85c'; ctx.fill();
     ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
-    if(motorLive.best>0){ ctx.beginPath(); ctx.arc(X(motorLive.rpm),Y(motorLive.best),4,0,6.2832); ctx.strokeStyle='#333'; ctx.lineWidth=1; ctx.stroke(); }
   }
 }
 const CSV3_FIELDS = [
@@ -1224,6 +1338,7 @@ const TS_FIELDS = [
     "ts_BaroPressure",
     "ts_AmbientTemp",
     "ts_IMU",
+    "ts_VictronSolar",
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -1740,28 +1855,27 @@ function initializeEventSource() {
         }, false);
 
 
-        // \u2500\u2500 SSE: AltLive \u2500 alternator-health live point + summary \u2500\u2500
+        // \u2500\u2500 SSE: AltLive \u2500 charging-system health live + trend (schema-driven via /altschema) \u2500\u2500
         source.addEventListener('AltLive', function (e) {
-            const p = e.data.split(',').map(Number);
-            if (p.length < 12) return;
-            altLive.valid = p[0] === 1;
-            altLive.rpm = p[1]; altLive.fi = p[2]; altLive.amps = p[3];
-            altLive.pred = p[4]; altLive.z = p[5];
-            altLive.status = p[6]; altLive.steady = p[7] === 1;
-            altLive.healthPct = p[8]; altLive.coveragePct = p[9];
-            altLive.baselineFrozen = p[10] === 1; altLive.obsCount = p[11];
+            if (!altSchema || !altSchema.live) { if (!altSchema) fetchAltSchema(); return; }
+            const v = e.data.split(',').map(Number);
+            altSchema.live.forEach((k, i) => { altLive[k] = v[i]; });
+            altLive.valid = altLive.valid === 1;
+            altLive.steady = altLive.steady === 1;
             updateAltHealth();
-            queueAltPlotUpdate();
+            queueAltTrendUpdate();
         }, false);
 
-        // \u2500\u2500 SSE: AltSettings \u2500 16 GUI-tunable values \u2192 echo spans \u2500\u2500
+        // \u2500\u2500 SSE: AltSettings \u2500 GUI-tunable values \u2192 echo spans (schema-driven) \u2500\u2500
         source.addEventListener('AltSettings', function (e) {
-            const p = e.data.split(',').map(Number);
-            if (p.length < ALT_SETTING_KEYS.length) return;
-            ALT_SETTING_KEYS.forEach((k, i) => {
-                altSettings[k] = p[i];
+            if (!altSchema || !altSchema.settings) { if (!altSchema) fetchAltSchema(); return; }
+            const v = e.data.split(',').map(Number);
+            const ALT_NOECHO = { altPaused: 1 };   // driven by the LEARNED/FIXED toggle, no echo span
+            altSchema.settings.forEach((k, i) => {
+                altSettings[k] = v[i];
+                if (ALT_NOECHO[k]) return;
                 const el = document.getElementById(k + '_echo');
-                if (el) el.textContent = (Math.round(p[i] * 1000) / 1000);
+                if (el) el.textContent = (Math.round(v[i] * 1000) / 1000);
             });
         }, false);
 
@@ -1776,8 +1890,10 @@ function initializeEventSource() {
         source.addEventListener('PerfSettings', function (e) {
             if (!perfSchema || !perfSchema.settings) { if (!perfSchema) fetchPerfSchema(); return; }
             const v = e.data.split(',').map(Number);
+            const PERF_NOECHO = { perfFoldSymmetric: 1, perfSpeedSrc: 1, perfPaused: 1 };  // segmented/switch controls, no echo span
             perfSchema.settings.forEach((k, i) => {
                 perfSettings[k] = v[i];
+                if (PERF_NOECHO[k]) return;
                 const el = document.getElementById(k + '_echo');
                 if (el) el.textContent = (Math.round(v[i] * 1000) / 1000);
             });
@@ -1791,6 +1907,7 @@ function initializeEventSource() {
             updateMotor(); queueMotorPlotUpdate();
         }, false);
         fetchPerfSchema();
+        fetchAltSchema();
 
         source.addEventListener('error', function (e) {
             const state = this.readyState;
@@ -4226,21 +4343,21 @@ function handleDeleteAllData() {
 }
 
 function resetThermalPID() {
-    if (!confirm('Reset thermal PID? Integrator and filter will be cleared and rebuilt from scratch.')) return;
+    if (!confirm('Reset the temperature controller? Its integrator and filter will be cleared and rebuilt.')) return;
     fetch(buildURL('/resetThermalPID'), { method: 'POST' })
         .then(r => r.ok ? console.log('Thermal PID reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetInnerPID() {
-    if (!confirm('Reset output current PID? Integrator will be zeroed and duty will ramp up from 0 via slew limiter.')) return;
+    if (!confirm('Reset the output current controller? Its integrator will be zeroed and field output will ramp back up from zero under the slew limit.')) return;
     fetch(buildURL('/resetInnerPID'), { method: 'POST' })
         .then(r => r.ok ? console.log('Output current PID reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetVoltageLoop() {
-    if (!confirm('Reset CV integrator (cv_I)? The voltage loop will rebuild from zero on the next tick.')) return;
+    if (!confirm('Reset the voltage controller integrator? The voltage loop will rebuild from zero.')) return;
     fetch(buildURL('/resetVoltageLoop'), { method: 'POST' })
         .then(r => r.ok ? console.log('Voltage loop reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
@@ -5002,14 +5119,14 @@ function resetCVAxisRanges() {
 }
 
 function resetVoltageProtectionCounters() {
-    if (!confirm('Reset all voltage & current protection counters? FastOV, iExcess, INA OV, hard OC, spike, and disagree counts will be cleared.')) return;
+    if (!confirm('Reset all voltage & current protection counters? Fast-overvoltage, excess-current, hardware overvoltage, hard overcurrent, spike, and sensor-disagreement counts will be cleared.')) return;
     fetch(buildURL('/resetVoltageProtectionCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('Voltage protection counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
 }
 
 function resetThermalProtectionCounters() {
-    if (!confirm('Reset thermal protection event counters? Temp critical, sustained, and stale counts will be cleared.')) return;
+    if (!confirm('Reset thermal protection event counters? Critical-temperature, sustained-temperature, and stale-sensor counts will be cleared.')) return;
     fetch(buildURL('/resetThermalProtectionCounters'), { method: 'POST' })
         .then(r => r.ok ? console.log('Thermal protection counters reset') : console.warn('Reset failed'))
         .catch(err => console.warn('Reset error:', err));
@@ -6443,6 +6560,16 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("SatelliteCountNMEA_ID", sa.satellites);
     applyStaleStyleByAge("VictronVoltageID", sa.victronVoltage);
     applyStaleStyleByAge("VictronCurrentID", sa.victronCurrent);
+    applyStaleStyleByAge("VictronSolarPowerID", sa.victronSolar);
+    applyStaleStyleByAge("VictronSolarVoltageID", sa.victronSolar);
+    applyStaleStyleByAge("VictronSolarCurrentID", sa.victronSolar);
+    applyStaleStyleByAge("VictronChargeStateID", sa.victronSolar);
+    applyStaleStyleByAge("VictronMPPTModeID", sa.victronSolar);
+    applyStaleStyleByAge("VictronErrorID", sa.victronSolar);
+    applyStaleStyleByAge("VictronYieldTodayID", sa.victronSolar);
+    applyStaleStyleByAge("VictronMaxPowerTodayID", sa.victronSolar);
+    applyStaleStyleByAge("VictronYieldYesterdayID", sa.victronSolar);
+    applyStaleStyleByAge("VictronMaxPowerYesterdayID", sa.victronSolar);
     applyStaleStyleByAge("AltTempID", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
     applyStaleStyleByAge("temperatureThermistorID", sa.thermistorTemp, STALE_THRESHOLD_TEMP_MS);
     applyStaleStyleByAge("RPMID", sa.rpm);
@@ -8061,7 +8188,8 @@ window.addEventListener("load", function () {
                     else if (["IBVMax", "ChargeCycles", "ChargeCycles_AllTime", "thermalPenaltyAmps", "MeasuredAmpsMax", "SOC_percent", "VictronCurrent", "performanceRatio", "UVThresholdHigh",
                         "PeakVoltage_AllTime", "MinVoltage", "MinVoltage_AllTime", "AvgSOC_AllTime", "AvgSpeed_AllTime", "InsulationLifePercent", "GreaseLifePercent",
                         "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA", "VMGUpwind",
-                        "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at"].includes(key)) {
+                        "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at",
+                        "VictronSolarVoltage_V", "VictronSolarCurrent_A", "VictronYieldToday_kWh", "VictronYieldYesterday_kWh"].includes(key)) {
                         // NOTE: ch1_worst_* and ina_worst_* are NOT in this list — firmware sends them as raw integer ms
                         // (only the matching *_avg_* values are scaled ×100). They fall through to the default integer render below.
                         newTextContent = (value / 100).toFixed(2);
@@ -8640,10 +8768,38 @@ window.addEventListener("load", function () {
                 ["baroPressureID_hi",            "wmIgn_baro_hi"],     ["baroPressureID_lo",            "wmIgn_baro_lo"],
                 ["ambientTempID_hi",             "wmIgn_ambient_hi"],  ["ambientTempID_lo",             "wmIgn_ambient_lo"],
 
+                // Victron VE.Direct solar/MPPT live (CS/MPPT/ERR codes decoded separately below)
+                ["VictronSolarPowerID",         "VictronSolarPower_W"],
+                ["VictronSolarVoltageID",       "VictronSolarVoltage_V"],
+                ["VictronSolarCurrentID",       "VictronSolarCurrent_A"],
+                ["VictronYieldTodayID",         "VictronYieldToday_kWh"],
+                ["VictronMaxPowerTodayID",      "VictronMaxPowerToday_W"],
+                ["VictronYieldYesterdayID",     "VictronYieldYesterday_kWh"],
+                ["VictronMaxPowerYesterdayID",  "VictronMaxPowerYesterday_W"],
+
             ];
 
             // Update other fields every cycle
             updateFields(otherFields);
+
+            // Victron MPPT status codes -> human text (CS charge state, MPPT tracker mode, ERR)
+            (function () {
+                const cs = { 0: 'Off', 2: 'Fault', 3: 'Bulk', 4: 'Absorption', 5: 'Float', 7: 'Equalize', 245: 'Starting', 247: 'Auto equalize', 252: 'Ext control' };
+                const mp = { 0: 'Off', 1: 'V/I limited', 2: 'Active MPPT' };
+                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                if (data.VictronChargeState !== undefined) {
+                    const c = Number(data.VictronChargeState);
+                    setText('VictronChargeStateID', c < 0 ? '—' : (cs[c] || ('Code ' + c)));
+                }
+                if (data.VictronMPPTMode !== undefined) {
+                    const m = Number(data.VictronMPPTMode);
+                    setText('VictronMPPTModeID', m < 0 ? '—' : (mp[m] || ('Code ' + m)));
+                }
+                if (data.VictronError !== undefined) {
+                    const e = Number(data.VictronError);
+                    setText('VictronErrorID', e < 0 ? '—' : (e === 0 ? 'OK' : ('Err ' + e)));
+                }
+            })();
 
             // Refresh the barometer panel (Other tab) each CSV2 cycle. Cheap no-op if the
             // panel hasn't been initialized yet (tab never opened). try/catch so a bug in
@@ -9208,7 +9364,8 @@ window.addEventListener("load", function () {
                 vmg: data.ts_VMG,
                 baroPressure: data.ts_BaroPressure,
                 ambientTemp: data.ts_AmbientTemp,
-                imu: data.ts_IMU
+                imu: data.ts_IMU,
+                victronSolar: data.ts_VictronSolar
             };
         }, false);
 
@@ -9398,7 +9555,7 @@ function handleResetAccelSession() {
 
 function handleResetAccelLifetime() {
     if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
-    if (!confirm("Reset ALL lifetime accel stats? This clears max heel/pitch, slam records, capsize and pitchpole counts from NVS. Cannot be undone.")) return;
+    if (!confirm("Reset ALL lifetime motion stats? This clears max heel/pitch, slam records, and capsize/pitchpole counts from the device's saved memory. Cannot be undone.")) return;
     const params = new URLSearchParams({ password: currentAdminPassword, ResetAccelLifetime: '1' });
     fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
         .then(() => {
@@ -12851,7 +13008,7 @@ function sysidStartProgressPoll() {
             const reasonText = SYSID_ABORT_REASONS[reasonCode] ?? ('reason code ' + reasonCode);
             const phaseText  = SYSID_PHASE_NAMES[abortPhase] ?? ('phase ' + abortPhase);
             const msg = (reasonCode === 0)
-                ? '⚠ Test aborted — a protection layer fired mid-test. Check the serial console for details.'
+                ? '⚠ Test aborted — a protection layer fired mid-test. Check the Console tab for details.'
                 : '⚠ Aborted at phase ' + abortPhase + ' (' + phaseText + '): ' + reasonText + '.';
             sysidShowAborted(msg);
             return;
@@ -12859,7 +13016,7 @@ function sysidStartProgressPoll() {
 
         if (elapsed > maxWaitMs) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
-            alert("SystemID timed out after " + (elapsed / 1000).toFixed(0) + "s. Check serial console for details.");
+            alert("Plant Delay test timed out after " + (elapsed / 1000).toFixed(0) + "s. Check the Console tab for details.");
             closeSystemIDModal();
         }
     }, pollMs);
@@ -13504,10 +13661,10 @@ window.addEventListener('load', function () {
     const fields = {};
     ENV.forEach(([k]) => fields[k] = { min:[], max:[], avg:[] });
     AVG.forEach(([k]) => fields[k] = { avg:[] });
-    const t = [], isGap = [];
+    const t = [], isGap = [], stage = [];
     // Synthetic null entry to break the line across a real time gap (power-off period).
     const pushGap = (gt) => {
-      t.push(gt); isGap.push(true);
+      t.push(gt); isGap.push(true); stage.push(null);
       ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); });
       AVG.forEach(([k]) => fields[k].avg.push(null));
     };
@@ -13541,9 +13698,17 @@ window.addEventListener('load', function () {
         fields[k].avg.push((valid & (1 << (ENV.length + ai))) ? dv.getInt16(ao, true) / scale : null);
         ao += 2;
       });
+      // chargeStage u8 sits right after the avg-only block (display code 0-7).
+      stage.push(dv.getUint8(base + 16 + ENV.length * 6 + AVG.length * 2));
     }
-    return { t, n: t.length, lastEpoch, interval, fields, isGap };
+    return { t, n: t.length, lastEpoch, interval, fields, isGap, stage };
   }
+
+  // Charge-stage palette — matches the live `.charge-stage-*` badge colors in styles.css.
+  // Codes per firmware LongTermRecord.chargeStage: 1 bulk,2 absorption,3 float,4 manual,
+  // 5 maintain,6 targetV,7 idle (0 = off/none → bare track).
+  const LT_STAGE_COLORS = { 1:'#00c853', 2:'#7e57c2', 3:'#ffb300', 4:'#ef5350', 5:'#66bb6a', 6:'#42a5f5', 7:'#78909c' };
+  const LT_STAGE_NAMES  = { 1:'Bulk', 2:'Absorption', 3:'Float', 4:'Manual', 5:'Maintain', 6:'Target V', 7:'Idle' };
 
   // ---- Decimation (ported from the cloud viewer's applyBinning) ----------------
   const LT_MAX_BINS = 120;   // matches the viewer's cap: ≤120 points drawn per chart
@@ -13666,6 +13831,7 @@ window.addEventListener('load', function () {
       });
     });
     ltRendering = false;
+    ltDrawStageBar();   // repaint the charge-stage strip over the same range
     // Reflect the rendered range back onto the brush selection (keeps the brush in sync
     // whether the range came from the brush itself or from a chart drag-zoom).
     if (_brushState && _brushState.nativeSink) {
@@ -13943,6 +14109,7 @@ window.addEventListener('load', function () {
       series: [ { key:'heel',  scale:'deg', color:'#3F51B5', label:'Heel (°)',  band:true },
                 { key:'pitch', scale:'deg', color:'#FF5722', label:'Pitch (°)', band:true } ]
     });
+    ltBuildStageLegend();
 
     }
     // When the local ring holds little (< ~1h span — always true right after an OTA
@@ -13979,6 +14146,90 @@ window.addEventListener('load', function () {
       const w = Math.floor((card ? card.clientWidth : el.clientWidth)) - 22;  // minus card padding
       if (w > 50) c.plot.setSize({ width: w, height: 300 });
     });
+    ltDrawStageBar();   // chart widths/x-gutter just changed → realign the stage strip
+  }
+
+  // Fill the charge-stage legend once (swatch + label per code) from the shared palette.
+  function ltBuildStageLegend() {
+    const el = document.getElementById('lt-stage-legend');
+    if (!el || el.childElementCount) return;
+    Object.keys(LT_STAGE_NAMES).forEach(code => {
+      const item = document.createElement('span');
+      item.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+      const sw = document.createElement('span');
+      sw.style.cssText = 'width:11px;height:11px;border-radius:2px;display:inline-block;background:' + LT_STAGE_COLORS[code] + ';';
+      item.appendChild(sw); item.appendChild(document.createTextNode(LT_STAGE_NAMES[code]));
+      el.appendChild(item);
+    });
+  }
+
+  // Paint the charge-stage strip over the currently-rendered range. One bar (not per-chart
+  // shading); its painted region is x-aligned to a reference chart's plot area so it sits
+  // under the curves, past the y-axis gutter. Stage 0/off and gaps are left as bare track.
+  function ltDrawStageBar() {
+    const cv = document.getElementById('lt-stage-bar');
+    if (!cv || !ltData || !ltData.stage || !ltCurRange) return;
+    const fromSec = ltCurRange[0], toSec = ltCurRange[1];
+    const card = cv.closest('.settings-card');
+    const cssW = Math.max((card ? card.clientWidth : cv.clientWidth) - 22, 50);
+    const cssH = 18, dpr = window.devicePixelRatio || 1;
+    cv.style.width = cssW + 'px'; cv.style.height = cssH + 'px';
+    cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    // Align the painted span to a reference chart's plotting area (uPlot adds a y-axis gutter).
+    let x0 = 0, x1 = cssW;
+    const ref = ltCharts.length ? ltCharts[0].plot : null;
+    if (ref && ref.over) {
+      const oRect = ref.over.getBoundingClientRect(), cRect = cv.getBoundingClientRect();
+      const a = oRect.left - cRect.left, b = oRect.right - cRect.left;
+      if (b > a && a >= -2 && b <= cssW + 2) { x0 = Math.max(a, 0); x1 = Math.min(b, cssW); }
+    }
+    const span = (toSec - fromSec) || 1;
+    ctx.fillStyle = 'rgba(128,128,128,0.15)';   // bare track behind everything
+    ctx.fillRect(x0, 0, x1 - x0, cssH);
+    // Per-pixel DOMINANT stage (no binning, never microscopic): accumulate each stage run's
+    // time-overlap into the pixel column(s) it covers, then paint each column the stage that
+    // held it longest. Stage 0/off (and no-data) winning a column → bare track. Zooming in
+    // shrinks each column's time slice, so short stages emerge instead of aliasing at zoom-out.
+    const t = ltData.t, st = ltData.stage, ig = ltData.isGap || [], N = ltData.n;
+    const interval = ltData.interval || 600;
+    const W = x1 - x0, pxN = Math.max(1, Math.round(W));
+    const acc = new Float32Array(pxN * 8);   // [pixel*8 + stageCode] → accumulated width (∝ time)
+    let i = 0;
+    while (i < N) {
+      if (ig[i] || st[i] == null) { i++; continue; }
+      const s = st[i];
+      let j = i;   // merge consecutive same-stage records to cover many columns in one pass
+      while (j + 1 < N && !ig[j + 1] && st[j + 1] === s) j++;
+      let segStart = t[i], segEnd = (j + 1 < N) ? t[j + 1] : t[j] + interval;
+      i = j + 1;
+      if (s < 0 || s > 7 || segEnd <= fromSec || segStart >= toSec) continue;
+      if (segStart < fromSec) segStart = fromSec;
+      if (segEnd > toSec) segEnd = toSec;
+      const pa = (segStart - fromSec) / span * W, pb = (segEnd - fromSec) / span * W;
+      const p0 = Math.max(0, Math.floor(pa)), p1 = Math.min(pxN - 1, Math.ceil(pb) - 1);
+      for (let p = p0; p <= p1; p++) {
+        const lo = Math.max(pa, p), hi = Math.min(pb, p + 1);
+        if (hi > lo) acc[p * 8 + s] += (hi - lo);
+      }
+    }
+    const dom = new Uint8Array(pxN);   // dominant stage per column (0 = off/no-data → track)
+    for (let p = 0; p < pxN; p++) {
+      let best = 0, bestV = 0;
+      for (let sc = 0; sc <= 7; sc++) { const v = acc[p * 8 + sc]; if (v > bestV) { bestV = v; best = sc; } }
+      dom[p] = bestV > 0 ? best : 0;
+    }
+    let p = 0;   // merge adjacent same-stage columns into one rect (no internal seams)
+    while (p < pxN) {
+      const d = dom[p];
+      if (d < 1 || !LT_STAGE_COLORS[d]) { p++; continue; }
+      let q = p; while (q + 1 < pxN && dom[q + 1] === d) q++;
+      ctx.fillStyle = LT_STAGE_COLORS[d];
+      ctx.fillRect(x0 + p, 0, q - p + 1, cssH);
+      p = q + 1;
+    }
   }
 
   function ltStatus(msg) {
@@ -14046,12 +14297,12 @@ window.addEventListener('load', function () {
   // shape, dropping any overlap with already-loaded data and breaking the line where
   // the 10-min cadence is interrupted (power-off period).
   function ltCloudRowsToSlice(rows, interval, boundarySec) {
-    const t = [], isGap = [], fields = {};
+    const t = [], isGap = [], stage = [], fields = {};
     ENV.forEach(([k]) => fields[k] = { min:[], max:[], avg:[] });
     AVG.forEach(([k]) => fields[k] = { avg:[] });
     const num = (v) => (v == null ? null : Number(v));
     const pushGap = (gt) => {
-      t.push(gt); isGap.push(true);
+      t.push(gt); isGap.push(true); stage.push(null);
       ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); });
       AVG.forEach(([k]) => fields[k].avg.push(null));
     };
@@ -14075,8 +14326,9 @@ window.addEventListener('load', function () {
         f.min.push(nz(k, num(r[c + '_min']))); f.max.push(nz(k, num(r[c + '_max']))); f.avg.push(nz(k, num(r[c + '_avg'])));
       });
       AVG.forEach(([k]) => fields[k].avg.push(nz(k, num(r[LT_CLOUD_COL[k] + '_avg']))));
+      stage.push(r.charge_stage == null ? null : Number(r.charge_stage));
     }
-    return { t, fields, isGap, n: t.length };
+    return { t, fields, isGap, stage, n: t.length };
   }
 
   // Reorder ltData strictly by ascending timestamp. A single out-of-order point makes
@@ -14095,9 +14347,10 @@ window.addEventListener('load', function () {
       for (let j = 0; j < idx.length; j++) if (idx[j] !== j) { clean = false; break; }
       if (clean) return;
     }
-    const og = ltData.isGap || [];
+    const og = ltData.isGap || [], ost = ltData.stage || [];
     ltData.t = idx.map(i => ot[i]);
     ltData.isGap = idx.map(i => og[i]);
+    ltData.stage = idx.map(i => ost[i]);
     ENV.forEach(([k]) => { const f = ltData.fields[k], mn = f.min, mx = f.max, av = f.avg;
       f.min = idx.map(i => mn[i]); f.max = idx.map(i => mx[i]); f.avg = idx.map(i => av[i]); });
     AVG.forEach(([k]) => { const av = ltData.fields[k].avg; ltData.fields[k].avg = idx.map(i => av[i]); });
@@ -14108,17 +14361,18 @@ window.addEventListener('load', function () {
   // cloud↔local seam if the cadence gaps there.
   function ltCloudPrepend(slice, interval) {
     if (!slice.n) return;
-    const t = slice.t.slice(), isGap = slice.isGap.slice(), fields = {};
+    const t = slice.t.slice(), isGap = slice.isGap.slice(), stage = (slice.stage || []).slice(), fields = {};
     ENV.forEach(([k]) => fields[k] = { min: slice.fields[k].min.slice(), max: slice.fields[k].max.slice(), avg: slice.fields[k].avg.slice() });
     AVG.forEach(([k]) => fields[k] = { avg: slice.fields[k].avg.slice() });
     if (ltData.t.length && (ltData.t[0] - slice.t[slice.n - 1]) > ltGapThreshold(interval)) {
       const gt = (slice.t[slice.n - 1] + ltData.t[0]) / 2;   // seam gap
-      t.push(gt); isGap.push(true);
+      t.push(gt); isGap.push(true); stage.push(null);
       ENV.forEach(([k]) => { fields[k].min.push(null); fields[k].max.push(null); fields[k].avg.push(null); });
       AVG.forEach(([k]) => fields[k].avg.push(null));
     }
     ltData.t = t.concat(ltData.t);
     ltData.isGap = isGap.concat(ltData.isGap || []);
+    ltData.stage = stage.concat(ltData.stage || []);
     ENV.forEach(([k]) => {
       ltData.fields[k].min = fields[k].min.concat(ltData.fields[k].min);
       ltData.fields[k].max = fields[k].max.concat(ltData.fields[k].max);

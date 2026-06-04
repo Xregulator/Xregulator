@@ -242,7 +242,7 @@ enum Csv2Index {
   CSV2_voltageError,
   CSV2_cv_I,
   CSV2_inIdleStage,
-  CSV2_altBaselineFrozen,
+  CSV2_altBaselineFrozen,    // v2: 1 = a cloud-fitted curve is held (else awaiting first fit)
   CSV2_ft_rai_total_win,
   CSV2_ft_rai_total_ses,
   CSV2_ft_rai_ina228_win,
@@ -494,17 +494,29 @@ enum Csv2Index {
   CSV2_wmIgn_VMGman_lo,   CSV2_wmIgn_VMGman_hi,    // VMG manual session min/max (knots ×10)
   CSV2_wmIgn_VMGup_lo,    CSV2_wmIgn_VMGup_hi,     // VMG upwind session min/max (knots ×10)
 
-  // Alternator health summary (Phase 2)
-  CSV2_altHealthPct,        // health % ×10
-  CSV2_altHealthStatus,     // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
-  CSV2_altCoveragePct,      // frozen / with-data % ×10
-  CSV2_altObsCount,         // scored observations since freeze
+  // Alternator (charging-system) health summary (v2 — values repurposed; slots unchanged)
+  CSV2_altHealthPct,        // worst-region performance % ×10
+  CSV2_altHealthStatus,     // 0 insufficient/awaiting fit, 1 healthy, 2 drifting
+  CSV2_altCoveragePct,      // record-book fill % ×10
+  CSV2_altObsCount,         // banked best-ever record count
 
   // IMU zero/level calibration echo (Phase 2 IMU zero button)
   CSV2_imuHeelOffset,       // captured rest heel offset (deg ×100)
   CSV2_imuPitchOffset,      // captured rest pitch offset (deg ×100)
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health fields = 449; +2 imu-zero = 451
+  // Victron VE.Direct solar/MPPT live block (10 fields)
+  CSV2_VictronSolarPower,        // PPV panel power (W ×1)
+  CSV2_VictronSolarVoltage,      // VPV panel voltage (V ×100)
+  CSV2_VictronSolarCurrent,      // derived panel current (A ×100)
+  CSV2_VictronChargeState,       // CS code (×1)
+  CSV2_VictronMPPTMode,          // MPPT tracker code (×1)
+  CSV2_VictronError,             // ERR code (×1)
+  CSV2_VictronYieldToday,        // H20 yield today (kWh ×100)
+  CSV2_VictronMaxPowerToday,     // H21 max power today (W ×1)
+  CSV2_VictronYieldYesterday,    // H22 yield yesterday (kWh ×100)
+  CSV2_VictronMaxPowerYesterday, // H23 max power yesterday (W ×1)
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461
 };
 
 enum Csv3Index {
@@ -827,8 +839,9 @@ enum TsIndex {
   TS_BaroPressure,
   TS_AmbientTemp,
   TS_IMU,
+  TS_VictronSolar,  // VE.Direct solar (PPV/VPV) staleness
 
-  TS_FIELD_COUNT  // = 28
+  TS_FIELD_COUNT  // = 29
 };
 
 
@@ -1853,66 +1866,50 @@ void setupServer() {
     request->send(response);
   });
 
-  // ── Alternator-health model export (base-map cells + centroids) ───────────
-  server.on("/altmodel.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!altBase) {
-      request->send(200, "text/plain", "Alternator health model not initialized.");
-      return;
-    }
-    struct AltExportState {
-      int idx;
-      bool header;
-      bool done;
-      char line[200];
-      int lineLen, linePos;
-    };
-    AltExportState state;
-    state.idx = 0; state.header = true; state.done = false;
-    state.lineLen = 0; state.linePos = 0;
-
-    AsyncWebServerResponse *response = request->beginChunkedResponse(
-      "text/csv",
-      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
-        if (state.done) return 0;
+  // ── Alternator (charging-system) health v2 — schema + curve + records + trend exports ──
+  // Self-describing schema; the dashboard zips these names against AltLive/AltSettings SSE values.
+  server.on("/altschema", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", altSchemaJson());
+  });
+  // The held best-ever front (BEFRONT1 CSV artifact).
+  server.on("/altcurve.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", altCurveCsv());
+  });
+  // Front support points as a plain scatter table.
+  server.on("/altrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/csv", altFrontRecordsCsv());
+  });
+  // Performance-vs-engine-hours trend ring (header + all points, chunked). This is the headline.
+  server.on("/alttrend.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!altTrend) { request->send(200, "text/plain", "engHour,worstPct,overallPct\n"); return; }
+    struct TrExp { int idx, total; bool header, done; char line[64]; int len, pos; };
+    TrExp st;
+    st.total = altTrendCount;
+    st.idx = 0; st.header = true; st.done = false; st.len = 0; st.pos = 0;
+    AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+      [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (st.done) return 0;
         size_t written = 0;
         while (written < maxLen) {
-          if (state.linePos >= state.lineLen) {
-            if (state.header) {
-              state.lineLen = snprintf(state.line, sizeof(state.line),
-                "rpm_bin,fi_bin,nObs,ref_valid,mean_amps,ref_amps,ref_rpm,ref_fi,ref_sigma\n");
-              state.header = false;
+          if (st.pos >= st.len) {
+            if (st.header) {
+              st.len = snprintf(st.line, sizeof(st.line), "engHour,worstPct,overallPct\n");
+              st.header = false;
             } else {
-              if (state.idx >= ALT_NUM_CELLS) { state.done = true; return written; }
-              AltCell &c = altBase[state.idx];
-              int ri = state.idx / ALT_FI_BINS;
-              int fb = state.idx % ALT_FI_BINS;
-              float mean = (c.sumW > 0) ? c.sumW_A / c.sumW : 0.0f;
-              state.lineLen = snprintf(state.line, sizeof(state.line),
-                "%d,%d,%u,%d,%.2f,%.2f,%.1f,%.2f,%.2f\n",
-                ri, fb, (unsigned)c.nObs, (int)c.ref_valid,
-                mean, c.ref_amps, c.ref_rpm, c.ref_fi, c.ref_sigma);
-              state.idx++;
+              if (st.idx >= st.total) { st.done = true; return written; }
+              AltTrendPt &p = altTrend[st.idx];
+              st.len = snprintf(st.line, sizeof(st.line), "%u,%.1f,%.1f\n",
+                                (unsigned)p.engHour, p.worstPct / 10.0f, p.overallPct / 10.0f);
+              st.idx++;
             }
-            state.linePos = 0;
+            st.pos = 0;
           }
-          size_t toWrite = min((size_t)(state.lineLen - state.linePos), maxLen - written);
-          memcpy(buf + written, state.line + state.linePos, toWrite);
-          written += toWrite;
-          state.linePos += (int)toWrite;
+          size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+          memcpy(buf + written, st.line + st.pos, tw);
+          written += tw; st.pos += (int)tw;
         }
         return written;
       });
-
-    char altTs[20] = "export";
-    if (timeIsSynced) {
-      time_t altNow = time(nullptr);
-      struct tm altTm;
-      localtime_r(&altNow, &altTm);
-      strftime(altTs, sizeof(altTs), "%Y%m%d_%H%M%S", &altTm);
-    }
-    char altDisp[80];
-    snprintf(altDisp, sizeof(altDisp), "attachment; filename=\"AltHealthModel_%s.csv\"", altTs);
-    response->addHeader("Content-Disposition", altDisp);
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
   });
@@ -1923,136 +1920,14 @@ void setupServer() {
     request->send(200, "application/json", perfSchemaJson());
   });
 
-  // Boat-performance sailing-polar model export (cells: centroid + dual-source best-ever).
-  server.on("/perfmodel.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!perfSail) {
-      request->send(200, "text/plain", "Boat performance model not initialized.");
-      return;
-    }
-    struct PerfExportState {
-      int idx;
-      bool header;
-      bool done;
-      char line[200];
-      int lineLen, linePos;
-    };
-    PerfExportState state;
-    state.idx = 0; state.header = true; state.done = false;
-    state.lineLen = 0; state.linePos = 0;
-
-    AsyncWebServerResponse *response = request->beginChunkedResponse(
-      "text/csv",
-      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
-        if (state.done) return 0;
-        size_t written = 0;
-        while (written < maxLen) {
-          if (state.linePos >= state.lineLen) {
-            if (state.header) {
-              state.lineLen = snprintf(state.line, sizeof(state.line),
-                "ws_bin,wa_bin,nWin,valid,best_stw,best_sog,cen_ws,cen_wa,cen_pitch\n");
-              state.header = false;
-            } else {
-              if (state.idx >= PERF_SAIL_CELLS) { state.done = true; return written; }
-              PerfCell &c = perfSail[state.idx];
-              int wsb = state.idx / PERF_WA_BINS;
-              int wab = state.idx % PERF_WA_BINS;
-              float bStw = perfCellRef(state.idx, 1);
-              float bSog = perfCellRef(state.idx, 2);
-              float cws = (c.nWin > 0) ? c.sumW_ws / c.nWin : 0.0f;
-              float cwa = (c.nWin > 0) ? c.sumW_wa / c.nWin : 0.0f;
-              float cp  = (c.nWin > 0) ? c.sumW_pitch / c.nWin : 0.0f;
-              state.lineLen = snprintf(state.line, sizeof(state.line),
-                "%d,%d,%u,%d,%.2f,%.2f,%.1f,%.0f,%.2f\n",
-                wsb, wab, (unsigned)c.nWin, (int)c.valid, bStw, bSog, cws, cwa, cp);
-              state.idx++;
-            }
-            state.linePos = 0;
-          }
-          size_t toWrite = min((size_t)(state.lineLen - state.linePos), maxLen - written);
-          memcpy(buf + written, state.line + state.linePos, toWrite);
-          written += toWrite;
-          state.linePos += (int)toWrite;
-        }
-        return written;
-      });
-
-    char perfTs[20] = "export";
-    if (timeIsSynced) {
-      time_t pNow = time(nullptr);
-      struct tm pTm;
-      localtime_r(&pNow, &pTm);
-      strftime(perfTs, sizeof(perfTs), "%Y%m%d_%H%M%S", &pTm);
-    }
-    char perfDisp[80];
-    snprintf(perfDisp, sizeof(perfDisp), "attachment; filename=\"BoatPerfModel_%s.csv\"", perfTs);
-    response->addHeader("Content-Disposition", perfDisp);
-    response->addHeader("Cache-Control", "no-cache");
-    request->send(response);
+  // The held best-ever fronts (BEFRONT1 CSV pair: SAIL + MOTOR blocks) — dashboard polar/curve source.
+  server.on("/perfcurve.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", perfCurveCsv());
   });
 
-  // Boat-performance motoring model export (1-D RPM cells: centroid + dual-source best-ever).
-  server.on("/motormodel.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!perfMotor) {
-      request->send(200, "text/plain", "Motoring model not initialized.");
-      return;
-    }
-    struct MotorExportState {
-      int idx;
-      bool header;
-      bool done;
-      char line[200];
-      int lineLen, linePos;
-    };
-    MotorExportState state;
-    state.idx = 0; state.header = true; state.done = false;
-    state.lineLen = 0; state.linePos = 0;
-
-    AsyncWebServerResponse *response = request->beginChunkedResponse(
-      "text/csv",
-      [state](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
-        if (state.done) return 0;
-        size_t written = 0;
-        while (written < maxLen) {
-          if (state.linePos >= state.lineLen) {
-            if (state.header) {
-              state.lineLen = snprintf(state.line, sizeof(state.line),
-                "rpm_bin,nWin,valid,best_stw,best_sog,cen_rpm,cen_headwind,cen_pitch\n");
-              state.header = false;
-            } else {
-              if (state.idx >= PERF_RPM_BINS) { state.done = true; return written; }
-              PerfCell &c = perfMotor[state.idx];
-              float bStw = perfMotorCellRef(state.idx, 1);
-              float bSog = perfMotorCellRef(state.idx, 2);
-              float crpm = (c.nWin > 0) ? c.sumW_ws / c.nWin : 0.0f;   // sumW_ws holds RPM centroid
-              float chw  = (c.nWin > 0) ? c.sumW_wa / c.nWin : 0.0f;   // sumW_wa holds headwind centroid
-              float cp   = (c.nWin > 0) ? c.sumW_pitch / c.nWin : 0.0f;
-              state.lineLen = snprintf(state.line, sizeof(state.line),
-                "%d,%u,%d,%.2f,%.2f,%.0f,%.1f,%.2f\n",
-                state.idx, (unsigned)c.nWin, (int)c.valid, bStw, bSog, crpm, chw, cp);
-              state.idx++;
-            }
-            state.linePos = 0;
-          }
-          size_t toWrite = min((size_t)(state.lineLen - state.linePos), maxLen - written);
-          memcpy(buf + written, state.line + state.linePos, toWrite);
-          written += toWrite;
-          state.linePos += (int)toWrite;
-        }
-        return written;
-      });
-
-    char mTs[20] = "export";
-    if (timeIsSynced) {
-      time_t mNow = time(nullptr);
-      struct tm mTm;
-      localtime_r(&mNow, &mTm);
-      strftime(mTs, sizeof(mTs), "%Y%m%d_%H%M%S", &mTm);
-    }
-    char mDisp[80];
-    snprintf(mDisp, sizeof(mDisp), "attachment; filename=\"MotoringModel_%s.csv\"", mTs);
-    response->addHeader("Content-Disposition", mDisp);
-    response->addHeader("Cache-Control", "no-cache");
-    request->send(response);
+  // Front support points as a plain scatter table (sail + motor, mode-tagged).
+  server.on("/perfrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/csv", perfRecordsCsv());
   });
 
   server.on("/cvlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2584,9 +2459,13 @@ void setupServer() {
     }
     else if (request->hasParam("ResetAlternatorHealth")) {
       foundParameter = true;
-      pendingResetAlternatorHealth = true;  // deferred to Core 1 to avoid SSE gap
+      pendingResetAlternatorHealth = true;  // deferred to Core 1 to avoid SSE gap (Start Over)
     }
-    // Alternator-health steady-state / freeze settings (registry-driven, 16 params)
+    else if (request->hasParam("altSimMode")) {
+      foundParameter = true;
+      altSimMode = request->getParam("altSimMode")->value().toFloat();  // bench simulator (not persisted)
+    }
+    // Alternator-health steady-state / window / record settings (registry-driven)
     if (altSettingsHandle(request)) {
       foundParameter = true;
       sendAltSettings();
@@ -5698,7 +5577,9 @@ void SendWifiData() {
                                "%d,%d,%d,%d,"
                                // VMGUpwind + sustainedTWS + currentGaleMinutes + 2 VMG watermark pairs (lo/hi)
                                // ...4 alt-health + 2 imu-zero offsets
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // Victron VE.Direct solar/MPPT live block (10 fields)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -5891,7 +5772,7 @@ void SendWifiData() {
                                SafeInt((ChargingVoltageTarget - getBatteryVoltage()) * 100),
                                SafeInt(cv_I * 100),
                                SafeInt(inIdleStage),
-                               (int)altHealth.baselineFrozen,
+                               altHaveFront(),                          // CSV2_altBaselineFrozen → have a usable best-ever front
                                SafeInt(ft_rai_total.worstWindow),
                                SafeInt(ft_rai_total.worstSession),
                                SafeInt(ft_rai_ina228.worstWindow),
@@ -6140,12 +6021,23 @@ void SendWifiData() {
                                SafeInt(currentGaleMinutes, 1),           // live gale minutes (int)
                                SafeInt(wmIgnSafe(wmIgn_VMGman.lo), 10),  SafeInt(wmIgnSafe(wmIgn_VMGman.hi), 10),
                                SafeInt(wmIgnSafe(wmIgn_VMGup.lo), 10),   SafeInt(wmIgnSafe(wmIgn_VMGup.hi), 10),
-                               SafeInt(altHealthPct(), 10),              // CSV2_altHealthPct
-                               (int)altHealth.status,                    // CSV2_altHealthStatus
-                               SafeInt(altCoveragePct(), 10),            // CSV2_altCoveragePct
-                               (int)altHealth.obsCount,                  // CSV2_altObsCount
+                               SafeInt(altWorstPct(), 10),              // CSV2_altHealthPct → worst-region perf% (v2)
+                               altStatus(),                              // CSV2_altHealthStatus → 0 insufficient,1 healthy,2 drifting (v2)
+                               SafeInt(altCoveragePct(), 10),            // CSV2_altCoveragePct → record-book fill% (v2)
+                               altFrontCount(),                          // CSV2_altObsCount → front support-point count
                                SafeInt(imuHeelOffsetDeg, 100),           // CSV2_imuHeelOffset
-                               SafeInt(imuPitchOffsetDeg, 100)           // CSV2_imuPitchOffset
+                               SafeInt(imuPitchOffsetDeg, 100),          // CSV2_imuPitchOffset
+                               // Victron VE.Direct solar/MPPT live block (10 fields)
+                               SafeInt(VictronSolarPower_W),             // CSV2_VictronSolarPower
+                               SafeInt(VictronSolarVoltage_V, 100),      // CSV2_VictronSolarVoltage
+                               SafeInt(VictronSolarCurrent_A, 100),      // CSV2_VictronSolarCurrent
+                               SafeInt(VictronChargeState),              // CSV2_VictronChargeState
+                               SafeInt(VictronMPPTMode),                 // CSV2_VictronMPPTMode
+                               SafeInt(VictronError),                    // CSV2_VictronError
+                               SafeInt(VictronYieldToday_kWh, 100),      // CSV2_VictronYieldToday
+                               SafeInt(VictronMaxPowerToday_W),          // CSV2_VictronMaxPowerToday
+                               SafeInt(VictronYieldYesterday_kWh, 100),  // CSV2_VictronYieldYesterday
+                               SafeInt(VictronMaxPowerYesterday_W)       // CSV2_VictronMaxPowerYesterday
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -6513,7 +6405,7 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),
@@ -6542,7 +6434,8 @@ void SendWifiData() {
                                        (dataTimestamps[IDX_VMG] == 0) ? 999999 : (now - dataTimestamps[IDX_VMG]),
                                        (dataTimestamps[IDX_BARO_PRESSURE] == 0) ? 999999 : (now - dataTimestamps[IDX_BARO_PRESSURE]),
                                        (dataTimestamps[IDX_AMBIENT_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_AMBIENT_TEMP]),
-                                       (dataTimestamps[IDX_IMU] == 0) ? 999999 : (now - dataTimestamps[IDX_IMU])
+                                       (dataTimestamps[IDX_IMU] == 0) ? 999999 : (now - dataTimestamps[IDX_IMU]),
+                                       (dataTimestamps[IDX_VICTRON_SOLAR] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_SOLAR])
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

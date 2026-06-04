@@ -77,6 +77,198 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include "LSM6DSOXSensor.h"  //accelerometer
 
 
+// ============================================================
+// BEST-EVER FRONT — shared engine (Phase A). Generic over an axis count NAXIS so one C++
+// instance serves each system: alternator (4-D), sail (3-D), motor (3-D). Lives here in the
+// main sketch (this project keeps no .h files) so the templates are defined before any use in
+// the _functions.ino files. Design contract: BEST_EVER_FRONT_SPEC.md §2/§5 + IMPLEMENTATION_PLAN.md §2.
+//   1. Episode<NAXIS>    — backward look-back / reseed steady-run detector (replaces fixed windows).
+//   2. FrontStore<NAXIS> — sparse best-ever support points (never a grid) + IDW eval + device keep-gate.
+// ============================================================
+
+// Per-axis steadiness knobs (live-tunable): deviation bound + how long it must hold.
+struct EpAxisCfg { float tol; float steadySec; };
+
+// One raw sample fed to the detector. x[] are the steadiness axes (band-checked AND averaged);
+// ex[] are extra raw "passenger" inputs that are AVERAGED over the run but NOT band-checked — kept
+// so the cloud retains the spec's diagnostic/forensic inputs (alt raw duty; motor raw AWS/AWA) for
+// recomputing a derived axis or diagnosing a bad point. out is the measured output, averaged.
+template <int NAXIS>
+struct RawSample { float x[NAXIS]; float ex[2]; float out; uint32_t tMs; };
+
+// One emitted episode point == one front support point. x[] are the SURFACE coordinates (which may
+// be DERIVED from the steadiness axes, e.g. excitation from duty); ex[] are the retained raw extras
+// (run-averaged, uploaded to the cloud's raw history, not used by the front eval); y is the output.
+template <int NAXIS>
+struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32_t tEmit; };
+
+// A run is a contiguous tail of recent samples all mutually within band on every axis (max-min
+// ≤ tol). It grows while each new sample stays in band; on a break it emits the run's average
+// (if every axis held for its steady time) and reseeds the next run from the longest in-band
+// tail ending at the breaking sample, so compatible points are reused, never discarded.
+template <int NAXIS>
+struct Episode {
+  EpAxisCfg cfg[NAXIS];
+  // current run (running sums → cheap average, no per-sample storage):
+  double    sumX[NAXIS], sumEx[2], sumOut;
+  float     runMin[NAXIS], runMax[NAXIS];
+  uint32_t  count, runStartMs;
+  // reseed look-back ring (PSRAM, allocated by the caller):
+  RawSample<NAXIS> *ring; int ringCap, ringHead, ringCount;
+
+  void init(RawSample<NAXIS> *ringBuf, int cap) {
+    ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
+    clearRun();
+  }
+  void clearRun() {
+    sumOut = 0; count = 0; runStartMs = 0; sumEx[0] = sumEx[1] = 0;
+    for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }
+  }
+  // Effective steady gate = max over axes (a run is mutually in-band on every axis, so every
+  // axis is in-band for the whole span → gate is run_span ≥ max(all steadySec)). Plan §0.4.
+  uint32_t maxSteadyMs() const {
+    float m = 0; for (int a = 0; a < NAXIS; a++) if (cfg[a].steadySec > m) m = cfg[a].steadySec;
+    return (uint32_t)(m * 1000.0f);
+  }
+  void ringPush(const RawSample<NAXIS> &s) {
+    ring[ringHead] = s;
+    ringHead = (ringHead + 1) % ringCap;
+    if (ringCount < ringCap) ringCount++;
+  }
+  // ring index of the k-th newest sample (k=0 = newest just pushed)
+  int ringIdx(int k) const { return ((ringHead - 1 - k) % ringCap + ringCap) % ringCap; }
+
+  void startRunWith(const RawSample<NAXIS> &s) {
+    sumOut = s.out; count = 1; runStartMs = s.tMs;
+    sumEx[0] = s.ex[0]; sumEx[1] = s.ex[1];
+    for (int a = 0; a < NAXIS; a++) { sumX[a] = s.x[a]; runMin[a] = runMax[a] = s.x[a]; }
+  }
+  bool inBandWith(const RawSample<NAXIS> &s) const {
+    for (int a = 0; a < NAXIS; a++) {
+      float lo = runMin[a] < s.x[a] ? runMin[a] : s.x[a];
+      float hi = runMax[a] > s.x[a] ? runMax[a] : s.x[a];
+      if (hi - lo > cfg[a].tol) return false;
+    }
+    return true;
+  }
+  void commit(const RawSample<NAXIS> &s) {
+    for (int a = 0; a < NAXIS; a++) {
+      sumX[a] += s.x[a];
+      if (s.x[a] < runMin[a]) runMin[a] = s.x[a];
+      if (s.x[a] > runMax[a]) runMax[a] = s.x[a];
+    }
+    sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
+    sumOut += s.out; count++;
+  }
+  // Complete the current run; emit its average to `out` if it held ≥ max steady time. Returns
+  // true if a point was emitted. `nowMs` is the breaking sample's time (plan §2.1 step 3a).
+  bool complete(uint32_t nowMs, FrontPoint<NAXIS> *out) {
+    bool emit = (count >= 1) && ((uint32_t)(nowMs - runStartMs) >= maxSteadyMs());
+    if (emit && out) {
+      for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(sumX[a] / (double)count);
+      out->ex[0] = (float)(sumEx[0] / (double)count);
+      out->ex[1] = (float)(sumEx[1] / (double)count);
+      out->y = (float)(sumOut / (double)count);
+      out->nSamp = count;
+      out->tEmit = nowMs;
+    }
+    return emit;
+  }
+  // Reseed a fresh run from the longest in-band tail of the ring ending at the newest sample.
+  void reseed() {
+    clearRun();
+    if (ringCount <= 0) return;
+    float mn[NAXIS], mx[NAXIS];
+    { const RawSample<NAXIS> &s0 = ring[ringIdx(0)];
+      for (int a = 0; a < NAXIS; a++) mn[a] = mx[a] = s0.x[a]; }
+    int oldestK = 0;
+    for (int k = 1; k < ringCount; k++) {
+      const RawSample<NAXIS> &s = ring[ringIdx(k)];
+      bool ok = true;
+      for (int a = 0; a < NAXIS; a++) {
+        float lo = mn[a] < s.x[a] ? mn[a] : s.x[a];
+        float hi = mx[a] > s.x[a] ? mx[a] : s.x[a];
+        if (hi - lo > cfg[a].tol) { ok = false; break; }
+      }
+      if (!ok) break;
+      for (int a = 0; a < NAXIS; a++) { if (s.x[a] < mn[a]) mn[a] = s.x[a]; if (s.x[a] > mx[a]) mx[a] = s.x[a]; }
+      oldestK = k;
+    }
+    for (int a = 0; a < NAXIS; a++) { runMin[a] = mn[a]; runMax[a] = mx[a]; }
+    for (int k = oldestK; k >= 0; k--) {           // oldest → newest
+      const RawSample<NAXIS> &s = ring[ringIdx(k)];
+      for (int a = 0; a < NAXIS; a++) sumX[a] += s.x[a];
+      sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
+      sumOut += s.out; count++;
+    }
+    runStartMs = ring[ringIdx(oldestK)].tMs;        // preserves accumulated dwell
+  }
+  // Feed one sample. eligible=false → below an admission floor: hard break, no reseed across it
+  // (the ring is dropped so a later run can't look back over the gap). Returns true + fills `out`
+  // when a completed run emits a point.
+  bool feed(bool eligible, const RawSample<NAXIS> &s, FrontPoint<NAXIS> *out) {
+    if (!eligible) {
+      bool emitted = complete(s.tMs, out);
+      clearRun();
+      ringHead = 0; ringCount = 0;                  // barrier: no reseed across the ineligible gap
+      return emitted;
+    }
+    ringPush(s);
+    if (count == 0) { startRunWith(s); return false; }   // empty run → s founds it
+    if (inBandWith(s)) { commit(s); return false; }      // grow
+    bool emitted = complete(s.tMs, out);                 // break: complete then reseed (includes s)
+    reseed();
+    return emitted;
+  }
+};
+
+// Sparse support points (never a grid). Memory scales with the data, not the input volume —
+// what makes the 4-D alternator affordable. axisScale[] normalizes each dimension's distance
+// for IDW (≈ that axis's tol or characteristic span).
+template <int NAXIS>
+struct FrontStore {
+  FrontPoint<NAXIS> *pts; int count, cap;
+  uint8_t source;                                   // 0 = LEARNED, 1 = FIXED (loaded curve)
+  float   axisScale[NAXIS];
+
+  void init(FrontPoint<NAXIS> *buf, int c) {
+    pts = buf; cap = c; count = 0; source = 0;
+    for (int a = 0; a < NAXIS; a++) axisScale[a] = 1.0f;
+  }
+  bool add(const FrontPoint<NAXIS> &p) {
+    if (count >= cap) return false;
+    pts[count++] = p; return true;
+  }
+  // IDW surface evaluation, O(count) — the spec's front_eval(). d_i = sqrt(Σ_a ((x[a]-pts.x[a])/
+  // axisScale[a])^2); exact hit → that point's y; else Σ w_i y_i / Σ w_i, w_i = 1/(d_i^power + eps).
+  float eval(const float x[NAXIS], float idwPower) const {
+    if (count <= 0) return 0.0f;                     // bootstrap: no surface yet
+    double wsum = 0, num = 0;
+    for (int i = 0; i < count; i++) {
+      double d2 = 0;
+      for (int a = 0; a < NAXIS; a++) {
+        double sc = (axisScale[a] > 1e-9f) ? (double)axisScale[a] : 1.0;
+        double dx = ((double)x[a] - (double)pts[i].x[a]) / sc;
+        d2 += dx * dx;
+      }
+      if (d2 < 1e-12) return pts[i].y;               // exact hit
+      // dᵢ^power. Fast-path power 2 (the default) — d2 already is dᵢ²; skip sqrt+pow (200 Hz hot path).
+      double dp = (idwPower == 2.0f) ? d2 : pow(sqrt(d2), (double)idwPower);
+      double w = 1.0 / (dp + 1e-9);
+      wsum += w; num += w * (double)pts[i].y;
+    }
+    return (wsum > 0) ? (float)(num / wsum) : 0.0f;
+  }
+  // Device keep-gate (LEARNED) — the spec's front_pushes(). Bias toward keep via safetyMargin:
+  // keep if it beats the margin-lowered surface. count==0 bootstraps (founds the surface).
+  bool pushes(const float x[NAXIS], float y, float safetyMargin, float idwPower) const {
+    if (count <= 0) return true;
+    return y > eval(x, idwPower) - safetyMargin;
+  }
+};
+
+
+
 // Make the types visible to auto-generated prototypes, hack
 struct UpdateInfo;
 struct StreamingExtractor;
@@ -141,6 +333,7 @@ enum HttpsRequestType {
   HTTPS_UPLOAD_PAYLOAD,
   HTTPS_UPLOAD_CONFIG,
   HTTPS_UPLOAD_BOATPERF,
+  HTTPS_UPLOAD_ALTHEALTH,
   HTTPS_FETCH_WEATHER,
   HTTPS_UPDATE_FW_VERSION,
   HTTPS_CHECK_FORCED_UPDATE,
@@ -168,7 +361,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.5";
+const char *FIRMWARE_VERSION = "0.0.12";
 
 String currentUID;
 
@@ -176,108 +369,70 @@ String currentUID;
 
 
 // ============================================================
-// ALTERNATOR HEALTH MODEL (Phase 2) — replaces the 3-D eff matrix above.
-// A_pred = base(rpm, excitation) × tempCorr(T) × busCorr(Vbus).
-// "excitation proxy" = temp-normalized field drive, NOT measured field current.
-// Built additively; the old eff* system is removed at cut-over.
-// Full design: LOCAL_DATA_SYSTEMS_PLAN.md Phase 2.
+// ALTERNATOR HEALTH v2 — cloud-fitted curve model + best-ever record book.
+//   A_pred = base(RPM, excitation) × tempCorr(T) × busCorr(Vbus).
+//   "excitation proxy" = temp-normalized field drive, NOT measured field current.
+//   The CLOUD fits these surfaces from uploaded best-ever record points (field-off +
+//   interval); the device only EVALUATES them to rate live output, BUFFERS new
+//   envelope-pushing records for the next upload, and tracks a performance%-vs-engine-
+//   hours TREND (the headline display). Best-ever works here because an alternator's
+//   output is near-deterministic given its inputs, so best-ever ≈ expected and the
+//   reference auto-ratchets to the healthy peak (no freeze trigger needed).
+//   Mirrors boat-performance v2. Full design: ALT_HEALTH_V2_REBUILD_PLAN.md.
 // ============================================================
-
-// Base-map axes — fine on RPM (the output knee is steep); PSRAM is free.
-#define ALT_RPM_BINS  60          // 100-RPM bins over 0..6000
-#define ALT_RPM_MAX   6000.0f
-#define ALT_FI_BINS   24          // excitation proxy over 0..15 ("temp-comp volts")
-#define ALT_FI_MAX    15.0f
-#define ALT_NUM_CELLS (ALT_RPM_BINS * ALT_FI_BINS)   // 1440
-
-// 1-D correction axes (learned + applied from day 1).
-#define ALT_TEMP_BINS 12
-#define ALT_TEMP_MIN  0.0f
-#define ALT_TEMP_MAX  260.0f
-#define ALT_VBUS_BINS 10
-#define ALT_VBUS_MIN  10.0f
-#define ALT_VBUS_MAX  16.0f
 
 // Excitation-proxy temp normalization (copper seed; cloud refits α later).
 #define ALT_ALPHA_PER_C 0.00393f
 #define ALT_TREF_C      25.0f
 #define ALT_MIN_BATT_V  8.0f
+#define ALT_RPM_MAX     6000.0f   // axis full-scale (RPM)
+#define ALT_FI_MAX      15.0f     // axis full-scale (excitation proxy)
 
-// Base-map cell: bin is a spatial hash; the cell stores the TRUE centroid of
-// its steady-state chunk-observations so quantization never smears the data.
-struct AltCell {
-  uint16_t nObs;        // independent chunk-observations binned here
-  float    sumW;        // Σ obs weight (coverage ceiling caps it)
-  float    sumW_A, sumW_A2;                    // → mean output + between-obs variance
-  float    sumW_rpm, sumW_fi, sumW_vbus, sumW_t;  // → per-input centroid = Σw·x / Σw
-  float    ref_amps, ref_rpm, ref_fi, ref_sigma;  // frozen reference (anchored at centroid)
-  uint8_t  ref_valid;   // 1 = graduated (else skip health here — no fabrication)
-  uint8_t  _pad[3];
-};  // 48 B → 1440 × 48 ≈ 67 KB PSRAM
+// Curve grid — anchors/samples. MUST match the cloud edge fn (update-alt-health) exactly.
+// ============================================================
+// ALTERNATOR HEALTH — Best-Ever Front. Reference = a sparse best-ever output-amps surface over
+//   {RPM, excitation, Vbus, temp}. The device learns + evaluates it (Episode + FrontStore engine
+//   at the top of this file); the cloud prunes + retains raw history. Replaces the old cloud-fitted
+//   anchor-grid curve + record book + sliding window. Engine instance + functions: 7_functions.ino.
+// ============================================================
 
-// 1-D learned multiplicative correction bin (tempCorr / busCorr).
-struct AltCorr {
-  uint16_t nObs;
-  float    sumW, sumW_ratio, value;  // value = applied factor (1.0 = none)
-  uint8_t  valid, _pad[1];
+// Performance-vs-engine-hours TREND ring (the headline). One point per engine-hour bucket:
+// average + worst output-% vs the best-ever front. Survives reboot; uploads for cloud history.
+#define ALT_TREND_CAP 512      // engine-hour buckets retained (~512 hrs)
+struct AltTrendPt {
+  uint16_t engHour;            // engine-hours-since-baseline bucket index
+  int16_t  worstPct;          // worst (min) output-% in this bucket (×10)
+  int16_t  overallPct;        // average output-% in this bucket (×10)
 };
+static AltTrendPt *altTrend = nullptr;
+static int         altTrendCount = 0;
+// Current-bucket accumulators (committed when the engine-hour bucket advances).
+static double altBucket_sum = 0, altBucket_n = 0;   // running average over the bucket
+static float  altBucket_worst = 0;                  // min output-% seen this bucket
+static int    altCurEngHour = -1;
+double altTrendBaselineSec = 0.0;   // EngineRunTime_AllTime at last "Start Over" (trend X-axis origin)
 
-// Whole-alternator health monitor (one instance).
-struct AltHealthMon {
-  float    ewmaRatio;             // EWMA of A_actual/A_pred → health % (1.0 = 100% healthy)
-  float    cusumPos, cusumNeg;    // two-sided CUSUM on standardized residual z (drift flags)
-  uint32_t obsCount;
-  uint8_t  status;                // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
-  uint8_t  baselineFrozen;        // 1 once ≥1 cell graduated
-  uint8_t  _pad[2];
-};
+// Live point for the dashboard gauge / trend dot, via AltLive SSE.
+static float   altLive_rpm = 0, altLive_exc = 0, altLive_amps = 0, altLive_pred = 0;
+static float   altLive_pct = 0;            // live output-% = amps ÷ front_eval (NO clamp; may exceed 100)
+static bool    altLiveValid = false;
+static bool    altSteady = false;          // currently inside a steady episode run (live indicator)
+static float   altWorstPctLive = 0;        // worst-bucket output-% (headline)
+static float   altOverallPctLive = 0;      // current-bucket average output-%
+static uint8_t altStatusCode = 0;          // 0 learning/insufficient, 1 healthy, 2 drifting, 3 disabled
 
-static AltCell     *altBase     = nullptr;  // [ALT_NUM_CELLS]
-static AltCorr     *altTempCorr = nullptr;  // [ALT_TEMP_BINS]
-static AltCorr     *altBusCorr  = nullptr;  // [ALT_VBUS_BINS]
-static AltHealthMon altHealth   = {};
-
-#define ALT_IDX(ri, fi)  ((ri) * ALT_FI_BINS + (fi))
-#define ALT_CELL(ri, fi) altBase[ALT_IDX(ri, fi)]
-
-// Steady-state detector state (per tick).
-static bool     altSteady       = false;  // AND of all per-parameter exit-band tests + min-dwell
-static uint32_t altSteadyStartMs = 0;     // episode start (first in-band tick)
-// Visit tracking — one observation per residency in a bin (exit + re-enter required for another).
-static int      altCurBin = -1;           // base-map cell currently occupied; -1 = none/invalid
-static uint32_t altVisitSteadyMs = 0;     // steady dwell accumulated this residency (vs min-dwell)
-static double   altVisit_w = 0.0;         // steady-sample count this visit
-static double   altVisit_A = 0.0, altVisit_A2 = 0.0;
-static double   altVisit_rpm = 0.0, altVisit_fi = 0.0, altVisit_vbus = 0.0, altVisit_t = 0.0;
-static float    altSS_rpmRef = 0, altSS_fiRef = 0, altSS_vbusRef = 0, altSS_tempRef = 0;  // exit-band anchors
-static uint32_t altThermInBandMs = 0;     // how long the thermal rate has stayed in-band
-
-// Live point for dashboard red dot / SSE.
-static float altLive_rpm = 0, altLive_fi = 0, altLive_amps = 0, altLive_pred = 0, altLive_z = 0;
-static bool  altLiveValid = false;
-
-// GUI-adjustable settings (Pattern B; build-then-tune). Electrical settle:
-float altElecSettleSec = 1.0f;   // electrical params must hold this long
-float altDutyTolPct    = 1.0f;   // excitation/duty stability band (% of duty)
-float altRpmTol        = 25.0f;  // RPM exit band (tight — knee)
-float altVbusTol       = 0.10f;  // bus-voltage exit band (V)
-// Thermal settle (model-free rate band):
-float altThermRateDegF = 5.0f;   // max temp change...
-float altThermRateMin  = 5.0f;   // ...over this many minutes
-float altThermDwellSec = 30.0f;  // rate must stay in-band this long
-// Visit:
-float altMinDwellSec = 5.0f;     // min steady dwell before a bin residency counts as one observation
+// GUI-adjustable settings (Pattern B; build-then-tune). Per-axis deviation bounds (steady times +
+// front/eval knobs altRpmSec/altDutySec/altVbusSec/altThermDegF/altThermSec/altSafetyMargin/
+// altIdwPower/altPruneK live with the engine instance in 7_functions.ino):
+float altDutyTolPct    = 1.0f;   // field-duty stability band (% points)
+float altRpmTol        = 25.0f;  // RPM deviation band
+float altVbusTol       = 0.10f;  // bus-voltage deviation band (V)
 // Admission floors:
 float altMinAmps = 2.0f;
 float altMinDuty = 5.0f;
-// Freeze (graduation) — X = min separate visits before a bin freezes as reference:
-float altFreezeMinVisits = 6;    // headline knob ("X"); needs X separate residencies, not one long cruise
-float altFreezeMaxVisits = 40;   // hard cap — freeze by here regardless of spread
-float altFreezeSEM  = 1.0f;      // optional spread gate: also require visit-to-visit SEM (A) < this
-// Health monitor tuning (advisory only — no alarm):
-float altEwmaLambda = 0.01f;
-float altCusumK     = 0.5f;
-float altCusumH     = 5.0f;
+// Mode:
+float altPaused       = 0.0f;    // 1 = halt learning/persist (sticky); live display still updates
+float altSimMode      = 0.0f;    // 1 = inject synthetic operating points for bench testing (not persisted)
 
 // ============================================================
 // BOAT PERFORMANCE — sailing polar (Phase 3). Pitch-corrected best-ever speed map.
@@ -295,85 +450,37 @@ float altCusumH     = 5.0f;
 #define PERF_SAIL_CELLS (PERF_WS_BINS * PERF_WA_BINS)   // 576
 #define PERF_TOPK       4          // best-ever = K best window-means; reference = min(topK) (robust high pct)
 
-// One sailing-polar cell: centroid of windows binned here + dual per-source best-ever top-K.
-struct PerfCell {
-  uint16_t nWin;                              // accepted windows binned here
-  float    sumW, sumW_ws, sumW_wa, sumW_pitch;  // → per-input centroid = Σx / nWin
-  float    bestSTW[PERF_TOPK];                // K best STW window-means (reference = min of these)
-  float    bestSOG[PERF_TOPK];                // K best SOG window-means
-  uint16_t nSTW, nSOG;                        // windows contributing per source
-  uint8_t  valid;                             // 1 = ≥1 source has a full top-K (trustable reference)
-  uint8_t  _pad;
-};
+// ============================================================
+// BOAT PERFORMANCE — Best-Ever Front (sailing polar + motoring curve). Two sparse best-ever
+//   boat-speed surfaces: SAIL over {AWS, AWA, sea-state(pitch-std)}, MOTOR over {RPM, headwind,
+//   sea-state}. Wind axes are APPARENT (raw both-sided stored); perfFoldSymmetric folds |AWA| at
+//   eval+display only. Speed = user-selected STW or SOG. Device learns + evaluates; cloud prunes +
+//   retains raw history. Engine instances + functions: 7_functions.ino. Generic engine: top of file.
+// ============================================================
 
-// 1-D multiplicative correction (pitch derate): achievable-in-seas ÷ flat-water best.
-struct PerfCorr { uint16_t nWin; float sumW, sumW_ratio, value; uint8_t valid, _pad[1]; };
-
-struct PerfMonitor {               // one per map
-  float    foulingScalar;          // recent achievable ÷ best-ever (1.0 = at best)
-  float    cusumNeg;               // one-sided CUSUM on sustained decline
-  uint32_t winCount;
-  uint8_t  status;                 // 0 learning,1 at-best,2 fouling/current-drift,3 low-coverage
-  uint8_t  _pad[3];
-};
-
-static PerfCell    *perfSail      = nullptr;  // [PERF_SAIL_CELLS]
-static PerfCorr    *perfSailPitch = nullptr;  // [PERF_PITCH_BINS]
-static PerfMonitor  perfSailMon   = {};
-
-#define PERF_SIDX(wsb, wab)  ((wsb) * PERF_WA_BINS + (wab))
-
-// Sliding-window accumulator (one window in progress).
-static uint32_t perfWinStartMs = 0;
-static double   perfWin_n = 0;
-static double   perfWin_ws = 0, perfWin_ws2 = 0;          // wind speed sum, sumsq → mean + std gate
-static double   perfWin_waS = 0, perfWin_waC = 0;         // wind angle circular accum (sin/cos)
-static double   perfWin_pitch = 0, perfWin_pitch2 = 0;    // pitch sum, sumsq → window std (sea state)
-static double   perfWin_stw = 0;  int perfWin_nstw = 0;   // STW speed sum + fresh-sample count
-static double   perfWin_sog = 0;  int perfWin_nsog = 0;   // SOG speed sum + fresh-sample count
-static double   perfWin_hdgS = 0, perfWin_hdgC = 0;       // heading circular accum (tack reject)
-
-// Live point for the dashboard (polar red dot + % gauge), via PerfLive SSE.
+// Live points for the dashboard (red dot + % gauge), via PerfLive / MotorLive SSE.
 static float perfLive_ws = 0, perfLive_wa = 0, perfLive_spd = 0, perfLive_best = 0;
 static float perfLive_pitch = 0, perfLive_pct = 0;
 static bool  perfLiveValid = false;
-static uint8_t perfLiveSrc = 0;     // 0 none, 1 STW, 2 SOG
-
-// GUI-adjustable settings (registry-driven; build-then-tune). 0/1 flags carried as floats.
-float perfWindowSec   = 60.0f;      // sliding-window length
-float perfWsTol       = 2.0f;       // wind-speed std band over the window (kt) — anti-smear
-float perfWaTol       = 12.0f;      // wind-angle spread band over the window (deg)
-float perfHdgTol      = 15.0f;      // heading spread band (deg) — bigger spread = tack/maneuver → reject
-float perfMinBoatSpeed = 0.5f;      // admission floor (kt)
-float perfMinWindSpeed = 2.0f;      // admission floor (kt)
-float perfRpmFloor    = 50.0f;      // RPM ≤ this = engine off = sailing (above = motoring → deferred map)
-float perfCusumK      = 0.05f;      // fouling CUSUM slack (fraction slow per window)
-float perfCusumH      = 1.0f;       // fouling CUSUM alarm threshold
-float perfSymmetric   = 1.0f;       // 1 = fold port/stbd by |angle| (default); 0 = keep both tacks
-float perfSpeedSrc    = 0.0f;       // 0 = Both, 1 = STW only, 2 = SOG only
-float perfPaused      = 0.0f;       // 1 = halt learning/persist (sticky across reboot); live display still updates
-float perfRpmTol      = 100.0f;     // RPM steadiness band over the window (motoring map)
-float perfSimMode     = 0.0f;       // 1 = inject synthetic wind/speed/RPM/pitch for bench testing (no boat); NOT persisted
-
-// Motoring map — speed = base(RPM) × windCorr(headwind) × pitchDerate(pitch_std). Same RPM
-// signal as the alt map; engine RPM > perfRpmFloor = motoring (motorsailing counts as motoring).
-#define PERF_RPM_BINS   30          // 0..6000 RPM, 200-RPM bins
-#define PERF_RPM_MAX    6000.0f
-#define PERF_WINDC_BINS 12          // headwind component (1-D correction)
-#define PERF_WINDC_MIN  -40.0f      // tailwind
-#define PERF_WINDC_MAX   40.0f      // headwind
-
-static PerfCell    *perfMotor      = nullptr;  // [PERF_RPM_BINS]; centroid: sumW_ws=RPM, sumW_wa=headwind, sumW_pitch=pitch
-static PerfCorr    *perfMotorWind  = nullptr;  // [PERF_WINDC_BINS]
-static PerfCorr    *perfMotorPitch = nullptr;  // [PERF_PITCH_BINS]
-static PerfMonitor  perfMotorMon   = {};
-
-static double perfWin_rpm = 0, perfWin_rpm2 = 0;   // window RPM sum + sumsq (mean + std gate)
-
-// Motoring live point (speed-vs-RPM dashboard).
-static float motorLive_rpm = 0, motorLive_hw = 0, motorLive_spd = 0, motorLive_best = 0, motorLive_pct = 0;
+static bool  perfSteady = false;    // currently inside a steady-run (sail OR motor episode accumulating) — live indicator
+static uint8_t perfLiveSrc = 0;     // 1 STW, 2 SOG
+static float motorLive_rpm = 0, motorLive_hw = 0, motorLive_spd = 0, motorLive_best = 0, motorLive_pct = 0, motorLive_pitch = 0;
 static bool  motorLiveValid = false;
 static uint8_t motorLiveSrc = 0;
+
+// GUI-adjustable settings (registry-driven; build-then-tune). Per-axis deviation bounds here;
+// steady times + sea-state window + headwind/front/eval/prune knobs live with the engine instance
+// in 7_functions.ino.
+float perfWsTol        = 2.0f;      // AWS deviation band (kt)
+float perfWaTol        = 12.0f;     // AWA deviation band (deg)
+float perfRpmTol       = 100.0f;    // motoring RPM deviation band
+float perfMinBoatSpeed = 0.5f;      // admission floor (kt)
+float perfMinWindSpeed = 2.0f;      // admission floor (kt, sailing)
+float perfRpmFloor     = 50.0f;     // RPM ≤ this = engine off = sailing; above = motoring (motorsailing counts as motoring)
+float perfSpeedSrc     = 1.0f;      // 1 = STW, 2 = SOG ("both" removed; switching source = Clear-All)
+float perfFoldSymmetric = 1.0f;     // 1 = fold |AWA| at eval/display (default); 0 = keep both tacks
+float perfPaused       = 0.0f;      // 1 = halt learning/persist (sticky across reboot); live display still updates
+float perfSimMode      = 0.0f;      // 1 = inject synthetic wind/speed/RPM/pitch for bench testing; NOT persisted
 
 // Supabase configuration......similar stuff is locally defined in a few functions that upload sensor data, config snapshots to cloud
 const char *SUPABASE_URL = "https://qnbekuaoweuteylitzvo.supabase.co";
@@ -661,12 +768,13 @@ const unsigned long CONFIG_SNAPSHOT_INTERVAL = 300000;    // 5 min — TEST (pro
 // SENSOR_UPLOAD_INTERVAL is firmware-only (no UI, no LittleFS) — edit + reflash to change.
 const unsigned long SENSOR_UPLOAD_INTERVAL = 120000;          // 2 min — TEST (production: 600000 = 10 min)
 const unsigned long BUFFER_UPLOAD_INTERVAL = 13000;  // 13 seconds
-const unsigned long BOATPERF_UPLOAD_INTERVAL = 600000;  // 10 min — TEST (production: 3600000 = 1 hr); field-off gated
+const unsigned long BOATPERF_UPLOAD_INTERVAL = 900000;  // 15 min — field-off-gated upload + cloud re-fit cadence
 unsigned long lastBoatPerfUploadTime = 0;
-// TODO TEST — temporarily 15 min to validate the warning banner/popup/graceful shutdown.
-// Revert to 43200000 (12 hr) for production. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min.)
-//const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
-const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
+const unsigned long ALTHEALTH_UPLOAD_INTERVAL = 900000;  // 15 min — field-off-gated alt-health upload + cloud re-fit cadence
+unsigned long lastAltHealthUploadTime = 0;
+// Set to PRODUCTION 2026-06-02. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min TEST.)
+const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
+//const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
 
 //Configuration Snapshot Stuff
 char *configPayloadBuffer;
@@ -1176,6 +1284,10 @@ float MinVoltage = 99.0f;          // V (session min)
 float MinVoltage_AllTime = 99.0f;  // V (lifetime min)
 // Runtime (hours)
 double EngineRunTime_AllTime = 0.0;  // seconds (lifetime) — divide by 3600 for hours; double for many-year precision
+// Boat-speed data maturity — lifetime seconds spent moving in each mode (sailing = engine off, motoring = engine on).
+// Shown next to "front points" in the Boat Speed plot. Reset by Clear All (resetBoatPerformance). Persisted in NVS.
+double perfSailSeconds = 0.0;
+double perfMotorSeconds = 0.0;
 // Charge cycles (count)
 float ChargeCycles = 0;          // count (session)
 float ChargeCycles_AllTime = 0;  // count (lifetime)
@@ -1797,6 +1909,8 @@ uint32_t prev_SolarEnergy_AllTime = 0;
 int32_t prev_AltFuelUsed_AllTime = 0;
 int32_t prev_EngineFuel_AllTime = 0;
 int32_t prev_EngineRunTime_AllTime = 0;
+int32_t prev_perfSailSeconds = 0;
+int32_t prev_perfMotorSeconds = 0;
 int32_t prev_EngineCycles_AllTime = 0;
 int32_t prev_AltOnTime_AllTime = 0;
 float prev_ChargeCycles_AllTime = 0;
@@ -1820,6 +1934,9 @@ uint32_t prev_vltTime_AllTime = 0;
 int32_t prev_AvgSOC = 0;
 int32_t prev_AvgSOC_AllTime = 0;
 static float prev_sailing_days_alltime = -1.0f;
+static float prev_sailing_dist_alltime = -1.0f;
+static float prev_alt_power_max_alltime_w = -1.0f;
+static float prev_solar_power_max_alltime_w = -1.0f;
 uint64_t prev_socAccum_AllTime = 0;
 uint32_t prev_socTime_AllTime = 0;
 
@@ -3278,6 +3395,19 @@ uint32_t g_currentStaleCount = 0;
 //additional leaderboard stuff
 float sailing_days_alltime = 0.0;             // Total sailing days (lifetime)
 float sailing_ratio = 0.0;                    // % of time spent sailing (calculated)
+float sailing_dist_alltime = 0.0f;            // nm under sail / engine-off (lifetime)
+float alt_power_max_alltime_w = 0.0f;         // peak alternator power, W (lifetime)
+float solar_power_max_alltime_w = 0.0f;       // peak solar power, W (lifetime)
+float VictronSolarPower_W = 0.0f;             // live solar panel power, W (VE.Direct PPV)
+float VictronSolarVoltage_V = 0.0f;           // live solar panel voltage, V (VE.Direct VPV)
+float VictronSolarCurrent_A = 0.0f;           // live solar panel current, A (PPV / VPV)
+int VictronChargeState = -1;                  // VE.Direct CS code (0=Off,3=Bulk,4=Abs,5=Float,7=Equalize); -1 = unknown
+int VictronMPPTMode = -1;                     // VE.Direct MPPT code (0=Off,1=V/I limited,2=active MPPT); -1 = unknown
+int VictronError = -1;                        // VE.Direct ERR code (0=no error); -1 = unknown
+float VictronYieldToday_kWh = 0.0f;           // VE.Direct H20 (0.01 kWh units -> kWh)
+float VictronMaxPowerToday_W = 0.0f;          // VE.Direct H21 (W)
+float VictronYieldYesterday_kWh = 0.0f;       // VE.Direct H22 (0.01 kWh units -> kWh)
+float VictronMaxPowerYesterday_W = 0.0f;      // VE.Direct H23 (W)
 float max_wind_speed_true_alltime = 0.0;      // Maximum true wind speed (knots)
 float max_wind_speed_apparent_alltime = 0.0;  // Maximum apparent wind speed (knots)
 float board_temp_max_alltime = -999.0;        // Maximum board temperature (°F)
@@ -3370,8 +3500,9 @@ enum DataIndex {
   IDX_IMU,                       // 34 - IMU (accel/gyro/derived angles)
   IDX_WATER_DEPTH,               // 35 - NMEA2k WaterDepth (PGN 128267)
   IDX_STW_NMEA,                  // 36 - Speed Through Water / SOW (PGN 128259) for the boat-performance polar
+  IDX_VICTRON_SOLAR,             // 37 - Victron VE.Direct solar (PPV/VPV) staleness
   // Keep this last and increment when new added
-  MAX_DATA_INDICES = 37
+  MAX_DATA_INDICES = 38
 };
 
 unsigned long dataTimestamps[MAX_DATA_INDICES];  // Uses the enum size automatically
@@ -4553,6 +4684,23 @@ void loop() {
             if (buildBoatPerfPayload(req.payload, sizeof(req.payload))) {
               if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
                 queueConsoleMessage("BoatPerf upload: HTTPS queue full, will retry next interval");
+              }
+            }
+          }
+        }
+
+        // Alternator-health best-ever records → cloud (field-off gated; sim never uploads).
+        // Alt-health LEARNS with the field ON, but uploads (like all flash/HTTPS) are field-OFF:
+        // records bank during charging and flush at the next field-off. buildAltHealthPayload
+        // is dirty-gated, so this is a no-op when nothing new has been banked.
+        if (hardwarePresent == 1 && fieldOffSettled(10000) && millis() - lastAltHealthUploadTime >= ALTHEALTH_UPLOAD_INTERVAL) {
+          lastAltHealthUploadTime = millis();
+          if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
+            HttpsRequest req = {};
+            req.type = HTTPS_UPLOAD_ALTHEALTH;
+            if (buildAltHealthPayload(req.payload, sizeof(req.payload))) {
+              if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                queueConsoleMessage("AltHealth upload: HTTPS queue full, will retry next interval");
               }
             }
           }
