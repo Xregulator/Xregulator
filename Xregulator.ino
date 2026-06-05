@@ -2712,7 +2712,6 @@ volatile bool pendingResetBoatPerformance = false;
 volatile bool pendingClearOverheatHistory = false;
 volatile bool pendingSaveUserTableEdits = false;
 volatile bool pendingSaveVesselInfo = false;
-volatile bool pendingClearVesselInfo = false;
 bool pendingShutdownFlush = false;     // set on ignition-off edge; cleared after full flush
 bool shutdownNVSFlushDone = false;     // true once NVS+sensor window saved this shutdown
 uint32_t shutdownCloudDeadlineMs = 0;  // millis() deadline for cloud drain window
@@ -4329,10 +4328,6 @@ void loop() {
       pendingSaveVesselInfo = false;
       saveVesselInfoToFile();
     }
-    if (pendingClearVesselInfo) {
-      pendingClearVesselInfo = false;
-      executeClearVesselInfo();
-    }
   }
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
@@ -4420,10 +4415,6 @@ void loop() {
             if (pendingSaveVesselInfo) {
               pendingSaveVesselInfo = false;
               saveVesselInfoToFile();
-            }
-            if (pendingClearVesselInfo) {
-              pendingClearVesselInfo = false;
-              executeClearVesselInfo();
             }
             shutdownNVSFlushDone = true;
             shutdownCloudDeadlineMs = millis() + 1800000;  // 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain

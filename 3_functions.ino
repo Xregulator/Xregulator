@@ -2213,41 +2213,6 @@ void setupServer() {
     pendingSaveVesselInfo = true;
     request->send(200, "application/json", "{\"success\":true}");
   });
-  server.on("/clearVesselInfo", HTTP_POST, [](AsyncWebServerRequest *request) {
-    // Password check
-    if (!request->hasParam("password", true)) {
-      request->send(401, "application/json", "{\"success\":false,\"error\":\"No password\"}");
-      return;
-    }
-    String password = request->getParam("password", true)->value();
-    password.trim();
-    if (!validatePassword(password.c_str())) {
-      request->send(401, "application/json", "{\"success\":false,\"error\":\"Invalid password\"}");
-      return;
-    }
-
-    // Reset all vessel info to defaults
-    BOAT_LENGTH_FT = 0;
-    BOAT_TYPE = "monohull";
-    BOAT_MAKE_MODEL = "";
-    BOAT_YEAR = 2025;
-    ENGINE_MAKE = "";
-    ENGINE_HP = 0;
-    HOME_PORT[0] = '\0';
-    BATTERY_VOLTAGE = 12;
-    BatteryCapacity_Ah = 0;
-    BATTERY_TYPE = "lifepo4";
-    ALTERNATOR_BRAND_MODEL = "";
-    SolarWatts = 0;
-    imuMountOrientation = 0;
-    IMU_DIST_BOW_FT = 0;
-    IMU_DIST_CL_FT = 0;
-    IMU_HEIGHT_WL_FT = 0;
-
-    // Defer file delete to Core 1 — LittleFS.remove on Core 0 stalls SSE delivery
-    pendingClearVesselInfo = true;
-    request->send(200, "application/json", "{\"success\":true}");
-  });
   // ============================================================
   // REFACTORED /get HANDLER
   // Replace the existing server.on("/get", ...) block in
@@ -6614,14 +6579,3 @@ void saveVesselInfoToFile() {
   writeFile(LittleFS, "/SolarWatts.txt",         String(SolarWatts).c_str());
 }
 
-// Called from Core 1 main loop via pendingClearVesselInfo flag — not safe to call on Core 0
-void executeClearVesselInfo() {
-  if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-    Serial.println("executeClearVesselInfo: mutex timeout");
-    return;
-  }
-  if (LittleFS.exists("/vessel_info.json")) {
-    LittleFS.remove("/vessel_info.json");
-  }
-  xSemaphoreGive(fsMutex);
-}

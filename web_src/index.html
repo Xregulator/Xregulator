@@ -615,8 +615,6 @@
               <div style="display: flex; gap: 10px;">
                 <input onclick="submitMessage.call(this)" type="submit" value="Save Vessel Info" class="btn-primary"
                   style="flex: 1; padding:12px;font-size:16px;font-weight:bold;">
-                <input onclick="clearVesselData.call(this)" type="button" value="Clear Vessel Data"
-                  class="btn-secondary" style="padding:8px 12px;font-size:13px;font-weight:600;align-self:center;">
               </div>
 
 
@@ -6237,8 +6235,9 @@
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('livedata', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'battery', event)">Battery</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'solar', event)">Solar</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'engine', event)">Engine</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'gps', event)">GPS/Travel/Wind</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'sailing', event)">Sailing</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'accel', event)">Accel</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'protection', event)">Protection</button>
@@ -6707,55 +6706,6 @@
           </div>
 
           <div class="card-group">
-            <p class="card-group-title">Solar (Victron MPPT)</p>
-            <div class="metric-row">
-              <span class="metric-label">Solar Power
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">Live solar panel power from a Victron MPPT over VE.Direct (PPV). Available if VE.Direct Data is turned on in Settings→System.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="VictronSolarPowerID">0</span> W</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Solar Voltage</span>
-              <span class="metric-value"><span id="VictronSolarVoltageID">0</span> V</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Solar Current</span>
-              <span class="metric-value"><span id="VictronSolarCurrentID">0</span> A</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Charge State</span>
-              <span class="metric-value"><span id="VictronChargeStateID">—</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Tracker Mode</span>
-              <span class="metric-value"><span id="VictronMPPTModeID">—</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Charger Error</span>
-              <span class="metric-value"><span id="VictronErrorID">—</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Yield Today</span>
-              <span class="metric-value"><span id="VictronYieldTodayID">0</span> kWh</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Max Power Today</span>
-              <span class="metric-value"><span id="VictronMaxPowerTodayID">0</span> W</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Yield Yesterday</span>
-              <span class="metric-value"><span id="VictronYieldYesterdayID">0</span> kWh</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Max Power Yesterday</span>
-              <span class="metric-value"><span id="VictronMaxPowerYesterdayID">0</span> W</span>
-            </div>
-          </div>
-
-          <div class="card-group">
             <p class="card-group-title">Charge/Discharge Time</p>
             <div class="metric-row">
               <span class="metric-label">Time to Full Charge</span>
@@ -6925,6 +6875,63 @@
     </div>
 
 
+    <!-- Solar (Victron MPPT) Live Data Sub-tab -->
+    <div id="livedata-solar" class="sub-tab-content">
+      <div class="settings-card">
+        <div class="grid">
+          <div class="card-group">
+            <p class="card-group-title">Solar (Victron MPPT)</p>
+            <div class="metric-row">
+              <span class="metric-label">Solar Power
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">Live solar panel power from a Victron MPPT over VE.Direct (PPV). Available if VE.Direct Data is turned on in Settings→System.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="VictronSolarPowerID">0</span> W</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Solar Voltage</span>
+              <span class="metric-value"><span id="VictronSolarVoltageID">0</span> V</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Solar Current</span>
+              <span class="metric-value"><span id="VictronSolarCurrentID">0</span> A</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Charge State</span>
+              <span class="metric-value"><span id="VictronChargeStateID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Tracker Mode</span>
+              <span class="metric-value"><span id="VictronMPPTModeID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Charger Error</span>
+              <span class="metric-value"><span id="VictronErrorID">—</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Yield Today</span>
+              <span class="metric-value"><span id="VictronYieldTodayID">0</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Max Power Today</span>
+              <span class="metric-value"><span id="VictronMaxPowerTodayID">0</span> W</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Yield Yesterday</span>
+              <span class="metric-value"><span id="VictronYieldYesterdayID">0</span> kWh</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Max Power Yesterday</span>
+              <span class="metric-value"><span id="VictronMaxPowerYesterdayID">0</span> W</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
     <!-- Engine Live Data Sub-tab -->
     <div id="livedata-engine" class="sub-tab-content">
       <div class="settings-card">
@@ -7053,8 +7060,8 @@
       </div>
     </div> <!--Closes Engine settings-card -->
 
-    <!-- GPS/Travel/Wind Live Data Sub-tab -->
-    <div id="livedata-gps" class="sub-tab-content">
+    <!-- Sailing Live Data Sub-tab (polar/motoring plot, GPS/travel, wind, boat speed, barometer) -->
+    <div id="livedata-sailing" class="sub-tab-content">
       <!-- Boat Performance (Phase 3) — unified sailing/motoring -->
       <div class="settings-card" style="margin-top:16px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
@@ -7076,10 +7083,16 @@
             <div id="perf-condL-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
             <div id="perf-condL-sub" style="font-size:13px;color:var(--text-muted);"></div>
           </div>
-          <!-- center: plot (one of the two is shown per view) -->
+          <!-- center: plot (one of the two is shown per view) + center-hub live speed -->
           <div style="grid-column:2;grid-row:1 / span 3;align-self:center;">
-            <canvas id="perf-plot" width="360" height="360" style="width:100%;max-width:260px;aspect-ratio:1/1;display:block;margin:0 auto;"></canvas>
-            <canvas id="motor-plot" width="520" height="300" style="width:100%;max-width:300px;aspect-ratio:520/300;display:none;margin:0 auto;"></canvas>
+            <div style="position:relative;max-width:300px;margin:0 auto;">
+              <canvas id="perf-plot" width="360" height="360" style="width:100%;max-width:260px;aspect-ratio:1/1;display:block;margin:0 auto;"></canvas>
+              <canvas id="motor-plot" width="520" height="300" style="width:100%;max-width:300px;aspect-ratio:520/300;display:none;margin:0 auto;"></canvas>
+              <div id="perf-speed-hub" style="position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;">
+                <div id="perf-speed-num" style="font-size:40px;font-weight:800;line-height:.85;color:var(--accent);">&mdash;</div>
+                <div id="perf-speed-unit" style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text-muted);">KNOTS</div>
+              </div>
+            </div>
           </div>
           <!-- TR: sea state -->
           <div style="grid-column:3;grid-row:1;text-align:right;">
@@ -7434,6 +7447,73 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Barometric Pressure (moved from Other): conditions header + 7-day history plot -->
+      <div class="settings-card">
+        <div class="card-group baro-panel">
+          <div class="card-group-title">Barometric Pressure
+            <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️
+              <span class="tooltip-box">
+                Sea-level barometric pressure (mbar — the unit used by the BBC Shipping Forecast, NOAA marine VHF, and most marine instruments; 1 mbar = 1 hPa exactly).
+                Sampled every 10 minutes into a 7-day PSRAM ring buffer, persisted to NVS only at the field-off edge (no impact on loop timing).
+                Forecast uses the <strong>Zambretti algorithm</strong> (1915, refined 1985) when true wind direction (NMEA2k) and GPS latitude are both fresh — it combines current pressure, 3-hour tendency, wind direction, and hemisphere/season into one of 26 outcomes.
+                When either is stale, it falls back to a simpler tendency-only rule based on the UK Met Office Shipping Forecast Glossary (Steady / Rising slowly / Rising / Rising quickly / Rising very rapidly, thresholds 0.1 / 1.5 / 3.5 / 6 mbar over 3 h).
+                History older than 7 days is available in your cloud storage.
+              </span>
+            </span>
+          </div>
+
+          <div class="baro-conditions">
+            <div class="baro-block">
+              <div class="baro-block-label">Zone</div>
+              <div class="baro-zone-label" id="baroZoneLabel">—</div>
+              <div class="baro-zone-sub" id="baroZoneSub">—</div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">Current</div>
+              <div class="baro-reading-big"><span id="baroPressureID">—</span> <span style="font-size:14px;color:var(--text-muted,#777);font-weight:normal;">mbar</span></div>
+              <div class="baro-reading-sub">
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
+                </span>
+              </div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">3-Hour Tendency</div>
+              <div class="baro-tendency-row">
+                <div class="baro-tendency-arrow" id="baroTendencyArrow"></div>
+                <div class="baro-tendency-text">
+                  <span class="baro-tendency-label" id="baroTendencyLabel">—</span>
+                  <span class="baro-tendency-delta" id="baroTendencyDelta">—</span>
+                </div>
+              </div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">Forecast Method</div>
+              <div class="baro-method-label" id="baroMethodLabel">—</div>
+              <div class="baro-method-sub" id="baroMethodSub">—</div>
+            </div>
+          </div>
+
+          <div class="baro-forecast-row" id="baroForecastText">—</div>
+
+          <div class="baro-plot-controls">
+            <label class="baro-autoscale-toggle">
+              <input type="checkbox" id="baroAutoscaleY">
+              Autoscale Y
+            </label>
+            <div class="baro-range-pills" id="baroRangePills">
+              <button class="sub-tab" data-range="3">3H</button>
+              <button class="sub-tab" data-range="6">6H</button>
+              <button class="sub-tab active" data-range="24">24H</button>
+              <button class="sub-tab" data-range="48">48H</button>
+              <button class="sub-tab" data-range="168">1W</button>
+            </div>
+          </div>
+          <div id="baroPlot" class="baro-plot-container"></div>
         </div>
       </div>
     </div>
@@ -8330,6 +8410,22 @@
                 </div>
               </div>
 
+              <!-- Alternator Health -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Alternator Health
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Updates the alternator best-ever health record book. Fires only when
+                      readings are steady — 0ms is normal between qualifying samples.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_altHealth_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_altHealth_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- Efficiency Tracker -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Efficiency Tracker
@@ -9163,72 +9259,6 @@
     <!-- Other Live Data Sub-tab -->
     <div id="livedata-other" class="sub-tab-content">
       <div class="settings-card">
-
-        <!-- Barometric Pressure: conditions header + 14-day history plot. Replaces the prior
-             single-value baro card. Board Temp + ADS Ch3 sit in the grid below. -->
-        <div class="card-group baro-panel">
-          <div class="card-group-title">Barometric Pressure
-            <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️
-              <span class="tooltip-box">
-                Sea-level barometric pressure (mbar — the unit used by the BBC Shipping Forecast, NOAA marine VHF, and most marine instruments; 1 mbar = 1 hPa exactly).
-                Sampled every 10 minutes into a 7-day PSRAM ring buffer, persisted to NVS only at the field-off edge (no impact on loop timing).
-                Forecast uses the <strong>Zambretti algorithm</strong> (1915, refined 1985) when true wind direction (NMEA2k) and GPS latitude are both fresh — it combines current pressure, 3-hour tendency, wind direction, and hemisphere/season into one of 26 outcomes.
-                When either is stale, it falls back to a simpler tendency-only rule based on the UK Met Office Shipping Forecast Glossary (Steady / Rising slowly / Rising / Rising quickly / Rising very rapidly, thresholds 0.1 / 1.5 / 3.5 / 6 mbar over 3 h).
-                History older than 7 days is available in your cloud storage.
-              </span>
-            </span>
-          </div>
-
-          <div class="baro-conditions">
-            <div class="baro-block">
-              <div class="baro-block-label">Zone</div>
-              <div class="baro-zone-label" id="baroZoneLabel">—</div>
-              <div class="baro-zone-sub" id="baroZoneSub">—</div>
-            </div>
-            <div class="baro-block">
-              <div class="baro-block-label">Current</div>
-              <div class="baro-reading-big"><span id="baroPressureID">—</span> <span style="font-size:14px;color:var(--text-muted,#777);font-weight:normal;">mbar</span></div>
-              <div class="baro-reading-sub">
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
-                </span>
-              </div>
-            </div>
-            <div class="baro-block">
-              <div class="baro-block-label">3-Hour Tendency</div>
-              <div class="baro-tendency-row">
-                <div class="baro-tendency-arrow" id="baroTendencyArrow"></div>
-                <div class="baro-tendency-text">
-                  <span class="baro-tendency-label" id="baroTendencyLabel">—</span>
-                  <span class="baro-tendency-delta" id="baroTendencyDelta">—</span>
-                </div>
-              </div>
-            </div>
-            <div class="baro-block">
-              <div class="baro-block-label">Forecast Method</div>
-              <div class="baro-method-label" id="baroMethodLabel">—</div>
-              <div class="baro-method-sub" id="baroMethodSub">—</div>
-            </div>
-          </div>
-
-          <div class="baro-forecast-row" id="baroForecastText">—</div>
-
-          <div class="baro-plot-controls">
-            <label class="baro-autoscale-toggle">
-              <input type="checkbox" id="baroAutoscaleY">
-              Autoscale Y
-            </label>
-            <div class="baro-range-pills" id="baroRangePills">
-              <button class="sub-tab" data-range="3">3H</button>
-              <button class="sub-tab" data-range="6">6H</button>
-              <button class="sub-tab active" data-range="24">24H</button>
-              <button class="sub-tab" data-range="48">48H</button>
-              <button class="sub-tab" data-range="168">1W</button>
-            </div>
-          </div>
-          <div id="baroPlot" class="baro-plot-container"></div>
-        </div>
 
         <div class="grid">
 

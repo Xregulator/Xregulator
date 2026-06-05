@@ -835,6 +835,12 @@ function setPerfView(v){
   const pp=document.getElementById('perf-plot'), mp=document.getElementById('motor-plot');
   if(pp) pp.style.display = v===0?'block':'none';
   if(mp) mp.style.display = v===1?'block':'none';
+  // Speed hub: centered in the sailing polar (open hub); upper-left on the motoring map (clears the rising curve)
+  const hub=document.getElementById('perf-speed-hub');
+  if(hub){
+    if(v===1){ hub.style.left='9%'; hub.style.top='11%'; hub.style.transform='none'; hub.style.textAlign='left'; }
+    else { hub.style.left='50%'; hub.style.top='54%'; hub.style.transform='translate(-50%,-50%)'; hub.style.textAlign='center'; }
+  }
   const symRow=document.getElementById('perf-sym-row'); if(symRow) symRow.style.display = v===0?'':'none';
   renderPerf();
   if(v===0) queuePerfPlotUpdate(); else queueMotorPlotUpdate();
@@ -842,6 +848,9 @@ function setPerfView(v){
 // Unified gauge/conditions updater — reads the active view's live object.
 function renderPerf(){
   const L = perfView ? motorLive : perfLive;
+  // Center-hub live speed — the dominant readable number on the plot (SOG sailing / STW motoring)
+  setTxt('perf-speed-num', (L.valid && typeof L.spd === 'number') ? L.spd.toFixed(1) : '—');
+  setTxt('perf-speed-unit', perfView ? 'KT · STW' : 'KT · SOG');
   setTxt('perf-pct', (L.valid && L.best>0.1) ? Math.round(L.pct)+'%' : '—');   // % vs best-ever, NO clamp
   // data maturity (bottom-right quadrant): learned front points + hours spent moving in this mode
   setTxt('perf-pts', (L.ptCount|0));
@@ -4205,7 +4214,7 @@ async function handleVesselInfoSave(event) {
 
             messageDiv.style.backgroundColor = '#e8f5e9';
             messageDiv.style.color = '#2e7d32';
-            messageDiv.textContent = 'Vessel info saved successfully! You can now access other tabs.';
+            messageDiv.innerHTML = 'Vessel info saved successfully! You can now access other tabs.<br>To push this profile to the cloud, go to Cloud Features &rarr; Registration (cloud features are on by default).';
 
             // Update dual-control echoes immediately
             updateEchoIfChanged('SolarWatts_echo', vesselData.solar_watts);
@@ -9739,8 +9748,8 @@ function showSubTab(parentTab, subTabName, evt = null) {
     }
 
 
-    // Initialize / refresh the barometer panel whenever the Other tab is opened
-    if (parentTab === 'livedata' && subTabName === 'other') {
+    // Initialize / refresh the barometer panel whenever the Sailing tab is opened (moved from Other)
+    if (parentTab === 'livedata' && subTabName === 'sailing') {
         if (typeof window.initBaroPanel === 'function') window.initBaroPanel();
     }
 
@@ -10921,47 +10930,6 @@ function populateYearDropdown() {
             yearSelect.appendChild(option);
         }
     }
-}
-
-function clearVesselData() {
-    if (!confirm('Are you sure? This will reset all vessel information to defaults.')) {
-        return;
-    }
-
-    const form = this.form || this.closest('form');
-    const password = form.querySelector('.password_field').value;
-
-    fetch(buildURL('/clearVesselInfo'), {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: `password=${encodeURIComponent(password)}`
-    })
-        .then(response => response.json())
-        .then(data => {
-            const messageDiv = document.getElementById('vessel-info-message');
-            if (data.success) {
-                messageDiv.textContent = 'Vessel data cleared successfully. Refreshing...';
-                messageDiv.style.display = 'block';
-                messageDiv.style.backgroundColor = '#d4edda';
-                messageDiv.style.color = '#155724';
-                setTimeout(() => location.reload(), 1000);
-            } else {
-                messageDiv.textContent = 'Error: ' + (data.error || 'Unknown error');
-                messageDiv.style.display = 'block';
-                messageDiv.style.backgroundColor = '#f8d7da';
-                messageDiv.style.color = '#721c24';
-            }
-        })
-        .catch(err => {
-            console.error('Clear vessel data error:', err);
-            const messageDiv = document.getElementById('vessel-info-message');
-            messageDiv.textContent = 'Network error clearing vessel data';
-            messageDiv.style.display = 'block';
-            messageDiv.style.backgroundColor = '#f8d7da';
-            messageDiv.style.color = '#721c24';
-        });
 }
 
 // Orientation card click handling
