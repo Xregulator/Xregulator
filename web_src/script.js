@@ -597,6 +597,10 @@ const CSV2_FIELDS = [
     "systemIDFallAvg",
     "ft_altHealth_win",
     "ft_altHealth_ses",
+    "ft_altFold_win",
+    "ft_altFold_ses",
+    "ft_boatPerf_win",
+    "ft_boatPerf_ses",
     "systemIDActive",
     "systemIDResultsReady",
     "systemIDStepAmp_0",
@@ -654,6 +658,18 @@ const CSV2_FIELDS = [
     "VictronMaxPowerToday_W",     // H21 max power today (W ×1)
     "VictronYieldYesterday_kWh",  // H22 yield yesterday (kWh ×100)
     "VictronMaxPowerYesterday_W", // H23 max power yesterday (W ×1)
+    "currentFuelGPH",             // live fuel flow (gal/hr ×100)
+    "currentNMPG",                // live fuel economy (naut mi/gal ×100)
+    // session fuel-economy curve: mpg per RPM bin (18 bins spanning 0..fuelCurveTopRPM), naut mi/gal ×100, 0 = empty
+    "fuelCurveNMPG_0", "fuelCurveNMPG_1", "fuelCurveNMPG_2", "fuelCurveNMPG_3", "fuelCurveNMPG_4", "fuelCurveNMPG_5",
+    "fuelCurveNMPG_6", "fuelCurveNMPG_7", "fuelCurveNMPG_8", "fuelCurveNMPG_9", "fuelCurveNMPG_10", "fuelCurveNMPG_11",
+    "fuelCurveNMPG_12", "fuelCurveNMPG_13", "fuelCurveNMPG_14", "fuelCurveNMPG_15", "fuelCurveNMPG_16", "fuelCurveNMPG_17",
+    "fuelCurveTopRPM",            // top configured fuel-table RPM -> chart x-axis scale (×1)
+    // 80MHz low-power loop instrumentation (4 fields)
+    "loopWorst80Win_ms",          // worst 80MHz loop pass, rolling 5s (ms)
+    "loopWorst80Ses_ms",          // worst 80MHz loop pass since Reset Peak Values (ms)
+    "loopOver80ImuLimitCount",    // # 80MHz passes over ~38ms accel-drain limit since reset
+    "loop80IterCount",            // total 80MHz passes since reset
 ];
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -697,30 +713,58 @@ function updateAltHealth() {
   if (dot) { dot.style.background = altLive.steady ? '#5cb85c' : '#ccc'; dot.title = altLive.steady?'in a steady run (folding)':'not steady'; }
   const modeLbl = document.getElementById('alt-mode-label');
   if (modeLbl) modeLbl.textContent = altLive.source>=1 ? 'FIXED' : (altLive.paused>=1 ? 'LEARNED (paused)' : 'LEARNED');
-  const simBtn = document.getElementById('alt-sim-btn');
-  if (simBtn){ const on=altLive.sim>=1; simBtn.value = on?'Simulator: ON':'Simulator: off'; simBtn.className = on?'btn-primary':'btn-secondary'; }
+  setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Settings (segmented, mirrors Vessel Performance)
 }
 
-function altToggleSim(){
+// Simulator Off(0)/On(1) — segmented toggle in Settings, parallels Vessel Performance's perfSimMode.
+function altSetSim(v){
   if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
-  const next = altLive.sim>=1 ? 0 : 1;
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSimMode='+next),{},5000).catch(()=>{});
+  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSimMode='+(v?1:0)),{},5000).catch(()=>{});
 }
 // LEARNED↔FIXED reference toggle: FIXED (1) freezes + pauses learning; LEARNED (0) resumes.
 function altSetSource(src){
   if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSource='+(src?1:0)),{},5000).catch(()=>{});
 }
-// Save the active front to a LittleFS file; Load it back (→ FIXED + paused). Spec §4/§8.
-function altSaveFront(){
-  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSaveFront=1'),{},5000)
-    .then(()=>{ alert('Front saved to /altfront_saved.csv'); }).catch(()=>{});
+// Fetch a CSV endpoint and SAVE it to the browser's Downloads as a dated, human-named file
+// (e.g. "Alternator Health Data 2026-06-05 12-47-00.csv") rather than rendering it inline. The
+// saved file round-trips straight back through the matching Load CSV button. Shared by both the
+// alternator-health and boat-performance download buttons. (Browser flow; Capacitor file-save is
+// a separate path.)
+function downloadCsv(url, baseName){
+  fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
+    if(!txt || txt.trim().length < 8){ alert('No '+baseName+' to download yet.'); return; }
+    const d=new Date(), p=n=>String(n).padStart(2,'0');
+    const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([txt],{type:'text/csv'}));
+    a.download=baseName+' '+stamp+'.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }).catch(e=>alert('Download failed: '+(e&&e.message?e.message:e)));
 }
-function altLoadFront(){
+// Import a health curve from a file in Downloads (BEFRONT1). Opens the native picker;
+// altUploadCsvFile() reads it and POSTs the raw text to /altUploadFront. Mirrors perfLoadCsv.
+function altLoadCsv(){
   if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
-  if(!confirm('Load the saved front? This replaces the live reference and switches to FIXED (learning paused).')) return;
-  fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altLoadFront=1'),{},5000).catch(()=>{});
+  const inp=document.getElementById('alt-load-file'); if(inp){ inp.value=''; inp.click(); }   // freeze/learn is asked after the file is chosen
+}
+function altUploadCsvFile(inp){
+  const f=inp.files && inp.files[0]; if(!f) return;
+  // Ask how to use the imported curve, right after the file is chosen: freeze (hold as-is) vs learn (adopt + refine).
+  const freeze = confirm('Import "'+f.name+'"\n\nHow should this health curve be used?\n\nOK = FREEZE — hold it exactly as imported (FIXED, learning paused). Stays on this device.\nCancel = LEARN — adopt it as your own and keep refining from your engine. Uploaded to the cloud as this device\'s data (tagged as imported).');
+  const rd=new FileReader();
+  rd.onload=function(){
+    const txt=String(rd.result||'');
+    if(txt.indexOf('BEFRONT1')<0){ alert('That file is not an alternator health (BEFRONT1) CSV.'); inp.value=''; return; }
+    fetchWithTimeout(buildURL('/altUploadFront?password='+encodeURIComponent(currentAdminPassword)+'&fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
+      .then(r=>{ if(r.ok){ alert('Health data imported — '+(freeze?'FIXED (learning paused)':'LEARNED (adopting to cloud; uploads at the next field-off)')+'.'); if(typeof fetchAltTrend==='function') fetchAltTrend(); }
+                 else { r.text().then(t=>alert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>alert('Import failed: HTTP '+r.status)); } })
+      .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+    inp.value='';
+  };
+  rd.onerror=function(){ alert('Could not read that file.'); inp.value=''; };
+  rd.readAsText(f);
 }
 
 function fetchAltTrend() {
@@ -754,7 +798,8 @@ function hidpiCtx(cv, W, H) {
 }
 
 // Performance-%-vs-engine-hours trend. Bold line = worst operating region (early warning);
-// faint line = overall. Live in-progress bucket appended as a dot. Empty \u2192 "awaiting first cloud fit".
+// faint line = overall. Live in-progress bucket appended as a dot. Empty \u2192 local "no trend yet" notice
+// (the trend is built on-device from engine-hours \u2014 NOT from the cloud; don't reintroduce a cloud message).
 function drawAltTrend() {
   const cv = document.getElementById('alt-trend');
   if (!cv || !cv.getContext) return;
@@ -765,7 +810,7 @@ function drawAltTrend() {
     pts.push({eng:altLive.engHours, worst:altLive.worstPct, overall:altLive.overallPct, live:true});
   if (pts.length === 0){
     ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center';
-    ctx.fillText('awaiting first cloud fit', W/2, H/2); ctx.textAlign='left'; return;
+    ctx.fillText('No trend yet — one point logs per engine-hour of running', W/2, H/2); ctx.textAlign='left'; return;
   }
   let maxE = 0; pts.forEach(p=>{ if(p.eng>maxE)maxE=p.eng; }); if(maxE<1)maxE=1;
   let minY = 70; const maxY = 105;
@@ -792,7 +837,11 @@ function drawAltTrend() {
   ctx.save(); ctx.translate(13,(padT+H-padB)/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('% of best-ever',0,0); ctx.restore();
   // lines \u2014 break across engine-hour gaps > GAP so missing data (e.g. engine on but alternator off) shows
   //         as a gap rather than a misleading slide toward 0. Firmware never commits 0-points (eligibility gate).
-  const GAP = 3;
+  // Break only across REAL data gaps, not normal point spacing (which grows when the firmware
+  // decimates a long history). Threshold = 3x the median step between points (floor 3 engine-hours).
+  let steps=[]; for(let i=1;i<pts.length;i++){ const d=pts[i].eng-pts[i-1].eng; if(d>0) steps.push(d); }
+  steps.sort((a,b)=>a-b);
+  const GAP = Math.max(3, (steps.length?steps[Math.floor(steps.length/2)]:1)*3);
   const line=(key,color,width)=>{ ctx.strokeStyle=color; ctx.lineWidth=width; ctx.beginPath();
     let pen=false, prevE=0;
     pts.forEach(p=>{ const x=X(p.eng), y=Y(Math.max(minY,Math.min(maxY,p[key])));
@@ -812,7 +861,7 @@ function drawAltTrend() {
 // so this can't fall out of sync with the firmware tables.
 let perfSchema = null;
 let perfLive = { valid:false, pct:0, spd:0, wa:0, ws:0, best:0, pitchStd:0, src:0,
-                 coverage:0, ptCount:0, source:0, paused:0, tickWinUs:0, sim:0 };
+                 coverage:0, ptCount:0, source:0, paused:0, sim:0 };
 let perfSettings = {};
 let perfCells = [];
 let _perfPlotPending = false, _perfModelLastFetch = 0;
@@ -842,6 +891,7 @@ function setPerfView(v){
     else { hub.style.left='50%'; hub.style.top='54%'; hub.style.transform='translate(-50%,-50%)'; hub.style.textAlign='center'; }
   }
   const symRow=document.getElementById('perf-sym-row'); if(symRow) symRow.style.display = v===0?'':'none';
+  const windTog=document.getElementById('perf-wind-toggle'); if(windTog) windTog.style.display = v===0?'':'none';
   renderPerf();
   if(v===0) queuePerfPlotUpdate(); else queueMotorPlotUpdate();
 }
@@ -899,41 +949,98 @@ function perfSetSpeedSrc(v){
   if(!confirm('Switching speed source (STW ↔ SOG) clears ALL learned boat-performance data — same as Clear All. Continue?')) return;
   perfSet('perfSpeedSrc', v);
 }
-// LEARNED↔FIXED reference toggle + Save/Load the boat front pair (spec §4).
+// LEARNED↔FIXED reference toggle.
 function perfSetSource(src){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } perfSet('perfSource', src?1:0); }
-function perfSaveFront(){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } perfSet('perfSaveFront',1); setTimeout(()=>alert('Boat fronts saved to /perffront_saved.csv'),300); }
-function perfLoadFront(){ if(!currentAdminPassword){ alert('Please unlock settings first'); return; } if(!confirm('Load the saved boat fronts? Replaces the live reference and switches to FIXED (learning paused).')) return; perfSet('perfLoadFront',1); }
+// Import a boat polar from a file (a shared BEFRONT1 CSV, or a Download-CSV backup). Opens the
+// native file picker; perfUploadCsvFile() reads it and POSTs the raw text to /perfUploadFront.
+function perfLoadCsv(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  const inp=document.getElementById('perf-load-file'); if(inp){ inp.value=''; inp.click(); }   // freeze/learn is asked after the file is chosen
+}
+function perfUploadCsvFile(inp){
+  const f=inp.files && inp.files[0]; if(!f) return;
+  // Ask how to use the imported polar, right after the file is chosen: freeze (hold as-is) vs learn (refine from it).
+  const freeze = confirm('Import "'+f.name+'"\n\nHow should this polar be used?\n\nOK = FREEZE — hold it exactly as imported (FIXED, learning paused).\nCancel = LEARN — use it as a starting point; your own sailing keeps refining it (LEARNED).');
+  const rd=new FileReader();
+  rd.onload=function(){
+    const txt=String(rd.result||'');
+    if(txt.indexOf('BEFRONT1')<0){ alert('That file is not a boat polar (BEFRONT1) CSV.'); inp.value=''; return; }
+    fetchWithTimeout(buildURL('/perfUploadFront?password='+encodeURIComponent(currentAdminPassword)+'&fixed='+(freeze?1:0)),{method:'POST',body:txt},10000)
+      .then(r=>{ if(r.ok){ alert('Polar imported — '+(freeze?'FIXED (learning paused)':'LEARNED (still refining from your sailing)')+'. The plot will refresh.'); fetchPerfCurve(); }
+                 else { r.text().then(t=>alert('Import failed: '+(t||('HTTP '+r.status)))).catch(()=>alert('Import failed: HTTP '+r.status)); } })
+      .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+    inp.value='';
+  };
+  rd.onerror=function(){ alert('Could not read that file.'); inp.value=''; };
+  rd.readAsText(f);
+}
 
 // ── v2 curve-driven render: the polar is the cloud-fitted curve sliced at the CURRENT wind speed +
 //    sea state, with faint record dots over it. (Bin scatter retired.) ──
-let perfCurve = null, perfRecs = [];
+// ── Boat-performance plots fed by the raw best-ever FRONT (BEFRONT1) the
+// firmware serves at /perfcurve.csv. We render directly from the front using
+// the SAME inverse-distance eval the firmware uses for the live "% of best"
+// (FrontStore::eval), so the plotted line always agrees with the gauge.
+// Each point: {x:[axis0, axis1, sea], y:speed, n:nSamp}.
+let sailFrontPts = [], motorFrontPts = [], perfRecs = [];
 let _perfCurveLastFetch = 0, _perfRecLastFetch = 0;
-function chopDer(a, chop){ if(!a||a.length<6) return 1; const st=12/5; let f=chop/st,i=Math.floor(f); if(i<0){i=0;f=0;} if(i>=5){i=4;f=5;} const t=f-i; return Math.max(0.3,Math.min(1.05,a[i]*(1-t)+a[i+1]*t)); }
-function windDer(a, hw){ if(!a||a.length<9) return 1; const st=80/8; let f=(hw+40)/st,i=Math.floor(f); if(i<0){i=0;f=0;} if(i>=8){i=7;f=8;} const t=f-i; return Math.max(0.3,Math.min(1.7,a[i]*(1-t)+a[i+1]*t)); }
-function evalSailCurve(c, tws, twa, chop){
-  if(!c||!c.sailValid) return 0;
-  let pa=((twa%360)+360)%360; if(pa>180)pa=360-pa;
-  let fs=pa/10, j=Math.floor(fs); if(j<0){j=0;fs=0;} if(j>=18){j=17;fs=18;} const tj=fs-j;
-  let a=0; while(a<5 && c.tws[a+1]<tws)a++; const b=a<5?a+1:a;
-  const ta=(b>a&&c.tws[b]>c.tws[a])?Math.max(0,Math.min(1,(tws-c.tws[a])/(c.tws[b]-c.tws[a]))):0;
-  const sa=c.spd[a][j]*(1-tj)+c.spd[a][j+1]*tj, sb=c.spd[b][j]*(1-tj)+c.spd[b][j+1]*tj;
-  return (sa*(1-ta)+sb*ta)*chopDer(c.chop,chop);
+// Per-axis distance normalization — MUST match the firmware axisScale[] (7_functions.ino).
+const SAIL_SCALE = [2.0, 12.0, 1.0];     // AWS, AWA, sea
+const MOTOR_SCALE = [100.0, 2.0, 1.0];   // RPM, headwind, sea
+function perfIdw(){ return (perfSettings.perfIdwPower != null && perfSettings.perfIdwPower > 0) ? perfSettings.perfIdwPower : 2.0; }
+
+// IDW surface eval — mirrors FrontStore::eval: dᵢ=√Σ((x-pt)/scale)²; exact hit→y; else Σwᵢyᵢ/Σwᵢ, w=1/(dᵢ^p+eps).
+function frontEval(pts, q, scale){
+  if(!pts.length) return 0;
+  const p=perfIdw(); let wsum=0,num=0;
+  for(const pt of pts){
+    let d2=0;
+    for(let a=0;a<q.length;a++){ const sc=scale[a]>1e-9?scale[a]:1; const dx=(q[a]-pt.x[a])/sc; d2+=dx*dx; }
+    if(d2<1e-12) return pt.y;
+    const dp = (p===2) ? d2 : Math.pow(Math.sqrt(d2), p);
+    const w = 1/(dp+1e-9); wsum+=w; num+=w*pt.y;
+  }
+  return wsum>0 ? num/wsum : 0;
 }
-function evalMotorCurve(c, rpm, hw, chop){
-  if(!c||!c.motorValid) return 0;
-  let a=0; while(a<c.mrpm.length-1 && c.mrpm[a+1]<rpm)a++; const b=a<c.mrpm.length-1?a+1:a;
-  const ta=(b>a&&c.mrpm[b]>c.mrpm[a])?Math.max(0,Math.min(1,(rpm-c.mrpm[a])/(c.mrpm[b]-c.mrpm[a]))):0;
-  return (c.mspd[a]*(1-ta)+c.mspd[b]*ta)*windDer(c.mwind,hw)*chopDer(c.mchop,chop);
+// Fold |AWA| to [0,180] when symmetric — mirrors perfFoldAwa (the front is stored folded only when symmetric).
+function foldAwaJS(a){
+  if(!(perfSettings.perfFoldSymmetric>=0.5)) return a;
+  let pa=a; while(pa<0)pa+=360; while(pa>=360)pa-=360; if(pa>180)pa=360-pa; return pa;
 }
-function parseCurveCsv(txt){
-  const t=txt.trim().split(','); if(t[0]!=='BPCURVE2') return null;
-  let i=1; const num=n=>{ const a=t.slice(i,i+n).map(Number); i+=n; return a; };
-  const c={};
-  c.sailValid=+t[i++]; c.sailFit=+t[i++]; c.tws=num(6); c.spd=[]; for(let a=0;a<6;a++)c.spd.push(num(19)); c.chop=num(6);
-  c.motorValid=+t[i++]; c.motorFit=+t[i++]; c.mrpm=num(8); c.mspd=num(8); c.mwind=num(9); c.mchop=num(6);
-  return c;
+// Apparent→true wind: standard transform from (AWS, AWA, boat speed). Returns {twa,tws}; TWA keeps AWA's side.
+function appToTrue(awa, bs, aws){
+  const r=Math.PI/180, ca=Math.cos(Math.abs(awa)*r);
+  const tws=Math.sqrt(Math.max(0, aws*aws + bs*bs - 2*aws*bs*ca));
+  let twa=0; if(tws>1e-6){ let c=(aws*ca - bs)/tws; c=Math.max(-1,Math.min(1,c)); twa=Math.acos(c)/r; }
+  return { twa: (awa<0?-twa:twa), tws };
 }
-function fetchPerfCurve(){ fetch('/perfcurve.csv').then(r=>r.text()).then(txt=>{ const c=parseCurveCsv(txt); if(c) perfCurve=c; drawPerfPlot(); drawMotorPlot(); }).catch(()=>{}); }
+// Polar display frame: 0 = apparent wind (the front's native frame), 1 = true wind (display-layer transform).
+let perfWindRef = 0;
+function setPerfWindRef(v){
+  perfWindRef = v?1:0;
+  const a=document.getElementById('perf-wind-0'), b=document.getElementById('perf-wind-1');
+  if(a) a.classList.toggle('cap-mode-active', perfWindRef===0);
+  if(b) b.classList.toggle('cap-mode-active', perfWindRef===1);
+  drawPerfPlot();
+}
+
+// Parse the BEFRONT1 sail+motor pair. Header: BEFRONT1,<SAIL|MOTOR>,<naxis>,<source>,<unit…>;
+// rows: x0..x(naxis-1),y,nSamp,tEmit. (sail x=[aws,awa,sea]; motor x=[rpm,headwind,sea]; y=boat speed.)
+function parseFrontCsv(txt){
+  const sail=[], motor=[]; let cur=null, naxis=3;
+  txt.split('\n').forEach(line=>{
+    const t=line.trim(); if(!t) return;
+    const c=t.split(',');
+    if(c[0]==='BEFRONT1'){ cur=(c[1]==='MOTOR')?motor:sail; naxis=(+c[2])||3; return; }
+    if(!cur || c.length < naxis+1) return;
+    const x=[]; for(let a=0;a<naxis;a++) x.push(+c[a]);
+    const y=+c[naxis], n=+c[naxis+1]||1;
+    if(x.some(Number.isNaN) || Number.isNaN(y)) return;
+    cur.push({x:x, y:y, n:n});
+  });
+  sailFrontPts=sail; motorFrontPts=motor;
+}
+function fetchPerfCurve(){ fetch('/perfcurve.csv').then(r=>r.text()).then(txt=>{ parseFrontCsv(txt); drawPerfPlot(); drawMotorPlot(); }).catch(()=>{}); }
 function fetchPerfRecords(){ fetch('/perfrecords.csv').then(r=>r.text()).then(txt=>{ const ln=txt.trim().split('\n'); perfRecs=[]; for(let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<8)continue; perfRecs.push({mode:+c[0],tws:+c[1],twa:+c[2],chop:+c[3],rpm:+c[4],hw:+c[5],stw:+c[6],sog:+c[7]}); } }).catch(()=>{}); }
 function queuePerfPlotUpdate(){
   const now=Date.now();
@@ -947,15 +1054,35 @@ function drawPerfPlot(){
   const cv=document.getElementById('perf-plot'); if(!cv||!cv.getContext) return;
   const W=360, H=360, ctx=hidpiCtx(cv, W, H); ctx.clearRect(0,0,W,H);
   const cx=W/2, cy=H*0.54, R=Math.min(W,H)*0.42;
-  const tws=perfLive.ws||0, chop=perfLive.pitchStd||0;
-  const haveCurve = perfCurve && perfCurve.sailValid;
+  const aws=perfLive.ws||0, sea=perfLive.pitchStd||0;
   const symFold = (perfSettings.perfFoldSymmetric==null) ? true : (perfSettings.perfFoldSymmetric>=0.5);
-  let maxS=4;
-  if(haveCurve) for(let twa=0;twa<=180;twa+=10){ const v=evalSailCurve(perfCurve,tws,twa,chop); if(v>maxS)maxS=v; }
-  perfRecs.forEach(r=>{ if(r.mode===0){ const sp=r.stw>0?r.stw:r.sog; if(sp>maxS)maxS=sp; } });
-  if(perfLive.valid && perfLive.spd>maxS) maxS=perfLive.spd;
+  const trueWind = (perfWindRef===1);
+  const haveData = sailFrontPts.length >= 2;
+
+  // Build the best-ever line: sweep the apparent-wind-angle range we've actually
+  // sailed, eval the front at the CURRENT wind speed + sea, and (optionally) map
+  // each point to true-wind coordinates for display. Points: [plotAngle, speed].
+  let curve=[], maxS=4;
+  if(haveData){
+    let lo=999, hi=-999; sailFrontPts.forEach(p=>{ if(p.x[1]<lo)lo=p.x[1]; if(p.x[1]>hi)hi=p.x[1]; });
+    const step=Math.max(1, (hi-lo)/90);
+    for(let awa=lo; awa<=hi+1e-6; awa+=step){
+      const s=frontEval(sailFrontPts, [aws, foldAwaJS(awa), sea], SAIL_SCALE);
+      if(s<=0) continue;
+      const ang = trueWind ? appToTrue(awa, s, aws).twa : awa;
+      curve.push([ang, s]); if(s>maxS) maxS=s;
+    }
+  }
+  // present point (apparent → true if toggled)
+  let nowPt=null;
+  if(perfLive.valid){
+    const ang = trueWind ? appToTrue(perfLive.wa, perfLive.spd, aws).twa : perfLive.wa;
+    nowPt=[ang, perfLive.spd]; if(perfLive.spd>maxS) maxS=perfLive.spd;
+  }
   maxS=Math.ceil(maxS);
   const P=(ang,s)=>{ const r=(s/maxS)*R, a=ang*Math.PI/180; return [cx+r*Math.sin(a), cy-r*Math.cos(a)]; };
+
+  // rings + spokes
   ctx.lineWidth=1; ctx.font='10px sans-serif';
   for(let k=1;k<=4;k++){ const r=R*k/4; ctx.strokeStyle='#ddd'; ctx.beginPath(); ctx.arc(cx,cy,r,0,6.2832); ctx.stroke();
     ctx.fillStyle='#aaa'; ctx.fillText(Math.round(maxS*k/4)+'kt', cx+3, cy-r+11); }
@@ -963,21 +1090,19 @@ function drawPerfPlot(){
   [0,45,90,135,180].forEach(d=>{ let p=P(d,maxS); ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(p[0],p[1]); ctx.stroke();
     let q=P(-d,maxS); ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(q[0],q[1]); ctx.stroke(); });
   ctx.fillStyle='#888'; ctx.fillText('0° into wind', cx-26, cy-R-3); ctx.fillText('180°', cx-11, cy+R+13);
-  // faint record dots near current TWS
-  perfRecs.forEach(r=>{ if(r.mode!==0) return; if(Math.abs(r.tws-tws)>3) return; const sp=r.stw>0?r.stw:r.sog; if(sp<=0)return;
-    const d=(ang)=>{ let p=P(ang,sp); ctx.beginPath(); ctx.arc(p[0],p[1],1.6,0,6.2832); ctx.fillStyle='rgba(58,123,213,0.28)'; ctx.fill(); };
-    d(r.twa); if(symFold && r.twa>0 && r.twa<180) d(-r.twa); });
-  // fitted polar at current conditions (bold), mirrored when symmetric
-  if(haveCurve){
-    const drawCurve=(sign)=>{ ctx.strokeStyle='#3a7bd5'; ctx.lineWidth=2.2; ctx.beginPath();
-      for(let twa=0;twa<=180;twa+=3){ const v=evalSailCurve(perfCurve,tws,twa,chop); const p=P(sign*twa,v); twa===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]); } ctx.stroke(); };
-    drawCurve(1); if(symFold) drawCurve(-1);
-  } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('awaiting first cloud fit', cx, cy); ctx.textAlign='left'; }
-  // live dot ("now") — single fixed colour (no performance bands; the blue curve already IS best)
-  if(perfLive.valid){
-    let p=P(perfLive.wa, perfLive.spd); ctx.beginPath(); ctx.arc(p[0],p[1],6,0,6.2832);
-    ctx.fillStyle = '#5cb85c'; ctx.fill();
-    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle='#aaa'; ctx.textAlign='center'; ctx.fillText(trueWind?'true wind':'apparent wind', cx, cy+R+26); ctx.textAlign='left';
+
+  // best-ever line (bold), mirrored when symmetric
+  if(haveData && curve.length>1){
+    const drawLine=(sign)=>{ ctx.strokeStyle='#3a7bd5'; ctx.lineWidth=2.2; ctx.beginPath();
+      curve.forEach((pt,i)=>{ const p=P(sign*pt[0], pt[1]); i===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]); }); ctx.stroke(); };
+    drawLine(1); if(symFold) drawLine(-1);
+  } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('No sailing data yet', cx, cy); ctx.textAlign='left'; }
+
+  // present point ("now")
+  if(nowPt){
+    let p=P(nowPt[0], nowPt[1]); ctx.beginPath(); ctx.arc(p[0],p[1],6,0,6.2832);
+    ctx.fillStyle='#5cb85c'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
   }
 }
 
@@ -1000,11 +1125,17 @@ function queueMotorPlotUpdate(){
 function drawMotorPlot(){
   const cv=document.getElementById('motor-plot'); if(!cv||!cv.getContext) return;
   const W=520, H=300, pad=38, ctx=hidpiCtx(cv, W, H); ctx.clearRect(0,0,W,H);
-  const hw=motorLive.headwind||0, chop=motorLive.pitchStd||0;
-  const haveCurve = perfCurve && perfCurve.motorValid;
+  const hw=motorLive.headwind||0, sea=motorLive.pitchStd||0;
+  const haveData = motorFrontPts.length >= 2;
+  // best-ever line: sweep the RPM range we've actually motored, eval at current headwind + sea.
+  let line=[], loR=0, hiR=0;
+  if(haveData){
+    loR=1e9; hiR=-1e9; motorFrontPts.forEach(p=>{ if(p.x[0]<loR)loR=p.x[0]; if(p.x[0]>hiR)hiR=p.x[0]; });
+    const step=Math.max(20, (hiR-loR)/120);
+    for(let r=loR; r<=hiR+1e-6; r+=step){ const v=frontEval(motorFrontPts,[r,hw,sea],MOTOR_SCALE); if(v>0) line.push([r,v]); }
+  }
   let maxR=3600, maxS=4;
-  if(haveCurve){ maxR=Math.max(maxR, perfCurve.mrpm[perfCurve.mrpm.length-1]); for(let r=0;r<=maxR;r+=200){ const v=evalMotorCurve(perfCurve,r,hw,chop); if(v>maxS)maxS=v; } }
-  perfRecs.forEach(r=>{ if(r.mode===1){ if(r.rpm>maxR)maxR=r.rpm; const sp=r.stw>0?r.stw:r.sog; if(sp>maxS)maxS=sp; } });
+  line.forEach(p=>{ if(p[0]>maxR)maxR=p[0]; if(p[1]>maxS)maxS=p[1]; });
   if(motorLive.valid){ if(motorLive.rpm>maxR)maxR=motorLive.rpm; if(motorLive.spd>maxS)maxS=motorLive.spd; }
   maxR=Math.ceil(maxR/500)*500; maxS=Math.ceil(maxS);
   const X=r=>pad+(r/maxR)*(W-2*pad), Y=s=>H-pad-(s/maxS)*(H-2*pad);
@@ -1020,15 +1151,13 @@ function drawMotorPlot(){
   ctx.textAlign='center'; ctx.textBaseline='alphabetic';
   ctx.fillText('RPM', W/2, H-pad+24);
   ctx.save(); ctx.translate(pad-26,H/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center'; ctx.fillText('boat speed',0,0); ctx.restore();
-  // faint record dots
-  perfRecs.forEach(r=>{ if(r.mode!==1) return; const sp=r.stw>0?r.stw:r.sog; if(sp<=0)return; ctx.beginPath(); ctx.arc(X(r.rpm),Y(sp),1.6,0,6.2832); ctx.fillStyle='rgba(58,123,213,0.28)'; ctx.fill(); });
-  // fitted speed-vs-RPM curve at current headwind + sea state
-  if(haveCurve){
-    ctx.strokeStyle='#3a7bd5'; ctx.lineWidth=2.2; ctx.beginPath(); let started=false;
-    for(let r=Math.max(0,perfCurve.mrpm[0]); r<=maxR; r+=50){ const v=evalMotorCurve(perfCurve,r,hw,chop); if(started) ctx.lineTo(X(r),Y(v)); else { ctx.moveTo(X(r),Y(v)); started=true; } }
+  // best-ever speed-vs-RPM line at current headwind + sea state (clipped to the RPM range actually motored)
+  if(haveData && line.length>1){
+    ctx.strokeStyle='#3a7bd5'; ctx.lineWidth=2.2; ctx.beginPath();
+    line.forEach((p,i)=>{ i===0?ctx.moveTo(X(p[0]),Y(p[1])):ctx.lineTo(X(p[0]),Y(p[1])); });
     ctx.stroke();
-  } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('awaiting first cloud fit',W/2,H/2); ctx.textAlign='left'; }
-  // live dot + best ring
+  } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('No motoring data yet',W/2,H/2); ctx.textAlign='left'; }
+  // present point ("now")
   if(motorLive.valid){
     ctx.beginPath(); ctx.arc(X(motorLive.rpm),Y(motorLive.spd),6,0,6.2832);
     ctx.fillStyle = '#5cb85c'; ctx.fill();
@@ -1873,6 +2002,7 @@ function initializeEventSource() {
             altLive.steady = altLive.steady === 1;
             updateAltHealth();
             queueAltTrendUpdate();
+            updateCloudStatus();
         }, false);
 
         // \u2500\u2500 SSE: AltSettings \u2500 GUI-tunable values \u2192 echo spans (schema-driven) \u2500\u2500
@@ -1895,6 +2025,7 @@ function initializeEventSource() {
             perfSchema.live.forEach((k, i) => { perfLive[k] = v[i]; });
             perfLive.valid = perfLive.valid === 1;
             updatePerf(); queuePerfPlotUpdate();
+            updateCloudStatus();
         }, false);
         source.addEventListener('PerfSettings', function (e) {
             if (!perfSchema || !perfSchema.settings) { if (!perfSchema) fetchPerfSchema(); return; }
@@ -3970,8 +4101,6 @@ function showSettingsAccess() {
 function lockSettingsManually() {
     const section = document.getElementById('settings-section');
     if (section) section.classList.add("locked");
-    const plotControls = document.getElementById('plots-controls');
-    if (plotControls) plotControls.classList.add("locked");
     // DON'T lock the header control - we want to allow turning OFF the alternator
     // const headerControl = document.querySelector('.alternator-control');
     // if (headerControl) headerControl.classList.add("locked");
@@ -4148,10 +4277,19 @@ async function fetchAndPopulateVesselInfo() {
             data.imu_height_wl_ft !== undefined;
 
         vesselInfoComplete = allFieldsFilled;
+        if (allFieldsFilled) setVesselButtonUpdateMode();
 
     } catch (error) {
         diagLog('Vessel info not found or invalid:', error);
     }
+}
+
+// Flip the Save button to "Update Vessel Info" and reveal its tooltip once info is on file.
+function setVesselButtonUpdateMode() {
+    const btn = document.getElementById('saveVesselInfoBtn');
+    if (btn) btn.value = 'Update Vessel Info';
+    const tip = document.getElementById('vesselUpdateTooltip');
+    if (tip) tip.style.display = 'inline-flex';
 }
 
 // Handle vessel info form submission
@@ -4211,6 +4349,7 @@ async function handleVesselInfoSave(event) {
         if (result.success) {
             window.vesselInfo = vesselData;
             vesselInfoComplete = true;
+            setVesselButtonUpdateMode();  // first save → becomes "Update Vessel Info" + tooltip
 
             messageDiv.style.backgroundColor = '#e8f5e9';
             messageDiv.style.color = '#2e7d32';
@@ -4316,7 +4455,7 @@ function handleDeleteAllData() {
         return;
     }
 
-    if (!confirm('⚠️ WARNING: This will permanently delete ALL your cloud data including history, profile, and statistics. This CANNOT be undone.\n\nYour device will continue to work locally, but all cloud features are reset.\n\nType DELETE in the next prompt to confirm.')) {
+    if (!confirm('WARNING: This permanently deletes your cloud account and ALL associated cloud data including history, profile, and statistics. This CANNOT be undone.\n\nYour hardware device will continue working locally, but all cloud features are reset.\n\nType DELETE in the next prompt to confirm.')) {
         return;
     }
 
@@ -4340,7 +4479,7 @@ function handleDeleteAllData() {
         })
         .then(data => {
             if (data.success) {
-                alert('All data deleted successfully. Cloud features have been reset.');
+                alert('Your account and all cloud data were deleted. Your device keeps working locally; cloud features have been reset.');
                 location.reload();
             } else {
                 alert('Error: ' + (data.error || 'Deletion failed'));
@@ -6792,8 +6931,6 @@ function setAdminPassword() {
                 // Unlock settings
                 const section = document.getElementById('settings-section');
                 if (section) section.classList.remove("locked");
-                const plotControls = document.getElementById('plots-controls');
-                if (plotControls) plotControls.classList.remove("locked");
                 document.querySelector('.permanent-header').classList.remove('locked');  // remove this bullshit probably
 
                 // Also unlock header controls
@@ -7091,6 +7228,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
+        updateCloudStatus();
         if (data.CloudFeatures !== undefined) {
             updateCloudFeaturesTabVisibility(data.CloudFeatures === 1);
         }
@@ -7301,10 +7439,14 @@ window.addEventListener("load", function () {
     // DEBUG CODE
     const originalGetElementById = document.getElementById;
     let warnedElements = new Set();
+    // IDs that are intentionally absent at times (created on demand, or only present
+    // while a transient dialog is open) — these are checked-then-created/guarded, so a
+    // null lookup is expected, not a stale reference. Don't flag them.
+    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint']);
 
     document.getElementById = function (id) {
         const element = originalGetElementById.call(document, id);
-        if (!element && !warnedElements.has(id)) {
+        if (!element && !warnedElements.has(id) && !optionalElementIds.has(id)) {
             diagError(`MISSING ELEMENT: ${id}`);
             console.trace();
             warnedElements.add(id);
@@ -7382,8 +7524,6 @@ window.addEventListener("load", function () {
     if (settingsSection) {
         settingsSection.classList.add("locked");
     }
-    const plotControls = document.getElementById('plots-controls');
-    if (plotControls) plotControls.classList.add("locked");
     const lockStatus = document.getElementById('lock-status');
     if (lockStatus) {
         lockStatus.textContent = "Settings are Locked";
@@ -7730,6 +7870,7 @@ window.addEventListener("load", function () {
             // Cache mode for other functions to use
             if (data.currentMode !== undefined) {
                 window._lastKnownMode = data.currentMode;
+                updateCloudStatus();
             }
             window._debugData = data;
 
@@ -7950,9 +8091,12 @@ window.addEventListener("load", function () {
                         softwareTab.style.display = 'none';
                     }
 
-                    const weatherTab = document.querySelector('.sub-tab[onclick*="weather"]');
-                    if (weatherTab) {
-                        weatherTab.style.display = 'none';
+                    // Weather/Solar tab stays visible offline — the array/position config is
+                    // worth setting regardless of connectivity. Only the live forecast needs
+                    // internet, so surface a note inside the Settings tab instead of hiding it.
+                    const wxNote = document.getElementById('weathersolar-offline-note');
+                    if (wxNote) {
+                        wxNote.style.display = 'block';
                     }
                 }
             }
@@ -8094,6 +8238,11 @@ window.addEventListener("load", function () {
                     // Stash for the Weather Mode source label (lives on the CSV1
                     // dispatcher, which doesn't see currentGpsSource directly).
                     window.currentGpsSource = Number(data.currentGpsSource);
+                    // Source badge on the GPS Position card (Boat Performance tab)
+                    const gpsBadge = document.getElementById('gps-source-badge');
+                    if (gpsBadge) {
+                        gpsBadge.textContent = ({ 0: 'no GPS', 1: 'NMEA 2000', 2: 'iOS app', 3: 'Manual' })[Number(data.currentGpsSource)] ?? '—';
+                    }
                 }
                 if (ind && (data.currentGpsSource !== undefined || data.currentTimeSource !== undefined)) {
                     const gpsLbl  = ({0:'no GPS', 1:'NMEA GPS', 2:'Phone GPS', 3:'Manual'})[Number(data.currentGpsSource)] ?? '?';
@@ -8557,6 +8706,11 @@ window.addEventListener("load", function () {
 
                 // IMU Diagnostics (imuEnabled/imuMountOrientation moved to CSV3 handler — those fields are in CSV3)
                 ["imu_fifo_overrun_count_ID", "imu_fifo_overrun_count"],
+                // 80MHz low-power loop health — paired with the FIFO overrun count above
+                ["loopWorst80Win_ID", "loopWorst80Win_ms"],
+                ["loopWorst80Ses_ID", "loopWorst80Ses_ms"],
+                ["loopOver80ImuLimit_ID", "loopOver80ImuLimitCount"],
+                ["loop80IterCount_ID", "loop80IterCount"],
                 ["imu_i2c_error_count_ID", "imu_i2c_error_count"],
                 ["imu_unknown_tag_count_ID", "imu_unknown_tag_count"],
                 ["imu_accel_dropped_ID", "imu_accel_dropped"],
@@ -8647,6 +8801,10 @@ window.addEventListener("load", function () {
                 ["ft_buildConfigPayload_ses_ID", "ft_buildConfigPayload_ses"],
                 ["ft_altHealth_win_ID", "ft_altHealth_win"],
                 ["ft_altHealth_ses_ID", "ft_altHealth_ses"],
+                ["ft_altFold_win_ID", "ft_altFold_win"],
+                ["ft_altFold_ses_ID", "ft_altFold_ses"],
+                ["ft_boatPerf_win_ID", "ft_boatPerf_win"],
+                ["ft_boatPerf_ses_ID", "ft_boatPerf_ses"],
                 ["VeTime2_ID", "VeTime2"],
                 ["systemIDActive_ID", "systemIDActive"],
                 ["systemIDResultsReady_ID", "systemIDResultsReady"],
@@ -8809,6 +8967,23 @@ window.addEventListener("load", function () {
                     setText('VictronErrorID', e < 0 ? '—' : (e === 0 ? 'OK' : ('Err ' + e)));
                 }
             })();
+
+            // Live engine fuel flow + economy (both ×100; firmware sends 0 when engine off / no GPS speed)
+            (function () {
+                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                if (data.currentFuelGPH !== undefined) {
+                    const gph = Number(data.currentFuelGPH) / 100;
+                    setText('fuelGPHID', gph > 0 ? gph.toFixed(2) : '—');
+                }
+                if (data.currentNMPG !== undefined) {
+                    const nmpg = Number(data.currentNMPG) / 100;
+                    setText('fuelNMPGID', nmpg > 0 ? nmpg.toFixed(2) : '—');
+                }
+            })();
+
+            // Session fuel-economy curve (mpg vs RPM). try/catch so a chart bug can't break the dispatcher.
+            try { if (typeof window.updateFuelCurve === 'function') window.updateFuelCurve(data); }
+            catch (e) { console.warn('fuel curve update failed:', e); }
 
             // Refresh the barometer panel (Other tab) each CSV2 cycle. Cheap no-op if the
             // panel hasn't been initialized yet (tab never opened). try/catch so a bug in
@@ -9748,8 +9923,8 @@ function showSubTab(parentTab, subTabName, evt = null) {
     }
 
 
-    // Initialize / refresh the barometer panel whenever the Sailing tab is opened (moved from Other)
-    if (parentTab === 'livedata' && subTabName === 'sailing') {
+    // Initialize / refresh the barometer panel whenever the Weather/Solar tab is opened (baro lives there now)
+    if (parentTab === 'livedata' && subTabName === 'weathersolar') {
         if (typeof window.initBaroPanel === 'function') window.initBaroPanel();
     }
 
@@ -9836,8 +10011,8 @@ function showRecoveryOptions() {
             box-shadow: 0 4px 8px rgba(0,0,0,0.3); z-index: 10000; border: 2px solid var(--accent);">
   <h3 style="margin-top: 0; color: var(--text-dark);">Connection Lost</h3>
   <p style="color: var(--text-dark);">Lost connection to alternator regulator.</p>
-  <button onclick="retryConnection()" style="background-color: var(--accent); color: white; border: none; padding: 8px 16px; border-radius: var(--radius); cursor: pointer; margin-right: 10px;">Retry Connection</button>
-  <button onclick="enterOfflineMode()" style="background-color: #555555; color: white; border: none; padding: 8px 16px; border-radius: var(--radius); cursor: pointer;">Continue Offline</button>
+  <button class="btn-primary" onclick="retryConnection()" style="margin-right: 10px;">Retry Connection</button>
+  <button class="btn-secondary" onclick="enterOfflineMode()">Continue Offline</button>
   <p style="font-size: 12px; color: var(--text-dark);"><small>If problem persists, the device may need to be power-cycled.</small></p>
 </div>
 `;
@@ -10145,6 +10320,30 @@ function resetDynamicAltZero() {
         .catch(err => diagError("Reset failed:", err));
 }
 
+
+// Small cloud-state badge on the Charging-System Health + Boat Speed panels. Uses signals the
+// dashboard already has — currentMode (AP=1) and the CloudFeatures toggle. Local-only states are grey;
+// cloud-on is green. (A "synced N ago" upgrade would need a firmware sync-timestamp — not wired yet.)
+function updateCloudStatus() {
+    const ap = (window._lastKnownMode === 1);   // 1 = Access Point
+    const cb = document.getElementById('CloudFeatures_checkbox');
+    const on = cb ? !!cb.checked : false;
+    const fmtAgo = (s) => {                       // seconds since last successful sync (this boot); <0 = none
+        if (s == null || s < 0) return '';
+        if (s < 90)   return ', synced just now';
+        if (s < 5400) return ', synced ' + Math.round(s / 60) + 'm ago';
+        return ', synced ' + Math.round(s / 3600) + 'h ago';
+    };
+    const set = (id, agoS) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (ap)       { el.textContent = '· AP mode (local only)';   el.style.color = '#888'; }
+        else if (!on) { el.textContent = '· cloud off (local only)'; el.style.color = '#888'; }
+        else          { el.textContent = '· cloud on' + fmtAgo(agoS); el.style.color = '#5cb85c'; }
+    };
+    set('alt-cloud-status',  (typeof altLive  !== 'undefined') ? altLive.syncAgoS  : null);
+    set('perf-cloud-status', (typeof perfLive !== 'undefined') ? perfLive.syncAgoS : null);
+}
 
 function updateCloudFeaturesTabVisibility(enabled) {
     const cloudTab = document.querySelector('.main-tab[onclick*="cloudfeatures"]');
@@ -14463,6 +14662,60 @@ window.addEventListener('load', function () {
       })
       // On a transient re-fetch failure, keep whatever's already on screen rather than blanking.
       .catch(e => { if (!ltLoaded) ltStatus('Long-term history unavailable (' + e.message + ').'); });
+  };
+})();
+
+/* ---- Session fuel-economy curve (mpg vs RPM), driven each CSV2 tick by window.updateFuelCurve ---- */
+(function () {
+  const NBINS = 18;                 // must match firmware FUELCURVE_BINS
+  const DEFAULT_TOP = 4500;         // fallback x-scale until firmware reports the configured top RPM
+  let plot = null;
+
+  function make(el) {
+    const opts = {
+      width: el.clientWidth || 600,
+      height: 300,
+      scales: { x: { time: false }, mpg: {} },
+      series: [
+        { label: "RPM" },
+        { label: "mpg", scale: "mpg", stroke: "#2e7d32", width: 2, points: { show: true, size: 6 }, spanGaps: false }
+      ],
+      axes: [
+        { scale: "x", label: "RPM", values: (u, t) => t.map(v => Math.round(v)) },
+        { scale: "mpg", label: "naut mi / gal", side: 3 }
+      ],
+      legend: { show: false }
+    };
+    plot = new uPlot(opts, [[0], [null]], el);
+    if (document.body.classList.contains('dark-mode')) updateUplotTheme(plot);
+    const ro = new ResizeObserver(() => { if (plot) plot.setSize({ width: el.clientWidth || 600, height: 300 }); });
+    ro.observe(el);
+  }
+
+  window.updateFuelCurve = function (data) {
+    if (data.fuelCurveNMPG_0 === undefined) return;        // not in this payload
+    const el = document.getElementById('fuelCurvePlot');
+    if (!el) return;
+    if (!plot) { if (typeof uPlot === 'undefined') return; make(el); }
+    // Bin width is universal: it scales with the engine's configured fuel-table top RPM.
+    const topRPM = Number(data.fuelCurveTopRPM) > 0 ? Number(data.fuelCurveTopRPM) : DEFAULT_TOP;
+    const binW = topRPM / NBINS;
+    const X = Array.from({ length: NBINS }, (_, i) => i * binW + binW / 2);  // bin centers
+    const y = new Array(NBINS);
+    let bestV = 0, bestI = -1;
+    for (let i = 0; i < NBINS; i++) {
+      const v = Number(data['fuelCurveNMPG_' + i]) / 100;
+      y[i] = v > 0 ? v : null;                              // 0 = empty bin -> gap
+      if (v > bestV) { bestV = v; bestI = i; }
+    }
+    plot.setData([X, y]);
+    const best = document.getElementById('fuelCurveBestID');
+    if (best) {
+      const txt = bestI >= 0
+        ? bestV.toFixed(2) + ' naut mi/gal at ~' + Math.round(bestI * binW) + '–' + Math.round((bestI + 1) * binW) + ' rpm'
+        : '—';
+      if (best.textContent !== txt) best.textContent = txt;
+    }
   };
 })();
 

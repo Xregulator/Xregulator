@@ -451,6 +451,10 @@ enum Csv2Index {
   CSV2_systemIDFallAvg,
   CSV2_ft_altHealth_win,
   CSV2_ft_altHealth_ses,
+  CSV2_ft_altFold_win,
+  CSV2_ft_altFold_ses,
+  CSV2_ft_boatPerf_win,
+  CSV2_ft_boatPerf_ses,
   CSV2_systemIDActive,
   CSV2_systemIDResultsReady,
   CSV2_systemIDStepAmp_0,
@@ -516,7 +520,26 @@ enum Csv2Index {
   CSV2_VictronYieldYesterday,    // H22 yield yesterday (kWh ×100)
   CSV2_VictronMaxPowerYesterday, // H23 max power yesterday (W ×1)
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461
+  // Live engine fuel flow + economy (2 fields)
+  CSV2_currentFuelGPH,           // live fuel flow (gal/hr ×100)
+  CSV2_currentNMPG,              // live fuel economy (naut mi/gal ×100)
+
+  // Session fuel-economy curve: mpg per 250-RPM bin (18 bins, 0..4500), naut mi/gal ×100, 0 = empty
+  CSV2_fuelCurveNMPG_0,  CSV2_fuelCurveNMPG_1,  CSV2_fuelCurveNMPG_2,
+  CSV2_fuelCurveNMPG_3,  CSV2_fuelCurveNMPG_4,  CSV2_fuelCurveNMPG_5,
+  CSV2_fuelCurveNMPG_6,  CSV2_fuelCurveNMPG_7,  CSV2_fuelCurveNMPG_8,
+  CSV2_fuelCurveNMPG_9,  CSV2_fuelCurveNMPG_10, CSV2_fuelCurveNMPG_11,
+  CSV2_fuelCurveNMPG_12, CSV2_fuelCurveNMPG_13, CSV2_fuelCurveNMPG_14,
+  CSV2_fuelCurveNMPG_15, CSV2_fuelCurveNMPG_16, CSV2_fuelCurveNMPG_17,
+  CSV2_fuelCurveTopRPM,          // top configured fuel-table RPM -> chart x-axis scale (×1)
+
+  // 80MHz low-power loop instrumentation (4 fields) — health while engine off / CPU throttled
+  CSV2_loopWorst80Win_ms,        // worst 80MHz loop pass, rolling 5s (ms ×1)
+  CSV2_loopWorst80Ses_ms,        // worst 80MHz loop pass since Reset Peak Values (ms ×1)
+  CSV2_loopOver80ImuLimitCount,  // # 80MHz passes over accel FIFO drain limit (~38ms) since reset
+  CSV2_loop80IterCount,          // total 80MHz passes since reset (denominator)
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490
 };
 
 enum Csv3Index {
@@ -1286,11 +1309,11 @@ void setupWiFiConfigServer() {
     Serial.printf("LittleFS used bytes: %u\n", (unsigned)usedB);
     Serial.printf("LittleFS free bytes: %u\n", (unsigned)(totalB - usedB));
 
-    writeFile(LittleFS, AP_PASSWORD_FILE, ap_password);
+    writeFileIfChanged(LittleFS, AP_PASSWORD_FILE, ap_password);
     esp32_ap_password = ap_password;
 
     if (hotspot_ssid[0] != '\0') {
-      writeFile(LittleFS, AP_SSID_FILE, hotspot_ssid);
+      writeFileIfChanged(LittleFS, AP_SSID_FILE, hotspot_ssid);
       esp32_ap_ssid = hotspot_ssid;
     } else {
       if (fsExists(AP_SSID_FILE)) {
@@ -1299,8 +1322,8 @@ void setupWiFiConfigServer() {
       esp32_ap_ssid = "ALTERNATOR_WIFI";
     }
 
-    writeFile(LittleFS, "/ssid.txt", ssid);
-    writeFile(LittleFS, "/pass.txt", password);
+    writeFileIfChanged(LittleFS, "/ssid.txt", ssid);
+    writeFileIfChanged(LittleFS, "/pass.txt", password);
 
     strncpy(cached_wifi_ssid, ssid, sizeof(cached_wifi_ssid) - 1);
     cached_wifi_ssid[sizeof(cached_wifi_ssid) - 1] = '\0';
@@ -1317,7 +1340,7 @@ void setupWiFiConfigServer() {
     request->send(200, "text/plain", "Configuration saved! Device will restart in 3 seconds.");
 
     Serial.println("=== CONFIGURATION SAVED - RESTARTING ===");
-    writeFile(LittleFS, "/first_config_done.txt", "1");
+    writeFileIfChanged(LittleFS, "/first_config_done.txt", "1");
     delay(3000);
     ESP.restart();
   });
@@ -1484,6 +1507,11 @@ int doCloudPOST(const char *endpointPath, const char *payload,
   client.stop();
   return httpCode;
 }
+
+// Accumulator for the /perfUploadFront POST body (Load CSV) — filled across body chunks, then
+// ingested once the request completes. LAN-only single-client dashboard, so one global is fine.
+static String perfUploadBuf;
+static String altUploadBuf;   // same, for /altUploadFront (alternator-health Load CSV)
 
 void setupServer() {
 
@@ -1879,13 +1907,19 @@ void setupServer() {
   server.on("/altrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/csv", altFrontRecordsCsv());
   });
-  // Performance-vs-engine-hours trend ring (header + all points, chunked). This is the headline.
+  // Performance-vs-engine-hours trend (header + points, chunked). This is the headline. Decimated to
+  // <= TR_MAXOUT output points for readability + payload (full hourly history stays on the device):
+  // each output point is one bucket of source hours — worst = min (preserve the early-warning
+  // envelope), overall = mean. stride==1 (<= TR_MAXOUT total) streams every hour, as before.
   server.on("/alttrend.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!altTrend) { request->send(200, "text/plain", "engHour,worstPct,overallPct\n"); return; }
-    struct TrExp { int idx, total; bool header, done; char line[64]; int len, pos; };
+    const int TR_MAXOUT = 200;
+    struct TrExp { int total, stride, outIdx, numOut; bool header, done; char line[64]; int len, pos; };
     TrExp st;
     st.total = altTrendCount;
-    st.idx = 0; st.header = true; st.done = false; st.len = 0; st.pos = 0;
+    st.stride = (st.total > TR_MAXOUT) ? ((st.total + TR_MAXOUT - 1) / TR_MAXOUT) : 1;
+    st.numOut = (st.stride > 0) ? ((st.total + st.stride - 1) / st.stride) : 0;
+    st.outIdx = 0; st.header = true; st.done = false; st.len = 0; st.pos = 0;
     AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
       [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
         if (st.done) return 0;
@@ -1896,11 +1930,18 @@ void setupServer() {
               st.len = snprintf(st.line, sizeof(st.line), "engHour,worstPct,overallPct\n");
               st.header = false;
             } else {
-              if (st.idx >= st.total) { st.done = true; return written; }
-              AltTrendPt &p = altTrend[st.idx];
-              st.len = snprintf(st.line, sizeof(st.line), "%u,%.1f,%.1f\n",
-                                (unsigned)p.engHour, p.worstPct / 10.0f, p.overallPct / 10.0f);
-              st.idx++;
+              if (st.outIdx >= st.numOut) { st.done = true; return written; }
+              int start = st.outIdx * st.stride, end = start + st.stride;
+              if (end > st.total) end = st.total;
+              float worst = 1e9f, sum = 0; int n = 0;
+              for (int i = start; i < end; i++) {
+                float w = altTrend[i].worstPct / 10.0f;
+                if (w < worst) worst = w;
+                sum += altTrend[i].overallPct / 10.0f; n++;
+              }
+              unsigned eh = (unsigned)altTrend[end - 1].engHour;   // bucket labelled by its most-recent hour
+              st.len = snprintf(st.line, sizeof(st.line), "%u,%.1f,%.1f\n", eh, worst, n ? sum / n : 0.0f);
+              st.outIdx++;
             }
             st.pos = 0;
           }
@@ -1929,6 +1970,60 @@ void setupServer() {
   server.on("/perfrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/csv", perfRecordsCsv());
   });
+
+  // Load CSV (import a shared/saved polar): POST the BEFRONT1 sail+motor pair as the raw body to
+  // /perfUploadFront?password=XXX. The body handler accumulates chunks into perfUploadBuf; the
+  // request handler (runs once the body is complete) password-gates, then perfUploadFrontCsv()
+  // replaces both fronts and applies the user's chosen mode (?fixed=1 freeze / 0 learn) + persists.
+  // Same ingest path as cloud-sync/Load-saved.
+  server.on("/perfUploadFront", HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
+        perfUploadBuf = ""; request->send(403, "text/plain", "Forbidden"); return;
+      }
+      if (perfUploadBuf.length() < 8 || perfUploadBuf.indexOf("BEFRONT1") < 0) {
+        perfUploadBuf = ""; request->send(400, "text/plain", "No BEFRONT1 data in upload"); return;
+      }
+      char *bodyc = strdup(perfUploadBuf.c_str());
+      perfUploadBuf = "";
+      if (!bodyc) { request->send(500, "text/plain", "Out of memory"); return; }
+      // fixed=1 → FIXED+paused (freeze), fixed=0 → LEARNED+resumed (learn). Default freeze if absent.
+      bool fixed = (!request->hasParam("fixed")) || (request->getParam("fixed")->value().toInt() != 0);
+      bool ok = perfUploadFrontCsv(bodyc, fixed);
+      free(bodyc);
+      request->send(ok ? 200 : 400, "text/plain", ok ? "OK" : "Parse failed");
+    },
+    NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (index == 0) { perfUploadBuf = ""; perfUploadBuf.reserve(total + 1); }
+      perfUploadBuf.concat((const char *)data, len);
+    });
+
+  // Load CSV (alternator health): POST the BEFRONT1 front as the raw body to /altUploadFront?password=XXX.
+  // Mirrors /perfUploadFront. ?fixed=1 freeze (local only) / 0 learn (adopt to cloud, tagged). The
+  // request handler password-gates once the body is complete, then altUploadFrontCsv() applies it.
+  server.on("/altUploadFront", HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
+        altUploadBuf = ""; request->send(403, "text/plain", "Forbidden"); return;
+      }
+      if (altUploadBuf.length() < 8 || altUploadBuf.indexOf("BEFRONT1") < 0) {
+        altUploadBuf = ""; request->send(400, "text/plain", "No BEFRONT1 data in upload"); return;
+      }
+      char *bodyc = strdup(altUploadBuf.c_str());
+      altUploadBuf = "";
+      if (!bodyc) { request->send(500, "text/plain", "Out of memory"); return; }
+      // fixed=1 → FIXED+paused (freeze), fixed=0 → LEARNED+resumed+adopt (learn). Default freeze if absent.
+      bool fixed = (!request->hasParam("fixed")) || (request->getParam("fixed")->value().toInt() != 0);
+      bool ok = altUploadFrontCsv(bodyc, fixed);
+      free(bodyc);
+      request->send(ok ? 200 : 400, "text/plain", ok ? "OK" : "Parse failed");
+    },
+    NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (index == 0) { altUploadBuf = ""; altUploadBuf.reserve(total + 1); }
+      altUploadBuf.concat((const char *)data, len);
+    });
 
   server.on("/cvlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!cvLogReady || !cvLog || cvLogCount == 0) {
@@ -2346,7 +2441,7 @@ void setupServer() {
       if (requestedState == 0) {
         // Turning OFF is ALWAYS allowed — safety critical
         OnOff = 0;
-        writeFile(LittleFS, "/OnOff.txt", "0");
+        writeFileIfChanged(LittleFS, "/OnOff.txt", "0");
         stateRevision++;
         queueConsoleMessage("FIELD OFF: Safety override (no password required)");
         request->send(200, "text/plain", "0");
@@ -2367,7 +2462,7 @@ void setupServer() {
     else if (request->hasParam("InputFilterTC")) {
       foundParameter = true;
       inputMessage = request->getParam("InputFilterTC")->value();
-      writeFile(LittleFS, "/InputFilterTC.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/InputFilterTC.txt", inputMessage.c_str());
       InputFilterTC = inputMessage.toFloat();
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -2375,7 +2470,7 @@ void setupServer() {
     else if (request->hasParam("SystemIDStepAmplitude")) {
       foundParameter = true;
       inputMessage = request->getParam("SystemIDStepAmplitude")->value();
-      writeFile(LittleFS, "/SystemIDStepAmplitude.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SystemIDStepAmplitude.txt", inputMessage.c_str());
       SystemIDStepAmplitude = inputMessage.toFloat();
     }
 
@@ -2413,7 +2508,7 @@ void setupServer() {
     if (request->hasParam("TemperatureLimitF")) {
       foundParameter = true;
       inputMessage = request->getParam("TemperatureLimitF")->value();
-      writeFile(LittleFS, "/TemperatureLimitF.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TemperatureLimitF.txt", inputMessage.c_str());
       TemperatureLimitF = inputMessage.toInt();
     }
     if (request->hasParam("ClearBuffer")) {
@@ -2452,25 +2547,25 @@ void setupServer() {
     if (request->hasParam("ManualDutyTarget")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualDutyTarget")->value();
-      writeFile(LittleFS, "/ManualDutyTarget.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ManualDutyTarget.txt", inputMessage.c_str());
       ManualDutyTarget = inputMessage.toInt();
     }
     if (request->hasParam("socInfoAvailable")) {
       foundParameter = true;
       inputMessage = request->getParam("socInfoAvailable")->value();
-      writeFile(LittleFS, "/socInfoAvailable.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/socInfoAvailable.txt", inputMessage.c_str());
       socInfoAvailable = inputMessage.toInt();
     }
     if (request->hasParam("TailCurrent_A")) {
       foundParameter = true;
       inputMessage = request->getParam("TailCurrent_A")->value();
-      writeFile(LittleFS, "/TailCurrent_A.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TailCurrent_A.txt", inputMessage.c_str());
       TailCurrent_A = inputMessage.toFloat();
     }
     if (request->hasParam("RebulkVoltage")) {
       foundParameter = true;
       inputMessage = request->getParam("RebulkVoltage")->value();
-      writeFile(LittleFS, "/RebulkVoltage.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/RebulkVoltage.txt", inputMessage.c_str());
       RebulkVoltage = inputMessage.toFloat();
     }
     if (request->hasParam("rebulkDebounceTime")) {
@@ -2478,38 +2573,38 @@ void setupServer() {
       inputMessage = request->getParam("rebulkDebounceTime")->value();
       rebulkDebounceTime = (uint32_t)inputMessage.toInt() * 1000UL;  // sec → ms
       // Save the ms value so boot load is consistent
-      writeFile(LittleFS, "/rebulkDebounceTime.txt", String(rebulkDebounceTime).c_str());
+      writeFileIfChanged(LittleFS, "/rebulkDebounceTime.txt", String(rebulkDebounceTime).c_str());
     }
 
     if (request->hasParam("MinFloatTime")) {
       foundParameter = true;
       inputMessage = request->getParam("MinFloatTime")->value();
       MinFloatTime = (uint32_t)inputMessage.toInt() * 60000UL;  // min → ms
-      writeFile(LittleFS, "/MinFloatTime.txt", String(MinFloatTime).c_str());
+      writeFileIfChanged(LittleFS, "/MinFloatTime.txt", String(MinFloatTime).c_str());
     }
     if (request->hasParam("SOC_BlockRebulk_percent")) {
       foundParameter = true;
       inputMessage = request->getParam("SOC_BlockRebulk_percent")->value();
-      writeFile(LittleFS, "/SOC_BlockRebulk_percent.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SOC_BlockRebulk_percent.txt", inputMessage.c_str());
       SOC_BlockRebulk_percent = inputMessage.toInt();
     }
     if (request->hasParam("SOC_AllowRebulk_percent")) {
       foundParameter = true;
       inputMessage = request->getParam("SOC_AllowRebulk_percent")->value();
-      writeFile(LittleFS, "/SOC_AllowRebulk_percent.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SOC_AllowRebulk_percent.txt", inputMessage.c_str());
       SOC_AllowRebulk_percent = inputMessage.toInt();
     }
     if (request->hasParam("BulkVoltage")) {
       foundParameter = true;
       inputMessage = request->getParam("BulkVoltage")->value();
-      writeFile(LittleFS, "/BulkVoltage.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/BulkVoltage.txt", inputMessage.c_str());
       BulkVoltage = inputMessage.toFloat();
       updateINA228OvervoltageThreshold();  // important!  update the hardware overvoltage limit provided by INA228
     }
     if (request->hasParam("wavePeriod")) {
       foundParameter = true;
       inputMessage = request->getParam("wavePeriod")->value();
-      writeFile(LittleFS, "/wavePeriod.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/wavePeriod.txt", inputMessage.c_str());
       wavePeriod = inputMessage.toInt();
       if (TuningMode) tuningParamChanged = true;
     }
@@ -2517,55 +2612,55 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("SwitchingFrequency")->value();
       int requestedFreq = inputMessage.toInt();
-      writeFile(LittleFS, "/SwitchingFrequency.txt", String(requestedFreq).c_str());
+      writeFileIfChanged(LittleFS, "/SwitchingFrequency.txt", String(requestedFreq).c_str());
       SwitchingFrequency = requestedFreq;
       queueConsoleMessageF("Frequency target set to %dHz", SwitchingFrequency);
     }
     if (request->hasParam("FloatVoltage")) {
       foundParameter = true;
       inputMessage = request->getParam("FloatVoltage")->value();
-      writeFile(LittleFS, "/FloatVoltage.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/FloatVoltage.txt", inputMessage.c_str());
       FloatVoltage = inputMessage.toFloat();
     }
     if (request->hasParam("yyMin")) {
       foundParameter = true;
       inputMessage = request->getParam("yyMin")->value();
-      writeFile(LittleFS, "/yyMin.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/yyMin.txt", inputMessage.c_str());
       yyMin = inputMessage.toInt();
     }
     if (request->hasParam("FieldAdjustmentInterval")) {
       foundParameter = true;
       inputMessage = request->getParam("FieldAdjustmentInterval")->value();
-      writeFile(LittleFS, "/FieldAdjustmentInterval.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/FieldAdjustmentInterval.txt", inputMessage.c_str());
       FieldAdjustmentInterval = inputMessage.toFloat();
     }
     if (request->hasParam("ManualFieldToggle")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualFieldToggle")->value();
-      writeFile(LittleFS, "/ManualFieldToggle.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ManualFieldToggle.txt", inputMessage.c_str());
       ManualFieldToggle = inputMessage.toInt();
     }
     if (request->hasParam("capLimitMode")) {
       foundParameter = true;
       inputMessage = request->getParam("capLimitMode")->value();
-      writeFile(LittleFS, "/capLimitMode.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/capLimitMode.txt", inputMessage.c_str());
       capLimitMode = constrain(inputMessage.toInt(), 0, 1);
     }
     if (request->hasParam("SwitchControlOverride")) {
       foundParameter = true;
       inputMessage = request->getParam("SwitchControlOverride")->value();
-      writeFile(LittleFS, "/SwitchControlOverride.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SwitchControlOverride.txt", inputMessage.c_str());
       SwitchControlOverride = inputMessage.toInt();
     }
     if (request->hasParam("MaintainMode")) {
       foundParameter = true;
       inputMessage = request->getParam("MaintainMode")->value();
       MaintainMode = inputMessage.toInt();
-      writeFile(LittleFS, "/MaintainMode.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MaintainMode.txt", inputMessage.c_str());
       if (MaintainMode) {
         // MaintainMode and TargetVoltageMode are mutually exclusive — clear the other.
         TargetVoltageMode = 0;
-        writeFile(LittleFS, "/TargetVoltageMode.txt", "0");
+        writeFileIfChanged(LittleFS, "/TargetVoltageMode.txt", "0");
       }
       queueConsoleMessageF("MaintainMode mode %s", MaintainMode ? "enabled" : "disabled");
     }
@@ -2573,11 +2668,11 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("TargetVoltageMode")->value();
       TargetVoltageMode = inputMessage.toInt();
-      writeFile(LittleFS, "/TargetVoltageMode.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TargetVoltageMode.txt", inputMessage.c_str());
       if (TargetVoltageMode) {
         // MaintainMode and TargetVoltageMode are mutually exclusive — clear the other.
         MaintainMode = 0;
-        writeFile(LittleFS, "/MaintainMode.txt", "0");
+        writeFileIfChanged(LittleFS, "/MaintainMode.txt", "0");
       }
       queueConsoleMessageF("TargetVoltageMode %s", TargetVoltageMode ? "enabled" : "disabled");
     }
@@ -2587,7 +2682,7 @@ void setupServer() {
       // password validation has passed.
       foundParameter = true;
       inputMessage = request->getParam("OnOff")->value();
-      writeFile(LittleFS, "/OnOff.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/OnOff.txt", inputMessage.c_str());
       OnOff = inputMessage.toInt();
     }
     if (request->hasParam("HiLow")) {
@@ -2596,7 +2691,7 @@ void setupServer() {
       int newMode = inputMessage.toInt();
       if (newMode != HiLow) {
         HiLow = newMode;
-        writeFile(LittleFS, "/HiLow.txt", inputMessage.c_str());
+        writeFileIfChanged(LittleFS, "/HiLow.txt", inputMessage.c_str());
         loadCapTablesForMode(HiLow);  // swap active cap tables to match new mode
         tempPIDActive = false;        // re-seeds thermal integrator for new cap on next tick
         stateRevision++;              // force immediate CSVData echo of new table values
@@ -2606,19 +2701,19 @@ void setupServer() {
     if (request->hasParam("InvertAltAmps")) {
       foundParameter = true;
       inputMessage = request->getParam("InvertAltAmps")->value();
-      writeFile(LittleFS, "/InvertAltAmps.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/InvertAltAmps.txt", inputMessage.c_str());
       InvertAltAmps = inputMessage.toInt();
     }
     if (request->hasParam("InvertBattAmps")) {
       foundParameter = true;
       inputMessage = request->getParam("InvertBattAmps")->value();
-      writeFile(LittleFS, "/InvertBattAmps.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/InvertBattAmps.txt", inputMessage.c_str());
       InvertBattAmps = inputMessage.toInt();
     }
     if (request->hasParam("MaxDuty")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxDuty")->value();
-      writeFile(LittleFS, "/MaxDuty.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MaxDuty.txt", inputMessage.c_str());
       MaxDuty = inputMessage.toInt();
       if (pidInitialized) {
         currentPID.SetOutputLimits(MinDuty, MaxDuty);
@@ -2628,7 +2723,7 @@ void setupServer() {
     if (request->hasParam("MinDuty")) {
       foundParameter = true;
       inputMessage = request->getParam("MinDuty")->value();
-      writeFile(LittleFS, "/MinDuty.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MinDuty.txt", inputMessage.c_str());
       MinDuty = inputMessage.toInt();
       if (pidInitialized) {
         currentPID.SetOutputLimits(MinDuty, MaxDuty);
@@ -2638,201 +2733,201 @@ void setupServer() {
     if (request->hasParam("LimpHome")) {
       foundParameter = true;
       inputMessage = request->getParam("LimpHome")->value();
-      writeFile(LittleFS, "/LimpHome.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LimpHome.txt", inputMessage.c_str());
       LimpHome = inputMessage.toInt();
     }
     if (request->hasParam("VeData")) {
       foundParameter = true;
       inputMessage = request->getParam("VeData")->value();
-      writeFile(LittleFS, "/VeData.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/VeData.txt", inputMessage.c_str());
       VeData = inputMessage.toInt();
     }
     if (request->hasParam("NMEA0183Data")) {
       foundParameter = true;
       inputMessage = request->getParam("NMEA0183Data")->value();
-      writeFile(LittleFS, "/NMEA0183Data.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/NMEA0183Data.txt", inputMessage.c_str());
       NMEA0183Data = inputMessage.toInt();
     }
     if (request->hasParam("NMEA2KData")) {
       foundParameter = true;
       inputMessage = request->getParam("NMEA2KData")->value();
-      writeFile(LittleFS, "/NMEA2KData.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/NMEA2KData.txt", inputMessage.c_str());
       NMEA2KData = inputMessage.toInt();
     }
     if (request->hasParam("waveAmplitude")) {
       foundParameter = true;
       inputMessage = request->getParam("waveAmplitude")->value();
-      writeFile(LittleFS, "/waveAmplitude.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/waveAmplitude.txt", inputMessage.c_str());
       waveAmplitude = inputMessage.toInt();
       if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("CurrentThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("CurrentThreshold")->value();
-      writeFile(LittleFS, "/CurrentThreshold.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/CurrentThreshold.txt", inputMessage.c_str());
       CurrentThreshold = inputMessage.toFloat();
     }
     if (request->hasParam("PeukertExponent")) {
       foundParameter = true;
       inputMessage = request->getParam("PeukertExponent")->value();
       PeukertExponent_scaled = (int)(inputMessage.toFloat() * 100);
-      writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
+      writeFileIfChanged(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
     }
     if (request->hasParam("ChargeEfficiency")) {
       foundParameter = true;
       inputMessage = request->getParam("ChargeEfficiency")->value();
-      writeFile(LittleFS, "/ChargeEfficiency.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ChargeEfficiency.txt", inputMessage.c_str());
       ChargeEfficiency_scaled = (int)round(inputMessage.toFloat() * 10);  // store as % × 10
     }
     if (request->hasParam("ChargedVoltage")) {
       foundParameter = true;
       inputMessage = request->getParam("ChargedVoltage")->value();
       ChargedVoltage_Scaled = (int)(inputMessage.toFloat() * 100);
-      writeFile(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
+      writeFileIfChanged(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
     }
     if (request->hasParam("TailCurrent")) {
       foundParameter = true;
       inputMessage = request->getParam("TailCurrent")->value();
-      writeFile(LittleFS, "/TailCurrent.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TailCurrent.txt", inputMessage.c_str());
       TailCurrent = inputMessage.toFloat();
     }
     if (request->hasParam("ChargedDetectionTime")) {
       foundParameter = true;
       inputMessage = request->getParam("ChargedDetectionTime")->value();
-      writeFile(LittleFS, "/ChargedDetectionTime.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ChargedDetectionTime.txt", inputMessage.c_str());
       ChargedDetectionTime = inputMessage.toInt();
     }
     if (request->hasParam("IgnoreTemperature")) {
       foundParameter = true;
       inputMessage = request->getParam("IgnoreTemperature")->value();
-      writeFile(LittleFS, "/IgnoreTemperature.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/IgnoreTemperature.txt", inputMessage.c_str());
       IgnoreTemperature = inputMessage.toInt();
     }
     if (request->hasParam("IgnoreRPM")) {
       foundParameter = true;
       inputMessage = request->getParam("IgnoreRPM")->value();
-      writeFile(LittleFS, "/IgnoreRPM.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/IgnoreRPM.txt", inputMessage.c_str());
       IgnoreRPM = inputMessage.toInt();
     }
     if (request->hasParam("MinRPMForField")) {
       foundParameter = true;
       inputMessage = request->getParam("MinRPMForField")->value();
-      writeFile(LittleFS, "/MinRPMForField.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MinRPMForField.txt", inputMessage.c_str());
       MinRPMForField = inputMessage.toInt();
     }
     if (request->hasParam("bmsLogic")) {
       foundParameter = true;
       inputMessage = request->getParam("bmsLogic")->value();
-      writeFile(LittleFS, "/bmsLogic.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/bmsLogic.txt", inputMessage.c_str());
       bmsLogic = inputMessage.toInt();
     }
     if (request->hasParam("bmsLogicLevelOff")) {
       foundParameter = true;
       inputMessage = request->getParam("bmsLogicLevelOff")->value();
-      writeFile(LittleFS, "/bmsLogicLevelOff.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/bmsLogicLevelOff.txt", inputMessage.c_str());
       bmsLogicLevelOff = inputMessage.toInt();
     }
     if (request->hasParam("AlarmActivate")) {
       foundParameter = true;
       inputMessage = request->getParam("AlarmActivate")->value();
-      writeFile(LittleFS, "/AlarmActivate.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AlarmActivate.txt", inputMessage.c_str());
       AlarmActivate = inputMessage.toInt();
     }
     if (request->hasParam("TempAlarm")) {
       foundParameter = true;
       inputMessage = request->getParam("TempAlarm")->value();
-      writeFile(LittleFS, "/TempAlarm.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempAlarm.txt", inputMessage.c_str());
       TempAlarm = inputMessage.toInt();
     }
     if (request->hasParam("TempAlarmLow")) {
       foundParameter = true;
       inputMessage = request->getParam("TempAlarmLow")->value();
-      writeFile(LittleFS, "/TempAlarmLow.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempAlarmLow.txt", inputMessage.c_str());
       TempAlarmLow = inputMessage.toInt();
     }
     if (request->hasParam("VoltageAlarmHigh")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageAlarmHigh")->value();
-      writeFile(LittleFS, "/VoltageAlarmHigh.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/VoltageAlarmHigh.txt", inputMessage.c_str());
       VoltageAlarmHigh = inputMessage.toInt();
     }
     if (request->hasParam("VoltageAlarmLow")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageAlarmLow")->value();
-      writeFile(LittleFS, "/VoltageAlarmLow.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/VoltageAlarmLow.txt", inputMessage.c_str());
       VoltageAlarmLow = inputMessage.toInt();
     }
     if (request->hasParam("CurrentAlarmHigh")) {
       foundParameter = true;
       inputMessage = request->getParam("CurrentAlarmHigh")->value();
-      writeFile(LittleFS, "/CurrentAlarmHigh.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/CurrentAlarmHigh.txt", inputMessage.c_str());
       CurrentAlarmHigh = inputMessage.toInt();
     }
     if (request->hasParam("RPMScalingFactor")) {
       foundParameter = true;
       inputMessage = request->getParam("RPMScalingFactor")->value();
-      writeFile(LittleFS, "/RPMScalingFactor.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/RPMScalingFactor.txt", inputMessage.c_str());
       RPMScalingFactor = inputMessage.toInt();
     }
     if (request->hasParam("FieldResistance")) {
       foundParameter = true;
       inputMessage = request->getParam("FieldResistance")->value();
-      writeFile(LittleFS, "/FieldResistance.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/FieldResistance.txt", inputMessage.c_str());
       FieldResistance = inputMessage.toFloat();
     }
     if (request->hasParam("AlternatorCOffset")) {
       foundParameter = true;
       inputMessage = request->getParam("AlternatorCOffset")->value();
-      writeFile(LittleFS, "/AlternatorCOffset.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AlternatorCOffset.txt", inputMessage.c_str());
       AlternatorCOffset = inputMessage.toFloat();
     }
     if (request->hasParam("BatteryCOffset")) {
       foundParameter = true;
       inputMessage = request->getParam("BatteryCOffset")->value();
-      writeFile(LittleFS, "/BatteryCOffset.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/BatteryCOffset.txt", inputMessage.c_str());
       BatteryCOffset = inputMessage.toFloat();
     }
     if (request->hasParam("AmpSensorRange")) {
       foundParameter = true;
       inputMessage = request->getParam("AmpSensorRange")->value();
-      writeFile(LittleFS, "/AmpSensorRange.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AmpSensorRange.txt", inputMessage.c_str());
       AmpSensorRange = inputMessage.toInt();
       queueConsoleMessageF("AmpSensorRange changed to: %d", AmpSensorRange);
     }
     if (request->hasParam("R_fixed")) {
       foundParameter = true;
       inputMessage = request->getParam("R_fixed")->value();
-      writeFile(LittleFS, "/R_fixed.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/R_fixed.txt", inputMessage.c_str());
       R_fixed = inputMessage.toFloat();
     }
     if (request->hasParam("Beta")) {
       foundParameter = true;
       inputMessage = request->getParam("Beta")->value();
-      writeFile(LittleFS, "/Beta.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Beta.txt", inputMessage.c_str());
       Beta = inputMessage.toFloat();
     }
     if (request->hasParam("T0_C")) {
       foundParameter = true;
       inputMessage = request->getParam("T0_C")->value();
-      writeFile(LittleFS, "/T0_C.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/T0_C.txt", inputMessage.c_str());
       T0_C = inputMessage.toFloat();
     }
     if (request->hasParam("TempSource")) {
       foundParameter = true;
       inputMessage = request->getParam("TempSource")->value();
-      writeFile(LittleFS, "/TempSource.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempSource.txt", inputMessage.c_str());
       TempSource = inputMessage.toInt();
     }
     if (request->hasParam("IgnitionOverride")) {
       foundParameter = true;
       inputMessage = request->getParam("IgnitionOverride")->value();
-      writeFile(LittleFS, "/IgnitionOverride.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/IgnitionOverride.txt", inputMessage.c_str());
       IgnitionOverride = inputMessage.toInt();
     }
     if (request->hasParam("AlarmLatchEnabled")) {
       foundParameter = true;
       inputMessage = request->getParam("AlarmLatchEnabled")->value();
-      writeFile(LittleFS, "/AlarmLatchEnabled.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AlarmLatchEnabled.txt", inputMessage.c_str());
       AlarmLatchEnabled = inputMessage.toInt();
     }
     if (request->hasParam("AlarmTest")) {
@@ -2884,7 +2979,7 @@ void setupServer() {
       inputMessage = request->getParam("absorptionCompleteTime")->value();
       uint32_t seconds = (uint32_t)inputMessage.toInt();
       absorptionCompleteTime = seconds * 1000UL;
-      writeFile(LittleFS, "/absorptionCompleteTime.txt", String(absorptionCompleteTime).c_str());
+      writeFileIfChanged(LittleFS, "/absorptionCompleteTime.txt", String(absorptionCompleteTime).c_str());
     }
     if (request->hasParam("FLOAT_DURATION")) {
       foundParameter = true;
@@ -2892,19 +2987,19 @@ void setupServer() {
       float hours = inputMessage.toFloat();
       int seconds = (int)(hours * 3600.0f);  // FIXED: fractional hours preserved
       FLOAT_DURATION = seconds;
-      writeFile(LittleFS, "/FLOAT_DURATION.txt", String(seconds).c_str());
+      writeFileIfChanged(LittleFS, "/FLOAT_DURATION.txt", String(seconds).c_str());
     }
     if (request->hasParam("UseFloat")) {
       foundParameter = true;
       inputMessage = request->getParam("UseFloat")->value();
       UseFloat = inputMessage.toInt();
-      writeFile(LittleFS, "/UseFloat.txt", String(UseFloat).c_str());
+      writeFileIfChanged(LittleFS, "/UseFloat.txt", String(UseFloat).c_str());
     }
     if (request->hasParam("RebulkCurrent_A")) {
       foundParameter = true;
       inputMessage = request->getParam("RebulkCurrent_A")->value();
       RebulkCurrent_A = inputMessage.toFloat();
-      writeFile(LittleFS, "/RebulkCurrent_A.txt", String(RebulkCurrent_A).c_str());
+      writeFileIfChanged(LittleFS, "/RebulkCurrent_A.txt", String(RebulkCurrent_A).c_str());
     }
     // VMGUseTrueWind (Target-mode toggle) removed — both VMGs (manual + upwind) are now always computed.
     if (request->hasParam("gpsTimeSourceMode")) {
@@ -2913,7 +3008,7 @@ void setupServer() {
       uint8_t m = (uint8_t)inputMessage.toInt();
       if (m > GTS_NTP) m = GTS_AUTO;  // sanity
       gpsTimeSourceMode = m;
-      writeFile(LittleFS, "/gpsTimeSourceMode.txt", String(gpsTimeSourceMode).c_str());
+      writeFileIfChanged(LittleFS, "/gpsTimeSourceMode.txt", String(gpsTimeSourceMode).c_str());
       const char *lbl = (m == GTS_AUTO)  ? "auto"
                       : (m == GTS_NMEA)  ? "NMEA only"
                       : (m == GTS_PHONE) ? "phone only"
@@ -3015,34 +3110,40 @@ void setupServer() {
       EngineFuelUsed = 0;
       queueConsoleMessage("Engine Fuel Used: Reset requested from web interface");
     }
+    if (request->hasParam("ResetFuelCurve")) {
+      foundParameter = true;
+      memset(fuelCurveNMPG, 0, sizeof(fuelCurveNMPG));  // clear all bins
+      fcRun = false;                                    // break any in-progress steady run
+      queueConsoleMessage("Fuel Economy Curve: Reset requested from web interface");
+    }
     if (request->hasParam("MaximumAllowedBatteryAmps")) {
       foundParameter = true;
       inputMessage = request->getParam("MaximumAllowedBatteryAmps")->value();
-      writeFile(LittleFS, "/MaximumAllowedBatteryAmps.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MaximumAllowedBatteryAmps.txt", inputMessage.c_str());
       MaximumAllowedBatteryAmps = inputMessage.toInt();
     }
     if (request->hasParam("LoadDumpDtThresh")) {
       foundParameter = true;
       inputMessage = request->getParam("LoadDumpDtThresh")->value();
       LoadDumpDtThresh = inputMessage.toFloat();
-      writeFile(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
+      writeFileIfChanged(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
     }
     if (request->hasParam("LoadDumpDtThresh1")) {
       foundParameter = true;
       inputMessage = request->getParam("LoadDumpDtThresh1")->value();
       LoadDumpDtThresh1 = inputMessage.toFloat();
-      writeFile(LittleFS, "/LoadDumpDtThresh1.txt", String(LoadDumpDtThresh1).c_str());
+      writeFileIfChanged(LittleFS, "/LoadDumpDtThresh1.txt", String(LoadDumpDtThresh1).c_str());
     }
     if (request->hasParam("LoadDumpDtThresh3")) {
       foundParameter = true;
       inputMessage = request->getParam("LoadDumpDtThresh3")->value();
       LoadDumpDtThresh3 = inputMessage.toFloat();
-      writeFile(LittleFS, "/LoadDumpDtThresh3.txt", String(LoadDumpDtThresh3).c_str());
+      writeFileIfChanged(LittleFS, "/LoadDumpDtThresh3.txt", String(LoadDumpDtThresh3).c_str());
     }
     if (request->hasParam("ManualSOCPoint")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualSOCPoint")->value();
-      writeFile(LittleFS, "/ManualSOCPoint.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ManualSOCPoint.txt", inputMessage.c_str());
       ManualSOCPoint = inputMessage.toInt();
       SOC_percent = ManualSOCPoint * 100;
       CoulombCount_Ah_scaled = (ManualSOCPoint * BatteryCapacity_Ah);
@@ -3051,7 +3152,7 @@ void setupServer() {
     if (request->hasParam("BatteryCapacity_Ah")) {
       foundParameter = true;
       inputMessage = request->getParam("BatteryCapacity_Ah")->value();
-      writeFile(LittleFS, "/BatteryCapacity_Ah.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/BatteryCapacity_Ah.txt", inputMessage.c_str());
       BatteryCapacity_Ah = inputMessage.toInt();
       PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;
       updateVesselInfoField("battery_capacity_ah", BatteryCapacity_Ah);
@@ -3060,14 +3161,14 @@ void setupServer() {
     if (request->hasParam("ShuntResistanceMicroOhm")) {
       foundParameter = true;
       inputMessage = request->getParam("ShuntResistanceMicroOhm")->value();
-      writeFile(LittleFS, "/ShuntResistanceMicroOhm.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ShuntResistanceMicroOhm.txt", inputMessage.c_str());
       ShuntResistanceMicroOhm = inputMessage.toInt();
     }
 
     if (request->hasParam("VoltageKp")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageKp")->value();
-      writeFile(LittleFS, "/VoltageKp.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/VoltageKp.txt", inputMessage.c_str());
       VoltageKp = inputMessage.toFloat();
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3075,67 +3176,67 @@ void setupServer() {
     if (request->hasParam("maxPoints")) {
       foundParameter = true;
       inputMessage = request->getParam("maxPoints")->value();
-      writeFile(LittleFS, "/maxPoints.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/maxPoints.txt", inputMessage.c_str());
       maxPoints = inputMessage.toInt();
     }
     if (request->hasParam("Ymin1")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymin1")->value();
-      writeFile(LittleFS, "/Ymin1.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymin1.txt", inputMessage.c_str());
       Ymin1 = inputMessage.toInt();
     }
     if (request->hasParam("Ymax1")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymax1")->value();
-      writeFile(LittleFS, "/Ymax1.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymax1.txt", inputMessage.c_str());
       Ymax1 = inputMessage.toInt();
     }
     if (request->hasParam("Ymin2")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymin2")->value();
-      writeFile(LittleFS, "/Ymin2.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymin2.txt", inputMessage.c_str());
       Ymin2 = inputMessage.toFloat();
     }
     if (request->hasParam("Ymax2")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymax2")->value();
-      writeFile(LittleFS, "/Ymax2.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymax2.txt", inputMessage.c_str());
       Ymax2 = inputMessage.toFloat();
     }
     if (request->hasParam("Ymin3")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymin3")->value();
-      writeFile(LittleFS, "/Ymin3.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymin3.txt", inputMessage.c_str());
       Ymin3 = inputMessage.toInt();
     }
     if (request->hasParam("Ymax3")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymax3")->value();
-      writeFile(LittleFS, "/Ymax3.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymax3.txt", inputMessage.c_str());
       Ymax3 = inputMessage.toInt();
     }
     if (request->hasParam("Ymin4")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymin4")->value();
-      writeFile(LittleFS, "/Ymin4.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymin4.txt", inputMessage.c_str());
       Ymin4 = inputMessage.toInt();
     }
     if (request->hasParam("Ymax4")) {
       foundParameter = true;
       inputMessage = request->getParam("Ymax4")->value();
-      writeFile(LittleFS, "/Ymax4.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/Ymax4.txt", inputMessage.c_str());
       Ymax4 = inputMessage.toInt();
     }
     if (request->hasParam("AutoShuntGainCorrection")) {
       foundParameter = true;
       inputMessage = request->getParam("AutoShuntGainCorrection")->value();
-      writeFile(LittleFS, "/AutoShuntGainCorrection.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AutoShuntGainCorrection.txt", inputMessage.c_str());
       AutoShuntGainCorrection = inputMessage.toInt();
     }
     if (request->hasParam("AutoAltCurrentZero")) {
       foundParameter = true;
       inputMessage = request->getParam("AutoAltCurrentZero")->value();
-      writeFile(LittleFS, "/AutoAltCurrentZero.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AutoAltCurrentZero.txt", inputMessage.c_str());
       AutoAltCurrentZero = inputMessage.toInt();
     }
     if (request->hasParam("ResetDynamicShuntGain")) {
@@ -3153,25 +3254,25 @@ void setupServer() {
     if (request->hasParam("WindingTempOffset")) {
       foundParameter = true;
       inputMessage = request->getParam("WindingTempOffset")->value();
-      writeFile(LittleFS, "/WindingTempOffset.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/WindingTempOffset.txt", inputMessage.c_str());
       WindingTempOffset = inputMessage.toFloat();
     }
     if (request->hasParam("displayTempUnit")) {
       foundParameter = true;
       inputMessage = request->getParam("displayTempUnit")->value();
-      writeFile(LittleFS, "/displayTempUnit.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/displayTempUnit.txt", inputMessage.c_str());
       displayTempUnit = (uint8_t)inputMessage.toInt();
     }
     if (request->hasParam("PulleyRatio")) {
       foundParameter = true;
       inputMessage = request->getParam("PulleyRatio")->value();
-      writeFile(LittleFS, "/PulleyRatio.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/PulleyRatio.txt", inputMessage.c_str());
       PulleyRatio = inputMessage.toFloat();
     }
     if (request->hasParam("ManualLifePercentage")) {
       foundParameter = true;
       inputMessage = request->getParam("ManualLifePercentage")->value();
-      writeFile(LittleFS, "/ManualLifePercentage.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/ManualLifePercentage.txt", inputMessage.c_str());
       ManualLifePercentage = inputMessage.toInt();
       float life_fraction = ManualLifePercentage / 100.00;
       CumulativeInsulationDamage = 1.0 - life_fraction;
@@ -3185,34 +3286,34 @@ void setupServer() {
       inputMessage = request->getParam("webgaugesinterval")->value();
       int newInterval = inputMessage.toInt();
       newInterval = constrain(newInterval, 1, 10000000);
-      writeFile(LittleFS, "/webgaugesinterval.txt", String(newInterval).c_str());
+      writeFileIfChanged(LittleFS, "/webgaugesinterval.txt", String(newInterval).c_str());
       webgaugesinterval = newInterval;
       queueConsoleMessageF("Update interval set to: %dms", newInterval);
     }
     if (request->hasParam("BatteryCurrentSource")) {
       foundParameter = true;
       inputMessage = request->getParam("BatteryCurrentSource")->value();
-      writeFile(LittleFS, "/BatteryCurrentSource.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/BatteryCurrentSource.txt", inputMessage.c_str());
       BatteryCurrentSource = inputMessage.toInt();
       queueConsoleMessageF("Battery current source changed to: %d", BatteryCurrentSource);
     }
     if (request->hasParam("totalPowerCycles")) {
       foundParameter = true;
       inputMessage = request->getParam("totalPowerCycles")->value();
-      writeFile(LittleFS, "/totalPowerCycles.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/totalPowerCycles.txt", inputMessage.c_str());
       totalPowerCycles = inputMessage.toInt();
     }
     if (request->hasParam("timeAxisModeChanging")) {
       foundParameter = true;
       inputMessage = request->getParam("timeAxisModeChanging")->value();
-      writeFile(LittleFS, "/timeAxisModeChanging.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/timeAxisModeChanging.txt", inputMessage.c_str());
       timeAxisModeChanging = inputMessage.toInt();
       queueConsoleMessageF("Time axis mode changed to: %s", timeAxisModeChanging ? "UNIX timestamps" : "relative time");
     }
     if (request->hasParam("plotTimeWindow")) {
       foundParameter = true;
       inputMessage = request->getParam("plotTimeWindow")->value();
-      writeFile(LittleFS, "/plotTimeWindow.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/plotTimeWindow.txt", inputMessage.c_str());
       plotTimeWindow = inputMessage.toInt();
     }
     if (request->hasParam("LatitudeNMEA") && request->hasParam("LongitudeNMEA")) {
@@ -3225,43 +3326,43 @@ void setupServer() {
       gpsManualActive = true;
       LatitudeNMEA  = LatitudeManual;   // apply immediately
       LongitudeNMEA = LongitudeManual;
-      writeFile(LittleFS, "/LatitudeManual.txt", String(LatitudeManual, 6).c_str());
-      writeFile(LittleFS, "/LongitudeManual.txt", String(LongitudeManual, 6).c_str());
-      writeFile(LittleFS, "/gpsManualActive.txt", "1");
+      writeFileIfChanged(LittleFS, "/LatitudeManual.txt", String(LatitudeManual, 6).c_str());
+      writeFileIfChanged(LittleFS, "/LongitudeManual.txt", String(LongitudeManual, 6).c_str());
+      writeFileIfChanged(LittleFS, "/gpsManualActive.txt", "1");
       queueConsoleMessageF("GPS: Manual override set to %.6f, %.6f (sticky — beats NMEA & phone)", LatitudeManual, LongitudeManual);
       nextWeatherUpdate = millis();  // fire next tick (signed-delta safe; '= 0' would miss past 24.8d uptime)
     }
     if (request->hasParam("clearGpsManual")) {
       foundParameter = true;
       gpsManualActive = false;
-      writeFile(LittleFS, "/gpsManualActive.txt", "0");
+      writeFileIfChanged(LittleFS, "/gpsManualActive.txt", "0");
       queueConsoleMessage("GPS: Manual override cleared — back to automatic (NMEA/phone)");
       nextWeatherUpdate = millis();  // refresh weather with whatever the auto chain now resolves
     }
     if (request->hasParam("weatherModeEnabled")) {
       foundParameter = true;
       inputMessage = request->getParam("weatherModeEnabled")->value();
-      writeFile(LittleFS, "/weatherModeEnabled.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/weatherModeEnabled.txt", inputMessage.c_str());
       weatherModeEnabled = inputMessage.toInt();
       queueConsoleMessageF("Weather Mode %s", weatherModeEnabled ? "enabled" : "disabled");
     }
     if (request->hasParam("UVThresholdHigh")) {
       foundParameter = true;
       inputMessage = request->getParam("UVThresholdHigh")->value();
-      writeFile(LittleFS, "/UVThresholdHigh.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/UVThresholdHigh.txt", inputMessage.c_str());
       UVThresholdHigh = inputMessage.toFloat();
     }
     if (request->hasParam("SolarWatts")) {
       foundParameter = true;
       inputMessage = request->getParam("SolarWatts")->value();
-      writeFile(LittleFS, "/SolarWatts.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SolarWatts.txt", inputMessage.c_str());
       SolarWatts = inputMessage.toInt();
       updateVesselInfoField("solar_watts", SolarWatts);
     }
     if (request->hasParam("performanceRatio")) {
       foundParameter = true;
       inputMessage = request->getParam("performanceRatio")->value();
-      writeFile(LittleFS, "/performanceRatio.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/performanceRatio.txt", inputMessage.c_str());
       performanceRatio = inputMessage.toFloat();
     }
     if (request->hasParam("TriggerWeatherUpdate")) {
@@ -3292,38 +3393,38 @@ void setupServer() {
     if (request->hasParam("CAPSIZE_THRESHOLD_DEG")) {
       foundParameter = true;
       inputMessage = request->getParam("CAPSIZE_THRESHOLD_DEG")->value();
-      writeFile(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt", inputMessage.c_str());
       CAPSIZE_THRESHOLD_DEG = inputMessage.toFloat();
     }
     if (request->hasParam("PITCHPOLE_THRESHOLD_DEG")) {
       foundParameter = true;
       inputMessage = request->getParam("PITCHPOLE_THRESHOLD_DEG")->value();
-      writeFile(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt", inputMessage.c_str());
       PITCHPOLE_THRESHOLD_DEG = inputMessage.toFloat();
     }
     if (request->hasParam("SLAM_THRESHOLD_G")) {
       foundParameter = true;
       inputMessage = request->getParam("SLAM_THRESHOLD_G")->value();
-      writeFile(LittleFS, "/SLAM_THRESHOLD_G.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SLAM_THRESHOLD_G.txt", inputMessage.c_str());
       SLAM_THRESHOLD_G = inputMessage.toFloat();
     }
     if (request->hasParam("IgnoreLearningDuringPenalty")) {
       foundParameter = true;
       inputMessage = request->getParam("IgnoreLearningDuringPenalty")->value();
-      writeFile(LittleFS, "/IgnoreLearningDuringPenalty.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/IgnoreLearningDuringPenalty.txt", inputMessage.c_str());
       IgnoreLearningDuringPenalty = inputMessage.toInt();
     }
     if (request->hasParam("CloudFeatures")) {
       foundParameter = true;
       inputMessage = request->getParam("CloudFeatures")->value();
-      writeFile(LittleFS, "/CloudFeatures.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/CloudFeatures.txt", inputMessage.c_str());
       CloudFeatures = inputMessage.toInt();
     }
     // AutoSaveLearningTable handler — OBSOLETE REMOVE LATER
     if (request->hasParam("EnableAmbientCorrection")) {
       foundParameter = true;
       inputMessage = request->getParam("EnableAmbientCorrection")->value();
-      writeFile(LittleFS, "/EnableAmbientCorrection.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/EnableAmbientCorrection.txt", inputMessage.c_str());
       EnableAmbientCorrection = inputMessage.toInt();
     }
     if (request->hasParam("testProtectionsEnabled")) {
@@ -3351,11 +3452,11 @@ void setupServer() {
         if (blocker != nullptr) {
           queueConsoleMessageF("Current tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
-          writeFile(LittleFS, "/TuningMode.txt", inputMessage.c_str());
+          writeFileIfChanged(LittleFS, "/TuningMode.txt", inputMessage.c_str());
           TuningMode = requested;
         }
       } else {
-        writeFile(LittleFS, "/TuningMode.txt", inputMessage.c_str());
+        writeFileIfChanged(LittleFS, "/TuningMode.txt", inputMessage.c_str());
         TuningMode = requested;
       }
     }
@@ -3367,13 +3468,13 @@ void setupServer() {
     if (request->hasParam("LogAllLearningEvents")) {
       foundParameter = true;
       inputMessage = request->getParam("LogAllLearningEvents")->value();
-      writeFile(LittleFS, "/LogAllLearningEvents.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LogAllLearningEvents.txt", inputMessage.c_str());
       LogAllLearningEvents = inputMessage.toInt();
     }
     if (request->hasParam("hardwarePresent")) {
       foundParameter = true;
       inputMessage = request->getParam("hardwarePresent")->value();
-      writeFile(LittleFS, "/hardwarePresent.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/hardwarePresent.txt", inputMessage.c_str());
       hardwarePresent = inputMessage.toInt();
       queueConsoleMessageF("hardwarePresent mode %s", hardwarePresent ? "enabled" : "disabled");
     }
@@ -3473,6 +3574,8 @@ void setupServer() {
 
     if (fuelTableUpdated) {
       saveFuelTableToNVS();
+      memset(fuelCurveNMPG, 0, sizeof(fuelCurveNMPG));  // GPH map + bin scale changed -> old mpg stale
+      fcRun = false;
       queueConsoleMessage("Fuel table updated from web interface");
     }
 
@@ -3480,44 +3583,44 @@ void setupServer() {
     if (request->hasParam("AlternatorNominalAmps")) {
       foundParameter = true;
       inputMessage = request->getParam("AlternatorNominalAmps")->value();
-      writeFile(LittleFS, "/AlternatorNominalAmps.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AlternatorNominalAmps.txt", inputMessage.c_str());
       AlternatorNominalAmps = inputMessage.toInt();
     }
     if (request->hasParam("LearningUpStep")) {
       foundParameter = true;
       inputMessage = request->getParam("LearningUpStep")->value();
-      writeFile(LittleFS, "/LearningUpStep.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LearningUpStep.txt", inputMessage.c_str());
       LearningUpStep = inputMessage.toFloat();
     }
     if (request->hasParam("LearningDownStep")) {
       foundParameter = true;
       inputMessage = request->getParam("LearningDownStep")->value();
-      writeFile(LittleFS, "/LearningDownStep.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LearningDownStep.txt", inputMessage.c_str());
       LearningDownStep = inputMessage.toFloat();
     }
     if (request->hasParam("AmbientTempCorrectionFactor")) {
       foundParameter = true;
       inputMessage = request->getParam("AmbientTempCorrectionFactor")->value();
-      writeFile(LittleFS, "/AmbientTempCorrectionFactor.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AmbientTempCorrectionFactor.txt", inputMessage.c_str());
       AmbientTempCorrectionFactor = inputMessage.toFloat();
     }
     if (request->hasParam("xTime")) {
       foundParameter = true;
       inputMessage = request->getParam("xTime")->value();
-      writeFile(LittleFS, "/xTime.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/xTime.txt", inputMessage.c_str());
       xTime = inputMessage.toFloat();
     }
     if (request->hasParam("MinLearningInterval")) {
       foundParameter = true;
       inputMessage = request->getParam("MinLearningInterval")->value();
       int temp = inputMessage.toInt() * 1000;  // from seconds (entry into html) to ms
-      writeFile(LittleFS, "/MinLearningInterval.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/MinLearningInterval.txt", String(temp).c_str());
       MinLearningInterval = temp;
     }
     if (request->hasParam("SetpointRiseRate")) {
       foundParameter = true;
       inputMessage = request->getParam("SetpointRiseRate")->value();
-      writeFile(LittleFS, "/SetpointRiseRate.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SetpointRiseRate.txt", inputMessage.c_str());
       SetpointRiseRate = inputMessage.toFloat();
       if (TuningMode) tuningParamChanged = true;
       if (CVTuningMode) cvTuningParamChanged = true;
@@ -3525,7 +3628,7 @@ void setupServer() {
     if (request->hasParam("SetpointFallRate")) {
       foundParameter = true;
       inputMessage = request->getParam("SetpointFallRate")->value();
-      writeFile(LittleFS, "/SetpointFallRate.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SetpointFallRate.txt", inputMessage.c_str());
       SetpointFallRate = inputMessage.toFloat();
       if (TuningMode) tuningParamChanged = true;
       if (CVTuningMode) cvTuningParamChanged = true;
@@ -3533,7 +3636,7 @@ void setupServer() {
     if (request->hasParam("StartupRiseRate")) {
       foundParameter = true;
       inputMessage = request->getParam("StartupRiseRate")->value();
-      writeFile(LittleFS, "/StartupRiseRate.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/StartupRiseRate.txt", inputMessage.c_str());
       StartupRiseRate = inputMessage.toFloat();
       queueConsoleMessageF("Startup rise rate set to: %.2f A/sec", StartupRiseRate);
     }
@@ -3541,7 +3644,7 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("PIDTrackingGain")->value();
       float temp = inputMessage.toFloat();
-      writeFile(LittleFS, "/PIDTrackingGain.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/PIDTrackingGain.txt", String(temp).c_str());
       PIDTrackingGain = temp;
       if (TuningMode) tuningParamChanged = true;
     }
@@ -3549,13 +3652,13 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("SafeOperationThreshold")->value();
       int temp = inputMessage.toInt() * 1000;  // from seconds (entry into html) to ms
-      writeFile(LittleFS, "/SafeOperationThreshold.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/SafeOperationThreshold.txt", String(temp).c_str());
       SafeOperationThreshold = temp;
     }
     if (request->hasParam("PidKp")) {
       foundParameter = true;
       inputMessage = request->getParam("PidKp")->value();
-      writeFile(LittleFS, "/PidKp.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/PidKp.txt", inputMessage.c_str());
       PidKp = inputMessage.toFloat();
       if (pidInitialized) {
         currentPID.SetTunings(PidKp, PidKi, PidKd);
@@ -3567,13 +3670,13 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("AbsorptionVoltage")->value();
       AbsorptionVoltage = inputMessage.toFloat();
-      writeFile(LittleFS, "/AbsorptionVoltage.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AbsorptionVoltage.txt", inputMessage.c_str());
     }
     if (request->hasParam("TargetVoltageSetpoint")) {
       foundParameter = true;
       inputMessage = request->getParam("TargetVoltageSetpoint")->value();
       TargetVoltageSetpoint = inputMessage.toFloat();
-      writeFile(LittleFS, "/TargetVoltageSetpoint.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TargetVoltageSetpoint.txt", inputMessage.c_str());
     }
 
     if (request->hasParam("AbsorptionTimeoutMs")) {
@@ -3581,20 +3684,20 @@ void setupServer() {
       inputMessage = request->getParam("AbsorptionTimeoutMs")->value();
       uint32_t minutes = (uint32_t)inputMessage.toInt();
       AbsorptionTimeoutMs = minutes * 60000UL;
-      writeFile(LittleFS, "/AbsorptionTimeoutMs.txt", String(AbsorptionTimeoutMs).c_str());
+      writeFileIfChanged(LittleFS, "/AbsorptionTimeoutMs.txt", String(AbsorptionTimeoutMs).c_str());
     }
     if (request->hasParam("bulkVoltageHoldMs")) {
       foundParameter = true;
       inputMessage = request->getParam("bulkVoltageHoldMs")->value();
       float seconds = inputMessage.toFloat();
       bulkVoltageHoldMs = (uint32_t)(seconds * 1000.0f);
-      writeFile(LittleFS, "/bulkVoltageHoldMs.txt", String(bulkVoltageHoldMs).c_str());
+      writeFileIfChanged(LittleFS, "/bulkVoltageHoldMs.txt", String(bulkVoltageHoldMs).c_str());
     }
     if (request->hasParam("VoltageKi")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageKi")->value();
       VoltageKi = inputMessage.toFloat();
-      writeFile(LittleFS, "/VoltageKi.txt", String(VoltageKi).c_str());
+      writeFileIfChanged(LittleFS, "/VoltageKi.txt", String(VoltageKi).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     // VoltageKd server handler removed — D term removed.
@@ -3603,27 +3706,27 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("SlopeBleedThresh")->value();
       SlopeBleedThresh = inputMessage.toFloat();
-      writeFile(LittleFS, "/SlopeBleedThresh.txt", String(SlopeBleedThresh, 3).c_str());
+      writeFileIfChanged(LittleFS, "/SlopeBleedThresh.txt", String(SlopeBleedThresh, 3).c_str());
       queueConsoleMessageF("Slope bleed threshold: %.3f V/s", SlopeBleedThresh);
     }
     if (request->hasParam("SlopeBleedK")) {
       foundParameter = true;
       inputMessage = request->getParam("SlopeBleedK")->value();
       SlopeBleedK = inputMessage.toFloat();
-      writeFile(LittleFS, "/SlopeBleedK.txt", String(SlopeBleedK, 1).c_str());
+      writeFileIfChanged(LittleFS, "/SlopeBleedK.txt", String(SlopeBleedK, 1).c_str());
       queueConsoleMessageF("Slope bleed gain: %.1f A/(V/s)", SlopeBleedK);
     }
     if (request->hasParam("SlopeBleedProxV")) {
       foundParameter = true;
       inputMessage = request->getParam("SlopeBleedProxV")->value();
       SlopeBleedProxV = inputMessage.toFloat();
-      writeFile(LittleFS, "/SlopeBleedProxV.txt", String(SlopeBleedProxV, 2).c_str());
+      writeFileIfChanged(LittleFS, "/SlopeBleedProxV.txt", String(SlopeBleedProxV, 2).c_str());
       queueConsoleMessageF("Slope bleed proximity gate: %.2f V", SlopeBleedProxV);
     }
     if (request->hasParam("TempPIDKp")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKp")->value();
-      writeFile(LittleFS, "/TempPIDKp.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempPIDKp.txt", inputMessage.c_str());
       TempPIDKp = inputMessage.toFloat();
       tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
       if (ThermalTuningMode) thermalTuningParamChanged = true;
@@ -3632,7 +3735,7 @@ void setupServer() {
     if (request->hasParam("TempPIDKi")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKi")->value();
-      writeFile(LittleFS, "/TempPIDKi.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempPIDKi.txt", inputMessage.c_str());
       TempPIDKi = inputMessage.toFloat();
       tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
       if (ThermalTuningMode) thermalTuningParamChanged = true;
@@ -3642,14 +3745,14 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("ThermalLookaheadSec")->value();
       ThermalLookaheadSec = clamp_f(inputMessage.toFloat(), 0.0f, 300.0f);
-      writeFile(LittleFS, "/ThermalLookaheadSec.txt", String(ThermalLookaheadSec, 1).c_str());
+      writeFileIfChanged(LittleFS, "/ThermalLookaheadSec.txt", String(ThermalLookaheadSec, 1).c_str());
       if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("ThermalLookaheadSec set to: %.1f s", ThermalLookaheadSec);
     }
     if (request->hasParam("TempPIDIntervalMs")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDIntervalMs")->value();
-      writeFile(LittleFS, "/TempPIDIntervalMs.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempPIDIntervalMs.txt", inputMessage.c_str());
       TempPIDIntervalMs = inputMessage.toInt();
       if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("Temp PID interval updated to: %d ms", TempPIDIntervalMs);
@@ -3657,7 +3760,7 @@ void setupServer() {
     if (request->hasParam("TempPIDFilterAlpha")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDFilterAlpha")->value();
-      writeFile(LittleFS, "/TempPIDFilterAlpha.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempPIDFilterAlpha.txt", inputMessage.c_str());
       TempPIDFilterAlpha = inputMessage.toFloat();
       if (ThermalTuningMode) thermalTuningParamChanged = true;
       queueConsoleMessageF("Temp PID filter alpha updated to: %.3f", TempPIDFilterAlpha);
@@ -3665,7 +3768,7 @@ void setupServer() {
     if (request->hasParam("PidKi")) {
       foundParameter = true;
       inputMessage = request->getParam("PidKi")->value();
-      writeFile(LittleFS, "/PidKi.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/PidKi.txt", inputMessage.c_str());
       PidKi = inputMessage.toFloat();
       if (pidInitialized) {
         currentPID.SetTunings(PidKp, PidKi, PidKd);
@@ -3676,7 +3779,7 @@ void setupServer() {
     if (request->hasParam("PidKd")) {
       foundParameter = true;
       inputMessage = request->getParam("PidKd")->value();
-      writeFile(LittleFS, "/PidKd.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/PidKd.txt", inputMessage.c_str());
       PidKd = inputMessage.toFloat();
       if (pidInitialized) {
         currentPID.SetTunings(PidKp, PidKi, PidKd);
@@ -3687,7 +3790,7 @@ void setupServer() {
     if (request->hasParam("PidSampleDivisor")) {
       foundParameter = true;
       inputMessage = request->getParam("PidSampleDivisor")->value();
-      writeFile(LittleFS, "/PidSampleDivisor.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/PidSampleDivisor.txt", inputMessage.c_str());
       PidSampleDivisor = inputMessage.toInt();
       if (TuningMode) tuningParamChanged = true;
     }
@@ -3695,26 +3798,26 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("LearningSettlingPeriod")->value();
       int temp = inputMessage.toInt() * 1000;  // Convert seconds to ms
-      writeFile(LittleFS, "/LearningSettlingPeriod.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/LearningSettlingPeriod.txt", String(temp).c_str());
       LearningSettlingPeriod = temp;
     }
     if (request->hasParam("LearningRPMChangeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("LearningRPMChangeThreshold")->value();
-      writeFile(LittleFS, "/LearningRPMChangeThreshold.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LearningRPMChangeThreshold.txt", inputMessage.c_str());
       LearningRPMChangeThreshold = inputMessage.toInt();
     }
     if (request->hasParam("LearningTempHysteresis")) {
       foundParameter = true;
       inputMessage = request->getParam("LearningTempHysteresis")->value();
-      writeFile(LittleFS, "/LearningTempHysteresis.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LearningTempHysteresis.txt", inputMessage.c_str());
       LearningTempHysteresis = inputMessage.toInt();
     }
     // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
     if (request->hasParam("MaxTableValue")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxTableValue")->value();
-      writeFile(LittleFS, "/MaxTableValue.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MaxTableValue.txt", inputMessage.c_str());
       MaxTableValue = inputMessage.toFloat();
       HardOCTripAmps = MaxTableValue + 10.0f;  // always 10A above current limit
       queueConsoleMessageF("Alternator current limit set to %.1fA — OC trip threshold: %.1fA", MaxTableValue, HardOCTripAmps);
@@ -3723,39 +3826,39 @@ void setupServer() {
     if (request->hasParam("MaxPenaltyPercent")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxPenaltyPercent")->value();
-      writeFile(LittleFS, "/MaxPenaltyPercent.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/MaxPenaltyPercent.txt", inputMessage.c_str());
       MaxPenaltyPercent = inputMessage.toFloat();
     }
     if (request->hasParam("MaxPenaltyDuration")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxPenaltyDuration")->value();
       int temp = inputMessage.toInt() * 1000;
-      writeFile(LittleFS, "/MaxPenaltyDuration.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/MaxPenaltyDuration.txt", String(temp).c_str());
       MaxPenaltyDuration = temp;
     }
     if (request->hasParam("NeighborLearningFactor")) {
       foundParameter = true;
       inputMessage = request->getParam("NeighborLearningFactor")->value();
-      writeFile(LittleFS, "/NeighborLearningFactor.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/NeighborLearningFactor.txt", inputMessage.c_str());
       NeighborLearningFactor = inputMessage.toFloat();
     }
     if (request->hasParam("yyMax")) {
       foundParameter = true;
       inputMessage = request->getParam("yyMax")->value();
-      writeFile(LittleFS, "/yyMax.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/yyMax.txt", inputMessage.c_str());
       yyMax = inputMessage.toInt();
     }
     if (request->hasParam("LearningMemoryDuration")) {
       foundParameter = true;
       inputMessage = request->getParam("LearningMemoryDuration")->value();
-      writeFile(LittleFS, "/LearningMemoryDuration.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/LearningMemoryDuration.txt", inputMessage.c_str());
       LearningMemoryDuration = inputMessage.toInt();
     }
     // LearningTableSaveInterval handler — OBSOLETE REMOVE LATER
     if (request->hasParam("DutyRampRate")) {
       foundParameter = true;
       inputMessage = request->getParam("DutyRampRate")->value();
-      writeFile(LittleFS, "/DutyRampRate.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/DutyRampRate.txt", inputMessage.c_str());
       DutyRampRate = inputMessage.toFloat();
       if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("Duty ramp rate set to: %.1f %%/sec", DutyRampRate);
@@ -3763,7 +3866,7 @@ void setupServer() {
     if (request->hasParam("DutySlowRampRate")) {
       foundParameter = true;
       inputMessage = request->getParam("DutySlowRampRate")->value();
-      writeFile(LittleFS, "/DutySlowRampRate.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/DutySlowRampRate.txt", inputMessage.c_str());
       DutySlowRampRate = inputMessage.toFloat();
       queueConsoleMessageF("Shutdown slow ramp rate set to: %.2f %%/s", DutySlowRampRate);
     }
@@ -3771,28 +3874,28 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("ShutdownPhase2HoldMs")->value();
       uint32_t ms = (uint32_t)inputMessage.toInt();
-      writeFile(LittleFS, "/ShutdownPhase2HoldMs.txt", String(ms).c_str());
+      writeFileIfChanged(LittleFS, "/ShutdownPhase2HoldMs.txt", String(ms).c_str());
       ShutdownPhase2HoldMs = ms;
       queueConsoleMessageF("Shutdown phase 2 hold set to: %u ms", ShutdownPhase2HoldMs);
     }
     if (request->hasParam("SettleTimeBeforeCut")) {
       foundParameter = true;
       inputMessage = request->getParam("SettleTimeBeforeCut")->value();
-      writeFile(LittleFS, "/SettleTimeBeforeCut.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/SettleTimeBeforeCut.txt", inputMessage.c_str());
       SettleTimeBeforeCut = inputMessage.toInt();
       queueConsoleMessageF("Settle time before cut set to: %d ms", SettleTimeBeforeCut);
     }
     if (request->hasParam("TempWarnExcess")) {
       foundParameter = true;
       inputMessage = request->getParam("TempWarnExcess")->value();
-      writeFile(LittleFS, "/TempWarnExcess.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempWarnExcess.txt", inputMessage.c_str());
       TempWarnExcess = inputMessage.toFloat();
       queueConsoleMessageF("Temp warning threshold set to: +%.1f°F above limit", TempWarnExcess);
     }
     if (request->hasParam("TempCritExcess")) {
       foundParameter = true;
       inputMessage = request->getParam("TempCritExcess")->value();
-      writeFile(LittleFS, "/TempCritExcess.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/TempCritExcess.txt", inputMessage.c_str());
       TempCritExcess = inputMessage.toFloat();
       queueConsoleMessageF("Temp critical threshold set to: +%.1f°F above limit", TempCritExcess);
     }
@@ -3800,14 +3903,14 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("TempSustainedTimeout")->value();
       int temp = inputMessage.toInt() * 1000;  // user enters seconds
-      writeFile(LittleFS, "/TempSustainedTimeout.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/TempSustainedTimeout.txt", String(temp).c_str());
       TempSustainedTimeout = temp;
       queueConsoleMessageF("Temp sustained timeout set to: %d seconds", inputMessage.toInt());
     }
     if (request->hasParam("AlternatorHardShutdownV")) {
       foundParameter = true;
       inputMessage = request->getParam("AlternatorHardShutdownV")->value();
-      writeFile(LittleFS, "/AlternatorHardShutdownV.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/AlternatorHardShutdownV.txt", inputMessage.c_str());
       AlternatorHardShutdownV = inputMessage.toFloat();
       queueConsoleMessageF("Alternator hard-shutdown voltage set to: %.2fV (absolute)", AlternatorHardShutdownV);
     }
@@ -3815,7 +3918,7 @@ void setupServer() {
     if (request->hasParam("HardOCDebounceMs")) {
       foundParameter = true;
       inputMessage = request->getParam("HardOCDebounceMs")->value();
-      writeFile(LittleFS, "/HardOCDebounceMs.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/HardOCDebounceMs.txt", inputMessage.c_str());
       HardOCDebounceMs = (uint32_t)inputMessage.toInt();
       queueConsoleMessageF("Overcurrent trip debounce set to: %ums", HardOCDebounceMs);
     }
@@ -3823,14 +3926,14 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("WarmupRampRate")->value();
       WarmupRampRate = max(0.0f, inputMessage.toFloat());
-      writeFile(LittleFS, "/WarmupRampRate.txt", String(WarmupRampRate, 2).c_str());
+      writeFileIfChanged(LittleFS, "/WarmupRampRate.txt", String(WarmupRampRate, 2).c_str());
       queueConsoleMessageF("Warmup ramp rate set to: %.2f A/s", WarmupRampRate);
     }
     if (request->hasParam("IExcessK")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessK")->value();
       IExcessK = inputMessage.toFloat();
-      writeFile(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());
+      writeFileIfChanged(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());
       queueConsoleMessageF("IExcess threshold set to: %.1fA above setpoint", IExcessK);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3838,7 +3941,7 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("IExcessN")->value();
       IExcessN = (int)inputMessage.toInt();
-      writeFile(LittleFS, "/IExcessN.txt", String(IExcessN).c_str());
+      writeFileIfChanged(LittleFS, "/IExcessN.txt", String(IExcessN).c_str());
       queueConsoleMessageF("IExcess persistence set to: %d ticks", IExcessN);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3846,7 +3949,7 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("IExcessKBleed")->value();
       IExcessKBleed = inputMessage.toFloat();
-      writeFile(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
+      writeFileIfChanged(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
       queueConsoleMessageF("K_bleed set to: %.2f A/s per A", IExcessKBleed);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3854,14 +3957,14 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("IExcessArmMarginV")->value();
       IExcessArmMarginV = constrain(inputMessage.toFloat(), 0.020f, 5.000f);
-      writeFile(LittleFS, "/IExcessArmMarginV.txt", String(IExcessArmMarginV, 3).c_str());
+      writeFileIfChanged(LittleFS, "/IExcessArmMarginV.txt", String(IExcessArmMarginV, 3).c_str());
       queueConsoleMessageF("iExcess arming margin set to: %.0f mV below target", IExcessArmMarginV * 1000.0f);
     }
     if (request->hasParam("AwBleedRate")) {
       foundParameter = true;
       inputMessage = request->getParam("AwBleedRate")->value();
       AwBleedRate = inputMessage.toFloat();
-      writeFile(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 1).c_str());
+      writeFileIfChanged(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 1).c_str());
       queueConsoleMessageF("AW bleed rate set to: %.1f A/s", AwBleedRate);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3870,28 +3973,28 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("FastSetpointRiseRate")->value();
       FastSetpointRiseRate = constrain(inputMessage.toFloat(), 1.0f, 50.0f);
-      writeFile(LittleFS, "/FastSetpointRiseRate.txt", String(FastSetpointRiseRate, 1).c_str());
+      writeFileIfChanged(LittleFS, "/FastSetpointRiseRate.txt", String(FastSetpointRiseRate, 1).c_str());
       queueConsoleMessageF("Fast setpoint rise rate set to: %.1fx", FastSetpointRiseRate);
     }
     if (request->hasParam("FastSetpointRiseWindowMs")) {
       foundParameter = true;
       inputMessage = request->getParam("FastSetpointRiseWindowMs")->value();
       FastSetpointRiseWindowMs = (uint32_t)constrain(inputMessage.toInt(), 500, 30000);
-      writeFile(LittleFS, "/FastSetpointRiseWindowMs.txt", String(FastSetpointRiseWindowMs).c_str());
+      writeFileIfChanged(LittleFS, "/FastSetpointRiseWindowMs.txt", String(FastSetpointRiseWindowMs).c_str());
       queueConsoleMessageF("Fast rise window set to: %ums", FastSetpointRiseWindowMs);
     }
     if (request->hasParam("FastSetpointRiseHeadroomV")) {
       foundParameter = true;
       inputMessage = request->getParam("FastSetpointRiseHeadroomV")->value();
       FastSetpointRiseHeadroomV = constrain(inputMessage.toFloat(), 0.05f, 2.0f);
-      writeFile(LittleFS, "/FastSetpointRiseHeadroomV.txt", String(FastSetpointRiseHeadroomV, 2).c_str());
+      writeFileIfChanged(LittleFS, "/FastSetpointRiseHeadroomV.txt", String(FastSetpointRiseHeadroomV, 2).c_str());
       queueConsoleMessageF("Fast rise headroom set to: %.2fV", FastSetpointRiseHeadroomV);
     }
     if (request->hasParam("AwSeedProtectMs")) {
       foundParameter = true;
       inputMessage = request->getParam("AwSeedProtectMs")->value();
       AwSeedProtectMs = (uint16_t)constrain(inputMessage.toInt(), 0, 2000);
-      writeFile(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
+      writeFileIfChanged(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
       queueConsoleMessageF("AW seed protect window set to: %u ms", (unsigned)AwSeedProtectMs);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3899,7 +4002,7 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("KHard")->value();
       KHard = inputMessage.toFloat();
-      writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
+      writeFileIfChanged(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
       queueConsoleMessageF("KHard set to: %.1f A/V", KHard);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -3907,21 +4010,21 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("OvGroup1Enable")->value();
       OvGroup1Enable = inputMessage.toInt() != 0;
-      writeFile(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
+      writeFileIfChanged(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
       queueConsoleMessageF("OV Group 1 (prediction-based cap): %s", OvGroup1Enable ? "ENABLED" : "DISABLED");
     }
     if (request->hasParam("OvGroup2Enable")) {
       foundParameter = true;
       inputMessage = request->getParam("OvGroup2Enable")->value();
       OvGroup2Enable = inputMessage.toInt() != 0;
-      writeFile(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
+      writeFileIfChanged(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
       queueConsoleMessageF("OV Group 2 (measured-voltage threshold): %s", OvGroup2Enable ? "ENABLED" : "DISABLED");
     }
     if (request->hasParam("IExcessSigSrc")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessSigSrc")->value();
       IExcessSigSrc = constrain(inputMessage.toInt(), 0, 2);
-      writeFile(LittleFS, "/IExcessSigSrc.txt", String(IExcessSigSrc).c_str());
+      writeFileIfChanged(LittleFS, "/IExcessSigSrc.txt", String(IExcessSigSrc).c_str());
       const char* sigNames[] = { "MA(N)", "EMA(TC)", "Raw" };
       queueConsoleMessageF("iExcess signal source: %s", sigNames[IExcessSigSrc]);
     }
@@ -3929,14 +4032,14 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("IExcessMA_N")->value();
       IExcessMA_N = constrain(inputMessage.toInt(), 1, I_RING_SIZE);
-      writeFile(LittleFS, "/IExcessMA_N.txt", String(IExcessMA_N).c_str());
+      writeFileIfChanged(LittleFS, "/IExcessMA_N.txt", String(IExcessMA_N).c_str());
       queueConsoleMessageF("iExcess MA window: N=%d", IExcessMA_N);
     }
     if (request->hasParam("OutputPIDSigSrc")) {
       foundParameter = true;
       inputMessage = request->getParam("OutputPIDSigSrc")->value();
       OutputPIDSigSrc = constrain(inputMessage.toInt(), 0, 2);
-      writeFile(LittleFS, "/OutputPIDSigSrc.txt", String(OutputPIDSigSrc).c_str());
+      writeFileIfChanged(LittleFS, "/OutputPIDSigSrc.txt", String(OutputPIDSigSrc).c_str());
       const char* sigNames[] = { "EMA(TC)", "MA(N)", "Raw" };
       queueConsoleMessageF("Output PID signal source: %s", sigNames[OutputPIDSigSrc]);
     }
@@ -3944,56 +4047,56 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("OutputPIDMA_N")->value();
       OutputPIDMA_N = constrain(inputMessage.toInt(), 1, I_RING_SIZE);
-      writeFile(LittleFS, "/OutputPIDMA_N.txt", String(OutputPIDMA_N).c_str());
+      writeFileIfChanged(LittleFS, "/OutputPIDMA_N.txt", String(OutputPIDMA_N).c_str());
       queueConsoleMessageF("Output PID MA window: N=%d", OutputPIDMA_N);
     }
     if (request->hasParam("OutputPIDFilterTC")) {
       foundParameter = true;
       inputMessage = request->getParam("OutputPIDFilterTC")->value();
       OutputPIDFilterTC = inputMessage.toFloat();
-      writeFile(LittleFS, "/OutputPIDFilterTC.txt", String(OutputPIDFilterTC).c_str());
+      writeFileIfChanged(LittleFS, "/OutputPIDFilterTC.txt", String(OutputPIDFilterTC).c_str());
       queueConsoleMessageF("Output PID EMA TC: %.1f ms", OutputPIDFilterTC);
     }
     if (request->hasParam("VoltageFilterTC")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageFilterTC")->value();
       VoltageFilterTC = inputMessage.toFloat();
-      writeFile(LittleFS, "/VoltageFilterTC.txt", String(VoltageFilterTC).c_str());
+      writeFileIfChanged(LittleFS, "/VoltageFilterTC.txt", String(VoltageFilterTC).c_str());
       queueConsoleMessageF("Voltage EMA TC: %.1f ms", VoltageFilterTC);
     }
     if (request->hasParam("TdPred")) {
       foundParameter = true;
       inputMessage = request->getParam("TdPred")->value();
       TdPred = constrain(inputMessage.toFloat(), 0.01f, 0.30f);
-      writeFile(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());
+      writeFileIfChanged(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());
       queueConsoleMessageF("OV prediction horizon set to: %.3f s", TdPred);
     }
     if (request->hasParam("OvMeasMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("OvMeasMarginV")->value();
       OvMeasMarginV = constrain(inputMessage.toFloat(), 0.020f, 0.500f);
-      writeFile(LittleFS, "/OvMeasMarginV.txt", String(OvMeasMarginV, 3).c_str());
+      writeFileIfChanged(LittleFS, "/OvMeasMarginV.txt", String(OvMeasMarginV, 3).c_str());
       queueConsoleMessageF("Group 2 measured-voltage trigger margin set to: %.0f mV", OvMeasMarginV * 1000.0f);
     }
     if (request->hasParam("OvPredMarginV")) {
       foundParameter = true;
       inputMessage = request->getParam("OvPredMarginV")->value();
       OvPredMarginV = constrain(inputMessage.toFloat(), 0.050f, 1.000f);
-      writeFile(LittleFS, "/OvPredMarginV.txt", String(OvPredMarginV, 3).c_str());
+      writeFileIfChanged(LittleFS, "/OvPredMarginV.txt", String(OvPredMarginV, 3).c_str());
       queueConsoleMessageF("Group 1 prediction trigger margin set to: %.0f mV", OvPredMarginV * 1000.0f);
     }
     if (request->hasParam("DvdtTC")) {
       foundParameter = true;
       inputMessage = request->getParam("DvdtTC")->value();
       DvdtTC = constrain(inputMessage.toFloat(), 5.0f, 500.0f);
-      writeFile(LittleFS, "/DvdtTC.txt", String(DvdtTC, 1).c_str());
+      writeFileIfChanged(LittleFS, "/DvdtTC.txt", String(DvdtTC, 1).c_str());
       queueConsoleMessageF("dvdt EMA TC set to: %.1f ms (dt-aware; alpha computed per-sample)", DvdtTC);
     }
     if (request->hasParam("ReseedFrac")) {
       foundParameter = true;
       inputMessage = request->getParam("ReseedFrac")->value();
       ReseedFrac = inputMessage.toFloat();
-      writeFile(LittleFS, "/ReseedFrac.txt", String(ReseedFrac, 2).c_str());
+      writeFileIfChanged(LittleFS, "/ReseedFrac.txt", String(ReseedFrac, 2).c_str());
       queueConsoleMessageF("Recovery seed fraction set to: %.2f", ReseedFrac);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
@@ -4009,11 +4112,11 @@ void setupServer() {
         if (blocker != nullptr) {
           queueConsoleMessageF("Voltage tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
-          writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
+          writeFileIfChanged(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
           CVTuningMode = requested;
         }
       } else {
-        writeFile(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
+        writeFileIfChanged(LittleFS, "/CVTuningMode.txt", inputMessage.c_str());
         CVTuningMode = requested;
       }
     }
@@ -4032,27 +4135,27 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("cvWaveAmplitudeV")->value();
       cvWaveAmplitudeV = inputMessage.toFloat();
-      writeFile(LittleFS, "/cvWaveAmplitudeV.txt", String(cvWaveAmplitudeV, 2).c_str());
+      writeFileIfChanged(LittleFS, "/cvWaveAmplitudeV.txt", String(cvWaveAmplitudeV, 2).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("cvWavePeriodSec")) {
       foundParameter = true;
       inputMessage = request->getParam("cvWavePeriodSec")->value();
       cvWavePeriodSec = inputMessage.toInt();
-      writeFile(LittleFS, "/cvWavePeriodSec.txt", String(cvWavePeriodSec).c_str());
+      writeFileIfChanged(LittleFS, "/cvWavePeriodSec.txt", String(cvWavePeriodSec).c_str());
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("cvKOvershoot")) {
       foundParameter = true;
       inputMessage = request->getParam("cvKOvershoot")->value();
       cvKOvershoot = inputMessage.toFloat();
-      writeFile(LittleFS, "/cvKOvershoot.txt", String(cvKOvershoot, 1).c_str());
+      writeFileIfChanged(LittleFS, "/cvKOvershoot.txt", String(cvKOvershoot, 1).c_str());
     }
     if (request->hasParam("cvConsecutiveReads")) {
       foundParameter = true;
       inputMessage = request->getParam("cvConsecutiveReads")->value();
       cvConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
-      writeFile(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
+      writeFileIfChanged(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
     }
     if (request->hasParam("ThermalTuningMode")) {
       foundParameter = true;
@@ -4066,11 +4169,11 @@ void setupServer() {
         if (blocker != nullptr) {
           queueConsoleMessageF("Thermal tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
-          writeFile(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
+          writeFileIfChanged(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
           ThermalTuningMode = requested;
         }
       } else {
-        writeFile(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
+        writeFileIfChanged(LittleFS, "/ThermalTuningMode.txt", inputMessage.c_str());
         ThermalTuningMode = requested;
       }
     }
@@ -4078,51 +4181,51 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("thermalWaveLowF")->value();
       thermalWaveLowF = inputMessage.toFloat();
-      writeFile(LittleFS, "/thermalWaveLowF.txt", String(thermalWaveLowF, 1).c_str());
+      writeFileIfChanged(LittleFS, "/thermalWaveLowF.txt", String(thermalWaveLowF, 1).c_str());
       if (ThermalTuningMode) thermalTuningParamChanged = true;
     }
     if (request->hasParam("thermalWaveHighF")) {
       foundParameter = true;
       inputMessage = request->getParam("thermalWaveHighF")->value();
       thermalWaveHighF = inputMessage.toFloat();
-      writeFile(LittleFS, "/thermalWaveHighF.txt", String(thermalWaveHighF, 1).c_str());
+      writeFileIfChanged(LittleFS, "/thermalWaveHighF.txt", String(thermalWaveHighF, 1).c_str());
       if (ThermalTuningMode) thermalTuningParamChanged = true;
     }
     if (request->hasParam("thermalWaveHalfPeriodMin")) {
       foundParameter = true;
       inputMessage = request->getParam("thermalWaveHalfPeriodMin")->value();
       thermalWaveHalfPeriodMin = inputMessage.toFloat();
-      writeFile(LittleFS, "/thermalWaveHalfPeriodMin.txt", String(thermalWaveHalfPeriodMin, 1).c_str());
+      writeFileIfChanged(LittleFS, "/thermalWaveHalfPeriodMin.txt", String(thermalWaveHalfPeriodMin, 1).c_str());
       if (ThermalTuningMode) thermalTuningParamChanged = true;
     }
     if (request->hasParam("thermalKOvershoot")) {
       foundParameter = true;
       inputMessage = request->getParam("thermalKOvershoot")->value();
       thermalKOvershoot = inputMessage.toFloat();
-      writeFile(LittleFS, "/thermalKOvershoot.txt", String(thermalKOvershoot, 1).c_str());
+      writeFileIfChanged(LittleFS, "/thermalKOvershoot.txt", String(thermalKOvershoot, 1).c_str());
     }
     if (request->hasParam("thermalKUndershoot")) {
       foundParameter = true;
       inputMessage = request->getParam("thermalKUndershoot")->value();
       thermalKUndershoot = inputMessage.toFloat();
-      writeFile(LittleFS, "/thermalKUndershoot.txt", String(thermalKUndershoot, 1).c_str());
+      writeFileIfChanged(LittleFS, "/thermalKUndershoot.txt", String(thermalKUndershoot, 1).c_str());
     }
     if (request->hasParam("thermalSettleThreshF")) {
       foundParameter = true;
       inputMessage = request->getParam("thermalSettleThreshF")->value();
       thermalSettleThreshF = inputMessage.toFloat();
-      writeFile(LittleFS, "/thermalSettleThreshF.txt", String(thermalSettleThreshF, 1).c_str());
+      writeFileIfChanged(LittleFS, "/thermalSettleThreshF.txt", String(thermalSettleThreshF, 1).c_str());
     }
     if (request->hasParam("thermalConsecutiveReads")) {
       foundParameter = true;
       inputMessage = request->getParam("thermalConsecutiveReads")->value();
       thermalConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
-      writeFile(LittleFS, "/thermalConsecutiveReads.txt", String(thermalConsecutiveReads).c_str());
+      writeFileIfChanged(LittleFS, "/thermalConsecutiveReads.txt", String(thermalConsecutiveReads).c_str());
     }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeThreshold")->value();
-      writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/VoltageDisagreeThreshold.txt", inputMessage.c_str());
       VoltageDisagreeThreshold = inputMessage.toFloat();
       queueConsoleMessageF("Voltage disagreement threshold set to: %.2fV", VoltageDisagreeThreshold);
     }
@@ -4130,21 +4233,21 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("VoltageDisagreeTimeout")->value();
       int temp = inputMessage.toInt() * 1000;  // user enters seconds
-      writeFile(LittleFS, "/VoltageDisagreeTimeout.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/VoltageDisagreeTimeout.txt", String(temp).c_str());
       VoltageDisagreeTimeout = temp;
       queueConsoleMessageF("Voltage disagreement timeout set to: %d seconds", inputMessage.toInt());
     }
     if (request->hasParam("VoltageLoopInterval")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageLoopInterval")->value();
-      writeFile(LittleFS, "/VoltageLoopInterval.txt", inputMessage.c_str());
+      writeFileIfChanged(LittleFS, "/VoltageLoopInterval.txt", inputMessage.c_str());
       VoltageLoopInterval = inputMessage.toInt();
     }
     if (request->hasParam("FIELD_COLLAPSE_DELAY")) {
       foundParameter = true;
       inputMessage = request->getParam("FIELD_COLLAPSE_DELAY")->value();
       int temp = inputMessage.toInt() * 1000;
-      writeFile(LittleFS, "/FIELD_COLLAPSE_DELAY.txt", String(temp).c_str());
+      writeFileIfChanged(LittleFS, "/FIELD_COLLAPSE_DELAY.txt", String(temp).c_str());
       FIELD_COLLAPSE_DELAY = temp;
     }
     if (request->hasParam("ResetPerfCounters")) {
@@ -4184,6 +4287,7 @@ void setupServer() {
       ft_updateAccelMetrics.worstSession = 0;
       ft_ReadVEData.worstSession = 0;
       ft_altHealth.worstSession = 0;
+      ft_altFold.worstSession = 0;
       ft_boatPerf.worstSession = 0;
       VeTime2 = 0;
       // CPU load maxes
@@ -4250,6 +4354,10 @@ void setupServer() {
       currentGaleMinutes = 0;
       prev_BestUpVMG_AT = 0;
       prev_GaleHrs_AT = 0;
+      // 80MHz low-power loop instrumentation — clear session worst + near-miss counters
+      loopWorst80Ses = 0;
+      loopOver80ImuLimitCount = 0;
+      loop80IterCount = 0;
       // Stamp the reset moment. Dashboard reads CSV1 slot 28 = (millis()-this)/1000
       // and formats it as "last 12 min" / "last 1.4 hr" on all .session-window-label spans.
       perfCountersResetMs = millis();
@@ -5544,7 +5652,16 @@ void SendWifiData() {
                                // ...4 alt-health + 2 imu-zero offsets
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // Victron VE.Direct solar/MPPT live block (10 fields)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // live engine fuel flow + economy (2 fields)
+                               "%d,%d,"
+                               // session fuel-economy curve (18 RPM bins + top-RPM scale)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +4 specifiers to balance the count after inserting ft_altFold + ft_boatPerf
+                               // win/ses mid-list (args emit positionally; field identity is via CSV2_FIELDS order)
+                               "%d,%d,%d,%d,"
+                               // +4: 80MHz low-power loop instrumentation (worst_win, worst_ses, over-limit count, total iters)
+                               "%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -5946,6 +6063,10 @@ void SendWifiData() {
                                (int)systemIDFallAvg_ms,
                                SafeInt(ft_altHealth.worstWindow),
                                SafeInt(ft_altHealth.worstSession),
+                               SafeInt(ft_altFold.worstWindow),
+                               SafeInt(ft_altFold.worstSession),
+                               SafeInt(ft_boatPerf.worstWindow),
+                               SafeInt(ft_boatPerf.worstSession),
                                (int)systemIDActive,
                                (int)systemIDResultsReady,
                                (int)(systemIDStepAmp_A[0] * 10),
@@ -6002,7 +6123,22 @@ void SendWifiData() {
                                SafeInt(VictronYieldToday_kWh, 100),      // CSV2_VictronYieldToday
                                SafeInt(VictronMaxPowerToday_W),          // CSV2_VictronMaxPowerToday
                                SafeInt(VictronYieldYesterday_kWh, 100),  // CSV2_VictronYieldYesterday
-                               SafeInt(VictronMaxPowerYesterday_W)       // CSV2_VictronMaxPowerYesterday
+                               SafeInt(VictronMaxPowerYesterday_W),      // CSV2_VictronMaxPowerYesterday
+                               SafeInt(currentFuelGPH, 100),             // CSV2_currentFuelGPH
+                               SafeInt(currentNMPG, 100),                // CSV2_currentNMPG
+                               // session fuel-economy curve (18 RPM bins, naut mi/gal ×100)
+                               SafeInt(fuelCurveNMPG[0], 100),  SafeInt(fuelCurveNMPG[1], 100),  SafeInt(fuelCurveNMPG[2], 100),
+                               SafeInt(fuelCurveNMPG[3], 100),  SafeInt(fuelCurveNMPG[4], 100),  SafeInt(fuelCurveNMPG[5], 100),
+                               SafeInt(fuelCurveNMPG[6], 100),  SafeInt(fuelCurveNMPG[7], 100),  SafeInt(fuelCurveNMPG[8], 100),
+                               SafeInt(fuelCurveNMPG[9], 100),  SafeInt(fuelCurveNMPG[10], 100), SafeInt(fuelCurveNMPG[11], 100),
+                               SafeInt(fuelCurveNMPG[12], 100), SafeInt(fuelCurveNMPG[13], 100), SafeInt(fuelCurveNMPG[14], 100),
+                               SafeInt(fuelCurveNMPG[15], 100), SafeInt(fuelCurveNMPG[16], 100), SafeInt(fuelCurveNMPG[17], 100),
+                               SafeInt(currentFuelTopRPM),               // CSV2_fuelCurveTopRPM (top fuel-table RPM)
+                               // 80MHz low-power loop instrumentation (4 fields) — µs→ms for the two worsts
+                               SafeInt(loopWorst80Win / 1000),           // CSV2_loopWorst80Win_ms
+                               SafeInt(loopWorst80Ses / 1000),           // CSV2_loopWorst80Ses_ms
+                               SafeInt(loopOver80ImuLimitCount),         // CSV2_loopOver80ImuLimitCount
+                               SafeInt(loop80IterCount)                  // CSV2_loop80IterCount
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -6575,7 +6711,7 @@ void saveVesselInfoToFile() {
   // boot's standalone-load doesn't overwrite the vesselData values in RAM.
   // The reverse direction (standalone /get handlers → vessel_info.json) is
   // handled by updateVesselInfoField().
-  writeFile(LittleFS, "/BatteryCapacity_Ah.txt", String(BatteryCapacity_Ah).c_str());
-  writeFile(LittleFS, "/SolarWatts.txt",         String(SolarWatts).c_str());
+  writeFileIfChanged(LittleFS, "/BatteryCapacity_Ah.txt", String(BatteryCapacity_Ah).c_str());
+  writeFileIfChanged(LittleFS, "/SolarWatts.txt",         String(SolarWatts).c_str());
 }
 

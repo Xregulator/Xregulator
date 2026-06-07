@@ -419,6 +419,7 @@ void checkTempTaskHealth() {
   if (otaInProgress) {
     return;  // Skip during OTA
   }
+  if (tempTaskSuspended) return;  // Temp task intentionally suspended in 80MHz engine-off idle — not a hang
   static unsigned long lastTempHealthCheck = 0;
   unsigned long now = millis();
 

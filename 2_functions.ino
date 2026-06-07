@@ -74,6 +74,15 @@ String readFile(fs::FS &fs, const char *path) {
   return result;
 }
 
+// Settings-write wrapper: skip the LittleFS erase/rewrite when the file already holds this exact
+// content (saves a flash cycle on no-op form re-submits). Fail-safe — any read mismatch just writes,
+// so it can never skip a needed write. writeFile uses file.print(message) and readFile reads it back
+// byte-for-byte, so an unchanged value round-trips exactly.
+bool writeFileIfChanged(fs::FS &fs, const char *path, const char *message) {
+  if (fsExists(path) && readFile(fs, path) == message) return true;   // unchanged → no write
+  return writeFile(fs, path, message);
+}
+
 bool writeFile(fs::FS &fs, const char *path, const char *message) {
   if (!littleFSMounted && !ensureLittleFS()) {
     return false;
@@ -665,16 +674,14 @@ void httpsTask(void *param) {
 
       // VERIFY PAYLOAD BEFORE PROCESSING
       if (request.type == HTTPS_UPLOAD_PAYLOAD || request.type == HTTPS_UPLOAD_CONFIG || request.type == HTTPS_UPLOAD_BOATPERF || request.type == HTTPS_UPLOAD_ALTHEALTH) {
-        size_t payloadLen = strlen(request.payload);
-        // Serial.printf("DEBUG: Received payload, length=%d bytes\n", payloadLen);
-
-        if (payloadLen >= sizeof(request.payload) || payloadLen == 0) {
-          // Serial.printf("ERROR: Invalid payload length %d - skipping\n", payloadLen);
+        size_t payloadLen = request.payload ? strlen(request.payload) : 0;
+        // payloadCap is the ps_malloc'd capacity (NOT sizeof a pointer); free + skip on any bad payload.
+        if (!request.payload || payloadLen >= request.payloadCap || payloadLen == 0) {
+          if (request.payload) free(request.payload);
           continue;
         }
-
         if (request.payload[0] != '{') {
-          // Serial.printf("ERROR: Payload doesn't start with '{' - corrupted\n");
+          free(request.payload);
           continue;
         }
       }
@@ -751,6 +758,8 @@ void httpsTask(void *param) {
       lastHttpsOperationTime = millis();
       core0Busy = false;  // Clear lock AFTER operation completes
       esp_task_wdt_reset();
+
+      if (request.payload) { free(request.payload); request.payload = nullptr; }  // release the PSRAM payload we own
     }
   }
 }
@@ -1435,14 +1444,18 @@ void uploadBufferedRecords() {
 
   HttpsRequest req = {};
   req.type = HTTPS_UPLOAD_PAYLOAD;
-  strncpy(req.payload, payloadBuffer, sizeof(req.payload) - 1);
-  req.payload[sizeof(req.payload) - 1] = '\0';
-
-  if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
-    sensorRingInFlightIndex = (int32_t)sensorRingTail;
-    lastUploadWasBuffered = true;
-  } else {
-    Serial.println("uploadBufferedRecords: httpsQueue full, will retry next tick");
+  req.payloadCap = PAYLOAD_BUFFER_SIZE;
+  req.payload = (char *)ps_malloc(req.payloadCap);
+  if (req.payload) {
+    strncpy(req.payload, payloadBuffer, req.payloadCap - 1);
+    req.payload[req.payloadCap - 1] = '\0';
+    if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
+      sensorRingInFlightIndex = (int32_t)sensorRingTail;
+      lastUploadWasBuffered = true;
+    } else {
+      free(req.payload);
+      Serial.println("uploadBufferedRecords: httpsQueue full, will retry next tick");
+    }
   }
   esp_task_wdt_reset();
 }
@@ -2519,6 +2532,7 @@ done_headers_bp:
 
     bool success = (httpCode == 200);
     if (success) {
+      if (timeIsSynced) lastBoatPerfSyncEpoch = (int64_t)time(NULL);   // for the "synced N ago" badge
       perfClearPending();   // cloud accepted the batch (raw history) → drop the pending points
       if (perfIngestFrontCsv(bpBody)) {
         boatPerfSave();   // persist the cloud's pruned fronts
@@ -2633,6 +2647,7 @@ done_headers_ah:
 
     bool success = (httpCode == 200);
     if (success) {
+      if (timeIsSynced) lastAltHealthSyncEpoch = (int64_t)time(NULL);   // for the "synced N ago" badge
       altClearPending();   // cloud accepted the batch (raw history) → drop the pending points
       if (altIngestFrontCsv(ahBody)) {
         altHealthSave();   // persist the cloud's pruned front

@@ -696,8 +696,12 @@ void captureResetReason() {
   writeFile(LittleFS, "/LastResetReason.txt", saveStr.c_str());
 }
 void UpdateEngineFuel(unsigned long elapsedMillis) {
-  // Only calculate fuel consumption if engine is running
-  if (RPM <= 0 || RPM >= 6000) {
+  // Only calculate fuel consumption if engine is running. (High-RPM glitch reject is below, scaled
+  // to the configured engine — a fixed 6000 ceiling would wrongly cut off high-revving engines.)
+  if (RPM <= 0) {
+    currentFuelGPH = 0.0f;  // engine off -> no live flow / economy
+    currentNMPG = 0.0f;
+    fcRun = false;          // break the steady-state run for the session fuel curve
     return;
   }
 
@@ -715,6 +719,21 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
 
   // If no valid data, return
   if (validEntries == 0) {
+    currentFuelGPH = 0.0f;  // no table configured -> no live flow / economy
+    currentNMPG = 0.0f;
+    fcRun = false;
+    return;
+  }
+
+  // Engine RPM range = the configured fuel table. Top breakpoint defines the curve's bin scale and
+  // a glitch ceiling that scales with the engine (no fixed 6000 cap, so high-rev engines aren't cut off).
+  float fuelTopRPM = fuelTableRPM[validEntries - 1];
+  if (fuelTopRPM < 1.0f) fuelTopRPM = 4500.0f;  // guard a degenerate table
+  currentFuelTopRPM = fuelTopRPM;               // published for the chart x-axis
+  if (RPM >= fuelTopRPM * 1.5f) {               // 50% over redline -> treat as sensor glitch
+    currentFuelGPH = 0.0f;
+    currentNMPG = 0.0f;
+    fcRun = false;
     return;
   }
 
@@ -739,6 +758,59 @@ void UpdateEngineFuel(unsigned long elapsedMillis) {
         break;
       }
     }
+  }
+
+  // Publish live fuel flow + economy for the dashboard (gal/hr, naut mi/gal).
+  // Economy = SOG (knots = naut mi/hr) / flow (gal/hr); 0 when not moving or no GPS speed.
+  currentFuelGPH = fuelRate_GPH;
+  currentNMPG = (fuelRate_GPH > 0.0f && SOGNMEA > 0.0f) ? (SOGNMEA / fuelRate_GPH) : 0.0f;
+
+  // Session fuel-economy curve: settle-then-measure. RPM and boat speed must hold within band
+  // (max-min ≤ tol on each) continuously; once they have held for fuelCurveSettleSec (the boat has
+  // reached true steady speed for that throttle), mpg is averaged over the next fuelCurveSampleSec and
+  // that average freezes the bin (overwriting). Then the settle->sample cycle restarts while still
+  // steady, so a long cruise refreshes the bin. ANY band break / stop / no-GPS reseeds from scratch.
+  if (currentNMPG > 0.0f && SOGNMEA > 0.0f) {
+    uint32_t nowMs = millis();
+    float r = RPM, s = SOGNMEA;
+    bool inBand = false;
+    if (fcRun) {
+      float rMin = min(fcRpmMin, r), rMax = max(fcRpmMax, r);
+      float sMin = min(fcSpdMin, s), sMax = max(fcSpdMax, s);
+      if ((rMax - rMin) <= fuelCurveRpmTol && (sMax - sMin) <= fuelCurveSpdTol) {
+        inBand = true;
+        fcRpmMin = rMin; fcRpmMax = rMax; fcSpdMin = sMin; fcSpdMax = sMax;  // extend the run
+        uint32_t elapsed = nowMs - fcRunStartMs;
+        uint32_t settleMs = (uint32_t)(fuelCurveSettleSec * 1000.0f);
+        uint32_t sampleMs = (uint32_t)(fuelCurveSampleSec * 1000.0f);
+        if (elapsed >= settleMs) {                  // settled -> accumulate the sample window
+          fcSampleMpgSum += currentNMPG;
+          fcSampleRpmSum += r;
+          fcSampleCount++;
+        }
+        if (elapsed >= settleMs + sampleMs) {       // sample window complete -> freeze the bin
+          if (fcSampleCount > 0) {
+            float avgMpg = (float)(fcSampleMpgSum / (double)fcSampleCount);
+            float avgRpm = (float)(fcSampleRpmSum / (double)fcSampleCount);  // band centroid picks the bin
+            float binW = fuelTopRPM / (float)FUELCURVE_BINS;                 // universal: width scales with engine
+            int bin = (binW > 0.0f) ? (int)(avgRpm / binW) : -1;
+            if (bin >= FUELCURVE_BINS) bin = FUELCURVE_BINS - 1;             // clamp top bin (RPM at/above redline)
+            if (bin >= 0 && bin < FUELCURVE_BINS) fuelCurveNMPG[bin] = avgMpg;  // overwrite bin
+          }
+          // restart the settle->sample cycle, still steady (reseed band + accumulators at this sample)
+          fcRunStartMs = nowMs;
+          fcRpmMin = fcRpmMax = r; fcSpdMin = fcSpdMax = s;
+          fcSampleMpgSum = 0; fcSampleRpmSum = 0; fcSampleCount = 0;
+        }
+      }
+    }
+    if (!inBand) {   // first entry, or band broke -> start a fresh settle, reseeded at this sample
+      fcRun = true;
+      fcRpmMin = fcRpmMax = r; fcSpdMin = fcSpdMax = s; fcRunStartMs = nowMs;
+      fcSampleMpgSum = 0; fcSampleRpmSum = 0; fcSampleCount = 0;
+    }
+  } else {
+    fcRun = false;  // stopped or no GPS speed -> break the run
   }
 
   // Calculate fuel consumed in this interval
@@ -2350,12 +2422,10 @@ void _ReadAnalogInputs_inner() {
                          bcurPrevMs = nowIna;
                        }
 
-                       // lastElectricalRecordMs bump: blocks NVS commits for 5s via inCriticalZone() —
-                       // a record being set means we're at an electrically stressed moment.
-                       if (IBV > IBVMax)              { IBVMax              = IBV; lastElectricalRecordMs = millis(); }
-                       if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
-                       if (IBV < MinVoltage)          { MinVoltage          = IBV; lastElectricalRecordMs = millis(); }
-                       if (IBV < MinVoltage_AllTime)  { MinVoltage_AllTime  = IBV; lastElectricalRecordMs = millis(); }
+                       if (IBV > IBVMax)              { IBVMax              = IBV; }
+                       if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; }
+                       if (IBV < MinVoltage)          { MinVoltage          = IBV; }
+                       if (IBV < MinVoltage_AllTime)  { MinVoltage_AllTime  = IBV; }
                        wmIgnUpdate(wmIgn_IBV,  IBV);   // ignition-cycle watermarks (lo + hi)
                        wmIgnUpdate(wmIgn_Bcur, Bcur);
                      }
@@ -2579,18 +2649,17 @@ void _ReadAnalogInputs_inner() {
                            // reflect the previous control tick — one-tick lag is acceptable for analysis.
                            cvLog_tick(millis());
 
-                           // Track max values. lastElectricalRecordMs bump: see IBV block above.
-                           if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; lastElectricalRecordMs = millis(); }
-                           if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; lastElectricalRecordMs = millis(); }
+                           // Track max values.
+                           if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; }
+                           if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; }
                            }  // end AmpSensorRange scale block
                            break;
 
                          case 2:
                            Channel2V = Raw / 32768.0 * 2 * 6.144 * RPMScalingFactor;
                            RPM = Channel2V;
-                           // lastElectricalRecordMs bump: see IBV block above.
-                           if (RPM > RPMMax)         { RPMMax         = RPM; lastElectricalRecordMs = millis(); }
-                           if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; lastElectricalRecordMs = millis(); }
+                           if (RPM > RPMMax)         { RPMMax         = RPM; }
+                           if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; }
                            if (RPM < 100) {
                              RPM = 0;
                            }
@@ -2943,11 +3012,10 @@ void ReadAnalogInputs_Fake() {
     MARK_FRESH(IDX_VICTRON_VOLTAGE);
 
 
-    // lastElectricalRecordMs bump: blocks NVS commits for 5s via inCriticalZone().
-    if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
-    if (IBV > IBVMax)              { IBVMax              = IBV; lastElectricalRecordMs = millis(); }
-    if (IBV < MinVoltage)          { MinVoltage          = IBV; lastElectricalRecordMs = millis(); }
-    if (MinVoltage_AllTime == 0.0 || IBV < MinVoltage_AllTime) { MinVoltage_AllTime = IBV; lastElectricalRecordMs = millis(); }
+    if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; }
+    if (IBV > IBVMax)              { IBVMax              = IBV; }
+    if (IBV < MinVoltage)          { MinVoltage          = IBV; }
+    if (MinVoltage_AllTime == 0.0 || IBV < MinVoltage_AllTime) { MinVoltage_AllTime = IBV; }
 
 
     // Generate fake alternator current: wander heavily in a broad band
@@ -2959,9 +3027,9 @@ void ReadAnalogInputs_Fake() {
     ch1FreshFlag = true;                                    // Signal PID that fresh current data is available
     MARK_FRESH(IDX_MEASURED_AMPS);
 
-    // Track max alternator current. lastElectricalRecordMs bump: see IBV block above.
-    if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; lastElectricalRecordMs = millis(); }
-    if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; lastElectricalRecordMs = millis(); }
+    // Track max alternator current.
+    if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; }
+    if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; }
 
 
     // Generate fake battery current - broad noisy range
@@ -2990,9 +3058,9 @@ void ReadAnalogInputs_Fake() {
     RPM = fakeRPM;
     MARK_FRESH(IDX_RPM);
 
-    // Track RPM max. lastElectricalRecordMs bump: see IBV block above.
-    if (RPM > RPMMax)         { RPMMax         = RPM; lastElectricalRecordMs = millis(); }
-    if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; lastElectricalRecordMs = millis(); }
+    // Track RPM max.
+    if (RPM > RPMMax)         { RPMMax         = RPM; }
+    if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; }
 
     // Generate fake temperatures (10–110°C, looser swings)
     fakeTemp += (random(-30, 30) / 10.0);
@@ -3995,33 +4063,6 @@ void saveNVSDataFull() {
   nvsFullSaveLastMs = (_nvsElapsed > 65535UL) ? 65535 : (uint16_t)_nvsElapsed;
   if (nvsFullSaveLastMs > nvsFullSaveWorstMs) nvsFullSaveWorstMs = nvsFullSaveLastMs;
   nvsFullSaveCount++;
-}
-
-// Returns true when battery is high AND field is on — the window where a 50ms stall
-// could mask a load-dump voltage spike. No NVS commits happen in this window.
-// Also returns true for 5s after any V/I/RPM record-high update — setting a new max
-// means we're at an electrically stressed moment, so defer the periodic commit.
-// 1.0V band (was 0.5V) for extra safety: deferred data always drains 5s after the
-// field-off edge via saveNVSDataFull() in the main loop, so widening costs nothing.
-bool inCriticalZone() {
-  if (BatteryV > (BulkVoltage - 1.0f) && fieldActiveStatus > 0) return true;
-  if (lastElectricalRecordMs > 0 && (millis() - lastElectricalRecordMs) < 5000UL) return true;
-  return false;
-}
-
-// Returns true once we've been continuously out of critical zone for 5 seconds.
-// Resets timer if critical zone re-enters. Prevents bursting deferred I/O the instant
-// voltage drops — voltage may still be oscillating near the threshold.
-bool safeToFlushIO() {
-  static unsigned long critZoneClearAt = 0;
-  if (inCriticalZone()) {
-    critZoneClearAt = 0;
-    return false;
-  }
-  if (critZoneClearAt == 0) {
-    critZoneClearAt = millis();
-  }
-  return (millis() - critZoneClearAt >= 5000);
 }
 
 // Returns true once fieldActiveStatus has been 0 continuously for 60s + extraMs.

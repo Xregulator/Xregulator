@@ -26,7 +26,8 @@
 
 #define ALT_VER          4u
 #define ALT_FRONT_MAGIC  0x414C4652u  // 'ALFR' — best-ever front point blob
-#define ALT_TREND_MAGIC  0x414C5452u  // 'ALTR'
+#define ALT_TREND_MAGIC  0x414C5452u  // 'ALTR' (legacy whole-blob trend; superseded by the append log)
+#define ALT_TRENDLOG_MAGIC 0x414C544Cu // 'ALTL' — append-only engine-hour trend log
 
 // Temp-normalized field drive ("excitation proxy"): (dutyFrac × Vbus) / (1 + α(Tc − Tref)).
 static inline float altExcitation(float duty, float vbus, float tF) {
@@ -40,9 +41,9 @@ static inline float altExcitation(float duty, float vbus, float tF) {
 // Steadiness/averaging axes: {RPM, field-duty %, Vbus, tempF}. Defined here (before every function
 // that references them) so the rest of the module can use the front. Generic engine: Xregulator.ino.
 #define ALT_NAXIS        4
-#define ALT_FRONT_CAP    256      // sparse support points (tens–low-hundreds typical)
+#define ALT_FRONT_CAP    1024     // sparse support points; cap is headroom (float IDW eval is cheap to ~1k)
 #define ALT_EP_RING_CAP  8192     // reseed look-back (~40 s of 200 Hz folds); PSRAM
-#define ALT_PENDING_CAP  128      // accepted points buffered for the next 15-min upload
+#define ALT_PENDING_CAP  1024     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<ALT_NAXIS>     altEpisode;
 static FrontStore<ALT_NAXIS>  altFront2;
@@ -50,6 +51,7 @@ static RawSample<ALT_NAXIS>  *altEpRing   = nullptr;
 static FrontPoint<ALT_NAXIS> *altFrontBuf = nullptr;
 static FrontPoint<ALT_NAXIS> *altPending  = nullptr;   // accepted-since-last-upload (raw points out)
 static int altPendingCount   = 0;
+static String altPendingSeededFrom = "";   // non-empty → this pending batch is an adopted import (provenance tag)
 static int altFrontEmitCount = 0;        // episode points emitted (whether or not they pushed the front)
 
 // Per-axis steady-time knobs + front/eval knobs (registry-wired below; per-axis tol + floors are in
@@ -79,6 +81,7 @@ static void altCommitTrendBucket() {
   if (altTrendCount >= ALT_TREND_CAP) {  // ring full → drop oldest
     memmove(altTrend, altTrend + 1, (ALT_TREND_CAP - 1) * sizeof(AltTrendPt));
     altTrendCount = ALT_TREND_CAP - 1;
+    altTrendRewrite = true;              // indices shifted → next save rewrites the whole log
   }
   AltTrendPt &p = altTrend[altTrendCount++];
   p.engHour = (uint16_t)altCurEngHour;
@@ -230,15 +233,16 @@ static float alf_ptCount()   { return (float)altFront2.count; }                 
 static float alf_source()    { return (float)altFront2.source; }                // 0 LEARNED, 1 FIXED
 static float alf_paused()    { return (altPaused >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
-static float alf_tickWin()   { return (float)ft_altHealth.worstWindow; }   // µs — Core-1 cost diagnostic
-static float alf_tickSes()   { return (float)ft_altHealth.worstSession; }  // µs since last Reset Peak Values
+static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
+                               time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
+// fold timing moved to the Function Timing table (ft_altHealth / ft_altFold rows) — not in this live stream
 static AltLiveField ALT_LIVE[] = {
   {"valid", alf_valid}, {"rpm", alf_rpm}, {"exc", alf_exc}, {"amps", alf_amps},
   {"pred", alf_pred}, {"pct", alf_pct}, {"worstPct", alf_worst}, {"overallPct", alf_overall},
   {"status", alf_status}, {"steady", alf_steady}, {"engHours", alf_engHours},
   {"coverage", alf_coverage}, {"haveCurve", alf_haveCurve}, {"ptCount", alf_ptCount},
   {"source", alf_source}, {"paused", alf_paused},
-  {"sim", alf_sim}, {"tickWinUs", alf_tickWin}, {"tickSesUs", alf_tickSes},
+  {"sim", alf_sim}, {"syncAgoS", alf_syncAgo},
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
@@ -255,7 +259,7 @@ float altWorstPct()    { return altWorstPctLive; }
 int   altStatus()      { return (int)altStatusCode; }
 int   altHaveFront()   { return (altFront2.count > 0) ? 1 : 0; }   // CSV2: have a usable best-ever front
 int   altFrontCount()  { return altFront2.count; }                 // CSV2: front support-point count
-void  altClearPending() { altPendingCount = 0; }                   // cloud accepted the batch → drop pending
+void  altClearPending() { altPendingCount = 0; altPendingSeededFrom = ""; }   // cloud accepted the batch → drop pending + tag
 
 // ---- front CSV (the artifact): BEFRONT1,<sys>,<naxis>,<source>,<units…> then x0..xN,y,nSamp,tEmit ----
 // Serves /altcurve.csv (dashboard), the cloud sync-back, and Save/Load to file (spec §2.2/§8).
@@ -312,9 +316,62 @@ bool altIngestFrontCsv(char *body) {
     if (!eol) break;
     line = eol + 1;
   }
+  if (line && *line && newCount >= ALT_FRONT_CAP)   // cloud sent more points than we can hold
+    queueConsoleMessageF("WARN: alt front truncated at %d pts — raise ALT_FRONT_CAP", ALT_FRONT_CAP);
   altFront2.count = newCount;
   altFront2.source = newSource;
   return true;
+}
+
+// Append-only engine-hour trend log: 8-byte {magic,ver} header + AltTrendPt records. Each field-off
+// appends only the newly committed buckets (~6 B/hour) instead of rewriting the whole 120 KB ring;
+// a full rewrite happens only on a load-miss or ring eviction (altTrendRewrite).
+static void altTrendPersist() {
+  if (!altTrend) return;
+  bool full = altTrendRewrite || altTrendFlushed > (uint32_t)altTrendCount || !fsExists("/alttrend.bin");
+  fsTakeLock();
+  if (full) {
+    File f = LittleFS.open("/alttrend.bin", "w");
+    if (f) {
+      uint32_t hdr[2] = { ALT_TRENDLOG_MAGIC, ALT_VER };
+      f.write((const uint8_t *)hdr, sizeof(hdr));
+      if (altTrendCount > 0) f.write((const uint8_t *)altTrend, (size_t)altTrendCount * sizeof(AltTrendPt));
+      f.close();
+      altTrendFlushed = altTrendCount; altTrendRewrite = false;
+    }
+  } else if ((uint32_t)altTrendCount > altTrendFlushed) {   // append only the new buckets
+    File f = LittleFS.open("/alttrend.bin", "a");
+    if (f) {
+      f.write((const uint8_t *)(altTrend + altTrendFlushed),
+              (size_t)((uint32_t)altTrendCount - altTrendFlushed) * sizeof(AltTrendPt));
+      f.close();
+      altTrendFlushed = altTrendCount;
+    }
+  }
+  fsReleaseLock();
+}
+static void altTrendLoad() {
+  altTrendCount = 0; altTrendFlushed = 0; altTrendRewrite = true;   // default: log missing/invalid → rewrite next save
+  if (!altTrend || !fsExists("/alttrend.bin")) return;
+  fsTakeLock();
+  File f = LittleFS.open("/alttrend.bin", "r");
+  if (f) {
+    uint32_t hdr[2] = { 0, 0 };
+    size_t sz = f.size();
+    if (sz >= sizeof(hdr) && f.read((uint8_t *)hdr, sizeof(hdr)) == sizeof(hdr)
+        && hdr[0] == ALT_TRENDLOG_MAGIC && hdr[1] == ALT_VER) {
+      uint32_t n = (sz - sizeof(hdr)) / sizeof(AltTrendPt);
+      if (n > (uint32_t)ALT_TREND_CAP) {                  // keep most recent CAP (far-future overflow)
+        f.seek(sizeof(hdr) + (size_t)(n - ALT_TREND_CAP) * sizeof(AltTrendPt));
+        n = ALT_TREND_CAP;
+      }
+      size_t got = f.read((uint8_t *)altTrend, (size_t)n * sizeof(AltTrendPt));
+      altTrendCount = (int)(got / sizeof(AltTrendPt));
+      altTrendFlushed = altTrendCount; altTrendRewrite = false;
+    }
+    f.close();
+  }
+  fsReleaseLock();
 }
 
 // ---- persistence (field-off-gated by caller) — front + trend survive reboot (cloud authoritative) ----
@@ -322,8 +379,7 @@ void altHealthSave() {
   if (!altFrontBuf || hardwarePresent != 1) return;
   uint32_t uw = ((uint32_t)altFront2.source << 8) | (uint32_t)ALT_NAXIS;   // stash source + naxis
   writePsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, uw, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, 0, altFront2.count);
-  if (altTrend)
-    writePsramBlob("/alttrend.bin", ALT_TREND_MAGIC, ALT_VER, 0, altTrend, sizeof(AltTrendPt), ALT_TREND_CAP, 0, altTrendCount);
+  altTrendPersist();                                                       // append-only trend log
   writeFile(LittleFS, "/altbaseSec.txt", String(altTrendBaselineSec, 1).c_str());   // trend X-axis origin
 }
 static void altLoad() {
@@ -332,30 +388,39 @@ static void altLoad() {
     altFront2.count = (int)readPsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, &uw, false);
     altFront2.source = (uint8_t)((uw >> 8) & 0xFF);
   }
-  if (altTrend)
-    altTrendCount = (int)readPsramBlob("/alttrend.bin", ALT_TREND_MAGIC, ALT_VER, altTrend, sizeof(AltTrendPt), ALT_TREND_CAP, &uw, false);
+  altTrendLoad();                                                          // append-only trend log
   if (fsExists("/altbaseSec.txt")) altTrendBaselineSec = readFile(LittleFS, "/altbaseSec.txt").toFloat();
 }
 
-// ---- Save / Load the active front to a LittleFS file (spec §4/§8) ----
-bool altFrontSaveFile() {
-  if (!altFrontBuf) return false;
-  String csv = altCurveCsv();
-  writeFile(LittleFS, "/altfront_saved.csv", csv.c_str());
-  queueConsoleMessageF("AltFront: saved %d pts to /altfront_saved.csv", altFront2.count);
-  return true;
-}
-bool altFrontLoadFile() {
-  if (!altFrontBuf || !fsExists("/altfront_saved.csv")) return false;
-  String csv = readFile(LittleFS, "/altfront_saved.csv");
-  if (csv.length() < 8) return false;
-  char *body = strdup(csv.c_str());
-  if (!body) return false;
+// Ingest a BEFRONT1 front UPLOADED from the browser (Load CSV) — replace the front, then apply the
+// mode the user chose at import: fixed=true → FIXED + paused (hold the borrowed curve exactly as-is,
+// local only, never uploaded); fixed=false → LEARNED + resumed AND adopt to cloud (stage the imported
+// points into pending, tagged "import", so the next field-off upload inserts them under THIS device —
+// the cloud then treats them as native history). Persists immediately so the import survives reboot.
+// Non-static so the /altUploadFront handler in 3_functions.ino can call it. Mutates the body buffer.
+bool altUploadFrontCsv(char *body, bool fixed) {
+  if (!altFrontBuf || !body) return false;
   bool ok = altIngestFrontCsv(body);
-  free(body);
-  if (ok) { altFront2.source = 1; altPaused = 1.0f; writeFile(LittleFS, "/altPaused.txt", "1.0000"); }  // FIXED + paused
-  queueConsoleMessageF("AltFront: loaded %d pts (FIXED, paused)", altFront2.count);
-  return ok;
+  if (!ok) return false;
+  if (fixed) {                                  // FREEZE — local only
+    altFront2.source = 1; altPaused = 1.0f;
+    writeFile(LittleFS, "/altPaused.txt", "1.0000");
+    altPendingCount = 0; altPendingSeededFrom = "";   // freeze never uploads
+    queueConsoleMessageF("AltFront: UPLOADED %d pts (FIXED, paused)", altFront2.count);
+  } else {                                      // LEARN — adopt to cloud, then keep refining
+    altPendingCount = 0;                        // replace pending with the imported set (pure seeded batch)
+    for (int i = 0; i < altFront2.count && altPendingCount < ALT_PENDING_CAP; i++)
+      altPending[altPendingCount++] = altFrontBuf[i];
+    altPendingSeededFrom = "import";
+    altFront2.source = 0; altPaused = 0.0f;
+    writeFile(LittleFS, "/altPaused.txt", "0.0000");
+    if (altPendingCount < altFront2.count)
+      queueConsoleMessageF("AltFront: UPLOADED %d pts (LEARNED); only %d queued to cloud (cap)", altFront2.count, altPendingCount);
+    else
+      queueConsoleMessageF("AltFront: UPLOADED %d pts (LEARNED, adopting to cloud)", altFront2.count);
+  }
+  altHealthSave();   // persist the front now (field-off-safe)
+  return true;
 }
 
 // ---- cloud upload: batch of accepted episode points since the last upload (raw out; pruned front in) ----
@@ -365,9 +430,14 @@ bool buildAltHealthPayload(char *buf, size_t size) {
   if (!altPending || altPendingCount == 0 || authToken.isEmpty()) return false;
   time_t now_ts = time(NULL);
   int off = snprintf(buf, size,
-    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"ALT\",\"pruneK\":%d,\"idwPower\":%.2f,\"pts\":[",
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"ALT\",\"pruneK\":%d,\"idwPower\":%.2f,",
     device_id_hex, authToken.c_str(), formatTimestamp(now_ts), (int)altPruneK, altIdwPower);
   if (off < 0 || (size_t)off >= size) return false;
+  if (altPendingSeededFrom.length()) {   // adopted import: tag the whole batch as borrowed provenance
+    off += snprintf(buf + off, size - off, "\"seededFrom\":\"%s\",", altPendingSeededFrom.c_str());
+    if (off < 0 || (size_t)off >= size) return false;
+  }
+  off += snprintf(buf + off, size - off, "\"pts\":[");
   bool first = true;
   for (int k = 0; k < altPendingCount; k++) {
     if (size - (size_t)off < 80) break;   // margin for the closer
@@ -397,7 +467,7 @@ void resetAlternatorHealth() {
   altFront2.count = 0; altFront2.source = 0;
   altPendingCount = 0; altFrontEmitCount = 0;
   altEpisode.clearRun(); altEpisode.ringHead = 0; altEpisode.ringCount = 0;
-  altTrendCount = 0;
+  altTrendCount = 0; altTrendFlushed = 0; altTrendRewrite = true;   // /alttrend.bin removed below → fresh log
   altBucket_sum = 0; altBucket_n = 0; altBucket_worst = 0; altCurEngHour = -1;
   altWorstPctLive = 0; altOverallPctLive = 0; altStatusCode = 0; altLive_pct = 0;
   altTrendBaselineSec = EngineRunTime_AllTime;   // new baseline → trend X-axis restarts at 0
@@ -487,9 +557,7 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
       handled = true;
     }
   }
-  // Actions (not float knobs): Save / Load the front file + LEARNED↔FIXED source toggle (spec §4).
-  if (request->hasParam("altSaveFront")) { altFrontSaveFile(); handled = true; }
-  if (request->hasParam("altLoadFront")) { altFrontLoadFile(); handled = true; }
+  // Action (not a float knob): LEARNED↔FIXED source toggle.
   if (request->hasParam("altSource")) {   // 1 = FIXED (freeze + pause), 0 = LEARNED (resume)
     int src = request->getParam("altSource")->value().toInt();
     altFront2.source = (uint8_t)(src ? 1 : 0);
@@ -530,9 +598,9 @@ String altSchemaJson() {
 #define PERF_SAILF_MAGIC 0x50534652u  // 'PSFR' sail front blob
 #define PERF_MOTF_MAGIC  0x504D4652u  // 'PMFR' motor front blob
 #define PERF_NAXIS       3
-#define PERF_FRONT_CAP   256
+#define PERF_FRONT_CAP   1024     // sparse support points; cap is headroom (10 Hz fold → eval cost trivial)
 #define PERF_EP_RING_CAP 2048    // reseed look-back (~200 s at 10 Hz); PSRAM
-#define PERF_PENDING_CAP 128
+#define PERF_PENDING_CAP 1024     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<PERF_NAXIS>    sailEpisode,  motorEpisode;
 static FrontStore<PERF_NAXIS> sailFront,    motorFront;
@@ -540,6 +608,7 @@ static RawSample<PERF_NAXIS>  *sailRing = nullptr,     *motorRing = nullptr;
 static FrontPoint<PERF_NAXIS> *sailFrontBuf = nullptr, *motorFrontBuf = nullptr;
 static FrontPoint<PERF_NAXIS> *sailPending = nullptr,  *motorPending = nullptr;
 static int sailPendingCount = 0, motorPendingCount = 0;
+static String perfPendingSeededFrom = "";   // non-empty → this pending batch is an adopted import (provenance tag)
 
 // Steady-time + sea-state-window + headwind + front/eval + cloud-prune knobs (registry-wired below;
 // per-axis deviation bounds + floors + mode flags are in Xregulator.ino).
@@ -560,7 +629,7 @@ float perfCoveragePct()      { return sailFrontBuf  ? (100.0f * (float)sailFront
 float perfMotorCoveragePct() { return motorFrontBuf ? (100.0f * (float)motorFront.count / (float)PERF_FRONT_CAP) : 0.0f; }
 int   perfSailCount()  { return sailFront.count; }
 int   perfMotorCount() { return motorFront.count; }
-void  perfClearPending() { sailPendingCount = 0; motorPendingCount = 0; }   // cloud accepted the batch
+void  perfClearPending() { sailPendingCount = 0; motorPendingCount = 0; perfPendingSeededFrom = ""; }   // cloud accepted the batch + tag
 
 // Fold |AWA| to [0,180] when symmetric (eval/display only — raw AWA is stored to pending/cloud).
 static inline float perfFoldAwa(float a) {
@@ -612,7 +681,7 @@ static void perfEpisodeSyncCfg() {
 // Bench simulator state (perfSim* — written ONLY by perfSimTick, never the real NMEA/IMU globals).
 static float perfSimTws = 0, perfSimTwa = 0, perfSimStw = 0, perfSimSog = 0;
 static float perfSimHdg = 90, perfSimPitch = 0, perfSimRpm = 0;
-static int   perfSimIdx = 0, perfSimLoops = 0;
+static int   perfSimLoops = 0;
 static uint32_t perfSimPtStartMs = 0;
 static float perfSimFoul = 1.0f;
 
@@ -706,55 +775,68 @@ void perfFold_tick(uint32_t nowMs) {
 }
 // ---- NMEA SIMULATOR (bench testing, no boat) ----
 // Writes ONLY to dedicated perfSim* vars (never the real NMEA/RPM/IMU globals) so it can't
-// touch the control loop or other subsystems. Sweeps a small set of operating points and
-// computes a synthetic STW from a physics model (sailing polar / speed-vs-RPM) × sea-state
-// derate × a slow fouling ramp + noise — so the maps converge. (perfSim* vars declared above the fold.)
-// Fine grid so the polar (and RPM curve) fill SMOOTHLY: sailing = 3 wind speeds × 14 wind angles
-// (30..160° every 10°), then motoring = 12 RPM steps. Hold each point a few windows so the step's
-// transition window is rejected and the next steady window banks a record.
-#define PERF_SIM_NTWA  14
-#define PERF_SIM_NTWS  3
-#define PERF_SIM_NSAIL (PERF_SIM_NTWS * PERF_SIM_NTWA)    // 42
-#define PERF_SIM_NRPM  12
-#define PERF_SIM_NPTS  (PERF_SIM_NSAIL + PERF_SIM_NRPM)   // 54
+// touch the control loop or other subsystems. Models a realistic sailboat: each "leg" picks a
+// random operating point (weighted toward how a boat actually sails), holds it steady within the
+// episode bands long enough to bank ONE record, then jumps to a new one — so the best-ever front
+// fills ORGANICALLY over time (sparse → dense → converged) instead of re-tracing a fixed grid.
+// Speed = hull × wind-response(TWS) × polar-shape(TWA) × sea derate × slow fouling × noise.
+// (perfSim* vars declared above the fold.)
+#define PERF_SIM_HOLD_MS 14000u    // hold each leg > max steady time so one run forms + emits
 
-#define PERF_SIM_HOLD_MS 12000u    // hold each point > max steady time so a run forms + emits
+// Normalized best-speed fraction vs TWA (0..180, 10° steps): zero in the no-go zone, peak on the
+// reach (~100-110°), still ~0.72 of peak dead downwind — matches the dashboard's render shape.
+static float perfSimShape(float pa) {
+  static const float S[19] = {0,0,0,0.42f,0.60f,0.74f,0.84f,0.90f,0.95f,0.98f,1.00f,1.00f,0.98f,0.94f,0.89f,0.85f,0.81f,0.78f,0.72f};
+  if (pa < 0) pa = -pa; if (pa > 180) pa = 360 - pa; if (pa < 0) pa = 0;
+  float f = pa / 10.0f; int i = (int)f; if (i > 17) i = 17; float t = f - i;
+  return S[i] * (1.0f - t) + S[i + 1] * t;
+}
 static void perfSimTick(uint32_t nowMs) {
-  uint32_t hold = PERF_SIM_HOLD_MS;
+  const float HULL = 7.6f;                  // typical ~35-40 ft sailboat hull speed (kt)
+  // Current leg's target — persists across ticks until the hold expires, then a new one is drawn.
+  static float legTws = 12, legTwa = 95, legRpm = 0, legSea = 1.0f;
+  static uint8_t legMotor = 0; static bool legInit = false;
   if (perfSimPtStartMs == 0) perfSimPtStartMs = nowMs;
-  if (nowMs - perfSimPtStartMs >= hold) {
-    perfSimPtStartMs = nowMs;
-    if (++perfSimIdx >= PERF_SIM_NPTS) { perfSimIdx = 0; perfSimLoops++; }
+  if (!legInit || nowMs - perfSimPtStartMs >= PERF_SIM_HOLD_MS) {
+    legInit = true; perfSimPtStartMs = nowMs; perfSimLoops++;          // count legs (drives fouling)
+    legMotor = (random(0, 100) < 20) ? 1 : 0;                          // ~20% of legs under engine
+    if (legMotor) {
+      legRpm = 1000.0f + (float)random(0, 2401);                       // 1000..3400 RPM
+      legTws = (float)random(0, 121) / 10.0f;                          // 0..12 kt ambient wind
+      legTwa = (float)random(0, 181);
+      legSea = 0.3f + (float)random(0, 151) / 100.0f;                  // 0.3..1.8
+    } else {
+      // wind speed: triangular (avg of two uniforms) → peaks ~13 kt, spans ~4..23
+      legTws = 4.0f + (float)(random(0, 191) + random(0, 191)) / 20.0f;
+      // wind angle: triangular → peaks ~105°, spans ~30..176 (full range incl. downwind)
+      legTwa = 30.0f + (float)(random(0, 1461) + random(0, 1461)) / 20.0f;
+      legSea = 0.3f + legTws * 0.12f + (float)random(-30, 31) / 100.0f;// chop grows with wind
+      if (legSea < 0) legSea = 0; if (legSea > 5) legSea = 5;
+      legRpm = 0;
+    }
   }
-  uint8_t motor; float tws, twa, rpm, sea;
-  if (perfSimIdx < PERF_SIM_NSAIL) {            // sailing sweep
-    motor = 0;
-    int ti = perfSimIdx / PERF_SIM_NTWA, ai = perfSimIdx % PERF_SIM_NTWA;
-    tws = (ti == 0) ? 8.0f : (ti == 1) ? 12.0f : 16.0f;
-    twa = 30.0f + ai * 10.0f;                   // 30..160°
-    rpm = 0; sea = 0.5f + 0.3f * ti;            // a bit more chop in more wind
-  } else {                                      // motoring sweep
-    motor = 1;
-    int ri = perfSimIdx - PERF_SIM_NSAIL;
-    rpm = 1000.0f + ri * 220.0f;                // 1000..3420
-    tws = 8.0f; twa = 30.0f; sea = 1.0f;
-  }
-  float headwind = tws * cosf(twa * (float)PI / 180.0f);
+  // Small in-band jitter so the run looks "live" but stays steady within the episode tolerances.
+  uint8_t motor = legMotor;
+  float tws = legTws + (float)random(-20, 21) / 100.0f;               // ±0.2 kt
+  float twa = legTwa + (float)random(-10, 11) / 10.0f;               // ±1.0°
+  float rpm = legMotor ? (legRpm + (float)random(-15, 16)) : 0.0f;    // ±15 RPM
+  float sea = legSea;
   float v;
   if (motor) {
-    v = 7.0f * (1.0f - expf(-rpm / 1500.0f)) - 0.02f * headwind;
+    v = HULL * (1.0f - expf(-(rpm - 600.0f) / 1300.0f));              // idle ~2kt, cruise ~6.5, → hull
+    if (v < 0) v = 0;
+    float hw = tws * cosf(twa * (float)PI / 180.0f);                  // ambient headwind while motoring
+    v -= 0.015f * (hw > 0 ? hw : 0);
   } else {
-    float pa = twa; if (pa > 180) pa = 360 - pa;
-    float eff = sinf((float)PI * (pa - 20.0f) / 160.0f); if (eff < 0) eff = 0;  // peaks ~100°, 0 at 20°/180°
-    v = tws * 0.55f * eff;
-    if (v > 7.5f) v = 7.5f;                                   // hull-speed cap
+    float resp = 1.0f - expf(-tws / 8.0f);                           // wind response: ~.63@8 .86@16 .94@22
+    v = HULL * resp * perfSimShape(twa);                              // × normalized polar shape
   }
   float seaStd = sea / 1.414f;
-  v *= (1.0f - 0.025f * seaStd);                             // rougher seas → slower
-  if (perfSimLoops >= 2) perfSimFoul -= 0.0005f;             // after 2 full sweeps, ramp fouling
+  v *= (1.0f - 0.025f * seaStd);                                      // rougher seas → slower
+  if (perfSimLoops >= 40) perfSimFoul -= 0.0002f;                     // gentle fouling after ~40 legs (~9 min)
   if (perfSimFoul < 0.85f) perfSimFoul = 0.85f;
   v *= perfSimFoul;
-  v *= 1.0f + (float)random(-30, 31) / 1000.0f;             // ±3% noise
+  v *= 1.0f + (float)random(-25, 26) / 1000.0f;                      // ±2.5% measurement noise
   if (v < 0.2f) v = 0.2f;
   perfSimPitch = sea * sinf(2.0f * (float)PI * (float)(nowMs % 4000) / 4000.0f);  // wave-like pitch
   perfSimTws = tws; perfSimTwa = twa; perfSimHdg = 90.0f;
@@ -781,9 +863,10 @@ static float plf_coverage() { return perfCoveragePct(); }
 static float plf_ptCount()  { return (float)sailFront.count; }
 static float plf_source()   { return (float)sailFront.source; }    // 0 LEARNED, 1 FIXED
 static float plf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
-static float plf_tickWin()  { return (float)ft_boatPerf.worstWindow; }   // µs — Core-1 cost diagnostic
-static float plf_tickSes()  { return (float)ft_boatPerf.worstSession; }  // µs since last Reset Peak Values
+// fold timing moved to the Function Timing table (ft_boatPerf row) — not in this live stream
 static float plf_sim()      { return (perfSimMode >= 0.5f) ? 1.0f : 0.0f; }
+static float plf_syncAgo()  { if (lastBoatPerfSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
+                              time_t n = time(NULL); return (n > (time_t)lastBoatPerfSyncEpoch) ? (float)(n - (time_t)lastBoatPerfSyncEpoch) : 0.0f; }
 static float plf_sailHours(){ return (float)(perfSailSeconds / 3600.0); }   // data-maturity hours
 static float plf_steady()   { return (float)perfSteady; }                   // in a steady-run right now
 static PerfLiveField PERF_LIVE[] = {
@@ -791,7 +874,7 @@ static PerfLiveField PERF_LIVE[] = {
   {"best", plf_best}, {"pct", plf_pct}, {"pitchStd", plf_pitchStd}, {"src", plf_src},
   {"coverage", plf_coverage}, {"ptCount", plf_ptCount}, {"source", plf_source},
   {"paused", plf_paused},
-  {"tickWinUs", plf_tickWin}, {"tickSesUs", plf_tickSes}, {"sim", plf_sim},
+  {"sim", plf_sim}, {"syncAgoS", plf_syncAgo},
   {"sailHours", plf_sailHours}, {"steady", plf_steady},
 };
 static const size_t PERF_LIVE_COUNT = sizeof(PERF_LIVE) / sizeof(PERF_LIVE[0]);
@@ -894,6 +977,8 @@ static int perfIngestBlock(char *p, int target) {
     if (!eol) break;
     line = eol + 1;
   }
+  if (line && *line && strncmp(line, "BEFRONT1", 8) != 0 && n >= PERF_FRONT_CAP)   // more than we can hold
+    queueConsoleMessageF("WARN: %s front truncated at %d pts — raise PERF_FRONT_CAP", target ? "motor" : "sail", PERF_FRONT_CAP);
   f.count = n; f.source = src;
   return n;
 }
@@ -915,10 +1000,15 @@ bool buildBoatPerfPayload(char *buf, size_t size) {
   if ((sailPendingCount == 0 && motorPendingCount == 0) || authToken.isEmpty()) return false;
   time_t now_ts = time(NULL);
   int off = snprintf(buf, size,
-    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"BOAT\",\"speedSrc\":%d,\"foldSym\":%d,\"pruneK\":%d,\"idwPower\":%.2f,\"sail\":[",
+    "{\"device_uid\":\"%s\",\"token\":\"%s\",\"ts\":\"%s\",\"sys\":\"BOAT\",\"speedSrc\":%d,\"foldSym\":%d,\"pruneK\":%d,\"idwPower\":%.2f,",
     device_id_hex, authToken.c_str(), formatTimestamp(now_ts),
     (int)perfSpeedSrc, (perfFoldSymmetric >= 0.5f) ? 1 : 0, (int)perfPruneK, perfIdwPower);
   if (off < 0 || (size_t)off >= size) return false;
+  if (perfPendingSeededFrom.length()) {   // adopted import: tag the whole batch as borrowed provenance
+    off += snprintf(buf + off, size - off, "\"seededFrom\":\"%s\",", perfPendingSeededFrom.c_str());
+    if (off < 0 || (size_t)off >= size) return false;
+  }
+  off += snprintf(buf + off, size - off, "\"sail\":[");
   bool first = true;
   for (int k = 0; k < sailPendingCount; k++) {
     if (size - (size_t)off < 64) break;
@@ -940,24 +1030,32 @@ bool buildBoatPerfPayload(char *buf, size_t size) {
   return true;
 }
 
-// ---- Save / Load the active fronts (the PAIR) to a LittleFS file (→ FIXED + paused) (spec §4) ----
-bool perfFrontSaveFile() {
-  if (!sailFrontBuf) return false;
-  String csv = perfCurveCsv();
-  writeFile(LittleFS, "/perffront_saved.csv", csv.c_str());
-  queueConsoleMessageF("PerfFront: saved sail %d + motor %d pts", sailFront.count, motorFront.count);
+// Ingest a BEFRONT1 pair UPLOADED from the browser (Load CSV) — replace both fronts, then set the
+// mode the user chose at import: fixed=true → FIXED + paused (hold the borrowed polar exactly as-is);
+// fixed=false → LEARNED + resumed (use it as a starting point, keep refining from your own sailing).
+// Persists immediately so the import survives reboot (the file isn't on the device to re-load).
+// Non-static so the /perfUploadFront handler in 3_functions.ino can call it (sailFront/motorFront are
+// file-static here). Mutates the body buffer.
+bool perfUploadFrontCsv(char *body, bool fixed) {
+  if (!sailFrontBuf || !body) return false;
+  bool ok = perfIngestFrontCsv(body);
+  if (!ok) return false;
+  uint8_t src = fixed ? 1 : 0;
+  sailFront.source = src; motorFront.source = src;
+  perfPaused = fixed ? 1.0f : 0.0f;
+  writeFile(LittleFS, "/perfPaused.txt", fixed ? "1.0000" : "0.0000");
+  if (fixed) {                                  // FREEZE — local only, never uploaded
+    sailPendingCount = motorPendingCount = 0; perfPendingSeededFrom = "";
+  } else {                                      // LEARN — adopt to cloud: stage both fronts (tagged), keep refining
+    sailPendingCount = motorPendingCount = 0;   // replace pending with the imported set (pure seeded batch)
+    for (int i = 0; i < sailFront.count  && sailPendingCount  < PERF_PENDING_CAP; i++) sailPending[sailPendingCount++]   = sailFrontBuf[i];
+    for (int i = 0; i < motorFront.count && motorPendingCount < PERF_PENDING_CAP; i++) motorPending[motorPendingCount++] = motorFrontBuf[i];
+    perfPendingSeededFrom = "import";
+  }
+  boatPerfSave();   // persist /sailfront.bin + /motorfront.bin now (field-off-safe)
+  queueConsoleMessageF("PerfFront: UPLOADED sail %d + motor %d (%s)",
+                       sailFront.count, motorFront.count, fixed ? "FIXED, paused" : "LEARNED, adopting to cloud");
   return true;
-}
-bool perfFrontLoadFile() {
-  if (!sailFrontBuf || !fsExists("/perffront_saved.csv")) return false;
-  String csv = readFile(LittleFS, "/perffront_saved.csv");
-  if (csv.length() < 8) return false;
-  char *bodyc = strdup(csv.c_str()); if (!bodyc) return false;
-  bool ok = perfIngestFrontCsv(bodyc);
-  free(bodyc);
-  if (ok) { sailFront.source = 1; motorFront.source = 1; perfPaused = 1.0f; writeFile(LittleFS, "/perfPaused.txt", "1.0000"); }
-  queueConsoleMessageF("PerfFront: loaded sail %d + motor %d (FIXED, paused)", sailFront.count, motorFront.count);
-  return ok;
 }
 
 // ---- lifecycle ----
@@ -1060,9 +1158,7 @@ bool perfSettingsHandle(AsyncWebServerRequest *request) {
     resetBoatPerformance();
     queueConsoleMessage("BoatPerf: speed source changed → Clear All (front reset)");
   }
-  // Actions (not float knobs): Save / Load the front pair + LEARNED↔FIXED source toggle (spec §4).
-  if (request->hasParam("perfSaveFront")) { perfFrontSaveFile(); handled = true; }
-  if (request->hasParam("perfLoadFront")) { perfFrontLoadFile(); handled = true; }
+  // Action (not a float knob): LEARNED↔FIXED source toggle.
   if (request->hasParam("perfSource")) {   // 1 = FIXED (freeze + pause), 0 = LEARNED (resume)
     int src = request->getParam("perfSource")->value().toInt();
     sailFront.source = motorFront.source = (uint8_t)(src ? 1 : 0);

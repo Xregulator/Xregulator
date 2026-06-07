@@ -214,15 +214,13 @@
   <div id="settings" class="tab-content">
     <!-- Settings Sub-tabs -->
     <div class="sub-tabs">
-      <button class="sub-tab" onclick="showSubTab('settings', 'vessel-info', event)">Vessel Info</button>
       <button class="sub-tab active" onclick="showSubTab('settings', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'battery', event)">Battery</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'weather', event)">Weather Mode</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'accel', event)">Accel</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'alarms', event)">Alarms</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'weathersolar', event)">Weather/Solar</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'boatperformance', event)">Boat Performance</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'batterymonitor', event)">Battery Monitor</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'engine', event)">Engine</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'vessel-performance', event)">Vessel Performance</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'alarms', event)">Alarms</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'vessel-info', event)">Vessel Info</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'system', event)">System</button>
     </div>
 
@@ -558,16 +556,11 @@
                       </span>
                     </div>
                     <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form" style="display:inline;">
-                        <input type="hidden" name="password" class="password_field">
-                        <input type="hidden" name="ZeroIMU" value="1">
-                        <input type="submit" value="Zero Now" class="btn-primary">
-                      </form>
-                      <form action="/get" method="GET" target="hidden-form" style="display:inline;">
-                        <input type="hidden" name="password" class="password_field">
-                        <input type="hidden" name="ClearIMUZero" value="1">
-                        <input type="submit" value="Clear" class="btn-secondary">
-                      </form>
+                      <!-- Plain buttons, NOT nested <form>s: a nested form's </form> would
+                           close the outer #vessel-info-form early and orphan the Save button.
+                           submitSimpleParam handles the password + /get fetch. -->
+                      <button type="button" onclick="submitSimpleParam('ZeroIMU', 1)" class="btn-primary">Zero Now</button>
+                      <button type="button" onclick="submitSimpleParam('ClearIMUZero', 1)" class="btn-secondary">Clear</button>
                     </div>
                   </div>
                 </div>
@@ -612,9 +605,13 @@
 
               </details>
 
-              <div style="display: flex; gap: 10px;">
-                <input onclick="submitMessage.call(this)" type="submit" value="Save Vessel Info" class="btn-primary"
+              <div style="display: flex; gap: 10px; align-items: center;">
+                <input id="saveVesselInfoBtn" onclick="submitMessage.call(this)" type="submit" value="Save Vessel Info" class="btn-primary"
                   style="flex: 1; padding:12px;font-size:16px;font-weight:bold;">
+                <!-- Tooltip shown only in "Update" mode (info already on file) — explains the cloud effect of a change. -->
+                <span id="vesselUpdateTooltip" class="tooltip" onclick="this.classList.toggle('active')" style="display:none;">
+                  <span class="tooltip-box">Saving writes to this regulator immediately, but your cloud profile, leaderboards, and fleet stats only change the next time you register or update your profile under Cloud Features -> Registration sub-tab. When that happens: general boat equipment/type changes may immediately move you into a new leaderboard group as if the new value had always applied. However, no calculations are re-done, so accel mounting position onlys affect data moving forward.</span>
+                </span>
               </div>
 
 
@@ -1619,6 +1616,8 @@
                 <div style="font-size:12px;color:var(--text-muted);margin:6px 0;">
                   All steady-state definitions are tunable (build it, then tune live). Values echo live.
                 </div>
+                <p class="card-group-title" style="margin:12px 0 4px;">Steady-state detection</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How stable a reading must hold, and for how long, before a point is recordable.</div>
                 <div class="form-row">
                   <div class="form-label"><span>RPM band (RPM) (<span id="altRpmTol_echo">?</span>):</span></div>
                   <div class="form-input">
@@ -1707,6 +1706,8 @@
                   </div>
                 </div>
                 <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">Point admission</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Minimum output before a steady point is admitted at all.</div>
                 <div class="form-row">
                   <div class="form-label"><span>Admission: min amps (A) (<span id="altMinAmps_echo">?</span>):</span></div>
                   <div class="form-input">
@@ -1729,6 +1730,8 @@
                   </div>
                 </div>
                 <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">Curve fitting</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How the best-ever surface is built from recorded points.</div>
                 <div class="form-row">
                   <div class="form-label"><span>Safety margin (A, biases toward keep) (<span id="altSafetyMargin_echo">?</span>):</span></div>
                   <div class="form-input">
@@ -1762,6 +1765,8 @@
                   </div>
                 </div>
                 <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">Reference &amp; data</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Learn or freeze the reference, back it up, simulate, or reset.</div>
                 <div class="form-row">
                   <div class="form-label"><span>Reference mode (<span id="alt-mode-label">?</span>):</span></div>
                   <div class="form-input">
@@ -1771,10 +1776,26 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Saved front file:</span></div>
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Simulator</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Injects synthetic operating points for bench testing without a running engine, so the curve fills and the health trend visibly declines. Leave off for real use; simulated data is not saved.</span></span>
+                  </div>
                   <div class="form-input">
-                    <input type="button" value="Save current" class="btn-secondary" onclick="altSaveFront()" />
-                    <input type="button" value="Load saved (→ FIXED)" class="btn-secondary" onclick="altLoadFront()" />
+                    <div class="cap-mode-toggle">
+                      <button type="button" id="alt-sim-off" class="cap-mode-btn" onclick="altSetSim(0)">Off</button>
+                      <button type="button" id="alt-sim-on" class="cap-mode-btn" onclick="altSetSim(1)">On</button>
+                    </div>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reset health data</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Start Over wipes ALL learned alternator-health data and restarts the trend at engine-hour 0. Do this after replacing the alternator, regulator, or drive belt, since the old best-ever baseline no longer applies. Cannot be undone.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <input type="button" value="Start Over (new baseline)" class="btn-danger"
+                      onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned alternator-health data and restart the trend at engine-hour 0? Do this after replacing the alternator, regulator, or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}" />
                   </div>
                 </div>
                 <hr>
@@ -2270,105 +2291,6 @@
           </div> <!-- close settings-card -->
         </div> <!-- close settings-alternator -->
 
-        <!-- Engine Settings Sub-tab -->
-        <div id="settings-engine" class="sub-tab-content">
-          <div class="settings-card">
-
-            <div class="section-header" style="margin-bottom: 15px;">
-              <span>Fuel Consumption Table</span>
-            </div>
-
-            <div style="display: flex; justify-content: center; margin-top: 0;">
-              <form action="/get" method="GET" target="hidden-form" id="fuel-table-form">
-                <input type="hidden" name="password" class="password_field">
-
-                <table class="learning-table fuel-table"
-                  style="max-width: 400px; border-collapse: collapse; width: 100%;">
-                  <thead>
-                    <tr>
-                      <th style="padding: 8px; width: 50%;">RPM</th>
-                      <th style="padding: 8px; width: 50%;">GPH</th>
-                    </tr>
-                  </thead>
-                  <tbody id="fuel-table-body">
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM0_input" name="fuelTableRPM0" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH0_input" name="fuelTableGPH0" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM1_input" name="fuelTableRPM1" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH1_input" name="fuelTableGPH1" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM2_input" name="fuelTableRPM2" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH2_input" name="fuelTableGPH2" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM3_input" name="fuelTableRPM3" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH3_input" name="fuelTableGPH3" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM4_input" name="fuelTableRPM4" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH4_input" name="fuelTableGPH4" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM5_input" name="fuelTableRPM5" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH5_input" name="fuelTableGPH5" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM6_input" name="fuelTableRPM6" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH6_input" name="fuelTableGPH6" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM7_input" name="fuelTableRPM7" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH7_input" name="fuelTableGPH7" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row">
-                      <td style="padding: 2px;"><input id="fuelTableRPM8_input" name="fuelTableRPM8" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH8_input" name="fuelTableGPH8" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
-                      <td style="padding: 2px;"><input id="fuelTableRPM9_input" name="fuelTableRPM9" type="number"
-                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                      <td style="padding: 2px;"><input id="fuelTableGPH9_input" name="fuelTableGPH9" type="number"
-                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
-                    </tr>
-                  </tbody>
-                </table>
-
-                <div style="margin-top: 15px; text-align: center;">
-                  <span id="fuel-table-status" class="table-save-status" style="display: none;"></span>
-                  <input type="submit" value="Save" id="fuel-table-save-button"
-                    onclick="return validateFuelTable() && submitMessage.call(this)" class="btn-primary">
-                </div>
-
-                <p style="margin-top: 14px; font-size: 13px; color: #888; text-align: center; line-height: 1.5;">
-                  These values are used to estimate fuel burned based on engine RPM. Fuel consumption totals appear in
-                  <strong>Cloud Features → Statistics</strong>.
-                </p>
-              </form>
-            </div>
-
-          </div> <!-- CLOSE Engine settings-card -->
-        </div> <!-- End Engine Settings Sub-tab -->
 
         <!-- Battery Settings Sub-tab -->
 
@@ -3052,8 +2974,16 @@
         </div>
 
         <!-- Weather Mode Settings Section -->
-        <div id="settings-weather" class="sub-tab-content">
+        <div id="settings-weathersolar" class="sub-tab-content">
           <div class="settings-card">
+
+            <!-- Offline note: shown only in AP mode. Config below is still worth setting offline;
+                 only the live solar forecast needs internet. Toggled by the AP-mode check in script.js. -->
+            <div id="weathersolar-offline-note" class="alert"
+              style="display: none; padding: 12px 15px; border-radius: var(--radius); margin-bottom: 20px; border-left: 4px solid var(--accent); background: #e8f5f3; color: #1f5a52; font-size: 14px; line-height: 1.5;">
+              <strong>Offline (Access Point mode).</strong><br>
+              You can still set your solar array and position here — the live solar forecast resumes automatically when you reconnect to the internet.
+            </div>
 
             <!-- Toggle On/Off -->
             <div style="padding: 15px 0; border-bottom: 2px solid var(--border); margin-bottom: 20px;">
@@ -3326,55 +3256,6 @@
         </div> <!-- CLOSE Weather settings-card -->
 
 
-        <!-- IMU/Accel Settings Sub-tab -->
-        <div id="settings-accel" class="sub-tab-content">
-          <div class="settings-card">
-
-            <!-- Event Detection Thresholds -->
-            <h3 style="margin-bottom:20px;padding-bottom:10px;border-bottom:2px solid var(--accent);">
-              Event Detection Thresholds</h3>
-
-            <div class="form-row">
-              <div class="form-label">Capsize Threshold (degrees) (<span id="CAPSIZE_THRESHOLD_DEG_echo">?</span>):
-              </div>
-              <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="CAPSIZE_THRESHOLD_DEG" type="number" step="1" min="0" max="180">
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary">
-                </form>
-              </div>
-            </div>
-
-            <hr>
-
-            <div class="form-row">
-              <div class="form-label">Pitchpole Threshold (degrees) (<span id="PITCHPOLE_THRESHOLD_DEG_echo">?</span>):
-              </div>
-              <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="PITCHPOLE_THRESHOLD_DEG" type="number" step="1" min="0" max="180">
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary">
-                </form>
-              </div>
-            </div>
-
-            <hr>
-
-            <div class="form-row">
-              <div class="form-label">Slam Threshold (g's) (<span id="SLAM_THRESHOLD_G_echo">?</span>):</div>
-              <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="SLAM_THRESHOLD_G" type="number" step="0.1" min="0" max="50.0">
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary">
-                </form>
-              </div>
-            </div>
-
-          </div>
-        </div>
 
         <!-- Alarms Settings Sub-tab -->
         <div id="settings-alarms" class="sub-tab-content">
@@ -4184,7 +4065,7 @@
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Erase All Memory:</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Scorched-earth reset. Erases all settings, WiFi credentials, calibration data, and buffered logs. The cloud registration token is deliberately preserved so your cloud account and history stay intact — after reconnecting WiFi, cloud features resume automatically. To also wipe the cloud account, press Delete All Data first. Device restarts into WiFi config mode; you will need to re-enter your WiFi network name and password before the regulator will operate again.</span>
+                    <span class="tooltip-box">Scorched-earth reset. Erases all settings, WiFi credentials, calibration data, and buffered logs. The cloud registration token is deliberately preserved so your cloud account and history stay intact — after reconnecting WiFi, cloud features resume automatically. To also delete your cloud account, press Delete My Account first. Device restarts into WiFi config mode; you will need to re-enter your WiFi network name and password before the regulator will operate again.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -4202,7 +4083,7 @@
              Live Data → GPS/Travel/Wind. The live polar/motoring display, the
              Sailing/Motoring toggle, the Learning switch and Download CSV stay on
              the Live Data side; everything configurable lives here. -->
-        <div id="settings-vessel-performance" class="sub-tab-content">
+        <div id="settings-boatperformance" class="sub-tab-content">
           <div class="settings-card">
             <p class="card-group-title">Boat Performance
               <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Settings for the best-ever boat-speed learning system. The live polar / motoring display is under Live Data &rarr; GPS/Travel/Wind.</span></span>
@@ -4250,19 +4131,6 @@
                   <button type="button" id="perf-ref-0" class="cap-mode-btn" onclick="perfSetSource(0)">LEARNED (resume)</button>
                   <button type="button" id="perf-ref-1" class="cap-mode-btn" onclick="perfSetSource(1)">FIXED (freeze)</button>
                 </div>
-              </div>
-            </div>
-            <hr />
-
-            <!-- saved front file (actions, stay as buttons) -->
-            <div class="form-row">
-              <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                <span>Saved front file</span>
-                <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Save current writes the live best-ever maps (sailing polar + motoring curve) to a file on the device. Load saved reads them back and switches to FIXED so they stop changing — handy for keeping a known-good baseline or restoring after a Clear All.</span></span>
-              </div>
-              <div class="form-input" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <input type="button" value="Save current" class="btn-secondary" onclick="perfSaveFront()" />
-                <input type="button" value="Load saved (&rarr; FIXED)" class="btn-secondary" onclick="perfLoadFront()" />
               </div>
             </div>
             <hr />
@@ -4434,6 +4302,152 @@
                 <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfPruneK" type="number" step="1" min="5" max="20" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
               </div>
             </details>
+          </div>
+
+          <!-- Fuel Consumption Table (moved from Engine settings) -->
+          <div class="settings-card">
+
+            <div class="section-header" style="margin-bottom: 15px;">
+              <span>Fuel Consumption Table</span>
+            </div>
+
+            <div style="display: flex; justify-content: center; margin-top: 0;">
+              <form action="/get" method="GET" target="hidden-form" id="fuel-table-form">
+                <input type="hidden" name="password" class="password_field">
+
+                <table class="learning-table fuel-table"
+                  style="max-width: 400px; border-collapse: collapse; width: 100%;">
+                  <thead>
+                    <tr>
+                      <th style="padding: 8px; width: 50%;">RPM</th>
+                      <th style="padding: 8px; width: 50%;">GPH</th>
+                    </tr>
+                  </thead>
+                  <tbody id="fuel-table-body">
+                    <tr class="learning-table-row fuel-table-row">
+                      <td style="padding: 2px;"><input id="fuelTableRPM0_input" name="fuelTableRPM0" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH0_input" name="fuelTableGPH0" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
+                      <td style="padding: 2px;"><input id="fuelTableRPM1_input" name="fuelTableRPM1" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH1_input" name="fuelTableGPH1" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row">
+                      <td style="padding: 2px;"><input id="fuelTableRPM2_input" name="fuelTableRPM2" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH2_input" name="fuelTableGPH2" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
+                      <td style="padding: 2px;"><input id="fuelTableRPM3_input" name="fuelTableRPM3" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH3_input" name="fuelTableGPH3" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row">
+                      <td style="padding: 2px;"><input id="fuelTableRPM4_input" name="fuelTableRPM4" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH4_input" name="fuelTableGPH4" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
+                      <td style="padding: 2px;"><input id="fuelTableRPM5_input" name="fuelTableRPM5" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH5_input" name="fuelTableGPH5" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row">
+                      <td style="padding: 2px;"><input id="fuelTableRPM6_input" name="fuelTableRPM6" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH6_input" name="fuelTableGPH6" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
+                      <td style="padding: 2px;"><input id="fuelTableRPM7_input" name="fuelTableRPM7" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH7_input" name="fuelTableGPH7" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row">
+                      <td style="padding: 2px;"><input id="fuelTableRPM8_input" name="fuelTableRPM8" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH8_input" name="fuelTableGPH8" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                    <tr class="learning-table-row fuel-table-row fuel-table-row-dark">
+                      <td style="padding: 2px;"><input id="fuelTableRPM9_input" name="fuelTableRPM9" type="number"
+                          min="0" max="10000" step="1" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                      <td style="padding: 2px;"><input id="fuelTableGPH9_input" name="fuelTableGPH9" type="number"
+                          min="0" max="200" step="0.01" style="width: 100%; padding: 4px; box-sizing: border-box;"></td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div style="margin-top: 15px; text-align: center;">
+                  <span id="fuel-table-status" class="table-save-status" style="display: none;"></span>
+                  <input type="submit" value="Save" id="fuel-table-save-button"
+                    onclick="return validateFuelTable() && submitMessage.call(this)" class="btn-primary">
+                </div>
+
+                <p style="margin-top: 14px; font-size: 13px; color: #888; text-align: center; line-height: 1.5;">
+                  These values are used to estimate fuel burned based on engine RPM. Fuel consumption totals appear in
+                  <strong>Cloud Features → Statistics</strong>.
+                </p>
+              </form>
+            </div>
+
+          </div> <!-- CLOSE Engine settings-card -->
+
+          <!-- Event Detection Thresholds (moved from Accel settings) -->
+          <div class="settings-card">
+
+            <!-- Event Detection Thresholds -->
+            <h3 style="margin-bottom:20px;padding-bottom:10px;border-bottom:2px solid var(--accent);">
+              Event Detection Thresholds</h3>
+
+            <div class="form-row">
+              <div class="form-label">Capsize Threshold (degrees) (<span id="CAPSIZE_THRESHOLD_DEG_echo">?</span>):
+              </div>
+              <div class="form-input">
+                <form action="/get" method="GET" target="hidden-form">
+                  <input type="hidden" name="password" class="password_field">
+                  <input name="CAPSIZE_THRESHOLD_DEG" type="number" step="1" min="0" max="180">
+                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary">
+                </form>
+              </div>
+            </div>
+
+            <hr>
+
+            <div class="form-row">
+              <div class="form-label">Pitchpole Threshold (degrees) (<span id="PITCHPOLE_THRESHOLD_DEG_echo">?</span>):
+              </div>
+              <div class="form-input">
+                <form action="/get" method="GET" target="hidden-form">
+                  <input type="hidden" name="password" class="password_field">
+                  <input name="PITCHPOLE_THRESHOLD_DEG" type="number" step="1" min="0" max="180">
+                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary">
+                </form>
+              </div>
+            </div>
+
+            <hr>
+
+            <div class="form-row">
+              <div class="form-label">Slam Threshold (g's) (<span id="SLAM_THRESHOLD_G_echo">?</span>):</div>
+              <div class="form-input">
+                <form action="/get" method="GET" target="hidden-form">
+                  <input type="hidden" name="password" class="password_field">
+                  <input name="SLAM_THRESHOLD_G" type="number" step="0.1" min="0" max="50.0">
+                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary">
+                </form>
+              </div>
+            </div>
+
           </div>
         </div>
 
@@ -6235,13 +6249,10 @@
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('livedata', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'battery', event)">Battery</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'solar', event)">Solar</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'engine', event)">Engine</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'sailing', event)">Sailing</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'accel', event)">Accel</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'weathersolar', event)">Weather/Solar</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'boatperformance', event)">Boat Performance</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'protection', event)">Protection</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'other', event)">Other</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
     </div>
     <div id="livedata-alternator" class="sub-tab-content">
 
@@ -6562,7 +6573,7 @@
         </div>
         <hr />
         <p class="card-group-title" style="display:flex;align-items:center;justify-content:space-between;">
-          <span>Charging-System Health vs Engine Hours</span>
+          <span>Charging-System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
         </p>
         <canvas id="alt-trend" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
@@ -6572,19 +6583,30 @@
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px dashed #bbccdd;"></i>best</span>
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#5cb85c;"></i>now</span>
         </div>
+        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
+          <div style="margin-top:8px;line-height:1.5;">
+            <p><b>What it measures.</b> The highest output the alternator has ever produced at a given steady-state operating
+              point — engine speed (RPM), field drive (excitation), bus voltage, and temperature — and
+              whether today's output is sliding below that best over time. </p>
+            <p><b>Learned on the device.</b> Every control tick (~200 Hz), when conditions are steady, the
+              regulator compares the present output against its best-ever surface — an interpolation
+              (inverse-distance weighting) over a sparse set of best-ever support points.</p>
+            <p><b>Pruned in the cloud (optional).</b> About every 15 minutes, engine off and device online, any new
+              frontier points upload. The cloud then drops points that
+              have become redundant (sitting below the envelope of their neighbours) and returns the cleaned
+              set. Raw history is kept server-side so the envelope can always be rebuilt.</p>
+          </div>
+        </details>
         <hr />
         <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
-          <input type="button" value="Download Records CSV" class="btn-secondary"
-            onclick="window.location='/altrecords.csv'"
-            title="Download the banked best-ever operating-point records as CSV" />
-          <input type="button" value="Download Curve CSV" class="btn-secondary"
-            onclick="window.location='/altcurve.csv'"
-            title="Download the held cloud-fitted curve as CSV" />
-          <input type="button" id="alt-sim-btn" value="Simulator: off" class="btn-secondary"
-            onclick="altToggleSim()"
-            title="Bench simulator — inject synthetic operating points so the curve fills and the trend declines (no engine needed)" />
-          <input type="button" value="Start Over (new baseline)" class="btn-danger"
-            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned alternator-health data and restart the trend at engine-hour 0? Do this after replacing the alternator, regulator, or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}" />
+          <input type="button" value="Download CSV" class="btn-secondary"
+            onclick="downloadCsv('/altcurve.csv','Alternator Health Data')"
+            title="Save the complete best-ever health dataset (BEFRONT1) to your Downloads as a dated file — the full, re-importable file to back up, reproduce, or share this alternator's learned curve, then re-load with Load CSV." />
+          <input type="button" id="alt-load-btn" value="Load CSV" class="btn-secondary"
+            onclick="altLoadCsv()"
+            title="Import an alternator health CSV (BEFRONT1) from another unit or a backup. You'll choose Freeze (hold it exactly as imported, learning paused) or Learn (adopt it as your own and keep refining from your engine)." />
+          <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
         </span>
       </div>
 
@@ -6875,8 +6897,164 @@
     </div>
 
 
-    <!-- Solar (Victron MPPT) Live Data Sub-tab -->
-    <div id="livedata-solar" class="sub-tab-content">
+    <div id="livedata-weathersolar" class="sub-tab-content">
+      <!-- Wind Data (moved from Sailing) -->
+      <div class="settings-card">
+        <div class="grid">
+          <!-- Wind Data -->
+          <div class="card-group">
+            <p class="card-group-title">Wind Data</p>
+            <div class="metric-row">
+              <span class="metric-label">Apparent Wind Speed
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Wind speed as measured on the boat (includes boat motion effect)
+                  </span>
+                </span>
+              </span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 20px;"><span id="ApparentWindSpeedNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="ApparentWindSpeedNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="ApparentWindSpeedNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Apparent Wind Angle
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Direction of apparent wind relative to boat heading
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ApparentWindAngleNMEA_ID">0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">True Wind Speed
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Actual wind speed with boat motion removed (calculated from apparent wind and boat speed)
+                  </span>
+                </span>
+              </span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 20px;"><span id="TrueWindSpeedNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="TrueWindSpeedNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="TrueWindSpeedNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">True Wind Direction
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Actual wind direction with boat motion removed (calculated from apparent wind and boat heading)
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="TrueWindAngleNMEA_ID">0</span>°</span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">Beaufort Scale
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Wind force on the Beaufort scale (0 Calm … 8 Gale … 12 Hurricane), from the 2-minute
+                    sustained true wind — not a single gust.
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="BeaufortID">—</span></span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">Gale Duration
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    How long the boat has been continuously in a gale (2-minute sustained true wind ≥ 34 kt).
+                    Shows 0 when not in a gale; brief lulls don't reset it.
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="GaleDurationID">0</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Barometric Pressure (moved from Other): conditions header + 7-day history plot -->
+      <div class="settings-card">
+        <div class="card-group baro-panel">
+          <div class="card-group-title">Barometric Pressure
+            <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️
+              <span class="tooltip-box">
+                Sea-level barometric pressure (mbar — the unit used by the BBC Shipping Forecast, NOAA marine VHF, and most marine instruments; 1 mbar = 1 hPa exactly).
+                Sampled every 10 minutes into a 7-day PSRAM ring buffer, persisted to NVS only at the field-off edge (no impact on loop timing).
+                Forecast uses the <strong>Zambretti algorithm</strong> (1915, refined 1985) when true wind direction (NMEA2k) and GPS latitude are both fresh — it combines current pressure, 3-hour tendency, wind direction, and hemisphere/season into one of 26 outcomes.
+                When either is stale, it falls back to a simpler tendency-only rule based on the UK Met Office Shipping Forecast Glossary (Steady / Rising slowly / Rising / Rising quickly / Rising very rapidly, thresholds 0.1 / 1.5 / 3.5 / 6 mbar over 3 h).
+                History older than 7 days is available in your cloud storage.
+              </span>
+            </span>
+          </div>
+
+          <div class="baro-conditions">
+            <div class="baro-block">
+              <div class="baro-block-label">Zone</div>
+              <div class="baro-zone-label" id="baroZoneLabel">—</div>
+              <div class="baro-zone-sub" id="baroZoneSub">—</div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">Current</div>
+              <div class="baro-reading-big"><span id="baroPressureID">—</span> <span style="font-size:14px;color:var(--text-muted,#777);font-weight:normal;">mbar</span></div>
+              <div class="baro-reading-sub">
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
+                </span>
+              </div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">3-Hour Tendency</div>
+              <div class="baro-tendency-row">
+                <div class="baro-tendency-arrow" id="baroTendencyArrow"></div>
+                <div class="baro-tendency-text">
+                  <span class="baro-tendency-label" id="baroTendencyLabel">—</span>
+                  <span class="baro-tendency-delta" id="baroTendencyDelta">—</span>
+                </div>
+              </div>
+            </div>
+            <div class="baro-block">
+              <div class="baro-block-label">Forecast Method</div>
+              <div class="baro-method-label" id="baroMethodLabel">—</div>
+              <div class="baro-method-sub" id="baroMethodSub">—</div>
+            </div>
+          </div>
+
+          <div class="baro-forecast-row" id="baroForecastText">—</div>
+
+          <div class="baro-plot-controls">
+            <label class="baro-autoscale-toggle">
+              <input type="checkbox" id="baroAutoscaleY">
+              Autoscale Y
+            </label>
+            <div class="baro-range-pills" id="baroRangePills">
+              <button class="sub-tab" data-range="3">3H</button>
+              <button class="sub-tab" data-range="6">6H</button>
+              <button class="sub-tab active" data-range="24">24H</button>
+              <button class="sub-tab" data-range="48">48H</button>
+              <button class="sub-tab" data-range="168">1W</button>
+            </div>
+          </div>
+          <div id="baroPlot" class="baro-plot-container"></div>
+        </div>
+      </div>
+
       <div class="settings-card">
         <div class="grid">
           <div class="card-group">
@@ -6929,11 +7107,453 @@
           </div>
         </div>
       </div>
+
+      <!-- Board Temperature (moved from Other) -->
+      <div class="settings-card">
+        <div class="grid">
+          <div class="card">
+            <p>Board Temperature
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">
+                  Temperature measured in the regulator, will often be 5-25 deg hotter than
+                  ambient depending on location and electrical demands
+                </span>
+              </span>
+            </p>
+            <p class="reading with-wm" id="ambientTemp-display" style="font-size: 28px;">
+              <span><span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span></span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="ambientTempID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="ambientTempID_lo">—</span></span>
+              </span>
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
 
+    <div id="livedata-boatperformance" class="sub-tab-content">
+      <!-- Boat Performance (Phase 3) — unified sailing/motoring -->
+      <div class="settings-card" style="margin-top:16px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+          <p class="card-group-title" style="margin:0;padding:0;border:0;white-space:normal;">Boat Speed
+            <span id="perf-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Best-ever boat speed versus the wind (Sailing) or engine RPM (Motoring), corrected for sea state — how much the boat pitches. Predicts speed through the water, or GPS speed if no log. Curve = learned best; green dot = now; black ring = best at this exact condition. A sustained drop below best = dirty bottom or adverse current.</span></span>
+          </p>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <!-- Polar wind frame: apparent (native) vs true (display-layer transform). Sailing view only. -->
+            <div class="cap-mode-toggle" id="perf-wind-toggle">
+              <button type="button" id="perf-wind-0" class="cap-mode-btn cap-mode-active" onclick="setPerfWindRef(0)">Apparent</button>
+              <button type="button" id="perf-wind-1" class="cap-mode-btn" onclick="setPerfWindRef(1)">True</button>
+            </div>
+            <div class="cap-mode-toggle">
+              <button type="button" id="perf-view-sail" class="cap-mode-btn cap-mode-active" onclick="setPerfView(0)">Sailing</button>
+              <button type="button" id="perf-view-motor" class="cap-mode-btn" onclick="setPerfView(1)">Motoring</button>
+            </div>
+          </div>
+        </div>
+        <hr />
 
-    <!-- Engine Live Data Sub-tab -->
-    <div id="livedata-engine" class="sub-tab-content">
+        <!-- 4-quadrant live frame: conditions top, % + data-maturity bottom, plot centered -->
+        <div style="display:grid;grid-template-columns:minmax(64px,1fr) auto minmax(64px,1fr);grid-template-rows:auto 1fr auto;gap:4px 8px;align-items:start;">
+          <!-- TL: conditions (apparent wind / engine RPM) -->
+          <div style="grid-column:1;grid-row:1;text-align:left;">
+            <div id="perf-condL-label" style="font-size:12px;color:var(--text-muted);">Apparent wind</div>
+            <div id="perf-condL-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
+            <div id="perf-condL-sub" style="font-size:13px;color:var(--text-muted);"></div>
+          </div>
+          <!-- center: plot (one of the two is shown per view) + center-hub live speed -->
+          <div style="grid-column:2;grid-row:1 / span 3;align-self:center;">
+            <div style="position:relative;max-width:300px;margin:0 auto;">
+              <canvas id="perf-plot" width="360" height="360" style="width:100%;max-width:260px;aspect-ratio:1/1;display:block;margin:0 auto;"></canvas>
+              <canvas id="motor-plot" width="520" height="300" style="width:100%;max-width:300px;aspect-ratio:520/300;display:none;margin:0 auto;"></canvas>
+              <div id="perf-speed-hub" style="position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;">
+                <div id="perf-speed-num" style="font-size:40px;font-weight:800;line-height:.85;color:var(--accent);">&mdash;</div>
+                <div id="perf-speed-unit" style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text-muted);">KNOTS</div>
+              </div>
+            </div>
+          </div>
+          <!-- TR: sea state -->
+          <div style="grid-column:3;grid-row:1;text-align:right;">
+            <div style="font-size:12px;color:var(--text-muted);">Sea state</div>
+            <div id="perf-sea-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
+            <div id="perf-sea-sub" style="font-size:13px;color:var(--text-muted);"></div>
+          </div>
+          <!-- BL: % of best -->
+          <div style="grid-column:1;grid-row:3;text-align:left;align-self:end;">
+            <div><span id="perf-pct" style="font-size:30px;font-weight:800;">&mdash;</span></div>
+            <div style="font-size:12px;color:var(--text-muted);">of best</div>
+          </div>
+          <!-- BR: data maturity (front points + sailing/motoring hours) -->
+          <div style="grid-column:3;grid-row:3;text-align:right;align-self:end;">
+            <div id="perf-pts" style="font-size:20px;font-weight:700;line-height:1.05;">&mdash;</div>
+            <div style="font-size:12px;color:var(--text-muted);">front points</div>
+            <div id="perf-hours-val" style="font-size:20px;font-weight:700;line-height:1.05;margin-top:4px;">&mdash;</div>
+            <div id="perf-hours-label" style="font-size:12px;color:var(--text-muted);">sailing hours</div>
+          </div>
+        </div>
+        <!-- legend -->
+        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i><span id="perf-legend-curve">best polar</span></span>
+          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#5cb85c;"></i>now</span>
+        </div>
+        <div style="text-align:center;margin-top:6px;font-size:12px;color:var(--text-muted);">
+          <span id="perf-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture
+        </div>
+        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
+          <div style="margin-top:8px;line-height:1.5;">
+            <p><b>What it measures.</b> The fastest boat speed achieved for the conditions — apparent
+              wind speed and angle when sailing, engine speed (RPM) when motoring — corrected for sea state
+              (measured as how much the bow pitches) and wind. A sustained shortfall against best may point to a
+              dirty bottom, poor sail trim, or adverse current (if not using STW).</p>
+            <p><b>Learned on the device.</b> About 10 times a second, when the inputs are steady, it compares
+             speed against the best-ever surface — an interpolation (inverse-distance weighting)
+              over a sparse set of best-ever points — for those same conditions. Two surfaces are learned independently: a sailing polar and a motoring speed-vs-RPM map.
+              </p>
+            <p><b>Pruned in the cloud (optional).</b> About every
+              15 minutes, engine off and system online, new points upload and the cloud <b>prunes</b> redundant
+              interior points back to the envelope, then returns the cleaned set. </p>
+          </div>
+        </details>
+        <hr />
+
+        <!-- learning switch + download (live display only; config/tuning live in Settings → Vessel Performance) -->
+        <div class="form-row">
+          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>Learning <span id="perf-learn-label" style="color:var(--text-muted);">&mdash;</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Turn off to stop learning while under tow, or in strong current with no water-speed log, so bad data can't poison the map. Stays off across reboots.</span></span>
+          </div>
+          <div class="form-input" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <label class="switch"><input id="perf-learn-switch" type="checkbox" onchange="perfSet('perfPaused', this.checked?0:1)" /><span class="slider"></span></label>
+            <input type="button" id="perf-dl-btn" value="Download CSV" class="btn-secondary" onclick="downloadCsv('/perfcurve.csv','Boat Performance Data')" title="Save the complete best-ever front (BEFRONT1 sail + motor pair) to your Downloads as a dated file — the full, re-importable dataset to reproduce or share this boat's polar, then re-load with Load CSV." />
+            <input type="button" id="perf-load-btn" value="Load CSV" class="btn-secondary" onclick="perfLoadCsv()" title="Import a boat polar CSV (BEFRONT1 sail + motor pair) shared from another boat or a backup. Replaces the live reference and switches to FIXED (learning paused)." />
+            <input type="file" id="perf-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="perfUploadCsvFile(this)" />
+          </div>
+        </div>
+        <hr />
+      </div>
+
+      <!-- Live glance: boat attitude (moved up under the polar) -->
+      <div class="settings-card">
+        <div class="grid">
+
+          <!-- Current Angles -->
+          <div class="card">
+            <p>Heel Angle</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="imu_heel_deg_ID">0.0</span>°</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="imu_heel_deg_ID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="imu_heel_deg_ID_lo">—</span></span>
+              </span>
+            </p>
+          </div>
+
+          <div class="card">
+            <p>Pitch Angle</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="imu_pitch_deg_ID">0.0</span>°</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="imu_pitch_deg_ID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="imu_pitch_deg_ID_lo">—</span></span>
+              </span>
+            </p>
+          </div>
+
+          <div class="card">
+            <p>Vertical Acceleration</p>
+            <p class="reading with-wm" style="font-size: 28px;">
+              <span><span id="imu_vertical_accel_g_ID">0.00</span> g</span>
+              <span class="wm-inline">
+                <span><span class="arr">↑</span><span id="imu_vertical_accel_g_ID_hi">—</span></span>
+                <span><span class="arr">↓</span><span id="imu_vertical_accel_g_ID_lo">—</span></span>
+              </span>
+            </p>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Fuel economy (moved up under the polar) -->
+      <div class="settings-card">
+        <div class="grid">
+        <!-- Live fuel economy: SOG (knots) / fuel flow = nautical miles per gallon; needs GPS speed -->
+        <div class="card">
+          <p>Fuel Economy</p>
+          <p class="reading" style="font-size: 28px;"><span id="fuelNMPGID">—</span> naut mi/gal</p>
+        </div>
+
+        <!-- Session fuel-economy curve: observed mpg vs RPM, steady-state gated. Peak = most efficient cruise RPM. -->
+        <div class="card">
+          <p>Fuel Economy vs RPM (this session)
+            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;
+              <span class="tooltip-box">Observed nautical miles per gallon at each RPM, this session only. A point is
+                recorded only after RPM and boat speed hold steady for 40 s (so the boat has reached true steady
+                speed for that throttle), then the next 20 s of economy is averaged in. The peak is your most
+                efficient cruise RPM. Cleared on reboot, on Reset, or when the fuel table is edited.</span>
+            </span>
+          </p>
+          <div id="fuelCurvePlot" style="width:100%;height:300px;"></div>
+          <p class="reading" style="font-size: 16px;">Most efficient so far: <span id="fuelCurveBestID">—</span></p>
+          <form action="/get" method="GET" target="hidden-form" style="margin-top:8px;">
+            <input type="hidden" name="ResetFuelCurve" id="ResetFuelCurve" value="0" />
+            <input type="hidden" name="password" class="password_field" />
+            <button type="button" class="btn-secondary" onclick="resetParameter('ResetFuelCurve')"
+              id="ResetFuelCurve_button">Reset Curve</button>
+          </form>
+        </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="grid">
+
+          <!-- Boat Speed -->
+          <div class="card-group">
+            <p class="card-group-title">Boat Speed</p>
+            <div class="metric-row">
+              <span class="metric-label">Speed Over Ground (SOG)
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Your speed measured by GPS (speed over ground). It includes the push of current
+                    and tide — your true progress across the seabed, not speed through the water.
+                    There is no separate paddlewheel (through-water) speed on this system.
+                  </span>
+                </span>
+              </span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="SOGNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="SOGNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="SOGNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">VMG — Manual Bearing
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Speed made good toward your manual target bearing (set below). Positive = getting closer,
+                    negative = getting farther away.
+                  </span>
+                </span>
+              </span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="VMGNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="VMGNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="VMGNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">VMG — Upwind
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Speed made good to windward (toward the true wind). Positive = gaining ground upwind.
+                    This is the sailing-performance number; needs true wind angle + boat speed.
+                  </span>
+                </span>
+              </span>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="VMGUpwind_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="VMGUpwind_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="VMGUpwind_ID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">Manual Bearing (<span id="VMGTargetBearing_echo">-1</span>)°
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Enter compass heading you want to sail toward (0-359°). Set to -1 to disable.
+                  </span>
+                </span>
+              </span>
+              <div>
+                <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
+                  <input type="hidden" name="password" class="password_field">
+                  <input name="VMGTargetBearing" type="number" step="1" min="-1" max="359"
+                    style="width: 50px; padding: 5px; margin-bottom: 5px;" value="-1" />
+                  <br>
+                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary"
+                    style="padding: 5px 10px;" />
+                </form>
+              </div>
+            </div>
+          </div>
+
+
+          <!-- Heading & Course -->
+          <div class="card-group">
+            <p class="card-group-title">Heading & Course</p>
+            <div class="metric-row">
+              <span class="metric-label">Heading</span>
+              <span class="metric-value"><span id="HeadingNMEAID">0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Course Over Ground (COG)</span>
+              <span class="metric-value"><span id="COGNMEA_ID">0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Leeway
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  ℹ️
+                  <span class="tooltip-box">
+                    Heading - COG. Positive = drifting to starboard, Negative = drifting to port
+                  </span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="LeewayNMEA_ID">0</span>°</span>
+            </div>
+          </div>
+
+          <!-- GPS Position -->
+          <div class="card-group">
+            <p class="card-group-title">GPS Position
+              <span id="gps-source-badge"
+                style="font-size:11px;font-weight:600;color:#fff;background:var(--accent);border-radius:999px;padding:2px 8px;margin-left:6px;vertical-align:middle;">—</span>
+            </p>
+            <div class="metric-row">
+              <span class="metric-label">Latitude</span>
+              <span class="metric-value"><span id="LatitudeNMEA_ID">0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Longitude</span>
+              <span class="metric-value"><span id="LongitudeNMEA_ID">0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label"># Satellites</span>
+              <span class="metric-value"><span id="SatelliteCountNMEA_ID">0</span></span>
+            </div>
+          </div>
+
+          <!-- Water Depth (moved from Other) -->
+          <div class="card">
+            <p>Water Depth
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                <span class="tooltip-box">
+                  Water depth at the transducer position (NMEA2k PGN 128267, including transducer offset if reported).
+                  Shows "—" when no depth sensor is broadcasting. Feeds the "Deepest Anchorage" leaderboard.
+                </span>
+              </span>
+            </p>
+            <p class="reading"><span id="WaterDepthID">—</span> ft</p>
+          </div>
+
+        </div>
+
+        <!-- ===== LIFETIME STATISTICS (moved here from the former Statistics sub-tab) ===== -->
+        <div class="section-title">Lifetime Statistics</div>
+
+        <!-- Distance Traveled -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Distance Traveled</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Distance actually traveled along your track, summed from GPS
+                position changes — not straight-line distance from where you started. A round trip
+                back to the same port still counts the full distance out and back. Lifetime keeps
+                accumulating; Session resets with the button.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="TotalDistance_AllTimeID">0.0</span><span>nm</span>
+              </div>
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Session</span>
+                <span class="counter-value" id="TotalDistanceID">0.0</span><span>nm</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetTotalDistance" id="ResetTotalDistance" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetTotalDistance')"
+                    id="ResetTotalDistance_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Speed Table -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Speed</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Average is the mean of your GPS speed readings over time
+                (not distance ÷ time), so it can differ slightly from distance covered over many
+                hours. Maximum is the highest GPS speed seen. Both are speed over ground, so they
+                include current. Lifetime persists; Session resets with the button.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div style="display:flex;flex-direction:column;gap:0;">
+              <!-- Average -->
+              <div class="metric-row" style="margin:0;padding:4px 0;">
+                <span class="metric-label">Average</span>
+                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
+                    <span class="metric-value-compact" id="AvgSpeed_AllTimeID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
+                    <span class="metric-value-compact" id="AvgSpeedID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                    <form action="/get" method="GET" target="hidden-form"
+                      style="position:absolute;left:100%;margin-left:8px;">
+                      <input type="hidden" name="ResetAvgSpeed" id="ResetAvgSpeed" value="0" />
+                      <input type="hidden" name="password" class="password_field" />
+                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
+                        onclick="resetParameter('ResetAvgSpeed')" id="ResetAvgSpeed_button">Reset</button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+              <!-- Maximum -->
+              <div class="metric-row" style="margin:0;padding:4px 0;border-top:1px solid var(--border);">
+                <span class="metric-label">Maximum</span>
+                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
+                    <span class="metric-value-compact" id="MaxSpeed_AllTimeID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
+                    <span class="metric-value-compact" id="MaxSpeedID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                    <form action="/get" method="GET" target="hidden-form"
+                      style="position:absolute;left:100%;margin-left:8px;">
+                      <input type="hidden" name="ResetMaxSpeed" id="ResetMaxSpeed" value="0" />
+                      <input type="hidden" name="password" class="password_field" />
+                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
+                        onclick="resetParameter('ResetMaxSpeed')" id="ResetMaxSpeed_button">Reset</button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Engine (moved from Engine tab) -->
       <div class="settings-card">
 
         <div class="card">
@@ -6946,6 +7566,13 @@
             </span>
           </p>
         </div>
+
+        <!-- Live fuel flow: interpolated from the RPM-consumption table in Settings -> Engine -->
+        <div class="card">
+          <p>Fuel Flow</p>
+          <p class="reading" style="font-size: 28px;"><span id="fuelGPHID">—</span> gal/hr</p>
+        </div>
+
 
         <!-- ===== LIFETIME STATISTICS (moved here from the former Statistics sub-tab) ===== -->
         <div class="section-title">Lifetime Statistics</div>
@@ -7058,506 +7685,14 @@
         </div>
 
       </div>
-    </div> <!--Closes Engine settings-card -->
 
-    <!-- Sailing Live Data Sub-tab (polar/motoring plot, GPS/travel, wind, boat speed, barometer) -->
-    <div id="livedata-sailing" class="sub-tab-content">
-      <!-- Boat Performance (Phase 3) — unified sailing/motoring -->
-      <div class="settings-card" style="margin-top:16px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
-          <p class="card-group-title" style="margin:0;padding:0;border:0;white-space:normal;">Boat Speed
-            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Best-ever boat speed versus the wind (Sailing) or engine RPM (Motoring), corrected for sea state — how much the boat pitches. Predicts speed through the water, or GPS speed if no log. Curve = learned best; green dot = now; black ring = best at this exact condition. A sustained drop below best = dirty bottom or adverse current.</span></span>
-          </p>
-          <div class="cap-mode-toggle">
-            <button type="button" id="perf-view-sail" class="cap-mode-btn cap-mode-active" onclick="setPerfView(0)">Sailing</button>
-            <button type="button" id="perf-view-motor" class="cap-mode-btn" onclick="setPerfView(1)">Motoring</button>
-          </div>
-        </div>
-        <hr />
-
-        <!-- 4-quadrant live frame: conditions top, % + data-maturity bottom, plot centered -->
-        <div style="display:grid;grid-template-columns:minmax(64px,1fr) auto minmax(64px,1fr);grid-template-rows:auto 1fr auto;gap:4px 8px;align-items:start;">
-          <!-- TL: conditions (apparent wind / engine RPM) -->
-          <div style="grid-column:1;grid-row:1;text-align:left;">
-            <div id="perf-condL-label" style="font-size:12px;color:var(--text-muted);">Apparent wind</div>
-            <div id="perf-condL-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
-            <div id="perf-condL-sub" style="font-size:13px;color:var(--text-muted);"></div>
-          </div>
-          <!-- center: plot (one of the two is shown per view) + center-hub live speed -->
-          <div style="grid-column:2;grid-row:1 / span 3;align-self:center;">
-            <div style="position:relative;max-width:300px;margin:0 auto;">
-              <canvas id="perf-plot" width="360" height="360" style="width:100%;max-width:260px;aspect-ratio:1/1;display:block;margin:0 auto;"></canvas>
-              <canvas id="motor-plot" width="520" height="300" style="width:100%;max-width:300px;aspect-ratio:520/300;display:none;margin:0 auto;"></canvas>
-              <div id="perf-speed-hub" style="position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;">
-                <div id="perf-speed-num" style="font-size:40px;font-weight:800;line-height:.85;color:var(--accent);">&mdash;</div>
-                <div id="perf-speed-unit" style="font-size:10px;font-weight:700;letter-spacing:1px;color:var(--text-muted);">KNOTS</div>
-              </div>
-            </div>
-          </div>
-          <!-- TR: sea state -->
-          <div style="grid-column:3;grid-row:1;text-align:right;">
-            <div style="font-size:12px;color:var(--text-muted);">Sea state</div>
-            <div id="perf-sea-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
-            <div id="perf-sea-sub" style="font-size:13px;color:var(--text-muted);"></div>
-          </div>
-          <!-- BL: % of best -->
-          <div style="grid-column:1;grid-row:3;text-align:left;align-self:end;">
-            <div><span id="perf-pct" style="font-size:30px;font-weight:800;">&mdash;</span></div>
-            <div style="font-size:12px;color:var(--text-muted);">of best</div>
-          </div>
-          <!-- BR: data maturity (front points + sailing/motoring hours) -->
-          <div style="grid-column:3;grid-row:3;text-align:right;align-self:end;">
-            <div id="perf-pts" style="font-size:20px;font-weight:700;line-height:1.05;">&mdash;</div>
-            <div style="font-size:12px;color:var(--text-muted);">front points</div>
-            <div id="perf-hours-val" style="font-size:20px;font-weight:700;line-height:1.05;margin-top:4px;">&mdash;</div>
-            <div id="perf-hours-label" style="font-size:12px;color:var(--text-muted);">sailing hours</div>
-          </div>
-        </div>
-        <!-- legend -->
-        <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i><span id="perf-legend-curve">best polar</span></span>
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#5cb85c;"></i>now</span>
-        </div>
-        <div style="text-align:center;margin-top:6px;font-size:12px;color:var(--text-muted);">
-          <span id="perf-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture
-        </div>
-        <hr />
-
-        <!-- learning switch + download (live display only; config/tuning live in Settings → Vessel Performance) -->
-        <div class="form-row">
-          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Learning <span id="perf-learn-label" style="color:var(--text-muted);">&mdash;</span></span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Turn off to stop learning while under tow, or in strong current with no water-speed log, so bad data can't poison the map. Stays off across reboots.</span></span>
-          </div>
-          <div class="form-input" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <label class="switch"><input id="perf-learn-switch" type="checkbox" onchange="perfSet('perfPaused', this.checked?0:1)" /><span class="slider"></span></label>
-            <input type="button" id="perf-dl-btn" value="Download CSV" class="btn-secondary" onclick="window.location=(perfView?'/motormodel.csv':'/perfmodel.csv')" />
-          </div>
-        </div>
-        <hr />
-      </div>
+      <!-- Comfort & Motion (moved from Accel tab) -->
       <div class="settings-card">
+
+        <!-- Comfort & Motion — interesting metrics open; raw/diagnostics nested below -->
+        <details>
+          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Comfort &amp; Motion</summary>
         <div class="grid">
-
-          <!-- Boat Speed -->
-          <div class="card-group">
-            <p class="card-group-title">Boat Speed</p>
-            <div class="metric-row">
-              <span class="metric-label">Speed Over Ground (SOG)
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Your speed measured by GPS (speed over ground). It includes the push of current
-                    and tide — your true progress across the seabed, not speed through the water.
-                    There is no separate paddlewheel (through-water) speed on this system.
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 18px;"><span id="SOGNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="SOGNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="SOGNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">VMG — Manual Bearing
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Speed made good toward your manual target bearing (set below). Positive = getting closer,
-                    negative = getting farther away.
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 18px;"><span id="VMGNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="VMGNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="VMGNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">VMG — Upwind
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Speed made good to windward (toward the true wind). Positive = gaining ground upwind.
-                    This is the sailing-performance number; needs true wind angle + boat speed.
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 18px;"><span id="VMGUpwind_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="VMGUpwind_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="VMGUpwind_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Manual Bearing (<span id="VMGTargetBearing_echo">-1</span>)°
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Enter compass heading you want to sail toward (0-359°). Set to -1 to disable.
-                  </span>
-                </span>
-              </span>
-              <div>
-                <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="VMGTargetBearing" type="number" step="1" min="-1" max="359"
-                    style="width: 50px; padding: 5px; margin-bottom: 5px;" value="-1" />
-                  <br>
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary"
-                    style="padding: 5px 10px;" />
-                </form>
-              </div>
-            </div>
-          </div>
-
-          <!-- Wind Data -->
-          <div class="card-group">
-            <p class="card-group-title">Wind Data</p>
-            <div class="metric-row">
-              <span class="metric-label">Apparent Wind Speed
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Wind speed as measured on the boat (includes boat motion effect)
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 20px;"><span id="ApparentWindSpeedNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="ApparentWindSpeedNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="ApparentWindSpeedNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Apparent Wind Angle
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Direction of apparent wind relative to boat heading
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ApparentWindAngleNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">True Wind Speed
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Actual wind speed with boat motion removed (calculated from apparent wind and boat speed)
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 20px;"><span id="TrueWindSpeedNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="TrueWindSpeedNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="TrueWindSpeedNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">True Wind Direction
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Actual wind direction with boat motion removed (calculated from apparent wind and boat heading)
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="TrueWindAngleNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Beaufort Scale
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Wind force on the Beaufort scale (0 Calm … 8 Gale … 12 Hurricane), from the 2-minute
-                    sustained true wind — not a single gust.
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="BeaufortID">—</span></span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Gale Duration
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    How long the boat has been continuously in a gale (2-minute sustained true wind ≥ 34 kt).
-                    Shows 0 when not in a gale; brief lulls don't reset it.
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="GaleDurationID">0</span></span>
-            </div>
-          </div>
-
-          <!-- Heading & Course -->
-          <div class="card-group">
-            <p class="card-group-title">Heading & Course</p>
-            <div class="metric-row">
-              <span class="metric-label">Heading</span>
-              <span class="metric-value"><span id="HeadingNMEAID">0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Course Over Ground (COG)</span>
-              <span class="metric-value"><span id="COGNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Leeway
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Heading - COG. Positive = drifting to starboard, Negative = drifting to port
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="LeewayNMEA_ID">0</span>°</span>
-            </div>
-          </div>
-
-          <!-- GPS Position -->
-          <div class="card-group">
-            <p class="card-group-title">GPS Position</p>
-            <div class="metric-row">
-              <span class="metric-label">Latitude</span>
-              <span class="metric-value"><span id="LatitudeNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Longitude</span>
-              <span class="metric-value"><span id="LongitudeNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label"># Satellites</span>
-              <span class="metric-value"><span id="SatelliteCountNMEA_ID">0</span></span>
-            </div>
-          </div>
-
-        </div>
-
-        <!-- ===== LIFETIME STATISTICS (moved here from the former Statistics sub-tab) ===== -->
-        <div class="section-title">Lifetime Statistics</div>
-
-        <!-- Distance Traveled -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Distance Traveled</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Distance actually traveled along your track, summed from GPS
-                position changes — not straight-line distance from where you started. A round trip
-                back to the same port still counts the full distance out and back. Lifetime keeps
-                accumulating; Session resets with the button.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <div class="dual-counter">
-              <div class="dual-counter-row">
-                <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="TotalDistance_AllTimeID">0.0</span><span>nm</span>
-              </div>
-              <div class="dual-counter-row" style="position:relative;">
-                <span class="counter-label">Session</span>
-                <span class="counter-value" id="TotalDistanceID">0.0</span><span>nm</span>
-                <form action="/get" method="GET" target="hidden-form"
-                  style="position:absolute;left:100%;margin-left:8px;">
-                  <input type="hidden" name="ResetTotalDistance" id="ResetTotalDistance" value="0" />
-                  <input type="hidden" name="password" class="password_field" />
-                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetTotalDistance')"
-                    id="ResetTotalDistance_button">Reset</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Speed Table -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Speed</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Average is the mean of your GPS speed readings over time
-                (not distance ÷ time), so it can differ slightly from distance covered over many
-                hours. Maximum is the highest GPS speed seen. Both are speed over ground, so they
-                include current. Lifetime persists; Session resets with the button.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <div style="display:flex;flex-direction:column;gap:0;">
-              <!-- Average -->
-              <div class="metric-row" style="margin:0;padding:4px 0;">
-                <span class="metric-label">Average</span>
-                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
-                  <div style="display:flex;align-items:center;gap:6px;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
-                    <span class="metric-value-compact" id="AvgSpeed_AllTimeID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
-                    <span class="metric-value-compact" id="AvgSpeedID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                    <form action="/get" method="GET" target="hidden-form"
-                      style="position:absolute;left:100%;margin-left:8px;">
-                      <input type="hidden" name="ResetAvgSpeed" id="ResetAvgSpeed" value="0" />
-                      <input type="hidden" name="password" class="password_field" />
-                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
-                        onclick="resetParameter('ResetAvgSpeed')" id="ResetAvgSpeed_button">Reset</button>
-                    </form>
-                  </div>
-                </div>
-              </div>
-              <!-- Maximum -->
-              <div class="metric-row" style="margin:0;padding:4px 0;border-top:1px solid var(--border);">
-                <span class="metric-label">Maximum</span>
-                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
-                  <div style="display:flex;align-items:center;gap:6px;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
-                    <span class="metric-value-compact" id="MaxSpeed_AllTimeID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
-                    <span class="metric-value-compact" id="MaxSpeedID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                    <form action="/get" method="GET" target="hidden-form"
-                      style="position:absolute;left:100%;margin-left:8px;">
-                      <input type="hidden" name="ResetMaxSpeed" id="ResetMaxSpeed" value="0" />
-                      <input type="hidden" name="password" class="password_field" />
-                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
-                        onclick="resetParameter('ResetMaxSpeed')" id="ResetMaxSpeed_button">Reset</button>
-                    </form>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Barometric Pressure (moved from Other): conditions header + 7-day history plot -->
-      <div class="settings-card">
-        <div class="card-group baro-panel">
-          <div class="card-group-title">Barometric Pressure
-            <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️
-              <span class="tooltip-box">
-                Sea-level barometric pressure (mbar — the unit used by the BBC Shipping Forecast, NOAA marine VHF, and most marine instruments; 1 mbar = 1 hPa exactly).
-                Sampled every 10 minutes into a 7-day PSRAM ring buffer, persisted to NVS only at the field-off edge (no impact on loop timing).
-                Forecast uses the <strong>Zambretti algorithm</strong> (1915, refined 1985) when true wind direction (NMEA2k) and GPS latitude are both fresh — it combines current pressure, 3-hour tendency, wind direction, and hemisphere/season into one of 26 outcomes.
-                When either is stale, it falls back to a simpler tendency-only rule based on the UK Met Office Shipping Forecast Glossary (Steady / Rising slowly / Rising / Rising quickly / Rising very rapidly, thresholds 0.1 / 1.5 / 3.5 / 6 mbar over 3 h).
-                History older than 7 days is available in your cloud storage.
-              </span>
-            </span>
-          </div>
-
-          <div class="baro-conditions">
-            <div class="baro-block">
-              <div class="baro-block-label">Zone</div>
-              <div class="baro-zone-label" id="baroZoneLabel">—</div>
-              <div class="baro-zone-sub" id="baroZoneSub">—</div>
-            </div>
-            <div class="baro-block">
-              <div class="baro-block-label">Current</div>
-              <div class="baro-reading-big"><span id="baroPressureID">—</span> <span style="font-size:14px;color:var(--text-muted,#777);font-weight:normal;">mbar</span></div>
-              <div class="baro-reading-sub">
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="baroPressureID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="baroPressureID_lo">—</span></span>
-                </span>
-              </div>
-            </div>
-            <div class="baro-block">
-              <div class="baro-block-label">3-Hour Tendency</div>
-              <div class="baro-tendency-row">
-                <div class="baro-tendency-arrow" id="baroTendencyArrow"></div>
-                <div class="baro-tendency-text">
-                  <span class="baro-tendency-label" id="baroTendencyLabel">—</span>
-                  <span class="baro-tendency-delta" id="baroTendencyDelta">—</span>
-                </div>
-              </div>
-            </div>
-            <div class="baro-block">
-              <div class="baro-block-label">Forecast Method</div>
-              <div class="baro-method-label" id="baroMethodLabel">—</div>
-              <div class="baro-method-sub" id="baroMethodSub">—</div>
-            </div>
-          </div>
-
-          <div class="baro-forecast-row" id="baroForecastText">—</div>
-
-          <div class="baro-plot-controls">
-            <label class="baro-autoscale-toggle">
-              <input type="checkbox" id="baroAutoscaleY">
-              Autoscale Y
-            </label>
-            <div class="baro-range-pills" id="baroRangePills">
-              <button class="sub-tab" data-range="3">3H</button>
-              <button class="sub-tab" data-range="6">6H</button>
-              <button class="sub-tab active" data-range="24">24H</button>
-              <button class="sub-tab" data-range="48">48H</button>
-              <button class="sub-tab" data-range="168">1W</button>
-            </div>
-          </div>
-          <div id="baroPlot" class="baro-plot-container"></div>
-        </div>
-      </div>
-    </div>
-
-
-    <!-- Accel/IMU Live Data Sub-tab -->
-    <div id="livedata-accel" class="sub-tab-content">
-      <div class="settings-card">
-        <div class="grid">
-
-          <!-- Current Angles -->
-          <div class="card">
-            <p>Heel Angle</p>
-            <p class="reading with-wm" style="font-size: 28px;">
-              <span><span id="imu_heel_deg_ID">0.0</span>°</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="imu_heel_deg_ID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="imu_heel_deg_ID_lo">—</span></span>
-              </span>
-            </p>
-          </div>
-
-          <div class="card">
-            <p>Pitch Angle</p>
-            <p class="reading with-wm" style="font-size: 28px;">
-              <span><span id="imu_pitch_deg_ID">0.0</span>°</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="imu_pitch_deg_ID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="imu_pitch_deg_ID_lo">—</span></span>
-              </span>
-            </p>
-          </div>
-
-          <div class="card">
-            <p>Vertical Acceleration</p>
-            <p class="reading with-wm" style="font-size: 28px;">
-              <span><span id="imu_vertical_accel_g_ID">0.00</span> g</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="imu_vertical_accel_g_ID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="imu_vertical_accel_g_ID_lo">—</span></span>
-              </span>
-            </p>
-          </div>
-
           <!-- Current Motion — always-on basics -->
           <div class="card-group" id="imu-current-motion-group">
             <p class="card-group-title">Current Motion</p>
@@ -7570,7 +7705,6 @@
               <span class="metric-value"><span id="imu_yaw_rate_dps_ID">0.0</span> °/s</span>
             </div>
           </div>
-
           <!-- At-Anchor Metrics — moves to top when anchored (SOG < 1.3 kt) -->
           <div class="card-group" id="imu-anchor-group">
             <p class="card-group-title">Anchorage Comfort</p>
@@ -7591,121 +7725,6 @@
               <span class="metric-value"><span id="imu_heading_swing_120s_ID">--</span> °</span>
             </div>
           </div>
-
-          <!-- Underway Metrics — moves to top when underway (SOG > 1.7 kt) -->
-          <div class="card-group" id="imu-underway-group">
-            <p class="card-group-title">Underway Metrics</p>
-            <div class="metric-row">
-              <span class="metric-label">Wave Period <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dominant wave period in seconds, auto-detected from the vertical acceleration signal. Calculated via zero-crossings of the 10 Hz-decimated vertical accel after DC (gravity) removal. Shows "--" until enough crossings are detected.</span></span></span>
-              <span class="metric-value"><span id="imu_wave_period_sec_ID">--</span> s</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Motion Sickness Index <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lawther &amp; Griffin (1987) motion sickness index. Frequency-weights vertical acceleration — peaks at 0.2 Hz (5-second waves), which causes the most sickness. Scale: 0–30 low, 30–70 moderate, 70+ severe. Not a percentage; higher is worse. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor. Resets to zero on departure and arrival — no cross-contamination between trips.</span></span></span>
-              <span class="metric-value"><span id="imu_msi_score_ID">--</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Vomit Probability (2hr) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Estimated percentage of an average population who would vomit during a 2-hour voyage at the current sustained motion level. Derived from the Motion Sickness Index using the Lawther &amp; Griffin power-law model. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor.</span></span></span>
-              <span class="metric-value"><span id="imu_vomit_pct_ID">--</span> %</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Heel Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in heel angle over the last 60 seconds (latest minus oldest sample). Captures slow, persistent roll shifts — e.g. a jibe or load transfer.</span></span></span>
-              <span class="metric-value"><span id="imu_heel_change_60s_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Heel Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean heel angle. Measures how much the boat is rocking side-to-side regardless of its steady list. High deviation = active rolling. Used in the Anchorage Comfort score.</span></span></span>
-              <span class="metric-value"><span id="imu_heel_deviation_60s_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Pitch Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in pitch angle over the last 60 seconds (latest minus oldest). Captures slow fore-aft trim shifts.</span></span></span>
-              <span class="metric-value"><span id="imu_pitch_change_60s_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Pitch Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean pitch angle. Measures fore-aft hobby-horsing. High deviation = active pitching. Used in the Anchorage Comfort score.</span></span></span>
-              <span class="metric-value"><span id="imu_pitch_deviation_60s_ID">0.0</span>°</span>
-            </div>
-          </div>
-
-          <!-- Event Counters - Current Window -->
-          <div class="card-group">
-            <p class="card-group-title">Events (Current Window)</p>
-            <div class="metric-row">
-              <span class="metric-label">Slam Count <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of slams in the current window. A slam is counted when vertical (upward) acceleration exceeds the configurable Slam Threshold, with a 300 ms refractory period to avoid counting one physical event multiple times.</span></span></span>
-              <span class="metric-value"><span id="imu_slam_count_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Slam Peak (Max) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Highest single vertical acceleration reading recorded during a slam event in the current window, in g's. Resets each window.</span></span></span>
-              <span class="metric-value"><span id="imu_slam_peak_max_ID">0.0</span> g</span>
-            </div>
-          </div>
-
-          <!-- Event Counters - Lifetime -->
-          <div class="card-group">
-            <p class="card-group-title">Events (Lifetime)</p>
-            <div class="metric-row">
-              <span class="metric-label">Total Slams <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative slam count since the device was last reset. Persists across power cycles via non-volatile storage.</span></span></span>
-              <span class="metric-value"><span id="imu_slam_count_lifetime_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Capsize Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times heel angle has exceeded the configurable Capsize Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
-              <span class="metric-value"><span id="imu_capsize_count_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Pitchpole Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times pitch angle has exceeded the configurable Pitchpole Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
-              <span class="metric-value"><span id="imu_pitchpole_count_ID">0</span></span>
-            </div>
-          </div>
-
-          <!-- Raw Accelerometer -->
-          <div class="card-group">
-            <p class="card-group-title">Raw Accelerometer (g)</p>
-            <div class="metric-row">
-              <span class="metric-label">Accel X</span>
-              <span class="metric-value"><span id="imu_accel_x_raw_ID">0.000</span> g</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Y</span>
-              <span class="metric-value"><span id="imu_accel_y_raw_ID">0.000</span> g</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Z</span>
-              <span class="metric-value"><span id="imu_accel_z_raw_ID">0.000</span> g</span>
-            </div>
-          </div>
-
-          <!-- Raw Gyroscope -->
-          <div class="card-group">
-            <p class="card-group-title">Raw Gyroscope (°/s)</p>
-            <div class="metric-row">
-              <span class="metric-label">Gyro X</span>
-              <span class="metric-value"><span id="imu_gyro_x_raw_ID">0.0</span> °/s</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Gyro Y</span>
-              <span class="metric-value"><span id="imu_gyro_y_raw_ID">0.0</span> °/s</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Gyro Z</span>
-              <span class="metric-value"><span id="imu_gyro_z_raw_ID">0.0</span> °/s</span>
-            </div>
-          </div>
-
-          <!-- Lifetime Maximums -->
-          <div class="card-group">
-            <p class="card-group-title">Lifetime Maximums</p>
-            <div class="metric-row">
-              <span class="metric-label">Max Heel Angle</span>
-              <span class="metric-value"><span id="imu_heel_max_lifetime_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Max Pitch Angle</span>
-              <span class="metric-value"><span id="imu_pitch_max_lifetime_ID">0.0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Worst Slam</span>
-              <span class="metric-value"><span id="imu_slam_peak_lifetime_ID">0.0</span> g</span>
-            </div>
-          </div>
-
           <!-- Sea State Hours -->
           <div class="card-group">
             <p class="card-group-title">Sea State Hours (Lifetime) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative hours bucketed by Motion Sickness Index and speed (moving = SOG ≥ 1.5 kt). Buckets: Gentle (MSI &lt; 10), Moderate (10–30), Rough (30–70), Extreme (MSI ≥ 70). Logged once per minute.</span></span></p>
@@ -7742,7 +7761,124 @@
               <span class="metric-value"><span id="imu_min_stat_extreme_ID">0.0</span> hr</span>
             </div>
           </div>
+          <!-- Underway Metrics — moves to top when underway (SOG > 1.7 kt) -->
+          <div class="card-group" id="imu-underway-group">
+            <p class="card-group-title">Underway Metrics</p>
+            <div class="metric-row">
+              <span class="metric-label">Wave Period <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dominant wave period in seconds, auto-detected from the vertical acceleration signal. Calculated via zero-crossings of the 10 Hz-decimated vertical accel after DC (gravity) removal. Shows "--" until enough crossings are detected.</span></span></span>
+              <span class="metric-value"><span id="imu_wave_period_sec_ID">--</span> s</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Motion Sickness Index <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lawther &amp; Griffin (1987) motion sickness index. Frequency-weights vertical acceleration — peaks at 0.2 Hz (5-second waves), which causes the most sickness. Scale: 0–30 low, 30–70 moderate, 70+ severe. Not a percentage; higher is worse. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor. Resets to zero on departure and arrival — no cross-contamination between trips.</span></span></span>
+              <span class="metric-value"><span id="imu_msi_score_ID">--</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Vomit Probability (2hr) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Estimated percentage of an average population who would vomit during a 2-hour voyage at the current sustained motion level. Derived from the Motion Sickness Index using the Lawther &amp; Griffin power-law model. Only accumulates underway (SOG ≥ 1.7 kt); grayed out at anchor.</span></span></span>
+              <span class="metric-value"><span id="imu_vomit_pct_ID">--</span> %</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Heel Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in heel angle over the last 60 seconds (latest minus oldest sample). Captures slow, persistent roll shifts — e.g. a jibe or load transfer.</span></span></span>
+              <span class="metric-value"><span id="imu_heel_change_60s_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Heel Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean heel angle. Measures how much the boat is rocking side-to-side regardless of its steady list. High deviation = active rolling. Used in the Anchorage Comfort score.</span></span></span>
+              <span class="metric-value"><span id="imu_heel_deviation_60s_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Pitch Change (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Total change in pitch angle over the last 60 seconds (latest minus oldest). Captures slow fore-aft trim shifts.</span></span></span>
+              <span class="metric-value"><span id="imu_pitch_change_60s_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Pitch Deviation (60s) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Average absolute departure from the 60-second mean pitch angle. Measures fore-aft hobby-horsing. High deviation = active pitching. Used in the Anchorage Comfort score.</span></span></span>
+              <span class="metric-value"><span id="imu_pitch_deviation_60s_ID">0.0</span>°</span>
+            </div>
+          </div>
+          <!-- Lifetime Maximums -->
+          <div class="card-group">
+            <p class="card-group-title">Lifetime Maximums</p>
+            <div class="metric-row">
+              <span class="metric-label">Max Heel Angle</span>
+              <span class="metric-value"><span id="imu_heel_max_lifetime_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Max Pitch Angle</span>
+              <span class="metric-value"><span id="imu_pitch_max_lifetime_ID">0.0</span>°</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Worst Slam</span>
+              <span class="metric-value"><span id="imu_slam_peak_lifetime_ID">0.0</span> g</span>
+            </div>
+          </div>
+        </div>
+        <div class="grid">
+          <!-- Event Counters - Current Window -->
+          <div class="card-group">
+            <p class="card-group-title">Events (Current Window)</p>
+            <div class="metric-row">
+              <span class="metric-label">Slam Count <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of slams in the current window. A slam is counted when vertical (upward) acceleration exceeds the configurable Slam Threshold, with a 300 ms refractory period to avoid counting one physical event multiple times.</span></span></span>
+              <span class="metric-value"><span id="imu_slam_count_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Slam Peak (Max) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Highest single vertical acceleration reading recorded during a slam event in the current window, in g's. Resets each window.</span></span></span>
+              <span class="metric-value"><span id="imu_slam_peak_max_ID">0.0</span> g</span>
+            </div>
+          </div>
+          <!-- Event Counters - Lifetime -->
+          <div class="card-group">
+            <p class="card-group-title">Events (Lifetime)</p>
+            <div class="metric-row">
+              <span class="metric-label">Total Slams <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative slam count since the device was last reset. Persists across power cycles via non-volatile storage.</span></span></span>
+              <span class="metric-value"><span id="imu_slam_count_lifetime_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Capsize Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times heel angle has exceeded the configurable Capsize Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
+              <span class="metric-value"><span id="imu_capsize_count_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Pitchpole Events <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of times pitch angle has exceeded the configurable Pitchpole Threshold (settable in IMU Settings). An NVS save is forced immediately on each event in case of power loss.</span></span></span>
+              <span class="metric-value"><span id="imu_pitchpole_count_ID">0</span></span>
+            </div>
+          </div>
+        </div>
 
+          <!-- Raw & Diagnostics — least-glanced data, collapsed -->
+          <details>
+            <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Raw &amp; Diagnostics</summary>
+        <div class="grid">
+          <!-- Raw Accelerometer -->
+          <div class="card-group">
+            <p class="card-group-title">Raw Accelerometer (g)</p>
+            <div class="metric-row">
+              <span class="metric-label">Accel X</span>
+              <span class="metric-value"><span id="imu_accel_x_raw_ID">0.000</span> g</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Accel Y</span>
+              <span class="metric-value"><span id="imu_accel_y_raw_ID">0.000</span> g</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Accel Z</span>
+              <span class="metric-value"><span id="imu_accel_z_raw_ID">0.000</span> g</span>
+            </div>
+          </div>
+          <!-- Raw Gyroscope -->
+          <div class="card-group">
+            <p class="card-group-title">Raw Gyroscope (°/s)</p>
+            <div class="metric-row">
+              <span class="metric-label">Gyro X</span>
+              <span class="metric-value"><span id="imu_gyro_x_raw_ID">0.0</span> °/s</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Gyro Y</span>
+              <span class="metric-value"><span id="imu_gyro_y_raw_ID">0.0</span> °/s</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Gyro Z</span>
+              <span class="metric-value"><span id="imu_gyro_z_raw_ID">0.0</span> °/s</span>
+            </div>
+          </div>
+        </div>
+        <div class="grid">
           <!-- Window Statistics - Accel -->
           <div class="card-group">
             <p class="card-group-title">Window Stats - Accel (g)</p>
@@ -7771,7 +7907,6 @@
               </span>
             </div>
           </div>
-
           <!-- Window Statistics - Gyro -->
           <div class="card-group">
             <p class="card-group-title">Window Stats - Gyro (°/s)</p>
@@ -7800,7 +7935,6 @@
               </span>
             </div>
           </div>
-
           <!-- Window Statistics - Calculated Metrics -->
           <div class="card-group">
             <p class="card-group-title">Window Stats - Calculated</p>
@@ -7837,7 +7971,8 @@
               </span>
             </div>
           </div>
-
+        </div>
+        <div class="grid">
           <!-- Diagnostics -->
           <div class="card-group">
             <p class="card-group-title">Diagnostics</p>
@@ -7865,6 +8000,40 @@
                 </span>
               </span>
               <span class="metric-value"><span id="imu_fifo_overrun_count_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">80 MHz Worst Loop (5 s)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Slowest single loop pass during engine-off low-power mode (the CPU drops to
+                    80 MHz to save power), over the last 5 seconds, in milliseconds. A few ms is normal. It becomes a
+                    concern as it climbs toward 38 ms — the point where the accelerometer can start filling its buffer
+                    faster than it's emptied. Blank/0 means the boat hasn't been in low-power mode recently.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="loopWorst80Win_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">80 MHz Worst Loop (Session)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Slowest single low-power (80 MHz) loop pass since the last Reset Peak Values,
+                    in milliseconds. Catches one-off spikes such as a flash write happening while the boat is asleep. A
+                    single high value is harmless; it's only a problem if it repeatedly sits above ~38 ms — watch the
+                    near-miss count below.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="loopWorst80Ses_ID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Accel Drain Near-Misses
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">How many engine-off (80 MHz) loop passes ran longer than ~38 ms — where the
+                    accelerometer buffer fills faster than it drains — followed by the total number of low-power passes.
+                    A handful is harmless: the buffer is deep and absorbs brief spikes. A steadily rising count is the
+                    early warning that the accelerometer could begin dropping samples; if that actually happens, the
+                    FIFO Overruns counter above starts incrementing. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="loopOver80ImuLimit_ID">0</span> of <span id="loop80IterCount_ID">0</span></span>
             </div>
             <div class="metric-row">
               <span class="metric-label">I²C Errors
@@ -7957,14 +8126,16 @@
               <span class="metric-value"><span id="gyro_ring_usage_ID">0</span>%</span>
             </div>
           </div>
-
-        </div> <!-- closes .grid -->
-        <div style="margin-top: 16px; display: flex; gap: 10px;">
-          <button type="button" class="btn-secondary" onclick="handleResetAccelSession()">Reset Session Stats</button>
-          <button type="button" class="btn-danger" onclick="handleResetAccelLifetime()">Reset Lifetime Stats</button>
         </div>
-      </div> <!-- closes .settings-card -->
-    </div> <!-- closes accel tab -->
+          </details>
+        </details>
+      </div>
+    </div>
+
+
+
+
+
 
     <!-- ESP32 Live Data Sub-tab -->
     <div id="livedata-esp32" class="sub-tab-content">
@@ -7972,8 +8143,118 @@
         <div style="margin-bottom: 12px;">
           <button type="button" class="btn-secondary" onclick="handleResetPerfCounters()">Reset Peak Values</button>
         </div>
-        <div class="grid">
 
+        <!-- Most-useful status, visible -->
+        <div class="grid">
+          <!-- WIFI STATUS -->
+          <div class="card-group">
+            <p class="card-group-title">WiFi Status</p>
+            <div class="metric-row">
+              <span class="metric-label">Strength (dBm)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="WifiStrengthID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Client Disconnects (count)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
+                    network
+                    issues)</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Heartbeat (count)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Increments with each packet sent</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
+            </div>
+          </div>
+          <!-- SYSTEM -->
+          <div class="card-group">
+            <p class="card-group-title">System</p>
+            <div class="metric-row">
+              <span class="metric-label">Mode
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Client = on ship's network, Access Point = regulator providing its own
+                    hotspot</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="currentModeID">?</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Device Serial
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Unique factory-burned ID for this regulator. Include this in any email to
+                    support about cloud account recovery.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="systemDeviceUID_ID" style="font-family:monospace;font-size:12px;">?</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Software Version</span>
+              <span class="metric-value"><span id="current-version-display-2">Loading...</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Software Image
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Factory Golden = safe working default, User Updateable = newer versions
+                    loaded from Settings→Software Updates</span>
+                </span>
+              </span>
+              <span class="metric-value" style="font-size: 13px;"><span id="currentPartitionTypeID">?</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Buffered Records (count)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Data buffered when WiFi disconnected. Will upload to Cloud at next
+                    opportunity. Resetting might take a few tries, brute force works.</span>
+                </span>
+              </span>
+              <span class="metric-value" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+                <span><span id="BufferedRecordCountID">0</span>/<span id="BufferedRecordCapID">?</span></span>
+                <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
+                    <input type="hidden" name="password" class="password_field">
+                    <input type="hidden" name="forceCloudFlush" value="1">
+                    <input type="submit" value="Upload Now" class="btn-primary"
+                      title="Force-upload buffered records to the cloud immediately. RECOMMENDED with field OFF. If field is ON: control loop is held for up to 10s during each upload, banner will show WAITING CLOUD. Hardware over-voltage protection stays armed, but a load transient mid-upload could trigger a hard cut. Avoid during dynamic events (RPM ramps, sudden load changes). Bypasses the 70s field-off settle and 13s interval throttle." />
+                  </form>
+                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
+                    <input type="hidden" name="password" class="password_field">
+                    <input type="hidden" name="ClearBuffer" value="1">
+                    <input onclick="return handleClearBuffer();" type="submit" value="Clear" class="btn-secondary"
+                      title="Delete all buffered sensor uploads" />
+                  </form>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Power Cycles (count)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Lifetime, or since re-flashing</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="totalPowerCyclesID">0</span></span>
+            </div>
+
+
+            <div class="metric-row">
+              <span class="metric-label">ADS1115 I2C Error Count
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Count for this power cycle only, does not persist thru power loss</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="adsI2CErrorCount_ID">0</span></span>
+            </div>
+
+          </div>
           <!-- MEMORY -->
           <div class="card-group">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
@@ -8045,7 +8326,106 @@
               <span class="metric-value"><span id="HeapfragID">0</span></span>
             </div>
           </div>
+          <!-- CPU LOAD -->
+          <div class="card-group">
+            <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
+              <span>CPU Load (%)</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">Core 0: WiFi/system tasks, Core 1: main control loop. Per-core CPU load for
+                  ESP32-S3 using FreeRTOS runtime stats. Works for SMP with unpinned tasks because idle tasks are
+                  core-pinned, but does not provide per-task or per-core attribution of non-idle time; values are
+                  estimates, not exact accounting of where each task actually executed.
+                </span>
+              </span>
+            </p>
+            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
+                <div style="padding: 6px 8px;"></div>
+                <div
+                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02);">
+                  Current</div>
+                <div
+                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
+                  Max</div>
+              </div>
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Core 0</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="cpuLoadCore0_display">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="cpuLoadCore0Max_display">0</span>
+                </div>
+              </div>
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Core 1</div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="cpuLoadCore1_display">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="cpuLoadCore1Max_display">0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- SESSION INFO -->
+          <div class="card-group">
+            <p class="card-group-title">Session Info</p>
+            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
+                <div style="padding: 6px 8px;"></div>
+                <div
+                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02);">
+                  This</div>
+                <div
+                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
+                  Last</div>
+              </div>
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Duration</div>
+                <div style="padding: 6px 8px; text-align: right;"><span class="metric-value-compact"
+                    id="CurrentSessionDurationID">0</span></div>
+                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border);"><span
+                    class="metric-value-compact" id="LastSessionDurationID">0</span></div>
+              </div>
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Max Loop (s)</div>
+                <div style="padding: 6px 8px; text-align: right;"><span class="metric-value-compact"
+                    id="MaximumLoopTimeID">0</span></div>
+                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border);"><span
+                    class="metric-value-compact" id="LastSessionMaxLoopTimeID">0</span></div>
+              </div>
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Reset Reason
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Common reset reasons: Scheduled Restart (11) is automatic maintenance
+                      every 4 hours (normal operation). Software Reset (1) is an unscheduled restart from crash
+                      recovery or manual commands. Task Watchdog (4) means the main program froze for over 16
+                      seconds. Power On (0) occurs after battery disconnect/reconnect. Most frequently seen:
+                      Scheduled Restart during normal operation. Note: Sessions following OTA updates may show
+                      inaccurate reset reasons.
+                    </span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; text-align: right; white-space: normal; word-break: break-word;"><span class="metric-value-compact"
+                    id="LastResetReasonID" style="white-space: normal;">Unknown</span></div>
+                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border); white-space: normal; word-break: break-word;"><span
+                    class="metric-value-compact" id="ancientResetReasonID" style="white-space: normal;">Unknown</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
 
+        <!-- Timing & low-level diagnostics, collapsed -->
+        <details>
+          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Timing &amp; Diagnostics</summary>
+        <div class="grid">
           <!-- FUNCTION TIMING — WORST CASE -->
           <div class="card-group" style="grid-column: 1 / -1;">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
@@ -8426,6 +8806,40 @@
                 </div>
               </div>
 
+              <!-- Alt Health Fold (200 Hz IDW eval) -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Alt Health Fold (200 Hz)
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Best-ever front IDW evaluation, folded once per control tick
+                      (~200 Hz). Cost scales with the number of front support points; near-zero until a
+                      front exists. This is the hot-path cost that bounds how large the front cap can grow.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_altFold_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_altFold_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Boat Perf Fold (10 Hz IDW eval) -->
+              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Boat Perf Fold (10 Hz)
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Best-ever sail/motor front IDW evaluation, folded every ~100 ms
+                      (10 Hz). Cost scales with the number of front support points; near-zero until a front
+                      exists. The vessel-performance counterpart of the Alt Health Fold.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_boatPerf_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_boatPerf_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- Efficiency Tracker -->
               <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Efficiency Tracker
@@ -8601,52 +9015,6 @@
 
             </div>
           </div>
-
-
-          <!-- NVS FULL-SAVE DIAGNOSTICS -->
-          <div class="card-group">
-            <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
-              <span>NVS Full Save</span>
-              <span class="tooltip" onclick="this.classList.toggle('active')">
-                ℹ️
-                <span class="tooltip-box">saveNVSDataFull() persists all session/lifetime accumulators (charged energy, runtime, fuel, distance, lifetime damage, dynamic learning, IMU lifetime counters) to flash in a single synchronous commit. It runs only at the field-off edge (5s after field cuts), at shutdown, and on capsize/pitchpole events. The commit blocks Core 1 for as long as it takes — that's safe because the field is off so there's no OV risk during the stall. If you've been running continuously for hours and the device loses power before the next field-off edge, the deltas since the last save are lost.</span>
-              </span>
-            </p>
-            <div class="metric-row">
-              <span class="metric-label">Time Since Last Save (s)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Seconds since the last successful saveNVSDataFull(). The longer this gets, the more accumulated session/lifetime data is at risk if the device loses power before the next field-off edge. 0 means no save has happened yet this boot.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="nvsSecsSinceLastSave_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Last Save Duration (ms)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Wall-clock time the most recent saveNVSDataFull() call took to complete, including the nvs_commit() flash write. Expected 50-300ms depending on how many sectors needed erasing. Always runs with field off so any duration is safe.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="nvsFullSaveLastMs_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Worst Save Duration (ms)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Longest saveNVSDataFull() duration seen since boot. Useful as a long-term wear indicator — if this climbs steadily over many months, the NVS partition is fragmenting and may benefit from an erase.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="nvsFullSaveWorstMs_ID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Save Count
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Total saveNVSDataFull() calls since boot. Confirms the field-off drain is firing as expected — should increment each time the field cuts (engine pause, anchor, dock).</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="nvsFullSaveCount_ID">0</span></span>
-            </div>
-          </div>
-
-
           <!-- CH1 INTERVAL DIAGNOSTICS -->
           <div class="card-group">
             <p class="card-group-title">CH1 Sample Interval (ms)</p>
@@ -8731,7 +9099,6 @@
               <span class="metric-value"><span id="ch1_over2x_at_ID">0</span></span>
             </div>
           </div>
-
           <!-- INA228 READ INTERVAL -->
           <div class="card-group">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
@@ -8822,7 +9189,6 @@
               <span class="metric-value"><span id="ina_over2x_at_ID">—</span></span>
             </div>
           </div>
-
           <!-- VOLTAGE LOOP ACTUAL INTERVAL -->
           <div class="card-group">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
@@ -8849,214 +9215,50 @@
               <span class="metric-value"><span id="voltLoopWorstInterval_ses_ID">—</span></span>
             </div>
           </div>
-
-          <!-- CPU LOAD -->
+          <!-- NVS FULL-SAVE DIAGNOSTICS -->
           <div class="card-group">
             <p class="card-group-title" style="display: flex; align-items: center; justify-content: space-between;">
-              <span>CPU Load (%)</span>
+              <span>NVS Full Save</span>
               <span class="tooltip" onclick="this.classList.toggle('active')">
                 ℹ️
-                <span class="tooltip-box">Core 0: WiFi/system tasks, Core 1: main control loop. Per-core CPU load for
-                  ESP32-S3 using FreeRTOS runtime stats. Works for SMP with unpinned tasks because idle tasks are
-                  core-pinned, but does not provide per-task or per-core attribution of non-idle time; values are
-                  estimates, not exact accounting of where each task actually executed.
-                </span>
+                <span class="tooltip-box">saveNVSDataFull() persists all session/lifetime accumulators (charged energy, runtime, fuel, distance, lifetime damage, dynamic learning, IMU lifetime counters) to flash in a single synchronous commit. It runs only at the field-off edge (5s after field cuts), at shutdown, and on capsize/pitchpole events. The commit blocks Core 1 for as long as it takes — that's safe because the field is off so there's no OV risk during the stall. If you've been running continuously for hours and the device loses power before the next field-off edge, the deltas since the last save are lost.</span>
               </span>
             </p>
-            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
-                <div style="padding: 6px 8px;"></div>
-                <div
-                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02);">
-                  Current</div>
-                <div
-                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
-                  Max</div>
-              </div>
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Core 0</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="cpuLoadCore0_display">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="cpuLoadCore0Max_display">0</span>
-                </div>
-              </div>
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Core 1</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="cpuLoadCore1_display">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="cpuLoadCore1Max_display">0</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- WIFI STATUS -->
-          <div class="card-group">
-            <p class="card-group-title">WiFi Status</p>
             <div class="metric-row">
-              <span class="metric-label">Strength (dBm)
+              <span class="metric-label">Time Since Last Save (s)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
+                  <span class="tooltip-box">Seconds since the last successful saveNVSDataFull(). The longer this gets, the more accumulated session/lifetime data is at risk if the device loses power before the next field-off edge. 0 means no save has happened yet this boot.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="WifiStrengthID">0</span></span>
+              <span class="metric-value"><span id="nvsSecsSinceLastSave_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Client Disconnects (count)
+              <span class="metric-label">Last Save Duration (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
-                    network
-                    issues)</span>
+                  <span class="tooltip-box">Wall-clock time the most recent saveNVSDataFull() call took to complete, including the nvs_commit() flash write. Expected 50-300ms depending on how many sectors needed erasing. Always runs with field off so any duration is safe.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
+              <span class="metric-value"><span id="nvsFullSaveLastMs_ID">0</span></span>
             </div>
             <div class="metric-row">
-              <span class="metric-label">Heartbeat (count)
+              <span class="metric-label">Worst Save Duration (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Increments with each packet sent</span>
+                  <span class="tooltip-box">Longest saveNVSDataFull() duration seen since boot. Useful as a long-term wear indicator — if this climbs steadily over many months, the NVS partition is fragmenting and may benefit from an erase.</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
+              <span class="metric-value"><span id="nvsFullSaveWorstMs_ID">0</span></span>
             </div>
-          </div>
-
-          <!-- SESSION INFO -->
-          <div class="card-group">
-            <p class="card-group-title">Session Info</p>
-            <div style="display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); gap: 0;">
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 2px solid var(--border);">
-                <div style="padding: 6px 8px;"></div>
-                <div
-                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02);">
-                  This</div>
-                <div
-                  style="padding: 6px 8px; font-size: 12px; font-weight: bold; text-align: center; background: rgba(0,0,0,0.02); border-left: 1px solid var(--border);">
-                  Last</div>
-              </div>
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Duration</div>
-                <div style="padding: 6px 8px; text-align: right;"><span class="metric-value-compact"
-                    id="CurrentSessionDurationID">0</span></div>
-                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border);"><span
-                    class="metric-value-compact" id="LastSessionDurationID">0</span></div>
-              </div>
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Max Loop (s)</div>
-                <div style="padding: 6px 8px; text-align: right;"><span class="metric-value-compact"
-                    id="MaximumLoopTimeID">0</span></div>
-                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border);"><span
-                    class="metric-value-compact" id="LastSessionMaxLoopTimeID">0</span></div>
-              </div>
-              <div style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Reset Reason
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Common reset reasons: Scheduled Restart (11) is automatic maintenance
-                      every 4 hours (normal operation). Software Reset (1) is an unscheduled restart from crash
-                      recovery or manual commands. Task Watchdog (4) means the main program froze for over 16
-                      seconds. Power On (0) occurs after battery disconnect/reconnect. Most frequently seen:
-                      Scheduled Restart during normal operation. Note: Sessions following OTA updates may show
-                      inaccurate reset reasons.
-                    </span>
-                  </span>
-                </div>
-                <div style="padding: 6px 8px; text-align: right; white-space: normal; word-break: break-word;"><span class="metric-value-compact"
-                    id="LastResetReasonID" style="white-space: normal;">Unknown</span></div>
-                <div style="padding: 6px 8px; text-align: right; border-left: 1px solid var(--border); white-space: normal; word-break: break-word;"><span
-                    class="metric-value-compact" id="ancientResetReasonID" style="white-space: normal;">Unknown</span></div>
-              </div>
-            </div>
-          </div>
-
-          <!-- SYSTEM -->
-          <div class="card-group">
-            <p class="card-group-title">System</p>
             <div class="metric-row">
-              <span class="metric-label">Mode
+              <span class="metric-label">Save Count
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Client = on ship's network, Access Point = regulator providing its own
-                    hotspot</span>
+                  <span class="tooltip-box">Total saveNVSDataFull() calls since boot. Confirms the field-off drain is firing as expected — should increment each time the field cuts (engine pause, anchor, dock).</span>
                 </span>
               </span>
-              <span class="metric-value"><span id="currentModeID">?</span></span>
+              <span class="metric-value"><span id="nvsFullSaveCount_ID">0</span></span>
             </div>
-            <div class="metric-row">
-              <span class="metric-label">Device Serial
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Unique factory-burned ID for this regulator. Include this in any email to
-                    support about cloud account recovery.</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="systemDeviceUID_ID" style="font-family:monospace;font-size:12px;">?</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Software Version</span>
-              <span class="metric-value"><span id="current-version-display-2">Loading...</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Software Image
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Factory Golden = safe working default, User Updateable = newer versions
-                    loaded from Settings→Software Updates</span>
-                </span>
-              </span>
-              <span class="metric-value" style="font-size: 13px;"><span id="currentPartitionTypeID">?</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Buffered Records (count)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Data buffered when WiFi disconnected. Will upload to Cloud at next
-                    opportunity. Resetting might take a few tries, brute force works.</span>
-                </span>
-              </span>
-              <span class="metric-value" style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-                <span><span id="BufferedRecordCountID">0</span>/<span id="BufferedRecordCapID">?</span></span>
-                <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
-                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
-                    <input type="hidden" name="password" class="password_field">
-                    <input type="hidden" name="forceCloudFlush" value="1">
-                    <input type="submit" value="Upload Now" class="btn-primary"
-                      title="Force-upload buffered records to the cloud immediately. RECOMMENDED with field OFF. If field is ON: control loop is held for up to 10s during each upload, banner will show WAITING CLOUD. Hardware over-voltage protection stays armed, but a load transient mid-upload could trigger a hard cut. Avoid during dynamic events (RPM ramps, sudden load changes). Bypasses the 70s field-off settle and 13s interval throttle." />
-                  </form>
-                  <form action="/get" method="GET" target="hidden-form" style="display:inline;">
-                    <input type="hidden" name="password" class="password_field">
-                    <input type="hidden" name="ClearBuffer" value="1">
-                    <input onclick="return handleClearBuffer();" type="submit" value="Clear" class="btn-secondary"
-                      title="Delete all buffered sensor uploads" />
-                  </form>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Power Cycles (count)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Lifetime, or since re-flashing</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="totalPowerCyclesID">0</span></span>
-            </div>
-
-
-            <div class="metric-row">
-              <span class="metric-label">ADS1115 I2C Error Count
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Count for this power cycle only, does not persist thru power loss</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="adsI2CErrorCount_ID">0</span></span>
-            </div>
-
           </div>
         </div>
+        </details>
       </div>
 
       <!-- DS18B20 Sensor Health -->
@@ -9256,52 +9458,6 @@
       </div>
     </div>
 
-    <!-- Other Live Data Sub-tab -->
-    <div id="livedata-other" class="sub-tab-content">
-      <div class="settings-card">
-
-        <div class="grid">
-
-          <div class="card">
-            <p>Board Temperature
-              <span class="tooltip" onclick="this.classList.toggle('active')">
-                ℹ️
-                <span class="tooltip-box">
-                  Temperature measured in the regulator, will often be 5-25 deg hotter than
-                  ambient depending on location and electrical demands
-                </span>
-              </span>
-            </p>
-            <p class="reading with-wm" id="ambientTemp-display" style="font-size: 28px;">
-              <span><span id="ambientTempID">0</span> <span class="temp-unit-label">°F</span></span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="ambientTempID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="ambientTempID_lo">—</span></span>
-              </span>
-            </p>
-          </div>
-
-          <div class="card">
-            <p>ADS Ch3 Voltage</p>
-            <p class="reading"><span id="ADS3ID">0</span> V</p>
-          </div>
-
-          <div class="card">
-            <p>Water Depth
-              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                <span class="tooltip-box">
-                  Water depth at the transducer position (NMEA2k PGN 128267, including transducer offset if reported).
-                  Shows "—" when no depth sensor is broadcasting. Feeds the "Deepest Anchorage" leaderboard.
-                </span>
-              </span>
-            </p>
-            <p class="reading"><span id="WaterDepthID">—</span> ft</p>
-          </div>
-
-        </div>
-      </div>
-
-    </div>
   </div>
   </div>
 
@@ -9516,10 +9672,10 @@
   <div id="console" class="tab-content">
     <div class="settings-card wide-card">
       <div class="form-label">
-        <button type="button" id="pauseConsoleBtn" onclick="toggleConsolePause()"
-          style="font-size: 12px; margin-left: 10px;">Pause</button>
-        <button type="button" onclick="copyConsole()" style="font-size: 12px; margin-left: 5px;">Copy</button>
-        <button type="button" onclick="clearConsole()" style="font-size: 12px; margin-left: 5px;">Clear</button>
+        <button type="button" id="pauseConsoleBtn" class="btn-secondary btn-sm" onclick="toggleConsolePause()"
+          style="margin-left: 10px;">Pause</button>
+        <button type="button" class="btn-secondary btn-sm" onclick="copyConsole()" style="margin-left: 5px;">Copy</button>
+        <button type="button" class="btn-secondary btn-sm" onclick="clearConsole()" style="margin-left: 5px;">Clear</button>
       </div>
       <div id="consoleOutput" class="responsive-console"></div>
       <div style="font-size: 11px; color: #888; margin-top: 8px; font-style: italic; text-align: center;">
@@ -9589,8 +9745,9 @@
           <p style="font-size: 12.5px; color: #777; line-height: 1.55; margin: 8px 0 4px; max-width: 660px;">
             <strong style="color: #555;">What's public:</strong> Registering shows your username, boat type, and
             boat length on the public leaderboards, visible to anyone. Your email and location are never shared.
-            You can leave at any time with <strong style="color: #555;">Delete All Cloud Data</strong> — your device
-            keeps working fully without the cloud.
+            You can leave at any time with <strong style="color: #555;">Delete My Account</strong> — this permanently
+            deletes your cloud account and associated cloud data. Your hardware device will continue working locally
+            without cloud features.
           </p>
 
           <hr />
@@ -9599,7 +9756,7 @@
                Delete is type=button + onclick so it never submits the profile form; its own JS confirm
                (warning + type-DELETE prompt) carries the irreversibility warning. -->
           <div style="display: flex; justify-content: flex-end; gap: 10px; align-items: center; flex-wrap: wrap;">
-            <button type="button" onclick="handleDeleteAllData()" class="btn-danger-ghost" title="Permanently deletes all your cloud data (GDPR). Cannot be undone — your device keeps working locally.">Delete All Cloud Data</button>
+            <button type="button" onclick="handleDeleteAllData()" class="btn-danger-ghost" title="Permanently deletes your cloud account and all associated cloud data. Cannot be undone — your hardware device keeps working locally without cloud features.">Delete My Account</button>
             <input type="submit" value="Save Profile Changes" class="btn-primary" />
           </div>
 

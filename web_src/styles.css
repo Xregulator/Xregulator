@@ -706,103 +706,104 @@ details.tuning-section[open] > summary.tuning-section-title::after {
   margin-left: 16px;
 }
 
-/* Buttons */
-.btn-primary {
-  padding: 6px 12px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--accent);
-  color: #fff;
-  font-weight: 800;
-  cursor: pointer;
+/* ===== Buttons — universal "Soft Tonal + depth" system (2026-06-04 restyle) =====
+   Tonal backgrounds + colored text + a subtle shadow, shared by every action button.
+   Small one-off buttons keep their inline padding/font (so they stay compact) and just
+   inherit the tonal look from these rules. Nav/filter chips (.sub-tab, .alt-tab-btn) and
+   the segmented .cap-mode controls are styled separately below. */
+.btn-primary,
+input[type="submit"],
+.btn-secondary,
+.btn-danger,
+.btn-danger-ghost {
+  padding: 8px 15px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-weight: 600;
   font-size: 14px;
-  flex-shrink: 0;
+  cursor: pointer;
   white-space: nowrap;
   width: auto;
   max-width: fit-content;
+  flex-shrink: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s, transform .05s;
 }
 
-/* override the color for Set buttons */
+.btn-primary:active,
+input[type="submit"]:active,
+.btn-secondary:active,
+.btn-danger:active,
+.btn-danger-ghost:active {
+  transform: translateY(1px);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.12);
+}
+
+/* Primary (teal) — also the "Set" submit buttons (!important defeats the old #666 override) */
+.btn-primary,
 input[type="submit"] {
-  background: #666 !important;
-  padding: 6px 12px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  color: #fff;
-  font-weight: 800;
-  cursor: pointer;
-  font-size: 14px;
-  flex-shrink: 0;
-  white-space: nowrap;
-  width: auto !important;
-  max-width: fit-content !important;
+  background: rgba(0, 161, 154, 0.14) !important;
+  color: #00867f !important;
+  border-color: rgba(0, 161, 154, 0.28);
+}
+input[type="submit"] {
   min-width: 60px !important;
   flex: 0 0 auto !important;
 }
-
-.btn-primary:active {
-  transform: translateY(1px);
+.btn-primary:hover,
+input[type="submit"]:hover {
+  background: rgba(0, 161, 154, 0.22) !important;
+  box-shadow: 0 2px 6px rgba(0, 161, 154, 0.30);
+}
+.dark-mode .btn-primary,
+.dark-mode input[type="submit"] {
+  background: rgba(0, 161, 154, 0.20) !important;
+  color: #4fd6ce !important;
 }
 
-
+/* Secondary (neutral) */
 .btn-secondary {
-  padding: 6px 12px;
-  border-radius: 4px;
-  border: 1px solid #555;
-  background: #666;
-  color: #fff;
-  font-weight: 800;
-  cursor: pointer;
-  font-size: 14px;
-  white-space: nowrap;
-  width: auto;
-  max-width: fit-content;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-dark);
+  border-color: rgba(0, 0, 0, 0.10);
+}
+.btn-secondary:hover {
+  background: rgba(0, 0, 0, 0.09);
 }
 
-.btn-secondary:active {
-  transform: translateY(1px);
-}
-
+/* Danger (red) */
 .btn-danger {
-  padding: 6px 12px;
-  border-radius: 4px;
-  border: 1px solid #a93226;
-  background: #dc3545;
-  color: #fff;
-  font-weight: 800;
-  cursor: pointer;
-  font-size: 14px;
-  white-space: nowrap;
-  width: auto;
-  max-width: fit-content;
+  background: rgba(214, 69, 62, 0.13);
+  color: #c23a34;
+  border-color: rgba(214, 69, 62, 0.26);
+}
+.btn-danger:hover {
+  background: rgba(214, 69, 62, 0.20);
+  box-shadow: 0 2px 6px rgba(214, 69, 62, 0.28);
+}
+.dark-mode .btn-danger {
+  color: #f08a84;
 }
 
-.btn-danger:active {
-  transform: translateY(1px);
-}
-
-/* De-emphasized destructive — outline only, fills on hover (used for GDPR Delete All Data) */
+/* De-emphasized destructive — lighter tonal danger (GDPR Delete All, Clear All) */
 .btn-danger-ghost {
-  padding: 6px 12px;
-  border-radius: 4px;
-  border: 1px solid #e3a9af;
-  background: #fff;
-  color: #dc3545;
-  font-weight: 800;
-  cursor: pointer;
-  font-size: 14px;
-  white-space: nowrap;
-  width: auto;
-  max-width: fit-content;
+  background: rgba(214, 69, 62, 0.07);
+  color: #c23a34;
+  border-color: rgba(214, 69, 62, 0.20);
 }
-
 .btn-danger-ghost:hover {
-  background: #fdf2f3;
-  border-color: #dc3545;
+  background: rgba(214, 69, 62, 0.15);
+  border-color: rgba(214, 69, 62, 0.32);
+}
+.dark-mode .btn-danger-ghost {
+  color: #f08a84;
 }
 
-.btn-danger-ghost:active {
-  transform: translateY(1px);
+/* Compact size modifier — pairs with any .btn-* class to keep a button small */
+.btn-sm {
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  border-radius: 6px !important;
 }
 
 .btn-row {
@@ -2115,22 +2116,20 @@ hr {
   }
 }
 
-/* Dark mode styles */
+/* Dark mode styles — tonal neutral (matches the universal Soft Tonal system) */
 .dark-mode .btn-secondary {
-  background-color: #555555;
-  color: #ffffff;
-  border: 1px solid #444444;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e0e0e0;
+  border: 1px solid rgba(255, 255, 255, 0.13);
 }
 
 .dark-mode .btn-secondary:hover {
-  background-color: #666666;
-  border-color: #777777;
+  background: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.18);
 }
 
 .dark-mode .btn-secondary:active {
-  background-color: #444444;
-  transform: translateY(0);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+  transform: translateY(1px);
 }
 
 /* Dark mode pulse animation */
@@ -2139,26 +2138,29 @@ hr {
 }
 
 
-/* Red save button when dirty — !important beats btn-primary */
+/* Save button when dirty — tonal danger so it reads "unsaved, act on me" (beats btn-primary) */
 .btn-save-table {
-  background-color: #f44336 !important;
-  color: white;
-  border: none;
+  background: rgba(214, 69, 62, 0.16) !important;
+  color: #c23a34 !important;
+  border: 1px solid rgba(214, 69, 62, 0.30) !important;
   padding: 10px 30px;
-  border-radius: var(--radius);
+  border-radius: 8px;
   cursor: pointer;
-  font-weight: bold;
+  font-weight: 700;
   font-size: 16px;
   /* iOS: 16px+ prevents auto-zoom on input focus */
-  transition: all 0.3s ease;
+  transition: all 0.2s ease;
   animation: fadeIn 0.3s ease-in;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
 .btn-save-table:hover {
-  background-color: #d32f2f;
+  background: rgba(214, 69, 62, 0.24) !important;
   transform: translateY(-1px);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 2px 6px rgba(214, 69, 62, 0.28);
 }
+
+.dark-mode .btn-save-table { color: #f08a84 !important; }
 
 /* Locking Settings Capability */
 
@@ -3164,36 +3166,46 @@ input:checked+.slider:before {
     color: var(--text-muted, #888);
     font-weight: 600;
   }
+  /* iOS-style segmented control (Soft Tonal system): tinted track, active = raised pill */
   .cap-mode-toggle {
-    display: flex;
-    border: 1.5px solid var(--border, #ccc);
-    border-radius: 6px;
-    overflow: hidden;
+    display: inline-flex;
+    gap: 3px;
+    padding: 3px;
+    background: rgba(0, 0, 0, 0.06);
+    border: 1px solid var(--border, #ccc);
+    border-radius: 9px;
+  }
+  .dark-mode .cap-mode-toggle {
+    background: rgba(255, 255, 255, 0.07);
   }
   .cap-mode-btn {
-    padding: 4px 14px;
+    padding: 5px 14px;
     font-size: 13px;
     font-weight: 600;
     border: none;
+    border-radius: 7px;
     background: transparent;
     color: var(--text-muted, #888);
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-  }
-  .cap-mode-btn:first-child {
-    border-right: 1.5px solid var(--border, #ccc);
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
   }
   .cap-mode-btn.cap-mode-active {
-    background: var(--teal, #00a19a);
-    color: #fff;
+    background: var(--card-light, #fff);
+    color: var(--teal, #00a19a);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
-  #chargeRateLowBtn.cap-mode-active {
-    background: #ff9800;
-    color: #fff;
+  .dark-mode .cap-mode-btn.cap-mode-active {
+    background: #3a3f44;
   }
+  #chargeRateLowBtn.cap-mode-active,
   #capModeRow.rate-low .cap-mode-btn.cap-mode-active {
-    background: #ff9800;
-    color: #fff;
+    background: var(--card-light, #fff);
+    color: #e08600;
+  }
+  .dark-mode #chargeRateLowBtn.cap-mode-active,
+  .dark-mode #capModeRow.rate-low .cap-mode-btn.cap-mode-active {
+    background: #3a3f44;
+    color: #ffb74d;
   }
   /* Derived (calculated) inputs — visually subordinate, not editable */
   .learning-table input.cap-derived {
@@ -3260,71 +3272,85 @@ input:checked+.slider:before {
     justify-content: center;
 }
 .log-pill .log-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-.log-pill-on  { background: #1b5e20; color: #a5d6a7; }            /* recording */
+.log-pill-on  { background: rgba(76, 175, 80, 0.16); color: #2e7d32; }   /* recording */
 .log-pill-on  .log-dot { background: #4caf50; animation: log-pulse 1.8s infinite; }
-.log-pill-off { background: #5a4000; color: #ffe082; }            /* paused / frozen */
-.log-pill-off .log-dot { background: #ffe082; }
+.log-pill-off { background: rgba(255, 167, 38, 0.18); color: #b26a00; }  /* paused / frozen */
+.log-pill-off .log-dot { background: #ffa726; }
+.dark-mode .log-pill-on  { color: #81c784; }
+.dark-mode .log-pill-off { color: #ffb74d; }
 @keyframes log-pulse {
     0%   { box-shadow: 0 0 0 0 rgba(76,175,80,.55); }
     70%  { box-shadow: 0 0 0 7px rgba(76,175,80,0); }
     100% { box-shadow: 0 0 0 0 rgba(76,175,80,0); }
 }
 
-/* Download = primary teal call-to-action */
+/* Download = primary teal call-to-action (tonal) */
 .btn-log-primary {
-    padding: 8px 14px;
-    border-radius: 6px;
-    border: 1px solid #00807b;
-    background: var(--accent);
-    color: #fff;
-    font-weight: 800;
+    padding: 8px 15px;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 161, 154, 0.28);
+    background: rgba(0, 161, 154, 0.14);
+    color: #00867f;
+    font-weight: 600;
     font-size: 14px;
     cursor: pointer;
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
     gap: 7px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+    transition: background .15s, box-shadow .15s, transform .05s;
 }
+.btn-log-primary:hover  { background: rgba(0, 161, 154, 0.22); box-shadow: 0 2px 6px rgba(0, 161, 154, 0.30); }
 .btn-log-primary:active { transform: translateY(1px); }
+.dark-mode .btn-log-primary { background: rgba(0, 161, 154, 0.20); color: #4fd6ce; }
 
 /* Pause/Resume toggle — fixed width so it never shifts neighbours */
 .btn-log-toggle {
     min-width: 150px;
     justify-content: center;
-    padding: 8px 14px;
-    border-radius: 6px;
-    font-weight: 800;
+    padding: 8px 15px;
+    border-radius: 8px;
+    font-weight: 600;
     font-size: 14px;
     cursor: pointer;
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    border: 1px solid #ccc;
-    background: #fff;
-    color: #555;
+    border: 1px solid rgba(0, 0, 0, 0.10);
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--text-dark);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+    transition: background .15s, box-shadow .15s, transform .05s;
 }
-.btn-log-toggle.is-recording { background: #fff; border-color: #ccc; color: #555; }       /* shows Pause */
-.btn-log-toggle.is-paused    { background: #5a4000; border-color: #3f2d00; color: #ffe082; } /* shows Resume */
+.btn-log-toggle.is-recording { background: rgba(0, 0, 0, 0.05); border-color: rgba(0, 0, 0, 0.10); color: var(--text-dark); }   /* shows Pause */
+.btn-log-toggle.is-paused    { background: rgba(255, 167, 38, 0.18); border-color: rgba(255, 167, 38, 0.30); color: #b26a00; } /* shows Resume */
+.btn-log-toggle:hover  { background: rgba(0, 0, 0, 0.09); }
 .btn-log-toggle:active { transform: translateY(1px); }
+.dark-mode .btn-log-toggle { background: rgba(255, 255, 255, 0.08); color: #e0e0e0; border-color: rgba(255, 255, 255, 0.13); }
+.dark-mode .btn-log-toggle.is-paused { color: #ffb74d; }
 
-/* Start Fresh Log — destructive, de-emphasized so it's deliberate */
+/* Start Fresh Log — destructive, de-emphasized so it's deliberate (tonal danger) */
 .btn-log-fresh {
-    padding: 8px 14px;
-    border-radius: 6px;
-    border: 1px solid #e3a9af;
-    background: #fff;
-    color: #dc3545;
-    font-weight: 800;
+    padding: 8px 15px;
+    border-radius: 8px;
+    border: 1px solid rgba(214, 69, 62, 0.20);
+    background: rgba(214, 69, 62, 0.07);
+    color: #c23a34;
+    font-weight: 600;
     font-size: 14px;
     cursor: pointer;
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
     gap: 7px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+    transition: background .15s, border-color .15s, transform .05s;
 }
-.btn-log-fresh:hover  { background: #fdf2f3; border-color: #dc3545; }
+.btn-log-fresh:hover  { background: rgba(214, 69, 62, 0.15); border-color: rgba(214, 69, 62, 0.32); }
 .btn-log-fresh:active { transform: translateY(1px); }
+.dark-mode .btn-log-fresh { color: #f08a84; }
 
 /* ── Anomaly banner (efficiency tab) ─────────────────────── */
 .eff-anomaly-banner {

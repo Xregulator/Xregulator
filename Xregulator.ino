@@ -239,25 +239,28 @@ struct FrontStore {
     if (count >= cap) return false;
     pts[count++] = p; return true;
   }
-  // IDW surface evaluation, O(count) — the spec's front_eval(). d_i = sqrt(Σ_a ((x[a]-pts.x[a])/
-  // axisScale[a])^2); exact hit → that point's y; else Σ w_i y_i / Σ w_i, w_i = 1/(d_i^power + eps).
+  // IDW surface evaluation, O(count) — the spec's front_eval(). Float + precomputed reciprocal axis
+  // scales (4 mults/point, not 4 divides) keep this cheap on the 200 Hz fold even at the raised cap.
+  // A convex blend of the support points → the result is ALWAYS within their y-range: never extrapolates.
+  // d_i = sqrt(Σ_a ((x[a]-pts.x[a])*invSc[a])^2); exact hit → that point's y; else Σ w_i y_i / Σ w_i.
   float eval(const float x[NAXIS], float idwPower) const {
     if (count <= 0) return 0.0f;                     // bootstrap: no surface yet
-    double wsum = 0, num = 0;
+    float invSc[NAXIS];
+    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
+    float wsum = 0, num = 0;
     for (int i = 0; i < count; i++) {
-      double d2 = 0;
+      float d2 = 0;
       for (int a = 0; a < NAXIS; a++) {
-        double sc = (axisScale[a] > 1e-9f) ? (double)axisScale[a] : 1.0;
-        double dx = ((double)x[a] - (double)pts[i].x[a]) / sc;
+        float dx = (x[a] - pts[i].x[a]) * invSc[a];
         d2 += dx * dx;
       }
-      if (d2 < 1e-12) return pts[i].y;               // exact hit
+      if (d2 < 1e-12f) return pts[i].y;              // exact hit
       // dᵢ^power. Fast-path power 2 (the default) — d2 already is dᵢ²; skip sqrt+pow (200 Hz hot path).
-      double dp = (idwPower == 2.0f) ? d2 : pow(sqrt(d2), (double)idwPower);
-      double w = 1.0 / (dp + 1e-9);
-      wsum += w; num += w * (double)pts[i].y;
+      float dp = (idwPower == 2.0f) ? d2 : powf(sqrtf(d2), idwPower);
+      float w = 1.0f / (dp + 1e-9f);
+      wsum += w; num += w * pts[i].y;
     }
-    return (wsum > 0) ? (float)(num / wsum) : 0.0f;
+    return (wsum > 0) ? (num / wsum) : 0.0f;
   }
   // Device keep-gate (LEARNED) — the spec's front_pushes(). Bias toward keep via safetyMargin:
   // keep if it beats the margin-lowered surface. count==0 bootstraps (founds the surface).
@@ -342,7 +345,8 @@ enum HttpsRequestType {
 
 struct HttpsRequest {
   HttpsRequestType type;
-  char payload[6144];
+  char    *payload;     // PSRAM, OWNED: producer ps_malloc's, the httpsTask worker free's after use.
+  uint32_t payloadCap;  // allocated capacity (0 / NULL payload for the no-body request types)
 };
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
@@ -361,7 +365,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.12";
+const char *FIRMWARE_VERSION = "0.0.23";
 
 String currentUID;
 
@@ -398,7 +402,7 @@ String currentUID;
 
 // Performance-vs-engine-hours TREND ring (the headline). One point per engine-hour bucket:
 // average + worst output-% vs the best-ever front. Survives reboot; uploads for cloud history.
-#define ALT_TREND_CAP 512      // engine-hour buckets retained (~512 hrs)
+#define ALT_TREND_CAP 20000    // engine-hour buckets retained (~20k hrs; 120 KB PSRAM)
 struct AltTrendPt {
   uint16_t engHour;            // engine-hours-since-baseline bucket index
   int16_t  worstPct;          // worst (min) output-% in this bucket (×10)
@@ -406,6 +410,8 @@ struct AltTrendPt {
 };
 static AltTrendPt *altTrend = nullptr;
 static int         altTrendCount = 0;
+static uint32_t    altTrendFlushed = 0;     // trend records already in the /alttrend.bin append log
+static bool        altTrendRewrite = true;  // force a full log rewrite (load-miss or ring eviction)
 // Current-bucket accumulators (committed when the engine-hour bucket advances).
 static double altBucket_sum = 0, altBucket_n = 0;   // running average over the bucket
 static float  altBucket_worst = 0;                  // min output-% seen this bucket
@@ -772,6 +778,8 @@ const unsigned long BOATPERF_UPLOAD_INTERVAL = 900000;  // 15 min — field-off-
 unsigned long lastBoatPerfUploadTime = 0;
 const unsigned long ALTHEALTH_UPLOAD_INTERVAL = 900000;  // 15 min — field-off-gated alt-health upload + cloud re-fit cadence
 unsigned long lastAltHealthUploadTime = 0;
+int64_t lastAltHealthSyncEpoch = 0;   // unix sec of last SUCCESSFUL alt-health cloud sync this boot (0 = none) — for "synced N ago"
+int64_t lastBoatPerfSyncEpoch  = 0;   // unix sec of last SUCCESSFUL boat-perf cloud sync this boot
 // Set to PRODUCTION 2026-06-02. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min TEST.)
 const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
 //const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
@@ -914,7 +922,8 @@ int totalPowerCycles = 0;    // Total number of power cycles (persistent)
 // These are health variables for the TempTask (digital temperature measurement)
 unsigned long lastTempTaskHeartbeat = 0;
 bool tempTaskHealthy = true;
-bool tempTaskAlarm = false;                     // Set by checkTempTaskHealth() — triggers buzzer regardless of AlarmActivate
+bool tempTaskSuspended = false;                 // True while temp task is intentionally suspended (80MHz engine-off idle); gates checkTempTaskHealth()
+bool tempTaskAlarm = false;                     // Set by checkTempTaskHealth() — raises alarm condition; physical buzzer (GPIO21) is still gated by AlarmActivate
 const unsigned long TEMP_TASK_TIMEOUT = 20000;  // 20 seconds
 
 //Cloud Upload Stuff
@@ -1278,6 +1287,28 @@ float fuelTableRPM[FUEL_TABLE_SIZE] = { 0, 500, 1000, 1500, 2000, 2500, 3000, 35
 float fuelTableGPH[FUEL_TABLE_SIZE] = { 0.0, 0.3, 0.5, 0.8, 1.2, 1.8, 2.5, 3.5, 5.0, 7.0 };
 float defaultFuelRPMValues[FUEL_TABLE_SIZE] = { 0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500 };
 float defaultFuelGPHValues[FUEL_TABLE_SIZE] = { 0.0, 0.3, 0.5, 0.8, 1.2, 1.8, 2.5, 3.5, 5.0, 7.0 };
+float currentFuelGPH = 0.0f;  // live fuel flow, gallons/hr (interpolated from table by RPM; 0 = engine off)
+float currentNMPG = 0.0f;     // live fuel economy, nautical miles per gallon (SOG / GPH; 0 = unavailable)
+// Session fuel-economy curve: observed mpg binned by RPM, this session only (zeroed at boot + Reset).
+// A reading is binned only once RPM and boat speed have BOTH held within tolerance for the hold time
+// (steady-state gate, mirrors the boat-perf Episode banding) so accel/decel transients don't pollute it.
+// UNIVERSAL SCALE: bins span [0, top configured fuel-table RPM], so binWidth auto-fits the engine
+// (default table top 4500 -> 250-RPM bins; an 8000-RPM engine -> 444-RPM bins). No hardcoded ceiling.
+#define FUELCURVE_BINS 18           // number of RPM bins (fixed); width = currentFuelTopRPM / FUELCURVE_BINS
+float fuelCurveNMPG[FUELCURVE_BINS] = { 0 };  // per-bin naut mi/gal; 0 = no qualified reading yet
+float currentFuelTopRPM = 0.0f;     // top configured fuel-table RPM; sent to the chart for x-axis scaling
+// Settle-then-measure gate: RPM+speed must hold within band for the settle time (boat speed lags throttle
+// by tens of seconds), THEN mpg is averaged over the sample window and that average freezes the bin.
+float fuelCurveRpmTol = 500.0f;     // RPM spread (max-min) still counted as steady
+float fuelCurveSpdTol = 2.0f;       // boat-speed spread (max-min) still counted as steady (= +/-1 kt)
+float fuelCurveSettleSec = 40.0f;   // hold steady this long before sampling starts (settling, discarded)
+float fuelCurveSampleSec = 20.0f;   // then average mpg over this window; the average freezes the bin
+// steady-gate running state + sample accumulators (engine-off / stopped / Reset all break the run):
+float fcRpmMin = 0, fcRpmMax = 0, fcSpdMin = 0, fcSpdMax = 0;
+uint32_t fcRunStartMs = 0;
+bool fcRun = false;
+double fcSampleMpgSum = 0, fcSampleRpmSum = 0;
+uint32_t fcSampleCount = 0;
 // Voltage (V)
 float PeakVoltage_AllTime = 0.0f;  // V (lifetime peak)
 float MinVoltage = 99.0f;          // V (session min)
@@ -1355,6 +1386,8 @@ bool isRegistered = false;  // Registration status
 // CLOUD FEATURES - STATIC BUFFERS// For ESP32-S3 with 16GB and OPI PSRAM
 const int PAYLOAD_BUFFER_SIZE = 4096;
 const int CONFIG_PAYLOAD_SIZE = 32768;  // bumped 8KB → 32KB for step 4 picker spec (~190 fields)
+const int ALT_UPLOAD_BUF_SIZE  = 64 * 1024;   // PSRAM upload buffer — holds a full alt front batch (≤1024 pts)
+const int PERF_UPLOAD_BUF_SIZE = 128 * 1024;  // PSRAM upload buffer — holds sail+motor batches (≤2048 pts)
 
 char *tempBuffer;
 
@@ -2250,6 +2283,7 @@ FuncTiming ft_rai_imu;             // IMU FIFO drain block
 FuncTiming ft_updateAccelMetrics;  // accel ring-buffer processing (updateAccelMetrics)
 FuncTiming ft_ReadVEData;
 FuncTiming ft_altHealth;
+FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from ft_altHealth (SSE wrapper)
 FuncTiming ft_boatPerf;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
@@ -2276,6 +2310,18 @@ uint32_t loopTime5sWindow = 0;                     // worst loop time in last Ai
 constexpr unsigned long AinputTrackerTime = 5000;  // rolling window reset interval (ms)
 // Previous session max loop time — snapshot of MaxLoopTime taken at boot before reset
 uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before this one (µs)
+
+// ── 80MHz low-power-mode loop instrumentation ─────────────────────────────────
+// Engine-off drops the CPU to 80MHz; these track loop health in that state only
+// (gated on getCpuFrequencyMhz()<81 at the read site — one cheap register read).
+// The accel FIFO net-fills if a single loop pass exceeds ~38ms (6-sample drain
+// budget / 156 sample-per-sec fill), so loopOver80ImuLimitCount is a "near-miss to
+// IMU overrun" counter — pair it with imu_fifo_overrun_count (actual losses).
+const uint32_t LOOP80_IMU_LIMIT_US = 38000;  // ~38ms: accel FIFO drain budget per poll
+uint32_t loopWorst80Win = 0;           // worst 80MHz loop pass, rolling 5s window (µs)
+uint32_t loopWorst80Ses = 0;           // worst 80MHz loop pass since Reset Peak Values (µs)
+uint32_t loopOver80ImuLimitCount = 0;  // # of 80MHz passes over LOOP80_IMU_LIMIT_US since reset
+uint32_t loop80IterCount = 0;          // total 80MHz passes since reset (denominator for the above)
 
 // ── End per-function timing ───────────────────────────────────────────────────
 
@@ -2726,11 +2772,6 @@ bool fieldOffFlushDone = false;         // NVS drain done this field-off window
 bool fieldOffMatrixFlushDone = false;   // matrix write done this field-off window
 int8_t lastFieldStateForFlush = -1;    // -1 = uninit; 0 = field off; 1 = field on
 uint32_t fieldOffEdgeMs = 0;           // millis() captured at most recent field-on -> field-off edge
-
-// Record-update freshness guard: any V/I/RPM record being set bumps this to millis().
-// inCriticalZone() blocks NVS commits for 5s after — setting a new max means we're at
-// an electrically stressed moment, so defer the periodic commit until things settle.
-uint32_t lastElectricalRecordMs = 0;
 
 
 uint32_t perfCountersResetMs = 0;
@@ -3695,6 +3736,7 @@ const uint16_t adsMuxCodes[4] = {
 // Forward declarations (for WiFi functions)
 String readFile(fs::FS &fs, const char *path);
 bool writeFile(fs::FS &fs, const char *path, const char *message);
+bool writeFileIfChanged(fs::FS &fs, const char *path, const char *message);
 // Versioned PSRAM-blob persistence (shared scaffold — see 2_functions.ino)
 uint32_t writePsramBlob(const char *path, uint32_t magic, uint32_t version,
                         uint32_t userWord, const void *base, size_t recordSize,
@@ -3978,6 +4020,7 @@ void setup() {
   memset(&ft_updateAccelMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ReadVEData, 0, sizeof(FuncTiming));
   memset(&ft_altHealth, 0, sizeof(FuncTiming));
+  memset(&ft_altFold, 0, sizeof(FuncTiming));
   memset(&ft_boatPerf, 0, sizeof(FuncTiming));
   memset(&ft_rai_total, 0, sizeof(FuncTiming));
   memset(&ft_rai_ina228, 0, sizeof(FuncTiming));
@@ -4050,7 +4093,7 @@ void setup() {
   setupWiFi();  // NOW setup WiFi with all settings properly loaded
 
   // ===== CREATE HTTPS TASK ON CORE 0 =====
-  httpsQueue = xQueueCreate(2, sizeof(HttpsRequest));  // Smaller queue, bigger messages
+  httpsQueue = xQueueCreate(2, sizeof(HttpsRequest));  // tiny messages now (payload is a PSRAM pointer, not an inline 6 KB buffer)
   Serial.println(httpsQueue ? "HTTPS queue created" : "ERROR: Queue creation failed");
 
   // Both stay on Core 0, but priority > 0
@@ -4288,46 +4331,44 @@ void loop() {
   // NVS now persists only at the field-off edge (saveNVSDataFull() further down in loop)
   // and at the shutdown sequence — both run with field off, so any commit duration is safe.
   // Deferred saves from Core 0 button handlers — executed here on Core 1 so Core 0 SSE is not blocked.
-  // Gated: wait 5 consecutive seconds out of critical zone before firing, to avoid bursting I/O
-  // the moment voltage drops. All flags in this block execute in the same tick — no re-entry possible.
-  // Shutdown flush (below) bypasses this gate and drains remaining flags unconditionally.
-  if (safeToFlushIO()) {
-    if (pendingSaveCVTuningLog) {
-      pendingSaveCVTuningLog = false;
-      saveCVTuningLog();
-    }
-    if (pendingSaveTuningLog) {
-      pendingSaveTuningLog = false;
-      saveTuningLog();
-    }
-    if (pendingSaveThermalTuningLog) {
-      pendingSaveThermalTuningLog = false;
-      saveThermalTuningLog();
-    }
-    if (pendingSaveSystemIDLog) {
-      pendingSaveSystemIDLog = false;
-      saveSystemIDLog();
-    }
-    if (pendingResetAlternatorHealth) {
-      pendingResetAlternatorHealth = false;
-      resetAlternatorHealth();
-    }
-    if (pendingResetBoatPerformance) {
-      pendingResetBoatPerformance = false;
-      resetBoatPerformance();
-    }
-    if (pendingClearOverheatHistory) {
-      pendingClearOverheatHistory = false;
-      clearOverheatHistoryAction();
-    }
-    if (pendingSaveUserTableEdits) {
-      pendingSaveUserTableEdits = false;
-      saveUserTableEdits();
-    }
-    if (pendingSaveVesselInfo) {
-      pendingSaveVesselInfo = false;
-      saveVesselInfoToFile();
-    }
+  // Fired immediately, no electrical-zone gate: every flag here is set only by a manual UI action
+  // (reset/clear/save buttons, or a user-requested SystemID run), so the brief flash write can only
+  // happen as a direct result of a user click — never autonomously. All flags execute in the same tick.
+  if (pendingSaveCVTuningLog) {
+    pendingSaveCVTuningLog = false;
+    saveCVTuningLog();
+  }
+  if (pendingSaveTuningLog) {
+    pendingSaveTuningLog = false;
+    saveTuningLog();
+  }
+  if (pendingSaveThermalTuningLog) {
+    pendingSaveThermalTuningLog = false;
+    saveThermalTuningLog();
+  }
+  if (pendingSaveSystemIDLog) {
+    pendingSaveSystemIDLog = false;
+    saveSystemIDLog();
+  }
+  if (pendingResetAlternatorHealth) {
+    pendingResetAlternatorHealth = false;
+    resetAlternatorHealth();
+  }
+  if (pendingResetBoatPerformance) {
+    pendingResetBoatPerformance = false;
+    resetBoatPerformance();
+  }
+  if (pendingClearOverheatHistory) {
+    pendingClearOverheatHistory = false;
+    clearOverheatHistoryAction();
+  }
+  if (pendingSaveUserTableEdits) {
+    pendingSaveUserTableEdits = false;
+    saveUserTableEdits();
+  }
+  if (pendingSaveVesselInfo) {
+    pendingSaveVesselInfo = false;
+    saveVesselInfoToFile();
   }
   // ========== POWER MANAGEMENT: Handle ignition state and WiFi wake mode ==========
   // This runs BEFORE the mode switch to ensure WiFi is in correct state before attempting transmission
@@ -4444,6 +4485,7 @@ void loop() {
           WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
           if (tempTaskHandle != NULL) {
             vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
+            tempTaskSuspended = true;      // intentional suspend — health monitor must not read this as a hang
           }
           setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
         } else {
@@ -4457,6 +4499,7 @@ void loop() {
             WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
             if (tempTaskHandle != NULL) {
               vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
+              tempTaskSuspended = true;      // intentional suspend — health monitor must not read this as a hang
             }
             setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
           }
@@ -4481,6 +4524,8 @@ void loop() {
       setCpuFrequencyMhz(240);         // Ensure full speed
       if (tempTaskHandle != NULL) {
         vTaskResume(tempTaskHandle);  // RESUME BACKGROUND TASKS AFTER SPEEDING UP CPU
+        tempTaskSuspended = false;
+        lastTempTaskHeartbeat = millis();  // restart the 20s window so the health check doesn't trip before the task posts its first beat
       }
       // Reconnect WiFi if needed (works for both AP and CLIENT modes)
       if (WiFi.getMode() == WIFI_OFF) {
@@ -4656,10 +4701,15 @@ void loop() {
               if (_configBuilt) {
                 HttpsRequest req = {};
                 req.type = HTTPS_UPLOAD_CONFIG;
-                strncpy(req.payload, configPayloadBuffer, sizeof(req.payload) - 1);
-                req.payload[sizeof(req.payload) - 1] = '\0';
-                if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
-                  queueConsoleMessage("Config snapshot: HTTPS queue full, will retry next interval");
+                req.payloadCap = CONFIG_PAYLOAD_SIZE;            // full config (was silently truncated to 6 KB)
+                req.payload = (char *)ps_malloc(req.payloadCap);
+                if (req.payload) {
+                  strncpy(req.payload, configPayloadBuffer, req.payloadCap - 1);
+                  req.payload[req.payloadCap - 1] = '\0';
+                  if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                    free(req.payload);
+                    queueConsoleMessage("Config snapshot: HTTPS queue full, will retry next interval");
+                  }
                 }
               }
             }
@@ -4672,10 +4722,15 @@ void loop() {
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
             HttpsRequest req = {};
             req.type = HTTPS_UPLOAD_BOATPERF;
-            if (buildBoatPerfPayload(req.payload, sizeof(req.payload))) {
+            req.payloadCap = PERF_UPLOAD_BUF_SIZE;
+            req.payload = (char *)ps_malloc(req.payloadCap);
+            if (req.payload && buildBoatPerfPayload(req.payload, req.payloadCap)) {
               if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                free(req.payload);
                 queueConsoleMessage("BoatPerf upload: HTTPS queue full, will retry next interval");
               }
+            } else if (req.payload) {
+              free(req.payload);   // nothing to send (build returned false) → release the buffer
             }
           }
         }
@@ -4689,10 +4744,15 @@ void loop() {
           if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && WiFi.RSSI() >= -76) {
             HttpsRequest req = {};
             req.type = HTTPS_UPLOAD_ALTHEALTH;
-            if (buildAltHealthPayload(req.payload, sizeof(req.payload))) {
+            req.payloadCap = ALT_UPLOAD_BUF_SIZE;
+            req.payload = (char *)ps_malloc(req.payloadCap);
+            if (req.payload && buildAltHealthPayload(req.payload, req.payloadCap)) {
               if (xQueueSend(httpsQueue, &req, 0) != pdTRUE) {
+                free(req.payload);
                 queueConsoleMessage("AltHealth upload: HTTPS queue full, will retry next interval");
               }
+            } else if (req.payload) {
+              free(req.payload);   // nothing to send (build returned false) → release the buffer
             }
           }
         }
@@ -4763,13 +4823,23 @@ void loop() {
     ft_updateAccelMetrics.worstWindow = 0;
     ft_ReadVEData.worstWindow = 0;
     ft_altHealth.worstWindow = 0;
+    ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;
     voltLoopWorstInterval_5s = 0;
+    loopWorst80Win = 0;  // 80MHz low-power loop worst — rolling 5s window
 
     prev_millis7888 = millis();
   }
   endtime = esp_timer_get_time();  //Record end of Loop
   LoopTime = (endtime - starttime);
+  // 80MHz low-power loop health (engine-off only). One cheap freq read gates it;
+  // tracks worst pass + counts passes over the accel FIFO drain limit. See LOOP80_* globals.
+  if (getCpuFrequencyMhz() < 81) {
+    loop80IterCount++;
+    if ((uint32_t)LoopTime > loopWorst80Win) loopWorst80Win = (uint32_t)LoopTime;
+    if ((uint32_t)LoopTime > loopWorst80Ses) loopWorst80Ses = (uint32_t)LoopTime;
+    if (LoopTime > LOOP80_IMU_LIMIT_US) loopOver80ImuLimitCount++;
+  }
   if (LoopTime > 5000000) {  // 5 seconds in microseconds
     Serial.printf("WARNING: Loop took %lld - potential watchdog risk\n", LoopTime / 1000);
     if (WiFi.getMode() != WIFI_OFF) {  //  GATE
