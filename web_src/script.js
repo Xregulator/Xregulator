@@ -670,6 +670,7 @@ const CSV2_FIELDS = [
     "loopWorst80Ses_ms",          // worst 80MHz loop pass since Reset Peak Values (ms)
     "loopOver80ImuLimitCount",    // # 80MHz passes over ~38ms accel-drain limit since reset
     "loop80IterCount",            // total 80MHz passes since reset
+    "STWNMEA",                    // Speed Through Water (SOW, knots ×100); -1 = NAN/no log
 ];
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -1477,6 +1478,7 @@ const TS_FIELDS = [
     "ts_AmbientTemp",
     "ts_IMU",
     "ts_VictronSolar",
+    "ts_StwNMEA",
 ];
 
 // Detect if running in Capacitor (iOS/Android) vs web browser
@@ -4281,6 +4283,9 @@ async function fetchAndPopulateVesselInfo() {
 
     } catch (error) {
         diagLog('Vessel info not found or invalid:', error);
+    } finally {
+        window._vesselInfoLoaded = true;
+        maybeApplyLanding();
     }
 }
 
@@ -4708,6 +4713,41 @@ function hideWaitingForRegulator() {
     el._wfrHidden = true;
     el.classList.add('wfr-hiding');
     setTimeout(() => { el.style.display = 'none'; }, 480);
+}
+
+// Landing tab, applied once on open: field on → Alternator, field off → Boat Performance
+// (Motoring plot if engine running); Vessel Info incomplete overrides to Settings.
+function applyLandingTab() {
+    try {
+        if (!vesselInfoComplete) {
+            showMainTab('settings');
+            showSubTab('settings', 'vessel-info');
+            return;
+        }
+        const d = window._debugData || {};
+        const fieldOn = Number(d.fieldActiveStatus) !== 0;  // OFF (0) is the only "field off" state
+        showMainTab('livedata');
+        if (fieldOn) {
+            showSubTab('livedata', 'alternator');
+        } else {
+            showSubTab('livedata', 'boatperformance');
+            const rpm = Number(d.RPM);
+            if (isFinite(rpm) && rpm > 50 && typeof setPerfView === 'function') {
+                setPerfView(1);  // engine running → Motoring view
+            }
+        }
+    } catch (err) {}
+}
+
+// Decide only when both signals are ready: first telemetry packet (field/engine) and the
+// vessel-info fetch (vesselInfoComplete). Guards the fetch-vs-packet race; runs once.
+window._vesselInfoLoaded = false;
+window._landingApplied = false;
+function maybeApplyLanding() {
+    if (window._landingApplied) return;
+    if (!window._firstCsvPacketReceived || !window._vesselInfoLoaded) return;
+    window._landingApplied = true;
+    applyLandingTab();
 }
 document.addEventListener('DOMContentLoaded', () => {
     // The splash is visible by default (see index.html) and hides on the first
@@ -6758,6 +6798,7 @@ function updateAllStalenessStyles() {
     // --- NMEA nav — dedicated timestamps ---
     applyStaleStyleByAge("COGNMEA_ID", sa.cogNMEA);
     applyStaleStyleByAge("SOGNMEA_ID", sa.sogNMEA);
+    applyStaleStyleByAge("STWNMEA_ID", sa.stwNMEA);
     applyStaleStyleByAge("VMGNMEA_ID", sa.vmg);
     applyStaleStyleByAge("LeewayNMEA_ID", sa.leeway);
     applyStaleStyleByAge("ApparentWindSpeedNMEA_ID", sa.appWindSpeed);
@@ -8091,9 +8132,7 @@ window.addEventListener("load", function () {
                         softwareTab.style.display = 'none';
                     }
 
-                    // Weather/Solar tab stays visible offline — the array/position config is
-                    // worth setting regardless of connectivity. Only the live forecast needs
-                    // internet, so surface a note inside the Settings tab instead of hiding it.
+                    // Visible offline on purpose: config is worth setting; only the forecast needs internet.
                     const wxNote = document.getElementById('weathersolar-offline-note');
                     if (wxNote) {
                         wxNote.style.display = 'block';
@@ -8121,11 +8160,15 @@ window.addEventListener("load", function () {
         };
         window._csvDataHandler = handleCSVData; // Store for demo mode
         source.addEventListener('CSVData', function (e) {
-            if (!window._firstCsvPacketReceived) {
+            const isFirstPacket = !window._firstCsvPacketReceived;
+            if (isFirstPacket) {
                 window._firstCsvPacketReceived = true;
                 hideWaitingForRegulator();
             }
             handleCSVData(e);
+            if (isFirstPacket) {
+                maybeApplyLanding();
+            }
         }, false);
 
         source.addEventListener('CSVData2', function (e) {
@@ -8238,7 +8281,6 @@ window.addEventListener("load", function () {
                     // Stash for the Weather Mode source label (lives on the CSV1
                     // dispatcher, which doesn't see currentGpsSource directly).
                     window.currentGpsSource = Number(data.currentGpsSource);
-                    // Source badge on the GPS Position card (Boat Performance tab)
                     const gpsBadge = document.getElementById('gps-source-badge');
                     if (gpsBadge) {
                         gpsBadge.textContent = ({ 0: 'no GPS', 1: 'NMEA 2000', 2: 'iOS app', 3: 'Manual' })[Number(data.currentGpsSource)] ?? '—';
@@ -8306,6 +8348,10 @@ window.addEventListener("load", function () {
                         } else {
                             newTextContent = (value / 10).toFixed(1);
                         }
+                    }
+                    // Speed Through Water (knots ×100): -1 sentinel = NAN / no paddlewheel log
+                    else if (key === "STWNMEA") {
+                        newTextContent = value < 0 ? "—" : (value / 100).toFixed(2);
                     }
                     // Time values that need conversion from minutes to days/hours/minutes
                     else if (["timeToFullChargeMin", "timeToFullDischargeMin"].includes(key)) {
@@ -8611,6 +8657,7 @@ window.addEventListener("load", function () {
                 ["BufferedRecordCapID", "BufferedRecordCap"],
                 ["COGNMEA_ID", "COGNMEA"],
                 ["SOGNMEA_ID", "SOGNMEA"],
+                ["STWNMEA_ID", "STWNMEA"],
                 ["ApparentWindSpeedNMEA_ID", "ApparentWindSpeedNMEA"],
                 ["ApparentWindAngleNMEA_ID", "ApparentWindAngleNMEA"],
                 ["TrueWindSpeedNMEA_ID", "TrueWindSpeedNMEA"],
@@ -9549,7 +9596,8 @@ window.addEventListener("load", function () {
                 baroPressure: data.ts_BaroPressure,
                 ambientTemp: data.ts_AmbientTemp,
                 imu: data.ts_IMU,
-                victronSolar: data.ts_VictronSolar
+                victronSolar: data.ts_VictronSolar,
+                stwNMEA: data.ts_StwNMEA
             };
         }, false);
 

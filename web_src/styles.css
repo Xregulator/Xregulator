@@ -2565,6 +2565,85 @@ input:checked+.slider:before {
   border-bottom-color: #444444;
 }
 
+/* Vital-signs tile grid — compact at-a-glance metrics under the Boat Performance polar.
+   Responsive: ~2-up on phones, up to 4-up on wide screens. */
+.vital-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.vital-tile {
+  background: var(--card-light);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  padding: 10px 12px;
+  min-width: 0;
+}
+.vt-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-muted, #888);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.vt-value {
+  font-size: 26px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--reading);
+  margin-top: 3px;
+}
+.vt-unit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #888);
+}
+.vt-sub {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--reading);
+  margin-top: 3px;
+}
+.vt-sub .vt-unit {
+  font-weight: 600;
+}
+.vt-wm {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  margin-top: 4px;
+}
+/* Combined tile: two related metrics stacked in one tile (VMG/Leeway, Heel/Pitch). */
+.vt-duo {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vt-value-md {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.1;
+  color: var(--reading);
+  margin-top: 2px;
+}
+.vt-wm-mini {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted, #888);
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.dark-mode .vital-tile {
+  background: var(--card-light);
+  border-color: #444444;
+}
+
 /* Min/Max watermarks — tiny gray annotations beside primary readings.
    Tracks lo/hi since boot (ignition cycle).
    .with-wm pins the watermark to the parent's right edge so layout

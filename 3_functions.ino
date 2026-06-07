@@ -538,8 +538,9 @@ enum Csv2Index {
   CSV2_loopWorst80Ses_ms,        // worst 80MHz loop pass since Reset Peak Values (ms ×1)
   CSV2_loopOver80ImuLimitCount,  // # 80MHz passes over accel FIFO drain limit (~38ms) since reset
   CSV2_loop80IterCount,          // total 80MHz passes since reset (denominator)
+  CSV2_STWNMEA,                  // Speed Through Water (SOW, PGN 128259) in knots (×100); NAN/no-log -> sent as 0
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491
 };
 
 enum Csv3Index {
@@ -863,8 +864,9 @@ enum TsIndex {
   TS_AmbientTemp,
   TS_IMU,
   TS_VictronSolar,  // VE.Direct solar (PPV/VPV) staleness
+  TS_StwNMEA,       // Speed Through Water (SOW, PGN 128259) staleness
 
-  TS_FIELD_COUNT  // = 29
+  TS_FIELD_COUNT  // = 30
 };
 
 
@@ -5661,7 +5663,9 @@ void SendWifiData() {
                                // win/ses mid-list (args emit positionally; field identity is via CSV2_FIELDS order)
                                "%d,%d,%d,%d,"
                                // +4: 80MHz low-power loop instrumentation (worst_win, worst_ses, over-limit count, total iters)
-                               "%d,%d,%d,%d",
+                               "%d,%d,%d,%d,"
+                               // +1: Speed Through Water (STW / SOW), knots ×100
+                               "%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -6138,7 +6142,8 @@ void SendWifiData() {
                                SafeInt(loopWorst80Win / 1000),           // CSV2_loopWorst80Win_ms
                                SafeInt(loopWorst80Ses / 1000),           // CSV2_loopWorst80Ses_ms
                                SafeInt(loopOver80ImuLimitCount),         // CSV2_loopOver80ImuLimitCount
-                               SafeInt(loop80IterCount)                  // CSV2_loop80IterCount
+                               SafeInt(loop80IterCount),                 // CSV2_loop80IterCount
+                               SafeInt(STWNMEA, 100)                     // CSV2_STWNMEA (knots ×100; NAN/no-log -> 0)
     );
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
@@ -6506,7 +6511,7 @@ void SendWifiData() {
       }
     }
     int timestampPayloadLen = snprintf(timestampPayload, TIMESTAMP_PAYLOAD_SIZE,
-                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+                                       "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
                                        (unsigned long)TS_FIELD_COUNT,
                                        (dataTimestamps[IDX_HEADING_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_HEADING_NMEA]),
                                        (dataTimestamps[IDX_LATITUDE_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_LATITUDE_NMEA]),
@@ -6536,7 +6541,8 @@ void SendWifiData() {
                                        (dataTimestamps[IDX_BARO_PRESSURE] == 0) ? 999999 : (now - dataTimestamps[IDX_BARO_PRESSURE]),
                                        (dataTimestamps[IDX_AMBIENT_TEMP] == 0) ? 999999 : (now - dataTimestamps[IDX_AMBIENT_TEMP]),
                                        (dataTimestamps[IDX_IMU] == 0) ? 999999 : (now - dataTimestamps[IDX_IMU]),
-                                       (dataTimestamps[IDX_VICTRON_SOLAR] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_SOLAR])
+                                       (dataTimestamps[IDX_VICTRON_SOLAR] == 0) ? 999999 : (now - dataTimestamps[IDX_VICTRON_SOLAR]),
+                                       (dataTimestamps[IDX_STW_NMEA] == 0) ? 999999 : (now - dataTimestamps[IDX_STW_NMEA])
     );
     if (timestampPayloadLen < 0 || timestampPayloadLen >= TIMESTAMP_PAYLOAD_SIZE) {
       Serial.printf("timestampPayload truncated or format error: %d\n", timestampPayloadLen);

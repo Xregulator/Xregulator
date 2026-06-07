@@ -2977,8 +2977,7 @@
         <div id="settings-weathersolar" class="sub-tab-content">
           <div class="settings-card">
 
-            <!-- Offline note: shown only in AP mode. Config below is still worth setting offline;
-                 only the live solar forecast needs internet. Toggled by the AP-mode check in script.js. -->
+            <!-- AP-mode only: config is worth setting offline; only the forecast needs internet. -->
             <div id="weathersolar-offline-note" class="alert"
               style="display: none; padding: 12px 15px; border-radius: var(--radius); margin-bottom: 20px; border-left: 4px solid var(--accent); background: #e8f5f3; color: #1f5a52; font-size: 14px; line-height: 1.5;">
               <strong>Offline (Access Point mode).</strong><br>
@@ -4304,7 +4303,6 @@
             </details>
           </div>
 
-          <!-- Fuel Consumption Table (moved from Engine settings) -->
           <div class="settings-card">
 
             <div class="section-header" style="margin-bottom: 15px;">
@@ -4402,7 +4400,7 @@
 
           </div> <!-- CLOSE Engine settings-card -->
 
-          <!-- Event Detection Thresholds (moved from Accel settings) -->
+          <!-- Event Detection Thresholds -->
           <div class="settings-card">
 
             <!-- Event Detection Thresholds -->
@@ -6898,7 +6896,6 @@
 
 
     <div id="livedata-weathersolar" class="sub-tab-content">
-      <!-- Wind Data (moved from Sailing) -->
       <div class="settings-card">
         <div class="grid">
           <!-- Wind Data -->
@@ -7108,7 +7105,6 @@
         </div>
       </div>
 
-      <!-- Board Temperature (moved from Other) -->
       <div class="settings-card">
         <div class="grid">
           <div class="card">
@@ -7235,161 +7231,111 @@
         <hr />
       </div>
 
-      <!-- Live glance: boat attitude (moved up under the polar) -->
-      <div class="settings-card">
-        <div class="grid">
+      <!-- Quick View: compact at-a-glance tiles directly under the polar. Each reuses the live
+           telemetry IDs (so updates/watermarks/staleness keep working); detail panels collapse below.
+           Related pairs share one tile: VMG/Leeway and Heel/Pitch. -->
+      <div class="settings-card" style="margin-top:16px;">
+        <p class="card-group-title" style="margin:0 0 10px 0;">Quick View</p>
+        <div class="vital-grid">
 
-          <!-- Current Angles -->
-          <div class="card">
-            <p>Heel Angle</p>
-            <p class="reading with-wm" style="font-size: 28px;">
-              <span><span id="imu_heel_deg_ID">0.0</span>°</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="imu_heel_deg_ID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="imu_heel_deg_ID_lo">—</span></span>
-              </span>
-            </p>
+          <!-- Boat speed: SOG (GPS) primary, STW (through-water) sub -->
+          <div class="vital-tile">
+            <div class="vt-label">Boat Speed (SOG)
+              <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">SOG is GPS speed over ground — includes current and tide. STW is speed through the water from a paddlewheel/log (excludes current); shows "—" when no log is connected.</span></span>
+            </div>
+            <div class="vt-value"><span id="SOGNMEA_ID">0</span> <span class="vt-unit">kts</span></div>
+            <div class="vt-wm"><span><span class="arr">↑</span><span id="SOGNMEA_ID_hi">—</span></span><span><span class="arr">↓</span><span id="SOGNMEA_ID_lo">—</span></span></div>
+            <div class="vt-sub">STW <span id="STWNMEA_ID">—</span> <span class="vt-unit">kts</span></div>
           </div>
 
-          <div class="card">
-            <p>Pitch Angle</p>
-            <p class="reading with-wm" style="font-size: 28px;">
-              <span><span id="imu_pitch_deg_ID">0.0</span>°</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="imu_pitch_deg_ID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="imu_pitch_deg_ID_lo">—</span></span>
-              </span>
-            </p>
+          <!-- Engine RPM -->
+          <div class="vital-tile">
+            <div class="vt-label">Engine Speed</div>
+            <div class="vt-value"><span id="RPMID">0</span> <span class="vt-unit">rev/min</span></div>
+            <div class="vt-wm"><span><span class="arr">↑</span><span id="RPMID_hi">—</span></span><span><span class="arr">↓</span><span id="RPMID_lo">—</span></span></div>
           </div>
 
-          <div class="card">
-            <p>Vertical Acceleration</p>
-            <p class="reading with-wm" style="font-size: 28px;">
-              <span><span id="imu_vertical_accel_g_ID">0.00</span> g</span>
-              <span class="wm-inline">
-                <span><span class="arr">↑</span><span id="imu_vertical_accel_g_ID_hi">—</span></span>
-                <span><span class="arr">↓</span><span id="imu_vertical_accel_g_ID_lo">—</span></span>
-              </span>
-            </p>
+          <!-- Water depth -->
+          <div class="vital-tile">
+            <div class="vt-label">Water Depth
+              <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Depth at the transducer (NMEA2k PGN 128267, incl. transducer offset if reported). "—" when no depth sensor is broadcasting. Feeds the Deepest Anchorage leaderboard.</span></span>
+            </div>
+            <div class="vt-value"><span id="WaterDepthID">—</span> <span class="vt-unit">ft</span></div>
           </div>
 
-        </div>
-      </div>
+          <!-- Fuel: live flow (gal/hr) primary, economy (naut mi/gal) sub -->
+          <div class="vital-tile">
+            <div class="vt-label">Fuel</div>
+            <div class="vt-value"><span id="fuelGPHID">—</span> <span class="vt-unit">gal/hr</span></div>
+            <div class="vt-sub"><span id="fuelNMPGID">—</span> <span class="vt-unit">naut mi/gal</span></div>
+          </div>
 
-      <!-- Fuel economy (moved up under the polar) -->
-      <div class="settings-card">
-        <div class="grid">
-        <!-- Live fuel economy: SOG (knots) / fuel flow = nautical miles per gallon; needs GPS speed -->
-        <div class="card">
-          <p>Fuel Economy</p>
-          <p class="reading" style="font-size: 28px;"><span id="fuelNMPGID">—</span> naut mi/gal</p>
-        </div>
-
-        <!-- Session fuel-economy curve: observed mpg vs RPM, steady-state gated. Peak = most efficient cruise RPM. -->
-        <div class="card">
-          <p>Fuel Economy vs RPM (this session)
-            <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;
-              <span class="tooltip-box">Observed nautical miles per gallon at each RPM, this session only. A point is
-                recorded only after RPM and boat speed hold steady for 40 s (so the boat has reached true steady
-                speed for that throttle), then the next 20 s of economy is averaged in. The peak is your most
-                efficient cruise RPM. Cleared on reboot, on Reset, or when the fuel table is edited.</span>
-            </span>
-          </p>
-          <div id="fuelCurvePlot" style="width:100%;height:300px;"></div>
-          <p class="reading" style="font-size: 16px;">Most efficient so far: <span id="fuelCurveBestID">—</span></p>
-          <form action="/get" method="GET" target="hidden-form" style="margin-top:8px;">
-            <input type="hidden" name="ResetFuelCurve" id="ResetFuelCurve" value="0" />
-            <input type="hidden" name="password" class="password_field" />
-            <button type="button" class="btn-secondary" onclick="resetParameter('ResetFuelCurve')"
-              id="ResetFuelCurve_button">Reset Curve</button>
-          </form>
-        </div>
-        </div>
-      </div>
-
-      <div class="settings-card">
-        <div class="grid">
-
-          <!-- Boat Speed -->
-          <div class="card-group">
-            <p class="card-group-title">Boat Speed</p>
-            <div class="metric-row">
-              <span class="metric-label">Speed Over Ground (SOG)
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Your speed measured by GPS (speed over ground). It includes the push of current
-                    and tide — your true progress across the seabed, not speed through the water.
-                    There is no separate paddlewheel (through-water) speed on this system.
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 18px;"><span id="SOGNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="SOGNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="SOGNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">VMG — Manual Bearing
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Speed made good toward your manual target bearing (set below). Positive = getting closer,
-                    negative = getting farther away.
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 18px;"><span id="VMGNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="VMGNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="VMGNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">VMG — Upwind
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Speed made good to windward (toward the true wind). Positive = gaining ground upwind.
-                    This is the sailing-performance number; needs true wind angle + boat speed.
-                  </span>
-                </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 18px;"><span id="VMGUpwind_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="VMGUpwind_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="VMGUpwind_ID_lo">—</span></span>
-                </span>
-              </span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Manual Bearing (<span id="VMGTargetBearing_echo">-1</span>)°
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Enter compass heading you want to sail toward (0-359°). Set to -1 to disable.
-                  </span>
-                </span>
-              </span>
-              <div>
-                <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="VMGTargetBearing" type="number" step="1" min="-1" max="359"
-                    style="width: 50px; padding: 5px; margin-bottom: 5px;" value="-1" />
-                  <br>
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary"
-                    style="padding: 5px 10px;" />
-                </form>
+          <!-- VMG upwind + Leeway combined -->
+          <div class="vital-tile">
+            <div class="vt-duo">
+              <div class="vt-duo-item">
+                <div class="vt-label">VMG Upwind
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Speed made good to windward (toward the true wind). Positive = gaining ground upwind. Needs true wind angle and boat speed.</span></span>
+                </div>
+                <div class="vt-value-md"><span id="VMGUpwind_ID">0</span> <span class="vt-unit">kts</span><span class="vt-wm-mini">↑<span id="VMGUpwind_ID_hi">—</span> ↓<span id="VMGUpwind_ID_lo">—</span></span></div>
+              </div>
+              <div class="vt-duo-item">
+                <div class="vt-label">Leeway
+                  <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Heading minus COG. Positive = drifting to starboard, negative = drifting to port.</span></span>
+                </div>
+                <div class="vt-value-md"><span id="LeewayNMEA_ID">0</span> <span class="vt-unit">&deg;</span></div>
               </div>
             </div>
           </div>
 
+          <!-- Heel + Pitch combined -->
+          <div class="vital-tile">
+            <div class="vt-duo">
+              <div class="vt-duo-item">
+                <div class="vt-label">Heel Angle</div>
+                <div class="vt-value-md"><span id="imu_heel_deg_ID">0.0</span> <span class="vt-unit">&deg;</span><span class="vt-wm-mini">↑<span id="imu_heel_deg_ID_hi">—</span> ↓<span id="imu_heel_deg_ID_lo">—</span></span></div>
+              </div>
+              <div class="vt-duo-item">
+                <div class="vt-label">Pitch Angle</div>
+                <div class="vt-value-md"><span id="imu_pitch_deg_ID">0.0</span> <span class="vt-unit">&deg;</span><span class="vt-wm-mini">↑<span id="imu_pitch_deg_ID_hi">—</span> ↓<span id="imu_pitch_deg_ID_lo">—</span></span></div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Fuel economy vs RPM curve — collapsible (uPlot ResizeObserver redraws on open) -->
+      <div class="settings-card">
+        <details>
+          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:0 0 10px;">Fuel Economy vs RPM (this session)</summary>
+          <!-- Session fuel-economy curve: observed mpg vs RPM, steady-state gated. Peak = most efficient cruise RPM. -->
+          <div class="card">
+            <p>Fuel Economy vs RPM (this session)
+              <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;
+                <span class="tooltip-box">Observed nautical miles per gallon at each RPM, this session only. A point is
+                  recorded only after RPM and boat speed hold steady for 40 s (so the boat has reached true steady
+                  speed for that throttle), then the next 20 s of economy is averaged in. The peak is your most
+                  efficient cruise RPM. Cleared on reboot, on Reset, or when the fuel table is edited.</span>
+              </span>
+            </p>
+            <div id="fuelCurvePlot" style="width:100%;height:300px;"></div>
+            <p class="reading" style="font-size: 16px;">Most efficient so far: <span id="fuelCurveBestID">—</span></p>
+            <form action="/get" method="GET" target="hidden-form" style="margin-top:8px;">
+              <input type="hidden" name="ResetFuelCurve" id="ResetFuelCurve" value="0" />
+              <input type="hidden" name="password" class="password_field" />
+              <button type="button" class="btn-secondary" onclick="resetParameter('ResetFuelCurve')"
+                id="ResetFuelCurve_button">Reset Curve</button>
+            </form>
+          </div>
+        </details>
+      </div>
+
+      <!-- Navigation detail — collapsed by default; primary speed/leeway live in Vital Signs above -->
+      <div class="settings-card">
+        <details>
+          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Heading, GPS &amp; VMG</summary>
+        <div class="grid">
 
           <!-- Heading & Course -->
           <div class="card-group">
@@ -7401,17 +7347,6 @@
             <div class="metric-row">
               <span class="metric-label">Course Over Ground (COG)</span>
               <span class="metric-value"><span id="COGNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Leeway
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Heading - COG. Positive = drifting to starboard, Negative = drifting to port
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="LeewayNMEA_ID">0</span>°</span>
             </div>
           </div>
 
@@ -7435,23 +7370,57 @@
             </div>
           </div>
 
-          <!-- Water Depth (moved from Other) -->
-          <div class="card">
-            <p>Water Depth
-              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                <span class="tooltip-box">
-                  Water depth at the transducer position (NMEA2k PGN 128267, including transducer offset if reported).
-                  Shows "—" when no depth sensor is broadcasting. Feeds the "Deepest Anchorage" leaderboard.
+          <!-- VMG (manual bearing) — VMG Upwind is shown live in Vital Signs above -->
+          <div class="card-group">
+            <p class="card-group-title">VMG (Manual Bearing)</p>
+            <div class="metric-row">
+              <span class="metric-label">VMG — Manual Bearing
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  &#8505;
+                  <span class="tooltip-box">
+                    Speed made good toward your manual target bearing (set below). Positive = getting closer,
+                    negative = getting farther away.
+                  </span>
                 </span>
               </span>
-            </p>
-            <p class="reading"><span id="WaterDepthID">—</span> ft</p>
+              <span class="with-wm">
+                <span class="metric-value" style="font-size: 18px;"><span id="VMGNMEA_ID">0</span> kts</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="VMGNMEA_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="VMGNMEA_ID_lo">—</span></span>
+                </span>
+              </span>
+            </div>
+            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
+              <span class="metric-label">Manual Bearing (<span id="VMGTargetBearing_echo">-1</span>)°
+                <span class="tooltip" onclick="this.classList.toggle('active')">
+                  &#8505;
+                  <span class="tooltip-box">
+                    Enter compass heading you want to sail toward (0-359°). Set to -1 to disable.
+                  </span>
+                </span>
+              </span>
+              <div>
+                <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
+                  <input type="hidden" name="password" class="password_field">
+                  <input name="VMGTargetBearing" type="number" step="1" min="-1" max="359"
+                    style="width: 50px; padding: 5px; margin-bottom: 5px;" value="-1" />
+                  <br>
+                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary"
+                    style="padding: 5px 10px;" />
+                </form>
+              </div>
+            </div>
           </div>
 
         </div>
+        </details>
+      </div>
 
-        <!-- ===== LIFETIME STATISTICS (moved here from the former Statistics sub-tab) ===== -->
-        <div class="section-title">Lifetime Statistics</div>
+      <!-- Lifetime statistics — collapsed by default -->
+      <div class="settings-card">
+        <details>
+          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Lifetime Statistics</summary>
 
         <!-- Distance Traveled -->
         <hr />
@@ -7551,31 +7520,7 @@
             </div>
           </div>
         </div>
-      </div>
-
-      <!-- Engine (moved from Engine tab) -->
-      <div class="settings-card">
-
-        <div class="card">
-          <p>Engine Speed</p>
-          <p class="reading with-wm" style="font-size: 28px;">
-            <span><span id="RPMID">0</span> rev/min</span>
-            <span class="wm-inline">
-              <span><span class="arr">↑</span><span id="RPMID_hi">—</span></span>
-              <span><span class="arr">↓</span><span id="RPMID_lo">—</span></span>
-            </span>
-          </p>
-        </div>
-
-        <!-- Live fuel flow: interpolated from the RPM-consumption table in Settings -> Engine -->
-        <div class="card">
-          <p>Fuel Flow</p>
-          <p class="reading" style="font-size: 28px;"><span id="fuelGPHID">—</span> gal/hr</p>
-        </div>
-
-
-        <!-- ===== LIFETIME STATISTICS (moved here from the former Statistics sub-tab) ===== -->
-        <div class="section-title">Lifetime Statistics</div>
+        <!-- engine lifetime stats continue in the same Lifetime Statistics panel (RPM + fuel flow now live in Vital Signs) -->
 
         <!-- Engine Fuel Consumed -->
         <hr />
@@ -7684,12 +7629,11 @@
           </div>
         </div>
 
+        </details>
       </div>
 
-      <!-- Comfort & Motion (moved from Accel tab) -->
       <div class="settings-card">
 
-        <!-- Comfort & Motion — interesting metrics open; raw/diagnostics nested below -->
         <details>
           <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Comfort &amp; Motion</summary>
         <div class="grid">
@@ -7703,6 +7647,17 @@
             <div class="metric-row">
               <span class="metric-label">Yaw Rate</span>
               <span class="metric-value"><span id="imu_yaw_rate_dps_ID">0.0</span> °/s</span>
+            </div>
+            <!-- Vertical Acceleration relocated here from Boat Performance top (low day-to-day interest) -->
+            <div class="metric-row">
+              <span class="metric-label">Vertical Acceleration</span>
+              <span class="with-wm">
+                <span class="metric-value"><span id="imu_vertical_accel_g_ID">0.00</span> g</span>
+                <span class="wm-inline">
+                  <span><span class="arr">↑</span><span id="imu_vertical_accel_g_ID_hi">—</span></span>
+                  <span><span class="arr">↓</span><span id="imu_vertical_accel_g_ID_lo">—</span></span>
+                </span>
+              </span>
             </div>
           </div>
           <!-- At-Anchor Metrics — moves to top when anchored (SOG < 1.3 kt) -->
@@ -7841,7 +7796,6 @@
           </div>
         </div>
 
-          <!-- Raw & Diagnostics — least-glanced data, collapsed -->
           <details>
             <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Raw &amp; Diagnostics</summary>
         <div class="grid">
@@ -8144,38 +8098,7 @@
           <button type="button" class="btn-secondary" onclick="handleResetPerfCounters()">Reset Peak Values</button>
         </div>
 
-        <!-- Most-useful status, visible -->
         <div class="grid">
-          <!-- WIFI STATUS -->
-          <div class="card-group">
-            <p class="card-group-title">WiFi Status</p>
-            <div class="metric-row">
-              <span class="metric-label">Strength (dBm)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="WifiStrengthID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Client Disconnects (count)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
-                    network
-                    issues)</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Heartbeat (count)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                  <span class="tooltip-box">Increments with each packet sent</span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
-            </div>
-          </div>
           <!-- SYSTEM -->
           <div class="card-group">
             <p class="card-group-title">System</p>
@@ -8420,9 +8343,38 @@
               </div>
             </div>
           </div>
+          <!-- WIFI STATUS -->
+          <div class="card-group">
+            <p class="card-group-title">WiFi Status</p>
+            <div class="metric-row">
+              <span class="metric-label">Strength (dBm)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Above -67dBm good. Below -75dBm unstable</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="WifiStrengthID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Client Disconnects (count)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">WiFi connection losses detected by ESP32 (router drops, signal loss,
+                    network
+                    issues)</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="wifiReconnectsTotalID">0</span></span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">Heartbeat (count)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Increments with each packet sent</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="WifiHeartBeatID">0</span></span>
+            </div>
+          </div>
         </div>
 
-        <!-- Timing & low-level diagnostics, collapsed -->
         <details>
           <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Timing &amp; Diagnostics</summary>
         <div class="grid">

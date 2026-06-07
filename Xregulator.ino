@@ -365,7 +365,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.23";
+const char *FIRMWARE_VERSION = "0.0.25";
 
 String currentUID;
 
