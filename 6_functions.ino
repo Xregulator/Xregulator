@@ -3545,7 +3545,7 @@ void resetLearningTableToDefaults() {
   totalOverheats = 0;
   // Reset to Normal mode so saveUserTableEdits() writes Normal defaults to "capTable"
   HiLow = 1;
-  writeFile(LittleFS, "/HiLow.txt", "1");
+  settingWrite(NK_HiLow, "1");
   saveUserTableEdits();  // saves Normal defaults to capTable / capPowerTable
   // Also write Lo defaults to capTableLo so that mode starts clean
   {

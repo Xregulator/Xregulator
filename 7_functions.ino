@@ -380,7 +380,7 @@ void altHealthSave() {
   uint32_t uw = ((uint32_t)altFront2.source << 8) | (uint32_t)ALT_NAXIS;   // stash source + naxis
   writePsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, uw, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, 0, altFront2.count);
   altTrendPersist();                                                       // append-only trend log
-  writeFile(LittleFS, "/altbaseSec.txt", String(altTrendBaselineSec, 1).c_str());   // trend X-axis origin
+  settingWrite(NK_altbaseSec, String(altTrendBaselineSec, 1).c_str());   // trend X-axis origin
 }
 static void altLoad() {
   uint32_t uw = 0;
@@ -389,7 +389,7 @@ static void altLoad() {
     altFront2.source = (uint8_t)((uw >> 8) & 0xFF);
   }
   altTrendLoad();                                                          // append-only trend log
-  if (fsExists("/altbaseSec.txt")) altTrendBaselineSec = readFile(LittleFS, "/altbaseSec.txt").toFloat();
+  if (settingExists(NK_altbaseSec)) altTrendBaselineSec = settingRead(NK_altbaseSec).toFloat();
 }
 
 // Ingest a BEFRONT1 front UPLOADED from the browser (Load CSV) — replace the front, then apply the
@@ -404,7 +404,7 @@ bool altUploadFrontCsv(char *body, bool fixed) {
   if (!ok) return false;
   if (fixed) {                                  // FREEZE — local only
     altFront2.source = 1; altPaused = 1.0f;
-    writeFile(LittleFS, "/altPaused.txt", "1.0000");
+    settingWrite(NK_altPaused, "1.0000");
     altPendingCount = 0; altPendingSeededFrom = "";   // freeze never uploads
     queueConsoleMessageF("AltFront: UPLOADED %d pts (FIXED, paused)", altFront2.count);
   } else {                                      // LEARN — adopt to cloud, then keep refining
@@ -413,7 +413,7 @@ bool altUploadFrontCsv(char *body, bool fixed) {
       altPending[altPendingCount++] = altFrontBuf[i];
     altPendingSeededFrom = "import";
     altFront2.source = 0; altPaused = 0.0f;
-    writeFile(LittleFS, "/altPaused.txt", "0.0000");
+    settingWrite(NK_altPaused, "0.0000");
     if (altPendingCount < altFront2.count)
       queueConsoleMessageF("AltFront: UPLOADED %d pts (LEARNED); only %d queued to cloud (cap)", altFront2.count, altPendingCount);
     else
@@ -475,7 +475,7 @@ void resetAlternatorHealth() {
   LittleFS.remove("/altfront.bin");
   LittleFS.remove("/alttrend.bin");
   fsReleaseLock();
-  writeFile(LittleFS, "/altbaseSec.txt", String(altTrendBaselineSec, 1).c_str());
+  settingWrite(NK_altbaseSec, String(altTrendBaselineSec, 1).c_str());
   queueConsoleMessage("AltHealth: full reset (Start Over)");
 }
 
@@ -540,10 +540,10 @@ static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTIN
 
 void altSettingsLoad() {
   for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
-    char path[48];
-    snprintf(path, sizeof(path), "/%s.txt", ALT_SETTINGS[i].name);
-    if (!fsExists(path)) writeFile(LittleFS, path, String(*ALT_SETTINGS[i].ptr, 4).c_str());
-    else *ALT_SETTINGS[i].ptr = readFile(LittleFS, path).toFloat();
+    char key[16];
+    snprintf(key, sizeof(key), "%s", ALT_SETTINGS[i].name);  // NVS key = registry name (15-char cap)
+    if (!settingExists(key)) settingWrite(key, String(*ALT_SETTINGS[i].ptr, 4).c_str());
+    else *ALT_SETTINGS[i].ptr = settingRead(key).toFloat();
   }
 }
 bool altSettingsHandle(AsyncWebServerRequest *request) {
@@ -551,9 +551,9 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
   for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
     if (request->hasParam(ALT_SETTINGS[i].name)) {
       *ALT_SETTINGS[i].ptr = request->getParam(ALT_SETTINGS[i].name)->value().toFloat();
-      char path[48];
-      snprintf(path, sizeof(path), "/%s.txt", ALT_SETTINGS[i].name);
-      writeFile(LittleFS, path, String(*ALT_SETTINGS[i].ptr, 4).c_str());
+      char key[16];
+      snprintf(key, sizeof(key), "%s", ALT_SETTINGS[i].name);  // NVS key = registry name (15-char cap)
+      settingWrite(key, String(*ALT_SETTINGS[i].ptr, 4).c_str());
       handled = true;
     }
   }
@@ -562,7 +562,7 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
     int src = request->getParam("altSource")->value().toInt();
     altFront2.source = (uint8_t)(src ? 1 : 0);
     altPaused = src ? 1.0f : 0.0f;
-    writeFile(LittleFS, "/altPaused.txt", String(altPaused, 4).c_str());
+    settingWrite(NK_altPaused, String(altPaused, 4).c_str());
     handled = true;
   }
   return handled;
@@ -1043,7 +1043,7 @@ bool perfUploadFrontCsv(char *body, bool fixed) {
   uint8_t src = fixed ? 1 : 0;
   sailFront.source = src; motorFront.source = src;
   perfPaused = fixed ? 1.0f : 0.0f;
-  writeFile(LittleFS, "/perfPaused.txt", fixed ? "1.0000" : "0.0000");
+  settingWrite(NK_perfPaused, fixed ? "1.0000" : "0.0000");
   if (fixed) {                                  // FREEZE — local only, never uploaded
     sailPendingCount = motorPendingCount = 0; perfPendingSeededFrom = "";
   } else {                                      // LEARN — adopt to cloud: stage both fronts (tagged), keep refining
@@ -1134,10 +1134,10 @@ static const size_t PERF_SETTING_COUNT = sizeof(PERF_SETTINGS) / sizeof(PERF_SET
 
 void perfSettingsLoad() {
   for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
-    char path[48];
-    snprintf(path, sizeof(path), "/%s.txt", PERF_SETTINGS[i].name);
-    if (!fsExists(path)) writeFile(LittleFS, path, String(*PERF_SETTINGS[i].ptr, 4).c_str());
-    else *PERF_SETTINGS[i].ptr = readFile(LittleFS, path).toFloat();
+    char key[16];
+    snprintf(key, sizeof(key), "%s", PERF_SETTINGS[i].name);  // NVS key = registry name truncated to the 15-char cap
+    if (!settingExists(key)) settingWrite(key, String(*PERF_SETTINGS[i].ptr, 4).c_str());
+    else *PERF_SETTINGS[i].ptr = settingRead(key).toFloat();
   }
 }
 bool perfSettingsHandle(AsyncWebServerRequest *request) {
@@ -1146,9 +1146,9 @@ bool perfSettingsHandle(AsyncWebServerRequest *request) {
   for (size_t i = 0; i < PERF_SETTING_COUNT; i++) {
     if (request->hasParam(PERF_SETTINGS[i].name)) {
       *PERF_SETTINGS[i].ptr = request->getParam(PERF_SETTINGS[i].name)->value().toFloat();
-      char path[48];
-      snprintf(path, sizeof(path), "/%s.txt", PERF_SETTINGS[i].name);
-      writeFile(LittleFS, path, String(*PERF_SETTINGS[i].ptr, 4).c_str());
+      char key[16];
+      snprintf(key, sizeof(key), "%s", PERF_SETTINGS[i].name);  // NVS key = registry name truncated to the 15-char cap
+      settingWrite(key, String(*PERF_SETTINGS[i].ptr, 4).c_str());
       handled = true;
     }
   }
@@ -1163,7 +1163,7 @@ bool perfSettingsHandle(AsyncWebServerRequest *request) {
     int src = request->getParam("perfSource")->value().toInt();
     sailFront.source = motorFront.source = (uint8_t)(src ? 1 : 0);
     perfPaused = src ? 1.0f : 0.0f;
-    writeFile(LittleFS, "/perfPaused.txt", String(perfPaused, 4).c_str());
+    settingWrite(NK_perfPaused, String(perfPaused, 4).c_str());
     handled = true;
   }
   return handled;

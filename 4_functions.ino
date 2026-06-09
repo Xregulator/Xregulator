@@ -297,70 +297,70 @@ void updateWeatherMode() {
 }
 
 void initWeatherModeSettings() {
-  if (!fsExists("/LatitudeNMEA.txt")) {
-    writeFile(LittleFS, "/LatitudeNMEA.txt", "0.0");
+  if (!settingExists(NK_LatitudeNMEA)) {
+    settingWrite(NK_LatitudeNMEA, "0.0");
   } else {
-    LatitudeNMEA = readFile(LittleFS, "/LatitudeNMEA.txt").toDouble();
+    LatitudeNMEA = settingRead(NK_LatitudeNMEA).toDouble();
   }
-  if (!fsExists("/LongitudeNMEA.txt")) {
-    writeFile(LittleFS, "/LongitudeNMEA.txt", "0.0");
+  if (!settingExists(NK_LongitudeNMEA)) {
+    settingWrite(NK_LongitudeNMEA, "0.0");
   } else {
-    LongitudeNMEA = readFile(LittleFS, "/LongitudeNMEA.txt").toDouble();
+    LongitudeNMEA = settingRead(NK_LongitudeNMEA).toDouble();
   }
   // Sticky manual GPS override (Weather Mode). Restored across reboot.
-  if (!fsExists("/LatitudeManual.txt")) {
-    writeFile(LittleFS, "/LatitudeManual.txt", "0.0");
+  if (!settingExists(NK_LatitudeManual)) {
+    settingWrite(NK_LatitudeManual, "0.0");
   } else {
-    LatitudeManual = readFile(LittleFS, "/LatitudeManual.txt").toDouble();
+    LatitudeManual = settingRead(NK_LatitudeManual).toDouble();
   }
-  if (!fsExists("/LongitudeManual.txt")) {
-    writeFile(LittleFS, "/LongitudeManual.txt", "0.0");
+  if (!settingExists(NK_LongitudeManual)) {
+    settingWrite(NK_LongitudeManual, "0.0");
   } else {
-    LongitudeManual = readFile(LittleFS, "/LongitudeManual.txt").toDouble();
+    LongitudeManual = settingRead(NK_LongitudeManual).toDouble();
   }
-  if (!fsExists("/gpsManualActive.txt")) {
-    writeFile(LittleFS, "/gpsManualActive.txt", "0");
+  if (!settingExists(NK_gpsManualActive)) {
+    settingWrite(NK_gpsManualActive, "0");
   } else {
-    gpsManualActive = (readFile(LittleFS, "/gpsManualActive.txt").toInt() == 1);
+    gpsManualActive = (settingRead(NK_gpsManualActive).toInt() == 1);
   }
   if (gpsManualActive) {  // apply immediately so weather has coords before first resolveSources()
     LatitudeNMEA  = LatitudeManual;
     LongitudeNMEA = LongitudeManual;
   }
-  if (!fsExists("/weatherModeEnabled.txt")) {
-    writeFile(LittleFS, "/weatherModeEnabled.txt", String(weatherModeEnabled).c_str());
+  if (!settingExists(NK_weatherModeEnabled)) {
+    settingWrite(NK_weatherModeEnabled, String(weatherModeEnabled).c_str());
   } else {
-    weatherModeEnabled = readFile(LittleFS, "/weatherModeEnabled.txt").toInt();
+    weatherModeEnabled = settingRead(NK_weatherModeEnabled).toInt();
   }
-  if (!fsExists("/UVThresholdHigh.txt")) {
-    writeFile(LittleFS, "/UVThresholdHigh.txt", String(UVThresholdHigh, 1).c_str());
+  if (!settingExists(NK_UVThresholdHigh)) {
+    settingWrite(NK_UVThresholdHigh, String(UVThresholdHigh, 1).c_str());
   } else {
-    UVThresholdHigh = readFile(LittleFS, "/UVThresholdHigh.txt").toFloat();
+    UVThresholdHigh = settingRead(NK_UVThresholdHigh).toFloat();
   }
-  if (!fsExists("/performanceRatio.txt")) {
-    writeFile(LittleFS, "/performanceRatio.txt", String(performanceRatio, 2).c_str());
+  if (!settingExists(NK_performanceRatio)) {
+    settingWrite(NK_performanceRatio, String(performanceRatio, 2).c_str());
   } else {
-    performanceRatio = readFile(LittleFS, "/performanceRatio.txt").toFloat();
+    performanceRatio = settingRead(NK_performanceRatio).toFloat();
   }
-  if (!fsExists("/SolarWatts.txt")) {
-    writeFile(LittleFS, "/SolarWatts.txt", String(SolarWatts).c_str());
+  if (!settingExists(NK_SolarWatts)) {
+    settingWrite(NK_SolarWatts, String(SolarWatts).c_str());
   } else {
-    SolarWatts = readFile(LittleFS, "/SolarWatts.txt").toInt();
+    SolarWatts = settingRead(NK_SolarWatts).toInt();
   }
-  if (!fsExists("/weatherDataValid.txt")) {
-    writeFile(LittleFS, "/weatherDataValid.txt", "0");
+  if (!settingExists(NK_weatherDataValid)) {
+    settingWrite(NK_weatherDataValid, "0");
   } else {
-    weatherDataValid = readFile(LittleFS, "/weatherDataValid.txt").toInt();
+    weatherDataValid = settingRead(NK_weatherDataValid).toInt();
   }
-  if (!fsExists("/WeatherUpdateInterval.txt")) {
-    writeFile(LittleFS, "/WeatherUpdateInterval.txt", String(WeatherUpdateInterval).c_str());
+  if (!settingExists(NK_WeatherUpdateInterval)) {
+    settingWrite(NK_WeatherUpdateInterval, String(WeatherUpdateInterval).c_str());
   } else {
-    WeatherUpdateInterval = readFile(LittleFS, "/WeatherUpdateInterval.txt").toInt();
+    WeatherUpdateInterval = settingRead(NK_WeatherUpdateInterval).toInt();
   }
-  if (!fsExists("/WeatherTimeoutMs.txt")) {
-    writeFile(LittleFS, "/WeatherTimeoutMs.txt", String(WeatherTimeoutMs).c_str());
+  if (!settingExists(NK_WeatherTimeoutMs)) {
+    settingWrite(NK_WeatherTimeoutMs, String(WeatherTimeoutMs).c_str());
   } else {
-    WeatherTimeoutMs = readFile(LittleFS, "/WeatherTimeoutMs.txt").toInt();
+    WeatherTimeoutMs = settingRead(NK_WeatherTimeoutMs).toInt();
   }
 }
 
@@ -791,7 +791,8 @@ Serial.println("BMP388 found");
   initIMUStructures();  // Accelerometer
   Serial.println("Hardware initialization complete");
 }
-void InitSystemSettings() {  // load all settings from LittleFS.  If no files exist, create them and populate with the hardcoded values
+void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, create them and populate with the hardcoded values
+  // (the one-time LittleFS-to-NVS import sweep runs earlier, in setup(), before the alt/perf registry loaders)
 
   // Load vessel info from LittleFS (stream parse; no malloc)
   if (LittleFS.exists("/vessel_info.json")) {
@@ -854,845 +855,842 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   }
 
   // Load IMU zero/level calibration (separate from vessel_info so a profile
-  // re-save from the cloud never clobbers physical-mount calibration)
-  if (LittleFS.exists("/imu_zero.json")) {
-    File zf = LittleFS.open("/imu_zero.json", "r");
-    if (zf) {
-      DynamicJsonDocument zdoc(256);
-      if (!deserializeJson(zdoc, zf)) {
-        imuHeelOffsetDeg = zdoc["heel_offset_deg"] | 0.0f;
-        imuPitchOffsetDeg = zdoc["pitch_offset_deg"] | 0.0f;
-        imuGxBias = zdoc["gx_bias"] | 0.0f;
-        imuGyBias = zdoc["gy_bias"] | 0.0f;
-        imuGzBias = zdoc["gz_bias"] | 0.0f;
-        Serial.println("IMU zero calibration loaded");
-      }
-      zf.close();
+  // re-save from the cloud never clobbers physical-mount calibration).
+  // Stored as one JSON-string NVS value.
+  if (settingExists(NK_imu_zero)) {
+    DynamicJsonDocument zdoc(256);
+    if (!deserializeJson(zdoc, settingRead(NK_imu_zero))) {
+      imuHeelOffsetDeg = zdoc["heel_offset_deg"] | 0.0f;
+      imuPitchOffsetDeg = zdoc["pitch_offset_deg"] | 0.0f;
+      imuGxBias = zdoc["gx_bias"] | 0.0f;
+      imuGyBias = zdoc["gy_bias"] | 0.0f;
+      imuGzBias = zdoc["gz_bias"] | 0.0f;
+      Serial.println("IMU zero calibration loaded");
     }
   }
 
-  if (!fsExists("/BatteryCapacity_Ah.txt")) {
-    writeFile(LittleFS, "/BatteryCapacity_Ah.txt", String(BatteryCapacity_Ah).c_str());
+  if (!settingExists(NK_BatteryCapacity_Ah)) {
+    settingWrite(NK_BatteryCapacity_Ah, String(BatteryCapacity_Ah).c_str());
   } else {
-    BatteryCapacity_Ah = readFile(LittleFS, "/BatteryCapacity_Ah.txt").toInt();
+    BatteryCapacity_Ah = settingRead(NK_BatteryCapacity_Ah).toInt();
   }
   PeukertRatedCurrent_A = BatteryCapacity_Ah / 20.0f;  // executes ever time InitSystemSettings runs, regardless of which branches are taken.  Correct.
-  if (!fsExists("/ChargeEfficiency.txt")) {
+  if (!settingExists(NK_ChargeEfficiency)) {
     // Save user-readable form (e.g. "99.0"), NOT the scaled integer, so the load path always
     // sees a value ≤ 100 and can safely apply × 10 to reconstruct the scaled integer.
-    writeFile(LittleFS, "/ChargeEfficiency.txt", String(ChargeEfficiency_scaled / 10.0f, 1).c_str());
+    settingWrite(NK_ChargeEfficiency, String(ChargeEfficiency_scaled / 10.0f, 1).c_str());
   } else {
-    // File stores the user-readable percentage string (e.g. "99.0"). Multiply by 10 to get scaled int.
-    ChargeEfficiency_scaled = (int)round(readFile(LittleFS, "/ChargeEfficiency.txt").toFloat() * 10);
+    // Key stores the user-readable percentage string (e.g. "99.0"). Multiply by 10 to get scaled int.
+    ChargeEfficiency_scaled = (int)round(settingRead(NK_ChargeEfficiency).toFloat() * 10);
   }
-  if (!fsExists("/TailCurrent.txt")) {
-    writeFile(LittleFS, "/TailCurrent.txt", String(TailCurrent).c_str());
+  if (!settingExists(NK_TailCurrent)) {
+    settingWrite(NK_TailCurrent, String(TailCurrent).c_str());
   } else {
-    TailCurrent = readFile(LittleFS, "/TailCurrent.txt").toFloat();
+    TailCurrent = settingRead(NK_TailCurrent).toFloat();
   }
-  if (!fsExists("/FuelEfficiency.txt")) {
-    writeFile(LittleFS, "/FuelEfficiency.txt", String(FuelEfficiency_scaled).c_str());
+  if (!settingExists(NK_FuelEfficiency)) {
+    settingWrite(NK_FuelEfficiency, String(FuelEfficiency_scaled).c_str());
   } else {
-    FuelEfficiency_scaled = readFile(LittleFS, "/FuelEfficiency.txt").toInt();
+    FuelEfficiency_scaled = settingRead(NK_FuelEfficiency).toInt();
   }
-  if (!fsExists("/TemperatureLimitF.txt")) {
-    writeFile(LittleFS, "/TemperatureLimitF.txt", String(TemperatureLimitF).c_str());
+  if (!settingExists(NK_TemperatureLimitF)) {
+    settingWrite(NK_TemperatureLimitF, String(TemperatureLimitF).c_str());
   } else {
-    TemperatureLimitF = readFile(LittleFS, "/TemperatureLimitF.txt").toInt();
+    TemperatureLimitF = settingRead(NK_TemperatureLimitF).toInt();
   }
-  if (!fsExists("/ManualDutyTarget.txt")) {
-    writeFile(LittleFS, "/ManualDutyTarget.txt", String(ManualDutyTarget).c_str());
+  if (!settingExists(NK_ManualDutyTarget)) {
+    settingWrite(NK_ManualDutyTarget, String(ManualDutyTarget).c_str());
   } else {
-    ManualDutyTarget = readFile(LittleFS, "/ManualDutyTarget.txt").toInt();  //
+    ManualDutyTarget = settingRead(NK_ManualDutyTarget).toInt();  //
   }
-  if (!fsExists("/capLimitMode.txt")) {
-    writeFile(LittleFS, "/capLimitMode.txt", String(capLimitMode).c_str());
+  if (!settingExists(NK_capLimitMode)) {
+    settingWrite(NK_capLimitMode, String(capLimitMode).c_str());
   } else {
-    capLimitMode = constrain(readFile(LittleFS, "/capLimitMode.txt").toInt(), 0, 1);
+    capLimitMode = constrain(settingRead(NK_capLimitMode).toInt(), 0, 1);
   }
-  if (!fsExists("/BulkVoltage.txt")) {
-    writeFile(LittleFS, "/BulkVoltage.txt", String(BulkVoltage).c_str());
+  if (!settingExists(NK_BulkVoltage)) {
+    settingWrite(NK_BulkVoltage, String(BulkVoltage).c_str());
   } else {
-    BulkVoltage = readFile(LittleFS, "/BulkVoltage.txt").toFloat();
+    BulkVoltage = settingRead(NK_BulkVoltage).toFloat();
   }
-  if (!fsExists("/socInfoAvailable.txt")) {
-    writeFile(LittleFS, "/socInfoAvailable.txt", String(socInfoAvailable).c_str());
+  if (!settingExists(NK_socInfoAvailable)) {
+    settingWrite(NK_socInfoAvailable, String(socInfoAvailable).c_str());
   } else {
-    socInfoAvailable = readFile(LittleFS, "/socInfoAvailable.txt").toInt();
+    socInfoAvailable = settingRead(NK_socInfoAvailable).toInt();
   }
-  if (!fsExists("/TailCurrent_A.txt")) {
-    writeFile(LittleFS, "/TailCurrent_A.txt", String(TailCurrent_A).c_str());
+  if (!settingExists(NK_TailCurrent_A)) {
+    settingWrite(NK_TailCurrent_A, String(TailCurrent_A).c_str());
   } else {
-    TailCurrent_A = readFile(LittleFS, "/TailCurrent_A.txt").toFloat();
+    TailCurrent_A = settingRead(NK_TailCurrent_A).toFloat();
   }
-  if (!fsExists("/RebulkVoltage.txt")) {
-    writeFile(LittleFS, "/RebulkVoltage.txt", String(RebulkVoltage).c_str());
+  if (!settingExists(NK_RebulkVoltage)) {
+    settingWrite(NK_RebulkVoltage, String(RebulkVoltage).c_str());
   } else {
-    RebulkVoltage = readFile(LittleFS, "/RebulkVoltage.txt").toFloat();
+    RebulkVoltage = settingRead(NK_RebulkVoltage).toFloat();
   }
-  if (!fsExists("/rebulkDebounceTime.txt")) {
-    writeFile(LittleFS, "/rebulkDebounceTime.txt", String(rebulkDebounceTime).c_str());
+  if (!settingExists(NK_rebulkDebounceTime)) {
+    settingWrite(NK_rebulkDebounceTime, String(rebulkDebounceTime).c_str());
   } else {
-    rebulkDebounceTime = readFile(LittleFS, "/rebulkDebounceTime.txt").toInt();
+    rebulkDebounceTime = settingRead(NK_rebulkDebounceTime).toInt();
   }
-  if (!fsExists("/MinFloatTime.txt")) {
-    writeFile(LittleFS, "/MinFloatTime.txt", String(MinFloatTime).c_str());
+  if (!settingExists(NK_MinFloatTime)) {
+    settingWrite(NK_MinFloatTime, String(MinFloatTime).c_str());
   } else {
-    MinFloatTime = readFile(LittleFS, "/MinFloatTime.txt").toInt();
+    MinFloatTime = settingRead(NK_MinFloatTime).toInt();
   }
-  if (!fsExists("/SOC_BlockRebulk_percent.txt")) {
-    writeFile(LittleFS, "/SOC_BlockRebulk_percent.txt", String(SOC_BlockRebulk_percent).c_str());
+  if (!settingExists(NK_SOC_BlockRebulk_percent)) {
+    settingWrite(NK_SOC_BlockRebulk_percent, String(SOC_BlockRebulk_percent).c_str());
   } else {
-    SOC_BlockRebulk_percent = readFile(LittleFS, "/SOC_BlockRebulk_percent.txt").toInt();
+    SOC_BlockRebulk_percent = settingRead(NK_SOC_BlockRebulk_percent).toInt();
   }
-  if (!fsExists("/SOC_AllowRebulk_percent.txt")) {
-    writeFile(LittleFS, "/SOC_AllowRebulk_percent.txt", String(SOC_AllowRebulk_percent).c_str());
+  if (!settingExists(NK_SOC_AllowRebulk_percent)) {
+    settingWrite(NK_SOC_AllowRebulk_percent, String(SOC_AllowRebulk_percent).c_str());
   } else {
-    SOC_AllowRebulk_percent = readFile(LittleFS, "/SOC_AllowRebulk_percent.txt").toInt();
+    SOC_AllowRebulk_percent = settingRead(NK_SOC_AllowRebulk_percent).toInt();
   }
-  if (!fsExists("/wavePeriod.txt")) {
-    writeFile(LittleFS, "/wavePeriod.txt", String(wavePeriod).c_str());
+  if (!settingExists(NK_wavePeriod)) {
+    settingWrite(NK_wavePeriod, String(wavePeriod).c_str());
   } else {
-    wavePeriod = readFile(LittleFS, "/wavePeriod.txt").toInt();
+    wavePeriod = settingRead(NK_wavePeriod).toInt();
   }
 
-  if (!fsExists("/InputFilterTC.txt")) {
-      writeFile(LittleFS, "/InputFilterTC.txt", String(InputFilterTC).c_str());
+  if (!settingExists(NK_InputFilterTC)) {
+      settingWrite(NK_InputFilterTC, String(InputFilterTC).c_str());
     } else {
-      InputFilterTC = readFile(LittleFS, "/InputFilterTC.txt").toFloat();
+      InputFilterTC = settingRead(NK_InputFilterTC).toFloat();
     }
 
-    if (!fsExists("/SystemIDStepAmplitude.txt")) {
-      writeFile(LittleFS, "/SystemIDStepAmplitude.txt", String(SystemIDStepAmplitude).c_str());
+    if (!settingExists(NK_SystemIDStepAmplitude)) {
+      settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude).c_str());
     } else {
-      SystemIDStepAmplitude = readFile(LittleFS, "/SystemIDStepAmplitude.txt").toFloat();
+      SystemIDStepAmplitude = settingRead(NK_SystemIDStepAmplitude).toFloat();
     }
     
-  if (!fsExists("/SwitchingFrequency.txt")) {
-    writeFile(LittleFS, "/SwitchingFrequency.txt", String(SwitchingFrequency).c_str());
+  if (!settingExists(NK_SwitchingFrequency)) {
+    settingWrite(NK_SwitchingFrequency, String(SwitchingFrequency).c_str());
   } else {
-    SwitchingFrequency = readFile(LittleFS, "/SwitchingFrequency.txt").toInt();
+    SwitchingFrequency = settingRead(NK_SwitchingFrequency).toInt();
   }
-  if (!fsExists("/FloatVoltage.txt")) {
-    writeFile(LittleFS, "/FloatVoltage.txt", String(FloatVoltage).c_str());
+  if (!settingExists(NK_FloatVoltage)) {
+    settingWrite(NK_FloatVoltage, String(FloatVoltage).c_str());
   } else {
-    FloatVoltage = readFile(LittleFS, "/FloatVoltage.txt").toFloat();
+    FloatVoltage = settingRead(NK_FloatVoltage).toFloat();
   }
-  if (!fsExists("/yyMin.txt")) {
-    writeFile(LittleFS, "/yyMin.txt", String(yyMin).c_str());
+  if (!settingExists(NK_yyMin)) {
+    settingWrite(NK_yyMin, String(yyMin).c_str());
   } else {
-    yyMin = readFile(LittleFS, "/yyMin.txt").toInt();
+    yyMin = settingRead(NK_yyMin).toInt();
   }
-  if (!fsExists("/FieldAdjustmentInterval.txt")) {
-    writeFile(LittleFS, "/FieldAdjustmentInterval.txt", String(FieldAdjustmentInterval).c_str());
+  if (!settingExists(NK_FieldAdjustmentInterval)) {
+    settingWrite(NK_FieldAdjustmentInterval, String(FieldAdjustmentInterval).c_str());
   } else {
-    FieldAdjustmentInterval = readFile(LittleFS, "/FieldAdjustmentInterval.txt").toFloat();
+    FieldAdjustmentInterval = settingRead(NK_FieldAdjustmentInterval).toFloat();
   }
-  if (!fsExists("/ManualFieldToggle.txt")) {
-    writeFile(LittleFS, "/ManualFieldToggle.txt", String(ManualFieldToggle).c_str());
+  if (!settingExists(NK_ManualFieldToggle)) {
+    settingWrite(NK_ManualFieldToggle, String(ManualFieldToggle).c_str());
   } else {
-    ManualFieldToggle = readFile(LittleFS, "/ManualFieldToggle.txt").toInt();
+    ManualFieldToggle = settingRead(NK_ManualFieldToggle).toInt();
   }
-  if (!fsExists("/SwitchControlOverride.txt")) {
-    writeFile(LittleFS, "/SwitchControlOverride.txt", String(SwitchControlOverride).c_str());
+  if (!settingExists(NK_SwitchControlOverride)) {
+    settingWrite(NK_SwitchControlOverride, String(SwitchControlOverride).c_str());
   } else {
-    SwitchControlOverride = readFile(LittleFS, "/SwitchControlOverride.txt").toInt();
+    SwitchControlOverride = settingRead(NK_SwitchControlOverride).toInt();
   }
-  if (!fsExists("/IgnitionOverride.txt")) {
-    writeFile(LittleFS, "/IgnitionOverride.txt", String(IgnitionOverride).c_str());
+  if (!settingExists(NK_IgnitionOverride)) {
+    settingWrite(NK_IgnitionOverride, String(IgnitionOverride).c_str());
   } else {
-    IgnitionOverride = readFile(LittleFS, "/IgnitionOverride.txt").toInt();
+    IgnitionOverride = settingRead(NK_IgnitionOverride).toInt();
   }
-  if (!fsExists("/hardwarePresent.txt")) {
-    writeFile(LittleFS, "/hardwarePresent.txt", String(hardwarePresent).c_str());
+  if (!settingExists(NK_hardwarePresent)) {
+    settingWrite(NK_hardwarePresent, String(hardwarePresent).c_str());
   } else {
-    hardwarePresent = readFile(LittleFS, "/hardwarePresent.txt").toInt();
+    hardwarePresent = settingRead(NK_hardwarePresent).toInt();
   }
   // VMGUseTrueWind.txt removed — Target-mode toggle gone; both VMGs always computed. Stale file (if any) is ignored.
-  if (!fsExists("/gpsTimeSourceMode.txt")) {
-    writeFile(LittleFS, "/gpsTimeSourceMode.txt", String(gpsTimeSourceMode).c_str());
+  if (!settingExists(NK_gpsTimeSourceMode)) {
+    settingWrite(NK_gpsTimeSourceMode, String(gpsTimeSourceMode).c_str());
   } else {
-    gpsTimeSourceMode = (uint8_t)readFile(LittleFS, "/gpsTimeSourceMode.txt").toInt();
+    gpsTimeSourceMode = (uint8_t)settingRead(NK_gpsTimeSourceMode).toInt();
     if (gpsTimeSourceMode > GTS_NTP) gpsTimeSourceMode = GTS_AUTO;  // sanity
   }
-  if (!fsExists("/MaintainMode.txt")) {
-    writeFile(LittleFS, "/MaintainMode.txt", String(MaintainMode).c_str());
+  if (!settingExists(NK_MaintainMode)) {
+    settingWrite(NK_MaintainMode, String(MaintainMode).c_str());
   } else {
-    MaintainMode = readFile(LittleFS, "/MaintainMode.txt").toInt();
+    MaintainMode = settingRead(NK_MaintainMode).toInt();
   }
-  if (!fsExists("/TargetVoltageMode.txt")) {
-    writeFile(LittleFS, "/TargetVoltageMode.txt", String(TargetVoltageMode).c_str());
+  if (!settingExists(NK_TargetVoltageMode)) {
+    settingWrite(NK_TargetVoltageMode, String(TargetVoltageMode).c_str());
   } else {
-    TargetVoltageMode = readFile(LittleFS, "/TargetVoltageMode.txt").toInt();
+    TargetVoltageMode = settingRead(NK_TargetVoltageMode).toInt();
   }
-  if (!fsExists("/OnOff.txt")) {
-    writeFile(LittleFS, "/OnOff.txt", String(OnOff).c_str());
+  if (!settingExists(NK_OnOff)) {
+    settingWrite(NK_OnOff, String(OnOff).c_str());
   } else {
-    OnOff = readFile(LittleFS, "/OnOff.txt").toInt();
+    OnOff = settingRead(NK_OnOff).toInt();
   }
-  if (!fsExists("/HiLow.txt")) {
-    writeFile(LittleFS, "/HiLow.txt", String(HiLow).c_str());
+  if (!settingExists(NK_HiLow)) {
+    settingWrite(NK_HiLow, String(HiLow).c_str());
   } else {
-    HiLow = readFile(LittleFS, "/HiLow.txt").toInt();
+    HiLow = settingRead(NK_HiLow).toInt();
   }
-  if (!fsExists("/AmpSensorRange.txt")) {
-    writeFile(LittleFS, "/AmpSensorRange.txt", String(AmpSensorRange).c_str());
+  if (!settingExists(NK_AmpSensorRange)) {
+    settingWrite(NK_AmpSensorRange, String(AmpSensorRange).c_str());
   } else {
-    AmpSensorRange = readFile(LittleFS, "/AmpSensorRange.txt").toInt();
+    AmpSensorRange = settingRead(NK_AmpSensorRange).toInt();
   }
-  if (!fsExists("/InvertAltAmps.txt")) {
-    writeFile(LittleFS, "/InvertAltAmps.txt", String(InvertAltAmps).c_str());
+  if (!settingExists(NK_InvertAltAmps)) {
+    settingWrite(NK_InvertAltAmps, String(InvertAltAmps).c_str());
   } else {
-    InvertAltAmps = readFile(LittleFS, "/InvertAltAmps.txt").toInt();
+    InvertAltAmps = settingRead(NK_InvertAltAmps).toInt();
   }
-  if (!fsExists("/InvertBattAmps.txt")) {
-    writeFile(LittleFS, "/InvertBattAmps.txt", String(InvertBattAmps).c_str());
+  if (!settingExists(NK_InvertBattAmps)) {
+    settingWrite(NK_InvertBattAmps, String(InvertBattAmps).c_str());
   } else {
-    InvertBattAmps = readFile(LittleFS, "/InvertBattAmps.txt").toInt();
+    InvertBattAmps = settingRead(NK_InvertBattAmps).toInt();
   }
-  if (!fsExists("/LimpHome.txt")) {
-    writeFile(LittleFS, "/LimpHome.txt", String(LimpHome).c_str());
+  if (!settingExists(NK_LimpHome)) {
+    settingWrite(NK_LimpHome, String(LimpHome).c_str());
   } else {
-    LimpHome = readFile(LittleFS, "/LimpHome.txt").toInt();
+    LimpHome = settingRead(NK_LimpHome).toInt();
   }
-  if (!fsExists("/VeData.txt")) {
-    writeFile(LittleFS, "/VeData.txt", String(VeData).c_str());
+  if (!settingExists(NK_VeData)) {
+    settingWrite(NK_VeData, String(VeData).c_str());
   } else {
-    VeData = readFile(LittleFS, "/VeData.txt").toInt();
+    VeData = settingRead(NK_VeData).toInt();
   }
-  if (!fsExists("/NMEA0183Data.txt")) {
-    writeFile(LittleFS, "/NMEA0183Data.txt", String(NMEA0183Data).c_str());
+  if (!settingExists(NK_NMEA0183Data)) {
+    settingWrite(NK_NMEA0183Data, String(NMEA0183Data).c_str());
   } else {
-    NMEA0183Data = readFile(LittleFS, "/NMEA0183Data.txt").toInt();
+    NMEA0183Data = settingRead(NK_NMEA0183Data).toInt();
   }
-  if (!fsExists("/NMEA2KData.txt")) {
-    writeFile(LittleFS, "/NMEA2KData.txt", String(NMEA2KData).c_str());
+  if (!settingExists(NK_NMEA2KData)) {
+    settingWrite(NK_NMEA2KData, String(NMEA2KData).c_str());
   } else {
-    NMEA2KData = readFile(LittleFS, "/NMEA2KData.txt").toInt();
+    NMEA2KData = settingRead(NK_NMEA2KData).toInt();
   }
-  if (!fsExists("/waveAmplitude.txt")) {
-    writeFile(LittleFS, "/waveAmplitude.txt", String(waveAmplitude).c_str());
+  if (!settingExists(NK_waveAmplitude)) {
+    settingWrite(NK_waveAmplitude, String(waveAmplitude).c_str());
   } else {
-    waveAmplitude = readFile(LittleFS, "/waveAmplitude.txt").toInt();
+    waveAmplitude = settingRead(NK_waveAmplitude).toInt();
   }
-  if (!fsExists("/CurrentThreshold.txt")) {
-    writeFile(LittleFS, "/CurrentThreshold.txt", String(CurrentThreshold).c_str());
+  if (!settingExists(NK_CurrentThreshold)) {
+    settingWrite(NK_CurrentThreshold, String(CurrentThreshold).c_str());
   } else {
-    CurrentThreshold = readFile(LittleFS, "/CurrentThreshold.txt").toFloat();
+    CurrentThreshold = settingRead(NK_CurrentThreshold).toFloat();
   }
-  if (!fsExists("/PeukertExponent.txt")) {
-    writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
+  if (!settingExists(NK_PeukertExponent)) {
+    settingWrite(NK_PeukertExponent, String(PeukertExponent_scaled).c_str());
   } else {
-    float pv = readFile(LittleFS, "/PeukertExponent.txt").toFloat();
+    float pv = settingRead(NK_PeukertExponent).toFloat();
     if (pv <= 2.0f) {
       // old file stored raw user input (e.g. "1.12") — migrate to scaled int
       PeukertExponent_scaled = (int)(pv * 100);
-      writeFile(LittleFS, "/PeukertExponent.txt", String(PeukertExponent_scaled).c_str());
+      settingWrite(NK_PeukertExponent, String(PeukertExponent_scaled).c_str());
     } else {
       PeukertExponent_scaled = (int)pv;
     }
   }
-  if (!fsExists("/ChargedVoltage.txt")) {
-    writeFile(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
+  if (!settingExists(NK_ChargedVoltage)) {
+    settingWrite(NK_ChargedVoltage, String(ChargedVoltage_Scaled).c_str());
   } else {
-    float cv = readFile(LittleFS, "/ChargedVoltage.txt").toFloat();
+    float cv = settingRead(NK_ChargedVoltage).toFloat();
     if (cv <= 70.0f) {
       // old file stored raw user input (e.g. "14.50") — migrate to scaled int
       ChargedVoltage_Scaled = (int)(cv * 100);
-      writeFile(LittleFS, "/ChargedVoltage.txt", String(ChargedVoltage_Scaled).c_str());
+      settingWrite(NK_ChargedVoltage, String(ChargedVoltage_Scaled).c_str());
     } else {
       ChargedVoltage_Scaled = (int)cv;
     }
   }
-  if (!fsExists("/ChargedDetectionTime.txt")) {
-    writeFile(LittleFS, "/ChargedDetectionTime.txt", String(ChargedDetectionTime).c_str());
+  if (!settingExists(NK_ChargedDetectionTime)) {
+    settingWrite(NK_ChargedDetectionTime, String(ChargedDetectionTime).c_str());
   } else {
-    ChargedDetectionTime = readFile(LittleFS, "/ChargedDetectionTime.txt").toInt();
+    ChargedDetectionTime = settingRead(NK_ChargedDetectionTime).toInt();
   }
-  if (!fsExists("/IgnoreTemperature.txt")) {
-    writeFile(LittleFS, "/IgnoreTemperature.txt", String(IgnoreTemperature).c_str());
+  if (!settingExists(NK_IgnoreTemperature)) {
+    settingWrite(NK_IgnoreTemperature, String(IgnoreTemperature).c_str());
   } else {
-    IgnoreTemperature = readFile(LittleFS, "/IgnoreTemperature.txt").toInt();
+    IgnoreTemperature = settingRead(NK_IgnoreTemperature).toInt();
   }
-  if (!fsExists("/IgnoreRPM.txt")) {
-    writeFile(LittleFS, "/IgnoreRPM.txt", String(IgnoreRPM).c_str());
+  if (!settingExists(NK_IgnoreRPM)) {
+    settingWrite(NK_IgnoreRPM, String(IgnoreRPM).c_str());
   } else {
-    IgnoreRPM = readFile(LittleFS, "/IgnoreRPM.txt").toInt();
+    IgnoreRPM = settingRead(NK_IgnoreRPM).toInt();
   }
-  if (!fsExists("/MinRPMForField.txt")) {
-    writeFile(LittleFS, "/MinRPMForField.txt", String(MinRPMForField).c_str());
+  if (!settingExists(NK_MinRPMForField)) {
+    settingWrite(NK_MinRPMForField, String(MinRPMForField).c_str());
   } else {
-    MinRPMForField = readFile(LittleFS, "/MinRPMForField.txt").toInt();
+    MinRPMForField = settingRead(NK_MinRPMForField).toInt();
   }
-  if (!fsExists("/bmsLogic.txt")) {
-    writeFile(LittleFS, "/bmsLogic.txt", String(bmsLogic).c_str());
+  if (!settingExists(NK_bmsLogic)) {
+    settingWrite(NK_bmsLogic, String(bmsLogic).c_str());
   } else {
-    bmsLogic = readFile(LittleFS, "/bmsLogic.txt").toInt();
+    bmsLogic = settingRead(NK_bmsLogic).toInt();
   }
-  if (!fsExists("/bmsLogicLevelOff.txt")) {
-    writeFile(LittleFS, "/bmsLogicLevelOff.txt", String(bmsLogicLevelOff).c_str());
+  if (!settingExists(NK_bmsLogicLevelOff)) {
+    settingWrite(NK_bmsLogicLevelOff, String(bmsLogicLevelOff).c_str());
   } else {
-    bmsLogicLevelOff = readFile(LittleFS, "/bmsLogicLevelOff.txt").toInt();
+    bmsLogicLevelOff = settingRead(NK_bmsLogicLevelOff).toInt();
   }
-  if (!fsExists("/AlarmActivate.txt")) {
-    writeFile(LittleFS, "/AlarmActivate.txt", String(AlarmActivate).c_str());
+  if (!settingExists(NK_AlarmActivate)) {
+    settingWrite(NK_AlarmActivate, String(AlarmActivate).c_str());
   } else {
-    AlarmActivate = readFile(LittleFS, "/AlarmActivate.txt").toInt();
+    AlarmActivate = settingRead(NK_AlarmActivate).toInt();
   }
-  if (!fsExists("/TempAlarm.txt")) {
-    writeFile(LittleFS, "/TempAlarm.txt", String(TempAlarm).c_str());
+  if (!settingExists(NK_TempAlarm)) {
+    settingWrite(NK_TempAlarm, String(TempAlarm).c_str());
   } else {
-    TempAlarm = readFile(LittleFS, "/TempAlarm.txt").toInt();
+    TempAlarm = settingRead(NK_TempAlarm).toInt();
   }
-  if (!fsExists("/TempAlarmLow.txt")) {
-    writeFile(LittleFS, "/TempAlarmLow.txt", String(TempAlarmLow).c_str());
+  if (!settingExists(NK_TempAlarmLow)) {
+    settingWrite(NK_TempAlarmLow, String(TempAlarmLow).c_str());
   } else {
-    TempAlarmLow = readFile(LittleFS, "/TempAlarmLow.txt").toInt();
+    TempAlarmLow = settingRead(NK_TempAlarmLow).toInt();
   }
-  if (!fsExists("/VoltageAlarmHigh.txt")) {
-    writeFile(LittleFS, "/VoltageAlarmHigh.txt", String(VoltageAlarmHigh).c_str());
+  if (!settingExists(NK_VoltageAlarmHigh)) {
+    settingWrite(NK_VoltageAlarmHigh, String(VoltageAlarmHigh).c_str());
   } else {
-    VoltageAlarmHigh = readFile(LittleFS, "/VoltageAlarmHigh.txt").toInt();
+    VoltageAlarmHigh = settingRead(NK_VoltageAlarmHigh).toInt();
   }
-  if (!fsExists("/VoltageAlarmLow.txt")) {
-    writeFile(LittleFS, "/VoltageAlarmLow.txt", String(VoltageAlarmLow).c_str());
+  if (!settingExists(NK_VoltageAlarmLow)) {
+    settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow).c_str());
   } else {
-    VoltageAlarmLow = readFile(LittleFS, "/VoltageAlarmLow.txt").toInt();
+    VoltageAlarmLow = settingRead(NK_VoltageAlarmLow).toInt();
   }
-  if (!fsExists("/CurrentAlarmHigh.txt")) {
-    writeFile(LittleFS, "/CurrentAlarmHigh.txt", String(CurrentAlarmHigh).c_str());
+  if (!settingExists(NK_CurrentAlarmHigh)) {
+    settingWrite(NK_CurrentAlarmHigh, String(CurrentAlarmHigh).c_str());
   } else {
-    CurrentAlarmHigh = readFile(LittleFS, "/CurrentAlarmHigh.txt").toInt();
+    CurrentAlarmHigh = settingRead(NK_CurrentAlarmHigh).toInt();
   }
-  if (!fsExists("/RPMScalingFactor.txt")) {
-    writeFile(LittleFS, "/RPMScalingFactor.txt", String(RPMScalingFactor).c_str());
+  if (!settingExists(NK_RPMScalingFactor)) {
+    settingWrite(NK_RPMScalingFactor, String(RPMScalingFactor).c_str());
   } else {
-    RPMScalingFactor = readFile(LittleFS, "/RPMScalingFactor.txt").toInt();
+    RPMScalingFactor = settingRead(NK_RPMScalingFactor).toInt();
   }
-  if (!fsExists("/FieldResistance.txt")) {
-    writeFile(LittleFS, "/FieldResistance.txt", String(FieldResistance).c_str());
+  if (!settingExists(NK_FieldResistance)) {
+    settingWrite(NK_FieldResistance, String(FieldResistance).c_str());
   } else {
-    FieldResistance = readFile(LittleFS, "/FieldResistance.txt").toFloat();
+    FieldResistance = settingRead(NK_FieldResistance).toFloat();
   }
-  if (!fsExists("/MaximumAllowedBatteryAmps.txt")) {
-    writeFile(LittleFS, "/MaximumAllowedBatteryAmps.txt", String(MaximumAllowedBatteryAmps).c_str());
+  if (!settingExists(NK_MaximumAllowedBatteryAmps)) {
+    settingWrite(NK_MaximumAllowedBatteryAmps, String(MaximumAllowedBatteryAmps).c_str());
   } else {
-    MaximumAllowedBatteryAmps = readFile(LittleFS, "/MaximumAllowedBatteryAmps.txt").toInt();
+    MaximumAllowedBatteryAmps = settingRead(NK_MaximumAllowedBatteryAmps).toInt();
   }
-  if (!fsExists("/LoadDumpDtThresh1.txt")) {
-    writeFile(LittleFS, "/LoadDumpDtThresh1.txt", String(LoadDumpDtThresh1).c_str());
+  if (!settingExists(NK_LoadDumpDtThresh1)) {
+    settingWrite(NK_LoadDumpDtThresh1, String(LoadDumpDtThresh1).c_str());
   } else {
-    LoadDumpDtThresh1 = readFile(LittleFS, "/LoadDumpDtThresh1.txt").toFloat();
+    LoadDumpDtThresh1 = settingRead(NK_LoadDumpDtThresh1).toFloat();
   }
-  if (!fsExists("/LoadDumpDtThresh.txt")) {
-    writeFile(LittleFS, "/LoadDumpDtThresh.txt", String(LoadDumpDtThresh).c_str());
+  if (!settingExists(NK_LoadDumpDtThresh)) {
+    settingWrite(NK_LoadDumpDtThresh, String(LoadDumpDtThresh).c_str());
   } else {
-    LoadDumpDtThresh = readFile(LittleFS, "/LoadDumpDtThresh.txt").toFloat();
+    LoadDumpDtThresh = settingRead(NK_LoadDumpDtThresh).toFloat();
   }
-  if (!fsExists("/LoadDumpDtThresh3.txt")) {
-    writeFile(LittleFS, "/LoadDumpDtThresh3.txt", String(LoadDumpDtThresh3).c_str());
+  if (!settingExists(NK_LoadDumpDtThresh3)) {
+    settingWrite(NK_LoadDumpDtThresh3, String(LoadDumpDtThresh3).c_str());
   } else {
-    LoadDumpDtThresh3 = readFile(LittleFS, "/LoadDumpDtThresh3.txt").toFloat();
+    LoadDumpDtThresh3 = settingRead(NK_LoadDumpDtThresh3).toFloat();
   }
-  if (!fsExists("/CVTuningMode.txt")) {
-    writeFile(LittleFS, "/CVTuningMode.txt", String(CVTuningMode).c_str());
+  if (!settingExists(NK_CVTuningMode)) {
+    settingWrite(NK_CVTuningMode, String(CVTuningMode).c_str());
   } else {
-    CVTuningMode = readFile(LittleFS, "/CVTuningMode.txt").toInt();
+    CVTuningMode = settingRead(NK_CVTuningMode).toInt();
   }
-  if (!fsExists("/cvWaveAmplitudeV.txt")) {
-    writeFile(LittleFS, "/cvWaveAmplitudeV.txt", String(cvWaveAmplitudeV).c_str());
+  if (!settingExists(NK_cvWaveAmplitudeV)) {
+    settingWrite(NK_cvWaveAmplitudeV, String(cvWaveAmplitudeV).c_str());
   } else {
-    cvWaveAmplitudeV = readFile(LittleFS, "/cvWaveAmplitudeV.txt").toFloat();
+    cvWaveAmplitudeV = settingRead(NK_cvWaveAmplitudeV).toFloat();
   }
-  if (!fsExists("/cvWavePeriodSec.txt")) {
-    writeFile(LittleFS, "/cvWavePeriodSec.txt", String(cvWavePeriodSec).c_str());
+  if (!settingExists(NK_cvWavePeriodSec)) {
+    settingWrite(NK_cvWavePeriodSec, String(cvWavePeriodSec).c_str());
   } else {
-    cvWavePeriodSec = readFile(LittleFS, "/cvWavePeriodSec.txt").toInt();
+    cvWavePeriodSec = settingRead(NK_cvWavePeriodSec).toInt();
   }
-  if (!fsExists("/cvKOvershoot.txt")) {
-    writeFile(LittleFS, "/cvKOvershoot.txt", String(cvKOvershoot).c_str());
+  if (!settingExists(NK_cvKOvershoot)) {
+    settingWrite(NK_cvKOvershoot, String(cvKOvershoot).c_str());
   } else {
-    cvKOvershoot = readFile(LittleFS, "/cvKOvershoot.txt").toFloat();
+    cvKOvershoot = settingRead(NK_cvKOvershoot).toFloat();
   }
-  if (!fsExists("/cvConsecutiveReads.txt")) {
-    writeFile(LittleFS, "/cvConsecutiveReads.txt", String(cvConsecutiveReads).c_str());
+  if (!settingExists(NK_cvConsecutiveReads)) {
+    settingWrite(NK_cvConsecutiveReads, String(cvConsecutiveReads).c_str());
   } else {
-    cvConsecutiveReads = (uint8_t)readFile(LittleFS, "/cvConsecutiveReads.txt").toInt();
+    cvConsecutiveReads = (uint8_t)settingRead(NK_cvConsecutiveReads).toInt();
   }
-  if (!fsExists("/ThermalTuningMode.txt")) {
-    writeFile(LittleFS, "/ThermalTuningMode.txt", String(ThermalTuningMode).c_str());
+  if (!settingExists(NK_ThermalTuningMode)) {
+    settingWrite(NK_ThermalTuningMode, String(ThermalTuningMode).c_str());
   } else {
-    ThermalTuningMode = readFile(LittleFS, "/ThermalTuningMode.txt").toInt();
+    ThermalTuningMode = settingRead(NK_ThermalTuningMode).toInt();
   }
-  if (!fsExists("/thermalWaveLowF.txt")) {
-    writeFile(LittleFS, "/thermalWaveLowF.txt", String(thermalWaveLowF, 1).c_str());
+  if (!settingExists(NK_thermalWaveLowF)) {
+    settingWrite(NK_thermalWaveLowF, String(thermalWaveLowF, 1).c_str());
   } else {
-    thermalWaveLowF = readFile(LittleFS, "/thermalWaveLowF.txt").toFloat();
+    thermalWaveLowF = settingRead(NK_thermalWaveLowF).toFloat();
   }
-  if (!fsExists("/thermalWaveHighF.txt")) {
-    writeFile(LittleFS, "/thermalWaveHighF.txt", String(thermalWaveHighF, 1).c_str());
+  if (!settingExists(NK_thermalWaveHighF)) {
+    settingWrite(NK_thermalWaveHighF, String(thermalWaveHighF, 1).c_str());
   } else {
-    thermalWaveHighF = readFile(LittleFS, "/thermalWaveHighF.txt").toFloat();
+    thermalWaveHighF = settingRead(NK_thermalWaveHighF).toFloat();
   }
-  if (!fsExists("/thermalWaveHalfPeriodMin.txt")) {
-    writeFile(LittleFS, "/thermalWaveHalfPeriodMin.txt", String(thermalWaveHalfPeriodMin, 1).c_str());
+  if (!settingExists(NK_thermalWaveHalfPeriodMin)) {
+    settingWrite(NK_thermalWaveHalfPeriodMin, String(thermalWaveHalfPeriodMin, 1).c_str());
   } else {
-    thermalWaveHalfPeriodMin = readFile(LittleFS, "/thermalWaveHalfPeriodMin.txt").toFloat();
+    thermalWaveHalfPeriodMin = settingRead(NK_thermalWaveHalfPeriodMin).toFloat();
   }
-  if (!fsExists("/thermalKOvershoot.txt")) {
-    writeFile(LittleFS, "/thermalKOvershoot.txt", String(thermalKOvershoot, 1).c_str());
+  if (!settingExists(NK_thermalKOvershoot)) {
+    settingWrite(NK_thermalKOvershoot, String(thermalKOvershoot, 1).c_str());
   } else {
-    thermalKOvershoot = readFile(LittleFS, "/thermalKOvershoot.txt").toFloat();
+    thermalKOvershoot = settingRead(NK_thermalKOvershoot).toFloat();
   }
-  if (!fsExists("/thermalKUndershoot.txt")) {
-    writeFile(LittleFS, "/thermalKUndershoot.txt", String(thermalKUndershoot, 1).c_str());
+  if (!settingExists(NK_thermalKUndershoot)) {
+    settingWrite(NK_thermalKUndershoot, String(thermalKUndershoot, 1).c_str());
   } else {
-    thermalKUndershoot = readFile(LittleFS, "/thermalKUndershoot.txt").toFloat();
+    thermalKUndershoot = settingRead(NK_thermalKUndershoot).toFloat();
   }
-  if (!fsExists("/thermalSettleThreshF.txt")) {
-    writeFile(LittleFS, "/thermalSettleThreshF.txt", String(thermalSettleThreshF, 1).c_str());
+  if (!settingExists(NK_thermalSettleThreshF)) {
+    settingWrite(NK_thermalSettleThreshF, String(thermalSettleThreshF, 1).c_str());
   } else {
-    thermalSettleThreshF = readFile(LittleFS, "/thermalSettleThreshF.txt").toFloat();
+    thermalSettleThreshF = settingRead(NK_thermalSettleThreshF).toFloat();
   }
-  if (!fsExists("/thermalConsecutiveReads.txt")) {
-    writeFile(LittleFS, "/thermalConsecutiveReads.txt", String(thermalConsecutiveReads).c_str());
+  if (!settingExists(NK_thermalConsecutiveReads)) {
+    settingWrite(NK_thermalConsecutiveReads, String(thermalConsecutiveReads).c_str());
   } else {
-    thermalConsecutiveReads = (uint8_t)readFile(LittleFS, "/thermalConsecutiveReads.txt").toInt();
+    thermalConsecutiveReads = (uint8_t)settingRead(NK_thermalConsecutiveReads).toInt();
   }
-  if (!fsExists("/ManualSOCPoint.txt")) {
-    writeFile(LittleFS, "/ManualSOCPoint.txt", String(ManualSOCPoint).c_str());
+  if (!settingExists(NK_ManualSOCPoint)) {
+    settingWrite(NK_ManualSOCPoint, String(ManualSOCPoint).c_str());
   } else {
-    ManualSOCPoint = readFile(LittleFS, "/ManualSOCPoint.txt").toInt();
+    ManualSOCPoint = settingRead(NK_ManualSOCPoint).toInt();
   }
-  if (!fsExists("/ManualLifePercentage.txt")) {  // manual override of alterantor lifetime estimates this is pointless
-    writeFile(LittleFS, "/ManualLifePercentage.txt", String(ManualLifePercentage).c_str());
+  if (!settingExists(NK_ManualLifePercentage)) {  // manual override of alterantor lifetime estimates this is pointless
+    settingWrite(NK_ManualLifePercentage, String(ManualLifePercentage).c_str());
   } else {
-    ManualLifePercentage = readFile(LittleFS, "/ManualLifePercentage.txt").toInt();
+    ManualLifePercentage = settingRead(NK_ManualLifePercentage).toInt();
   }
-  if (!fsExists("/ShuntResistanceMicroOhm.txt")) {
-    writeFile(LittleFS, "/ShuntResistanceMicroOhm.txt", String(ShuntResistanceMicroOhm).c_str());
+  if (!settingExists(NK_ShuntResistanceMicroOhm)) {
+    settingWrite(NK_ShuntResistanceMicroOhm, String(ShuntResistanceMicroOhm).c_str());
   } else {
-    ShuntResistanceMicroOhm = readFile(LittleFS, "/ShuntResistanceMicroOhm.txt").toInt();
+    ShuntResistanceMicroOhm = settingRead(NK_ShuntResistanceMicroOhm).toInt();
   }
-  if (!fsExists("/maxPoints.txt")) {
-    writeFile(LittleFS, "/maxPoints.txt", String(maxPoints).c_str());
+  if (!settingExists(NK_maxPoints)) {
+    settingWrite(NK_maxPoints, String(maxPoints).c_str());
   } else {
-    maxPoints = readFile(LittleFS, "/maxPoints.txt").toInt();
+    maxPoints = settingRead(NK_maxPoints).toInt();
   }
-  if (!fsExists("/Ymin1.txt")) {
-    writeFile(LittleFS, "/Ymin1.txt", String(Ymin1).c_str());
+  if (!settingExists(NK_Ymin1)) {
+    settingWrite(NK_Ymin1, String(Ymin1).c_str());
   } else {
-    Ymin1 = readFile(LittleFS, "/Ymin1.txt").toInt();
+    Ymin1 = settingRead(NK_Ymin1).toInt();
   }
-  if (!fsExists("/Ymax1.txt")) {
-    writeFile(LittleFS, "/Ymax1.txt", String(Ymax1).c_str());
+  if (!settingExists(NK_Ymax1)) {
+    settingWrite(NK_Ymax1, String(Ymax1).c_str());
   } else {
-    Ymax1 = readFile(LittleFS, "/Ymax1.txt").toInt();
+    Ymax1 = settingRead(NK_Ymax1).toInt();
   }
-  if (!fsExists("/Ymin2.txt")) {
-    writeFile(LittleFS, "/Ymin2.txt", String(Ymin2).c_str());
+  if (!settingExists(NK_Ymin2)) {
+    settingWrite(NK_Ymin2, String(Ymin2).c_str());
   } else {
-    Ymin2 = readFile(LittleFS, "/Ymin2.txt").toFloat();
+    Ymin2 = settingRead(NK_Ymin2).toFloat();
   }
-  if (!fsExists("/Ymax2.txt")) {
-    writeFile(LittleFS, "/Ymax2.txt", String(Ymax2).c_str());
+  if (!settingExists(NK_Ymax2)) {
+    settingWrite(NK_Ymax2, String(Ymax2).c_str());
   } else {
-    Ymax2 = readFile(LittleFS, "/Ymax2.txt").toFloat();
+    Ymax2 = settingRead(NK_Ymax2).toFloat();
   }
-  if (!fsExists("/Ymin3.txt")) {
-    writeFile(LittleFS, "/Ymin3.txt", String(Ymin3).c_str());
+  if (!settingExists(NK_Ymin3)) {
+    settingWrite(NK_Ymin3, String(Ymin3).c_str());
   } else {
-    Ymin3 = readFile(LittleFS, "/Ymin3.txt").toInt();
+    Ymin3 = settingRead(NK_Ymin3).toInt();
   }
-  if (!fsExists("/Ymax3.txt")) {
-    writeFile(LittleFS, "/Ymax3.txt", String(Ymax3).c_str());
+  if (!settingExists(NK_Ymax3)) {
+    settingWrite(NK_Ymax3, String(Ymax3).c_str());
   } else {
-    Ymax3 = readFile(LittleFS, "/Ymax3.txt").toInt();
+    Ymax3 = settingRead(NK_Ymax3).toInt();
   }
-  if (!fsExists("/Ymin4.txt")) {
-    writeFile(LittleFS, "/Ymin4.txt", String(Ymin4).c_str());
+  if (!settingExists(NK_Ymin4)) {
+    settingWrite(NK_Ymin4, String(Ymin4).c_str());
   } else {
-    Ymin4 = readFile(LittleFS, "/Ymin4.txt").toInt();
+    Ymin4 = settingRead(NK_Ymin4).toInt();
   }
-  if (!fsExists("/Ymax4.txt")) {
-    writeFile(LittleFS, "/Ymax4.txt", String(Ymax4).c_str());
+  if (!settingExists(NK_Ymax4)) {
+    settingWrite(NK_Ymax4, String(Ymax4).c_str());
   } else {
-    Ymax4 = readFile(LittleFS, "/Ymax4.txt").toInt();
+    Ymax4 = settingRead(NK_Ymax4).toInt();
   }
-  if (!fsExists("/MaxDuty.txt")) {
-    writeFile(LittleFS, "/MaxDuty.txt", String(MaxDuty).c_str());
+  if (!settingExists(NK_MaxDuty)) {
+    settingWrite(NK_MaxDuty, String(MaxDuty).c_str());
   } else {
-    MaxDuty = readFile(LittleFS, "/MaxDuty.txt").toInt();
+    MaxDuty = settingRead(NK_MaxDuty).toInt();
   }
-  if (!fsExists("/MinDuty.txt")) {
-    writeFile(LittleFS, "/MinDuty.txt", String(MinDuty).c_str());
+  if (!settingExists(NK_MinDuty)) {
+    settingWrite(NK_MinDuty, String(MinDuty).c_str());
   } else {
-    MinDuty = readFile(LittleFS, "/MinDuty.txt").toInt();
+    MinDuty = settingRead(NK_MinDuty).toInt();
   }
-  if (!fsExists("/R_fixed.txt")) {
-    writeFile(LittleFS, "/R_fixed.txt", String(R_fixed).c_str());
+  if (!settingExists(NK_R_fixed)) {
+    settingWrite(NK_R_fixed, String(R_fixed).c_str());
   } else {
-    R_fixed = readFile(LittleFS, "/R_fixed.txt").toFloat();
+    R_fixed = settingRead(NK_R_fixed).toFloat();
   }
-  if (!fsExists("/Beta.txt")) {
-    writeFile(LittleFS, "/Beta.txt", String(Beta).c_str());
+  if (!settingExists(NK_Beta)) {
+    settingWrite(NK_Beta, String(Beta).c_str());
   } else {
-    Beta = readFile(LittleFS, "/Beta.txt").toFloat();
+    Beta = settingRead(NK_Beta).toFloat();
   }
-  if (!fsExists("/T0_C.txt")) {
-    writeFile(LittleFS, "/T0_C.txt", String(T0_C).c_str());
+  if (!settingExists(NK_T0_C)) {
+    settingWrite(NK_T0_C, String(T0_C).c_str());
   } else {
-    T0_C = readFile(LittleFS, "/T0_C.txt").toFloat();
+    T0_C = settingRead(NK_T0_C).toFloat();
   }
-  if (!fsExists("/TempSource.txt")) {
-    writeFile(LittleFS, "/TempSource.txt", String(TempSource).c_str());
+  if (!settingExists(NK_TempSource)) {
+    settingWrite(NK_TempSource, String(TempSource).c_str());
   } else {
-    TempSource = readFile(LittleFS, "/TempSource.txt").toInt();
+    TempSource = settingRead(NK_TempSource).toInt();
   }
-  if (!fsExists("/AlternatorCOffset.txt")) {
-    writeFile(LittleFS, "/AlternatorCOffset.txt", String(AlternatorCOffset).c_str());
+  if (!settingExists(NK_AlternatorCOffset)) {
+    settingWrite(NK_AlternatorCOffset, String(AlternatorCOffset).c_str());
   } else {
-    AlternatorCOffset = readFile(LittleFS, "/AlternatorCOffset.txt").toFloat();
+    AlternatorCOffset = settingRead(NK_AlternatorCOffset).toFloat();
   }
-  if (!fsExists("/BatteryCOffset.txt")) {
-    writeFile(LittleFS, "/BatteryCOffset.txt", String(BatteryCOffset).c_str());
+  if (!settingExists(NK_BatteryCOffset)) {
+    settingWrite(NK_BatteryCOffset, String(BatteryCOffset).c_str());
   } else {
-    BatteryCOffset = readFile(LittleFS, "/BatteryCOffset.txt").toFloat();
+    BatteryCOffset = settingRead(NK_BatteryCOffset).toFloat();
   }
-  if (!fsExists("/AlarmLatchEnabled.txt")) {
-    writeFile(LittleFS, "/AlarmLatchEnabled.txt", String(AlarmLatchEnabled).c_str());
+  if (!settingExists(NK_AlarmLatchEnabled)) {
+    settingWrite(NK_AlarmLatchEnabled, String(AlarmLatchEnabled).c_str());
   } else {
-    AlarmLatchEnabled = readFile(LittleFS, "/AlarmLatchEnabled.txt").toInt();
+    AlarmLatchEnabled = settingRead(NK_AlarmLatchEnabled).toInt();
   }
-  if (!fsExists("/absorptionCompleteTime.txt")) {
-    writeFile(LittleFS, "/absorptionCompleteTime.txt", String(absorptionCompleteTime).c_str());
+  if (!settingExists(NK_absorptionCompleteTime)) {
+    settingWrite(NK_absorptionCompleteTime, String(absorptionCompleteTime).c_str());
   } else {
-    absorptionCompleteTime = readFile(LittleFS, "/absorptionCompleteTime.txt").toInt();
+    absorptionCompleteTime = settingRead(NK_absorptionCompleteTime).toInt();
   }
-  if (!fsExists("/FLOAT_DURATION.txt")) {
-    writeFile(LittleFS, "/FLOAT_DURATION.txt", String(FLOAT_DURATION).c_str());
+  if (!settingExists(NK_FLOAT_DURATION)) {
+    settingWrite(NK_FLOAT_DURATION, String(FLOAT_DURATION).c_str());
   } else {
-    FLOAT_DURATION = readFile(LittleFS, "/FLOAT_DURATION.txt").toInt();
+    FLOAT_DURATION = settingRead(NK_FLOAT_DURATION).toInt();
   }
 
-  if (!fsExists("/RebulkCurrent_A.txt")) {
-    writeFile(LittleFS, "/RebulkCurrent_A.txt", String(RebulkCurrent_A).c_str());
+  if (!settingExists(NK_RebulkCurrent_A)) {
+    settingWrite(NK_RebulkCurrent_A, String(RebulkCurrent_A).c_str());
   } else {
-    RebulkCurrent_A = readFile(LittleFS, "/RebulkCurrent_A.txt").toFloat();
+    RebulkCurrent_A = settingRead(NK_RebulkCurrent_A).toFloat();
   }
-  if (!fsExists("/UseFloat.txt")) {
-    writeFile(LittleFS, "/UseFloat.txt", String(UseFloat).c_str());
+  if (!settingExists(NK_UseFloat)) {
+    settingWrite(NK_UseFloat, String(UseFloat).c_str());
   } else {
-    UseFloat = readFile(LittleFS, "/UseFloat.txt").toInt();
+    UseFloat = settingRead(NK_UseFloat).toInt();
   }
 
   // ADD: Dynamic correction settings (add with other settings)
-  if (!fsExists("/AutoShuntGainCorrection.txt")) {  // BOOLEAN
-    writeFile(LittleFS, "/AutoShuntGainCorrection.txt", String(AutoShuntGainCorrection).c_str());
+  if (!settingExists(NK_AutoShuntGainCorrection)) {  // BOOLEAN
+    settingWrite(NK_AutoShuntGainCorrection, String(AutoShuntGainCorrection).c_str());
   } else {
-    AutoShuntGainCorrection = readFile(LittleFS, "/AutoShuntGainCorrection.txt").toInt();
+    AutoShuntGainCorrection = settingRead(NK_AutoShuntGainCorrection).toInt();
   }
-  if (!fsExists("/AutoAltCurrentZero.txt")) {  // BOOLEAN
-    writeFile(LittleFS, "/AutoAltCurrentZero.txt", String(AutoAltCurrentZero).c_str());
+  if (!settingExists(NK_AutoAltCurrentZero)) {  // BOOLEAN
+    settingWrite(NK_AutoAltCurrentZero, String(AutoAltCurrentZero).c_str());
   } else {
-    AutoAltCurrentZero = readFile(LittleFS, "/AutoAltCurrentZero.txt").toInt();
+    AutoAltCurrentZero = settingRead(NK_AutoAltCurrentZero).toInt();
   }
-  if (!fsExists("/WindingTempOffset.txt")) {
-    writeFile(LittleFS, "/WindingTempOffset.txt", String(WindingTempOffset, 1).c_str());
+  if (!settingExists(NK_WindingTempOffset)) {
+    settingWrite(NK_WindingTempOffset, String(WindingTempOffset, 1).c_str());
   } else {
-    WindingTempOffset = readFile(LittleFS, "/WindingTempOffset.txt").toFloat();
+    WindingTempOffset = settingRead(NK_WindingTempOffset).toFloat();
   }
-  if (!fsExists("/displayTempUnit.txt")) {
-    writeFile(LittleFS, "/displayTempUnit.txt", String(displayTempUnit).c_str());
+  if (!settingExists(NK_displayTempUnit)) {
+    settingWrite(NK_displayTempUnit, String(displayTempUnit).c_str());
   } else {
-    displayTempUnit = (uint8_t)readFile(LittleFS, "/displayTempUnit.txt").toInt();
+    displayTempUnit = (uint8_t)settingRead(NK_displayTempUnit).toInt();
   }
-  if (!fsExists("/PulleyRatio.txt")) {
-    writeFile(LittleFS, "/PulleyRatio.txt", String(PulleyRatio, 2).c_str());
+  if (!settingExists(NK_PulleyRatio)) {
+    settingWrite(NK_PulleyRatio, String(PulleyRatio, 2).c_str());
   } else {
-    PulleyRatio = readFile(LittleFS, "/PulleyRatio.txt").toFloat();
+    PulleyRatio = settingRead(NK_PulleyRatio).toFloat();
   }
-  if (!fsExists("/BatteryCurrentSource.txt")) {
-    writeFile(LittleFS, "/BatteryCurrentSource.txt", String(BatteryCurrentSource).c_str());
+  if (!settingExists(NK_BatteryCurrentSource)) {
+    settingWrite(NK_BatteryCurrentSource, String(BatteryCurrentSource).c_str());
   } else {
-    BatteryCurrentSource = readFile(LittleFS, "/BatteryCurrentSource.txt").toInt();
+    BatteryCurrentSource = settingRead(NK_BatteryCurrentSource).toInt();
   }
 
-  if (!fsExists("/timeAxisModeChanging.txt")) {
-    writeFile(LittleFS, "/timeAxisModeChanging.txt", String(timeAxisModeChanging).c_str());
+  if (!settingExists(NK_timeAxisModeChanging)) {
+    settingWrite(NK_timeAxisModeChanging, String(timeAxisModeChanging).c_str());
   } else {
-    timeAxisModeChanging = readFile(LittleFS, "/timeAxisModeChanging.txt").toInt();
+    timeAxisModeChanging = settingRead(NK_timeAxisModeChanging).toInt();
   }
-  if (!fsExists("/webgaugesinterval.txt")) {
-    writeFile(LittleFS, "/webgaugesinterval.txt", String(webgaugesinterval).c_str());
+  if (!settingExists(NK_webgaugesinterval)) {
+    settingWrite(NK_webgaugesinterval, String(webgaugesinterval).c_str());
   } else {
-    webgaugesinterval = readFile(LittleFS, "/webgaugesinterval.txt").toInt();
+    webgaugesinterval = settingRead(NK_webgaugesinterval).toInt();
     webgaugesinterval = constrain(webgaugesinterval, 1, 10000000);
   }
-  if (!fsExists("/plotTimeWindow.txt")) {
-    writeFile(LittleFS, "/plotTimeWindow.txt", String(plotTimeWindow).c_str());
+  if (!settingExists(NK_plotTimeWindow)) {
+    settingWrite(NK_plotTimeWindow, String(plotTimeWindow).c_str());
   } else {
-    plotTimeWindow = readFile(LittleFS, "/plotTimeWindow.txt").toInt();
+    plotTimeWindow = settingRead(NK_plotTimeWindow).toInt();
     plotTimeWindow = constrain(plotTimeWindow, 1, 1000000);  // 10s to 10min
   }
-  if (!fsExists("/IgnoreLearningDuringPenalty.txt")) {
-    writeFile(LittleFS, "/IgnoreLearningDuringPenalty.txt", String(IgnoreLearningDuringPenalty).c_str());
+  if (!settingExists(NK_IgnoreLearningDuringPenalty)) {
+    settingWrite(NK_IgnoreLearningDuringPenalty, String(IgnoreLearningDuringPenalty).c_str());
   } else {
-    IgnoreLearningDuringPenalty = readFile(LittleFS, "/IgnoreLearningDuringPenalty.txt").toInt();
+    IgnoreLearningDuringPenalty = settingRead(NK_IgnoreLearningDuringPenalty).toInt();
   }
-  if (!fsExists("/CloudFeatures.txt")) {
-    writeFile(LittleFS, "/CloudFeatures.txt", String(CloudFeatures).c_str());
+  if (!settingExists(NK_CloudFeatures)) {
+    settingWrite(NK_CloudFeatures, String(CloudFeatures).c_str());
   } else {
-    CloudFeatures = readFile(LittleFS, "/CloudFeatures.txt").toInt();
+    CloudFeatures = settingRead(NK_CloudFeatures).toInt();
   }
-  if (!fsExists("/EnableAmbientCorrection.txt")) {
-    writeFile(LittleFS, "/EnableAmbientCorrection.txt", String(EnableAmbientCorrection).c_str());
+  if (!settingExists(NK_EnableAmbientCorrection)) {
+    settingWrite(NK_EnableAmbientCorrection, String(EnableAmbientCorrection).c_str());
   } else {
-    EnableAmbientCorrection = readFile(LittleFS, "/EnableAmbientCorrection.txt").toInt();
+    EnableAmbientCorrection = settingRead(NK_EnableAmbientCorrection).toInt();
   }
-  if (!fsExists("/TuningMode.txt")) {
-    writeFile(LittleFS, "/TuningMode.txt", String(TuningMode).c_str());
+  if (!settingExists(NK_TuningMode)) {
+    settingWrite(NK_TuningMode, String(TuningMode).c_str());
   } else {
-    TuningMode = readFile(LittleFS, "/TuningMode.txt").toInt();
+    TuningMode = settingRead(NK_TuningMode).toInt();
   }
-  if (!fsExists("/LogAllLearningEvents.txt")) {
-    writeFile(LittleFS, "/LogAllLearningEvents.txt", String(LogAllLearningEvents).c_str());
+  if (!settingExists(NK_LogAllLearningEvents)) {
+    settingWrite(NK_LogAllLearningEvents, String(LogAllLearningEvents).c_str());
   } else {
-    LogAllLearningEvents = readFile(LittleFS, "/LogAllLearningEvents.txt").toInt();
+    LogAllLearningEvents = settingRead(NK_LogAllLearningEvents).toInt();
   }
-  if (!fsExists("/AlternatorNominalAmps.txt")) {
-    writeFile(LittleFS, "/AlternatorNominalAmps.txt", String(AlternatorNominalAmps).c_str());
+  if (!settingExists(NK_AlternatorNominalAmps)) {
+    settingWrite(NK_AlternatorNominalAmps, String(AlternatorNominalAmps).c_str());
   } else {
-    AlternatorNominalAmps = readFile(LittleFS, "/AlternatorNominalAmps.txt").toInt();
+    AlternatorNominalAmps = settingRead(NK_AlternatorNominalAmps).toInt();
   }
-  if (!fsExists("/LearningUpStep.txt")) {
-    writeFile(LittleFS, "/LearningUpStep.txt", String(LearningUpStep, 2).c_str());
+  if (!settingExists(NK_LearningUpStep)) {
+    settingWrite(NK_LearningUpStep, String(LearningUpStep, 2).c_str());
   } else {
-    LearningUpStep = readFile(LittleFS, "/LearningUpStep.txt").toFloat();
+    LearningUpStep = settingRead(NK_LearningUpStep).toFloat();
   }
-  if (!fsExists("/LearningDownStep.txt")) {
-    writeFile(LittleFS, "/LearningDownStep.txt", String(LearningDownStep, 2).c_str());
+  if (!settingExists(NK_LearningDownStep)) {
+    settingWrite(NK_LearningDownStep, String(LearningDownStep, 2).c_str());
   } else {
-    LearningDownStep = readFile(LittleFS, "/LearningDownStep.txt").toFloat();
+    LearningDownStep = settingRead(NK_LearningDownStep).toFloat();
   }
-  if (!fsExists("/AmbientTempCorrectionFactor.txt")) {
-    writeFile(LittleFS, "/AmbientTempCorrectionFactor.txt", String(AmbientTempCorrectionFactor, 2).c_str());
+  if (!settingExists(NK_AmbientTempCorrectionFactor)) {
+    settingWrite(NK_AmbientTempCorrectionFactor, String(AmbientTempCorrectionFactor, 2).c_str());
   } else {
-    AmbientTempCorrectionFactor = readFile(LittleFS, "/AmbientTempCorrectionFactor.txt").toFloat();
+    AmbientTempCorrectionFactor = settingRead(NK_AmbientTempCorrectionFactor).toFloat();
   }
-  if (!fsExists("/xTime.txt")) {
-    writeFile(LittleFS, "/xTime.txt", String(xTime, 2).c_str());
+  if (!settingExists(NK_xTime)) {
+    settingWrite(NK_xTime, String(xTime, 2).c_str());
   } else {
-    xTime = readFile(LittleFS, "/xTime.txt").toFloat();
+    xTime = settingRead(NK_xTime).toFloat();
   }
-  if (!fsExists("/MinLearningInterval.txt")) {
-    writeFile(LittleFS, "/MinLearningInterval.txt", String(MinLearningInterval).c_str());
+  if (!settingExists(NK_MinLearningInterval)) {
+    settingWrite(NK_MinLearningInterval, String(MinLearningInterval).c_str());
   } else {
-    MinLearningInterval = readFile(LittleFS, "/MinLearningInterval.txt").toInt();
+    MinLearningInterval = settingRead(NK_MinLearningInterval).toInt();
   }
-  if (!fsExists("/SafeOperationThreshold.txt")) {
-    writeFile(LittleFS, "/SafeOperationThreshold.txt", String(SafeOperationThreshold).c_str());
+  if (!settingExists(NK_SafeOperationThreshold)) {
+    settingWrite(NK_SafeOperationThreshold, String(SafeOperationThreshold).c_str());
   } else {
-    SafeOperationThreshold = readFile(LittleFS, "/SafeOperationThreshold.txt").toInt();
+    SafeOperationThreshold = settingRead(NK_SafeOperationThreshold).toInt();
   }
-  if (!fsExists("/SetpointRiseRate.txt")) {
-    writeFile(LittleFS, "/SetpointRiseRate.txt", String(SetpointRiseRate, 2).c_str());
+  if (!settingExists(NK_SetpointRiseRate)) {
+    settingWrite(NK_SetpointRiseRate, String(SetpointRiseRate, 2).c_str());
   } else {
-    SetpointRiseRate = readFile(LittleFS, "/SetpointRiseRate.txt").toFloat();
+    SetpointRiseRate = settingRead(NK_SetpointRiseRate).toFloat();
   }
-  if (!fsExists("/SetpointFallRate.txt")) {
-    writeFile(LittleFS, "/SetpointFallRate.txt", String(SetpointFallRate, 2).c_str());
+  if (!settingExists(NK_SetpointFallRate)) {
+    settingWrite(NK_SetpointFallRate, String(SetpointFallRate, 2).c_str());
   } else {
-    SetpointFallRate = readFile(LittleFS, "/SetpointFallRate.txt").toFloat();
+    SetpointFallRate = settingRead(NK_SetpointFallRate).toFloat();
   }
-  if (!fsExists("/StartupRiseRate.txt")) {
-    writeFile(LittleFS, "/StartupRiseRate.txt", String(StartupRiseRate, 2).c_str());
+  if (!settingExists(NK_StartupRiseRate)) {
+    settingWrite(NK_StartupRiseRate, String(StartupRiseRate, 2).c_str());
   } else {
-    StartupRiseRate = readFile(LittleFS, "/StartupRiseRate.txt").toFloat();
+    StartupRiseRate = settingRead(NK_StartupRiseRate).toFloat();
   }
-  if (!fsExists("/PIDTrackingGain.txt")) {
-    writeFile(LittleFS, "/PIDTrackingGain.txt", String(PIDTrackingGain, 2).c_str());
+  if (!settingExists(NK_PIDTrackingGain)) {
+    settingWrite(NK_PIDTrackingGain, String(PIDTrackingGain, 2).c_str());
   } else {
-    PIDTrackingGain = readFile(LittleFS, "/PIDTrackingGain.txt").toFloat();
+    PIDTrackingGain = settingRead(NK_PIDTrackingGain).toFloat();
   }
-  if (!fsExists("/AbsorptionVoltage.txt")) {
-    writeFile(LittleFS, "/AbsorptionVoltage.txt", String(AbsorptionVoltage).c_str());
+  if (!settingExists(NK_AbsorptionVoltage)) {
+    settingWrite(NK_AbsorptionVoltage, String(AbsorptionVoltage).c_str());
   } else {
-    AbsorptionVoltage = readFile(LittleFS, "/AbsorptionVoltage.txt").toFloat();
+    AbsorptionVoltage = settingRead(NK_AbsorptionVoltage).toFloat();
   }
-  if (!fsExists("/TargetVoltageSetpoint.txt")) {
-    writeFile(LittleFS, "/TargetVoltageSetpoint.txt", String(TargetVoltageSetpoint).c_str());
+  if (!settingExists(NK_TargetVoltageSetpoint)) {
+    settingWrite(NK_TargetVoltageSetpoint, String(TargetVoltageSetpoint).c_str());
   } else {
-    TargetVoltageSetpoint = readFile(LittleFS, "/TargetVoltageSetpoint.txt").toFloat();
+    TargetVoltageSetpoint = settingRead(NK_TargetVoltageSetpoint).toFloat();
   }
-  if (!fsExists("/AbsorptionTimeoutMs.txt")) {
-    writeFile(LittleFS, "/AbsorptionTimeoutMs.txt", String(AbsorptionTimeoutMs).c_str());
+  if (!settingExists(NK_AbsorptionTimeoutMs)) {
+    settingWrite(NK_AbsorptionTimeoutMs, String(AbsorptionTimeoutMs).c_str());
   } else {
-    AbsorptionTimeoutMs = readFile(LittleFS, "/AbsorptionTimeoutMs.txt").toInt();
+    AbsorptionTimeoutMs = settingRead(NK_AbsorptionTimeoutMs).toInt();
   }
-  if (!fsExists("/bulkVoltageHoldMs.txt")) {
-    writeFile(LittleFS, "/bulkVoltageHoldMs.txt", String(bulkVoltageHoldMs).c_str());
+  if (!settingExists(NK_bulkVoltageHoldMs)) {
+    settingWrite(NK_bulkVoltageHoldMs, String(bulkVoltageHoldMs).c_str());
   } else {
-    bulkVoltageHoldMs = readFile(LittleFS, "/bulkVoltageHoldMs.txt").toInt();
+    bulkVoltageHoldMs = settingRead(NK_bulkVoltageHoldMs).toInt();
   }
 
 
-  if (!fsExists("/VoltageKi.txt")) {
-    writeFile(LittleFS, "/VoltageKi.txt", String(VoltageKi).c_str());
+  if (!settingExists(NK_VoltageKi)) {
+    settingWrite(NK_VoltageKi, String(VoltageKi).c_str());
   } else {
-    VoltageKi = readFile(LittleFS, "/VoltageKi.txt").toFloat();
+    VoltageKi = settingRead(NK_VoltageKi).toFloat();
   }
   // VoltageKd (D term) removed — LittleFS file /VoltageKd.txt no longer loaded.
   // ProtectionProxGateV removed 2026-05-22 — no longer used by any protection. See CV_Loop_Dev_Summary.md.
-  if (!fsExists("/SlopeBleedThresh.txt")) {
-    writeFile(LittleFS, "/SlopeBleedThresh.txt", String(SlopeBleedThresh, 3).c_str());
+  if (!settingExists(NK_SlopeBleedThresh)) {
+    settingWrite(NK_SlopeBleedThresh, String(SlopeBleedThresh, 3).c_str());
   } else {
-    SlopeBleedThresh = readFile(LittleFS, "/SlopeBleedThresh.txt").toFloat();
+    SlopeBleedThresh = settingRead(NK_SlopeBleedThresh).toFloat();
   }
-  if (!fsExists("/SlopeBleedK.txt")) {
-    writeFile(LittleFS, "/SlopeBleedK.txt", String(SlopeBleedK, 1).c_str());
+  if (!settingExists(NK_SlopeBleedK)) {
+    settingWrite(NK_SlopeBleedK, String(SlopeBleedK, 1).c_str());
   } else {
-    SlopeBleedK = readFile(LittleFS, "/SlopeBleedK.txt").toFloat();
+    SlopeBleedK = settingRead(NK_SlopeBleedK).toFloat();
   }
-  if (!fsExists("/SlopeBleedProxV.txt")) {
-    writeFile(LittleFS, "/SlopeBleedProxV.txt", String(SlopeBleedProxV, 2).c_str());
+  if (!settingExists(NK_SlopeBleedProxV)) {
+    settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
   } else {
-    SlopeBleedProxV = readFile(LittleFS, "/SlopeBleedProxV.txt").toFloat();
+    SlopeBleedProxV = settingRead(NK_SlopeBleedProxV).toFloat();
   }
-  if (!fsExists("/PidKp.txt")) {
-    writeFile(LittleFS, "/PidKp.txt", String(PidKp, 3).c_str());
+  if (!settingExists(NK_PidKp)) {
+    settingWrite(NK_PidKp, String(PidKp, 3).c_str());
   } else {
-    PidKp = readFile(LittleFS, "/PidKp.txt").toFloat();
+    PidKp = settingRead(NK_PidKp).toFloat();
   }
-  if (!fsExists("/TempPIDKp.txt")) {
-    writeFile(LittleFS, "/TempPIDKp.txt", String(TempPIDKp, 6).c_str());
+  if (!settingExists(NK_TempPIDKp)) {
+    settingWrite(NK_TempPIDKp, String(TempPIDKp, 6).c_str());
   } else {
-    TempPIDKp = readFile(LittleFS, "/TempPIDKp.txt").toFloat();
+    TempPIDKp = settingRead(NK_TempPIDKp).toFloat();
   }
-  if (!fsExists("/ThermalLookaheadSec.txt")) {
-    writeFile(LittleFS, "/ThermalLookaheadSec.txt", String(ThermalLookaheadSec, 1).c_str());
+  if (!settingExists(NK_ThermalLookaheadSec)) {
+    settingWrite(NK_ThermalLookaheadSec, String(ThermalLookaheadSec, 1).c_str());
   } else {
-    ThermalLookaheadSec = max(0.0f, readFile(LittleFS, "/ThermalLookaheadSec.txt").toFloat());
-  }
-
-  if (!fsExists("/TempPIDKi.txt")) {
-    writeFile(LittleFS, "/TempPIDKi.txt", String(TempPIDKi, 6).c_str());
-  } else {
-    TempPIDKi = readFile(LittleFS, "/TempPIDKi.txt").toFloat();
+    ThermalLookaheadSec = max(0.0f, settingRead(NK_ThermalLookaheadSec).toFloat());
   }
 
-
-  if (!fsExists("/TempPIDIntervalMs.txt")) {
-    writeFile(LittleFS, "/TempPIDIntervalMs.txt", String(TempPIDIntervalMs).c_str());
+  if (!settingExists(NK_TempPIDKi)) {
+    settingWrite(NK_TempPIDKi, String(TempPIDKi, 6).c_str());
   } else {
-    TempPIDIntervalMs = readFile(LittleFS, "/TempPIDIntervalMs.txt").toInt();
-  }
-
-  if (!fsExists("/TempPIDFilterAlpha.txt")) {
-    writeFile(LittleFS, "/TempPIDFilterAlpha.txt", String(TempPIDFilterAlpha, 3).c_str());
-  } else {
-    TempPIDFilterAlpha = readFile(LittleFS, "/TempPIDFilterAlpha.txt").toFloat();
+    TempPIDKi = settingRead(NK_TempPIDKi).toFloat();
   }
 
 
-  if (!fsExists("/PidKi.txt")) {
-    writeFile(LittleFS, "/PidKi.txt", String(PidKi, 3).c_str());
+  if (!settingExists(NK_TempPIDIntervalMs)) {
+    settingWrite(NK_TempPIDIntervalMs, String(TempPIDIntervalMs).c_str());
   } else {
-    PidKi = readFile(LittleFS, "/PidKi.txt").toFloat();
+    TempPIDIntervalMs = settingRead(NK_TempPIDIntervalMs).toInt();
   }
-  if (!fsExists("/PidKd.txt")) {
-    writeFile(LittleFS, "/PidKd.txt", String(PidKd, 3).c_str());
+
+  if (!settingExists(NK_TempPIDFilterAlpha)) {
+    settingWrite(NK_TempPIDFilterAlpha, String(TempPIDFilterAlpha, 3).c_str());
   } else {
-    PidKd = readFile(LittleFS, "/PidKd.txt").toFloat();
+    TempPIDFilterAlpha = settingRead(NK_TempPIDFilterAlpha).toFloat();
   }
-  if (!fsExists("/DutySlowRampRate.txt")) {
-    writeFile(LittleFS, "/DutySlowRampRate.txt", String(DutySlowRampRate, 2).c_str());
+
+
+  if (!settingExists(NK_PidKi)) {
+    settingWrite(NK_PidKi, String(PidKi, 3).c_str());
   } else {
-    DutySlowRampRate = readFile(LittleFS, "/DutySlowRampRate.txt").toFloat();
+    PidKi = settingRead(NK_PidKi).toFloat();
   }
-  if (!fsExists("/ShutdownPhase2HoldMs.txt")) {
-    writeFile(LittleFS, "/ShutdownPhase2HoldMs.txt", String(ShutdownPhase2HoldMs).c_str());
+  if (!settingExists(NK_PidKd)) {
+    settingWrite(NK_PidKd, String(PidKd, 3).c_str());
   } else {
-    ShutdownPhase2HoldMs = readFile(LittleFS, "/ShutdownPhase2HoldMs.txt").toInt();
+    PidKd = settingRead(NK_PidKd).toFloat();
   }
-  if (!fsExists("/PidSampleDivisor.txt")) {
-    writeFile(LittleFS, "/PidSampleDivisor.txt", String(PidSampleDivisor).c_str());
+  if (!settingExists(NK_DutySlowRampRate)) {
+    settingWrite(NK_DutySlowRampRate, String(DutySlowRampRate, 2).c_str());
   } else {
-    PidSampleDivisor = readFile(LittleFS, "/PidSampleDivisor.txt").toInt();
+    DutySlowRampRate = settingRead(NK_DutySlowRampRate).toFloat();
+  }
+  if (!settingExists(NK_ShutdownPhase2HoldMs)) {
+    settingWrite(NK_ShutdownPhase2HoldMs, String(ShutdownPhase2HoldMs).c_str());
+  } else {
+    ShutdownPhase2HoldMs = settingRead(NK_ShutdownPhase2HoldMs).toInt();
+  }
+  if (!settingExists(NK_PidSampleDivisor)) {
+    settingWrite(NK_PidSampleDivisor, String(PidSampleDivisor).c_str());
+  } else {
+    PidSampleDivisor = settingRead(NK_PidSampleDivisor).toInt();
   }
   // Add after other learning settings:
-  if (!fsExists("/LearningSettlingPeriod.txt")) {
-    writeFile(LittleFS, "/LearningSettlingPeriod.txt", String(LearningSettlingPeriod).c_str());
+  if (!settingExists(NK_LearningSettlingPeriod)) {
+    settingWrite(NK_LearningSettlingPeriod, String(LearningSettlingPeriod).c_str());
   } else {
-    LearningSettlingPeriod = readFile(LittleFS, "/LearningSettlingPeriod.txt").toInt();
+    LearningSettlingPeriod = settingRead(NK_LearningSettlingPeriod).toInt();
   }
-  if (!fsExists("/LearningRPMChangeThreshold.txt")) {
-    writeFile(LittleFS, "/LearningRPMChangeThreshold.txt", String(LearningRPMChangeThreshold).c_str());
+  if (!settingExists(NK_LearningRPMChangeThreshold)) {
+    settingWrite(NK_LearningRPMChangeThreshold, String(LearningRPMChangeThreshold).c_str());
   } else {
-    LearningRPMChangeThreshold = readFile(LittleFS, "/LearningRPMChangeThreshold.txt").toInt();
+    LearningRPMChangeThreshold = settingRead(NK_LearningRPMChangeThreshold).toInt();
   }
-  if (!fsExists("/LearningTempHysteresis.txt")) {
-    writeFile(LittleFS, "/LearningTempHysteresis.txt", String(LearningTempHysteresis).c_str());
+  if (!settingExists(NK_LearningTempHysteresis)) {
+    settingWrite(NK_LearningTempHysteresis, String(LearningTempHysteresis).c_str());
   } else {
-    LearningTempHysteresis = readFile(LittleFS, "/LearningTempHysteresis.txt").toInt();
+    LearningTempHysteresis = settingRead(NK_LearningTempHysteresis).toInt();
   }
-  if (!fsExists("/MaxTableValue.txt")) {
-    writeFile(LittleFS, "/MaxTableValue.txt", String(MaxTableValue, 2).c_str());
+  if (!settingExists(NK_MaxTableValue)) {
+    settingWrite(NK_MaxTableValue, String(MaxTableValue, 2).c_str());
   } else {
-    MaxTableValue = readFile(LittleFS, "/MaxTableValue.txt").toFloat();
+    MaxTableValue = settingRead(NK_MaxTableValue).toFloat();
   }
   HardOCTripAmps = MaxTableValue + 10.0f;  // always derived, not persisted
   // MinTableValue — OBSOLETE REMOVE LATER (LittleFS init removed)
-  if (!fsExists("/MaxPenaltyPercent.txt")) {
-    writeFile(LittleFS, "/MaxPenaltyPercent.txt", String(MaxPenaltyPercent, 2).c_str());
+  if (!settingExists(NK_MaxPenaltyPercent)) {
+    settingWrite(NK_MaxPenaltyPercent, String(MaxPenaltyPercent, 2).c_str());
   } else {
-    MaxPenaltyPercent = readFile(LittleFS, "/MaxPenaltyPercent.txt").toFloat();
+    MaxPenaltyPercent = settingRead(NK_MaxPenaltyPercent).toFloat();
   }
-  if (!fsExists("/MaxPenaltyDuration.txt")) {
-    writeFile(LittleFS, "/MaxPenaltyDuration.txt", String(MaxPenaltyDuration).c_str());
+  if (!settingExists(NK_MaxPenaltyDuration)) {
+    settingWrite(NK_MaxPenaltyDuration, String(MaxPenaltyDuration).c_str());
   } else {
-    MaxPenaltyDuration = readFile(LittleFS, "/MaxPenaltyDuration.txt").toInt();
+    MaxPenaltyDuration = settingRead(NK_MaxPenaltyDuration).toInt();
   }
-  if (!fsExists("/NeighborLearningFactor.txt")) {
-    writeFile(LittleFS, "/NeighborLearningFactor.txt", String(NeighborLearningFactor, 3).c_str());
+  if (!settingExists(NK_NeighborLearningFactor)) {
+    settingWrite(NK_NeighborLearningFactor, String(NeighborLearningFactor, 3).c_str());
   } else {
-    NeighborLearningFactor = readFile(LittleFS, "/NeighborLearningFactor.txt").toFloat();
+    NeighborLearningFactor = settingRead(NK_NeighborLearningFactor).toFloat();
   }
-  if (!fsExists("/yyMax.txt")) {
-    writeFile(LittleFS, "/yyMax.txt", String(yyMax).c_str());
+  if (!settingExists(NK_yyMax)) {
+    settingWrite(NK_yyMax, String(yyMax).c_str());
   } else {
-    yyMax = readFile(LittleFS, "/yyMax.txt").toInt();
+    yyMax = settingRead(NK_yyMax).toInt();
   }
-  if (!fsExists("/LearningMemoryDuration.txt")) {
-    writeFile(LittleFS, "/LearningMemoryDuration.txt", String(LearningMemoryDuration).c_str());
+  if (!settingExists(NK_LearningMemoryDuration)) {
+    settingWrite(NK_LearningMemoryDuration, String(LearningMemoryDuration).c_str());
   } else {
-    LearningMemoryDuration = readFile(LittleFS, "/LearningMemoryDuration.txt").toInt();
+    LearningMemoryDuration = settingRead(NK_LearningMemoryDuration).toInt();
   }
   // LearningTableSaveInterval — OBSOLETE REMOVE LATER (LittleFS init removed)
-  if (!fsExists("/DutyRampRate.txt")) {
-    writeFile(LittleFS, "/DutyRampRate.txt", String(DutyRampRate, 1).c_str());
+  if (!settingExists(NK_DutyRampRate)) {
+    settingWrite(NK_DutyRampRate, String(DutyRampRate, 1).c_str());
   } else {
-    DutyRampRate = readFile(LittleFS, "/DutyRampRate.txt").toFloat();
+    DutyRampRate = settingRead(NK_DutyRampRate).toFloat();
   }
-  if (!fsExists("/SettleTimeBeforeCut.txt")) {
-    writeFile(LittleFS, "/SettleTimeBeforeCut.txt", String(SettleTimeBeforeCut).c_str());
+  if (!settingExists(NK_SettleTimeBeforeCut)) {
+    settingWrite(NK_SettleTimeBeforeCut, String(SettleTimeBeforeCut).c_str());
   } else {
-    SettleTimeBeforeCut = readFile(LittleFS, "/SettleTimeBeforeCut.txt").toInt();
+    SettleTimeBeforeCut = settingRead(NK_SettleTimeBeforeCut).toInt();
   }
-  if (!fsExists("/TempWarnExcess.txt")) {
-    writeFile(LittleFS, "/TempWarnExcess.txt", String(TempWarnExcess, 1).c_str());
+  if (!settingExists(NK_TempWarnExcess)) {
+    settingWrite(NK_TempWarnExcess, String(TempWarnExcess, 1).c_str());
   } else {
-    TempWarnExcess = readFile(LittleFS, "/TempWarnExcess.txt").toFloat();
+    TempWarnExcess = settingRead(NK_TempWarnExcess).toFloat();
   }
-  if (!fsExists("/TempCritExcess.txt")) {
-    writeFile(LittleFS, "/TempCritExcess.txt", String(TempCritExcess, 1).c_str());
+  if (!settingExists(NK_TempCritExcess)) {
+    settingWrite(NK_TempCritExcess, String(TempCritExcess, 1).c_str());
   } else {
-    TempCritExcess = readFile(LittleFS, "/TempCritExcess.txt").toFloat();
+    TempCritExcess = settingRead(NK_TempCritExcess).toFloat();
   }
-  if (!fsExists("/TempSustainedTimeout.txt")) {
-    writeFile(LittleFS, "/TempSustainedTimeout.txt", String(TempSustainedTimeout).c_str());
+  if (!settingExists(NK_TempSustainedTimeout)) {
+    settingWrite(NK_TempSustainedTimeout, String(TempSustainedTimeout).c_str());
   } else {
-    TempSustainedTimeout = readFile(LittleFS, "/TempSustainedTimeout.txt").toInt();
+    TempSustainedTimeout = settingRead(NK_TempSustainedTimeout).toInt();
   }
   // AlternatorHardShutdownV — absolute hard-shutdown voltage threshold.
   // First-boot default auto-scales as BulkVoltage + 0.3 V so 24V and 48V systems get
@@ -1701,206 +1699,206 @@ void InitSystemSettings() {  // load all settings from LittleFS.  If no files ex
   // a system-class change later requires manually re-setting it from the UI.
   // Migration: if the old /VoltageSpikeMargin.txt exists and the new file does not, convert
   // the stored margin to an absolute value (BulkVoltage was loaded earlier in this function).
-  if (!fsExists("/AlternatorHardShutdownV.txt")) {
-    if (fsExists("/VoltageSpikeMargin.txt")) {
-      float oldMargin = readFile(LittleFS, "/VoltageSpikeMargin.txt").toFloat();
+  if (!settingExists(NK_AlternatorHardShutdownV)) {
+    if (settingExists(NK_VoltageSpikeMargin)) {
+      float oldMargin = settingRead(NK_VoltageSpikeMargin).toFloat();
       AlternatorHardShutdownV = BulkVoltage + oldMargin;
     } else {
       AlternatorHardShutdownV = BulkVoltage + 0.3f;  // first-boot auto-scale default
     }
-    writeFile(LittleFS, "/AlternatorHardShutdownV.txt", String(AlternatorHardShutdownV, 2).c_str());
+    settingWrite(NK_AlternatorHardShutdownV, String(AlternatorHardShutdownV, 2).c_str());
   } else {
-    AlternatorHardShutdownV = readFile(LittleFS, "/AlternatorHardShutdownV.txt").toFloat();
+    AlternatorHardShutdownV = settingRead(NK_AlternatorHardShutdownV).toFloat();
   }
-  if (!fsExists("/HardOCDebounceMs.txt")) {
-    writeFile(LittleFS, "/HardOCDebounceMs.txt", String(HardOCDebounceMs).c_str());
+  if (!settingExists(NK_HardOCDebounceMs)) {
+    settingWrite(NK_HardOCDebounceMs, String(HardOCDebounceMs).c_str());
   } else {
-    HardOCDebounceMs = (uint32_t)readFile(LittleFS, "/HardOCDebounceMs.txt").toInt();
+    HardOCDebounceMs = (uint32_t)settingRead(NK_HardOCDebounceMs).toInt();
   }
-  if (!fsExists("/WarmupRampRate.txt")) {
-    writeFile(LittleFS, "/WarmupRampRate.txt", String(WarmupRampRate, 2).c_str());
+  if (!settingExists(NK_WarmupRampRate)) {
+    settingWrite(NK_WarmupRampRate, String(WarmupRampRate, 2).c_str());
   } else {
-    WarmupRampRate = max(0.0f, readFile(LittleFS, "/WarmupRampRate.txt").toFloat());
+    WarmupRampRate = max(0.0f, settingRead(NK_WarmupRampRate).toFloat());
   }
-  if (!fsExists("/IExcessK.txt")) {
-    writeFile(LittleFS, "/IExcessK.txt", String(IExcessK, 1).c_str());
+  if (!settingExists(NK_IExcessK)) {
+    settingWrite(NK_IExcessK, String(IExcessK, 1).c_str());
   } else {
-    IExcessK = readFile(LittleFS, "/IExcessK.txt").toFloat();
+    IExcessK = settingRead(NK_IExcessK).toFloat();
   }
-  if (!fsExists("/IExcessN.txt")) {
-    writeFile(LittleFS, "/IExcessN.txt", String(IExcessN).c_str());
+  if (!settingExists(NK_IExcessN)) {
+    settingWrite(NK_IExcessN, String(IExcessN).c_str());
   } else {
-    IExcessN = (int)readFile(LittleFS, "/IExcessN.txt").toInt();
+    IExcessN = (int)settingRead(NK_IExcessN).toInt();
   }
-  if (!fsExists("/IExcessKBleed.txt")) {
-    writeFile(LittleFS, "/IExcessKBleed.txt", String(IExcessKBleed, 2).c_str());
+  if (!settingExists(NK_IExcessKBleed)) {
+    settingWrite(NK_IExcessKBleed, String(IExcessKBleed, 2).c_str());
   } else {
-    IExcessKBleed = readFile(LittleFS, "/IExcessKBleed.txt").toFloat();
+    IExcessKBleed = settingRead(NK_IExcessKBleed).toFloat();
   }
-  if (!fsExists("/IExcessArmMarginV.txt")) {
-    writeFile(LittleFS, "/IExcessArmMarginV.txt", String(IExcessArmMarginV, 3).c_str());
+  if (!settingExists(NK_IExcessArmMarginV)) {
+    settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
   } else {
-    IExcessArmMarginV = readFile(LittleFS, "/IExcessArmMarginV.txt").toFloat();
+    IExcessArmMarginV = settingRead(NK_IExcessArmMarginV).toFloat();
   }
-  if (!fsExists("/AwBleedRate.txt")) {
-    writeFile(LittleFS, "/AwBleedRate.txt", String(AwBleedRate, 2).c_str());
+  if (!settingExists(NK_AwBleedRate)) {
+    settingWrite(NK_AwBleedRate, String(AwBleedRate, 2).c_str());
   } else {
-    AwBleedRate = readFile(LittleFS, "/AwBleedRate.txt").toFloat();
+    AwBleedRate = settingRead(NK_AwBleedRate).toFloat();
   }
   // AwRecoverRate is hardcoded (0.1f) — no LittleFS persistence
-  if (!fsExists("/AwSeedProtectMs.txt")) {
-    writeFile(LittleFS, "/AwSeedProtectMs.txt", String(AwSeedProtectMs).c_str());
+  if (!settingExists(NK_AwSeedProtectMs)) {
+    settingWrite(NK_AwSeedProtectMs, String(AwSeedProtectMs).c_str());
   } else {
-    AwSeedProtectMs = (uint16_t)readFile(LittleFS, "/AwSeedProtectMs.txt").toInt();
+    AwSeedProtectMs = (uint16_t)settingRead(NK_AwSeedProtectMs).toInt();
   }
-  if (!fsExists("/FastSetpointRiseRate.txt")) {
-    writeFile(LittleFS, "/FastSetpointRiseRate.txt", String(FastSetpointRiseRate, 1).c_str());
+  if (!settingExists(NK_FastSetpointRiseRate)) {
+    settingWrite(NK_FastSetpointRiseRate, String(FastSetpointRiseRate, 1).c_str());
   } else {
-    FastSetpointRiseRate = readFile(LittleFS, "/FastSetpointRiseRate.txt").toFloat();
+    FastSetpointRiseRate = settingRead(NK_FastSetpointRiseRate).toFloat();
   }
-  if (!fsExists("/FastSetpointRiseWindowMs.txt")) {
-    writeFile(LittleFS, "/FastSetpointRiseWindowMs.txt", String(FastSetpointRiseWindowMs).c_str());
+  if (!settingExists(NK_FastSetpointRiseWindowMs)) {
+    settingWrite(NK_FastSetpointRiseWindowMs, String(FastSetpointRiseWindowMs).c_str());
   } else {
-    FastSetpointRiseWindowMs = (uint32_t)readFile(LittleFS, "/FastSetpointRiseWindowMs.txt").toInt();
+    FastSetpointRiseWindowMs = (uint32_t)settingRead(NK_FastSetpointRiseWindowMs).toInt();
   }
-  if (!fsExists("/FastSetpointRiseHeadroomV.txt")) {
-    writeFile(LittleFS, "/FastSetpointRiseHeadroomV.txt", String(FastSetpointRiseHeadroomV, 2).c_str());
+  if (!settingExists(NK_FastSetpointRiseHeadroomV)) {
+    settingWrite(NK_FastSetpointRiseHeadroomV, String(FastSetpointRiseHeadroomV, 2).c_str());
   } else {
-    FastSetpointRiseHeadroomV = readFile(LittleFS, "/FastSetpointRiseHeadroomV.txt").toFloat();
+    FastSetpointRiseHeadroomV = settingRead(NK_FastSetpointRiseHeadroomV).toFloat();
   }
-  if (!fsExists("/KHard.txt")) {
-    writeFile(LittleFS, "/KHard.txt", String(KHard, 1).c_str());
+  if (!settingExists(NK_KHard)) {
+    settingWrite(NK_KHard, String(KHard, 1).c_str());
   } else {
-    KHard = readFile(LittleFS, "/KHard.txt").toFloat();
+    KHard = settingRead(NK_KHard).toFloat();
   }
   // ReseedFrac (was IExcessReseedFrac) — migrates from old filename if present
-  if (fsExists("/ReseedFrac.txt")) {
-    ReseedFrac = readFile(LittleFS, "/ReseedFrac.txt").toFloat();
-  } else if (fsExists("/IExcessReseedFrac.txt")) {
-    ReseedFrac = readFile(LittleFS, "/IExcessReseedFrac.txt").toFloat();
-    writeFile(LittleFS, "/ReseedFrac.txt", String(ReseedFrac, 2).c_str());
+  if (settingExists(NK_ReseedFrac)) {
+    ReseedFrac = settingRead(NK_ReseedFrac).toFloat();
+  } else if (settingExists(NK_IExcessReseedFrac)) {
+    ReseedFrac = settingRead(NK_IExcessReseedFrac).toFloat();
+    settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
   } else {
-    writeFile(LittleFS, "/ReseedFrac.txt", String(ReseedFrac, 2).c_str());
+    settingWrite(NK_ReseedFrac, String(ReseedFrac, 2).c_str());
   }
   // OvGroup1Enable — migrates from old /OvLayer2Enable.txt if found
-  if (fsExists("/OvGroup1Enable.txt")) {
-    OvGroup1Enable = readFile(LittleFS, "/OvGroup1Enable.txt").toInt() != 0;
-  } else if (fsExists("/OvLayer2Enable.txt")) {
-    OvGroup1Enable = readFile(LittleFS, "/OvLayer2Enable.txt").toInt() != 0;
-    writeFile(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
+  if (settingExists(NK_OvGroup1Enable)) {
+    OvGroup1Enable = settingRead(NK_OvGroup1Enable).toInt() != 0;
+  } else if (settingExists(NK_OvLayer2Enable)) {
+    OvGroup1Enable = settingRead(NK_OvLayer2Enable).toInt() != 0;
+    settingWrite(NK_OvGroup1Enable, String((int)OvGroup1Enable).c_str());
   } else {
-    writeFile(LittleFS, "/OvGroup1Enable.txt", String((int)OvGroup1Enable).c_str());
+    settingWrite(NK_OvGroup1Enable, String((int)OvGroup1Enable).c_str());
   }
   // OvGroup2Enable — migrates from old /OvLayer3Enable.txt if found
-  if (fsExists("/OvGroup2Enable.txt")) {
-    OvGroup2Enable = readFile(LittleFS, "/OvGroup2Enable.txt").toInt() != 0;
-  } else if (fsExists("/OvLayer3Enable.txt")) {
-    OvGroup2Enable = readFile(LittleFS, "/OvLayer3Enable.txt").toInt() != 0;
-    writeFile(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
+  if (settingExists(NK_OvGroup2Enable)) {
+    OvGroup2Enable = settingRead(NK_OvGroup2Enable).toInt() != 0;
+  } else if (settingExists(NK_OvLayer3Enable)) {
+    OvGroup2Enable = settingRead(NK_OvLayer3Enable).toInt() != 0;
+    settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
   } else {
-    writeFile(LittleFS, "/OvGroup2Enable.txt", String((int)OvGroup2Enable).c_str());
+    settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
   }
-  if (!fsExists("/IExcessSigSrc.txt")) {
-    writeFile(LittleFS, "/IExcessSigSrc.txt", String(IExcessSigSrc).c_str());
+  if (!settingExists(NK_IExcessSigSrc)) {
+    settingWrite(NK_IExcessSigSrc, String(IExcessSigSrc).c_str());
   } else {
-    IExcessSigSrc = constrain(readFile(LittleFS, "/IExcessSigSrc.txt").toInt(), 0, 2);
+    IExcessSigSrc = constrain(settingRead(NK_IExcessSigSrc).toInt(), 0, 2);
   }
-  if (!fsExists("/IExcessMA_N.txt")) {
-    writeFile(LittleFS, "/IExcessMA_N.txt", String(IExcessMA_N).c_str());
+  if (!settingExists(NK_IExcessMA_N)) {
+    settingWrite(NK_IExcessMA_N, String(IExcessMA_N).c_str());
   } else {
-    IExcessMA_N = constrain(readFile(LittleFS, "/IExcessMA_N.txt").toInt(), 1, I_RING_SIZE);
+    IExcessMA_N = constrain(settingRead(NK_IExcessMA_N).toInt(), 1, I_RING_SIZE);
   }
-  if (!fsExists("/OutputPIDSigSrc.txt")) {
-    writeFile(LittleFS, "/OutputPIDSigSrc.txt", String(OutputPIDSigSrc).c_str());
+  if (!settingExists(NK_OutputPIDSigSrc)) {
+    settingWrite(NK_OutputPIDSigSrc, String(OutputPIDSigSrc).c_str());
   } else {
-    OutputPIDSigSrc = constrain(readFile(LittleFS, "/OutputPIDSigSrc.txt").toInt(), 0, 2);
+    OutputPIDSigSrc = constrain(settingRead(NK_OutputPIDSigSrc).toInt(), 0, 2);
   }
-  if (!fsExists("/OutputPIDMA_N.txt")) {
-    writeFile(LittleFS, "/OutputPIDMA_N.txt", String(OutputPIDMA_N).c_str());
+  if (!settingExists(NK_OutputPIDMA_N)) {
+    settingWrite(NK_OutputPIDMA_N, String(OutputPIDMA_N).c_str());
   } else {
-    OutputPIDMA_N = constrain(readFile(LittleFS, "/OutputPIDMA_N.txt").toInt(), 1, I_RING_SIZE);
+    OutputPIDMA_N = constrain(settingRead(NK_OutputPIDMA_N).toInt(), 1, I_RING_SIZE);
   }
-  if (!fsExists("/OutputPIDFilterTC.txt")) {
-    writeFile(LittleFS, "/OutputPIDFilterTC.txt", String(OutputPIDFilterTC).c_str());
+  if (!settingExists(NK_OutputPIDFilterTC)) {
+    settingWrite(NK_OutputPIDFilterTC, String(OutputPIDFilterTC).c_str());
   } else {
-    OutputPIDFilterTC = readFile(LittleFS, "/OutputPIDFilterTC.txt").toFloat();
+    OutputPIDFilterTC = settingRead(NK_OutputPIDFilterTC).toFloat();
   }
-  if (!fsExists("/VoltageFilterTC.txt")) {
-    writeFile(LittleFS, "/VoltageFilterTC.txt", String(VoltageFilterTC).c_str());
+  if (!settingExists(NK_VoltageFilterTC)) {
+    settingWrite(NK_VoltageFilterTC, String(VoltageFilterTC).c_str());
   } else {
-    VoltageFilterTC = readFile(LittleFS, "/VoltageFilterTC.txt").toFloat();
+    VoltageFilterTC = settingRead(NK_VoltageFilterTC).toFloat();
   }
-  if (!fsExists("/TdPred.txt")) {
-    writeFile(LittleFS, "/TdPred.txt", String(TdPred, 3).c_str());
+  if (!settingExists(NK_TdPred)) {
+    settingWrite(NK_TdPred, String(TdPred, 3).c_str());
   } else {
-    TdPred = readFile(LittleFS, "/TdPred.txt").toFloat();
+    TdPred = settingRead(NK_TdPred).toFloat();
   }
-  if (!fsExists("/OvMeasMarginV.txt")) {
-    if (fsExists("/VSoftMarginV.txt")) { OvMeasMarginV = readFile(LittleFS, "/VSoftMarginV.txt").toFloat(); }
-    writeFile(LittleFS, "/OvMeasMarginV.txt", String(OvMeasMarginV, 3).c_str());
+  if (!settingExists(NK_OvMeasMarginV)) {
+    if (settingExists(NK_VSoftMarginV)) { OvMeasMarginV = settingRead(NK_VSoftMarginV).toFloat(); }
+    settingWrite(NK_OvMeasMarginV, String(OvMeasMarginV, 3).c_str());
   } else {
-    OvMeasMarginV = readFile(LittleFS, "/OvMeasMarginV.txt").toFloat();
+    OvMeasMarginV = settingRead(NK_OvMeasMarginV).toFloat();
   }
-  if (!fsExists("/OvPredMarginV.txt")) {
-    if (fsExists("/VHardMarginV.txt")) { OvPredMarginV = readFile(LittleFS, "/VHardMarginV.txt").toFloat(); }
-    writeFile(LittleFS, "/OvPredMarginV.txt", String(OvPredMarginV, 3).c_str());
+  if (!settingExists(NK_OvPredMarginV)) {
+    if (settingExists(NK_VHardMarginV)) { OvPredMarginV = settingRead(NK_VHardMarginV).toFloat(); }
+    settingWrite(NK_OvPredMarginV, String(OvPredMarginV, 3).c_str());
   } else {
-    OvPredMarginV = readFile(LittleFS, "/OvPredMarginV.txt").toFloat();
+    OvPredMarginV = settingRead(NK_OvPredMarginV).toFloat();
   }
   // DvdtTC (was DvdtAlpha) — migrates from old alpha-based file if present.
   // Conversion: TC = 5ms × (1 − α) / α  (preserves behavior at 5ms nominal cadence).
-  if (fsExists("/DvdtTC.txt")) {
-    DvdtTC = constrain(readFile(LittleFS, "/DvdtTC.txt").toFloat(), 5.0f, 500.0f);
-  } else if (fsExists("/DvdtAlpha.txt")) {
-    float oldAlpha = constrain(readFile(LittleFS, "/DvdtAlpha.txt").toFloat(), 0.01f, 0.50f);
+  if (settingExists(NK_DvdtTC)) {
+    DvdtTC = constrain(settingRead(NK_DvdtTC).toFloat(), 5.0f, 500.0f);
+  } else if (settingExists(NK_DvdtAlpha)) {
+    float oldAlpha = constrain(settingRead(NK_DvdtAlpha).toFloat(), 0.01f, 0.50f);
     DvdtTC = constrain(5.0f * (1.0f - oldAlpha) / oldAlpha, 5.0f, 500.0f);
-    writeFile(LittleFS, "/DvdtTC.txt", String(DvdtTC, 1).c_str());
+    settingWrite(NK_DvdtTC, String(DvdtTC, 1).c_str());
   } else {
-    writeFile(LittleFS, "/DvdtTC.txt", String(DvdtTC, 1).c_str());
+    settingWrite(NK_DvdtTC, String(DvdtTC, 1).c_str());
   }
-  if (!fsExists("/VoltageDisagreeThreshold.txt")) {
-    writeFile(LittleFS, "/VoltageDisagreeThreshold.txt", String(VoltageDisagreeThreshold, 2).c_str());
+  if (!settingExists(NK_VoltageDisagreeThreshold)) {
+    settingWrite(NK_VoltageDisagreeThreshold, String(VoltageDisagreeThreshold, 2).c_str());
   } else {
-    VoltageDisagreeThreshold = readFile(LittleFS, "/VoltageDisagreeThreshold.txt").toFloat();
+    VoltageDisagreeThreshold = settingRead(NK_VoltageDisagreeThreshold).toFloat();
   }
-  if (!fsExists("/VoltageDisagreeTimeout.txt")) {
-    writeFile(LittleFS, "/VoltageDisagreeTimeout.txt", String(VoltageDisagreeTimeout).c_str());
+  if (!settingExists(NK_VoltageDisagreeTimeout)) {
+    settingWrite(NK_VoltageDisagreeTimeout, String(VoltageDisagreeTimeout).c_str());
   } else {
-    VoltageDisagreeTimeout = readFile(LittleFS, "/VoltageDisagreeTimeout.txt").toInt();
+    VoltageDisagreeTimeout = settingRead(NK_VoltageDisagreeTimeout).toInt();
   }
   // (Old anomaly settings removed — alternator-health settings load via altSettingsLoad() in setup.)
 
-  if (!fsExists("/VoltageKp.txt")) {
-    writeFile(LittleFS, "/VoltageKp.txt", String(VoltageKp, 1).c_str());
+  if (!settingExists(NK_VoltageKp)) {
+    settingWrite(NK_VoltageKp, String(VoltageKp, 1).c_str());
   } else {
-    VoltageKp = readFile(LittleFS, "/VoltageKp.txt").toFloat();
+    VoltageKp = settingRead(NK_VoltageKp).toFloat();
   }
-  if (!fsExists("/VoltageLoopInterval.txt")) {
-    writeFile(LittleFS, "/VoltageLoopInterval.txt", String(VoltageLoopInterval).c_str());
+  if (!settingExists(NK_VoltageLoopInterval)) {
+    settingWrite(NK_VoltageLoopInterval, String(VoltageLoopInterval).c_str());
   } else {
-    VoltageLoopInterval = readFile(LittleFS, "/VoltageLoopInterval.txt").toInt();
+    VoltageLoopInterval = settingRead(NK_VoltageLoopInterval).toInt();
   }
-  if (!fsExists("/FIELD_COLLAPSE_DELAY.txt")) {
-    writeFile(LittleFS, "/FIELD_COLLAPSE_DELAY.txt", String(FIELD_COLLAPSE_DELAY).c_str());
+  if (!settingExists(NK_FIELD_COLLAPSE_DELAY)) {
+    settingWrite(NK_FIELD_COLLAPSE_DELAY, String(FIELD_COLLAPSE_DELAY).c_str());
   } else {
-    FIELD_COLLAPSE_DELAY = readFile(LittleFS, "/FIELD_COLLAPSE_DELAY.txt").toInt();
+    FIELD_COLLAPSE_DELAY = settingRead(NK_FIELD_COLLAPSE_DELAY).toInt();
   }
   // IMU safety thresholds — user-set via form, persisted to LittleFS (Pattern B).
   // imuMountOrientation rides on /vessel_info.json (separate path).
-  if (!fsExists("/CAPSIZE_THRESHOLD_DEG.txt")) {
-    writeFile(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt", String(CAPSIZE_THRESHOLD_DEG, 1).c_str());
+  if (!settingExists(NK_CAPSIZE_THRESHOLD_DEG)) {
+    settingWrite(NK_CAPSIZE_THRESHOLD_DEG, String(CAPSIZE_THRESHOLD_DEG, 1).c_str());
   } else {
-    CAPSIZE_THRESHOLD_DEG = readFile(LittleFS, "/CAPSIZE_THRESHOLD_DEG.txt").toFloat();
+    CAPSIZE_THRESHOLD_DEG = settingRead(NK_CAPSIZE_THRESHOLD_DEG).toFloat();
   }
-  if (!fsExists("/PITCHPOLE_THRESHOLD_DEG.txt")) {
-    writeFile(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt", String(PITCHPOLE_THRESHOLD_DEG, 1).c_str());
+  if (!settingExists(NK_PITCHPOLE_THRESHOLD_DEG)) {
+    settingWrite(NK_PITCHPOLE_THRESHOLD_DEG, String(PITCHPOLE_THRESHOLD_DEG, 1).c_str());
   } else {
-    PITCHPOLE_THRESHOLD_DEG = readFile(LittleFS, "/PITCHPOLE_THRESHOLD_DEG.txt").toFloat();
+    PITCHPOLE_THRESHOLD_DEG = settingRead(NK_PITCHPOLE_THRESHOLD_DEG).toFloat();
   }
-  if (!fsExists("/SLAM_THRESHOLD_G.txt")) {
-    writeFile(LittleFS, "/SLAM_THRESHOLD_G.txt", String(SLAM_THRESHOLD_G, 2).c_str());
+  if (!settingExists(NK_SLAM_THRESHOLD_G)) {
+    settingWrite(NK_SLAM_THRESHOLD_G, String(SLAM_THRESHOLD_G, 2).c_str());
   } else {
-    SLAM_THRESHOLD_G = readFile(LittleFS, "/SLAM_THRESHOLD_G.txt").toFloat();
+    SLAM_THRESHOLD_G = settingRead(NK_SLAM_THRESHOLD_G).toFloat();
   }
 }
 
@@ -2388,8 +2386,9 @@ void updateAccelMetrics() {
     zdoc["gx_bias"] = imuGxBias;
     zdoc["gy_bias"] = imuGyBias;
     zdoc["gz_bias"] = imuGzBias;
-    File zf = LittleFS.open("/imu_zero.json", "w");
-    if (zf) { serializeJson(zdoc, zf); zf.close(); }
+    String zout;
+    serializeJson(zdoc, zout);
+    settingWrite(NK_imu_zero, zout.c_str());
 
     cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
     imuZeroInProgress = false;

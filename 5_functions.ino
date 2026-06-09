@@ -639,7 +639,7 @@ void checkAndRestart() {
   }
 }
 void captureResetReason() {
-  String fileContent = readFile(LittleFS, "/LastResetReason.txt");
+  String fileContent = settingRead(NK_LastResetReason);
 
   // Parse "last,ancient" format
   int commaPos = fileContent.indexOf(',');
@@ -687,7 +687,7 @@ void captureResetReason() {
 
   // Save both values: "current,ancient"
   String saveStr = String(LastResetReason) + "," + String(ancientResetReason);
-  writeFile(LittleFS, "/LastResetReason.txt", saveStr.c_str());
+  settingWrite(NK_LastResetReason, saveStr.c_str());
 }
 void UpdateEngineFuel(unsigned long elapsedMillis) {
   // Only calculate fuel consumption if engine is running. (High-RPM glitch reject is below, scaled
@@ -3740,73 +3740,49 @@ void sha256(const char *input, char *outputBuffer) {  // for security
 }
 
 void loadPasswordHash() {
-  // First try to load plaintext password (for auth)
-  if (fsExists("/password.txt")) {
-    fsTakeLock();
-    File plainFile = LittleFS.open("/password.txt", "r");
-    if (plainFile) {
-      size_t n = plainFile.readBytesUntil('\n', requiredPassword, sizeof(requiredPassword) - 1);
-      requiredPassword[n] = '\0';
-
-      // Trim trailing whitespace/newlines
-      while (n > 0 && (requiredPassword[n - 1] == '\r' || requiredPassword[n - 1] == '\n' || requiredPassword[n - 1] == ' ' || requiredPassword[n - 1] == '\t')) {
-        requiredPassword[--n] = '\0';
-      }
-
-      plainFile.close();
-      Serial.println("Plaintext password loaded from LittleFS");
-    }
-    fsReleaseLock();
+  // First try to load plaintext password (for auth). Values imported from the
+  // old files may carry a trailing newline (println) — trim handles both.
+  if (settingExists(NK_password)) {
+    String plain = settingRead(NK_password);
+    plain.trim();
+    strncpy(requiredPassword, plain.c_str(), sizeof(requiredPassword) - 1);
+    requiredPassword[sizeof(requiredPassword) - 1] = '\0';
+    Serial.println("Plaintext password loaded from NVS");
   }
   // Now load the hash (for future use)
-  if (fsExists("/password.hash")) {
-    fsTakeLock();
-    File file = LittleFS.open("/password.hash", "r");
-    if (file) {
-      size_t len = file.readBytesUntil('\n', storedPasswordHash, sizeof(storedPasswordHash) - 1);
-      storedPasswordHash[len] = '\0';
-      file.close();
-      fsReleaseLock();
-      Serial.println("Password hash loaded from LittleFS");
+  if (settingExists(NK_passwordHash)) {
+    String hash = settingRead(NK_passwordHash);
+    hash.trim();
+    if (hash.length() > 0) {
+      strncpy(storedPasswordHash, hash.c_str(), sizeof(storedPasswordHash) - 1);
+      storedPasswordHash[sizeof(storedPasswordHash) - 1] = '\0';
+      Serial.println("Password hash loaded from NVS");
       return;
     }
-    fsReleaseLock();
   }
 
-  // If we get here, no password files exist - set defaults
+  // If we get here, no password keys exist - set defaults
   strncpy(requiredPassword, "admin", sizeof(requiredPassword) - 1);
   sha256("admin", storedPasswordHash);
-  Serial.println("No password file, using default admin password");
+  Serial.println("No password stored, using default admin password");
 }
 
 void savePasswordHash() {
-  fsTakeLock();
-  File file = LittleFS.open("/password.hash", "w");
-  if (file) {
-    file.println(storedPasswordHash);
-    file.close();
-    fsReleaseLock();
-    Serial.println("Password hash saved to LittleFS");
-    queueConsoleMessage("Password hash saved to LittleFS");
+  if (settingWrite(NK_passwordHash, storedPasswordHash)) {
+    Serial.println("Password hash saved to NVS");
+    queueConsoleMessage("Password hash saved");
   } else {
-    fsReleaseLock();
-    Serial.println("Failed to open password.hash for writing");
-    queueConsoleMessage("Failed to open password.hash for writing");
+    Serial.println("Failed to save password hash to NVS");
+    queueConsoleMessage("Password hash save failed");
   }
 }
 
 void savePasswordPlaintext(const char *password) {
-  fsTakeLock();
-  File file = LittleFS.open("/password.txt", "w");
-  if (file) {
-    file.println(password);
-    file.close();
-    fsReleaseLock();
-    Serial.println("Password saved to LittleFS");
+  if (settingWrite(NK_password, password)) {
+    Serial.println("Password saved to NVS");
     queueConsoleMessage("Password saved");
   } else {
-    fsReleaseLock();
-    Serial.println("Failed to open password.txt for writing");
+    Serial.println("Failed to save password to NVS");
     queueConsoleMessage("Password save failed");
   }
 }
@@ -4290,7 +4266,7 @@ void loadNVSData() {
 
   // imuMountOrientation now loads from /vessel_info.json in InitSystemSettings.
   // CAPSIZE_THRESHOLD_DEG / PITCHPOLE_THRESHOLD_DEG / SLAM_THRESHOLD_G now load from
-  // their own LittleFS files in InitSystemSettings (Pattern B).
+  // their own NVS "settings" keys in InitSystemSettings (Pattern B).
 
   // Extrema, environment maxima, and UV forecast
   required_size = sizeof(float); nvs_get_blob(nvs_handle, "MaxSpd",      &MaxSpeed,                         &required_size);

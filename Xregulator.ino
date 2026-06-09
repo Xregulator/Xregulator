@@ -409,7 +409,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.33";
+const char *FIRMWARE_VERSION = "0.0.34";
 
 String currentUID;
 
@@ -766,7 +766,7 @@ float cf_heel = 0;   // Filtered heel angle
 float cf_pitch = 0;  // Filtered pitch angle
 unsigned long cf_lastUpdate = 0;
 
-// --- IMU ZERO / LEVEL CALIBRATION (captured at rest, persisted to /imu_zero.json) ---
+// --- IMU ZERO / LEVEL CALIBRATION (captured at rest, persisted as JSON string in NVS key NK_imu_zero) ---
 float imuHeelOffsetDeg = 0;   // accel-derived heel at rest; subtracted from filter
 float imuPitchOffsetDeg = 0;  // accel-derived pitch at rest; subtracted from filter
 float imuGxBias = 0;          // gyro pitch-rate bias at rest (dps, vessel frame)
@@ -894,12 +894,10 @@ struct StreamingExtractor {
 BMP388_DEV bmp388;
 
 //WIFI STUFF
-//these will be the custom network created by the user in AP mode
+//these will be the custom network created by the user in AP mode (custom values persist in NVS as NK_apssid / NK_appass)
 String esp32_ap_ssid = "ALTERNATOR_WIFI";  // Default SSID
-const char *AP_SSID_FILE = "/apssid.txt";  // File to store custom SSID
 // WiFi connection timeout when trying to avoid Access Point Mode (and connect to ship's wifi on reboot)
 const unsigned long WIFI_TIMEOUT = 20000;  // 20 seconds
-const char *AP_PASSWORD_FILE = "/appass.txt";
 String esp32_ap_password = "alternator123";  // Default ESP32 AP password
 //WiFi Reconnection Management with Signal Strength Awareness
 struct WiFiReconnection {
@@ -3796,9 +3794,7 @@ unsigned long webgaugesinterval = 100;      // delay in ms between sensor update
 int plotTimeWindow = 60;                    // Plot time window in seconds
 unsigned long healthystuffinterval = 5000;  // check hardware health parameters only every 5 seconds, not that they consume much   THIS IS DEAD CODE, REMOVE LATER
 
-// WiFi provisioning settings
-const char *WIFI_SSID_FILE = "/ssid.txt";
-const char *WIFI_PASS_FILE = "/pass.txt";
+// WiFi provisioning settings persist in NVS as NK_ssid / NK_pass
 // Cached WiFi client credentials (loaded once, reused for reconnects)
 char cached_wifi_ssid[33] = "";  // 32 + null
 char cached_wifi_pass[65] = "";  // 64 + null
@@ -4216,6 +4212,7 @@ void setup() {
   MaxLoopTime = 0;                       // reset for this session (persists to NVS on next save)
   totalPowerCycles++;
   saveNVSDataFull();  // Synchronous write — persists boot-time adjustments before loop() starts
+  importLegacySettingsFromLittleFS();  // one-time pre-NVS sweep — MUST run before ANY settings reader (alt/perf loaders below, InitSystemSettings, WiFi creds, password)
   initAlternatorHealth();
   altSettingsLoad();
   initBoatPerformance();
@@ -4237,7 +4234,7 @@ void setup() {
   // If you have custom headers, also:
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "*");
 
-  InitSystemSettings();       // load all settings from LittleFS.  If no files exist, create them.
+  InitSystemSettings();       // load all settings from NVS (one-time LittleFS import sweep first).  If no keys exist, create them.
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS
   loadCVTuningLog();          // restore CV tuning records from LittleFS

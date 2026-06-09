@@ -138,6 +138,573 @@ bool fsRemove(const char *path) {
   return result;
 }
 
+// ==== NVS settings layer ====
+// User settings live in the NVS "settings" namespace as strings, NOT in
+// LittleFS files. The userdata LittleFS partition is high-churn (logs, rings,
+// history) and mounts with formatOnFail — a corruption there must not wipe
+// user settings. String storage keeps exact parity with the old file contents
+// (same parse paths, e.g. ChargeEfficiency's user-readable "99.0" form).
+// NVS keys cap at 15 chars, so long setting names map to short keys via the
+// NK_* macros below (generated; doc: Working Markdown Docs/NVS_SETTINGS_KEY_MAP.md).
+// The alt*/perf* registry tables in 7_functions.ino use their entry names
+// truncated to 15 chars as keys directly — keep new registry names unique
+// in their first 15 chars.
+#define NK_AbsorptionTimeoutMs "AbsorptionTmtMs"
+#define NK_AbsorptionVoltage "AbsorptionVoltg"
+#define NK_AlarmActivate "AlarmActivate"
+#define NK_AlarmLatchEnabled "AlarmLatchEnbld"
+#define NK_AlternatorCOffset "AlternatrCOffst"
+#define NK_AlternatorHardShutdownV "AltrntrHrdShtdw"
+#define NK_AlternatorNominalAmps "AltrntrNmnlAmps"
+#define NK_AmbientTempCorrectionFactor "AmbntTmpCrrctnF"
+#define NK_AmpSensorRange "AmpSensorRange"
+#define NK_AutoAltCurrentZero "AutoAltCurrntZr"
+#define NK_AutoShuntGainCorrection "AutShntGnCrrctn"
+#define NK_AwBleedRate "AwBleedRate"
+#define NK_AwSeedProtectMs "AwSeedProtectMs"
+#define NK_BatteryCOffset "BatteryCOffset"
+#define NK_BatteryCapacity_Ah "BatteryCapctyAh"
+#define NK_BatteryCurrentSource "BatteryCrrntSrc"
+#define NK_Beta "Beta"
+#define NK_BulkVoltage "BulkVoltage"
+#define NK_CAPSIZE_THRESHOLD_DEG "CAPSIZETHRESHOL"
+#define NK_CVTuningMode "CVTuningMode"
+#define NK_ChargeEfficiency "ChargeEfficincy"
+#define NK_ChargedDetectionTime "ChargedDetctnTm"
+#define NK_ChargedVoltage "ChargedVoltage"
+#define NK_CloudFeatures "CloudFeatures"
+#define NK_CurrentAlarmHigh "CurrentAlarmHgh"
+#define NK_CurrentThreshold "CurrentThreshld"
+#define NK_DutyRampRate "DutyRampRate"
+#define NK_DutySlowRampRate "DutySlowRampRat"
+#define NK_DvdtAlpha "DvdtAlpha"
+#define NK_DvdtTC "DvdtTC"
+#define NK_EnableAmbientCorrection "EnblAmbntCrrctn"
+#define NK_FIELD_COLLAPSE_DELAY "FIELDCOLLAPSEDE"
+#define NK_FLOAT_DURATION "FLOAT_DURATION"
+#define NK_FastSetpointRiseHeadroomV "FstStpntRsHdrmV"
+#define NK_FastSetpointRiseRate "FastSetpontRsRt"
+#define NK_FastSetpointRiseWindowMs "FstStpntRsWndwM"
+#define NK_FieldAdjustmentInterval "FldAdjstmntIntr"
+#define NK_FieldResistance "FieldResistance"
+#define NK_FloatVoltage "FloatVoltage"
+#define NK_FuelEfficiency "FuelEfficiency"
+#define NK_HardOCDebounceMs "HardOCDebouncMs"
+#define NK_HiLow "HiLow"
+#define NK_IExcessArmMarginV "IExcessArmMrgnV"
+#define NK_IExcessK "IExcessK"
+#define NK_IExcessKBleed "IExcessKBleed"
+#define NK_IExcessMA_N "IExcessMA_N"
+#define NK_IExcessN "IExcessN"
+#define NK_IExcessReseedFrac "IExcessResedFrc"
+#define NK_IExcessSigSrc "IExcessSigSrc"
+#define NK_IgnitionOverride "IgnitionOverrid"
+#define NK_IgnoreLearningDuringPenalty "IgnrLrnngDrngPn"
+#define NK_IgnoreRPM "IgnoreRPM"
+#define NK_IgnoreTemperature "IgnoreTemperatr"
+#define NK_InputFilterTC "InputFilterTC"
+#define NK_InvertAltAmps "InvertAltAmps"
+#define NK_InvertBattAmps "InvertBattAmps"
+#define NK_KHard "KHard"
+#define NK_LastResetReason "LastResetReason"
+#define NK_LatitudeManual "LatitudeManual"
+#define NK_LatitudeNMEA "LatitudeNMEA"
+#define NK_LearningDownStep "LearningDownStp"
+#define NK_LearningMemoryDuration "LearnngMmryDrtn"
+#define NK_LearningRPMChangeThreshold "LrnngRPMChngThr"
+#define NK_LearningSettlingPeriod "LernngSttlngPrd"
+#define NK_LearningTempHysteresis "LrnngTmpHystrss"
+#define NK_LearningUpStep "LearningUpStep"
+#define NK_LimpHome "LimpHome"
+#define NK_LoadDumpDtThresh "LoadDumpDtThrsh"
+#define NK_LoadDumpDtThresh1 "LoadDmpDtThrsh1"
+#define NK_LoadDumpDtThresh3 "LoadDmpDtThrsh3"
+#define NK_LogAllLearningEvents "LgAllLrnngEvnts"
+#define NK_LongitudeManual "LongitudeManual"
+#define NK_LongitudeNMEA "LongitudeNMEA"
+#define NK_MaintainMode "MaintainMode"
+#define NK_ManualDutyTarget "ManualDutyTargt"
+#define NK_ManualFieldToggle "ManualFieldTggl"
+#define NK_ManualLifePercentage "ManualLifPrcntg"
+#define NK_ManualSOCPoint "ManualSOCPoint"
+#define NK_MaxDuty "MaxDuty"
+#define NK_MaxPenaltyDuration "MaxPenaltyDurtn"
+#define NK_MaxPenaltyPercent "MaxPenaltyPrcnt"
+#define NK_MaxTableValue "MaxTableValue"
+#define NK_MaximumAllowedBatteryAmps "MxmmAllwdBttryA"
+#define NK_MinDuty "MinDuty"
+#define NK_MinFloatTime "MinFloatTime"
+#define NK_MinLearningInterval "MinLernngIntrvl"
+#define NK_MinRPMForField "MinRPMForField"
+#define NK_NMEA0183Data "NMEA0183Data"
+#define NK_NMEA2KData "NMEA2KData"
+#define NK_NeighborLearningFactor "NeghbrLrnngFctr"
+#define NK_OnOff "OnOff"
+#define NK_OutputPIDFilterTC "OutputPIDFltrTC"
+#define NK_OutputPIDMA_N "OutputPIDMA_N"
+#define NK_OutputPIDSigSrc "OutputPIDSigSrc"
+#define NK_OvGroup1Enable "OvGroup1Enable"
+#define NK_OvGroup2Enable "OvGroup2Enable"
+#define NK_OvLayer2Enable "OvLayer2Enable"
+#define NK_OvLayer3Enable "OvLayer3Enable"
+#define NK_OvMeasMarginV "OvMeasMarginV"
+#define NK_OvPredMarginV "OvPredMarginV"
+#define NK_PIDTrackingGain "PIDTrackingGain"
+#define NK_PITCHPOLE_THRESHOLD_DEG "PITCHPOLETHRESH"
+#define NK_PeukertExponent "PeukertExponent"
+#define NK_PidKd "PidKd"
+#define NK_PidKi "PidKi"
+#define NK_PidKp "PidKp"
+#define NK_PidSampleDivisor "PidSampleDivisr"
+#define NK_PulleyRatio "PulleyRatio"
+#define NK_RPMScalingFactor "RPMScalingFactr"
+#define NK_R_fixed "R_fixed"
+#define NK_RebulkCurrent_A "RebulkCurrent_A"
+#define NK_RebulkVoltage "RebulkVoltage"
+#define NK_ReseedFrac "ReseedFrac"
+#define NK_SLAM_THRESHOLD_G "SLAMTHRESHOLDG"
+#define NK_SOC_AllowRebulk_percent "SOCAllwRblkprcn"
+#define NK_SOC_BlockRebulk_percent "SOCBlckRblkprcn"
+#define NK_SafeOperationThreshold "SafOprtnThrshld"
+#define NK_SetpointFallRate "SetpointFallRat"
+#define NK_SetpointRiseRate "SetpointRiseRat"
+#define NK_SettleTimeBeforeCut "SettleTimeBfrCt"
+#define NK_ShuntResistanceMicroOhm "ShntRsstncMcrOh"
+#define NK_ShutdownPhase2HoldMs "ShtdwnPhs2HldMs"
+#define NK_SlopeBleedK "SlopeBleedK"
+#define NK_SlopeBleedProxV "SlopeBleedProxV"
+#define NK_SlopeBleedThresh "SlopeBleedThrsh"
+#define NK_SolarWatts "SolarWatts"
+#define NK_StartupRiseRate "StartupRiseRate"
+#define NK_SwitchControlOverride "SwtchCntrlOvrrd"
+#define NK_SwitchingFrequency "SwitchingFrqncy"
+#define NK_SystemIDStepAmplitude "SystmIDStpAmplt"
+#define NK_T0_C "T0_C"
+#define NK_TailCurrent "TailCurrent"
+#define NK_TailCurrent_A "TailCurrent_A"
+#define NK_TargetVoltageMode "TargetVoltageMd"
+#define NK_TargetVoltageSetpoint "TargetVltgStpnt"
+#define NK_TdPred "TdPred"
+#define NK_TempAlarm "TempAlarm"
+#define NK_TempAlarmLow "TempAlarmLow"
+#define NK_TempCritExcess "TempCritExcess"
+#define NK_TempPIDFilterAlpha "TempPIDFltrAlph"
+#define NK_TempPIDIntervalMs "TempPIDIntrvlMs"
+#define NK_TempPIDKi "TempPIDKi"
+#define NK_TempPIDKp "TempPIDKp"
+#define NK_TempSource "TempSource"
+#define NK_TempSustainedTimeout "TempSustaindTmt"
+#define NK_TempWarnExcess "TempWarnExcess"
+#define NK_TemperatureLimitF "TemperatureLmtF"
+#define NK_ThermalLookaheadSec "ThermalLookhdSc"
+#define NK_ThermalTuningMode "ThermalTuningMd"
+#define NK_TuningMode "TuningMode"
+#define NK_UVThresholdHigh "UVThresholdHigh"
+#define NK_UseFloat "UseFloat"
+#define NK_VHardMarginV "VHardMarginV"
+#define NK_VSoftMarginV "VSoftMarginV"
+#define NK_VeData "VeData"
+#define NK_VoltageAlarmHigh "VoltageAlarmHgh"
+#define NK_VoltageAlarmLow "VoltageAlarmLow"
+#define NK_VoltageDisagreeThreshold "VltgDsgrThrshld"
+#define NK_VoltageDisagreeTimeout "VoltageDisgrTmt"
+#define NK_VoltageFilterTC "VoltageFilterTC"
+#define NK_VoltageKi "VoltageKi"
+#define NK_VoltageKp "VoltageKp"
+#define NK_VoltageLoopInterval "VoltageLpIntrvl"
+#define NK_VoltageSpikeMargin "VoltageSpikMrgn"
+#define NK_WarmupRampRate "WarmupRampRate"
+#define NK_WeatherTimeoutMs "WeatherTimeotMs"
+#define NK_WeatherUpdateInterval "WethrUpdtIntrvl"
+#define NK_WindingTempOffset "WindingTmpOffst"
+#define NK_Ymax1 "Ymax1"
+#define NK_Ymax2 "Ymax2"
+#define NK_Ymax3 "Ymax3"
+#define NK_Ymax4 "Ymax4"
+#define NK_Ymin1 "Ymin1"
+#define NK_Ymin2 "Ymin2"
+#define NK_Ymin3 "Ymin3"
+#define NK_Ymin4 "Ymin4"
+#define NK_absorptionCompleteTime "absorptnCmpltTm"
+#define NK_altPaused "altPaused"
+#define NK_altbaseSec "altbaseSec"
+#define NK_bmsLogic "bmsLogic"
+#define NK_bmsLogicLevelOff "bmsLogicLevlOff"
+#define NK_bulkVoltageHoldMs "bulkVoltagHldMs"
+#define NK_capLimitMode "capLimitMode"
+#define NK_cvConsecutiveReads "cvConsecutivRds"
+#define NK_cvKOvershoot "cvKOvershoot"
+#define NK_cvWaveAmplitudeV "cvWaveAmplitudV"
+#define NK_cvWavePeriodSec "cvWavePeriodSec"
+#define NK_displayTempUnit "displayTempUnit"
+#define NK_gpsManualActive "gpsManualActive"
+#define NK_gpsTimeSourceMode "gpsTimeSourceMd"
+#define NK_hardwarePresent "hardwarePresent"
+#define NK_maxPoints "maxPoints"
+#define NK_perfPaused "perfPaused"
+#define NK_performanceRatio "performanceRati"
+#define NK_plotTimeWindow "plotTimeWindow"
+#define NK_rebulkDebounceTime "rebulkDebouncTm"
+#define NK_socInfoAvailable "socInfoAvailabl"
+#define NK_thermalConsecutiveReads "thermlCnsctvRds"
+#define NK_thermalKOvershoot "thermalKOversht"
+#define NK_thermalKUndershoot "thermalKUndrsht"
+#define NK_thermalSettleThreshF "thrmlSttlThrshF"
+#define NK_thermalWaveHalfPeriodMin "thrmlWvHlfPrdMn"
+#define NK_thermalWaveHighF "thermalWaveHghF"
+#define NK_thermalWaveLowF "thermalWaveLowF"
+#define NK_timeAxisModeChanging "timeAxsMdChngng"
+#define NK_totalPowerCycles "totalPowerCycls"
+#define NK_waveAmplitude "waveAmplitude"
+#define NK_wavePeriod "wavePeriod"
+#define NK_weatherDataValid "weatherDataVald"
+#define NK_weatherModeEnabled "weatherModEnbld"
+#define NK_webgaugesinterval "webgaugesintrvl"
+#define NK_xTime "xTime"
+#define NK_yyMax "yyMax"
+#define NK_yyMin "yyMin"
+// WiFi provisioning + interface password + IMU level calibration (migrated 2nd pass)
+#define NK_ssid "ssid"
+#define NK_pass "pass"
+#define NK_apssid "apssid"
+#define NK_appass "appass"
+#define NK_first_config_done "firstconfigdone"
+#define NK_password "password"
+#define NK_passwordHash "passwordHash"
+#define NK_imu_zero "imu_zero"
+
+#define SETTINGS_NVS_NAMESPACE "settings"
+
+bool settingExists(const char *key) {
+  nvs_handle_t h;
+  if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+  size_t len = 0;
+  bool found = (nvs_get_str(h, key, NULL, &len) == ESP_OK);
+  nvs_close(h);
+  return found;
+}
+
+String settingRead(const char *key) {
+  nvs_handle_t h;
+  if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return String();
+  String out;
+  size_t len = 0;
+  if (nvs_get_str(h, key, NULL, &len) == ESP_OK && len > 0 && len < 4096) {
+    char *buf = (char *)malloc(len);
+    if (buf) {
+      if (nvs_get_str(h, key, buf, &len) == ESP_OK) out = String(buf);
+      free(buf);
+    }
+  }
+  nvs_close(h);
+  return out;
+}
+
+bool settingWrite(const char *key, const char *value) {
+  if (!key || !value) return false;
+  nvs_handle_t h;
+  if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+  // compare-first: unchanged value -> no flash write (wear + entry churn)
+  char cur[128];
+  size_t len = sizeof(cur);
+  if (nvs_get_str(h, key, cur, &len) == ESP_OK && strcmp(cur, value) == 0) {
+    nvs_close(h);
+    return true;
+  }
+  esp_err_t e = nvs_set_str(h, key, value);
+  if (e == ESP_OK) e = nvs_commit(h);
+  nvs_close(h);
+  return e == ESP_OK;
+}
+
+bool settingRemove(const char *key) {
+  nvs_handle_t h;
+  if (nvs_open(SETTINGS_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+  esp_err_t e = nvs_erase_key(h, key);
+  if (e == ESP_OK) e = nvs_commit(h);
+  nvs_close(h);
+  return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;  // already-absent counts as removed
+}
+
+// One-time sweep at boot: move any pre-NVS settings file into NVS, then delete
+// the file. No-op once the filesystem is clean; a virgin device finds nothing
+// and falls through to hardcoded defaults in InitSystemSettings.
+struct LegacySettingFile { const char *file; const char *key; };
+static const LegacySettingFile LEGACY_SETTINGS[] = {
+  { "/AbsorptionTimeoutMs.txt", NK_AbsorptionTimeoutMs },
+  { "/AbsorptionVoltage.txt", NK_AbsorptionVoltage },
+  { "/AlarmActivate.txt", NK_AlarmActivate },
+  { "/AlarmLatchEnabled.txt", NK_AlarmLatchEnabled },
+  { "/AlternatorCOffset.txt", NK_AlternatorCOffset },
+  { "/AlternatorHardShutdownV.txt", NK_AlternatorHardShutdownV },
+  { "/AlternatorNominalAmps.txt", NK_AlternatorNominalAmps },
+  { "/AmbientTempCorrectionFactor.txt", NK_AmbientTempCorrectionFactor },
+  { "/AmpSensorRange.txt", NK_AmpSensorRange },
+  { "/AutoAltCurrentZero.txt", NK_AutoAltCurrentZero },
+  { "/AutoShuntGainCorrection.txt", NK_AutoShuntGainCorrection },
+  { "/AwBleedRate.txt", NK_AwBleedRate },
+  { "/AwSeedProtectMs.txt", NK_AwSeedProtectMs },
+  { "/BatteryCOffset.txt", NK_BatteryCOffset },
+  { "/BatteryCapacity_Ah.txt", NK_BatteryCapacity_Ah },
+  { "/BatteryCurrentSource.txt", NK_BatteryCurrentSource },
+  { "/Beta.txt", NK_Beta },
+  { "/BulkVoltage.txt", NK_BulkVoltage },
+  { "/CAPSIZE_THRESHOLD_DEG.txt", NK_CAPSIZE_THRESHOLD_DEG },
+  { "/CVTuningMode.txt", NK_CVTuningMode },
+  { "/ChargeEfficiency.txt", NK_ChargeEfficiency },
+  { "/ChargedDetectionTime.txt", NK_ChargedDetectionTime },
+  { "/ChargedVoltage.txt", NK_ChargedVoltage },
+  { "/CloudFeatures.txt", NK_CloudFeatures },
+  { "/CurrentAlarmHigh.txt", NK_CurrentAlarmHigh },
+  { "/CurrentThreshold.txt", NK_CurrentThreshold },
+  { "/DutyRampRate.txt", NK_DutyRampRate },
+  { "/DutySlowRampRate.txt", NK_DutySlowRampRate },
+  { "/DvdtAlpha.txt", NK_DvdtAlpha },
+  { "/DvdtTC.txt", NK_DvdtTC },
+  { "/EnableAmbientCorrection.txt", NK_EnableAmbientCorrection },
+  { "/FIELD_COLLAPSE_DELAY.txt", NK_FIELD_COLLAPSE_DELAY },
+  { "/FLOAT_DURATION.txt", NK_FLOAT_DURATION },
+  { "/FastSetpointRiseHeadroomV.txt", NK_FastSetpointRiseHeadroomV },
+  { "/FastSetpointRiseRate.txt", NK_FastSetpointRiseRate },
+  { "/FastSetpointRiseWindowMs.txt", NK_FastSetpointRiseWindowMs },
+  { "/FieldAdjustmentInterval.txt", NK_FieldAdjustmentInterval },
+  { "/FieldResistance.txt", NK_FieldResistance },
+  { "/FloatVoltage.txt", NK_FloatVoltage },
+  { "/FuelEfficiency.txt", NK_FuelEfficiency },
+  { "/HardOCDebounceMs.txt", NK_HardOCDebounceMs },
+  { "/HiLow.txt", NK_HiLow },
+  { "/IExcessArmMarginV.txt", NK_IExcessArmMarginV },
+  { "/IExcessK.txt", NK_IExcessK },
+  { "/IExcessKBleed.txt", NK_IExcessKBleed },
+  { "/IExcessMA_N.txt", NK_IExcessMA_N },
+  { "/IExcessN.txt", NK_IExcessN },
+  { "/IExcessReseedFrac.txt", NK_IExcessReseedFrac },
+  { "/IExcessSigSrc.txt", NK_IExcessSigSrc },
+  { "/IgnitionOverride.txt", NK_IgnitionOverride },
+  { "/IgnoreLearningDuringPenalty.txt", NK_IgnoreLearningDuringPenalty },
+  { "/IgnoreRPM.txt", NK_IgnoreRPM },
+  { "/IgnoreTemperature.txt", NK_IgnoreTemperature },
+  { "/InputFilterTC.txt", NK_InputFilterTC },
+  { "/InvertAltAmps.txt", NK_InvertAltAmps },
+  { "/InvertBattAmps.txt", NK_InvertBattAmps },
+  { "/KHard.txt", NK_KHard },
+  { "/LastResetReason.txt", NK_LastResetReason },
+  { "/LatitudeManual.txt", NK_LatitudeManual },
+  { "/LatitudeNMEA.txt", NK_LatitudeNMEA },
+  { "/LearningDownStep.txt", NK_LearningDownStep },
+  { "/LearningMemoryDuration.txt", NK_LearningMemoryDuration },
+  { "/LearningRPMChangeThreshold.txt", NK_LearningRPMChangeThreshold },
+  { "/LearningSettlingPeriod.txt", NK_LearningSettlingPeriod },
+  { "/LearningTempHysteresis.txt", NK_LearningTempHysteresis },
+  { "/LearningUpStep.txt", NK_LearningUpStep },
+  { "/LimpHome.txt", NK_LimpHome },
+  { "/LoadDumpDtThresh.txt", NK_LoadDumpDtThresh },
+  { "/LoadDumpDtThresh1.txt", NK_LoadDumpDtThresh1 },
+  { "/LoadDumpDtThresh3.txt", NK_LoadDumpDtThresh3 },
+  { "/LogAllLearningEvents.txt", NK_LogAllLearningEvents },
+  { "/LongitudeManual.txt", NK_LongitudeManual },
+  { "/LongitudeNMEA.txt", NK_LongitudeNMEA },
+  { "/MaintainMode.txt", NK_MaintainMode },
+  { "/ManualDutyTarget.txt", NK_ManualDutyTarget },
+  { "/ManualFieldToggle.txt", NK_ManualFieldToggle },
+  { "/ManualLifePercentage.txt", NK_ManualLifePercentage },
+  { "/ManualSOCPoint.txt", NK_ManualSOCPoint },
+  { "/MaxDuty.txt", NK_MaxDuty },
+  { "/MaxPenaltyDuration.txt", NK_MaxPenaltyDuration },
+  { "/MaxPenaltyPercent.txt", NK_MaxPenaltyPercent },
+  { "/MaxTableValue.txt", NK_MaxTableValue },
+  { "/MaximumAllowedBatteryAmps.txt", NK_MaximumAllowedBatteryAmps },
+  { "/MinDuty.txt", NK_MinDuty },
+  { "/MinFloatTime.txt", NK_MinFloatTime },
+  { "/MinLearningInterval.txt", NK_MinLearningInterval },
+  { "/MinRPMForField.txt", NK_MinRPMForField },
+  { "/NMEA0183Data.txt", NK_NMEA0183Data },
+  { "/NMEA2KData.txt", NK_NMEA2KData },
+  { "/NeighborLearningFactor.txt", NK_NeighborLearningFactor },
+  { "/OnOff.txt", NK_OnOff },
+  { "/OutputPIDFilterTC.txt", NK_OutputPIDFilterTC },
+  { "/OutputPIDMA_N.txt", NK_OutputPIDMA_N },
+  { "/OutputPIDSigSrc.txt", NK_OutputPIDSigSrc },
+  { "/OvGroup1Enable.txt", NK_OvGroup1Enable },
+  { "/OvGroup2Enable.txt", NK_OvGroup2Enable },
+  { "/OvLayer2Enable.txt", NK_OvLayer2Enable },
+  { "/OvLayer3Enable.txt", NK_OvLayer3Enable },
+  { "/OvMeasMarginV.txt", NK_OvMeasMarginV },
+  { "/OvPredMarginV.txt", NK_OvPredMarginV },
+  { "/PIDTrackingGain.txt", NK_PIDTrackingGain },
+  { "/PITCHPOLE_THRESHOLD_DEG.txt", NK_PITCHPOLE_THRESHOLD_DEG },
+  { "/PeukertExponent.txt", NK_PeukertExponent },
+  { "/PidKd.txt", NK_PidKd },
+  { "/PidKi.txt", NK_PidKi },
+  { "/PidKp.txt", NK_PidKp },
+  { "/PidSampleDivisor.txt", NK_PidSampleDivisor },
+  { "/PulleyRatio.txt", NK_PulleyRatio },
+  { "/RPMScalingFactor.txt", NK_RPMScalingFactor },
+  { "/R_fixed.txt", NK_R_fixed },
+  { "/RebulkCurrent_A.txt", NK_RebulkCurrent_A },
+  { "/RebulkVoltage.txt", NK_RebulkVoltage },
+  { "/ReseedFrac.txt", NK_ReseedFrac },
+  { "/SLAM_THRESHOLD_G.txt", NK_SLAM_THRESHOLD_G },
+  { "/SOC_AllowRebulk_percent.txt", NK_SOC_AllowRebulk_percent },
+  { "/SOC_BlockRebulk_percent.txt", NK_SOC_BlockRebulk_percent },
+  { "/SafeOperationThreshold.txt", NK_SafeOperationThreshold },
+  { "/SetpointFallRate.txt", NK_SetpointFallRate },
+  { "/SetpointRiseRate.txt", NK_SetpointRiseRate },
+  { "/SettleTimeBeforeCut.txt", NK_SettleTimeBeforeCut },
+  { "/ShuntResistanceMicroOhm.txt", NK_ShuntResistanceMicroOhm },
+  { "/ShutdownPhase2HoldMs.txt", NK_ShutdownPhase2HoldMs },
+  { "/SlopeBleedK.txt", NK_SlopeBleedK },
+  { "/SlopeBleedProxV.txt", NK_SlopeBleedProxV },
+  { "/SlopeBleedThresh.txt", NK_SlopeBleedThresh },
+  { "/SolarWatts.txt", NK_SolarWatts },
+  { "/StartupRiseRate.txt", NK_StartupRiseRate },
+  { "/SwitchControlOverride.txt", NK_SwitchControlOverride },
+  { "/SwitchingFrequency.txt", NK_SwitchingFrequency },
+  { "/SystemIDStepAmplitude.txt", NK_SystemIDStepAmplitude },
+  { "/T0_C.txt", NK_T0_C },
+  { "/TailCurrent.txt", NK_TailCurrent },
+  { "/TailCurrent_A.txt", NK_TailCurrent_A },
+  { "/TargetVoltageMode.txt", NK_TargetVoltageMode },
+  { "/TargetVoltageSetpoint.txt", NK_TargetVoltageSetpoint },
+  { "/TdPred.txt", NK_TdPred },
+  { "/TempAlarm.txt", NK_TempAlarm },
+  { "/TempAlarmLow.txt", NK_TempAlarmLow },
+  { "/TempCritExcess.txt", NK_TempCritExcess },
+  { "/TempPIDFilterAlpha.txt", NK_TempPIDFilterAlpha },
+  { "/TempPIDIntervalMs.txt", NK_TempPIDIntervalMs },
+  { "/TempPIDKi.txt", NK_TempPIDKi },
+  { "/TempPIDKp.txt", NK_TempPIDKp },
+  { "/TempSource.txt", NK_TempSource },
+  { "/TempSustainedTimeout.txt", NK_TempSustainedTimeout },
+  { "/TempWarnExcess.txt", NK_TempWarnExcess },
+  { "/TemperatureLimitF.txt", NK_TemperatureLimitF },
+  { "/ThermalLookaheadSec.txt", NK_ThermalLookaheadSec },
+  { "/ThermalTuningMode.txt", NK_ThermalTuningMode },
+  { "/TuningMode.txt", NK_TuningMode },
+  { "/UVThresholdHigh.txt", NK_UVThresholdHigh },
+  { "/UseFloat.txt", NK_UseFloat },
+  { "/VHardMarginV.txt", NK_VHardMarginV },
+  { "/VSoftMarginV.txt", NK_VSoftMarginV },
+  { "/VeData.txt", NK_VeData },
+  { "/VoltageAlarmHigh.txt", NK_VoltageAlarmHigh },
+  { "/VoltageAlarmLow.txt", NK_VoltageAlarmLow },
+  { "/VoltageDisagreeThreshold.txt", NK_VoltageDisagreeThreshold },
+  { "/VoltageDisagreeTimeout.txt", NK_VoltageDisagreeTimeout },
+  { "/VoltageFilterTC.txt", NK_VoltageFilterTC },
+  { "/VoltageKi.txt", NK_VoltageKi },
+  { "/VoltageKp.txt", NK_VoltageKp },
+  { "/VoltageLoopInterval.txt", NK_VoltageLoopInterval },
+  { "/VoltageSpikeMargin.txt", NK_VoltageSpikeMargin },
+  { "/WarmupRampRate.txt", NK_WarmupRampRate },
+  { "/WeatherTimeoutMs.txt", NK_WeatherTimeoutMs },
+  { "/WeatherUpdateInterval.txt", NK_WeatherUpdateInterval },
+  { "/WindingTempOffset.txt", NK_WindingTempOffset },
+  { "/Ymax1.txt", NK_Ymax1 },
+  { "/Ymax2.txt", NK_Ymax2 },
+  { "/Ymax3.txt", NK_Ymax3 },
+  { "/Ymax4.txt", NK_Ymax4 },
+  { "/Ymin1.txt", NK_Ymin1 },
+  { "/Ymin2.txt", NK_Ymin2 },
+  { "/Ymin3.txt", NK_Ymin3 },
+  { "/Ymin4.txt", NK_Ymin4 },
+  { "/absorptionCompleteTime.txt", NK_absorptionCompleteTime },
+  { "/altPaused.txt", NK_altPaused },
+  { "/altbaseSec.txt", NK_altbaseSec },
+  { "/bmsLogic.txt", NK_bmsLogic },
+  { "/bmsLogicLevelOff.txt", NK_bmsLogicLevelOff },
+  { "/bulkVoltageHoldMs.txt", NK_bulkVoltageHoldMs },
+  { "/capLimitMode.txt", NK_capLimitMode },
+  { "/cvConsecutiveReads.txt", NK_cvConsecutiveReads },
+  { "/cvKOvershoot.txt", NK_cvKOvershoot },
+  { "/cvWaveAmplitudeV.txt", NK_cvWaveAmplitudeV },
+  { "/cvWavePeriodSec.txt", NK_cvWavePeriodSec },
+  { "/displayTempUnit.txt", NK_displayTempUnit },
+  { "/gpsManualActive.txt", NK_gpsManualActive },
+  { "/gpsTimeSourceMode.txt", NK_gpsTimeSourceMode },
+  { "/hardwarePresent.txt", NK_hardwarePresent },
+  { "/maxPoints.txt", NK_maxPoints },
+  { "/perfPaused.txt", NK_perfPaused },
+  { "/performanceRatio.txt", NK_performanceRatio },
+  { "/plotTimeWindow.txt", NK_plotTimeWindow },
+  { "/rebulkDebounceTime.txt", NK_rebulkDebounceTime },
+  { "/socInfoAvailable.txt", NK_socInfoAvailable },
+  { "/thermalConsecutiveReads.txt", NK_thermalConsecutiveReads },
+  { "/thermalKOvershoot.txt", NK_thermalKOvershoot },
+  { "/thermalKUndershoot.txt", NK_thermalKUndershoot },
+  { "/thermalSettleThreshF.txt", NK_thermalSettleThreshF },
+  { "/thermalWaveHalfPeriodMin.txt", NK_thermalWaveHalfPeriodMin },
+  { "/thermalWaveHighF.txt", NK_thermalWaveHighF },
+  { "/thermalWaveLowF.txt", NK_thermalWaveLowF },
+  { "/timeAxisModeChanging.txt", NK_timeAxisModeChanging },
+  { "/totalPowerCycles.txt", NK_totalPowerCycles },
+  { "/waveAmplitude.txt", NK_waveAmplitude },
+  { "/wavePeriod.txt", NK_wavePeriod },
+  { "/weatherDataValid.txt", NK_weatherDataValid },
+  { "/weatherModeEnabled.txt", NK_weatherModeEnabled },
+  { "/webgaugesinterval.txt", NK_webgaugesinterval },
+  { "/xTime.txt", NK_xTime },
+  { "/yyMax.txt", NK_yyMax },
+  { "/yyMin.txt", NK_yyMin },
+  { "/altRpmTol.txt", "altRpmTol" },
+  { "/altRpmSec.txt", "altRpmSec" },
+  { "/altDutyTolPct.txt", "altDutyTolPct" },
+  { "/altDutySec.txt", "altDutySec" },
+  { "/altVbusTol.txt", "altVbusTol" },
+  { "/altVbusSec.txt", "altVbusSec" },
+  { "/altThermDegF.txt", "altThermDegF" },
+  { "/altThermSec.txt", "altThermSec" },
+  { "/altMinAmps.txt", "altMinAmps" },
+  { "/altMinDuty.txt", "altMinDuty" },
+  { "/altSafetyMargin.txt", "altSafetyMargin" },
+  { "/altIdwPower.txt", "altIdwPower" },
+  { "/altPruneK.txt", "altPruneK" },
+  { "/perfWsTol.txt", "perfWsTol" },
+  { "/perfWsSec.txt", "perfWsSec" },
+  { "/perfWaTol.txt", "perfWaTol" },
+  { "/perfWaSec.txt", "perfWaSec" },
+  { "/perfSeaTol.txt", "perfSeaTol" },
+  { "/perfSeaSec.txt", "perfSeaSec" },
+  { "/perfSeaWinSec.txt", "perfSeaWinSec" },
+  { "/perfRpmTol.txt", "perfRpmTol" },
+  { "/perfRpmSec.txt", "perfRpmSec" },
+  { "/perfHwTol.txt", "perfHwTol" },
+  { "/perfHwSec.txt", "perfHwSec" },
+  { "/perfMinBoatSpeed.txt", "perfMinBoatSpee" },
+  { "/perfMinWindSpeed.txt", "perfMinWindSpee" },
+  { "/perfRpmFloor.txt", "perfRpmFloor" },
+  { "/perfSafetyMargin.txt", "perfSafetyMargi" },
+  { "/perfIdwPower.txt", "perfIdwPower" },
+  { "/perfPruneK.txt", "perfPruneK" },
+  { "/perfSpeedSrc.txt", "perfSpeedSrc" },
+  { "/perfFoldSymmetric.txt", "perfFoldSymmetr" },
+  // 2nd pass: WiFi provisioning, interface password, IMU level calibration.
+  // Values may carry a trailing newline from the old file writers (println) —
+  // the loaders trim. imu_zero is the whole JSON blob as one string value.
+  { "/ssid.txt", NK_ssid },
+  { "/pass.txt", NK_pass },
+  { "/apssid.txt", NK_apssid },
+  { "/appass.txt", NK_appass },
+  { "/first_config_done.txt", NK_first_config_done },
+  { "/password.txt", NK_password },
+  { "/password.hash", NK_passwordHash },
+  { "/imu_zero.json", NK_imu_zero },
+};
+
+void importLegacySettingsFromLittleFS() {
+  if (!littleFSMounted) return;
+  int moved = 0;
+  for (size_t i = 0; i < sizeof(LEGACY_SETTINGS) / sizeof(LEGACY_SETTINGS[0]); i++) {
+    if (!fsExists(LEGACY_SETTINGS[i].file)) continue;
+    if (!settingExists(LEGACY_SETTINGS[i].key)) {
+      String v = readFile(LittleFS, LEGACY_SETTINGS[i].file);
+      if (v.length()) settingWrite(LEGACY_SETTINGS[i].key, v.c_str());
+      moved++;
+    }
+    fsRemove(LEGACY_SETTINGS[i].file);
+  }
+  if (moved) Serial.printf("Settings: imported %d legacy LittleFS settings into NVS\n", moved);
+}
+
 bool fsMkdir(const char *path) {
   if (!fsMutex || xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
     Serial.println("fsMkdir: mutex timeout");
@@ -316,7 +883,8 @@ void performDeepFactoryReset() {
     }
   }
 
-  // Step 1: Unmount and reformat LittleFS (userdata partition - all settings/buffer files)
+  // Step 1: Unmount and reformat LittleFS (userdata partition - rings, logs, buffer files,
+  // vessel_info.json; user settings now live in NVS and are wiped in Step 2)
   Serial.println("RESET: Acquiring FS mutex and unmounting LittleFS...");
   if (fsMutex) {
     xSemaphoreTake(fsMutex, pdMS_TO_TICKS(5000));  // Block other FS ops

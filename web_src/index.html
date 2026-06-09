@@ -217,7 +217,7 @@
       <button class="sub-tab active" onclick="showSubTab('settings', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'battery', event)">Battery</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'weathersolar', event)">Weather/Solar</button>
-      <button class="sub-tab" onclick="showSubTab('settings', 'boatperformance', event)">Boat Performance</button>
+      <button class="sub-tab" onclick="showSubTab('settings', 'boatperformance', event)">Boat</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'batterymonitor', event)">Battery Monitor</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'alarms', event)">Alarms</button>
       <button class="sub-tab" onclick="showSubTab('settings', 'vessel-info', event)">Vessel Info</button>
@@ -4084,7 +4084,7 @@
              the Live Data side; everything configurable lives here. -->
         <div id="settings-boatperformance" class="sub-tab-content">
           <div class="settings-card">
-            <p class="card-group-title">Boat Performance
+            <p class="card-group-title">Performance Learning
               <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Settings for the best-ever boat-speed learning system. The live polar / motoring display is under Live Data &rarr; GPS/Travel/Wind.</span></span>
             </p>
             <hr />
@@ -4305,9 +4305,7 @@
 
           <div class="settings-card">
 
-            <div class="section-header" style="margin-bottom: 15px;">
-              <span>Fuel Consumption Table</span>
-            </div>
+            <p class="card-group-title">Fuel Consumption</p>
 
             <div style="display: flex; justify-content: center; margin-top: 0;">
               <form action="/get" method="GET" target="hidden-form" id="fuel-table-form">
@@ -4400,12 +4398,10 @@
 
           </div> <!-- CLOSE Engine settings-card -->
 
-          <!-- Event Detection Thresholds -->
+          <!-- Motion event thresholds (capsize / pitchpole / slam) -->
           <div class="settings-card">
 
-            <!-- Event Detection Thresholds -->
-            <h3 style="margin-bottom:20px;padding-bottom:10px;border-bottom:2px solid var(--accent);">
-              Event Detection Thresholds</h3>
+            <p class="card-group-title">Motion Events</p>
 
             <div class="form-row">
               <div class="form-label">Capsize Threshold (degrees) (<span id="CAPSIZE_THRESHOLD_DEG_echo">?</span>):
@@ -6245,7 +6241,7 @@
       <button class="sub-tab active" onclick="showSubTab('livedata', 'alternator', event)">Alternator</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'battery', event)">Battery</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'weathersolar', event)">Weather/Solar</button>
-      <button class="sub-tab" onclick="showSubTab('livedata', 'boatperformance', event)">Boat Performance</button>
+      <button class="sub-tab" onclick="showSubTab('livedata', 'boatperformance', event)">Boat</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'protection', event)">Protection</button>
       <button class="sub-tab" onclick="showSubTab('livedata', 'esp32', event)">ESP32</button>
     </div>
@@ -7412,221 +7408,6 @@
         </details>
       </div>
 
-      <!-- Lifetime statistics — collapsed by default -->
-      <div class="settings-card">
-        <details>
-          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Lifetime Statistics</summary>
-
-        <!-- Distance Traveled -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Distance Traveled</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Distance actually traveled along your track, summed from GPS
-                position changes — not straight-line distance from where you started. A round trip
-                back to the same port still counts the full distance out and back. Lifetime keeps
-                accumulating; Session resets with the button.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <div class="dual-counter">
-              <div class="dual-counter-row">
-                <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="TotalDistance_AllTimeID">0.0</span><span>nm</span>
-              </div>
-              <div class="dual-counter-row" style="position:relative;">
-                <span class="counter-label">Session</span>
-                <span class="counter-value" id="TotalDistanceID">0.0</span><span>nm</span>
-                <form action="/get" method="GET" target="hidden-form"
-                  style="position:absolute;left:100%;margin-left:8px;">
-                  <input type="hidden" name="ResetTotalDistance" id="ResetTotalDistance" value="0" />
-                  <input type="hidden" name="password" class="password_field" />
-                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetTotalDistance')"
-                    id="ResetTotalDistance_button">Reset</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Speed Table -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Speed</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Average is the mean of your GPS speed readings over time
-                (not distance ÷ time), so it can differ slightly from distance covered over many
-                hours. Maximum is the highest GPS speed seen. Both are speed over ground, so they
-                include current. Lifetime persists; Session resets with the button.</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <div style="display:flex;flex-direction:column;gap:0;">
-              <!-- Average -->
-              <div class="metric-row" style="margin:0;padding:4px 0;">
-                <span class="metric-label">Average</span>
-                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
-                  <div style="display:flex;align-items:center;gap:6px;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
-                    <span class="metric-value-compact" id="AvgSpeed_AllTimeID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
-                    <span class="metric-value-compact" id="AvgSpeedID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                    <form action="/get" method="GET" target="hidden-form"
-                      style="position:absolute;left:100%;margin-left:8px;">
-                      <input type="hidden" name="ResetAvgSpeed" id="ResetAvgSpeed" value="0" />
-                      <input type="hidden" name="password" class="password_field" />
-                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
-                        onclick="resetParameter('ResetAvgSpeed')" id="ResetAvgSpeed_button">Reset</button>
-                    </form>
-                  </div>
-                </div>
-              </div>
-              <!-- Maximum -->
-              <div class="metric-row" style="margin:0;padding:4px 0;border-top:1px solid var(--border);">
-                <span class="metric-label">Maximum</span>
-                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
-                  <div style="display:flex;align-items:center;gap:6px;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
-                    <span class="metric-value-compact" id="MaxSpeed_AllTimeID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
-                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
-                    <span class="metric-value-compact" id="MaxSpeedID">0.0</span><span
-                      style="font-size:11px;">kts</span>
-                    <form action="/get" method="GET" target="hidden-form"
-                      style="position:absolute;left:100%;margin-left:8px;">
-                      <input type="hidden" name="ResetMaxSpeed" id="ResetMaxSpeed" value="0" />
-                      <input type="hidden" name="password" class="password_field" />
-                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
-                        onclick="resetParameter('ResetMaxSpeed')" id="ResetMaxSpeed_button">Reset</button>
-                    </form>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <!-- engine lifetime stats continue in the same Lifetime Statistics panel (RPM + fuel flow now live in Vital Signs) -->
-
-        <!-- Engine Fuel Consumed -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Engine Fuel Consumed</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Based on measured RPM and RPM-consumption table defined in Settings →
-                Engine</span>
-            </span>
-          </div>
-          <div class="form-input">
-            <div class="dual-counter">
-              <div class="dual-counter-row">
-                <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="EngineFuelUsed_AllTimeID">0</span><span>L</span>
-              </div>
-              <div class="dual-counter-row" style="position:relative;">
-                <span class="counter-label">Session</span>
-                <span class="counter-value" id="EngineFuelUsedID">0</span><span>L</span>
-                <form action="/get" method="GET" target="hidden-form"
-                  style="position:absolute;left:100%;margin-left:8px;">
-                  <input type="hidden" name="ResetEngineFuelUsed" id="ResetEngineFuelUsed" value="0" />
-                  <input type="hidden" name="password" class="password_field" />
-                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetEngineFuelUsed')"
-                    id="ResetEngineFuelUsed_button">Reset</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Engine Run Time -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Engine Run Time</div>
-          <div class="form-input">
-            <div class="dual-counter">
-              <div class="dual-counter-row">
-                <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="EngineRunTime_AllTimeID">0:00:00</span>
-              </div>
-              <div class="dual-counter-row" style="position:relative;">
-                <span class="counter-label">Session</span>
-                <span class="counter-value" id="EngineRunTimeID">0:00:00</span>
-                <form action="/get" method="GET" target="hidden-form"
-                  style="position:absolute;left:100%;margin-left:8px;">
-                  <input type="hidden" name="ResetEngineRunTime" id="ResetEngineRunTime" value="0" />
-                  <input type="hidden" name="password" class="password_field" />
-                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetEngineRunTime')"
-                    id="ResetEngineRunTime_button">Reset</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Engine Rev Counter -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Engine Rev Counter</div>
-          <div class="form-input">
-            <div class="dual-counter">
-              <div class="dual-counter-row">
-                <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="EngineCycles_AllTimeID">0</span><span>rotations</span>
-              </div>
-              <div class="dual-counter-row" style="position:relative;">
-                <span class="counter-label">Session</span>
-                <span class="counter-value" id="EngineCyclesID">0</span><span>rotations</span>
-                <form action="/get" method="GET" target="hidden-form"
-                  style="position:absolute;left:100%;margin-left:8px;">
-                  <input type="hidden" name="ResetEngineCycles" id="ResetEngineCycles" value="0" />
-                  <input type="hidden" name="password" class="password_field" />
-                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetEngineCycles')"
-                    id="ResetEngineCycles_button">Reset</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Max Engine RPM -->
-        <hr />
-        <div class="form-row">
-          <div class="form-label">Max Engine RPM</div>
-          <div class="form-input">
-            <div class="dual-counter">
-              <div class="dual-counter-row">
-                <span class="counter-label">Lifetime</span>
-                <span class="counter-value" id="RPMMax_AllTimeID">0</span><span>rev/min</span>
-              </div>
-              <div class="dual-counter-row" style="position:relative;">
-                <span class="counter-label">Session</span>
-                <span class="counter-value" id="RPMMaxID">0</span><span>rev/min</span>
-                <form action="/get" method="GET" target="hidden-form"
-                  style="position:absolute;left:100%;margin-left:8px;">
-                  <input type="hidden" name="ResetRPMMax" id="ResetRPMMax" value="0" />
-                  <input type="hidden" name="password" class="password_field" />
-                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetRPMMax')"
-                    id="ResetRPMMax_button">Reset</button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        </details>
-      </div>
-
       <div class="settings-card">
 
         <details>
@@ -7943,6 +7724,221 @@
           </div>
         </div>
           </details>
+        </details>
+      </div>
+
+      <!-- Lifetime statistics — collapsed by default -->
+      <div class="settings-card">
+        <details>
+          <summary style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin:14px 0 10px;">Lifetime Statistics</summary>
+
+        <!-- Distance Traveled -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Distance Traveled</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Distance actually traveled along your track, summed from GPS
+                position changes — not straight-line distance from where you started. A round trip
+                back to the same port still counts the full distance out and back. Lifetime keeps
+                accumulating; Session resets with the button.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="TotalDistance_AllTimeID">0.0</span><span>nm</span>
+              </div>
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Session</span>
+                <span class="counter-value" id="TotalDistanceID">0.0</span><span>nm</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetTotalDistance" id="ResetTotalDistance" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetTotalDistance')"
+                    id="ResetTotalDistance_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Speed Table -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Speed</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Average is the mean of your GPS speed readings over time
+                (not distance ÷ time), so it can differ slightly from distance covered over many
+                hours. Maximum is the highest GPS speed seen. Both are speed over ground, so they
+                include current. Lifetime persists; Session resets with the button.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div style="display:flex;flex-direction:column;gap:0;">
+              <!-- Average -->
+              <div class="metric-row" style="margin:0;padding:4px 0;">
+                <span class="metric-label">Average</span>
+                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
+                    <span class="metric-value-compact" id="AvgSpeed_AllTimeID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
+                    <span class="metric-value-compact" id="AvgSpeedID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                    <form action="/get" method="GET" target="hidden-form"
+                      style="position:absolute;left:100%;margin-left:8px;">
+                      <input type="hidden" name="ResetAvgSpeed" id="ResetAvgSpeed" value="0" />
+                      <input type="hidden" name="password" class="password_field" />
+                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
+                        onclick="resetParameter('ResetAvgSpeed')" id="ResetAvgSpeed_button">Reset</button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+              <!-- Maximum -->
+              <div class="metric-row" style="margin:0;padding:4px 0;border-top:1px solid var(--border);">
+                <span class="metric-label">Maximum</span>
+                <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end;">
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Lifetime</span>
+                    <span class="metric-value-compact" id="MaxSpeed_AllTimeID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;position:relative;">
+                    <span style="font-size:10px;color:#666;min-width:50px;">Session</span>
+                    <span class="metric-value-compact" id="MaxSpeedID">0.0</span><span
+                      style="font-size:11px;">kts</span>
+                    <form action="/get" method="GET" target="hidden-form"
+                      style="position:absolute;left:100%;margin-left:8px;">
+                      <input type="hidden" name="ResetMaxSpeed" id="ResetMaxSpeed" value="0" />
+                      <input type="hidden" name="password" class="password_field" />
+                      <button type="button" class="btn-secondary" style="padding:2px 6px;font-size:11px;"
+                        onclick="resetParameter('ResetMaxSpeed')" id="ResetMaxSpeed_button">Reset</button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- engine lifetime stats continue in the same Lifetime Statistics panel (RPM + fuel flow now live in Vital Signs) -->
+
+        <!-- Engine Fuel Consumed -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Engine Fuel Consumed</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">Based on measured RPM and RPM-consumption table defined in Settings →
+                Engine</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="EngineFuelUsed_AllTimeID">0</span><span>L</span>
+              </div>
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Session</span>
+                <span class="counter-value" id="EngineFuelUsedID">0</span><span>L</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetEngineFuelUsed" id="ResetEngineFuelUsed" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetEngineFuelUsed')"
+                    id="ResetEngineFuelUsed_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Engine Run Time -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Engine Run Time</div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="EngineRunTime_AllTimeID">0:00:00</span>
+              </div>
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Session</span>
+                <span class="counter-value" id="EngineRunTimeID">0:00:00</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetEngineRunTime" id="ResetEngineRunTime" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetEngineRunTime')"
+                    id="ResetEngineRunTime_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Engine Rev Counter -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Engine Rev Counter</div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="EngineCycles_AllTimeID">0</span><span>rotations</span>
+              </div>
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Session</span>
+                <span class="counter-value" id="EngineCyclesID">0</span><span>rotations</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetEngineCycles" id="ResetEngineCycles" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetEngineCycles')"
+                    id="ResetEngineCycles_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Max Engine RPM -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Max Engine RPM</div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="RPMMax_AllTimeID">0</span><span>rev/min</span>
+              </div>
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Session</span>
+                <span class="counter-value" id="RPMMaxID">0</span><span>rev/min</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetRPMMax" id="ResetRPMMax" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetRPMMax')"
+                    id="ResetRPMMax_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
         </details>
       </div>
     </div>
