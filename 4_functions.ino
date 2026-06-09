@@ -3062,6 +3062,10 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
 
   // DECLARE ALL VARIABLES AT TOP (before any goto statements)
   bool success = true;
+  // Post-download rejection (signature/finalize). The reboot-into-current-
+  // firmware these paths take is the right recovery — but without this flag
+  // the cleanup branch reported it as a successful update.
+  bool verifyFailed = false;
   StreamingExtractor extractor = {};
   HTTPClient http;
   unsigned long downloadStartTime = 0;
@@ -3283,6 +3287,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   if (!base64Decode(signatureBase64, signature, sizeof(signature), &sigLength)) {
     Serial.println("SECURITY: Failed to decode signature");
     if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    verifyFailed = true;
     goto cleanup;
   }
 
@@ -3292,6 +3297,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
     Serial.printf("SECURITY: Failed to parse public key: -0x%04x\n", -ret);
     if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
     mbedtls_pk_free(&pk);
+    verifyFailed = true;
     goto cleanup;
   }
 
@@ -3301,6 +3307,7 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
   if (ret != 0) {
     Serial.printf("SECURITY: Signature verification FAILED (error -0x%04x)\n", -ret);
     if (extractor.otaStarted) esp_ota_abort(extractor.otaHandle);
+    verifyFailed = true;
     goto cleanup;
   }
 
@@ -3311,12 +3318,14 @@ void performStreamingOTAUpdate(const UpdateInfo &updateInfo, const String &signa
     esp_err_t err = esp_ota_end(extractor.otaHandle);
     if (err != ESP_OK) {
       Serial.printf("OTA end failed: %s\n", esp_err_to_name(err));
+      verifyFailed = true;
       goto cleanup;
     }
 
     err = esp_ota_set_boot_partition(extractor.otaPartition);
     if (err != ESP_OK) {
       Serial.printf("Set boot partition failed: %s\n", esp_err_to_name(err));
+      verifyFailed = true;
       goto cleanup;
     }
   }
@@ -3344,6 +3353,11 @@ cleanup:
 
   if (success && extractor.otaStarted) {
     lastHttpsOperationTime = millis();
+    if (verifyFailed) {
+      // Same reboot as the success path (clean recovery into current firmware,
+      // rejected image already aborted/never set bootable) — but say so honestly.
+      Serial.println("=== OTA UPDATE FAILED AFTER DOWNLOAD (see error above) — rebooting on current firmware ===");
+    }
     delay(3000);
     ESP.restart();
   } else {
@@ -4033,88 +4047,13 @@ static void otaHeapMark(const char *tag) {
                 ESP.getFreeHeap());
 }
 // TIME MANAGEMENT FUNCTIONS
-// Load time sync state from NVS (call in setup after loadAuthToken)
-void loadTimeSyncState() {
-  nvs_handle_t nvs_handle;
-  esp_err_t err = nvs_open("timesync", NVS_READONLY, &nvs_handle);
-  if (err != ESP_OK) {
-    Serial.println("No time sync state in NVS (open failed)");
-    timeIsSynced = false;
-    timeBase = 0;
-    return;
-  }
-
-  uint64_t tb_u64 = 0;
-  uint32_t tbm_u32 = 0;
-
-  esp_err_t e1 = nvs_get_u64(nvs_handle, "timeBase", &tb_u64);
-  esp_err_t e2 = nvs_get_u32(nvs_handle, "timeBaseMillis", &tbm_u32);
-  // Note: timeSource is intentionally NOT restored. It's a runtime label
-  // derived from current freshness state — restoring it from a prior boot
-  // makes the dashboard claim e.g. "NMEA-GPS" before any source has actually
-  // reported. Leave currentTimeSource at its boot default (TIME_NONE); the
-  // first successful sync or resolveSources() tick will set it.
-
-  nvs_close(nvs_handle);
-
-  // Require both kept keys; otherwise treat as "no valid state"
-  if (e1 != ESP_OK || e2 != ESP_OK) {
-    Serial.println("No complete time sync state in NVS (missing key)");
-    timeIsSynced = false;
-    timeBase = 0;
-    return;
-  }
-
-  // Restore globals
-  timeBase = (time_t)tb_u64;
-  timeBaseMillis = (unsigned long)tbm_u32;
-
-  // Sanity check: if timeBase looks recent and reasonable, trust it
-  // Allow reconstruction for ~30 days after reboot (well under 49-day millis wrap)
-  time_t now_approx = timeBase + ((millis() - timeBaseMillis) / 1000);
-
-  if (now_approx > 1704067200 && now_approx < 2000000000) {  // Jan 1 2024 to ~2033
-    timeIsSynced = true;
-    Serial.printf("Time sync restored from NVS: epoch=%ld, millis=%lu\n",
-                  (long)timeBase, (unsigned long)timeBaseMillis);
-  } else {
-    timeIsSynced = false;
-    timeBase = 0;
-    Serial.println("NVS time sync invalid - will re-sync");
-  }
-}
-// Persist time sync state (call after successful NTP/GPS sync)
-void saveTimeSyncState() {
-  if (!timeIsSynced || timeBase == 0) return;
-
-  nvs_handle_t nvs_handle;
-  esp_err_t err = nvs_open("timesync", NVS_READWRITE, &nvs_handle);
-  if (err != ESP_OK) {
-    Serial.println("ERROR: Failed to open NVS for time sync");
-    return;
-  }
-
-  esp_err_t e1 = nvs_set_u64(nvs_handle, "timeBase", (uint64_t)timeBase);
-  esp_err_t e2 = nvs_set_u32(nvs_handle, "timeBaseMillis", (uint32_t)timeBaseMillis);
-  // timeSource intentionally not written — see loadTimeSyncState comment.
-  // (Any pre-existing NVS entry under that key is harmless; we just ignore it.)
-
-  if (e1 != ESP_OK || e2 != ESP_OK) {
-    Serial.printf("ERROR: Failed writing time sync state: e1=%d e2=%d\n",
-                  (int)e1, (int)e2);
-    nvs_close(nvs_handle);
-    return;
-  }
-
-  err = nvs_commit(nvs_handle);
-  nvs_close(nvs_handle);
-
-  if (err != ESP_OK) {
-    Serial.printf("ERROR: Failed to commit time sync state to NVS (err=%d)\n", (int)err);
-  } else {
-    Serial.println("Time sync state saved to NVS");
-  }
-}
+// Time sync is deliberately RAM-only. NVS persistence (save/loadTimeSyncState)
+// was deleted: the loader was never wired into setup(), so the per-message
+// commits only wore the tiny 20KB nvs partition without ever being read back.
+// After a reboot the device stays unsynced until a live source (NMEA / phone /
+// NTP) reports. Don't re-add persistence casually — restoring a prior boot's
+// timeBaseMillis breaks getCurrentTimestamp(): millis() restarts at 0, so the
+// unsigned subtraction wraps ~49.7 days into the future.
 
 time_t getCurrentTimestamp() {
   if (timeIsSynced && timeBase > 0) {
@@ -4134,8 +4073,6 @@ void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
     timeIsSynced = true;
     currentTimeSource = TIME_GPS;
     lastTimeSyncAttempt = millis();
-
-    saveTimeSyncState();  // Persist immediately
 
     if (NMEA2KVerbose) {
       Serial.println("Time synced from GPS");
@@ -4170,7 +4107,6 @@ void syncTimeFromPhone(time_t phoneEpochSec) {
   timeIsSynced = true;
   currentTimeSource = TIME_PHONE;
   lastTimeSyncAttempt = millis();
-  saveTimeSyncState();
 }
 
 // Promote phone GPS into the effective Latitude/Longitude globals. Respects

@@ -771,6 +771,26 @@ input[type="submit"]:hover {
   background: rgba(0, 0, 0, 0.09);
 }
 
+/* The Plant Delay (sysid) modal and the Test Active floating panel are hardcoded
+   dark panels, so their .btn-secondary buttons must stay legible even when the app
+   is in light mode (otherwise dark text on a near-black panel reads as "greyed out
+   / unclickable"). Also give a genuine disabled state so a blocked Start Test looks
+   distinct from an enabled one. */
+#sysid-modal-panel .btn-secondary,
+#test-panel .btn-secondary {
+  background: rgba(255, 255, 255, 0.10);
+  color: #e8e8e8;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+#sysid-modal-panel .btn-secondary:hover,
+#test-panel .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+#sysid-modal-panel .btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* Danger (red) */
 .btn-danger {
   background: rgba(214, 69, 62, 0.13);
@@ -1667,6 +1687,7 @@ input[type="submit"]:hover {
 /* Main Tab Navigation */
 .main-tabs {
   display: flex;
+  flex-wrap: wrap;   /* below ~360px, tabs wrap to a 2nd row instead of clipping off the right edge */
   margin-bottom: 0;
   gap: 2px;
 }
@@ -2247,6 +2268,38 @@ hr {
   }
 }
 
+/* Phone (≤480px): stack each form-row's label above its control, and let
+   multi-button control rows (Time Window 5S/10S/…, Download & Logging) wrap
+   to the full width instead of clipping off the right edge. */
+@media (max-width: 480px) {
+  .form-row {
+    flex-direction: column;
+    align-items: stretch;
+    max-width: 100%;
+  }
+
+  .form-label {
+    flex: 0 0 auto;          /* don't stretch vertically in the column */
+    padding-right: 0;
+    margin-bottom: 6px;
+  }
+
+  .form-input {
+    justify-content: flex-start;   /* left-align once it owns the full width */
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .form-input form {
+    flex-wrap: wrap;
+    flex-shrink: 1;          /* override the desktop flex-shrink:0 so buttons can wrap */
+  }
+
+  /* Download & Logging: buttons get the full width to wrap onto */
+  .log-group { flex-wrap: wrap; }
+  .log-fresh-wrap { margin-left: 0; }   /* override margin-left:auto so it wraps inline */
+}
+
 /* Toggle switch styling */
 .switch {
   position: relative;
@@ -2510,9 +2563,20 @@ input:checked+.slider:before {
   margin: 0 0 8px 0;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-  overflow: visible;        /* was: hidden — clipped the tooltip-box which renders below the title (top:125%) */
-  text-overflow: ellipsis;
+  white-space: normal;      /* allow long titles to wrap instead of overrunning into the info icon / card edge */
+  overflow: visible;        /* keep visible so the tooltip-box (top:125%) isn't clipped — so we wrap rather than ellipsis-clip */
+  display: flex;            /* layout moved off inline styles so align-items below can take effect */
+  justify-content: space-between;
+  align-items: flex-start;  /* with a wrapped multi-line title, top-align the info icon instead of centering it */
+}
+
+/* title text takes the available width and wraps; the info icon keeps its own fixed column */
+.card-group-title > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.card-group-title > .tooltip {
+  flex: 0 0 auto;
 }
 
 .metric-row {
@@ -2565,6 +2629,53 @@ input:checked+.slider:before {
   border-bottom-color: #444444;
 }
 
+/* Two-signal interval comparison tables (Timing & Diagnostics):
+   one metric-label column + two right-aligned value columns. Replaces the
+   four single-signal interval cards with two side-by-side comparisons. */
+.interval-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px 76px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.interval-row:last-child {
+  border-bottom: none;
+}
+.interval-head {
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 8px;
+}
+.interval-label {
+  font-size: 12px;
+  color: #666;
+  padding-right: 4px;
+}
+.interval-colhead {
+  font-size: 11px;
+  font-weight: bold;
+  color: var(--text-dark);
+  text-align: right;
+  line-height: 1.2;
+}
+.interval-val {
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--reading);
+  text-align: right;
+}
+.dark-mode .interval-label {
+  color: #aaa;
+}
+.dark-mode .interval-colhead {
+  color: #cccccc;
+}
+.dark-mode .interval-row,
+.dark-mode .interval-head {
+  border-bottom-color: #444444;
+}
+
 /* Vital-signs tile grid — compact at-a-glance metrics under the Boat Performance polar.
    Responsive: ~2-up on phones, up to 4-up on wide screens. */
 .vital-grid {
@@ -2597,6 +2708,8 @@ input:checked+.slider:before {
   line-height: 1.1;
   color: var(--reading);
   margin-top: 3px;
+  white-space: nowrap;            /* value + unit never wrap -> tile height is digit-count independent */
+  font-variant-numeric: tabular-nums;
 }
 .vt-unit {
   font-size: 12px;
@@ -2608,6 +2721,8 @@ input:checked+.slider:before {
   font-weight: 700;
   color: var(--reading);
   margin-top: 3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .vt-sub .vt-unit {
   font-weight: 600;
@@ -2631,13 +2746,19 @@ input:checked+.slider:before {
   line-height: 1.1;
   color: var(--reading);
   margin-top: 2px;
+  white-space: nowrap;            /* value + unit stay on one line */
+  font-variant-numeric: tabular-nums;
 }
+/* Min/max on combined tiles sits on its OWN line, so a wider value can never push it
+   (and the neighbouring metric) down. Fixed line count = no vertical jump. */
 .vt-wm-mini {
+  display: block;
   font-size: 10px;
   font-weight: 600;
   color: var(--text-muted, #888);
-  margin-left: 6px;
+  margin-top: 1px;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .dark-mode .vital-tile {
   background: var(--card-light);

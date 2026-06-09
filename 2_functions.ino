@@ -732,7 +732,20 @@ void httpsTask(void *param) {
       if (request.type == HTTPS_UPLOAD_PAYLOAD) {
         if (opSuccess) {
           consecutiveFailures = 0;
-        } else if (lastHttpResponseCode != 400 && lastHttpResponseCode != 401) {
+        } else {
+          // Transport-level failures (WiFi drop, connect fail, send fail, read
+          // timeout) return from executeUploadPayload before its response
+          // handling, leaving the buffered in-flight marker set — clear it here
+          // or uploadBufferedRecords() refuses to queue forever and the full
+          // ring silently drops every new snapshot. The record itself stays in
+          // the ring for retry. (Idempotent: parsed-response failure paths
+          // already cleared it.)
+          if (lastUploadWasBuffered && sensorRingInFlightIndex >= 0) {
+            sensorRingInFlightIndex = -1;
+            lastUploadWasBuffered = false;
+          }
+        }
+        if (!opSuccess && lastHttpResponseCode != 400 && lastHttpResponseCode != 401) {
           // Don't count 400/401 as failures - they indicate bad data that gets auto-deleted
           consecutiveFailures++;
           //Serial.printf("Consecutive failures: %d/%d\n", consecutiveFailures, MAX_CONSECUTIVE_FAILURES);MAX_CONSECUTIVE_FAILURES);
@@ -1674,15 +1687,25 @@ inline bool ringIsEmpty() { return sensorRingCount == 0; }
 // so we don't yank the rug out from Core 0 mid-upload).
 void pushSensorSnapshot(time_t collectionTime) {
   if (!sensorRing) return;
+  // Index RMWs under sensorRingMux (Core 0 pops concurrently). The big struct
+  // copy below stays OUTSIDE the lock — the head slot is invisible to Core 0
+  // until the count++ publish at the end.
+  bool dropNewest = false;
+  portENTER_CRITICAL(&sensorRingMux);
   if (ringIsFull()) {
     if (sensorRingInFlightIndex == (int32_t)sensorRingTail) {
       // Oldest slot is being uploaded; drop the NEW snapshot instead.
-      Serial.println("sensorRing full + tail in-flight; dropping newest snapshot");
-      return;
+      dropNewest = true;
+    } else {
+      // Drop oldest to make room.
+      sensorRingTail = (sensorRingTail + 1) % SENSOR_RING_SIZE;
+      sensorRingCount--;
     }
-    // Drop oldest to make room.
-    sensorRingTail = (sensorRingTail + 1) % SENSOR_RING_SIZE;
-    sensorRingCount--;
+  }
+  portEXIT_CRITICAL(&sensorRingMux);
+  if (dropNewest) {
+    Serial.println("sensorRing full + tail in-flight; dropping newest snapshot");
+    return;
   }
   sensorRing[sensorRingHead].collectionTime = (int64_t)collectionTime;
   sensorRing[sensorRingHead].window = *currentWindow;  // struct copy from PSRAM to PSRAM
@@ -1714,9 +1737,11 @@ void pushSensorSnapshot(time_t collectionTime) {
   // Charge stage at window-roll time (cloud upload is deferred minutes/hours, so
   // we can't read live state at JSON-build time). Matches the LT-ring capture.
   sensorRing[sensorRingHead].chargeStage = getChargeStageDisplayCode();
+  portENTER_CRITICAL(&sensorRingMux);
   sensorRingHead = (sensorRingHead + 1) % SENSOR_RING_SIZE;
   sensorRingCount++;
   bufferedRecordCount = sensorRingCount;  // dashboard mirror
+  portEXIT_CRITICAL(&sensorRingMux);
   // Re-arm the "all uploaded" console message — count just went non-zero so
   // the next time we drain to empty, we want to announce it once.
   extern volatile bool sensorRingAnnouncedEmpty;
@@ -1734,10 +1759,18 @@ bool peekTailSnapshot(SensorSnapshot *out) {
 // Pop oldest. Caller must have already successfully consumed it (e.g. queued
 // for upload and Core 0 confirmed 200 OK).
 void popTailSnapshot() {
-  if (!sensorRing || ringIsEmpty()) return;
+  if (!sensorRing) return;
+  // Runs on Core 0 (httpsTask) against Core 1's push — empty-check and RMW
+  // must be one atomic unit or a lost decrement wraps count to 65535.
+  portENTER_CRITICAL(&sensorRingMux);
+  if (ringIsEmpty()) {
+    portEXIT_CRITICAL(&sensorRingMux);
+    return;
+  }
   sensorRingTail = (sensorRingTail + 1) % SENSOR_RING_SIZE;
   sensorRingCount--;
   bufferedRecordCount = sensorRingCount;  // dashboard mirror
+  portEXIT_CRITICAL(&sensorRingMux);
 }
 
 // Binary-format file used by Phase 3 (shutdown dump + boot restore) so the
@@ -2017,12 +2050,15 @@ void restoreLongTermRing() {
 // Dashboard "Clear" button handler. Empties the PSRAM ring and removes the
 // LittleFS shutdown-dump file so nothing comes back on next boot.
 void clearSensorBuffer() {
+  // Runs on the async web task — third context touching the ring indices.
+  portENTER_CRITICAL(&sensorRingMux);
   sensorRingHead = 0;
   sensorRingTail = 0;
   sensorRingCount = 0;
   sensorRingInFlightIndex = -1;
   sensorRingAnnouncedEmpty = false;
   bufferedRecordCount = 0;
+  portEXIT_CRITICAL(&sensorRingMux);
 
   fsTakeLock();
   if (fsExists(SENSOR_RING_BACKUP_PATH)) {
@@ -2535,7 +2571,10 @@ done_headers_bp:
       if (timeIsSynced) lastBoatPerfSyncEpoch = (int64_t)time(NULL);   // for the "synced N ago" badge
       perfClearPending();   // cloud accepted the batch (raw history) → drop the pending points
       if (perfIngestFrontCsv(bpBody)) {
-        boatPerfSave();   // persist the cloud's pruned fronts
+        // Field-off-gate the flash write: a LittleFS write stalls the flash cache (both cores).
+        // If the field re-engaged while this upload was in flight, skip — the in-memory front is
+        // already updated, and the field-off Gate-2 edge persists it later (no data loss).
+        if (fieldActiveStatus <= 0) boatPerfSave();   // persist the cloud's pruned fronts
         queueConsoleMessage("Boat performance: fronts updated from cloud");
       } else {
         queueConsoleMessage("Boat performance uploaded (no front in response)");
@@ -2650,7 +2689,10 @@ done_headers_ah:
       if (timeIsSynced) lastAltHealthSyncEpoch = (int64_t)time(NULL);   // for the "synced N ago" badge
       altClearPending();   // cloud accepted the batch (raw history) → drop the pending points
       if (altIngestFrontCsv(ahBody)) {
-        altHealthSave();   // persist the cloud's pruned front
+        // Field-off-gate the flash write: a LittleFS write stalls the flash cache (both cores).
+        // If the field re-engaged while this upload was in flight, skip — the in-memory front is
+        // already updated, and the field-off Gate-2 edge persists it later (no data loss).
+        if (fieldActiveStatus <= 0) altHealthSave();   // persist the cloud's pruned front
         queueConsoleMessage("Alternator health: front updated from cloud");
       } else {
         queueConsoleMessage("Alternator health uploaded (no front in response)");
@@ -2698,8 +2740,6 @@ void syncTimeFromNTP() {
     timeIsSynced = true;
     currentTimeSource = TIME_NTP;
     lastTimeSyncAttempt = millis();
-
-    saveTimeSyncState();  // Persist immediately
 
     queueConsoleMessage("Time synced from NTP");
     Serial.printf("NTP synced: epoch=%ld\n", timeBase);

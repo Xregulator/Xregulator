@@ -611,8 +611,16 @@ const CSV2_FIELDS = [
     "systemIDQuietPP_2",
     "systemIDAbortReason",                 // FieldEventReason code if protection aborted last test; 0=no abort
     "systemIDAbortPhase",                  // phase 1-9 at moment of protection abort; 0=no abort
-    "voltLoopWorstInterval_5s",            // worst voltage loop actual interval 5s window (ms)
-    "voltLoopWorstInterval_ses",           // worst voltage loop actual interval since boot (ms)
+    "vl_last_ms",                          // CV voltage-loop firing-interval ladder (CH1/pf-style)
+    "vl_avg_10s",
+    "vl_worst_10s",
+    "vl_over2x_10s",
+    "vl_avg_2m",
+    "vl_worst_2m",
+    "vl_over2x_2m",
+    "vl_avg_at",
+    "vl_worst_at",
+    "vl_over2x_at",
     "nvsSecsSinceLastSave",                // seconds since last successful saveNVSDataFull() (0 = never)
     "nvsFullSaveLastMs",                   // wall-clock duration of most recent saveNVSDataFull() (ms)
     "nvsFullSaveWorstMs",                  // worst saveNVSDataFull() duration since boot (ms)
@@ -671,6 +679,29 @@ const CSV2_FIELDS = [
     "loopOver80ImuLimitCount",    // # 80MHz passes over ~38ms accel-drain limit since reset
     "loop80IterCount",            // total 80MHz passes since reset
     "STWNMEA",                    // Speed Through Water (SOW, knots ×100); -1 = NAN/no log
+    // thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
+    "tempFiltered",               // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF
+    "outerImpliedPenalty",        // voltage cap as downstream amps penalty (A ×100); Plot 2 "Implied Penalty"
+    "thermalFlags",               // state-strip bitfield: bit0 tempPIDActive, bit4 AUTO, bit5 shutdown
+    "outerAntiWindupFired",       // 1 = CV-bleed anti-windup fired since last frame (red ticks)
+    // +10: Inner Current PID firing interval (field-on-gated), CH1-style stats (avg ÷100)
+    "pf_last_ms",
+    "pf_avg_10s",
+    "pf_worst_10s",
+    "pf_over2x_10s",
+    "pf_avg_2m",
+    "pf_worst_2m",
+    "pf_over2x_2m",
+    "pf_avg_at",
+    "pf_worst_at",
+    "pf_over2x_at",
+    "inaBusReadWorstUs",
+    "inaBusSlowCount",
+    "ina228ErrorCount",
+    "imuFifoFetchWorstUs",
+    "imuFifoWorstSamples",
+    "ft_dumpLongTermRing_win",
+    "ft_dumpLongTermRing_ses",
 ];
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -913,7 +944,8 @@ function renderPerf(){
   if(perfView){
     setTxt('perf-condL-label','Engine RPM');
     setTxt('perf-condL-val', L.valid ? Math.round(L.rpm) : '—');
-    setTxt('perf-condL-sub', Math.round(L.headwind||0)+' kt headwind');
+    const hwv = L.headwind||0;   // fore-aft apparent wind: + = headwind, - = tailwind; show magnitude + word, never a negative
+    setTxt('perf-condL-sub', Math.round(Math.abs(hwv))+(hwv<0?' kt tailwind':' kt headwind'));
   } else {
     setTxt('perf-condL-label','Apparent wind');
     setTxt('perf-condL-val', L.valid ? Math.round(L.ws||0)+' kt' : '—');
@@ -921,9 +953,7 @@ function renderPerf(){
   }
   const sea=L.pitchStd||0;
   setTxt('perf-sea-val', sea.toFixed(1)+'°'); setTxt('perf-sea-sub', seaWord(sea));
-  // steady-state capture light (green only while a steady run is actively banking data)
-  const sdot=document.getElementById('perf-steady-dot');
-  if(sdot) sdot.style.background = (L.steady>=0.5) ? '#5cb85c' : '#ccc';
+  // steady-state is now shown by the "now" dot itself (solid = banking data, hollow = not steady) — see drawPerfPlot/drawMotorPlot
   // Learning switch (Live Data) + simulator/reference segmented toggles (Settings → Vessel Performance).
   // All driven by perfLive, which always carries paused+sim+source.
   const paused=perfLive.paused===1;
@@ -1100,10 +1130,11 @@ function drawPerfPlot(){
     drawLine(1); if(symFold) drawLine(-1);
   } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('No sailing data yet', cx, cy); ctx.textAlign='left'; }
 
-  // present point ("now")
+  // present point ("now") — solid green while a steady run is banking data into the front, hollow grey when not steady
   if(nowPt){
     let p=P(nowPt[0], nowPt[1]); ctx.beginPath(); ctx.arc(p[0],p[1],6,0,6.2832);
-    ctx.fillStyle='#5cb85c'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+    if(perfLive.steady>=0.5){ ctx.fillStyle='#5cb85c'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); }
+    else                    { ctx.fillStyle='#fff';    ctx.fill(); ctx.strokeStyle='#999'; ctx.lineWidth=2; ctx.stroke(); }
   }
 }
 
@@ -1158,11 +1189,11 @@ function drawMotorPlot(){
     line.forEach((p,i)=>{ i===0?ctx.moveTo(X(p[0]),Y(p[1])):ctx.lineTo(X(p[0]),Y(p[1])); });
     ctx.stroke();
   } else { ctx.fillStyle='#999'; ctx.textAlign='center'; ctx.fillText('No motoring data yet',W/2,H/2); ctx.textAlign='left'; }
-  // present point ("now")
+  // present point ("now") — solid green while a steady run is banking data into the front, hollow grey when not steady
   if(motorLive.valid){
     ctx.beginPath(); ctx.arc(X(motorLive.rpm),Y(motorLive.spd),6,0,6.2832);
-    ctx.fillStyle = '#5cb85c'; ctx.fill();
-    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+    if(motorLive.steady>=0.5){ ctx.fillStyle='#5cb85c'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); }
+    else                     { ctx.fillStyle='#fff';    ctx.fill(); ctx.strokeStyle='#999'; ctx.lineWidth=2; ctx.stroke(); }
   }
 }
 const CSV3_FIELDS = [
@@ -4430,10 +4461,16 @@ function handleProfileUpdate(event) {
                 body: formData
             }, 8000);
         })
-        .then(response => {
-            return response.json().then(data => ({ httpStatus: response.status, data }));
-        })
-        .then(({ httpStatus, data }) => {
+        // Text-first parse: cloud sends JSON {success,error} on 4xx/409, but the firmware
+        // can also reply with plain text (403 "Forbidden" on bad password, empty body on
+        // 502/503). Reading text and tolerating a parse failure surfaces every error path
+        // instead of throwing a misleading "Network error" on non-JSON replies.
+        .then(response => response.text().then(text => {
+            let data = {};
+            try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {}; }
+            return { httpStatus: response.status, data, raw: text };
+        }))
+        .then(({ httpStatus, data, raw }) => {
             if (data.success) {
                 messageDiv.style.backgroundColor = '#e8f5e9';
                 messageDiv.style.color = '#2e7d32';
@@ -4443,7 +4480,8 @@ function handleProfileUpdate(event) {
             } else {
                 messageDiv.style.backgroundColor = '#ffebee';
                 messageDiv.style.color = '#c62828';
-                messageDiv.textContent = 'Error: ' + (data.error || `HTTP ${httpStatus}`);
+                // Prefer the cloud's error string; fall back to raw body (e.g. "Forbidden") then status
+                messageDiv.textContent = 'Error: ' + (data.error || (raw && raw.trim()) || `HTTP ${httpStatus}`);
             }
         })
         .catch(err => {
@@ -4478,16 +4516,19 @@ function handleDeleteAllData() {
         method: 'POST',
         body: formData
     }, 8000)
-        .then(response => {
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            return response.json();
-        })
-        .then(data => {
+        // Text-first parse so a non-2xx cloud reply (e.g. 409, or a 403 "Forbidden" from the
+        // firmware) surfaces its real error string instead of being swallowed as a bare status.
+        .then(response => response.text().then(text => {
+            let data = {};
+            try { data = text ? JSON.parse(text) : {}; } catch (e) { data = {}; }
+            return { httpStatus: response.status, data, raw: text };
+        }))
+        .then(({ httpStatus, data, raw }) => {
             if (data.success) {
                 alert('Your account and all cloud data were deleted. Your device keeps working locally; cloud features have been reset.');
                 location.reload();
             } else {
-                alert('Error: ' + (data.error || 'Deletion failed'));
+                alert('Error: ' + (data.error || (raw && raw.trim()) || `HTTP ${httpStatus}` || 'Deletion failed'));
             }
         })
         .catch(err => {
@@ -6765,7 +6806,6 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("BatteryVID", sa.batteryV);
     applyStaleStyleByAge("IBVID", sa.ibv);
     applyStaleStyleByAge("BCurrID", sa.bcur);
-    applyStaleStyleByAge("ADS3ID", sa.channel3V);
     applyStaleStyleByAge("dutyCycleID", sa.dutyCycle);
     applyStaleStyleByAge("FieldVoltsID", sa.fieldVolts);
     applyStaleStyleByAge("FieldAmpsID", sa.fieldAmps);
@@ -7576,13 +7616,14 @@ window.addEventListener("load", function () {
         if (darkToggle) darkToggle.checked = true;
     }
 
-    // Load Settings > Vessel Info if incomplete, otherwise Live Data > Alternator
-    if (!vesselInfoComplete) {
-        showMainTab('settings');
-        showSubTab('settings', 'vessel-info');
-    } else {
-        showMainTab('livedata');  // safety net inside showMainTab activates alternator sub-tab
-    }
+    // Pre-telemetry placeholder view only: Settings with its static sub-tab default
+    // (Alternator > Setup). Do NOT force Vessel Info here — vesselInfoComplete is still
+    // its initial false at this point (the vessel-info fetch is async and hasn't resolved),
+    // and forcing vessel-info would leave it as the active settings sub-tab even after a
+    // complete device lands on Live Data. The real landing (Live Data when complete, or
+    // Settings > Vessel Info when not) is applied by maybeApplyLanding() once both the
+    // vessel-info fetch and first telemetry packet have resolved.
+    showMainTab('settings');
     // // Simple WiFi disconnect tracking - ping every 10 seconds
     // setTrackedInterval(() => {
     //     fetchWithTimeout(buildURL('/ping?t=' + Date.now()), {}, 5000).catch(() => { });
@@ -7837,13 +7878,19 @@ window.addEventListener("load", function () {
         });
 
         // Staleness detection - check if data is still flowing
-        setTrackedInterval(function () {
-            const timeSinceLastEvent = Date.now() - lastEventTime;
-            if (timeSinceLastEvent > 9000) { // 9 seconds without data = disconnected (was working well at 8s for a long time)
-                updateInlineStatus(false);
-                markAllReadingsStale(); //gray out
-            }
-        }, 2000); // Check every 1 seconds (was working well at 2s for a long time)
+        // Created ONCE per page life: attachStreamListeners re-runs on every SSE
+        // reconnect attempt, and an unguarded interval here leaked one stacked
+        // copy per attempt (a day of flaky boat WiFi = dozens of 2s sweeps).
+        if (!window.stalenessWatchdogStarted) {
+            window.stalenessWatchdogStarted = true;
+            setTrackedInterval(function () {
+                const timeSinceLastEvent = Date.now() - lastEventTime;
+                if (timeSinceLastEvent > 9000) { // 9 seconds without data = disconnected (was working well at 8s for a long time)
+                    updateInlineStatus(false);
+                    markAllReadingsStale(); //gray out
+                }
+            }, 2000); // Check every 1 seconds (was working well at 2s for a long time)
+        }
 
 
         const handleCSVData = function (e) {
@@ -7882,6 +7929,9 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV1_FIELDS.map((key, i) => [key, values[i]]));
+
+            // Thermal tuning plot: cache the two fast (CSV1) series for the live ring.
+            try { thermalLiveOnCsv1(data); } catch (e) { }
 
             // Update all "session window" labels with the current elapsed time since
             // "Reset Peak Values" was pressed (or boot). One CSV1 field drives every
@@ -7986,7 +8036,7 @@ window.addEventListener("load", function () {
                         else if (abs >= 10)  newTextContent = amps.toFixed(1);
                         else                 newTextContent = amps.toFixed(2);
                     }
-                    else if (["BatteryV", "uTargetAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "BatteryV_raw", "MeasuredAmps_filtered"].includes(key)) {
+                    else if (["BatteryV", "uTargetAmps", "Ymin2", "Ymax2", "setpointLimited", "pidInput", "pidOutput", "pidError", "Channel3V", "IBV", "VictronVoltage", "vvout", "imu_heel_deg", "imu_pitch_deg", "imu_yaw_rate_dps", "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at", "pf_avg_10s", "pf_avg_2m", "pf_avg_at", "vl_avg_10s", "vl_avg_2m", "vl_avg_at", "BatteryV_raw", "MeasuredAmps_filtered"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "dutyCycle") {
@@ -8052,7 +8102,6 @@ window.addEventListener("load", function () {
                 ["BCurrID", "Bcur"],                     // Battery Current 
                 ["RPMID", "RPM"],                        // Engine Speed 
                 ["WifiHeartBeatID", "WifiHeartBeat"],     // WifiHeartbeat
-                ["ADS3ID", "Channel3V"],
                 ["WaterDepthID", "WaterDepth_ft"],
                 ["FieldVoltsID", "vvout"],
                 ["FieldVoltsID2", "vvout"], // have to use 2 because it appears in two HTML displays (Dumb rule)
@@ -8193,6 +8242,9 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
+
+            // Thermal tuning plot: sample the live ring off this CSV2 frame (~5s).
+            try { thermalLiveOnCsv2(data); } catch (e) { }
 
             // IMU zero/level calibration status (offsets sent deg ×100)
             try {
@@ -8353,6 +8405,14 @@ window.addEventListener("load", function () {
                     else if (key === "STWNMEA") {
                         newTextContent = value < 0 ? "—" : (value / 100).toFixed(2);
                     }
+                    // IMU FIFO drain durations: firmware sends µs; display in ms to match the rest of this page
+                    else if (key === "IMUReadTime" || key === "IMUReadTime2") {
+                        newTextContent = (value / 1000).toFixed(2);
+                    }
+                    // Bus-only worst read timers: firmware sends µs; display in ms to match the rest of this page
+                    else if (key === "inaBusReadWorstUs" || key === "imuFifoFetchWorstUs") {
+                        newTextContent = (value / 1000).toFixed(2);
+                    }
                     // Time values that need conversion from minutes to days/hours/minutes
                     else if (["timeToFullChargeMin", "timeToFullDischargeMin"].includes(key)) {
                         newTextContent = formatMinutesToDHM(value);
@@ -8393,6 +8453,8 @@ window.addEventListener("load", function () {
                         "PeakVoltage_AllTime", "MinVoltage", "MinVoltage_AllTime", "AvgSOC_AllTime", "AvgSpeed_AllTime", "InsulationLifePercent", "GreaseLifePercent",
                         "BrushLifePercent", "pKwHrToday", "pKwHrTomorrow", "pKwHr2days", "AvgSpeed", "MeasuredAmpsMax_AllTime", "SOGNMEA", "ApparentWindSpeedNMEA", "TrueWindSpeedNMEA", "VMGNMEA", "VMGUpwind",
                         "fastOvCurrentCap", "ch1_avg_10s", "ch1_avg_2m", "ch1_avg_at", "ina_avg_10s", "ina_avg_2m", "ina_avg_at",
+                        "pf_avg_10s", "pf_avg_2m", "pf_avg_at",
+                        "vl_avg_10s", "vl_avg_2m", "vl_avg_at",
                         "VictronSolarVoltage_V", "VictronSolarCurrent_A", "VictronYieldToday_kWh", "VictronYieldYesterday_kWh"].includes(key)) {
                         // NOTE: ch1_worst_* and ina_worst_* are NOT in this list — firmware sends them as raw integer ms
                         // (only the matching *_avg_* values are scaled ×100). They fall through to the default integer render below.
@@ -8767,6 +8829,11 @@ window.addEventListener("load", function () {
                 ["IMUReadTime2_ID", "IMUReadTime2"],
                 ["IMUReadTime_ID", "IMUReadTime"],
                 ["adsI2CErrorCount_ID", "adsI2CErrorCount"],
+                ["inaBusReadWorstUs_ID", "inaBusReadWorstUs"],
+                ["inaBusSlowCount_ID", "inaBusSlowCount"],
+                ["ina228ErrorCount_ID", "ina228ErrorCount"],
+                ["imuFifoFetchWorstUs_ID", "imuFifoFetchWorstUs"],
+                ["imuFifoWorstSamples_ID", "imuFifoWorstSamples"],
 
                 //Temperature PID loop
                 ["tempPIDActive_display", "tempPIDActive"],
@@ -8842,6 +8909,8 @@ window.addEventListener("load", function () {
                 ["ft_AdjustFieldLearnMode_ses_ID", "ft_AdjustFieldLearnMode_ses"],
                 ["ft_uploadSensorHistory_win_ID", "ft_uploadSensorHistory_win"],
                 ["ft_uploadSensorHistory_ses_ID", "ft_uploadSensorHistory_ses"],
+                ["ft_dumpLongTermRing_win_ID", "ft_dumpLongTermRing_win"],
+                ["ft_dumpLongTermRing_ses_ID", "ft_dumpLongTermRing_ses"],
                 ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
@@ -8946,6 +9015,17 @@ window.addEventListener("load", function () {
                 ["ch1_avg_at_ID", "ch1_avg_at"],
                 ["ch1_worst_at_ID", "ch1_worst_at"],
                 ["ch1_over2x_at_ID", "ch1_over2x_at"],
+                // Inner Current PID firing interval (field-on)
+                ["pf_last_ms_ID", "pf_last_ms"],
+                ["pf_avg_10s_ID", "pf_avg_10s"],
+                ["pf_worst_10s_ID", "pf_worst_10s"],
+                ["pf_over2x_10s_ID", "pf_over2x_10s"],
+                ["pf_avg_2m_ID", "pf_avg_2m"],
+                ["pf_worst_2m_ID", "pf_worst_2m"],
+                ["pf_over2x_2m_ID", "pf_over2x_2m"],
+                ["pf_avg_at_ID", "pf_avg_at"],
+                ["pf_worst_at_ID", "pf_worst_at"],
+                ["pf_over2x_at_ID", "pf_over2x_at"],
                 ["ina_last_ms_ID", "ina_last_ms"],
                 ["ina_avg_10s_ID", "ina_avg_10s"],
                 ["ina_worst_10s_ID", "ina_worst_10s"],
@@ -8956,8 +9036,16 @@ window.addEventListener("load", function () {
                 ["ina_avg_at_ID", "ina_avg_at"],
                 ["ina_worst_at_ID", "ina_worst_at"],
                 ["ina_over2x_at_ID", "ina_over2x_at"],
-                ["voltLoopWorstInterval_5s_ID", "voltLoopWorstInterval_5s"],
-                ["voltLoopWorstInterval_ses_ID", "voltLoopWorstInterval_ses"],
+                ["vl_last_ms_ID", "vl_last_ms"],
+                ["vl_avg_10s_ID", "vl_avg_10s"],
+                ["vl_worst_10s_ID", "vl_worst_10s"],
+                ["vl_over2x_10s_ID", "vl_over2x_10s"],
+                ["vl_avg_2m_ID", "vl_avg_2m"],
+                ["vl_worst_2m_ID", "vl_worst_2m"],
+                ["vl_over2x_2m_ID", "vl_over2x_2m"],
+                ["vl_avg_at_ID", "vl_avg_at"],
+                ["vl_worst_at_ID", "vl_worst_at"],
+                ["vl_over2x_at_ID", "vl_over2x_at"],
                 ["nvsSecsSinceLastSave_ID", "nvsSecsSinceLastSave"],
                 ["nvsFullSaveLastMs_ID", "nvsFullSaveLastMs"],
                 ["nvsFullSaveWorstMs_ID", "nvsFullSaveWorstMs"],
@@ -9751,6 +9839,7 @@ function handleResetPerfCounters() {
                 'ft_ReadAnalogInputs_ses_ID', 'ft_rai_total_ses_ID', 'ft_rai_ina228_ses_ID',
                 'ft_rai_ads_state_ses_ID', 'ft_rai_bmp_state_ses_ID', 'ft_rai_imu_ses_ID', 'ft_updateAccelMetrics_ses_ID',
                 'VeTime2_ID', 'ft_AdjustFieldLearnMode_ses_ID', 'ft_uploadSensorHistory_ses_ID',
+                'ft_dumpLongTermRing_ses_ID',
                 'ft_uploadBufferedRecords_ses_ID', 'ft_buildConfigPayload_ses_ID',
                 'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
                 'MaximumLoopTimeID',
@@ -9762,7 +9851,9 @@ function handleResetPerfCounters() {
                 'ina_last_ms_ID', 'ina_avg_10s_ID', 'ina_worst_10s_ID', 'ina_over2x_10s_ID',
                 'ina_avg_2m_ID', 'ina_worst_2m_ID', 'ina_over2x_2m_ID',
                 'ina_avg_at_ID', 'ina_worst_at_ID', 'ina_over2x_at_ID',
-                'voltLoopWorstInterval_5s_ID', 'voltLoopWorstInterval_ses_ID'
+                'vl_last_ms_ID', 'vl_avg_10s_ID', 'vl_worst_10s_ID', 'vl_over2x_10s_ID',
+                'vl_avg_2m_ID', 'vl_worst_2m_ID', 'vl_over2x_2m_ID',
+                'vl_avg_at_ID', 'vl_worst_at_ID', 'vl_over2x_at_ID'
             ];
             resetDisplayValuesAndCaches(ids);
         })
@@ -11516,11 +11607,9 @@ function updateVoltageModeGreyout(stage) {
 let _thermalStateArrays = {
     flagsArr: [], antiWindupArr: [], stageArr: [], tArr: []
 };
-let thermalLogAutoRefreshTimer = null;
 let thermalLogPlots = [null, null, null];
 let thermalLogResizeObservers = [null, null, null];
 let thermalWindowMin = 30;
-let thermalFetchInProgress = false;
 
 // Default visibility — hide the four requested series
 let thermalSeriesVisible = {
@@ -11533,7 +11622,7 @@ let thermalSeriesVisible = {
 // Window buttons
 // ---------------------------------------------------------------------------
 function highlightThermalWindowBtn(minutes) {
-    [5, 10, 30, 60, 120].forEach(v => {
+    [5, 10, 30, 60].forEach(v => {
         const btn = document.getElementById(`tw-${v}`);
         if (btn) btn.classList.toggle('btn-primary', v === minutes);
         if (btn) btn.classList.toggle('btn-secondary', v !== minutes);
@@ -11543,8 +11632,9 @@ function highlightThermalWindowBtn(minutes) {
 function setThermalWindow(minutes) {
     thermalWindowMin = minutes;
     highlightThermalWindowBtn(minutes);
+    // Destroy so each plot re-creates with the new x-range; re-render from the live ring.
     thermalLogPlots.forEach((p, i) => { if (p) { p.destroy(); thermalLogPlots[i] = null; } });
-    fetchAndRenderThermalLog();
+    thermalRenderAll();
 }
 
 function resetThermalZoom() {
@@ -11581,110 +11671,82 @@ function drawThermalWatermark(u) {
 // ---------------------------------------------------------------------------
 // Fetch
 // ---------------------------------------------------------------------------
-async function fetchAndRenderThermalLog() {
-    if (thermalFetchInProgress) return;
-    thermalFetchInProgress = true;
-    const statusEl = document.getElementById('thermallog-status');
-    if (statusEl) statusEl.textContent = 'Fetching…';
-    try {
-        const resp = await fetch(buildURL('/thermallog.bin'));
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = await resp.arrayBuffer();
-        // Capture scroll position only when we're about to do real DOM work (chart rebuild).
-        // Moving this inside the try block means failed fetches never clobber user scroll position.
-        const scrollY = window.scrollY;
-        parseThermalBin(buf);
-        if (statusEl) statusEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                if (Math.abs(window.scrollY - scrollY) > 2) window.scrollTo(0, scrollY);
-            });
-        });
-    } catch (err) {
-        if (statusEl) statusEl.textContent = `Fetch error: ${err.message}`;
-        console.error('thermallog fetch:', err);
-    } finally {
-        thermalFetchInProgress = false;
-    }
+// Sampled off the live CSV stream (replaces the old /thermallog.bin pull). One
+// column per THERMAL_SAMPLE_MS, driven by the CSV2 frame (~5s) so it can never
+// need a manual refresh. measAmps/uTarget ride CSV1 (cached every 10Hz frame);
+// the rest ride CSV2. dCorrection is derived; anti-windup is OR-accumulated
+// across frames so sub-sample CV-bleed events still show as ticks.
+const THERMAL_SAMPLE_MS = 5000;          // one column per 5s (~720 cols/hr ≈ 1 pt/px on an 800px plot)
+const THERMAL_MAX_WINDOW_MIN = 60;       // longest selectable window
+const THERMAL_RING_CAP = 900;            // hard cap (>720 for cadence jitter headroom)
+
+let _thermalRing = {
+    ts: [], tempFilt: [], tempProjected: [], tempSetpoint: [], penalty: [],
+    measAmps: [], uTarget: [], outerP: [], outerI: [], outerD: [], implied: [],
+    flags: [], antiWindup: [], stage: []
+};
+let _thermalCsv1 = { measAmps: 0, uTarget: 0 };   // latest CSV1 values (10Hz)
+let _thermalAntiWindupAccum = 0;                  // OR-accumulated between samples
+let _thermalLastSampleMs = 0;
+
+// Called from the CSV1 frame handler — cache the two fast series the plot needs.
+function thermalLiveOnCsv1(data) {
+    if ('MeasuredAmps' in data) _thermalCsv1.measAmps = Number(data.MeasuredAmps) / 100;
+    if ('uTargetAmps' in data) _thermalCsv1.uTarget = Number(data.uTargetAmps) / 100;
 }
 
-// ---------------------------------------------------------------------------
-// Parse binary
-// ---------------------------------------------------------------------------
-function parseThermalBin(buf) {
-    const view = new DataView(buf);
-    if (buf.byteLength < 8) {
-        const el = document.getElementById('thermallog-status');
-        if (el) el.textContent = 'No log data yet — waiting for AUTO control tick…';
-        return;
+// Called from the CSV2 frame handler (~5s). Accumulates the anti-windup latch
+// across frames, then appends one ring column per THERMAL_SAMPLE_MS.
+function thermalLiveOnCsv2(data) {
+    if (Number(data.outerAntiWindupFired)) _thermalAntiWindupAccum = 1;
+
+    const now = Date.now();
+    if (now - _thermalLastSampleMs < THERMAL_SAMPLE_MS) return;
+    _thermalLastSampleMs = now;
+
+    const r = _thermalRing;
+    r.ts.push(now);
+    r.tempFilt.push(Number(data.tempFiltered) / 100);
+    r.tempProjected.push(Number(data.tempPIDInput_d) / 100);
+    r.tempSetpoint.push(Number(data.tempPIDSetpoint_d) / 100);
+    r.penalty.push(Number(data.thermalPenaltyAmps) / 100);
+    r.measAmps.push(_thermalCsv1.measAmps);
+    r.uTarget.push(_thermalCsv1.uTarget);
+    r.outerP.push(Number(data.outerTermP) / 100);
+    r.outerI.push(Number(data.outerTermI) / 100);
+    r.outerD.push(Number(data.outerTermD) / 100);
+    r.implied.push(Number(data.outerImpliedPenalty) / 100);
+    r.flags.push(Number(data.thermalFlags) | 0);
+    r.antiWindup.push(_thermalAntiWindupAccum);
+    r.stage.push(Number(data.chargeStageDisplay) | 0);
+    _thermalAntiWindupAccum = 0;
+
+    // Trim: drop columns older than the max window (+ slack), then hard-cap length.
+    const cutoff = now - (THERMAL_MAX_WINDOW_MIN * 60000 + THERMAL_SAMPLE_MS);
+    while (r.ts.length && r.ts[0] < cutoff) { for (const k in r) r[k].shift(); }
+    while (r.ts.length > THERMAL_RING_CAP) { for (const k in r) r[k].shift(); }
+
+    // Only touch the DOM/charts when the section is actually open.
+    const det = document.getElementById('thermallog-details');
+    if (det && det.open) thermalRenderAll();
+}
+
+// Build the uPlot data arrays from the ring (x = minutes ago) and render all 3.
+function thermalRenderAll() {
+    const r = _thermalRing;
+    const n = r.ts.length;
+    if (n === 0) return;
+    const now = Date.now();
+    const t = new Array(n);
+    const dCorrection = new Array(n);
+    for (let i = 0; i < n; i++) {
+        t[i] = -(now - r.ts[i]) / 60000;          // minutes ago (ascending, oldest first)
+        dCorrection[i] = r.tempProjected[i] - r.tempFilt[i];
     }
-
-    const count = view.getUint32(0, true);
-    const intervalMs = view.getUint32(4, true);
-
-    if (count === 0) {
-        const el = document.getElementById('thermallog-status');
-        if (el) el.textContent = 'Log empty — data will appear once alternator is running in AUTO mode.';
-        return;
-    }
-
-    const ENTRY_SIZE = 48;
-    const HEADER_SIZE = 8;
-
-    if (buf.byteLength < HEADER_SIZE + count * ENTRY_SIZE) {
-        console.error('thermallog.bin: truncated response', buf.byteLength, 'need', HEADER_SIZE + count * ENTRY_SIZE);
-        return;
-    }
-
-    const intervalMin = intervalMs / 60000.0;
-
-    const t = new Array(count);
-    const tempFilt = new Array(count);
-    const tempProjected = new Array(count);
-    const tempSetpoint = new Array(count);
-    const penalty = new Array(count);
-    const outerP = new Array(count);
-    const outerI = new Array(count);
-    const outerD = new Array(count);
-    const implied = new Array(count);
-    const outerDExt = new Array(count);
-    const measAmps = new Array(count);
-    const uTarget = new Array(count);
-    const spLimited = new Array(count);
-    const voltCap = new Array(count);
-    const flagsArr = new Array(count);
-    const antiWindup = new Array(count);
-    const stageArr = new Array(count);
-
-    for (let i = 0; i < count; i++) {
-        t[i] = -(count - 1 - i) * intervalMin;
-        const b = HEADER_SIZE + i * ENTRY_SIZE;
-
-        tempFilt[i]      = view.getInt16(b + 4, true) / 10.0;
-        tempProjected[i] = view.getInt16(b + 6, true) / 10.0;
-        tempSetpoint[i]  = view.getInt16(b + 8, true) / 10.0;
-        voltCap[i] = view.getInt16(b + 12, true) / 10.0;
-        uTarget[i] = view.getInt16(b + 14, true) / 10.0;
-        spLimited[i] = view.getInt16(b + 16, true) / 10.0;
-        measAmps[i] = view.getInt16(b + 28, true) / 10.0;
-        penalty[i] = view.getInt16(b + 30, true) / 10.0;
-
-        flagsArr[i] = view.getUint8(b + 32);
-        antiWindup[i] = view.getUint8(b + 33);
-        stageArr[i] = view.getUint8(b + 34);
-
-        outerP[i] = view.getInt16(b + 36, true) / 10.0;
-        outerI[i] = view.getInt16(b + 38, true) / 10.0;
-        outerD[i] = view.getInt16(b + 40, true) / 10.0;
-        implied[i] = view.getInt16(b + 42, true) / 10.0;
-        outerDExt[i] = view.getInt16(b + 44, true) / 1000.0;  // thermalSlopeFPerSec (°F/s) — unused in plots, kept for future use
-    }
-
-    const dCorrection = tempProjected.map((tp, i) => tp - tempFilt[i]);
-
-    renderThermalPlot1([t, tempFilt, tempProjected, tempSetpoint, dCorrection, penalty, measAmps, uTarget], t[0]);
-    renderThermalPlotState([t, new Array(count).fill(null)], t[0], flagsArr, antiWindup, stageArr, t);
-    renderThermalPlot2([t, outerP, outerI, outerD, implied], t[0]);
+    renderThermalPlot1([t, r.tempFilt, r.tempProjected, r.tempSetpoint, dCorrection, r.penalty, r.measAmps, r.uTarget], t[0]);
+    // State strip gets snapshot copies so a resize-redraw can't index a grown ring against a stale time axis.
+    renderThermalPlotState([t, new Array(n).fill(null)], t[0], r.flags.slice(), r.antiWindup.slice(), r.stage.slice(), t);
+    renderThermalPlot2([t, r.outerP, r.outerI, r.outerD, r.implied], t[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -11706,16 +11768,20 @@ const thermalZoomPlugin = {
 // ---------------------------------------------------------------------------
 // Mode decode
 // ---------------------------------------------------------------------------
+// Distinct hue per stage — no two stages should read alike (old palette had
+// shutdown≈manual red and bulk≈maintain green). antiWindup is the tick marker;
+// it sits on the background strip above the bands, so it's drawn theme-aware
+// (near-black on light, white on dark) rather than from this value.
 const THERMAL_MODE_COLORS = {
-    shutdown: '#d9534f',
-    bulk: '#00c853',
-    absorption: '#7e57c2',
-    float: '#ffb300',
-    manual: '#ef5350',
-    maintain: '#66bb6a',
-    targetV: '#42a5f5',
-    idle: '#666666',
-    antiWindup: '#d9534f'
+    shutdown: '#e53935',    // red — alarm
+    bulk: '#2e7d32',        // dark green
+    absorption: '#fb8c00',  // orange
+    float: '#1e88e5',       // blue
+    maintain: '#00acc1',    // teal
+    targetV: '#8e24aa',     // purple
+    manual: '#d81b60',      // magenta
+    idle: '#9e9e9e',        // gray
+    antiWindup: '#111111'   // tick (light mode); dark mode overrides to white
 };
 function modeFromStage(stage, flags) {
     if (flags & (1 << 5)) {
@@ -11993,7 +12059,8 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
                         }
 
                         ctx.globalAlpha = 0.95;
-                        ctx.strokeStyle = THERMAL_MODE_COLORS.antiWindup;
+                        // Ticks sit on the background strip above the bands — contrast with the theme, not a band color.
+                        ctx.strokeStyle = document.body.classList.contains('dark-mode') ? '#ffffff' : THERMAL_MODE_COLORS.antiWindup;
                         ctx.lineWidth = 1.5;
 
                         for (let i = 0; i < antiWindupArr.length; i++) {
@@ -12037,7 +12104,7 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
         wrap.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:12px;';
         const swatch = document.createElement('div');
         swatch.style.cssText = item.tick
-            ? `width:2px;height:14px;background:${item.color};border-radius:1px;`
+            ? `width:2px;height:14px;background:var(--text-dark);border-radius:1px;`   // tick adapts to theme like the on-plot marker
             : `width:14px;height:10px;background:${item.color};border-radius:2px;opacity:0.85;`;
         const span = document.createElement('span');
         span.textContent = item.label;
@@ -12141,14 +12208,10 @@ function applyThermalRanges() {
 
         highlightThermalWindowBtn(30);
 
+        // Live-streamed off CSV2 — no fetch, no auto-refresh timer. Just draw the
+        // current ring on open; thermalLiveOnCsv2() keeps it updating while open.
         det.addEventListener('toggle', () => {
-            if (det.open) {
-                setTimeout(() => { fetchAndRenderThermalLog(); }, 50);
-                thermalLogAutoRefreshTimer = setInterval(fetchAndRenderThermalLog, 15000);
-            } else {
-                clearInterval(thermalLogAutoRefreshTimer);
-                thermalLogAutoRefreshTimer = null;
-            }
+            if (det.open) setTimeout(() => { thermalRenderAll(); }, 50);
         });
 
         document.getElementById('thermal-autoscale')?.addEventListener('change', function () {
@@ -12394,7 +12457,7 @@ function updateFloatVisibility() {
 //
 // Header (36 bytes):
 //   offset  0  uint32  count
-//   offset  4  uint32  entrySize (= 50)
+//   offset  4  uint32  entrySize (= 51)
 //   offset  8  float32 VoltageKp
 //   offset 12  float32 VoltageKi
 //   offset 16  uint32  VoltageLoopInterval (ms)
@@ -12430,10 +12493,11 @@ function updateFloatVisibility() {
 //   offset 44  int16    voltLoopIntervalMs  ms    actual voltage loop interval when fired (0 if not)
 //   offset 46  int16    inaIntervalMs       ms    ina_last_ms at log time — INA228 read freshness
 //   offset 48  int16    slopeBleedAmps_x1000 / 1000 → A  cv_I drain this VL tick (0 on non-VL ticks)
+//   offset 50  uint8    capReason   0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap this tick)
 // ===========================================================================
 
 const CV_LOG_HEADER_SIZE = 36;
-const CV_LOG_ENTRY_SIZE = 50;
+const CV_LOG_ENTRY_SIZE = 51;
 
 // ---------------------------------------------------------------------------
 // parseCvBin(buf)
@@ -12498,6 +12562,7 @@ function parseCvBin(buf) {
     const voltLoopInterval = new Array(count);
     const inaInterval = new Array(count);
     const slopeBleedAmps = new Array(count);
+    const capReason = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
@@ -12535,6 +12600,7 @@ function parseCvBin(buf) {
         voltLoopInterval[i] = view.getInt16(b + 44, true);
         inaInterval[i] = view.getInt16(b + 46, true);
         slopeBleedAmps[i] = view.getInt16(b + 48, true) / 1000.0;
+        capReason[i] = view.getUint8(b + 50);
         iExcess[i] = (f >> 5) & 1;
         loadDumpActive[i] = (f >> 6) & 1;
     }
@@ -12548,7 +12614,7 @@ function parseCvBin(buf) {
         fastOvActive, voltLoopFired, cvActive, hardClamp,
         rpm, battV_filt, iMeas_filt, ch1Interval, cvDSlope, iExcess, battI,
         dBcur_dt, loadDumpActive, awState, voltLoopInterval, inaInterval,
-        slopeBleedAmps,
+        slopeBleedAmps, capReason,
     };
 }
 
@@ -12579,6 +12645,9 @@ function cvBinToCsv(d, csv3) {
     lines.push(
         `# SlopeBleed: SlopeBleedThresh=${d.sbThresh.toFixed(3)}V/s SlopeBleedK=${d.sbK.toFixed(1)}A/(V/s) SlopeBleedProxV=${d.sbProxV.toFixed(3)}V`
     );
+    lines.push(
+        `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump`
+    );
 
     // Column headers
     lines.push([
@@ -12592,7 +12661,7 @@ function cvBinToCsv(d, csv3) {
         'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
         'cvDSlope_Vps', 'awState',
         'voltLoopInterval_ms', 'inaInterval_ms',
-        'slopeBleedAmps_A',
+        'slopeBleedAmps_A', 'capReason',
     ].join(','));
 
     for (let i = 0; i < d.count; i++) {
@@ -12613,7 +12682,7 @@ function cvBinToCsv(d, csv3) {
             d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
             d.cvDSlope[i].toFixed(4), d.awState[i],
             d.voltLoopInterval[i], d.inaInterval[i],
-            d.slopeBleedAmps[i].toFixed(4),
+            d.slopeBleedAmps[i].toFixed(4), d.capReason[i],
         ].join(','));
     }
 
@@ -14702,7 +14771,7 @@ window.addEventListener('load', function () {
         // Empty local ring: if Cloud Features is on, still build the charts so the cloud
         // stitch can fill the timeline; only show the "no data" notice when cloud is off.
         if (ltData.n === 0 && !ltCloudEnabled()) {
-          ltStatus('No long-term data yet — records accumulate every ~10 min.');
+          ltStatus('No long-term data yet — records accumulate locally every ~10 min. Without WiFi/Cloud, history is on-device only (about 30 days).');
           return;
         }
         ltStatus(null);

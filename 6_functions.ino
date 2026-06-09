@@ -512,11 +512,31 @@ void loadTuningLog() {
   if (!tuningLog) return;
   File f = LittleFS.open("/tuninglog.bin", "r");
   if (!f) return;
+  // Struct size is part of the wire format. Bail cleanly on mismatch (e.g. after
+  // TuningRecord layout changed) instead of reading garbage into the array.
+  const size_t expected = sizeof(tuningLogCount) + sizeof(tuningLogHead)
+                          + sizeof(tuningRunCounter) + 50 * sizeof(TuningRecord);
+  if (f.size() != expected) {
+    Serial.printf("TuningLog: size mismatch (%u vs %u expected) — discarding old log\n",
+                  (unsigned)f.size(), (unsigned)expected);
+    f.close();
+    LittleFS.remove("/tuninglog.bin");
+    return;
+  }
   f.read((uint8_t *)&tuningLogCount, sizeof(tuningLogCount));
   f.read((uint8_t *)&tuningLogHead, sizeof(tuningLogHead));
   f.read((uint8_t *)&tuningRunCounter, sizeof(tuningRunCounter));
   f.read((uint8_t *)tuningLog, 50 * sizeof(TuningRecord));
   f.close();
+  // Corrupt count/head would index past the 50-slot ring (commit writes BEFORE
+  // the %50 wrap) — discard rather than trust a bad header.
+  if (tuningLogCount > 50 || tuningLogHead >= 50) {
+    Serial.println("TuningLog: corrupt count/head — discarding old log");
+    tuningLogCount = 0;
+    tuningLogHead = 0;
+    LittleFS.remove("/tuninglog.bin");
+    return;
+  }
   Serial.printf("TuningLog: loaded %d records, counter=%d\n", tuningLogCount, tuningRunCounter);
 }
 
@@ -588,6 +608,15 @@ void loadCVTuningLog() {
   f.read((uint8_t *)&cvTuningRunCounter, sizeof(cvTuningRunCounter));
   f.read((uint8_t *)cvTuningLog, 50 * sizeof(CVTuningRecord));
   f.close();
+  // Corrupt count/head would index past the 50-slot ring (commit writes BEFORE
+  // the %50 wrap) — discard rather than trust a bad header.
+  if (cvTuningLogCount > 50 || cvTuningLogHead >= 50) {
+    Serial.println("CVTuningLog: corrupt count/head — discarding old log");
+    cvTuningLogCount = 0;
+    cvTuningLogHead = 0;
+    LittleFS.remove("/cvtuninglog.bin");
+    return;
+  }
   Serial.printf("CVTuningLog: loaded %d records, counter=%d\n", cvTuningLogCount, cvTuningRunCounter);
 }
 
@@ -744,11 +773,31 @@ void loadThermalTuningLog() {
   if (!thermalTuningLog) return;
   File f = LittleFS.open("/thermaltuninglog.bin", "r");
   if (!f) return;
+  // Struct size is part of the wire format. Bail cleanly on mismatch (e.g. after
+  // ThermalTuningRecord layout changed) instead of reading garbage into the array.
+  const size_t expected = sizeof(thermalTuningLogCount) + sizeof(thermalTuningLogHead)
+                          + sizeof(thermalTuningRunCounter) + 50 * sizeof(ThermalTuningRecord);
+  if (f.size() != expected) {
+    Serial.printf("ThermalTuningLog: size mismatch (%u vs %u expected) — discarding old log\n",
+                  (unsigned)f.size(), (unsigned)expected);
+    f.close();
+    LittleFS.remove("/thermaltuninglog.bin");
+    return;
+  }
   f.read((uint8_t *)&thermalTuningLogCount, sizeof(thermalTuningLogCount));
   f.read((uint8_t *)&thermalTuningLogHead, sizeof(thermalTuningLogHead));
   f.read((uint8_t *)&thermalTuningRunCounter, sizeof(thermalTuningRunCounter));
   f.read((uint8_t *)thermalTuningLog, 50 * sizeof(ThermalTuningRecord));
   f.close();
+  // Corrupt count/head would index past the 50-slot ring (commit writes BEFORE
+  // the %50 wrap) — discard rather than trust a bad header.
+  if (thermalTuningLogCount > 50 || thermalTuningLogHead >= 50) {
+    Serial.println("ThermalTuningLog: corrupt count/head — discarding old log");
+    thermalTuningLogCount = 0;
+    thermalTuningLogHead = 0;
+    LittleFS.remove("/thermaltuninglog.bin");
+    return;
+  }
   Serial.printf("ThermalTuningLog: loaded %d records, counter=%d\n", thermalTuningLogCount, thermalTuningRunCounter);
 }
 
@@ -810,11 +859,31 @@ void loadSystemIDLog() {
   if (!systemIDLog) return;
   File f = LittleFS.open("/systemidlog.bin", "r");
   if (!f) return;
+  // Struct size is part of the wire format. Bail cleanly on mismatch (e.g. after
+  // SystemIDRecord layout changed) instead of reading garbage into the array.
+  const size_t expected = sizeof(systemIDLogCount) + sizeof(systemIDLogHead)
+                          + sizeof(systemIDRunCounter) + 50 * sizeof(SystemIDRecord);
+  if (f.size() != expected) {
+    Serial.printf("SystemIDLog: size mismatch (%u vs %u expected) — discarding old log\n",
+                  (unsigned)f.size(), (unsigned)expected);
+    f.close();
+    LittleFS.remove("/systemidlog.bin");
+    return;
+  }
   f.read((uint8_t *)&systemIDLogCount,   sizeof(systemIDLogCount));
   f.read((uint8_t *)&systemIDLogHead,    sizeof(systemIDLogHead));
   f.read((uint8_t *)&systemIDRunCounter, sizeof(systemIDRunCounter));
   f.read((uint8_t *)systemIDLog,         50 * sizeof(SystemIDRecord));
   f.close();
+  // Corrupt count/head would index past the 50-slot ring (commit writes BEFORE
+  // the %50 wrap) — discard rather than trust a bad header.
+  if (systemIDLogCount > 50 || systemIDLogHead >= 50) {
+    Serial.println("SystemIDLog: corrupt count/head — discarding old log");
+    systemIDLogCount = 0;
+    systemIDLogHead = 0;
+    LittleFS.remove("/systemidlog.bin");
+    return;
+  }
   Serial.printf("SystemIDLog: loaded %d records, counter=%d\n",
                 systemIDLogCount, systemIDRunCounter);
 }
@@ -1051,6 +1120,7 @@ void AdjustFieldLearnMode() {
   // ========== TIMING ==========
   static uint32_t lastControlTickMs = 0;
   uint32_t currentMillis = millis();
+  uint32_t aflT0 = micros();  // section profiler entry mark (see aflWorstSecUs globals)
 
   // Thermal log runs FIRST so temperature history accumulates regardless of mode.
   // Every early-return below (immediate cut, LimpHome, stale CH1, non-normal mode,
@@ -1058,6 +1128,7 @@ void AdjustFieldLearnMode() {
   // 1 Hz throttle keeps cadence. Control-side fields (pidOut, outerTermP/I/D,
   // cv_I) freeze when their owners aren't ticking; temperature fields keep moving.
   thermalLog_tick(currentMillis);
+  uint32_t aflM0 = micros();  // end of section 0: thermal log
 
   uint32_t actualDtMs = (lastControlTickMs == 0) ? 62 : (currentMillis - lastControlTickMs);
   if (actualDtMs > 500) actualDtMs = 500;
@@ -1068,6 +1139,7 @@ void AdjustFieldLearnMode() {
   float uTargetRaw = (float)MaxTableValue;  // always MaxTableValue; kept for uTargetRaw_cached lineage only
   float fastOvBaseCap = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
   float fastOvCurrentCap = fastOvBaseCap;
+  g_fastOvCapReason = CAP_REASON_NONE;  // reset binding-reason tracker each tick; set at each cap-lowering site below
   bool fastOvClampActive = false;
   static uint32_t ocTripStartMs = 0;
 
@@ -1075,6 +1147,7 @@ void AdjustFieldLearnMode() {
   updateRPMBucketHistory(currentMillis);
 
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
+  uint32_t aflM1 = micros();  // end of section 1: RPM tables + tick snapshot
   // pidLog_tick() runs at the END of the normal control path, after all state is final.
   // thermalLog_tick() runs at the TOP of this function (above) — unconditional,
   // so temperature history continues during off/fault/shutdown/sysID.
@@ -1184,7 +1257,8 @@ void AdjustFieldLearnMode() {
       if (testProtectionsEnabled && !TuningMode && IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
-          fastOvCurrentCap = fminf(fastOvCurrentCap, hardCap);
+          // record reason only when this layer actually lowers the cap (equiv. to fminf)
+          if (hardCap < fastOvCurrentCap) { fastOvCurrentCap = hardCap; g_fastOvCapReason = CAP_REASON_KHARD_G1; }
           fastOvClampActive = true;
           g_fastOvHardActive = true;
         }
@@ -1193,7 +1267,7 @@ void AdjustFieldLearnMode() {
       if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
         float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
-        fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
+        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; g_fastOvCapReason = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
         ovActive = true;
         g_fastOvHardActive = true;
@@ -1207,7 +1281,7 @@ void AdjustFieldLearnMode() {
       else if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && ovActive && IBV > ChargingVoltageTarget) {
         float ovExcessSoft = IBV - ChargingVoltageTarget;
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcessSoft);
-        fastOvCurrentCap = fminf(fastOvCurrentCap, hystCap);
+        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; g_fastOvCapReason = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
       }
 
@@ -1252,6 +1326,7 @@ void AdjustFieldLearnMode() {
     handleLimpHome(currentMillis, tick);
     return;
   }
+  uint32_t aflM2 = micros();  // end of section 2: temp warning + fast-OV supervisor + limp gate
 
   // ========== GATE ON FRESH CH1 DATA ==========
   // PidSampleDivisor=1: PID runs every CH1 sample (~200Hz, ~5ms interval)
@@ -1466,6 +1541,7 @@ void AdjustFieldLearnMode() {
   if (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) >= FIELD_COLLAPSE_DELAY) {
     fieldCollapseTime = 0;
   }
+  uint32_t aflM3 = micros();  // end of section 3: CH1 gate + stage/governor/mode transitions
   // ========== NON-NORMAL MODE: SHUTDOWN / FAULT HANDLING ==========
   // NOTE: pidLog_tick() is NOT called in the shutdown/fault path.
   if (!isNormalMode) {
@@ -1500,7 +1576,13 @@ void AdjustFieldLearnMode() {
         return;
       }
       // Timeout: drop queued requests and let charging proceed.
-      xQueueReset(httpsQueue);
+      // Drain item-by-item, NOT xQueueReset — each queued request OWNS a
+      // ps_malloc'd payload that only the receiver frees; a raw reset
+      // leaks 4-128KB of PSRAM per flushed request.
+      HttpsRequest droppedReq;
+      while (xQueueReceive(httpsQueue, &droppedReq, 0) == pdTRUE) {
+        if (droppedReq.payload) free(droppedReq.payload);
+      }
       sensorRingInFlightIndex = -1;
       queueConsoleMessage("Field-on wait timeout (10s) — flushed cloud queue, proceeding");
       fieldHoldStartMs = 0;
@@ -1881,7 +1963,7 @@ void AdjustFieldLearnMode() {
                 g_iExcessCount++;
               }
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
-              fastOvCurrentCap = fminf(fastOvCurrentCap, ieCap);
+              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; g_fastOvCapReason = CAP_REASON_IEXCESS; }
               fastOvClampActive = true;
               iExcessActive = true;
               // One-shot cv_I drain on the rising edge only — postFastOvMismatch arms below
@@ -1952,6 +2034,7 @@ void AdjustFieldLearnMode() {
             bool ldNow = (ldCount1 >= 1) || (ldCount2 >= 2) || (ldCount3 >= 3);
             if (ldNow) {
               fastOvCurrentCap = 0.0f;
+              g_fastOvCapReason = CAP_REASON_LOADDUMP;  // hard cutoff — always the binding cap
               setpointLimited = 0.0f;
               fastOvClampActive = true;
               if (!ldWasActive) {
@@ -2256,11 +2339,10 @@ void AdjustFieldLearnMode() {
             if (prevVoltageLoopMs != 0) {
               uint32_t actualIv = currentMillis - prevVoltageLoopMs;
               g_voltLoopActualIntervalMs = (uint16_t)(actualIv < 65535u ? actualIv : 65535u);
-              if (g_voltLoopActualIntervalMs > voltLoopWorstInterval_5s) voltLoopWorstInterval_5s = g_voltLoopActualIntervalMs;
-              if (g_voltLoopActualIntervalMs > voltLoopWorstInterval_ses) voltLoopWorstInterval_ses = g_voltLoopActualIntervalMs;
             } else {
               g_voltLoopActualIntervalMs = 0;
             }
+            voltLoop_record(currentMillis);  // feed the CV-interval ladder (vl_*); vlHasPrev re-baselines on CV exit
             pidLog_voltageLoopRanThisTick = 1;
             pidLog_enteringCV = enteringCV ? 1 : 0;
 
@@ -2332,6 +2414,7 @@ void AdjustFieldLearnMode() {
         } else {
           pidLog_uTargetBeforeVoltCap = i_ceiling_pre_ov;
           pidLog_uTargetAfterVoltCap = (float)uTargetAmps;
+          vlHasPrev = false;  // CV inactive — re-baseline the CV-interval ladder so the off-gap isn't logged
         }
 
         // Per-tick Icv recompute — proportional path responds every output current loop tick;
@@ -2475,6 +2558,7 @@ void AdjustFieldLearnMode() {
   }  // end if (!sysIDRunning)
 
 
+  uint32_t aflM4 = micros();  // end of section 4: normal-mode control body (PID/CV/sysID)
   // ========== BUILD DUTY REQUEST ==========
   float dutyRequest;
   if (sysMode == SYS_MODE_MANUAL) {
@@ -2559,12 +2643,34 @@ void AdjustFieldLearnMode() {
 
   uTargetRaw_cached = uTargetRaw;  // update pre-OV ceiling for next tick's fastOvBaseCap
 
+  uint32_t aflM5 = micros();  // end of section 5: duty build + governor + state/telemetry
   // All temperature loop, output current PID, and duty pipeline state is now final for this tick.
   // Called only in the normal-mode path — shutdown/fault paths do not log here.
   pidLog_tick(currentMillis);
+  // Inner Current PID firing-interval sample — reached only on a normal field-on tick
+  // (past digitalWrite(4,HIGH)). loop() clears pfHasPrev while the field is off so the
+  // first firing after a field-off stretch re-baselines instead of logging the off-gap.
+  pidFire_record(currentMillis);
   // Best-Ever Front: fold one alternator-health sample per control tick (~200 Hz). Live only —
   // bench-sim folds at 1 Hz from altHealth_tick instead. Off/fault/shutdown early-return above this.
   if (altSimMode < 0.5f) TIMED_CALL(ft_altFold, altFold_tick(currentMillis));
+  // Section profiler latch — full passes only; early returns above never reach here.
+  // A whole-core preemption is charged to whichever section it landed in, same caveat
+  // as the Function Timing table. Breakdown surfaces in /debug, resets with Reset Peak Values.
+  {
+    uint32_t aflEnd = micros();
+    uint32_t aflTot = aflEnd - aflT0;
+    if (aflTot > aflWorstTotalUs) {
+      aflWorstTotalUs = aflTot;
+      aflWorstSecUs[0] = aflM0 - aflT0;   // thermal log
+      aflWorstSecUs[1] = aflM1 - aflM0;   // RPM tables + tick snapshot
+      aflWorstSecUs[2] = aflM2 - aflM1;   // temp warning + fast-OV supervisor + limp gate
+      aflWorstSecUs[3] = aflM3 - aflM2;   // CH1 gate + stage/governor/mode transitions
+      aflWorstSecUs[4] = aflM4 - aflM3;   // normal-mode control body (PID/CV/sysID)
+      aflWorstSecUs[5] = aflM5 - aflM4;   // duty build + governor + state/telemetry
+      aflWorstSecUs[6] = aflEnd - aflM5;  // pidLog + PID-interval sample + alt-health fold
+    }
+  }
   prevMode = mode;
 }
 
@@ -3188,6 +3294,12 @@ bool shouldImmediatelyCutGPIO4(FieldEventReason reason) {
   if (reason == REASON_INA_OVERVOLTAGE) return true;
   if (reason == REASON_HARD_OVERCURRENT) return true;
   if (reason == REASON_RPM_TOO_LOW) return true;
+  // Stale current must cut here: a dead CH1 means ch1FreshFlag never sets, so
+  // AdjustFieldLearnMode returns at its freshness gate before the ramp-down /
+  // settle-cut path ever runs — without this the field freezes at last duty.
+  // (CURRENT_STALE also outranks TEMP_CRITICAL in selectFieldEventReason, so
+  // a non-cutting stale reason would mask the temp-critical cut too.)
+  if (reason == REASON_CURRENT_STALE) return true;
   if (reason == REASON_TEMP_CRITICAL) {
     return true;
   }
@@ -4075,6 +4187,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
       }
       tempPID.TrackAppliedOutput(0.0, (double)actualDtSec);
       outerAntiWindupFired = true;
+      thermalAntiWindupLatch = true;   // sticky for the next CSV2 frame (cleared on send)
     } else {
       cvBleedFired = false;  // Reset so the entry log fires again next CV entry
     }

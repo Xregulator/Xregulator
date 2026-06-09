@@ -8,6 +8,9 @@ Diagnostic plotter for CVlog data from the ESP32 alternator regulator.
   Plot 3 — Engine RPM + CH1 scheduling jitter | duty% right axis
 
 State strip (below each plot):
+  - binding-cap track (capReason): which layer actually set the current ceiling each tick
+    (purple=KHard, teal=iExcess, orange=loadDump; blank=unclamped) — answers "is KHard
+    doing anything?". Console also prints the per-reason sample share at load time.
   - cvActive bar (green when CV active, grey otherwise)
   - fastOvActive overlay (red when FastOV or iExcess active; load dump has its own track)
   - Tick marks: voltLoopFired (pink), hardClamp (purple),
@@ -257,6 +260,7 @@ numeric_cols = [
     "cvDSlope_Vps", "awState",
     "voltLoopInterval_ms", "inaInterval_ms",
     "slopeBleedAmps_A",
+    "capReason",
 ]
 
 for col in numeric_cols:
@@ -293,6 +297,24 @@ df["cvActive"]       = _to_int("cvActive")
 df["hardClamp"]      = _to_int("hardClamp")
 df["iExcess"]        = _to_int("iExcess")
 df["loadDumpActive"] = _to_int("loadDumpActive")
+df["capReason"]      = _to_int("capReason")   # 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap; older logs lack it → all 0)
+
+# capReason: which protection layer was the BINDING current cap each tick. This answers
+# "does KHard actually do anything?" — KHard only matters when capReason is 1 or 2.
+CAP_REASON_LABELS = {0: "none", 1: "KHard_G1", 2: "KHard_G2", 3: "iExcess", 4: "loadDump"}
+CAP_REASON_COLORS = {0: "#cccccc", 1: "#8e24aa", 2: "#6a1b9a", 3: "#00838f", 4: "#f57c00"}
+_have_capreason = "capReason" in _col_names  # present only in newer CV-binary logs
+if _have_capreason:
+    _n = len(df)
+    print("Binding cap reason (share of all samples):")
+    for _code in (0, 1, 2, 3, 4):
+        _pct = 100.0 * (df["capReason"] == _code).sum() / _n if _n else 0.0
+        print(f"    {CAP_REASON_LABELS[_code]:<9} {_pct:5.1f}%")
+    _khard_share = 100.0 * df["capReason"].isin([1, 2]).sum() / _n if _n else 0.0
+    print(f"  KHard was the binding cap on {_khard_share:.1f}% of samples "
+          f"({'meaningful' if _khard_share >= 1.0 else 'negligible — other layers dominate'}).")
+else:
+    print("Binding cap reason: column 'capReason' not in this log (older firmware) — skipping.")
 
 # Extract voltage loop Kp/Ki (D term removed — VoltageKd was always 0, tombstoned in log).
 # New log format: per-row voltageKp/Ki columns hold the actual outer voltage loop gains.
@@ -474,12 +496,35 @@ def draw_flag_bars(ax, df):
     """Mode bar + duration bars + VLoop ticks — replaces state strip on all plots."""
     flag_h  = 0.18
     spacing = 0.26
-    n_rows  = 6   # cvActive + voltLoopFired + 4 protection flags
+    n_rows  = 7   # capReason + cvActive + voltLoopFired + 4 protection flags
     top     = (n_rows - 1) * spacing + flag_h + 0.06
 
     span = df["t_plot"].iloc[-1] - df["t_plot"].iloc[0]
 
-    # --- Row 5 (top): cvActive mode bar — green/grey segments ---
+    # --- Row 6 (top): capReason — which layer was the BINDING cap (colored segments) ---
+    # Only non-"none" segments are drawn, so any color here = a protection actually set
+    # the current ceiling. KHard shows as purple (G1 lighter, G2 darker).
+    cr_offset = 6 * spacing
+    if "capReason" in df.columns:
+        cr_vals = df["capReason"].values
+        t_arr   = df["t_plot"].values
+        seg_start = 0
+        for i in range(1, len(cr_vals) + 1):
+            last = (i == len(cr_vals))
+            if last or cr_vals[i] != cr_vals[seg_start]:
+                code = int(cr_vals[seg_start])
+                if code != 0:  # skip "none" — leave the row blank when nothing bound
+                    seg_end = t_arr[-1] if last else t_arr[i]  # transition time = right edge (matches other bars)
+                    ax.barh(cr_offset + flag_h / 2, seg_end - t_arr[seg_start],
+                            left=t_arr[seg_start], height=flag_h,
+                            color=CAP_REASON_COLORS.get(code, "#000000"), alpha=0.85, align="center")
+                if not last:
+                    seg_start = i
+    ax.text(df["t_plot"].iloc[0], cr_offset + flag_h / 2,
+            "  binding cap (purple=KHard, teal=iExcess, orange=loadDump)",
+            va="center", fontsize=7, color="#4a148c", fontweight="bold")
+
+    # --- Row 5: cvActive mode bar — green/grey segments ---
     cv_offset = 5 * spacing
     prev_t   = df["t_plot"].iloc[0]
     prev_val = df["cvActive"].iloc[0]

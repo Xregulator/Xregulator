@@ -115,6 +115,14 @@ struct Episode {
   uint32_t  count, runStartMs;
   // reseed look-back ring (PSRAM, allocated by the caller):
   RawSample<NAXIS> *ring; int ringCap, ringHead, ringCount;
+  // Per-axis INDEPENDENT steadiness trackers. Each axis keeps its own in-band window + dwell so a
+  // long steady-time on a slow axis (e.g. temperature, 30 s) does NOT force the fast axes
+  // (RPM/duty/Vbus, ~3 s) to also hold that long — the whole point of per-axis criteria. These
+  // PERSIST across reseeds (a fast-axis break must not wipe the slow axis's accumulated dwell);
+  // they re-center only on a full reset (ringCount==0 → next sample is "fresh").
+  float     axMin[NAXIS], axMax[NAXIS];
+  uint32_t  axSinceMs[NAXIS];   // when each axis last (re)entered its band
+  bool      runQualified;       // current run has met EVERY axis's own steady time
 
   void init(RawSample<NAXIS> *ringBuf, int cap) {
     ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
@@ -122,13 +130,26 @@ struct Episode {
   }
   void clearRun() {
     sumOut = 0; count = 0; runStartMs = 0; sumEx[0] = sumEx[1] = 0;
-    for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }
+    runQualified = false;   // NB: does NOT reset the per-axis trackers (reseed() calls clearRun);
+    for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }   // they re-center on a "fresh" sample
   }
-  // Effective steady gate = max over axes (a run is mutually in-band on every axis, so every
-  // axis is in-band for the whole span → gate is run_span ≥ max(all steadySec)). Plan §0.4.
-  uint32_t maxSteadyMs() const {
-    float m = 0; for (int a = 0; a < NAXIS; a++) if (cfg[a].steadySec > m) m = cfg[a].steadySec;
-    return (uint32_t)(m * 1000.0f);
+  // Per-axis independent steadiness. `fresh` (first sample after a full reset) re-centers every
+  // axis on the sample; otherwise each axis extends its own band, and restarts ONLY its own clock
+  // when IT leaves its band — independent of the other axes.
+  void axisTrack(const RawSample<NAXIS> &s, bool fresh) {
+    for (int a = 0; a < NAXIS; a++) {
+      if (fresh) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; continue; }
+      float lo = axMin[a] < s.x[a] ? axMin[a] : s.x[a];
+      float hi = axMax[a] > s.x[a] ? axMax[a] : s.x[a];
+      if (hi - lo > cfg[a].tol) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; }   // this axis left its band → restart its own clock
+      else { axMin[a] = lo; axMax[a] = hi; }
+    }
+  }
+  // True once EVERY axis has independently held within its band for at least its OWN steady time.
+  bool axesQualified(uint32_t nowMs) const {
+    for (int a = 0; a < NAXIS; a++)
+      if ((uint32_t)(nowMs - axSinceMs[a]) < (uint32_t)(cfg[a].steadySec * 1000.0f)) return false;
+    return true;
   }
   void ringPush(const RawSample<NAXIS> &s) {
     ring[ringHead] = s;
@@ -160,10 +181,11 @@ struct Episode {
     sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
     sumOut += s.out; count++;
   }
-  // Complete the current run; emit its average to `out` if it held ≥ max steady time. Returns
-  // true if a point was emitted. `nowMs` is the breaking sample's time (plan §2.1 step 3a).
+  // Complete the current run; emit its average to `out` if it qualified — i.e. every axis
+  // independently held within its band for its OWN steady time (runQualified, latched during
+  // feed). Returns true if a point was emitted. `nowMs` is the breaking sample's time.
   bool complete(uint32_t nowMs, FrontPoint<NAXIS> *out) {
-    bool emit = (count >= 1) && ((uint32_t)(nowMs - runStartMs) >= maxSteadyMs());
+    bool emit = (count >= 1) && runQualified;
     if (emit && out) {
       for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(sumX[a] / (double)count);
       out->ex[0] = (float)(sumEx[0] / (double)count);
@@ -213,6 +235,9 @@ struct Episode {
       ringHead = 0; ringCount = 0;                  // barrier: no reseed across the ineligible gap
       return emitted;
     }
+    bool fresh = (ringCount == 0);                   // first eligible sample after init/barrier → re-center axis trackers
+    axisTrack(s, fresh);                             // per-axis INDEPENDENT steadiness (decoupled steady times)
+    if (!runQualified && axesQualified(s.tMs)) runQualified = true;   // latch once every axis has met its own time
     ringPush(s);
     if (count == 0) { startRunWith(s); return false; }   // empty run → s founds it
     if (inBandWith(s)) { commit(s); return false; }      // grow
@@ -235,7 +260,23 @@ struct FrontStore {
     pts = buf; cap = c; count = 0; source = 0;
     for (int a = 0; a < NAXIS; a++) axisScale[a] = 1.0f;
   }
+  // Max-per-cell insert: keep the store a true upper ENVELOPE, not a point cloud. If an incoming run
+  // lands in the same operating cell as an existing point (within half an axisScale on EVERY axis),
+  // keep only the higher-y one — so eval() interpolates between bests instead of averaging a best with
+  // also-rans. Returns true ONLY on a genuine improvement (new cell, or a higher y in an existing cell);
+  // false when an existing run already beat it — callers use that to gate cloud upload + console logs.
   bool add(const FrontPoint<NAXIS> &p) {
+    for (int i = 0; i < count; i++) {
+      bool sameCell = true;
+      for (int a = 0; a < NAXIS; a++) {
+        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
+        if (fabsf(p.x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
+      }
+      if (sameCell) {
+        if (p.y > pts[i].y) { pts[i] = p; return true; }   // new best at this cell
+        return false;                                       // an existing run here was already better
+      }
+    }
     if (count >= cap) return false;
     pts[count++] = p; return true;
   }
@@ -262,8 +303,9 @@ struct FrontStore {
     }
     return (wsum > 0) ? (num / wsum) : 0.0f;
   }
-  // Device keep-gate (LEARNED) — the spec's front_pushes(). Bias toward keep via safetyMargin:
-  // keep if it beats the margin-lowered surface. count==0 bootstraps (founds the surface).
+  // Device keep-gate (LEARNED) — the spec's front_pushes(). Keep only runs that beat the current
+  // surface; safetyMargin now defaults 0 (was a keep-bias for cloud sampling, but the cloud only
+  // prunes / gets raw episodes regardless, so a margin just polluted the local eval). count==0 bootstraps.
   bool pushes(const float x[NAXIS], float y, float safetyMargin, float idwPower) const {
     if (count <= 0) return true;
     return y > eval(x, idwPower) - safetyMargin;
@@ -312,8 +354,10 @@ CachedGzFile loadFileToRAM(const char *path) {
     return result;
   }
   result.size = f.size();
-  result.data = (uint8_t *)ps_malloc(result.size);                 // PSRAM-aware malloc
-  if (!result.data) result.data = (uint8_t *)malloc(result.size);  // heap fallback
+  // PSRAM only — no internal-heap fallback: ~300KB of web bundle on the internal
+  // heap would destroy the contiguous block TLS handshakes need. On failure
+  // serveCachedGz() returns false and the file is served from flash instead.
+  result.data = (uint8_t *)ps_malloc(result.size);
   if (result.data) {
     f.read(result.data, result.size);
     Serial.printf("Preloaded %s into RAM (%d bytes)\n", path, result.size);
@@ -365,7 +409,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.25";
+const char *FIRMWARE_VERSION = "0.0.33";
 
 String currentUID;
 
@@ -1658,6 +1702,10 @@ volatile uint16_t sensorRingHead = 0;    // next write slot
 volatile uint16_t sensorRingTail = 0;    // oldest unread slot
 volatile uint16_t sensorRingCount = 0;   // 0..SENSOR_RING_SIZE
 volatile int32_t sensorRingInFlightIndex = -1;  // ring index currently being uploaded by Core 0 (-1 = none)
+// Guards the count/tail/head read-modify-writes: Core 1 pushes, Core 0 pops,
+// the async web task clears — volatile alone doesn't make uint16 RMW atomic
+// on Xtensa, and a lost update near empty wraps count to 65535 (= full forever).
+portMUX_TYPE sensorRingMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool forceCloudFlushPending = false;   // set by /get?forceCloudFlush=1, cleared after drain attempt
 volatile bool sensorRingAnnouncedEmpty = false; // throttle for "all data uploaded" console — fires once per drain-to-empty
 
@@ -2234,6 +2282,83 @@ static uint32_t ch1AtOver2x = 0;  // threshold = running mean at sample time (ap
 static uint32_t ch1PrevTs = 0;
 static bool ch1HasPrev = false;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Inner Current PID Firing Interval — field-on-gated clone of the CH1 tracker.
+// Records the gap between successive inner-current-PID firings, but ONLY on ticks
+// where the field is actually driven. pidFire_record() is called once per normal
+// control tick (past the digitalWrite(4,HIGH) gate); field-off ticks never reach
+// it, and loop() clears pfHasPrev whenever the field is down so the first firing
+// after a field-off stretch re-baselines instead of logging the whole off-gap.
+// Reuses Ch1Bucket. No PSRAM ring — CH1's 5000-entry ring only ever yielded "last",
+// which we track directly in pf_last_ms.
+// ─────────────────────────────────────────────────────────────────────────────
+uint16_t pf_last_ms = 0;
+float    pf_avg_10s = 0;
+uint16_t pf_worst_10s = 0;
+uint16_t pf_over2x_10s = 0;  // mirrors CH1: not tracked at 1s granularity (always 0)
+float    pf_avg_2m = 0;
+uint16_t pf_worst_2m = 0;
+uint32_t pf_over2x_2m = 0;
+float    pf_avg_at = 0;
+uint16_t pf_worst_at = 0;
+uint32_t pf_over2x_at = 0;
+
+#define PF_BUCKETS 12      // 12 closed buckets × 10 s = 2-minute window
+#define PF_1S_BUCKETS 10   // 1s mini-buckets for O(1) 10s window stats
+static Ch1Bucket pfBuckets[PF_BUCKETS];
+static uint8_t pfBktHead = 0;
+static uint8_t pfBktCount = 0;
+static uint32_t pfBktStart = 0;
+Ch1Bucket pfBkt1s[PF_1S_BUCKETS];
+Ch1Bucket pfBkt1sCurrent = { 0, 0, 0, 0 };
+uint8_t pfBkt1sHead = 0;
+uint8_t pfBkt1sCount = 0;
+uint32_t pfBkt1sStart = 0;
+static uint64_t pfAtSum = 0;
+static uint32_t pfAtCount = 0;
+static uint16_t pfAtWorst = 0;
+static uint32_t pfAtOver2x = 0;
+static uint32_t pfPrevTs = 0;
+bool pfHasPrev = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CV Voltage Loop Firing Interval — CV-mode-gated clone of the pf tracker above.
+// Records the gap between successive CV (constant-voltage) loop firings, but ONLY
+// while voltageControlActive (the regulator is actively holding a voltage target).
+// voltLoop_record() is called once per CV fire; the control loop clears vlHasPrev
+// whenever CV is inactive so the first firing after a CV-off stretch re-baselines
+// instead of logging the whole off-gap (this is why the old single-watermark card
+// warned about inflated values — the ladder fixes it). Reuses Ch1Bucket.
+// ─────────────────────────────────────────────────────────────────────────────
+uint16_t vl_last_ms = 0;
+float    vl_avg_10s = 0;
+uint16_t vl_worst_10s = 0;
+uint16_t vl_over2x_10s = 0;
+float    vl_avg_2m = 0;
+uint16_t vl_worst_2m = 0;
+uint32_t vl_over2x_2m = 0;
+float    vl_avg_at = 0;
+uint16_t vl_worst_at = 0;
+uint32_t vl_over2x_at = 0;
+
+#define VL_BUCKETS 12      // 12 closed buckets × 10 s = 2-minute window
+#define VL_1S_BUCKETS 10   // 1s mini-buckets for O(1) 10s window stats
+static Ch1Bucket vlBuckets[VL_BUCKETS];
+static uint8_t vlBktHead = 0;
+static uint8_t vlBktCount = 0;
+static uint32_t vlBktStart = 0;
+Ch1Bucket vlBkt1s[VL_1S_BUCKETS];
+Ch1Bucket vlBkt1sCurrent = { 0, 0, 0, 0 };
+uint8_t vlBkt1sHead = 0;
+uint8_t vlBkt1sCount = 0;
+uint32_t vlBkt1sStart = 0;
+static uint64_t vlAtSum = 0;
+static uint32_t vlAtCount = 0;
+static uint16_t vlAtWorst = 0;
+static uint32_t vlAtOver2x = 0;
+static uint32_t vlPrevTs = 0;
+bool vlHasPrev = false;
+
 // variables used to show how long each loop takes
 uint64_t starttime;
 uint64_t endtime;
@@ -2261,6 +2386,7 @@ FuncTiming ft_CheckAlarms;
 FuncTiming ft_calculateDerivedMetrics;
 FuncTiming ft_ch1_compute_stats;
 FuncTiming ft_uploadSensorHistory;
+FuncTiming ft_dumpLongTermRing;  // 15-min long-term-ring flash flush (field-off only) — was untimed, caused invisible ~250ms loop spikes
 FuncTiming ft_uploadBufferedRecords;
 FuncTiming ft_buildConfigPayload;
 FuncTiming ft_UpdateEngineRuntime;
@@ -2718,8 +2844,7 @@ bool testProtectionsEnabled = true;
 // --- CV loop runtime state ---
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
 uint16_t g_voltLoopActualIntervalMs = 0;  // actual interval of last voltage loop fire (ms); 0 until second fire
-uint16_t voltLoopWorstInterval_5s = 0;    // worst voltage loop interval in rolling 5s window (ms)
-uint16_t voltLoopWorstInterval_ses = 0;   // worst voltage loop interval since boot (ms)
+// (voltLoopWorstInterval_5s/_ses removed — replaced by the vl_* interval ladder above)
 float g_slopeBleedAmpsThisTick = 0.0f;   // slope bleed drain applied this voltage loop tick (A); cleared by cvLog_tick after logging
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
@@ -3013,6 +3138,9 @@ float cvDSlope = 0.0f;              // V/s — mirrors g_fastOvDvdt; used by slo
 
 float outerImpliedPenalty = 0.0f;
 bool outerAntiWindupFired = false;
+// Sticky version of outerAntiWindupFired: set on any CV-bleed event, cleared when CSV2 captures it.
+// outerAntiWindupFired resets every tempPID_tick (~16Hz) so the 5s CSV2 frame would otherwise miss it.
+volatile bool thermalAntiWindupLatch = false;
 
 // ===== CALCULATED VALUES FOR DISPLAY =====
 float learningTargetFromRPM = -1.0;  // Table lookup result before corrections
@@ -3346,8 +3474,9 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t voltLoopIntervalMs;      // actual voltage loop interval when fired this tick (ms); 0 if not fired
   int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
   int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
+  uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump
 };
-static_assert(sizeof(CvLogEntry) == 50, "CvLogEntry must be 50 bytes");
+static_assert(sizeof(CvLogEntry) == 51, "CvLogEntry must be 51 bytes");
 
 
 struct CvBinDLState {
@@ -3366,7 +3495,7 @@ struct CvBinDLState {
 // BINARY HEADER  (36 bytes)
 // offset  field           type      notes
 //   0     count           uint32    number of valid entries
-//   4     entrySize       uint32    = 50
+//   4     entrySize       uint32    = 51
 //   8     voltageKp       float     VoltageKp at download time
 //  12     voltageKi       float     VoltageKi at download time
 //  16     voltageInterval uint32    VoltageLoopInterval ms
@@ -3390,6 +3519,18 @@ float g_dBcur_dt = 0.0f;          // dBcur/dt (A/s), updated every INA228 read; 
 float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageControlActive
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
 uint32_t g_fastOvHardCount = 0;
+
+// Which protection layer actually set the final fastOvCurrentCap this tick (the BINDING
+// constraint — lowest cap wins). Lets the CV log distinguish "KHard fired" from "KHard
+// fired but iExcess/loadDump was the real limit". 0 = cap left at base (unclamped).
+enum FastOvCapReason : uint8_t {
+  CAP_REASON_NONE     = 0,  // cap at fastOvBaseCap — no protection bound
+  CAP_REASON_KHARD_G1 = 1,  // Group 1 predictive KHard (Vpred)
+  CAP_REASON_KHARD_G2 = 2,  // Group 2 measured KHard / hysteresis hold (IBV)
+  CAP_REASON_IEXCESS  = 3,  // iExcess supervisor
+  CAP_REASON_LOADDUMP = 4,  // load-dump cutoff
+};
+uint8_t g_fastOvCapReason = CAP_REASON_NONE;
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────
 // Written in ADS case 1, read by AdjustFieldLearnMode and cvLog_tick
@@ -3704,8 +3845,26 @@ Stream *OutputStream = &Serial;
 //ADS1115 more pre-setup crap
 uint32_t adsI2CErrorCount = 0;
 uint32_t adsSlowReadCount = 0;      // times ADS_READ_RESULT took >5ms (I2C stall events)
+// I2C bus-health instrumentation — separates a true bus stall from loop preemption.
+// inaBusReadWorstUs / imuFifoFetchWorstUs time ONLY the Wire transactions; compare them
+// to the whole-block ft_rai_ina228 / IMU-drain timers: equal => the bus, much smaller =>
+// the loop was preempted mid-read by Core-1 load. All four reset with "Reset Peak Values".
+uint32_t inaBusReadWorstUs = 0;    // worst µs spent in the two INA228 Wire reads since reset
+uint32_t inaBusSlowCount = 0;      // INA228 bus reads > 15 ms (one Wire-timeout's worth) since reset
+uint32_t ina228ErrorCount = 0;     // INA228 reads dropped (sanity fail / exception) — was silent before
+uint32_t imuFifoFetchWorstUs = 0;  // worst µs spent in Get_FIFO_Sample since reset
+uint16_t imuFifoWorstSamples = 0;  // sample count of THAT worst fetch — 42 bytes is ~1ms at 400kHz, so a
+                                   // worst at the 6-sample cap proves the stall is bus/preemption, not transfer size
 uint32_t adsLastSlowEndTxUs = 0;    // endTransmission duration on most recent slow read (µs)
 uint32_t adsLastSlowReqFromUs = 0;  // requestFrom duration on most recent slow read (µs)
+// AdjustFieldLearnMode worst-pass section profiler — post-AsyncTCP-pin residual stalls
+// (~16ms) keep landing in this one function; this latches a per-section breakdown of the
+// worst FULL pass (early-return passes are not recorded — if the Adjust Field row in
+// Function Timing spikes but aflWorstTotalUs doesn't, the spike was in an early-return
+// pass, i.e. the pre-gate region). Read via /debug; resets with "Reset Peak Values".
+#define AFL_SECTIONS 7
+uint32_t aflWorstTotalUs = 0;
+uint32_t aflWorstSecUs[AFL_SECTIONS] = { 0 };
 
 enum ADS1115_State {
   ADS_IDLE,
@@ -3768,35 +3927,50 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "button{background:#00a19a;color:white;padding:10px 20px;border:none;border-radius:4px;cursor:pointer;width:100%}"
   "button:hover{background:#008c86}"
   ".info-box{background:#e8f4f8;border:1px solid #bee5eb;color:#0c5460;padding:12px;border-radius:4px;margin:10px 0;font-size:14px}"
+  "label{display:block;margin-top:8px;color:#333}"
+  // Option-grouping boxes: each WiFi mode (its description + its inputs) lives in one bordered box
+  ".option{border-radius:8px;padding:14px;margin:16px 0;border:2px solid}"
+  ".option-preferred{border-color:#00a19a;background:#f1faf9}"
+  ".option-secondary{border-color:#ccc;background:#fafafa}"
+  ".opt-badge{display:inline-block;font-size:12px;font-weight:bold;letter-spacing:.5px;text-transform:uppercase;padding:3px 10px;border-radius:12px;margin-bottom:10px}"
+  ".badge-preferred{background:#00a19a;color:white}"
+  ".badge-secondary{background:#888;color:white}"
+  ".opt-title{font-weight:bold;color:#333;display:block;margin-bottom:4px}"
+  ".opt-desc{font-size:14px;color:#444;line-height:1.45}"
+  ".option .info-box{margin-top:12px}"
+  // box-sizing so full-width inputs sit flush inside the padded option boxes
+  "input,select{box-sizing:border-box}"
   "</style>"
   "</head><body>"
 
   "<div class=\"card\">"
   "<h1>WiFi Configuration</h1>"
 
-  "<div class=\"info-box\">"
-  "<strong>Preferred Option:</strong><br>"
-  "Enter your ship's network WiFi credentials below. The regulator will run in Client Mode and the user interface will be accessible via your local wifi.  Navigate to alternator.local in any browser, just like you'd go to google.com."
-  "</div>"
-
   "<form action=\"/wifi\" method=\"POST\">"
+
+  // Preferred option: client mode credentials live inside the teal-accented box
+  "<div class=\"option option-preferred\">"
+  "<span class=\"opt-badge badge-preferred\">Preferred</span>"
+  "<span class=\"opt-title\">Connect to your ship's WiFi (Client Mode)</span>"
+  "<span class=\"opt-desc\">Enter your ship's network WiFi credentials below. The regulator will run in Client Mode and the user interface will be accessible via your local wifi.  Navigate to alternator.local in any browser, just like you'd go to google.com.</span>"
   "<label>Ship's WiFi Name (SSID):</label>"
   "<input type=\"text\" name=\"ssid\" placeholder=\"Required for client mode\">"
   "<label>Ship's WiFi Password:</label>"
   "<input type=\"password\" name=\"password\" placeholder=\"Required for client mode\">"
-
-  "<div class=\"info-box\">"
-  "<strong>Non-Preferred Option:</strong><br>"
-  "As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, Blue wire) to Ground.  Leave it connected to GND forever if you prefer this mode."
   "</div>"
 
+  // Non-preferred option: hotspot/AP credentials live inside the de-emphasized grey box
+  "<div class=\"option option-secondary\">"
+  "<span class=\"opt-badge badge-secondary\">Non-Preferred</span>"
+  "<span class=\"opt-title\">Use the regulator as a Hotspot (Access Point)</span>"
+  "<span class=\"opt-desc\">As backup, or for ships without existing WiFi networks, you may use the regualtor as a Hotspot (aka Access Point). The regulator controller will broadcast its own WiFi network which you can connect to from any device (phone, ipad, laptop, etc.).  Mostly the same functionality will exist at alternator.local, but with no internet, you won't be able to use weather mode, get software updates, see Community features, etc.  This mode is less supported.  To enter this mode on a reboot, you must connect pin 12 in RJ3 (the rightmost ethernet connector, Blue wire) to Ground.  Leave it connected to GND forever if you prefer this mode.</span>"
   "<label>New Alt. Reg. Hotspot Name (SSID):</label>"
   "<input type=\"text\" name=\"hotspot_ssid\" placeholder=\"Leave blank for default: ALTERNATOR_WIFI\">"
   "<label>New Alt. Reg. Hotspot Password:</label>"
   "<input type=\"password\" name=\"ap_password\" placeholder=\"Leave blank for default: alternator123\">"
-
   "<div class=\"info-box\">"
   "***To boot into Hotspot mode, the Hotspot Wire (pin 12 in RJ3, the rightmost ethernet connector, Blue wire) must be connected to Ground during a restart.***"
+  "</div>"
   "</div>"
 
   "<div class=\"info-box\">"
@@ -3840,6 +4014,7 @@ void setup() {
   messageBuffer = (char *)ps_malloc(MESSAGE_BUFFER_SIZE);
   if (!messageBuffer) Serial.println("FATAL: messageBuffer ps_malloc failed");
   consoleQueue = (ConsoleMessage *)ps_malloc(CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
+  if (!consoleQueue) Serial.println("FATAL: consoleQueue ps_malloc failed");
   sensorRing = (SensorSnapshot *)ps_malloc(SENSOR_RING_SIZE * sizeof(SensorSnapshot));
   if (!sensorRing) Serial.println("FATAL: sensorRing ps_malloc failed");
   else memset(sensorRing, 0, SENSOR_RING_SIZE * sizeof(SensorSnapshot));
@@ -3855,6 +4030,7 @@ void setup() {
   else memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
+  if (!taskArray) Serial.println("FATAL: taskArray ps_malloc failed");
   // CH1 interval ring — 30 KB to PSRAM
   ch1Ring = (Ch1Entry *)ps_malloc(sizeof(Ch1Entry) * CH1_RING);
   if (!ch1Ring) Serial.println("FATAL: ch1Ring ps_malloc failed");
@@ -4003,6 +4179,7 @@ void setup() {
   memset(&ft_calculateDerivedMetrics, 0, sizeof(FuncTiming));
   memset(&ft_ch1_compute_stats, 0, sizeof(FuncTiming));
   memset(&ft_uploadSensorHistory, 0, sizeof(FuncTiming));
+  memset(&ft_dumpLongTermRing, 0, sizeof(FuncTiming));
   memset(&ft_uploadBufferedRecords, 0, sizeof(FuncTiming));
   memset(&ft_buildConfigPayload, 0, sizeof(FuncTiming));
   memset(&ft_UpdateEngineRuntime, 0, sizeof(FuncTiming));
@@ -4320,7 +4497,7 @@ void loop() {
     bool ltRisingEdge = (ltFieldOff && !prevLongTermFieldOff);
     bool ltPeriodic   = (ltFieldOff && (millis() - lastLongTermDumpMs >= LONGTERM_DUMP_INTERVAL_MS));
     if ((ltRisingEdge || ltPeriodic) && prev_longTermHead != longTermHead) {
-      dumpLongTermRing();
+      TIMED_CALL(ft_dumpLongTermRing, dumpLongTermRing());  // untimed before — this LittleFS flush is the periodic ~250ms loop spike
       lastLongTermDumpMs = millis();
     }
     prevLongTermFieldOff = ltFieldOff;
@@ -4474,7 +4651,7 @@ void loop() {
                             (unsigned)sensorRingCount);
               dumpSensorRingToLittleFS();
             }
-            dumpLongTermRing();  // durable month-long plot cache → flash (final)
+            TIMED_CALL(ft_dumpLongTermRing, dumpLongTermRing());  // durable month-long plot cache → flash (final)
             pendingShutdownFlush = false;
             shutdownNVSFlushDone = false;
             shutdownCloudDeadlineMs = 0;
@@ -4595,6 +4772,10 @@ void loop() {
         TIMED_CALL(ft_updateWeatherMode, updateWeatherMode());
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
+      // Inner-PID firing-interval re-baseline: while the field is down, drop the previous-
+      // firing timestamp so the first firing after re-enable measures a fresh interval,
+      // not the whole field-off gap. gpio4IsLow reflects field state set inside the call above.
+      if (gpio4IsLow) pfHasPrev = false;
       TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
       TIMED_CALL(ft_boatPerf, boatPerf_tick(millis()));   // Phase 3 boat performance (timing exposed via PerfLive registry)
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop
@@ -4652,6 +4833,21 @@ void loop() {
         }
       }
 
+      // Local long-term accumulation — runs regardless of CloudFeatures so the 30-day
+      // local ring (and its Long Term plots) fill even in AP mode / no-WiFi. Only the
+      // cloud uploads below are gated. uploadSensorHistory() self-skips during OTA; the
+      // window accumulates while the field is on and is saved at any time, no internet.
+      if (!otaInProgress) {
+        unsigned long nowLocalAccum = millis();
+        if (nowLocalAccum - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
+          esp_task_wdt_reset();
+          TIMED_CALL(ft_UpdateSailingMetrics, UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL));
+          lastSensorUploadTime = nowLocalAccum;
+          TIMED_CALL(ft_uploadSensorHistory, uploadSensorHistory());
+          esp_task_wdt_reset();
+        }
+      }
+
       if (CloudFeatures == 1) {
         if (otaInProgress) {
           return;  // Skip during OTA
@@ -4659,15 +4855,6 @@ void loop() {
         unsigned long currentMillisz = millis();
         // Check time sync every 12 hours — requires field off for 60s (fieldOffSettled)
         if (fieldOffSettled(0)) TIMED_CALL(ft_checkTimeSync, checkTimeSync());
-        // Save current sensor window to local buffer every SENSOR_UPLOAD_INTERVAL.
-        // No internet involved — window accumulates while field is on, saved any time.
-        if (currentMillisz - lastSensorUploadTime >= SENSOR_UPLOAD_INTERVAL) {
-          esp_task_wdt_reset();
-          TIMED_CALL(ft_UpdateSailingMetrics, UpdateSailingMetrics(SENSOR_UPLOAD_INTERVAL));
-          lastSensorUploadTime = currentMillisz;
-          TIMED_CALL(ft_uploadSensorHistory, uploadSensorHistory());
-          esp_task_wdt_reset();
-        }
 
         // Upload buffered records every BUFFER_UPLOAD_INTERVAL — requires field off for 70s.
         // Bumped from 65s to 70s so the buffered upload's TLS handshake doesn't land on top
@@ -4801,6 +4988,7 @@ void loop() {
     ft_calculateDerivedMetrics.worstWindow = 0;
     ft_ch1_compute_stats.worstWindow = 0;
     ft_uploadSensorHistory.worstWindow = 0;
+    ft_dumpLongTermRing.worstWindow = 0;
     ft_uploadBufferedRecords.worstWindow = 0;
     ft_buildConfigPayload.worstWindow = 0;
     ft_UpdateEngineRuntime.worstWindow = 0;
@@ -4825,7 +5013,6 @@ void loop() {
     ft_altHealth.worstWindow = 0;
     ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;
-    voltLoopWorstInterval_5s = 0;
     loopWorst80Win = 0;  // 80MHz low-power loop worst — rolling 5s window
 
     prev_millis7888 = millis();

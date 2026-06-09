@@ -61,7 +61,7 @@ float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
 float altThermDegF    = 5.0f;    // temperature deviation bound (°F)
 float altThermSec     = 30.0f;   // temperature steady time (s)
-float altSafetyMargin = 3.0f;    // amps — keep-bias on the device gate (errs toward keep)
+float altSafetyMargin = 0.0f;    // amps — gate keeps only runs that strictly beat the front (no keep-bias: the cloud only prunes, so sub-front samples were pure pollution of the local eval surface)
 float altIdwPower     = 2.0f;    // IDW power for front_eval
 float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied cloud-side)
 
@@ -620,7 +620,7 @@ float perfSeaWinSec = 20.0f; // rolling window the pitch-std NUMBER is computed 
 float perfRpmSec = 3.0f;     // motoring RPM steady time (s)
 float perfHwTol  = 2.0f;     // headwind deviation band (kt)
 float perfHwSec  = 3.0f;     // headwind steady time (s)
-float perfSafetyMargin = 0.2f;  // kt — keep-bias on the device gate (errs toward keep)
+float perfSafetyMargin = 0.0f;  // kt — gate keeps only runs that strictly beat the front (no keep-bias: cloud gets raw episodes regardless, so sub-front samples only dragged down the local eval surface)
 float perfIdwPower     = 2.0f;  // IDW power for front eval
 float perfPruneK       = 6.0f;  // cloud prune neighbor count (echoed; applied cloud-side)
 
@@ -1285,6 +1285,8 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_iExcessActive)   e.flags |= (1 << 5);
   if (g_loadDumpActive)  e.flags |= (1 << 6);
 
+  e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
+
   cvLogHead = (cvLogHead + 1) % CV_LOG_SIZE;
   if (cvLogCount < CV_LOG_SIZE) cvLogCount++;
 }
@@ -1314,17 +1316,19 @@ void ch1_record(uint32_t now) {
   ch1AtCount++;
   ch1AtSum += iv;
   if (iv > ch1AtWorst) ch1AtWorst = iv;
-  // over2x uses running mean at this instant as threshold — known approximation,
-  // acceptable for a session-level diagnostic counter.
+  // over2x is per-sample vs the running mean — the SAME test feeds the 1s mini-bucket
+  // below, so the 10s / 2m / all-time over-counts are all on the same footing.
+  bool isOver2x = false;
   if (ch1AtCount > 1) {
     float runMean = (float)((double)ch1AtSum / ch1AtCount);
-    if ((float)iv > runMean * 2.0f) ch1AtOver2x++;
+    if ((float)iv > runMean * 2.0f) { ch1AtOver2x++; isOver2x = true; }
   }
 
   // ── 1s mini-bucket: incremental update, O(1), no ring scan ────────────
   ch1Bkt1sCurrent.sum += iv;
   ch1Bkt1sCurrent.count++;
   if (iv > ch1Bkt1sCurrent.worst) ch1Bkt1sCurrent.worst = iv;
+  if (isOver2x) ch1Bkt1sCurrent.over2x++;
 
   // 1s rollover: close current mini-bucket, open a new one
   if (now - ch1Bkt1sStart >= 1000UL) {
@@ -1336,7 +1340,7 @@ void ch1_record(uint32_t now) {
   }
 
   // ── 10s→2m bucket rollover: O(10) mini-bucket sum, no ring scan ────────
-  // over2x approximated using bucket mean * 2 threshold (acceptable for 2m diagnostic)
+  // over2x carries forward the per-sample counts accumulated in the 1s mini-buckets
   if (now - ch1BktStart >= 10000UL) {
     Ch1Bucket bkt = { 0, 0, 0, 0 };
 
@@ -1346,22 +1350,13 @@ void ch1_record(uint32_t now) {
       bkt.sum += ch1Bkt1s[idx].sum;
       bkt.count += ch1Bkt1s[idx].count;
       if (ch1Bkt1s[idx].worst > bkt.worst) bkt.worst = ch1Bkt1s[idx].worst;
+      bkt.over2x += ch1Bkt1s[idx].over2x;  // per-sample over-2× counts
     }
     // Include currently open mini-bucket
     bkt.sum += ch1Bkt1sCurrent.sum;
     bkt.count += ch1Bkt1sCurrent.count;
     if (ch1Bkt1sCurrent.worst > bkt.worst) bkt.worst = ch1Bkt1sCurrent.worst;
-
-    // over2x: approximate — count mini-buckets whose worst exceeds 2× overall mean
-    // (per-sample accuracy not possible without ring scan; this is a diagnostic counter)
-    if (bkt.count > 0) {
-      float thresh = ((float)bkt.sum / (float)bkt.count) * 2.0f;
-      for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
-        uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
-        bkt.over2x += ch1Bkt1s[idx].over2x;  // carry forward from mini-buckets if tracked
-        if ((float)ch1Bkt1s[idx].worst > thresh) bkt.over2x++;
-      }
-    }
+    bkt.over2x += ch1Bkt1sCurrent.over2x;
 
     ch1Buckets[ch1BktHead] = bkt;
     ch1BktHead = (ch1BktHead + 1) % CH1_BUCKETS;
@@ -1377,15 +1372,17 @@ void ch1_compute_stats() {
   ch1_last_ms = ch1Ring[(ch1Head + CH1_RING - 1) % CH1_RING].iv;  // O(1) single element
   ch1_n_10s = ch1Bkt1sCurrent.count;                              // start with open bucket
   ch1_worst_10s = ch1Bkt1sCurrent.worst;
-  ch1_over2x_10s = 0;  // not tracked at 1s granularity
+  uint32_t ch1_o10 = ch1Bkt1sCurrent.over2x;
   uint32_t sum10 = ch1Bkt1sCurrent.sum;
 
   for (uint8_t i = 0; i < ch1Bkt1sCount; i++) {
     uint8_t idx = (ch1Bkt1sHead + CH1_1S_BUCKETS - 1 - i) % CH1_1S_BUCKETS;
     sum10 += ch1Bkt1s[idx].sum;
     ch1_n_10s += ch1Bkt1s[idx].count;
+    ch1_o10 += ch1Bkt1s[idx].over2x;
     if (ch1Bkt1s[idx].worst > ch1_worst_10s) ch1_worst_10s = ch1Bkt1s[idx].worst;
   }
+  ch1_over2x_10s = (ch1_o10 > 65535u) ? 65535u : (uint16_t)ch1_o10;  // per-sample count over the 10s window
   if (ch1_n_10s > 0) ch1_avg_10s = (float)sum10 / (float)ch1_n_10s;
   else ch1_avg_10s = 0.0f;
 
@@ -1413,11 +1410,214 @@ void ch1_compute_stats() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Inner Current PID Firing Interval — field-on-gated clone of ch1_record/_compute_stats.
+// Called once per normal control tick (field driven). Globals live in Xregulator.ino.
+// ─────────────────────────────────────────────────────────────────────────────
+void pidFire_record(uint32_t now) {
+  if (!pfHasPrev) {
+    pfPrevTs = now;
+    pfBktStart = now;
+    pfBkt1sStart = now;
+    pfHasPrev = true;
+    return;
+  }
+
+  uint32_t diff = now - pfPrevTs;
+  pfPrevTs = now;
+  uint16_t iv = (diff > 65535u) ? 65535u : (uint16_t)diff;
+  pf_last_ms = iv;
+
+  // ── All-time accumulators ─────────────────────────────────────────────
+  pfAtCount++;
+  pfAtSum += iv;
+  if (iv > pfAtWorst) pfAtWorst = iv;
+  // over-2× is per-sample vs the running mean — the SAME test feeds the 1s mini-bucket
+  // below, so the 10s / 2m / all-time over-counts are all on the same footing.
+  bool isOver2x = false;
+  if (pfAtCount > 1) {
+    float runMean = (float)((double)pfAtSum / pfAtCount);
+    if ((float)iv > runMean * 2.0f) { pfAtOver2x++; isOver2x = true; }
+  }
+
+  // ── 1s mini-bucket ────────────────────────────────────────────────────
+  pfBkt1sCurrent.sum += iv;
+  pfBkt1sCurrent.count++;
+  if (iv > pfBkt1sCurrent.worst) pfBkt1sCurrent.worst = iv;
+  if (isOver2x) pfBkt1sCurrent.over2x++;
+  if (now - pfBkt1sStart >= 1000UL) {
+    pfBkt1s[pfBkt1sHead] = pfBkt1sCurrent;
+    pfBkt1sHead = (pfBkt1sHead + 1) % PF_1S_BUCKETS;
+    if (pfBkt1sCount < PF_1S_BUCKETS) pfBkt1sCount++;
+    pfBkt1sCurrent = { 0, 0, 0, 0 };
+    pfBkt1sStart = now;
+  }
+
+  // ── 10s→2m bucket rollover ────────────────────────────────────────────
+  if (now - pfBktStart >= 10000UL) {
+    Ch1Bucket bkt = { 0, 0, 0, 0 };
+    for (uint8_t i = 0; i < pfBkt1sCount; i++) {
+      uint8_t idx = (pfBkt1sHead + PF_1S_BUCKETS - 1 - i) % PF_1S_BUCKETS;
+      bkt.sum += pfBkt1s[idx].sum;
+      bkt.count += pfBkt1s[idx].count;
+      if (pfBkt1s[idx].worst > bkt.worst) bkt.worst = pfBkt1s[idx].worst;
+      bkt.over2x += pfBkt1s[idx].over2x;
+    }
+    bkt.sum += pfBkt1sCurrent.sum;
+    bkt.count += pfBkt1sCurrent.count;
+    if (pfBkt1sCurrent.worst > bkt.worst) bkt.worst = pfBkt1sCurrent.worst;
+    bkt.over2x += pfBkt1sCurrent.over2x;
+    pfBuckets[pfBktHead] = bkt;
+    pfBktHead = (pfBktHead + 1) % PF_BUCKETS;
+    if (pfBktCount < PF_BUCKETS) pfBktCount++;
+    pfBktStart = now;
+  }
+}
+
+void pidFire_compute_stats() {
+  if (pfAtCount == 0 && pfBkt1sCount == 0 && pfBkt1sCurrent.count == 0) return;
+
+  // ── 10s window: open 1s bucket + closed 1s buckets ────────────────────
+  pf_worst_10s = pfBkt1sCurrent.worst;
+  uint32_t n10 = pfBkt1sCurrent.count;
+  uint32_t sum10 = pfBkt1sCurrent.sum;
+  uint32_t o10 = pfBkt1sCurrent.over2x;
+  for (uint8_t i = 0; i < pfBkt1sCount; i++) {
+    uint8_t idx = (pfBkt1sHead + PF_1S_BUCKETS - 1 - i) % PF_1S_BUCKETS;
+    sum10 += pfBkt1s[idx].sum;
+    n10 += pfBkt1s[idx].count;
+    o10 += pfBkt1s[idx].over2x;
+    if (pfBkt1s[idx].worst > pf_worst_10s) pf_worst_10s = pfBkt1s[idx].worst;
+  }
+  pf_avg_10s = (n10 > 0) ? (float)sum10 / (float)n10 : 0.0f;
+  pf_over2x_10s = (o10 > 65535u) ? 65535u : (uint16_t)o10;  // per-sample count over the 10s window
+
+  // ── 2m window: closed 10s buckets ─────────────────────────────────────
+  pf_worst_2m = 0;
+  pf_over2x_2m = 0;
+  uint32_t n2m = 0;
+  uint64_t sum2m = 0;
+  for (uint8_t i = 0; i < pfBktCount; i++) {
+    uint8_t idx = (pfBktHead + PF_BUCKETS - 1 - i) % PF_BUCKETS;
+    n2m += pfBuckets[idx].count;
+    sum2m += pfBuckets[idx].sum;
+    pf_over2x_2m += pfBuckets[idx].over2x;
+    if (pfBuckets[idx].worst > pf_worst_2m) pf_worst_2m = pfBuckets[idx].worst;
+  }
+  pf_avg_2m = (n2m > 0) ? (float)sum2m / (float)n2m : 0.0f;
+
+  // ── All-time ──────────────────────────────────────────────────────────
+  pf_worst_at = pfAtWorst;
+  pf_avg_at = pfAtCount > 0 ? (float)((double)pfAtSum / pfAtCount) : 0.0f;
+  pf_over2x_at = pfAtOver2x;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CV Voltage Loop Firing Interval — CV-mode-gated clone of pidFire_record/_compute_stats.
+// Called once per CV fire. Globals live in Xregulator.ino. The control loop clears
+// vlHasPrev when CV is inactive, so re-entering CV re-baselines instead of logging the gap.
+// ─────────────────────────────────────────────────────────────────────────────
+void voltLoop_record(uint32_t now) {
+  if (!vlHasPrev) {
+    vlPrevTs = now;
+    vlBktStart = now;
+    vlBkt1sStart = now;
+    vlHasPrev = true;
+    return;
+  }
+
+  uint32_t diff = now - vlPrevTs;
+  vlPrevTs = now;
+  uint16_t iv = (diff > 65535u) ? 65535u : (uint16_t)diff;
+  vl_last_ms = iv;
+
+  // ── All-time accumulators ─────────────────────────────────────────────
+  vlAtCount++;
+  vlAtSum += iv;
+  if (iv > vlAtWorst) vlAtWorst = iv;
+  bool isOver2x = false;
+  if (vlAtCount > 1) {
+    float runMean = (float)((double)vlAtSum / vlAtCount);
+    if ((float)iv > runMean * 2.0f) { vlAtOver2x++; isOver2x = true; }
+  }
+
+  // ── 1s mini-bucket ────────────────────────────────────────────────────
+  vlBkt1sCurrent.sum += iv;
+  vlBkt1sCurrent.count++;
+  if (iv > vlBkt1sCurrent.worst) vlBkt1sCurrent.worst = iv;
+  if (isOver2x) vlBkt1sCurrent.over2x++;
+  if (now - vlBkt1sStart >= 1000UL) {
+    vlBkt1s[vlBkt1sHead] = vlBkt1sCurrent;
+    vlBkt1sHead = (vlBkt1sHead + 1) % VL_1S_BUCKETS;
+    if (vlBkt1sCount < VL_1S_BUCKETS) vlBkt1sCount++;
+    vlBkt1sCurrent = { 0, 0, 0, 0 };
+    vlBkt1sStart = now;
+  }
+
+  // ── 10s→2m bucket rollover ────────────────────────────────────────────
+  if (now - vlBktStart >= 10000UL) {
+    Ch1Bucket bkt = { 0, 0, 0, 0 };
+    for (uint8_t i = 0; i < vlBkt1sCount; i++) {
+      uint8_t idx = (vlBkt1sHead + VL_1S_BUCKETS - 1 - i) % VL_1S_BUCKETS;
+      bkt.sum += vlBkt1s[idx].sum;
+      bkt.count += vlBkt1s[idx].count;
+      if (vlBkt1s[idx].worst > bkt.worst) bkt.worst = vlBkt1s[idx].worst;
+      bkt.over2x += vlBkt1s[idx].over2x;
+    }
+    bkt.sum += vlBkt1sCurrent.sum;
+    bkt.count += vlBkt1sCurrent.count;
+    if (vlBkt1sCurrent.worst > bkt.worst) bkt.worst = vlBkt1sCurrent.worst;
+    bkt.over2x += vlBkt1sCurrent.over2x;
+    vlBuckets[vlBktHead] = bkt;
+    vlBktHead = (vlBktHead + 1) % VL_BUCKETS;
+    if (vlBktCount < VL_BUCKETS) vlBktCount++;
+    vlBktStart = now;
+  }
+}
+
+void voltLoop_compute_stats() {
+  if (vlAtCount == 0 && vlBkt1sCount == 0 && vlBkt1sCurrent.count == 0) return;
+
+  // ── 10s window: open 1s bucket + closed 1s buckets ────────────────────
+  vl_worst_10s = vlBkt1sCurrent.worst;
+  uint32_t n10 = vlBkt1sCurrent.count;
+  uint32_t sum10 = vlBkt1sCurrent.sum;
+  uint32_t o10 = vlBkt1sCurrent.over2x;
+  for (uint8_t i = 0; i < vlBkt1sCount; i++) {
+    uint8_t idx = (vlBkt1sHead + VL_1S_BUCKETS - 1 - i) % VL_1S_BUCKETS;
+    sum10 += vlBkt1s[idx].sum;
+    n10 += vlBkt1s[idx].count;
+    o10 += vlBkt1s[idx].over2x;
+    if (vlBkt1s[idx].worst > vl_worst_10s) vl_worst_10s = vlBkt1s[idx].worst;
+  }
+  vl_avg_10s = (n10 > 0) ? (float)sum10 / (float)n10 : 0.0f;
+  vl_over2x_10s = (o10 > 65535u) ? 65535u : (uint16_t)o10;
+
+  // ── 2m window: closed 10s buckets ─────────────────────────────────────
+  vl_worst_2m = 0;
+  vl_over2x_2m = 0;
+  uint32_t n2m = 0;
+  uint64_t sum2m = 0;
+  for (uint8_t i = 0; i < vlBktCount; i++) {
+    uint8_t idx = (vlBktHead + VL_BUCKETS - 1 - i) % VL_BUCKETS;
+    n2m += vlBuckets[idx].count;
+    sum2m += vlBuckets[idx].sum;
+    vl_over2x_2m += vlBuckets[idx].over2x;
+    if (vlBuckets[idx].worst > vl_worst_2m) vl_worst_2m = vlBuckets[idx].worst;
+  }
+  vl_avg_2m = (n2m > 0) ? (float)sum2m / (float)n2m : 0.0f;
+
+  // ── All-time ──────────────────────────────────────────────────────────
+  vl_worst_at = vlAtWorst;
+  vl_avg_at = vlAtCount > 0 ? (float)((double)vlAtSum / vlAtCount) : 0.0f;
+  vl_over2x_at = vlAtOver2x;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // INA228 fast-mode interval tracking
 // Mirrors CH1 interval stats. Only updated when inaFastModeActive.
 // resetINA228IntervalWindows() clears 10s/2m windows; all-time persists.
 // ─────────────────────────────────────────────────────────────────────────────
-struct InaMiniB  { uint32_t sum; uint32_t count; uint16_t worst; };
+struct InaMiniB  { uint32_t sum; uint32_t count; uint16_t worst; uint16_t over2x; };
 struct InaBucket { uint32_t sum; uint32_t count; uint16_t worst; uint16_t over2x; };
 
 #define INA_1S_BUCKETS 11
@@ -1491,17 +1691,19 @@ void recordINA228Interval(uint32_t now) {
   // 2m rolling window. The bucket-based avg + over2x for 2m still work
   // and remain rolling. Tooltips should say "since fast-mode start" for these.
   if (iv > ina_worst_2m) ina_worst_2m = iv;
+  bool isOver2x = false;
   if (inaAtCount > 1) {
     // Bias correction: compute mean of prior samples only, otherwise a huge
     // outlier inflates its own mean and fails the > 2× test against itself.
     float runMean = (float)((double)(inaAtSum - iv) / (inaAtCount - 1));
-    if ((float)iv > runMean * 2.0f) inaAtOver2x++;
+    if ((float)iv > runMean * 2.0f) { inaAtOver2x++; isOver2x = true; }
   }
 
-  // 1s mini-bucket
+  // 1s mini-bucket (over2x counted per-sample so 10s / 2m / all-time agree)
   ina1sCur.sum += iv;
   ina1sCur.count++;
   if (iv > ina1sCur.worst) ina1sCur.worst = iv;
+  if (isOver2x) ina1sCur.over2x++;
 
   if (now - ina1sStart >= 1000UL) {
     ina1sB[ina1sHead] = ina1sCur;
@@ -1519,17 +1721,12 @@ void recordINA228Interval(uint32_t now) {
       bkt.sum   += ina1sB[idx].sum;
       bkt.count += ina1sB[idx].count;
       if (ina1sB[idx].worst > bkt.worst) bkt.worst = ina1sB[idx].worst;
+      bkt.over2x += ina1sB[idx].over2x;  // per-sample over-2× counts
     }
     bkt.sum   += ina1sCur.sum;
     bkt.count += ina1sCur.count;
     if (ina1sCur.worst > bkt.worst) bkt.worst = ina1sCur.worst;
-    if (bkt.count > 0) {
-      float thresh = ((float)bkt.sum / (float)bkt.count) * 2.0f;
-      for (uint8_t i = 0; i < ina1sCount; i++) {
-        uint8_t idx = (ina1sHead + INA_1S_BUCKETS - 1 - i) % INA_1S_BUCKETS;
-        if ((float)ina1sB[idx].worst > thresh) bkt.over2x++;
-      }
-    }
+    bkt.over2x += ina1sCur.over2x;
     ina2mB[ina2mHead] = bkt;
     ina2mHead = (ina2mHead + 1) % INA_BUCKETS;
     if (ina2mCount < INA_BUCKETS) ina2mCount++;
@@ -1537,16 +1734,17 @@ void recordINA228Interval(uint32_t now) {
   }
 
   // Publish 10s stats
-  uint32_t sum10 = ina1sCur.sum, n10 = ina1sCur.count;
+  uint32_t sum10 = ina1sCur.sum, n10 = ina1sCur.count, o10 = ina1sCur.over2x;
   ina_worst_10s = ina1sCur.worst;
   for (uint8_t i = 0; i < ina1sCount; i++) {
     uint8_t idx = (ina1sHead + INA_1S_BUCKETS - 1 - i) % INA_1S_BUCKETS;
     sum10 += ina1sB[idx].sum;
     n10   += ina1sB[idx].count;
+    o10   += ina1sB[idx].over2x;
     if (ina1sB[idx].worst > ina_worst_10s) ina_worst_10s = ina1sB[idx].worst;
   }
   ina_avg_10s    = (n10 > 0) ? (float)sum10 / (float)n10 : 0.0f;
-  ina_over2x_10s = 0;  // not tracked at 1s granularity
+  ina_over2x_10s = (o10 > 65535u) ? 65535u : (uint16_t)o10;  // per-sample count over the 10s window
 
   // Publish 2m stats. ina_worst_2m is now updated DIRECTLY on every sample
   // (above), so this block does NOT touch it — only avg + over2x come from

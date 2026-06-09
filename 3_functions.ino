@@ -465,8 +465,17 @@ enum Csv2Index {
   CSV2_systemIDQuietPP_2,
   CSV2_systemIDAbortReason,       // FieldEventReason code if protection aborted last test; 0=no abort
   CSV2_systemIDAbortPhase,        // phase 1-9 at moment of protection abort; 0=no abort
-  CSV2_voltLoopWorstInterval_5s,  // worst voltage loop actual interval in 5s window (ms)
-  CSV2_voltLoopWorstInterval_ses, // worst voltage loop actual interval since boot (ms)
+  // CV voltage-loop firing-interval ladder (vl_*), CH1/pf-style stats (replaced the old 2-row voltLoop watermarks)
+  CSV2_vl_last_ms,
+  CSV2_vl_avg_10s,
+  CSV2_vl_worst_10s,
+  CSV2_vl_over2x_10s,
+  CSV2_vl_avg_2m,
+  CSV2_vl_worst_2m,
+  CSV2_vl_over2x_2m,
+  CSV2_vl_avg_at,
+  CSV2_vl_worst_at,
+  CSV2_vl_over2x_at,
   // NVS full-save diagnostics — saveNVSDataFull() fires only at field-off edge / shutdown / capsize.
   CSV2_nvsSecsSinceLastSave,      // seconds since last successful saveNVSDataFull() (0 = never saved this boot)
   CSV2_nvsFullSaveLastMs,         // wall-clock duration of most recent saveNVSDataFull() (ms)
@@ -539,8 +548,36 @@ enum Csv2Index {
   CSV2_loopOver80ImuLimitCount,  // # 80MHz passes over accel FIFO drain limit (~38ms) since reset
   CSV2_loop80IterCount,          // total 80MHz passes since reset (denominator)
   CSV2_STWNMEA,                  // Speed Through Water (SOW, PGN 128259) in knots (×100); NAN/no-log -> sent as 0
+  // +4: thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
+  CSV2_tempFiltered,             // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF, used as PID base
+  CSV2_outerImpliedPenalty,      // voltage cap expressed as a downstream amps penalty (A ×100); Plot 2 "Implied Penalty"
+  CSV2_thermalFlags,             // state-strip bitfield: bit0 tempPIDActive, bit4 AUTO, bit5 shutdown
+  CSV2_thermalAntiWindupLatch,   // 1 = CV-bleed anti-windup fired since last CSV2 send (latched; JS draws red ticks)
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491
+  // +10: Inner Current PID firing interval (field-on-gated), CH1-style stats (avg ×100)
+  CSV2_pf_last_ms,
+  CSV2_pf_avg_10s,
+  CSV2_pf_worst_10s,
+  CSV2_pf_over2x_10s,
+  CSV2_pf_avg_2m,
+  CSV2_pf_worst_2m,
+  CSV2_pf_over2x_2m,
+  CSV2_pf_avg_at,
+  CSV2_pf_worst_at,
+  CSV2_pf_over2x_at,
+
+  // +4: I2C bus-health — bus-only timing isolates a true bus stall from loop preemption
+  CSV2_inaBusReadWorstUs,    // worst µs in the two INA228 Wire reads (vs whole-block ft_rai_ina228)
+  CSV2_inaBusSlowCount,      // INA228 bus reads > 15 ms since reset
+  CSV2_ina228ErrorCount,     // INA228 reads dropped (sanity fail / exception)
+  CSV2_imuFifoFetchWorstUs,  // worst µs in Get_FIFO_Sample
+  CSV2_imuFifoWorstSamples,  // sample count of that worst fetch — small count + big µs = stall/preemption, not transfer size
+
+  // +2: long-term-ring flash-flush timer (field-off 15-min dump; was untimed = invisible loop spikes)
+  CSV2_dumpLongTermRing_win,  // worst µs of the flush, rolling 5s window
+  CSV2_dumpLongTermRing_ses,  // worst µs of the flush since last Reset Peak Values
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520
 };
 
 enum Csv3Index {
@@ -4267,6 +4304,7 @@ void setupServer() {
       ft_calculateDerivedMetrics.worstSession = 0;
       ft_ch1_compute_stats.worstSession = 0;
       ft_uploadSensorHistory.worstSession = 0;
+      ft_dumpLongTermRing.worstSession = 0;
       ft_uploadBufferedRecords.worstSession = 0;
       ft_buildConfigPayload.worstSession = 0;
       ft_UpdateEngineRuntime.worstSession = 0;
@@ -4328,13 +4366,54 @@ void setupServer() {
       ch1Bkt1sStart = millis();
       // Reset interval baseline so first post-reset sample doesn't carry stale timestamp gap
       ch1HasPrev = false;
+      // Inner Current PID firing-interval stats — clears all windows AND all-time accumulators
+      pfAtWorst = 0;
+      pfAtOver2x = 0;
+      pfAtSum = 0;
+      pfAtCount = 0;
+      pf_worst_at = 0;
+      pf_over2x_at = 0;
+      pf_avg_at = 0.0f;
+      pf_avg_10s = 0.0f;
+      pf_worst_10s = 0;
+      pf_over2x_10s = 0;
+      pf_avg_2m = 0.0f;
+      pf_worst_2m = 0;
+      pf_over2x_2m = 0;
+      pfBktHead = 0;
+      pfBktCount = 0;
+      pfBktStart = millis();
+      pfBkt1sCount = 0;
+      pfBkt1sHead = 0;
+      pfBkt1sCurrent = { 0, 0, 0, 0 };
+      pfBkt1sStart = millis();
+      pfHasPrev = false;
       // INA228 interval stats — clears all windows AND all-time accumulators
       // (without this, ina_worst_at/ina_worst_2m survived the reset and the
       // dashboard kept showing stale 149 ms NVS-stall spikes forever).
       resetINA228AllStats();
-      // Voltage loop worst (labeled "Worst Session" in UI) — wasn't reset before;
-      // adding here so the label-renamed "Worst — last X min" tracks reality.
-      voltLoopWorstInterval_ses = 0;
+      // CV voltage-loop firing-interval ladder — clears all windows AND all-time accumulators
+      vlAtWorst = 0;
+      vlAtOver2x = 0;
+      vlAtSum = 0;
+      vlAtCount = 0;
+      vl_worst_at = 0;
+      vl_over2x_at = 0;
+      vl_avg_at = 0.0f;
+      vl_avg_10s = 0.0f;
+      vl_worst_10s = 0;
+      vl_over2x_10s = 0;
+      vl_avg_2m = 0.0f;
+      vl_worst_2m = 0;
+      vl_over2x_2m = 0;
+      vlBktHead = 0;
+      vlBktCount = 0;
+      vlBktStart = millis();
+      vlBkt1sCount = 0;
+      vlBkt1sHead = 0;
+      vlBkt1sCurrent = { 0, 0, 0, 0 };
+      vlBkt1sStart = millis();
+      vlHasPrev = false;
       // Longest single trip — clear the lifetime max. In-progress trip (currentTripDistanceNm) is intentionally preserved.
       LongestSingleTrip_Nm_AllTime = 0.0f;
       // 24-hour rolling distance — clear watermark + ring (otherwise post-reset window keeps the pre-reset peak alive).
@@ -4360,6 +4439,26 @@ void setupServer() {
       loopWorst80Ses = 0;
       loopOver80ImuLimitCount = 0;
       loop80IterCount = 0;
+      // I2C bus-health — clear bus-only worst-timers and stall/error counts for a fresh window
+      inaBusReadWorstUs = 0;
+      inaBusSlowCount = 0;
+      ina228ErrorCount = 0;
+      adsI2CErrorCount = 0;
+      imuFifoFetchWorstUs = 0;
+      imuFifoWorstSamples = 0;
+      // AdjustField section profiler — clear the worst-full-pass latch + breakdown (/debug)
+      aflWorstTotalUs = 0;
+      memset(aflWorstSecUs, 0, sizeof(aflWorstSecUs));
+      // NVS full-save diagnostics — clear the worst-duration watermark and the call
+      // counter so "Worst Save Duration" and "Save Count" track since-reset, not since-boot.
+      // "Last Save Duration" is zeroed too (it just shows 0 until the next field-off save).
+      nvsFullSaveWorstMs = 0;
+      nvsFullSaveCount = 0;
+      nvsFullSaveLastMs = 0;
+      // Reset to the "never saved this boot" sentinel so "Time Since Last Save" reads 0
+      // and STAYS 0 until the next field-off save fires — turns the field into a live
+      // "is the save actually firing?" indicator after a reset.
+      lastNVSSaveTime = 0;
       // Stamp the reset moment. Dashboard reads CSV1 slot 28 = (millis()-this)/1000
       // and formats it as "last 12 min" / "last 1.4 hr" on all .session-window-label spans.
       perfCountersResetMs = millis();
@@ -4531,15 +4630,30 @@ void setupServer() {
                             : (currentGpsSource == GPS_PHONE)  ? "Phone"
                             : (currentGpsSource == GPS_MANUAL) ? "Manual" : "none";
     unsigned long now = millis();
-    char out[384];
+    // Ground truth for the Core-1 preemption investigation: where the network tasks
+    // actually landed. async_tcp must read 0 if the Core-0 pin made it into THIS image
+    // (the pin is a compile-time default — a stale factory/IDE flash won't have it).
+    // 2147483647 = tskNO_AFFINITY (floating), -99 = task not found by name.
+    TaskHandle_t hAsyncTcp = xTaskGetHandle("async_tcp");
+    TaskHandle_t hLwip = xTaskGetHandle("tiT");
+    int asyncTcpCore = hAsyncTcp ? (int)xTaskGetCoreID(hAsyncTcp) : -99;
+    int lwipCore = hLwip ? (int)xTaskGetCoreID(hLwip) : -99;
+    char out[768];
     snprintf(out, sizeof(out),
              "Partition: %s\nVersion: %s\nFree heap: %lu\n"
+             "Net task cores (0/1=pinned, 2147483647=floating, -99=not found): async_tcp=%d lwIP=%d\n"
+             "AdjustField worst full pass (ms): total=%.1f | thermal=%.1f snapshot=%.1f fastov=%.1f modes=%.1f control=%.1f duty=%.1f tail=%.1f\n"
              "Time source: %s (NMEA last sync: %lus ago, Phone last: %lus ago)\n"
              "GPS source:  %s (NMEA last fix: %lus ago, Phone last: %lus ago)\n"
              "Lat/Lon: %.6f, %.6f\n",
              (running && running->label) ? running->label : "unknown",
              FIRMWARE_VERSION,
              (unsigned long)ESP.getFreeHeap(),
+             asyncTcpCore, lwipCore,
+             aflWorstTotalUs / 1000.0f,
+             aflWorstSecUs[0] / 1000.0f, aflWorstSecUs[1] / 1000.0f, aflWorstSecUs[2] / 1000.0f,
+             aflWorstSecUs[3] / 1000.0f, aflWorstSecUs[4] / 1000.0f, aflWorstSecUs[5] / 1000.0f,
+             aflWorstSecUs[6] / 1000.0f,
              timeSrcName,
              lastNmea2kSystemTimeMs ? (now - lastNmea2kSystemTimeMs) / 1000UL : 0UL,
              lastPhoneTimeMs        ? (now - lastPhoneTimeMs)        / 1000UL : 0UL,
@@ -5592,8 +5706,10 @@ void SendWifiData() {
   if ((sysIDRunning || !sentSomething) && now - lastpayload2send >= (sysIDRunning ? 500UL : 5000UL) && events.count() > 0) {
     WifiStrength = cachedWiFiRSSI;
     ch1_compute_stats();
+    pidFire_compute_stats();
+    voltLoop_compute_stats();
     static char *payload2 = nullptr;
-    static const size_t PAYLOAD2_SIZE = 3400;  // (447 fields + 1) × 7 = 3136, rounded up to 3400
+    static const size_t PAYLOAD2_SIZE = 3800;  // (505 fields + 1) × 7 = 3542, rounded up to 3800
     if (!payload2) {
       payload2 = (char *)ps_malloc(PAYLOAD2_SIZE);  // allocated to PSRAM
       if (!payload2) {
@@ -5665,7 +5781,20 @@ void SendWifiData() {
                                // +4: 80MHz low-power loop instrumentation (worst_win, worst_ses, over-limit count, total iters)
                                "%d,%d,%d,%d,"
                                // +1: Speed Through Water (STW / SOW), knots ×100
-                               "%d",
+                               "%d,"
+                               // +4: thermal tuning live-stream fields (tempFiltered, impliedPenalty, flags, antiWindup latch)
+                               "%d,%d,%d,%d,"
+                               // +10: inner-current-PID firing interval (field-on), CH1-style stats
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +4: I2C bus-health (inaBusReadWorstUs, inaBusSlowCount, ina228ErrorCount, imuFifoFetchWorstUs)
+                               "%d,%d,%d,%d,"
+                               // +8 net: CV voltage-loop ladder is 10 vl_* fields, but reuses the 2 specifiers freed by the
+                               // removed 2-row voltLoop watermarks (still sitting in the generic blocks above), so only +8 here.
+                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +1: imuFifoWorstSamples (sample count at the worst IMU fetch — bus-stall vs transfer-size diag)
+                               "%d,"
+                               // +2: long-term-ring flash-flush timer (worst window / session, µs)
+                               "%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -6081,8 +6210,16 @@ void SendWifiData() {
                                (int)(systemIDQuietPP_A[2] * 10),
                                (int)systemIDAbortReason,
                                (int)systemIDAbortPhase,
-                               SafeInt(voltLoopWorstInterval_5s),
-                               SafeInt(voltLoopWorstInterval_ses),
+                               SafeInt(vl_last_ms),
+                               SafeInt(vl_avg_10s, 100),
+                               SafeInt(vl_worst_10s),
+                               SafeInt(vl_over2x_10s),
+                               SafeInt(vl_avg_2m, 100),
+                               SafeInt(vl_worst_2m),
+                               SafeInt(vl_over2x_2m),
+                               SafeInt(vl_avg_at, 100),
+                               SafeInt(vl_worst_at),
+                               SafeInt(vl_over2x_at),
                                (int)((lastNVSSaveTime == 0) ? 0 : ((millis() - lastNVSSaveTime) / 1000UL)),
                                SafeInt(nvsFullSaveLastMs),
                                SafeInt(nvsFullSaveWorstMs),
@@ -6143,8 +6280,33 @@ void SendWifiData() {
                                SafeInt(loopWorst80Ses / 1000),           // CSV2_loopWorst80Ses_ms
                                SafeInt(loopOver80ImuLimitCount),         // CSV2_loopOver80ImuLimitCount
                                SafeInt(loop80IterCount),                 // CSV2_loop80IterCount
-                               SafeInt(STWNMEA, 100)                     // CSV2_STWNMEA (knots ×100; NAN/no-log -> 0)
+                               SafeInt(STWNMEA, 100),                    // CSV2_STWNMEA (knots ×100; NAN/no-log -> 0)
+                               // thermal tuning live-stream fields (see CSV2 enum) — flags byte mirrors the thermal log writer
+                               SafeInt(tempFiltered, 100),               // CSV2_tempFiltered
+                               SafeInt(outerImpliedPenalty, 100),        // CSV2_outerImpliedPenalty
+                               SafeInt((tempPIDActive ? (1 << 0) : 0) | (sysMode == SYS_MODE_AUTO ? (1 << 4) : 0) | (shutdownPhase != SHUTDOWN_PHASE_NONE ? (1 << 5) : 0)),  // CSV2_thermalFlags
+                               SafeInt(thermalAntiWindupLatch ? 1 : 0),  // CSV2_thermalAntiWindupLatch
+                               // +10: inner-current-PID firing interval (field-on)
+                               SafeInt(pf_last_ms),                      // CSV2_pf_last_ms
+                               SafeInt(pf_avg_10s, 100),                 // CSV2_pf_avg_10s
+                               SafeInt(pf_worst_10s),                    // CSV2_pf_worst_10s
+                               SafeInt(pf_over2x_10s),                   // CSV2_pf_over2x_10s
+                               SafeInt(pf_avg_2m, 100),                  // CSV2_pf_avg_2m
+                               SafeInt(pf_worst_2m),                     // CSV2_pf_worst_2m
+                               SafeInt(pf_over2x_2m),                    // CSV2_pf_over2x_2m
+                               SafeInt(pf_avg_at, 100),                  // CSV2_pf_avg_at
+                               SafeInt(pf_worst_at),                     // CSV2_pf_worst_at
+                               SafeInt(pf_over2x_at),                    // CSV2_pf_over2x_at
+                               SafeInt(inaBusReadWorstUs),               // CSV2_inaBusReadWorstUs
+                               SafeInt(inaBusSlowCount),                 // CSV2_inaBusSlowCount
+                               SafeInt(ina228ErrorCount),                // CSV2_ina228ErrorCount
+                               SafeInt(imuFifoFetchWorstUs),             // CSV2_imuFifoFetchWorstUs
+                               SafeInt(imuFifoWorstSamples),             // CSV2_imuFifoWorstSamples
+                               SafeInt(ft_dumpLongTermRing.worstWindow),  // CSV2_dumpLongTermRing_win
+                               SafeInt(ft_dumpLongTermRing.worstSession)  // CSV2_dumpLongTermRing_ses
     );
+    // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
+    thermalAntiWindupLatch = false;
     if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
       return;

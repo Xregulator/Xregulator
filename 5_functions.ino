@@ -609,12 +609,6 @@ void checkAndRestart() {
     delay(1000);
     esp_task_wdt_reset();
 
-    // Persist time sync state
-    if (timeIsSynced && timeBase > 0) {
-      Serial.println("Saving time sync state before restart");
-      saveTimeSyncState();
-    }
-
     // Save final sensor window if it has data — push into PSRAM ring so the
     // shutdown Phase 4 dump (or next-tick cloud upload) preserves it.
     if (currentWindow->battVolt_valid_us > 0) {
@@ -936,7 +930,10 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // =================================================================
   // When battery voltage is high AND current is low (tail current),
   // we know it's fully charged regardless of what's charging it
-  if ((abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah / 100)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
+  // Units: BatteryCurrent_scaled is A×100. TailCurrent is % of capacity, so the
+  // threshold in A×100 is (TailCurrent/100 × Capacity) × 100 = TailCurrent × Capacity.
+  // (The old "/ 100" compared amps against A×100 — 100x too strict, never fired.)
+  if ((abs(BatteryCurrent_scaled) <= (TailCurrent * BatteryCapacity_Ah)) && (Voltage_scaled >= ChargedVoltage_Scaled)) {
     // Conditions met - start/continue timer
     FullChargeTimer += elapsedSeconds;
 
@@ -2373,8 +2370,12 @@ void _ReadAnalogInputs_inner() {
       // ft_rai_ina228 / AnalogReadTime aliases: worstWindow + lastCall updated by macro
       TIMED_CALL(ft_rai_ina228, ([&]() {
                    try {
+                     uint32_t inaBusT0 = micros();
                      IBV = INA.getBusVoltage();
                      ShuntVoltage_mV = INA.getShuntVoltage() * 1000;
+                     uint32_t inaBusDt = micros() - inaBusT0;            // time in JUST the two Wire reads
+                     if (inaBusDt > inaBusReadWorstUs) inaBusReadWorstUs = inaBusDt;
+                     if (inaBusDt > 15000UL) inaBusSlowCount++;          // ≥1 Wire-timeout's worth = bus stall
 
                      // Sanity check the readings
                      if (!isnan(IBV) && IBV > 5.0 && IBV < 70.0 && !isnan(ShuntVoltage_mV)) {
@@ -2428,14 +2429,17 @@ void _ReadAnalogInputs_inner() {
                        if (IBV < MinVoltage_AllTime)  { MinVoltage_AllTime  = IBV; }
                        wmIgnUpdate(wmIgn_IBV,  IBV);   // ignition-cycle watermarks (lo + hi)
                        wmIgnUpdate(wmIgn_Bcur, Bcur);
+                     } else {
+                       ina228ErrorCount++;   // implausible read — dropped (no MARK_FRESH); was silent before
                      }
 
                    } catch (...) {
-                     // INA228 read failed - do not call MARK_FRESH
+                     ina228ErrorCount++;   // exception path — visible on dashboard "I2C Bus Health"
+                     // INA228 read failed - do not call MARK_FRESH. The counter replaces the old
+                     // throttled console spam (now redundant); keep one rare Serial line for USB debug.
                      static unsigned long lastINAFailureWarning = 0;
                      if (millis() - lastINAFailureWarning > 10000) {
                        Serial.println("INA228 read failed");
-                       queueConsoleMessage("INA228 read failed");
                        lastINAFailureWarning = millis();
                      }
                    }
@@ -2864,9 +2868,15 @@ void drainIMUFifo() {
                                             ? MAX_FIFO_DRAIN_PER_POLL
                                             : fifo_samples;
 
+               uint32_t imuFetchT0 = micros();
                if (imu.Get_FIFO_Sample(fifoBuffer, samples_to_read) != LSM6DSOX_OK) {
                  imuRecordI2CError();
                  return;
+               }
+               uint32_t imuFetchDt = micros() - imuFetchT0;   // time in JUST the FIFO Wire read
+               if (imuFetchDt > imuFifoFetchWorstUs) {
+                 imuFifoFetchWorstUs = imuFetchDt;
+                 imuFifoWorstSamples = samples_to_read;   // bytes-in-flight at the worst fetch (×7 = bytes)
                }
 
                // Timestamp the batch end, then backdate each sample by its nominal interval.
