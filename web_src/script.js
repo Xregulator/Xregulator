@@ -5260,6 +5260,26 @@ function initCVTuningPlot() {
         lockBtnCV.style.opacity = cvTuningPlotPaused ? '1' : '0.6';
     });
 
+    // Click-to-edit Y limits — routed through the same range setters as the
+    // fields below the plot, and kept in sync with those fields.
+    const cvSyncInputs = (minId, maxId, mn, mx) => {
+        const a = document.getElementById(minId), b = document.getElementById(maxId);
+        if (a) a.value = mn;
+        if (b) b.value = mx;
+    };
+    attachYAxisEdit(cvTuningPlot, [
+        {
+            scale: 'volts', decimals: 2,
+            apply: (mn, mx) => { cvSyncInputs('cvVoltsMinInput', 'cvVoltsMaxInput', mn, mx); setCVVoltsRange(mn, mx); },
+            auto: () => { cvVoltsMin = null; cvVoltsMax = null; if (cvTuningPlot) { cvTuningPlot.destroy(); initCVTuningPlot(); } }
+        },
+        {
+            scale: 'amps', decimals: 1, topPx: 26,   // clears the corner lock button
+            apply: (mn, mx) => { cvSyncInputs('cvAmpsMinInput', 'cvAmpsMaxInput', mn, mx); setCVAmpsRange(mn, mx); },
+            auto: () => { cvAmpsMin = null; cvAmpsMax = null; if (cvTuningPlot) { cvTuningPlot.destroy(); initCVTuningPlot(); } }
+        }
+    ]);
+
     if (cvTuningPlotResizeObserver) cvTuningPlotResizeObserver.disconnect();
     cvTuningPlotResizeObserver = new ResizeObserver(() => {
         if (cvTuningPlot) cvTuningPlot.setSize({ width: plotEl.clientWidth, height: 350 });
@@ -6063,6 +6083,101 @@ function initPlotDataStructures() {
     ];
 }
 
+// =====================================================================
+// On-plot Y-axis editing — gives every uPlot chart small click-to-edit
+// min/max boxes at the corners of its plot area, one pair per Y scale,
+// on whichever side that scale's axis is drawn. Type a value and press
+// Enter (or tap away) to apply. Where the chart supports automatic
+// ranging, clearing BOTH boxes and pressing Enter returns it to auto.
+// cfgs: [{ scale, apply(min,max), auto() optional, decimals optional }]
+function attachYAxisEdit(u, cfgs) {
+    if (!u || !u.over) return;
+    u.over.querySelectorAll('.yaxis-edit').forEach(n => n.remove());
+    const pairs = [];
+
+    const fmt = (v, cfg) => {
+        if (v == null || !isFinite(v)) return '';
+        let d = cfg.decimals;
+        if (d === undefined) {
+            const sc = u.scales[cfg.scale];
+            const span = (sc && isFinite(sc.max - sc.min)) ? Math.abs(sc.max - sc.min) : 0;
+            d = span >= 100 ? 0 : span >= 10 ? 1 : 2;
+        }
+        return String(parseFloat(v.toFixed(d)));
+    };
+
+    const refresh = () => {
+        pairs.forEach(p => {
+            const sc = u.scales[p.cfg.scale];
+            if (!sc) return;
+            if (document.activeElement !== p.minBox) p.minBox.value = fmt(sc.min, p.cfg);
+            if (document.activeElement !== p.maxBox) p.maxBox.value = fmt(sc.max, p.cfg);
+        });
+    };
+
+    cfgs.forEach(cfg => {
+        const axis = u.axes.find(a => a.scale === cfg.scale);
+        const onRight = !!axis && axis.side === 1;
+
+        const mkBox = (isMax) => {
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.step = 'any';
+            inp.className = 'yaxis-edit';
+            inp.title = (isMax ? 'Y max' : 'Y min') + ' — type a value, Enter to apply'
+                + (cfg.auto ? '; clear both boxes + Enter for auto' : '');
+            inp.style[onRight ? 'right' : 'left'] = '2px';
+            // topPx pushes the max box down when a corner control (lock/auto) already lives there
+            inp.style[isMax ? 'top' : 'bottom'] = (isMax && cfg.topPx ? cfg.topPx : 2) + 'px';
+            // Keep clicks/drags on the boxes away from uPlot's cursor + zoom handling.
+            ['mousedown', 'mouseup', 'touchstart', 'click', 'dblclick'].forEach(ev =>
+                inp.addEventListener(ev, e => e.stopPropagation()));
+            u.over.appendChild(inp);
+            return inp;
+        };
+
+        const pair = { cfg, dirty: false, maxBox: mkBox(true), minBox: mkBox(false) };
+
+        const commit = () => {
+            const mnRaw = pair.minBox.value.trim(), mxRaw = pair.maxBox.value.trim();
+            if (mnRaw === '' && mxRaw === '' && cfg.auto) { cfg.auto(); setTimeout(refresh, 0); return; }
+            const mn = parseFloat(mnRaw), mx = parseFloat(mxRaw);
+            if (isFinite(mn) && isFinite(mx) && mx > mn) cfg.apply(mn, mx);
+            setTimeout(refresh, 0);
+        };
+
+        [pair.minBox, pair.maxBox].forEach(inp => {
+            inp.addEventListener('input', () => { pair.dirty = true; });
+            inp.addEventListener('keydown', e => {
+                e.stopPropagation();
+                if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+                else if (e.key === 'Escape') { pair.dirty = false; inp.dataset.esc = '1'; inp.blur(); }
+            });
+            inp.addEventListener('blur', () => {
+                if (inp.dataset.esc) { delete inp.dataset.esc; refresh(); return; }
+                if (!pair.dirty) { refresh(); return; }
+                pair.dirty = false;
+                commit();
+            });
+        });
+
+        pairs.push(pair);
+    });
+
+    (u.hooks.draw = u.hooks.draw || []).push(refresh);
+    refresh();
+}
+
+// Persist a Y-axis range to the regulator (same params the settings forms use).
+// Settings are password-gated — while the dashboard is locked the new range
+// still applies, it just stays local to this browser session.
+function sendYAxisSetting(params) {
+    if (!currentAdminPassword) return;
+    const q = new URLSearchParams(params);
+    q.set('password', currentAdminPassword);
+    fetchWithTimeout(buildURL('/get?' + q.toString()), {}, 5000).catch(() => { });
+}
+
 function initCurrentTempPlot() {
     const plotEl = document.getElementById('current-temp-plot');
     if (!plotEl) {
@@ -6213,6 +6328,17 @@ function initCurrentTempPlot() {
             currentTempPlot.setScale('pct', { min: 0, max: 100 });
         }
     });
+
+    // Click-to-edit Y limits, saved to the regulator as Ymin1/Ymax1
+    attachYAxisEdit(currentTempPlot, [{
+        scale: 'current', decimals: 0,
+        apply: (mn, mx) => {
+            Ymin1 = Math.round(mn); Ymax1 = Math.round(mx);
+            if (asCb.checked) { asCb.checked = false; asCb.dispatchEvent(new Event('change')); }
+            else currentTempPlot.setScale('current', { min: Ymin1, max: Ymax1 });
+            sendYAxisSetting({ Ymin1: Ymin1, Ymax1: Ymax1 });
+        }
+    }]);
 }
 
 function initVoltagePlot() {
@@ -6357,6 +6483,17 @@ function initVoltagePlot() {
             voltagePlot.setScale('pct', { min: 0, max: 100 });
         }
     });
+
+    // Click-to-edit Y limits in volts, saved to the regulator as Ymin2/Ymax2
+    attachYAxisEdit(voltagePlot, [{
+        scale: 'voltage', decimals: 2,
+        apply: (mn, mx) => {
+            Ymin2 = mn * 100; Ymax2 = mx * 100;
+            if (asCbV.checked) { asCbV.checked = false; asCbV.dispatchEvent(new Event('change')); }
+            else voltagePlot.setScale('voltage', { min: mn, max: mx });
+            sendYAxisSetting({ Ymin2: mn, Ymax2: mx });
+        }
+    }]);
 }
 
 function initRPMPlot() {
@@ -6495,6 +6632,17 @@ function initRPMPlot() {
             rpmPlot.setScale('pct', { min: 0, max: 100 });
         }
     });
+
+    // Click-to-edit Y limits, saved to the regulator as Ymin3/Ymax3
+    attachYAxisEdit(rpmPlot, [{
+        scale: 'rpm', decimals: 0,
+        apply: (mn, mx) => {
+            Ymin3 = Math.round(mn); Ymax3 = Math.round(mx);
+            if (asCbR.checked) { asCbR.checked = false; asCbR.dispatchEvent(new Event('change')); }
+            else rpmPlot.setScale('rpm', { min: Ymin3, max: Ymax3 });
+            sendYAxisSetting({ Ymin3: Ymin3, Ymax3: Ymax3 });
+        }
+    }]);
 }
 
 function initTemperaturePlot() {
@@ -6632,6 +6780,17 @@ function initTemperaturePlot() {
             temperaturePlot.setScale('pct', { min: 0, max: 100 });
         }
     });
+
+    // Click-to-edit Y limits, saved to the regulator as Ymin4/Ymax4
+    attachYAxisEdit(temperaturePlot, [{
+        scale: 'temperature', decimals: 0,
+        apply: (mn, mx) => {
+            Ymin4 = Math.round(mn); Ymax4 = Math.round(mx);
+            if (asCbT.checked) { asCbT.checked = false; asCbT.dispatchEvent(new Event('change')); }
+            else temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
+            sendYAxisSetting({ Ymin4: Ymin4, Ymax4: Ymax4 });
+        }
+    }]);
 }
 
 //Staleness stuff
@@ -10876,6 +11035,11 @@ function initPidTuningDataStructures() {
     plotInterp.pid.arrivalTime = 0;
 }
 // Initialize PID tuning plot
+// Manual override for the PID plot's right-hand duty axis (browser-side only;
+// the left amps axis persists on the regulator as yyMin/yyMax).
+let pidDutyRange = null;
+try { pidDutyRange = JSON.parse(localStorage.getItem('pidDutyRange')) || null; } catch (e) { }
+
 function initPidTuningPlot() {
     const plotEl = document.getElementById('pid-tuning-plot');
     if (!plotEl) {
@@ -10946,7 +11110,7 @@ function initPidTuningPlot() {
             },
             duty: {
                 auto: false,
-                range: [-25, 105]
+                range: pidDutyRange || [-25, 105]
             }
         },
         axes: [
@@ -11002,6 +11166,32 @@ function initPidTuningPlot() {
 
     pidTuningPlot = new uPlot(opts, pidTuningData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(pidTuningPlot);
+
+    // Click-to-edit Y limits: amps axis saves to the regulator (yyMin/yyMax,
+    // same as the form fields below), duty axis is a local override.
+    attachYAxisEdit(pidTuningPlot, [
+        {
+            scale: 'amps', decimals: 0,
+            apply: (mn, mx) => {
+                yyMin = Math.round(mn); yyMax = Math.round(mx);
+                pidTuningPlot.setScale('amps', { min: yyMin, max: yyMax });
+                sendYAxisSetting({ yyMin: yyMin, yyMax: yyMax });
+            }
+        },
+        {
+            scale: 'duty', decimals: 0,
+            apply: (mn, mx) => {
+                pidDutyRange = [mn, mx];
+                localStorage.setItem('pidDutyRange', JSON.stringify(pidDutyRange));
+                pidTuningPlot.setScale('duty', { min: mn, max: mx });
+            },
+            auto: () => {
+                pidDutyRange = null;
+                localStorage.removeItem('pidDutyRange');
+                pidTuningPlot.setScale('duty', { min: -25, max: 105 });
+            }
+        }
+    ]);
 }
 
 // Custom legend with checkboxes for PID tuning plot
@@ -11908,6 +12098,12 @@ function renderThermalPlot1(data, tMin) {
         if (thermalLogPlots[0] && el.clientWidth > 0)
             thermalLogPlots[0].setSize({ width: el.clientWidth, height: H });
     });
+
+    // Click-to-edit Y limits (clear both boxes + Enter returns to autoscale)
+    attachYAxisEdit(thermalLogPlots[0], [
+        { scale: 'temp', decimals: 0, apply: (mn, mx) => setThermalManualRange('p1-temp-min', 'p1-temp-max', mn, mx), auto: thermalRangesToAuto },
+        { scale: 'amps', decimals: 0, apply: (mn, mx) => setThermalManualRange('p1-amps-min', 'p1-amps-max', mn, mx), auto: thermalRangesToAuto }
+    ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -11965,6 +12161,11 @@ function renderThermalPlot2(data, tMin) {
         if (thermalLogPlots[2] && el.clientWidth > 0)
             thermalLogPlots[2].setSize({ width: el.clientWidth, height: H });
     });
+
+    // Click-to-edit Y limits (clear both boxes + Enter returns to autoscale)
+    attachYAxisEdit(thermalLogPlots[2], [
+        { scale: 'amps', decimals: 0, apply: (mn, mx) => setThermalManualRange('p3-min', 'p3-max', mn, mx), auto: thermalRangesToAuto }
+    ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -12171,6 +12372,22 @@ function _createThermalLegend(container, plotIdx, items) {
 // ---------------------------------------------------------------------------
 // Y axis range controls
 // ---------------------------------------------------------------------------
+// On-plot Y boxes write into the existing manual-range fields, switch the
+// thermal autoscale checkbox off, and re-apply — so both UIs stay in agreement.
+function setThermalManualRange(minId, maxId, mn, mx) {
+    const minEl = document.getElementById(minId), maxEl = document.getElementById(maxId);
+    if (minEl) minEl.value = mn;
+    if (maxEl) maxEl.value = mx;
+    const cb = document.getElementById('thermal-autoscale');
+    if (cb && cb.checked) { cb.checked = false; cb.dispatchEvent(new Event('change')); }
+    else applyThermalRanges();
+}
+
+function thermalRangesToAuto() {
+    const cb = document.getElementById('thermal-autoscale');
+    if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change')); }
+}
+
 function applyThermalRanges() {
     const auto = document.getElementById('thermal-autoscale')?.checked ?? true;
     const get = (id) => parseFloat(document.getElementById(id)?.value);
@@ -13567,6 +13784,8 @@ window.addEventListener('load', function () {
   let baroBufferEpochAtEnd = 0;          // unix seconds of the newest non-NaN sample (0 = unknown)
   let currentRangeHours = 24;
   let autoscaleY = false;
+  let baroYManual = null;          // [min,max] typed on the plot; beats autoscale + fixed default
+  try { baroYManual = JSON.parse(localStorage.getItem('baroYManual')) || null; } catch (e) { }
   let fetchTimer = null;
   let initialized = false;
   let panelVisible = false;
@@ -13724,6 +13943,22 @@ window.addEventListener('load', function () {
     new ResizeObserver(() => {
       if (baroPlot) baroPlot.setSize({ width: el.clientWidth, height: el.clientHeight || 280 });
     }).observe(el);
+
+    // Click-to-edit Y limits (clear both boxes + Enter returns to the
+    // default/autoscale behavior picked by the checkbox below the plot)
+    attachYAxisEdit(baroPlot, [{
+      scale: 'y', decimals: 0,
+      apply: (mn, mx) => {
+        baroYManual = [mn, mx];
+        localStorage.setItem('baroYManual', JSON.stringify(baroYManual));
+        refreshPlot();
+      },
+      auto: () => {
+        baroYManual = null;
+        localStorage.removeItem('baroYManual');
+        refreshPlot();
+      }
+    }]);
   }
 
   function refreshPlot() {
@@ -13748,6 +13983,7 @@ window.addEventListener('load', function () {
   }
 
   function computeYRange() {
+    if (baroYManual) return baroYManual;
     if (!autoscaleY) return [940, 1050];
     // Middle 2/3 of plot height: pad = 25% of data range above and below.
     const slice = computePlotSlice().values;
@@ -13874,6 +14110,8 @@ window.addEventListener('load', function () {
     const cb = document.getElementById('baroAutoscaleY');
     if (cb) cb.addEventListener('change', e => {
       autoscaleY = e.target.checked;
+      baroYManual = null;                       // the checkbox always wins over a typed range
+      localStorage.removeItem('baroYManual');
       if (baroPlot) refreshPlot();
     });
   }
@@ -14322,6 +14560,14 @@ window.addEventListener('load', function () {
     });
     ctrl.appendChild(applyBtn); ctrl.appendChild(resetBtn);
     el.appendChild(ctrl);
+
+    // On-plot Y boxes mirror the Min/Max fields above — same persistence path
+    // (clear both boxes + Enter returns that axis to auto-fit).
+    attachYAxisEdit(plot, spec.scales.map(sc => ({
+      scale: sc.name,
+      apply: (mn, mx) => { inputs[sc.name].mn.value = mn; inputs[sc.name].mx.value = mx; applyBtn.click(); },
+      auto: () => { inputs[sc.name].mn.value = ''; inputs[sc.name].mx.value = ''; applyBtn.click(); }
+    })));
 
     if (document.body.classList.contains('dark-mode') && typeof updateUplotTheme === 'function') updateUplotTheme(plot);
     plot.over.addEventListener('click', () => {   // tap to pin a crosshair time across all charts
@@ -14787,12 +15033,17 @@ window.addEventListener('load', function () {
   const NBINS = 18;                 // must match firmware FUELCURVE_BINS
   const DEFAULT_TOP = 4500;         // fallback x-scale until firmware reports the configured top RPM
   let plot = null;
+  let yManual = null;               // [min,max] typed on the plot; null = auto-fit
+  try { yManual = JSON.parse(localStorage.getItem('fuelCurveYRange')) || null; } catch (e) { }
 
   function make(el) {
     const opts = {
       width: el.clientWidth || 600,
       height: 300,
-      scales: { x: { time: false }, mpg: {} },
+      scales: {
+        x: { time: false },
+        mpg: { range: (u, mn, mx) => yManual ? yManual : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) }
+      },
       series: [
         { label: "RPM" },
         { label: "mpg", scale: "mpg", stroke: "#2e7d32", width: 2, points: { show: true, size: 6 }, spanGaps: false }
@@ -14807,6 +15058,21 @@ window.addEventListener('load', function () {
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(plot);
     const ro = new ResizeObserver(() => { if (plot) plot.setSize({ width: el.clientWidth || 600, height: 300 }); });
     ro.observe(el);
+
+    // Click-to-edit Y limits (clear both boxes + Enter returns to auto-fit)
+    attachYAxisEdit(plot, [{
+      scale: 'mpg', decimals: 2,
+      apply: (mn, mx) => {
+        yManual = [mn, mx];
+        localStorage.setItem('fuelCurveYRange', JSON.stringify(yManual));
+        plot.setData(plot.data);   // re-runs the range function
+      },
+      auto: () => {
+        yManual = null;
+        localStorage.removeItem('fuelCurveYRange');
+        plot.setData(plot.data);
+      }
+    }]);
   }
 
   window.updateFuelCurve = function (data) {

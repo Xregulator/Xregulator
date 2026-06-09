@@ -4110,4 +4110,34 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 .wfr-light .bl-clouds span:nth-child(1) { top: 116px; left: 24px; --s: 1; opacity: 0.9; animation: bl-cloud 90s linear infinite; }
 .wfr-light .bl-clouds span:nth-child(2) { top: 172px; left: 150px; --s: 0.58; opacity: 0.6; animation: bl-cloud 120s linear infinite; }
 
+/* On-plot Y-axis click-to-edit boxes (attachYAxisEdit in script.js).
+   Sit at the corners of every uPlot chart's plot area; faint until
+   hovered/focused so they read as axis labels, not form fields. */
+.yaxis-edit {
+  position: absolute;
+  z-index: 12;
+  width: 58px;
+  padding: 1px 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dark, #333);
+  background: rgba(127, 127, 127, 0.10);
+  border: 1px solid rgba(127, 127, 127, 0.45);
+  border-radius: 3px;
+  opacity: 0.55;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.yaxis-edit:hover,
+.yaxis-edit:focus {
+  opacity: 1;
+  background: var(--card-dark, rgba(255, 255, 255, 0.92));
+  outline: none;
+}
+.yaxis-edit::-webkit-outer-spin-button,
+.yaxis-edit::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 /* XREG_END */
