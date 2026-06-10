@@ -1325,6 +1325,11 @@ input[type="submit"]:hover {
     flex-direction: row;
     align-items: center;
     gap: 0;
+    /* Neither tier can compress (max-content grid + flex-shrink:0 control), so
+       without wrap the Alternator Enable block hangs up to ~150px outside the
+       row on 560–820px screens. Wrap drops it to its own line instead. */
+    flex-wrap: wrap;
+    row-gap: 8px;
   }
 
   .sensor-control-row .sensor-readings-tier {
@@ -3428,21 +3433,27 @@ input:checked+.slider:before {
   color: #856404;
 }
 
-/* Responsive grid for configuration rows on mobile */
+/* Responsive grid for configuration rows on mobile.
+   Panel id is settings-weathersolar — these selectors said #settings-weather
+   for months, matched nothing, and the whole mobile layout silently never ran. */
 @media (max-width: 768px) {
-  #settings-weather .form-row[style*="grid-template-columns"] {
+  #settings-weathersolar .form-row[style*="grid-template-columns"] {
     grid-template-columns: 1fr !important;
     gap: 8px !important;
   }
 
-  #settings-weather .form-input form:not(:has(.switch)) {
+  #settings-weathersolar .form-input form:not(:has(.switch)) {
     flex-direction: column !important;
   }
 
-  #settings-weather .form-input input[type="number"] {
+  #settings-weathersolar .form-input input[type="number"] {
     max-width: 100% !important;
   }
 }
+
+/* Weather config forms must be allowed to shrink inside their 1fr grid cell —
+   the base .form-input form flex-shrink:0 made the Set button overflow the row. */
+#settings-weathersolar .form-input form { flex-shrink: 1; min-width: 0; }
 
 .emergency-section-content {
   background: #fff3cd;
@@ -3575,26 +3586,33 @@ input:checked+.slider:before {
 /* Lets a form-row span the full card width instead of the default 480px cap */
 .form-row-wide { max-width: none; }
 
-/* Logging controls: tooltip on the right, 4-cell equal grid fills the rest */
+/* Logging controls: tooltip on the right, equal grid cells fill the rest.
+   auto-fit + minmax keeps every cell at least as wide as the widest nowrap
+   button ("Start Fresh Log" ~165px) and drops the column count (4→3→2→1)
+   as the card narrows — no fixed breakpoint, so labels can never overlap. */
 .log-row { align-items: center; }
 .log-row .log-info { flex-shrink: 0; margin-left: 10px; cursor: pointer; }
 .log-grid {
     flex: 1;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 8px;
     align-items: stretch;
 }
-/* equalize the cells — kill the per-button min-widths so all four match */
-.log-grid > * { width: 100%; margin: 0; }
+/* equalize the cells — kill the per-button min-widths so all four match.
+   border-box is mandatory here: this sheet has no global box-sizing reset, so
+   width:100% alone makes padding+border overflow the grid track and each cell
+   slides under its right neighbor (the recurring pill/Pause overlap). */
+.log-grid > * { width: 100%; margin: 0; box-sizing: border-box; }
 /* two-class specificity to beat the pill/toggle min-widths so all cells equalize */
 .log-grid > .log-pill, .log-grid > .btn-log-toggle { min-width: 0; }
-@media (max-width: 640px) {
-    .log-grid { grid-template-columns: repeat(2, 1fr); }   /* 2x2 on mobile */
-}
 
-/* Time-window buttons wrap instead of overflowing the card on narrow widths */
-.time-window-input form { flex-wrap: wrap; justify-content: flex-end; }
+/* Time-window buttons wrap instead of overflowing the card on narrow widths.
+   flex-shrink:1 + min-width:0 are mandatory: the base .form-input form rule is
+   flex-shrink:0, so without them this 6-button strip stays rigid, flex-wrap never
+   triggers, and flex-end spills the overflow LEFT under the label + info icon. */
+.time-window-input { min-width: 0; }
+.time-window-input form { flex-wrap: wrap; justify-content: flex-end; flex-shrink: 1; min-width: 0; }
 
 /* status badge — fixed min-width so Recording / Paused are the same size */
 .log-pill {

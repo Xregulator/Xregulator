@@ -5234,8 +5234,10 @@ function initCVTuningPlot() {
         ],
         scales: {
             x:     { time: false, auto: false, range: [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
-            volts: (cvVoltsMin !== null && cvVoltsMax !== null) ? { auto: false, range: [cvVoltsMin, cvVoltsMax] } : {},
-            amps:  (cvAmpsMin  !== null && cvAmpsMax  !== null) ? { auto: false, range: [cvAmpsMin,  cvAmpsMax]  } : {},
+            // Range fns, not arrays: re-read each redraw so manual Y edits survive
+            // mid-capture setData re-ranging. Null globals = default autoscale fit.
+            volts: { range: (u, mn, mx) => (cvVoltsMin !== null && cvVoltsMax !== null) ? [cvVoltsMin, cvVoltsMax] : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
+            amps:  { range: (u, mn, mx) => (cvAmpsMin  !== null && cvAmpsMax  !== null) ? [cvAmpsMin,  cvAmpsMax]  : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
         },
     };
 
@@ -6157,11 +6159,22 @@ function attachYAxisEdit(u, cfgs) {
             hot.title = 'Click to edit axis ' + (isMax ? 'maximum' : 'minimum')
                 + (cfg.auto ? ' — clear + Enter for auto' : '');
             // Keep clicks/drags away from uPlot's cursor + zoom handling
-            ['mousedown', 'mouseup', 'touchstart', 'dblclick'].forEach(ev =>
+            ['mousedown', 'touchstart', 'dblclick', 'click'].forEach(ev =>
                 hot.addEventListener(ev, e => e.stopPropagation()));
             const zone = { cfg, isMax, onRight, hot };
-            hot.addEventListener('click', e => {
+            // Open on mouseup, NOT click: uPlot installs a capture-phase click
+            // listener on .u-wrap (its drag-end click suppressor) whose moved-cursor
+            // check is always true over the axis strip, so it swallows every click
+            // before it can reach this element — a click handler here never fires.
+            // The armed flag ignores mouseups from drags that started elsewhere
+            // (e.g. releasing a plot-area zoom drag on top of an axis label).
+            let armed = false;
+            hot.addEventListener('mousedown', () => { armed = true; });
+            hot.addEventListener('mouseleave', () => { armed = false; });
+            hot.addEventListener('mouseup', e => {
                 e.stopPropagation();
+                if (!armed) return;
+                armed = false;
                 const sc = u.scales[cfg.scale];
                 if (!sc) return;
                 editing = zone;
@@ -6252,11 +6265,11 @@ function initCurrentTempPlot() {
         ],
         scales: useTimestamps ? {
             x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
-            current: { auto: false, range: [Ymin1, Ymax1] },
+            current: { auto: false, range: () => [Ymin1, Ymax1] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         } : {
             x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
-            current: { auto: false, range: [Ymin1, Ymax1] },
+            current: { auto: false, range: () => [Ymin1, Ymax1] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         },
         axes: useTimestamps ? [
@@ -6409,11 +6422,11 @@ function initVoltagePlot() {
         ],
         scales: useTimestamps ? {
             x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
-            voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] },
+            voltage: { auto: false, range: () => [Ymin2 / 100, Ymax2 / 100] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         } : {
             x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
-            voltage: { auto: false, range: [Ymin2 / 100, Ymax2 / 100] },
+            voltage: { auto: false, range: () => [Ymin2 / 100, Ymax2 / 100] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         },
         axes: useTimestamps ? [
@@ -6558,11 +6571,11 @@ function initRPMPlot() {
         ],
         scales: useTimestamps ? {
             x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
-            rpm: { auto: false, range: [Ymin3, Ymax3] },
+            rpm: { auto: false, range: () => [Ymin3, Ymax3] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         } : {
             x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
-            rpm: { auto: false, range: [Ymin3, Ymax3] },
+            rpm: { auto: false, range: () => [Ymin3, Ymax3] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         },
 
@@ -6707,11 +6720,11 @@ function initTemperaturePlot() {
         ],
         scales: useTimestamps ? {
             x: { time: true, range: (u, dMin, dMax) => [dMax - liveWindowSec, dMax] },
-            temperature: { auto: false, range: [Ymin4, Ymax4] },
+            temperature: { auto: false, range: () => [Ymin4, Ymax4] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         } : {
             x: { time: false, range: (u, dMin, dMax) => [-liveWindowSec, 0] },
-            temperature: { auto: false, range: [Ymin4, Ymax4] },
+            temperature: { auto: false, range: () => [Ymin4, Ymax4] },   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             pct: { auto: false, range: [0, 100] }
         },
         axes: useTimestamps ? [
@@ -10701,7 +10714,7 @@ function resetDynamicAltZero() {
 }
 
 
-// Small cloud-state badge on the Charging-System Health + Boat Speed panels. Uses signals the
+// Small cloud-state badge on the Charging-System Health + Speed (boat performance) panels. Uses signals the
 // dashboard already has — currentMode (AP=1) and the CloudFeatures toggle. Local-only states are grey;
 // cloud-on is green. (A "synced N ago" upgrade would need a firmware sync-timestamp — not wired yet.)
 function updateCloudStatus() {
@@ -11188,11 +11201,11 @@ function initPidTuningPlot() {
             },
             amps: {
                 auto: false,
-                range: [yyMin, yyMax]
+                range: () => [yyMin, yyMax]   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
             },
             duty: {
                 auto: false,
-                range: pidDutyRange || [-25, 105]
+                range: () => pidDutyRange || [-25, 105]   // fn, not array: same reason
             }
         },
         axes: [
@@ -11882,8 +11895,9 @@ function updateVoltageModeGreyout(stage) {
 let _thermalStateArrays = {
     flagsArr: [], antiWindupArr: [], stageArr: [], tArr: []
 };
-let thermalLogPlots = [null, null, null];
-let thermalLogResizeObservers = [null, null, null];
+// Index 1 is retired (old middle plot deleted) — slots: 0 temp/penalty, 2 PID terms, 3 mode strip
+let thermalLogPlots = [null, null, null, null];
+let thermalLogResizeObservers = [null, null, null, null];
 let thermalWindowMin = 30;
 
 // Default visibility — hide the four requested series
@@ -12299,7 +12313,7 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
         plugins: [
             {
                 hooks: {
-                    init: [(u) => _thermalResizeObserver(1, elId, H)],
+                    init: [(u) => _thermalResizeObserver(3, elId, H)],
                     drawClear: [(u) => {
                         // Destructure fresh arrays every draw — never use closure copies
                         const { flagsArr, antiWindupArr, stageArr, tArr } = _thermalStateArrays;
@@ -12489,12 +12503,6 @@ function applyThermalRanges() {
             ? (u, min, max) => [min, max]
             : () => [get('p1-amps-min'), get('p1-amps-max')];
         thermalLogPlots[0].redraw();
-    }
-    if (thermalLogPlots[1]) {
-        thermalLogPlots[1].scales.amps.range = auto
-            ? (u, min, max) => [min, max]
-            : () => [get('p2-min'), get('p2-max')];
-        thermalLogPlots[1].redraw();
     }
     if (thermalLogPlots[2]) {
         thermalLogPlots[2].scales.amps.range = auto

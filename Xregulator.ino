@@ -492,7 +492,7 @@ const char *OTA_BASE_URL = "https://ota.xengineering.net";
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.34";
+const char *FIRMWARE_VERSION = "0.0.36";
 
 String currentUID;
 
@@ -4309,6 +4309,7 @@ void setup() {
   setCpuFrequencyMhz(240);
   pinMode(4, OUTPUT);     // This pin is used to provide a high signal to Field Enable pin
   digitalWrite(4, LOW);   // Start with field off
+  gpio4IsLow = true;      // keep the shadow in sync — field starts off
   pinMode(5, INPUT);      // WiFi wake button
   pinMode(2, OUTPUT);     // This pin is used to provide a field PWM indicator (pin 2 of ESP32 is the LED)
   pinMode(1, INPUT);      // Ignition
