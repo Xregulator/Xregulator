@@ -1617,7 +1617,7 @@
                   All steady-state definitions are tunable (build it, then tune live). Values echo live.
                 </div>
                 <p class="card-group-title" style="margin:12px 0 4px;">Steady-state detection</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How stable a reading must hold, and for how long, before a point is recordable.</div>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">How stable a reading must hold, and for how long, before a point is recordable. Bands are judged on smoothed signals (see the smoothing filter below), so size them for real operating-point movement, not sensor noise.</div>
                 <div class="form-row">
                   <div class="form-label"><span>RPM band (RPM) (<span id="altRpmTol_echo">?</span>):</span></div>
                   <div class="form-input">
@@ -1706,6 +1706,67 @@
                   </div>
                 </div>
                 <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Output-amps band (% of reading) (<span id="altAmpsTolPct_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">The alternator output itself must also hold steady before a point is recorded. The band scales with the reading so one setting works at low float current and full bulk current; the floor below takes over at low output.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altAmpsTolPct" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Output-amps band floor (A) (<span id="altAmpsFloorA_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altAmpsFloorA" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Output-amps steady time (s) (<span id="altAmpsSec_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altAmpsSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Signal smoothing filter (s) (<span id="altEmaSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Smoothing applied to RPM, field duty, voltage, and amps before steadiness is judged. Strips control-loop dither and sensor jitter so the bands above can stay tight enough to reject real transients. 0 = off. Heavier than about 1 second starts hiding real movement.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altEmaSec" type="number" step="0.1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Minimum steady-run length (s) (<span id="altMinRunSec_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altMinRunSec" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
                 <p class="card-group-title" style="margin:12px 0 4px;">Point admission</p>
                 <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Minimum output before a steady point is admitted at all.</div>
                 <div class="form-row">
@@ -1749,6 +1810,20 @@
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="altIdwPower" type="number" step="0.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reference validity radius (<span id="altRefRadius_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">How close (in normalized axis units) the nearest recorded point must be for the health % to be trusted. Operating farther than this from all recorded points shows "no reference" instead of comparing against a guess, and the trend skips those readings. Larger = more coverage from sparse data, less honest far from support.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRefRadius" type="number" step="0.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -4084,7 +4159,7 @@
              the Live Data side; everything configurable lives here. -->
         <div id="settings-boatperformance" class="sub-tab-content">
           <div class="settings-card">
-            <p class="card-group-title">Performance Learning
+            <p class="card-group-title"><span>Performance Learning</span>
               <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Settings for the best-ever boat-speed learning system. The live polar / motoring display is under Live Data &rarr; GPS/Travel/Wind.</span></span>
             </p>
             <hr />
@@ -4888,37 +4963,8 @@
                   </div>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Y Axis Maximum (<span id="yyMax_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Upper
-                        bound of the live plot Y axis.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="yyMax" type="number" step="1" min="-1000" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Y Axis Minimum (<span id="yyMin_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lower
-                        bound of the live plot Y axis.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="yyMin" type="number" step="1" min="-1000" max="10000" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+                <!-- Y axis min/max form rows removed — the plot's on-plot edit
+                     boxes (attachYAxisEdit) own yyMin/yyMax now -->
 
               </details> <!-- END Current Target Generator -->
 
@@ -5216,7 +5262,8 @@
                   Scored high cycles: <strong id="cvTestCycleCount">0</strong>
                 </div>
 
-                <!-- CV plot axis controls -->
+                <!-- CV plot axis controls — Y ranges are edited directly on the plot
+                     (attachYAxisEdit boxes); only the X window and Auto reset live here -->
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 2px 0; font-size:0.83em; color:var(--text-muted);">
                   <span style="font-weight:600; white-space:nowrap;">Plot axes:</span>
 
@@ -5228,29 +5275,7 @@
                             class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
                   </span>
 
-                  <span style="white-space:nowrap;">
-                    V min:
-                    <input id="cvVoltsMinInput" type="number" step="0.1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    max:
-                    <input id="cvVoltsMaxInput" type="number" step="0.1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    <button onclick="setCVVoltsRange(document.getElementById('cvVoltsMinInput').value, document.getElementById('cvVoltsMaxInput').value)"
-                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
-                  </span>
-
-                  <span style="white-space:nowrap;">
-                    A min:
-                    <input id="cvAmpsMinInput" type="number" step="1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    max:
-                    <input id="cvAmpsMaxInput" type="number" step="1"
-                           style="width:52px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    <button onclick="setCVAmpsRange(document.getElementById('cvAmpsMinInput').value, document.getElementById('cvAmpsMaxInput').value)"
-                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
-                  </span>
-
-                  <button onclick="resetCVAxisRanges()" class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Auto</button>
+                  <button onclick="resetCVAxisRanges()" class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Y Auto</button>
                 </div>
 
                 <!-- Live plot -->
@@ -5630,9 +5655,9 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Projected Temp Input
+                      <span class="metric-label telemetry-label">Temp Loop Input
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Temperature the PID actually sees: projectedTemp = filteredTemp + slope × ThermalLookaheadSec. Can exceed any temperature the sensor has ever measured when temp is rising. Zero slope is used during the ~65s slope buffer warmup after startup or reset, so the value equals filteredTemp until then.</span>
+                          <span class="tooltip-box">Temperature the PID actually sees: the higher of the projected temperature (present temperature + rate of rise × Thermal Lookahead) and the present temperature, so a hot alternator is never forgiven just because the trend is flat or falling. Can exceed any temperature the sensor has ever measured when temp is rising. Zero slope is used during the ~65s slope buffer warmup after startup or reset, so the value equals the present temperature until then.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="tempPIDInput_display">?</span> <span class="temp-unit-label">°F</span></span>
@@ -5673,7 +5698,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Temperature I Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Integral accumulator (A). Builds positive while projected temperature stays above setpoint. Bounded by the PID output limits (0 to MaxTableValue) — cannot go negative to boost current above the cap table.</span>
+                          <span class="tooltip-box">Integral accumulator (A). Builds positive while the controlled temperature (higher of projected and present) stays above setpoint. Bounded by the PID output limits (0 to MaxTableValue) — cannot go negative to boost current above the cap table.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="outerTermI_display">?</span> A</span>
@@ -5955,7 +5980,7 @@
                           <th style="padding:4px 6px;text-align:left;">High (°F)</th>
                           <th style="padding:4px 6px;text-align:left;">Half-Period (min)</th>
                           <th style="padding:4px 6px;text-align:left;">RPM</th>
-                          <th style="padding:4px 6px;text-align:left;">Ambient (°F)</th>
+                          <th style="padding:4px 6px;text-align:left;">Board (°F)</th>
                           <th style="padding:4px 6px;text-align:left;">Rise (A/s)</th>
                           <th style="padding:4px 6px;text-align:left;">Fall (A/s)</th>
                         </tr>
@@ -5988,7 +6013,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain (A per °F of projected temperature error). The error is the projected temperature minus the temperature limit. Higher values derate current more aggressively as projected temperature approaches the limit.</span></span>
+                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the temperature limit. Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6003,7 +6028,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while projected temperature stays above the limit. Bounded by the penalty output limits (0 up to the cap-table maximum).</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while the controlled temperature (higher of projected and present) stays above the limit. This term carries nearly all of the steady-state penalty — it sets how fast the loop converges to its holding level after the initial approach. Bounded by the penalty output limits (0 up to the cap-table maximum).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6097,10 +6122,12 @@
                   stays constant regardless of voltage sag or rise during charging.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Forecasted Thermal Penalty:</strong> The temperature controller does not act on the current
-                  temperature reading. It acts on a projected temperature — current filtered temperature plus the
-                  measured rate of rise multiplied by the Thermal Lookahead horizon. This is
-                  what lets the loop pull current down <em>before</em> the alternator actually reaches the limit. The
+                  <strong>Forecasted Thermal Penalty:</strong> The temperature controller acts on the higher of two
+                  temperatures: the present filtered reading, and a projected temperature — present temperature plus the
+                  measured rate of rise multiplied by the Thermal Lookahead horizon. Projection is
+                  what lets the loop pull current down <em>before</em> the alternator actually reaches the limit, while
+                  taking the higher of the two means a hot alternator is never given current back just because the
+                  temperature trend has flattened. The
                   setpoint is the real damage limit (Alternator Temp Limit) and the output is a penalty in amps: zero
                   means no restriction, higher numbers mean more current pulled away from what the RPM Cap Table
                   would otherwise allow. Because the penalty is relative rather than absolute, it transfers cleanly
@@ -6582,7 +6609,11 @@
               whether today's output is sliding below that best over time. </p>
             <p><b>Learned on the device.</b> Every control tick (~200 Hz), when conditions are steady, the
               regulator compares the present output against its best-ever surface — an interpolation
-              (inverse-distance weighting) over a sparse set of best-ever support points.</p>
+              (inverse-distance weighting) over a sparse set of best-ever support points. "Steady" means
+              the smoothed engine speed, field drive, voltage, temperature, AND output current all hold
+              within their bands for their set times (tunable in Settings). Comparisons only count where
+              a recorded point exists nearby — far from anything recorded, the panel shows "no reference"
+              rather than guessing, and a steady run there records a new point instead.</p>
             <p><b>Pruned in the cloud (optional).</b> About every 15 minutes, engine off and device online, any new
               frontier points upload. The cloud then drops points that
               have become redundant (sitting below the envelope of their neighbours) and returns the cleaned
@@ -6981,7 +7012,7 @@
       <!-- Barometric Pressure (moved from Other): conditions header + 7-day history plot -->
       <div class="settings-card">
         <div class="card-group baro-panel">
-          <div class="card-group-title">Barometric Pressure
+          <div class="card-group-title"><span>Barometric Pressure</span>
             <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️
               <span class="tooltip-box">
                 Sea-level barometric pressure (mbar — the unit used by the BBC Shipping Forecast, NOAA marine VHF, and most marine instruments; 1 mbar = 1 hPa exactly).
@@ -7126,8 +7157,8 @@
       <!-- Boat Performance (Phase 3) — unified sailing/motoring -->
       <div class="settings-card" style="margin-top:16px;">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
-          <p class="card-group-title" style="margin:0;padding:0;border:0;white-space:normal;">Boat Speed
-            <span id="perf-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span>
+          <p class="card-group-title" style="margin:0;padding:0;border:0;white-space:normal;"><span>Boat Speed
+            <span id="perf-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
             <span class="tooltip" onclick="this.classList.toggle('active')">&#8505;<span class="tooltip-box">Best-ever boat speed versus the wind (Sailing) or engine RPM (Motoring), corrected for sea state — how much the boat pitches. Predicts speed through the water, or GPS speed if no log. Curve = learned best; the "now" dot is your current speed — solid green while it is being recorded into the learned best (a steady run), hollow when conditions are too unsteady to record. A sustained drop below best = dirty bottom or adverse current.</span></span>
           </p>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -7343,9 +7374,9 @@
 
           <!-- GPS Position -->
           <div class="card-group">
-            <p class="card-group-title">GPS Position
+            <p class="card-group-title"><span>GPS Position
               <span id="gps-source-badge"
-                style="font-size:11px;font-weight:600;color:#fff;background:var(--accent);border-radius:999px;padding:2px 8px;margin-left:6px;vertical-align:middle;">—</span>
+                style="font-size:11px;font-weight:600;color:#fff;background:var(--accent);border-radius:999px;padding:2px 8px;margin-left:6px;vertical-align:middle;">—</span></span>
             </p>
             <div class="metric-row">
               <span class="metric-label">Latitude</span>
@@ -7458,7 +7489,7 @@
           </div>
           <!-- Sea State Hours -->
           <div class="card-group">
-            <p class="card-group-title">Sea State Hours (Lifetime) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative hours bucketed by Motion Sickness Index and speed (moving = SOG ≥ 1.5 kt). Buckets: Gentle (MSI &lt; 10), Moderate (10–30), Rough (30–70), Extreme (MSI ≥ 70). Logged once per minute.</span></span></p>
+            <p class="card-group-title"><span>Sea State Hours (Lifetime)</span> <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Cumulative hours bucketed by Motion Sickness Index and speed (moving = SOG ≥ 1.5 kt). Buckets: Gentle (MSI &lt; 10), Moderate (10–30), Rough (30–70), Extreme (MSI ≥ 70). Logged once per minute.</span></span></p>
             <div class="metric-row">
               <span class="metric-label">Moving — Gentle</span>
               <span class="metric-value"><span id="imu_min_moving_gentle_ID">0.0</span> hr</span>
@@ -7609,96 +7640,65 @@
           </div>
         </div>
         <div class="grid">
-          <!-- Window Statistics - Accel -->
-          <div class="card-group">
+          <!-- Window Statistics - Accel — tabular grid (unit in title) -->
+          <div class="card-group stat-card">
             <p class="card-group-title">Window Stats - Accel (g)</p>
-            <div class="metric-row">
-              <span class="metric-label">Accel X (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="accel_x_min_ID">0.000</span> /
-                <span id="accel_x_avg_ID">0.000</span> /
-                <span id="accel_x_max_ID">0.000</span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Y (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="accel_y_min_ID">0.000</span> /
-                <span id="accel_y_avg_ID">0.000</span> /
-                <span id="accel_y_max_ID">0.000</span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Accel Z (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="accel_z_min_ID">0.000</span> /
-                <span id="accel_z_avg_ID">0.000</span> /
-                <span id="accel_z_max_ID">0.000</span>
-              </span>
+            <div class="stat-table">
+              <span class="stat-cap"></span><span class="stat-cap">Min</span><span class="stat-cap">Avg</span><span class="stat-cap">Max</span>
+              <span class="stat-name">Accel X</span>
+              <span class="stat-cell" id="accel_x_min_ID">0.000</span>
+              <span class="stat-cell" id="accel_x_avg_ID">0.000</span>
+              <span class="stat-cell" id="accel_x_max_ID">0.000</span>
+              <span class="stat-name">Accel Y</span>
+              <span class="stat-cell" id="accel_y_min_ID">0.000</span>
+              <span class="stat-cell" id="accel_y_avg_ID">0.000</span>
+              <span class="stat-cell" id="accel_y_max_ID">0.000</span>
+              <span class="stat-name">Accel Z</span>
+              <span class="stat-cell" id="accel_z_min_ID">0.000</span>
+              <span class="stat-cell" id="accel_z_avg_ID">0.000</span>
+              <span class="stat-cell" id="accel_z_max_ID">0.000</span>
             </div>
           </div>
-          <!-- Window Statistics - Gyro -->
-          <div class="card-group">
+          <!-- Window Statistics - Gyro — tabular grid (unit in title) -->
+          <div class="card-group stat-card">
             <p class="card-group-title">Window Stats - Gyro (°/s)</p>
-            <div class="metric-row">
-              <span class="metric-label">Gyro X (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="gyro_x_min_ID">0.0</span> /
-                <span id="gyro_x_avg_ID">0.0</span> /
-                <span id="gyro_x_max_ID">0.0</span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Gyro Y (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="gyro_y_min_ID">0.0</span> /
-                <span id="gyro_y_avg_ID">0.0</span> /
-                <span id="gyro_y_max_ID">0.0</span>
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Gyro Z (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="gyro_z_min_ID">0.0</span> /
-                <span id="gyro_z_avg_ID">0.0</span> /
-                <span id="gyro_z_max_ID">0.0</span>
-              </span>
+            <div class="stat-table">
+              <span class="stat-cap"></span><span class="stat-cap">Min</span><span class="stat-cap">Avg</span><span class="stat-cap">Max</span>
+              <span class="stat-name">Gyro X</span>
+              <span class="stat-cell" id="gyro_x_min_ID">0.0</span>
+              <span class="stat-cell" id="gyro_x_avg_ID">0.0</span>
+              <span class="stat-cell" id="gyro_x_max_ID">0.0</span>
+              <span class="stat-name">Gyro Y</span>
+              <span class="stat-cell" id="gyro_y_min_ID">0.0</span>
+              <span class="stat-cell" id="gyro_y_avg_ID">0.0</span>
+              <span class="stat-cell" id="gyro_y_max_ID">0.0</span>
+              <span class="stat-name">Gyro Z</span>
+              <span class="stat-cell" id="gyro_z_min_ID">0.0</span>
+              <span class="stat-cell" id="gyro_z_avg_ID">0.0</span>
+              <span class="stat-cell" id="gyro_z_max_ID">0.0</span>
             </div>
           </div>
-          <!-- Window Statistics - Calculated Metrics -->
-          <div class="card-group">
+          <!-- Window Statistics - Calculated Metrics — tabular grid (per-row units, since Heel/Pitch are ° and accels are g) -->
+          <div class="card-group stat-card">
             <p class="card-group-title">Window Stats - Calculated</p>
-            <div class="metric-row">
-              <span class="metric-label">Heel (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="heel_min_ID">0.0</span>° /
-                <span id="heel_avg_ID">0.0</span>° /
-                <span id="heel_max_ID">0.0</span>°
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Pitch (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="pitch_min_ID">0.0</span>° /
-                <span id="pitch_avg_ID">0.0</span>° /
-                <span id="pitch_max_ID">0.0</span>°
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Vert Accel (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="vertical_accel_min_ID">0.00</span> /
-                <span id="vertical_accel_avg_ID">0.00</span> /
-                <span id="vertical_accel_max_ID">0.00</span> g
-              </span>
-            </div>
-            <div class="metric-row">
-              <span class="metric-label">Total Accel (min/avg/max)</span>
-              <span class="metric-value">
-                <span id="total_accel_min_ID">0.00</span> /
-                <span id="total_accel_avg_ID">0.00</span> /
-                <span id="total_accel_max_ID">0.00</span> g
-              </span>
+            <div class="stat-table">
+              <span class="stat-cap"></span><span class="stat-cap">Min</span><span class="stat-cap">Avg</span><span class="stat-cap">Max</span>
+              <span class="stat-name">Heel (°)</span>
+              <span class="stat-cell" id="heel_min_ID">0.0</span>
+              <span class="stat-cell" id="heel_avg_ID">0.0</span>
+              <span class="stat-cell" id="heel_max_ID">0.0</span>
+              <span class="stat-name">Pitch (°)</span>
+              <span class="stat-cell" id="pitch_min_ID">0.0</span>
+              <span class="stat-cell" id="pitch_avg_ID">0.0</span>
+              <span class="stat-cell" id="pitch_max_ID">0.0</span>
+              <span class="stat-name">Vert Accel (g)</span>
+              <span class="stat-cell" id="vertical_accel_min_ID">0.00</span>
+              <span class="stat-cell" id="vertical_accel_avg_ID">0.00</span>
+              <span class="stat-cell" id="vertical_accel_max_ID">0.00</span>
+              <span class="stat-name">Total Accel (g)</span>
+              <span class="stat-cell" id="total_accel_min_ID">0.00</span>
+              <span class="stat-cell" id="total_accel_avg_ID">0.00</span>
+              <span class="stat-cell" id="total_accel_max_ID">0.00</span>
             </div>
           </div>
         </div>
@@ -8325,7 +8325,8 @@
                       inside a pass. The 5s column resets every 5s — shows active spikes; the right column tracks the
                       worst since the most recent "Reset Peak Values" press (or boot). Note: not gated by field state,
                       so a spike here can come from either field-on control or field-off background work (such as a
-                      flash write while the field is off, which is intentional and harmless to control).</span>
+                      flash write while the field is off, which is intentional and harmless to control) — the
+                      field-gated row below isolates the passes that matter for control.</span>
                   </span>
                 </div>
                 <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
@@ -8333,6 +8334,30 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_loop_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Loop Time when Field is On -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Loop Time when Field is On
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Same measurement as Loop Time, but only counting passes that started with the
+                      field gate open — i.e. while the regulator was actively controlling the alternator. This is the
+                      number that matters for safety: a stall here means voltage-control ticks were delayed while
+                      charging. The Loop Time row above is not field-gated, so its worst is dominated by deliberate
+                      field-off background work (flash writes, cloud uploads). Compare the two: a big Loop Time with a
+                      small value here means the ugliness is harmless housekeeping; a spike HERE is a real
+                      control-path finding. Shows 0 until the field has been on. Same blind spots as Loop Time (the
+                      untimed regions at the top of a pass and between passes), so the interval cards remain the
+                      authoritative stall detectors.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_loopFieldOn_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_loopFieldOn_ses_ID">0</span>
                 </div>
               </div>
 
@@ -9452,41 +9477,34 @@
     <!-- Plot Displays Sub-tab - This should be active by default -->
     <div id="plots-displays" class="sub-tab-content active">
       <div class="settings-card">
-        <div class="form-row">
-          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span>Download &amp; Logging:</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">
-              ℹ️
-              <span class="tooltip-box">Downloads three diagnostic logs as CSV files to the Downloads folder (pc)
-                or Files (mobile device): a temperature log (up to the last ~2 hours at 1-second resolution), a
-                control-loop log (the last ~11 seconds at the full control-loop rate, ~200 Hz), and a
-                voltage-tuning log (the last ~28 seconds, also ~200 Hz). Logs are automatically cleared after
-                download. Pause Logs freezes the log buffers so their contents stay fixed; Resume Logs continues
-                recording. Start Fresh Log clears the buffers and begins a new log.</span>
-            </span>
-          </div>
-          <!-- Option 3 layout: status+toggle bundled left, Download primary, Start Fresh isolated right -->
-          <div class="form-input log-controls">
-            <div class="log-group">
-              <span id="loggingStatusPill" class="log-pill log-pill-on"><span class="log-dot"></span>Recording</span>
-              <button type="button" id="logToggleBtn" class="btn-log-toggle is-recording" onclick="toggleLogs()">⏸ Pause Logs</button>
-            </div>
+        <!-- Equal 4-cell grid: status pill, pause/resume, download, start-fresh; tooltip sits to the right -->
+        <div class="form-row form-row-wide log-row">
+          <div class="log-grid">
+            <span id="loggingStatusPill" class="log-pill log-pill-on"><span class="log-dot"></span>Recording</span>
+            <button type="button" id="logToggleBtn" class="btn-log-toggle is-recording" onclick="toggleLogs()">⏸ Pause Logs</button>
             <button type="button" class="btn-log-primary" onclick="downloadLogs()">⬇ Download Logs</button>
-            <div class="log-fresh-wrap">
-              <button type="button" class="btn-log-fresh" onclick="resetLogs()">↻ Start Fresh Log</button>
-            </div>
+            <button type="button" class="btn-log-fresh" onclick="resetLogs()">↻ Start Fresh Log</button>
           </div>
+          <span class="tooltip log-info" onclick="this.classList.toggle('active')">
+            ℹ️
+            <span class="tooltip-box">Downloads three diagnostic logs as CSV files to the Downloads folder (pc)
+              or Files (mobile device): a temperature log (up to the last ~2 hours at 1-second resolution), a
+              control-loop log (the last ~11 seconds at the full control-loop rate, ~200 Hz), and a
+              voltage-tuning log (the last ~28 seconds, also ~200 Hz). Logs are automatically cleared after
+              download. Pause Logs freezes the log buffers so their contents stay fixed; Resume Logs continues
+              recording. Start Fresh Log clears the buffers and begins a new log.</span>
+          </span>
         </div>
       </div>
       <!-- X-axis time window — buttons set plotTimeWindow (seconds) for all four live plots.
            Replaces the old Plot Controls numeric input. Y axis is set by dragging on a plot (double-click resets). -->
       <div class="settings-card">
-        <div class="form-row">
+        <div class="form-row form-row-wide">
           <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
             <span style="white-space: nowrap;">Time Window (current: <span id="plotTimeWindow_echo" style="font-variant-numeric: tabular-nums;">?</span> s):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how many seconds of live data all four short-term plots show on the X axis. To zoom the Y axis, drag a box directly on a plot; double-click a plot to reset its zoom.</span></span>
           </div>
-          <div class="form-input">
+          <div class="form-input time-window-input">
             <form action="/get" method="GET" target="hidden-form">
               <input type="hidden" name="password" class="password_field">
               <button name="plotTimeWindow" value="5" type="submit" onclick="submitMessage()" class="btn-primary">5S</button>
@@ -9844,6 +9862,7 @@
     <span id="FloatVoltage_echo" style="display:none;">0</span>
     <span id="SwitchingFrequency_echo" style="display:none;">0</span>
     <span id="yyMin_echo" style="display:none;">0</span>
+    <span id="yyMax_echo" style="display:none;">0</span>
     <span id="FieldAdjustmentInterval_echo" style="display:none;">0</span>
     <span id="ManualDutyTarget_echo" style="display:none;">0</span>
     <span id="SwitchControlOverride_echo" style="display:none;">0</span>
@@ -10163,12 +10182,16 @@
        cancelled by a parent display:none when tabs switch.
   ──────────────────────────────────────────────────────────────────────────-->
   <div id="sysid-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
-    <div id="sysid-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:380px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:85vh; overflow-y:auto;">
+    <div id="sysid-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:380px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
 
-      <!-- Drag handle header -->
+      <!-- Drag handle header (desktop); on mobile it's the bottom-sheet header with a minimize button -->
       <div id="sysid-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
         <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Plant Delay Test</span>
-        <button onclick="closeSystemIDModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1; pointer-events:auto;">✕</button>
+        <span style="display:flex; align-items:center;">
+          <!-- Minimize: mobile only (CSS-gated). Collapses to a progress pill so the current plot is visible behind it. -->
+          <button id="sysid-min-btn" onclick="sysidMinimize()" title="Minimize" style="background:none; border:none; color:#888; cursor:pointer; font-size:20px; padding:0 8px; line-height:1; pointer-events:auto;">—</button>
+          <button onclick="closeSystemIDModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1; pointer-events:auto;">✕</button>
+        </span>
       </div>
 
       <div style="padding:20px;">
@@ -10301,6 +10324,21 @@
 
       </div><!-- END screens padding wrapper -->
     </div><!-- END sysid-modal-panel -->
+
+    <!-- Minimized state (mobile): thin bottom pill with live progress; tap to restore.
+         Hidden until the overlay has the .sysid-min class. -->
+    <div id="sysid-pill" onclick="sysidRestore()">
+      <span id="sysid-pill-dot" class="sysid-pill-dot"></span>
+      <div class="sysid-pill-col">
+        <div class="sysid-pill-row">
+          <span class="sysid-pill-lbl">Plant Delay Test</span>
+          <span id="sysid-pill-phase" class="sysid-pill-phase">tap to expand</span>
+        </div>
+        <div class="sysid-pill-bar"><i id="sysid-pill-bar-fill"></i></div>
+      </div>
+      <span id="sysid-pill-pct" class="sysid-pill-pct"></span>
+      <span class="sysid-pill-exp">⤢</span>
+    </div>
   </div><!-- END sysid-modal-overlay -->
 
   <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->

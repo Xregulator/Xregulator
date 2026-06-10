@@ -1957,7 +1957,7 @@ constexpr float GYRO_SCALE = 0.070f;      // dps per LSB
 //              [3]=gyro_pitch, [4]=gyro_heel,  [5]=gyro_yaw
 // Verification status:
 //   0: VERIFIED from physical tilt tests
-//   1: DERIVED (geometric 180° flip of orientation 0) - retest when possible
+//   1: VERIFIED from physical tilt tests (2026-06-09)
 //   2: VERIFIED from physical tilt tests
 //   3: VERIFIED from physical tilt tests
 struct AxisRemap {
@@ -2059,6 +2059,19 @@ void complementaryFilter(float ax, float ay, float az, float gx, float gy, float
   // Accel-derived angles (noisy but no drift)
   float accel_heel = atan2(ay, sqrt(ax * ax + az * az)) * 180.0f / PI - imuHeelOffsetDeg;
   float accel_pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / PI - imuPitchOffsetDeg;
+
+  // First sample after boot seeds the filter from accel directly. Starting from
+  // 0 made the estimate slew to the true attitude over several seconds, and the
+  // long-term ring recorded that sweep as a 0-to-actual min/max wedge in the
+  // first bucket. (IMU-zero capture still snaps to 0 by design — that's a new
+  // level reference, not a restart.)
+  static bool cf_seeded = false;
+  if (!cf_seeded) {
+    cf_seeded = true;
+    cf_heel = accel_heel;
+    cf_pitch = accel_pitch;
+    return;
+  }
 
   // Integrate gyro (smooth but drifts)
   cf_heel += gy * dt;

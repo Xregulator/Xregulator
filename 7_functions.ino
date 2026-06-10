@@ -61,6 +61,14 @@ float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
 float altThermDegF    = 5.0f;    // temperature deviation bound (°F)
 float altThermSec     = 30.0f;   // temperature steady time (s)
+// Output-steadiness band (5th criterion: the measured amps themselves must hold steady — directly
+// guards what gets recorded, letting the input bands stay tight) + detector signal conditioning:
+float altAmpsTolPct   = 5.0f;    // output-amps band, % of the filtered reading
+float altAmpsFloorA   = 1.5f;    // output-amps band floor (A) — governs at low output where ripple dominates
+float altAmpsSec      = 3.0f;    // output-amps steady time (s)
+float altEmaSec       = 0.5f;    // EMA time constant (s) on detector inputs RPM/duty/Vbus/amps (0 = off)
+float altMinRunSec    = 2.0f;    // minimum steady-run length to emit a point (s)
+float altRefRadius    = 2.0f;    // normalized nearest-support distance beyond which live % + trend report no reference
 float altSafetyMargin = 0.0f;    // amps — gate keeps only runs that strictly beat the front (no keep-bias: the cloud only prunes, so sub-front samples were pure pollution of the local eval surface)
 float altIdwPower     = 2.0f;    // IDW power for front_eval
 float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied cloud-side)
@@ -140,12 +148,16 @@ static void altSimTick(uint32_t nowMs) {
 }
 
 // Per-axis tol from the deviation-bound knobs, steady time from the *Sec knobs. Resynced every
-// fold so live knob edits take effect immediately.
-static void altEpisodeSyncCfg() {
-  altEpisode.cfg[0] = { altRpmTol,     altRpmSec  };   // RPM
-  altEpisode.cfg[1] = { altDutyTolPct, altDutySec };   // field duty % (absolute % points)
-  altEpisode.cfg[2] = { altVbusTol,    altVbusSec };   // Vbus (V)
+// fold so live knob edits take effect immediately. ampsFilt sizes the relative output band
+// (percent-of-reading with an absolute floor — one knob pair works at 5 A float and 150 A bulk).
+static void altEpisodeSyncCfg(float ampsFilt) {
+  altEpisode.cfg[0] = { altRpmTol,     altRpmSec  };   // RPM (filtered)
+  altEpisode.cfg[1] = { altDutyTolPct, altDutySec };   // field duty % (filtered, absolute % points)
+  altEpisode.cfg[2] = { altVbusTol,    altVbusSec };   // Vbus (V, filtered)
   altEpisode.cfg[3] = { altThermDegF,  altThermSec };  // temp (°F)
+  float aTol = altAmpsTolPct * 0.01f * ampsFilt;
+  altEpisode.outCfg = { (aTol > altAmpsFloorA) ? aTol : altAmpsFloorA, altAmpsSec };
+  altEpisode.minRunMs = (altMinRunSec > 0) ? (uint32_t)(altMinRunSec * 1000.0f) : 0;
 }
 
 // ---- per-control-tick fold (THE canonical cadence) ----
@@ -160,32 +172,58 @@ void altFold_tick(uint32_t nowMs) {
   // IgnoreTemperature → the ENTIRE alt-health system is disabled: no live, no points, no trend.
   if (IgnoreTemperature) { altLiveValid = false; altSteady = false; altStatusCode = 3; return; }
 
-  float rpm, exc, tF, vbus, amps, duty;
+  float rpm, tF, vbus, amps, duty;
   if (altSimMode >= 0.5f) {
-    rpm = altSimRpm; exc = altSimExc; tF = altSimT; vbus = altSimV; amps = altSimAmps; duty = altSimDuty;
+    rpm = altSimRpm; tF = altSimT; vbus = altSimV; amps = altSimAmps; duty = altSimDuty;
   } else {
     vbus = getBatteryVoltage();
     amps = isnan(MeasuredAmps) ? 0.0f : MeasuredAmps;
     tF = TempToUse; duty = dutyCycle; rpm = RPM;
-    exc = altExcitation(duty, vbus, tF);
   }
 
-  // Live point + best-ever reference (dashboard gauge/dot). % is NOT clamped (spec §1/§6).
-  float surf[ALT_NAXIS] = { rpm, exc, vbus, tF };
-  altLive_rpm = rpm; altLive_exc = exc; altLive_amps = amps;
+  // Detector-input EMA (altEmaSec): strips inner-loop duty dither, RPM jitter, and current ripple
+  // so the steadiness bands can be sized purely for real operating-point movement (= transient
+  // rejection). The control loops never see these. A long gap between folds (field off, boot)
+  // reseeds the filters from raw so stale state can't bridge it.
+  static float fRpm = 0, fDuty = 0, fVbus = 0, fAmps = 0;
+  static uint32_t lastFoldMs = 0;
+  static bool fInit = false;
+  float tauMs = altEmaSec * 1000.0f;
+  uint32_t dtMs = nowMs - lastFoldMs;
+  lastFoldMs = nowMs;
+  if (!fInit || tauMs < 1.0f || dtMs > (uint32_t)(5.0f * tauMs) + 1000u) {
+    fRpm = rpm; fDuty = duty; fVbus = vbus; fAmps = amps; fInit = true;
+  } else {
+    float a = (float)dtMs / (tauMs + (float)dtMs);   // irregular-interval EMA
+    fRpm  += a * (rpm  - fRpm);  fDuty += a * (duty - fDuty);
+    fVbus += a * (vbus - fVbus); fAmps += a * (amps - fAmps);
+  }
+  // Bench-sim injects its own consistent excitation; live derives it from the filtered drive.
+  float exc = (altSimMode >= 0.5f) ? altSimExc : altExcitation(fDuty, fVbus, tF);
+
+  // Live point + best-ever reference (dashboard gauge/dot). % is NOT clamped (spec §1/§6) — but it
+  // IS reference-gated: beyond altRefRadius of all support the IDW blend is fiction (a 3-point
+  // high-RPM front once "predicted" 21 A at idle → bogus 28% health), so report no reference.
+  float surf[ALT_NAXIS] = { fRpm, exc, fVbus, tF };
+  altLive_rpm = fRpm; altLive_exc = exc; altLive_amps = fAmps;
   altLive_pred = altFront2.eval(surf, altIdwPower);
-  altLive_pct  = (altLive_pred > 0.1f) ? (amps / altLive_pred * 100.0f) : 0.0f;
-  altLiveValid = (!isnan(rpm) && !isnan(exc) && !isnan(vbus) && vbus >= ALT_MIN_BATT_V);
+  altRefDist   = altFront2.nearestNormDist(surf);
+  if (altRefDist > 999.0f) altRefDist = 999.0f;
+  altRefOk     = (altFront2.count > 0 && altRefDist <= altRefRadius);
+  altLive_pct  = (altRefOk && altLive_pred > 0.1f) ? (fAmps / altLive_pred * 100.0f) : 0.0f;
+  altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V);
 
   if (hardwarePresent != 1 && altSimMode < 0.5f) { altSteady = false; return; }    // display only
   if (altPaused >= 0.5f || altFront2.source == 1) { altSteady = false; return; }   // FIXED/paused: no learning
 
-  // Feed the Episode detector (steadiness/averaging axes {RPM, duty %, Vbus, tempF}).
-  altEpisodeSyncCfg();
-  bool eligible = (!isnan(vbus) && vbus >= ALT_MIN_BATT_V && amps >= altMinAmps && duty >= altMinDuty && rpm >= 0);
+  // Feed the Episode detector (steadiness/averaging axes {RPM, duty %, Vbus, tempF} + the
+  // output-amps band) — all filtered, including the admission floors, so a single noise dip
+  // can't act as a barrier that wipes the look-back ring mid-run.
+  altEpisodeSyncCfg(fAmps);
+  bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
   RawSample<ALT_NAXIS> s;
-  s.x[0] = rpm; s.x[1] = duty; s.x[2] = vbus; s.x[3] = tF; s.out = amps; s.tMs = nowMs;
-  s.ex[0] = duty; s.ex[1] = 0;   // retain raw duty (excitation is derived from it) for cloud diagnosis
+  s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
+  s.ex[0] = fDuty; s.ex[1] = 0;   // retain run duty (excitation is derived from it) for cloud diagnosis
   FrontPoint<ALT_NAXIS> ep;
   bool emitted = altEpisode.feed(eligible, s, &ep);
   altSteady = (altEpisode.count > 0);
@@ -203,12 +241,21 @@ void altFold_tick(uint32_t nowMs) {
   sp.y = ep.y; sp.nSamp = ep.nSamp; sp.tEmit = ep.tEmit;
 
   float yref = altFront2.eval(sp.x, altIdwPower);                       // pre-add reference (trend %)
-  if (yref > 0.1f) altTrendAdd(sp.y / yref);                           // engine-hour trend (no clamp)
-  if (!altFront2.pushes(sp.x, sp.y, altSafetyMargin, altIdwPower)) return;  // didn't beat the front
+  bool refOk = (altFront2.count > 0 && altFront2.nearestNormDist(sp.x) <= altRefRadius);
+  if (refOk && yref > 0.1f) altTrendAdd(sp.y / yref);                   // trend only vs a locally-supported reference
+  // Cell-local admit gate: a run in an unvisited cell is admitted unconditionally (opens the region
+  // at its true value); only a run with same-cell support must beat the IDW surface. The old global
+  // gate locked low-output regions out forever once high-output points existed.
+  if (altFront2.hasLocalSupport(sp.x)
+      && !altFront2.pushes(sp.x, sp.y, altSafetyMargin, altIdwPower)) return;
   if (altFront2.add(sp)) {                                              // optimistic local front (cloud re-prunes)
     if (altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;  // queue for upload
-    queueConsoleMessageF("AltFront +pt #%d rpm=%.0f exc=%.2f V=%.2f T=%.0f amps=%.1f (ref=%.1f n=%u)",
-      altFront2.count, sp.x[0], sp.x[1], sp.x[2], sp.x[3], sp.y, yref, sp.nSamp);
+    // span r/d/v/t/a = the accepted run's per-axis spread (RPM/duty/Vbus/temp/amps) — soak evidence
+    // for whether each band is doing real work or just slack.
+    queueConsoleMessageF("AltFront +pt #%d rpm=%.0f exc=%.2f V=%.2f T=%.0f amps=%.1f (ref=%.1f n=%u span r=%.0f d=%.2f v=%.3f t=%.1f a=%.2f)",
+      altFront2.count, sp.x[0], sp.x[1], sp.x[2], sp.x[3], sp.y, yref, sp.nSamp,
+      altEpisode.lastRunSpan[0], altEpisode.lastRunSpan[1], altEpisode.lastRunSpan[2],
+      altEpisode.lastRunSpan[3], altEpisode.lastRunOutSpan);
   }
 }
 
@@ -232,6 +279,8 @@ static float alf_haveCurve() { return (float)(altFront2.count > 0 ? 1 : 0); }   
 static float alf_ptCount()   { return (float)altFront2.count; }                 // front support points
 static float alf_source()    { return (float)altFront2.source; }                // 0 LEARNED, 1 FIXED
 static float alf_paused()    { return (altPaused >= 0.5f) ? 1.0f : 0.0f; }
+static float alf_refOk()     { return altRefOk ? 1.0f : 0.0f; }          // live % has nearby support → trustworthy
+static float alf_refDist()   { return altRefDist; }                       // normalized distance to nearest support
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                                time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
@@ -242,11 +291,12 @@ static AltLiveField ALT_LIVE[] = {
   {"status", alf_status}, {"steady", alf_steady}, {"engHours", alf_engHours},
   {"coverage", alf_coverage}, {"haveCurve", alf_haveCurve}, {"ptCount", alf_ptCount},
   {"source", alf_source}, {"paused", alf_paused},
+  {"refOk", alf_refOk}, {"refDist", alf_refDist},
   {"sim", alf_sim}, {"syncAgoS", alf_syncAgo},
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
-  char buf[224];
+  char buf[256];
   int off = 0;
   for (size_t i = 0; i < ALT_LIVE_COUNT; i++)
     off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
@@ -490,7 +540,7 @@ void altFrontInit() {
   memset(altPending,  0, (size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
   altPendingCount = 0;
   altEpisode.init(altEpRing, ALT_EP_RING_CAP);
-  altEpisodeSyncCfg();
+  altEpisodeSyncCfg(0.0f);   // amps band starts at the floor; resized from filtered amps every fold
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
   // axisScale ≈ each surface axis's characteristic span (plan §8: start at the axis tol).
   altFront2.axisScale[0] = 25.0f;   // RPM
@@ -532,6 +582,8 @@ static AltSetting ALT_SETTINGS[] = {
   {"altDutyTolPct", &altDutyTolPct}, {"altDutySec", &altDutySec},
   {"altVbusTol", &altVbusTol}, {"altVbusSec", &altVbusSec},
   {"altThermDegF", &altThermDegF}, {"altThermSec", &altThermSec},
+  {"altAmpsTolPct", &altAmpsTolPct}, {"altAmpsFloorA", &altAmpsFloorA}, {"altAmpsSec", &altAmpsSec},
+  {"altEmaSec", &altEmaSec}, {"altMinRunSec", &altMinRunSec}, {"altRefRadius", &altRefRadius},
   {"altMinAmps", &altMinAmps}, {"altMinDuty", &altMinDuty},
   {"altSafetyMargin", &altSafetyMargin}, {"altIdwPower", &altIdwPower}, {"altPruneK", &altPruneK},
   {"altPaused", &altPaused},

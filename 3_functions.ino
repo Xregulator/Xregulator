@@ -547,6 +547,10 @@ enum Csv2Index {
   CSV2_loopWorst80Ses_ms,        // worst 80MHz loop pass since Reset Peak Values (ms ×1)
   CSV2_loopOver80ImuLimitCount,  // # 80MHz passes over accel FIFO drain limit (~38ms) since reset
   CSV2_loop80IterCount,          // total 80MHz passes since reset (denominator)
+  // Field-ON loop instrumentation (2 fields) — worst pass while actually regulating (gate latched
+  // at top of pass); splits control-path stalls from intentional field-off background work
+  CSV2_loopFieldOnWin_ms,        // worst field-ON loop pass, rolling 5s (ms ×1)
+  CSV2_loopFieldOnSes_ms,        // worst field-ON loop pass since Reset Peak Values (ms ×1)
   CSV2_STWNMEA,                  // Speed Through Water (SOW, PGN 128259) in knots (×100); NAN/no-log -> sent as 0
   // +4: thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
   CSV2_tempFiltered,             // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF, used as PID base
@@ -577,7 +581,7 @@ enum Csv2Index {
   CSV2_dumpLongTermRing_win,  // worst µs of the flush, rolling 5s window
   CSV2_dumpLongTermRing_ses,  // worst µs of the flush since last Reset Peak Values
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522
 };
 
 enum Csv3Index {
@@ -4426,6 +4430,8 @@ void setupServer() {
       loopWorst80Ses = 0;
       loopOver80ImuLimitCount = 0;
       loop80IterCount = 0;
+      // field-ON loop instrumentation — clear session worst
+      loopFieldOnSes = 0;
       // I2C bus-health — clear bus-only worst-timers and stall/error counts for a fresh window
       inaBusReadWorstUs = 0;
       inaBusSlowCount = 0;
@@ -5757,6 +5763,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,"
                                // +4: 80MHz low-power loop instrumentation (worst_win, worst_ses, over-limit count, total iters)
                                "%d,%d,%d,%d,"
+                               // +2: field-ON loop instrumentation (worst_win, worst_ses)
+                               "%d,%d,"
                                // +1: Speed Through Water (STW / SOW), knots ×100
                                "%d,"
                                // +4: thermal tuning live-stream fields (tempFiltered, impliedPenalty, flags, antiWindup latch)
@@ -5826,7 +5834,7 @@ void SendWifiData() {
                                SafeInt(pKwHrTomorrow, 100),
                                SafeInt(pKwHr2days, 100),
                                SafeInt(ambientTemp),
-                               SafeInt(baroPressure),
+                               SafeInt(baroPressure, 10),  // mbar ×10 — whole-mbar rounding froze the display (~1 mbar/hr drift); JS divides by 10
                                SafeInt(firmwareVersionInt),
                                deviceIdUpper,                                    // 54 (%u)
                                deviceIdLower,                                    // 55 (%u)
@@ -6257,6 +6265,9 @@ void SendWifiData() {
                                SafeInt(loopWorst80Ses / 1000),           // CSV2_loopWorst80Ses_ms
                                SafeInt(loopOver80ImuLimitCount),         // CSV2_loopOver80ImuLimitCount
                                SafeInt(loop80IterCount),                 // CSV2_loop80IterCount
+                               // field-ON loop instrumentation (2 fields) — µs→ms
+                               SafeInt(loopFieldOnWin / 1000),           // CSV2_loopFieldOnWin_ms
+                               SafeInt(loopFieldOnSes / 1000),           // CSV2_loopFieldOnSes_ms
                                SafeInt(STWNMEA, 100),                    // CSV2_STWNMEA (knots ×100; NAN/no-log -> 0)
                                // thermal tuning live-stream fields (see CSV2 enum) — flags byte mirrors the thermal log writer
                                SafeInt(tempFiltered, 100),               // CSV2_tempFiltered

@@ -1961,6 +1961,10 @@ void AdjustFieldLearnMode() {
                 cv_I_aw_cap = cv_I;         // cap the bumpless tracker ceiling to pre-event level — prevents current-limited rewind
                 postFastOvMismatch = true;  // iExcess collapses setpointLimited the same way fastOV does; block re-trigger during field TC wind-down
                 g_iExcessCount++;
+                // Collapse inner PID integrator (same as hard-OV reset) — without it duty authority
+                // is only innerKp × measured current, weak from low setpoints. See CV_Loop_Dev_Summary.md.
+                currentPID.ResetIntegratorTo(0.0);
+                queueConsoleMessage("iExcess: inner PID integrator reset");
               }
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
               if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; g_fastOvCapReason = CAP_REASON_IEXCESS; }
@@ -1972,9 +1976,9 @@ void AdjustFieldLearnMode() {
               // for the rest of the event comes from awBleedAmpS in the bumpless tracker block.
               // IExcessKBleed = 0: snap cv_I to zero (deepest starting point for recovery).
               // IExcessKBleed > 0: subtract K_bleed × excess × dtSec from cv_I once.
-              // Both modes drive output current to minimum duty within one tick via the
-              // fastOvCurrentCap collapse and the 1e9 fall-rate override on setpointLimited;
-              // the IExcessKBleed knob only sets the post-event recovery depth.
+              // Both modes zero the current COMMAND in one tick (1e9 fall-rate override on
+              // setpointLimited); the duty itself collapses via the inner-PID integrator
+              // reset above. The IExcessKBleed knob only sets the post-event recovery depth.
               // Final reseed is via the unified falling-edge reseed when ALL protections clear.
               if (IExcessKBleed <= 0.0f) {
                 cv_I = 0.0f;
@@ -1982,6 +1986,10 @@ void AdjustFieldLearnMode() {
                 cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * excess * actualDtSec);
               }
             } else if (iExcessActive && !belowHysteresis) {
+              // Re-apply proportional cap each tick of the event (fire branch runs once).
+              // Deliberately not a hard 0-cap — that would deepen recovery undershoot.
+              float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
+              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; g_fastOvCapReason = CAP_REASON_IEXCESS; }
               fastOvClampActive = true;  // hold govBypass during hysteresis
             } else {
               iExcessActive = false;     // release; unified reseed handles cv_I
@@ -4127,7 +4135,12 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // ---------------------------------------------------------------------------
   const float effectiveSetpoint = thermalSlopeBufFull ? (activeTempLimit - 5.0f) : (activeTempLimit - 20.0f);
   tempPIDSetpoint_d = (double)effectiveSetpoint;
-  tempPIDInput_d = (double)projectedTempF;
+  // PID input is the worse of projected and present temp — projection alone forgives
+  // the entire present error whenever slope <= 0, releasing penalty while still hot.
+  {
+    float tempNowPid = (TempSource == 0) ? TempToUse : tempFiltered;
+    tempPIDInput_d = (double)fmaxf(projectedTempF, tempNowPid);
+  }
 
   tempPID.SetTunings((double)TempPIDKp, (double)TempPIDKi, 0.0);
   tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);

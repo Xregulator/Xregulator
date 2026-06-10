@@ -678,6 +678,9 @@ const CSV2_FIELDS = [
     "loopWorst80Ses_ms",          // worst 80MHz loop pass since Reset Peak Values (ms)
     "loopOver80ImuLimitCount",    // # 80MHz passes over ~38ms accel-drain limit since reset
     "loop80IterCount",            // total 80MHz passes since reset
+    // field-ON loop instrumentation (2 fields) — worst pass while actually regulating
+    "loopFieldOnWin_ms",          // worst field-ON loop pass, rolling 5s (ms)
+    "loopFieldOnSes_ms",          // worst field-ON loop pass since Reset Peak Values (ms)
     "STWNMEA",                    // Speed Through Water (SOW, knots ×100); -1 = NAN/no log
     // thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
     "tempFiltered",               // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF
@@ -710,7 +713,7 @@ let altSchema = null;
 let altSettings = {};
 let altLive = { valid:false, rpm:0, exc:0, amps:0, pred:0, pct:0, worstPct:0, overallPct:0,
                 status:0, steady:false, engHours:0, coverage:0, haveCurve:0, ptCount:0,
-                source:0, paused:0, sim:0 };
+                source:0, paused:0, refOk:1, refDist:0, sim:0 };
 let altTrend = [];     // committed trend points: [{eng, worst, overall}]
 let _altTrendPending = false, _altTrendLastFetch = 0;
 
@@ -732,6 +735,7 @@ function updateAltHealth() {
                        : fixed ? 'FIXED (loaded curve)'
                        : altLive.paused>=1 ? 'Paused'
                        : altLive.status===2 ? 'Drifting down'
+                       : (have && altLive.refOk===0) ? 'No reference here yet (learning this operating region)'
                        : '';
     statEl.style.color = altLive.status===2 ? '#d9534f' : '#888';
   }
@@ -3607,11 +3611,13 @@ function updatePlotConfiguration(data) {
         cachedYmin2 = data.Ymin2; cachedYmax2 = data.Ymax2;
         cachedYmin3 = data.Ymin3; cachedYmax3 = data.Ymax3;
         cachedYmin4 = data.Ymin4; cachedYmax4 = data.Ymax4;
-        // Destroy and recreate all plots
-        if (currentTempPlot) { currentTempPlot.destroy(); initCurrentTempPlot(); }
-        if (voltagePlot) { voltagePlot.destroy(); initVoltagePlot(); }
-        if (rpmPlot) { rpmPlot.destroy(); initRPMPlot(); }
-        if (temperaturePlot) { temperaturePlot.destroy(); initTemperaturePlot(); }
+        // Re-range in place — destroying/recreating the plots here made the
+        // page jump every time a Y limit was edited and echoed back. Plots in
+        // autoscale mode skip the set; the per-frame autoscale pass owns them.
+        if (currentTempPlot && !autoScaleCurrent) currentTempPlot.setScale('current', { min: Ymin1, max: Ymax1 });
+        if (voltagePlot && !autoScaleVoltage) voltagePlot.setScale('voltage', { min: Ymin2 / 100, max: Ymax2 / 100 });
+        if (rpmPlot && !autoScaleRPM) rpmPlot.setScale('rpm', { min: Ymin3, max: Ymax3 });
+        if (temperaturePlot && !autoScaleTemp) temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
 
         configChanged = true;
     }
@@ -3650,11 +3656,8 @@ function updatePlotConfiguration(data) {
         cachedYyMin = data.yyMin;
         cachedYyMax = data.yyMax;
 
-        // Destroy and recreate PID tuning plot
-        if (pidTuningPlot) {
-            pidTuningPlot.destroy();
-            initPidTuningPlot();
-        }
+        // Re-range in place — recreate caused a page jump (same as the live plots above)
+        if (pidTuningPlot) pidTuningPlot.setScale('amps', { min: yyMin, max: yyMax });
 
         configChanged = true;
     }
@@ -5260,22 +5263,16 @@ function initCVTuningPlot() {
         lockBtnCV.style.opacity = cvTuningPlotPaused ? '1' : '0.6';
     });
 
-    // Click-to-edit Y limits — routed through the same range setters as the
-    // fields below the plot, and kept in sync with those fields.
-    const cvSyncInputs = (minId, maxId, mn, mx) => {
-        const a = document.getElementById(minId), b = document.getElementById(maxId);
-        if (a) a.value = mn;
-        if (b) b.value = mx;
-    };
+    // Click-to-edit Y limits — the on-plot boxes are the only Y range controls
     attachYAxisEdit(cvTuningPlot, [
         {
             scale: 'volts', decimals: 2,
-            apply: (mn, mx) => { cvSyncInputs('cvVoltsMinInput', 'cvVoltsMaxInput', mn, mx); setCVVoltsRange(mn, mx); },
+            apply: (mn, mx) => setCVVoltsRange(mn, mx),
             auto: () => { cvVoltsMin = null; cvVoltsMax = null; if (cvTuningPlot) { cvTuningPlot.destroy(); initCVTuningPlot(); } }
         },
         {
-            scale: 'amps', decimals: 1, topPx: 26,   // clears the corner lock button
-            apply: (mn, mx) => { cvSyncInputs('cvAmpsMinInput', 'cvAmpsMaxInput', mn, mx); setCVAmpsRange(mn, mx); },
+            scale: 'amps', decimals: 1,
+            apply: (mn, mx) => setCVAmpsRange(mn, mx),
             auto: () => { cvAmpsMin = null; cvAmpsMax = null; if (cvTuningPlot) { cvTuningPlot.destroy(); initCVTuningPlot(); } }
         }
     ]);
@@ -6084,16 +6081,19 @@ function initPlotDataStructures() {
 }
 
 // =====================================================================
-// On-plot Y-axis editing — gives every uPlot chart small click-to-edit
-// min/max boxes at the corners of its plot area, one pair per Y scale,
-// on whichever side that scale's axis is drawn. Type a value and press
-// Enter (or tap away) to apply. Where the chart supports automatic
-// ranging, clearing BOTH boxes and pressing Enter returns it to auto.
+// On-plot Y-axis editing — makes each Y axis's extreme tick labels
+// directly editable. uPlot draws tick labels on canvas, so they can't
+// take click handlers themselves; instead an invisible click zone sits
+// over each axis's min and max label. Clicking it summons an edit box
+// in place, prefilled with the current bound. Enter (or tap away)
+// applies, Escape cancels, and where the chart supports automatic
+// ranging, clearing the value and pressing Enter returns it to auto.
 // cfgs: [{ scale, apply(min,max), auto() optional, decimals optional }]
 function attachYAxisEdit(u, cfgs) {
     if (!u || !u.over) return;
-    u.over.querySelectorAll('.yaxis-edit').forEach(n => n.remove());
-    const pairs = [];
+    const wrap = u.over.parentElement;   // .u-wrap — contains plot area AND axis strips
+    if (!wrap) return;
+    wrap.querySelectorAll('.yaxis-hot, .yaxis-edit').forEach(n => n.remove());
 
     const fmt = (v, cfg) => {
         if (v == null || !isFinite(v)) return '';
@@ -6106,66 +6106,99 @@ function attachYAxisEdit(u, cfgs) {
         return String(parseFloat(v.toFixed(d)));
     };
 
-    const refresh = () => {
-        pairs.forEach(p => {
-            const sc = u.scales[p.cfg.scale];
-            if (!sc) return;
-            if (document.activeElement !== p.minBox) p.minBox.value = fmt(sc.min, p.cfg);
-            if (document.activeElement !== p.maxBox) p.maxBox.value = fmt(sc.max, p.cfg);
-        });
+    // Touch: taller tap targets and a wider edit box (the box also gets a
+    // 16px font from CSS — anything smaller makes iOS auto-zoom the page)
+    const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    const HOT_H = coarse ? 28 : 18, HOT_W = 46, INP_W = coarse ? 76 : 58;
+    const zones = [];
+
+    // One shared edit box, summoned to whichever label was clicked
+    const inp = document.createElement('input');
+    inp.type = 'number';
+    inp.step = 'any';
+    inp.className = 'yaxis-edit';
+    ['mousedown', 'mouseup', 'touchstart', 'click', 'dblclick'].forEach(ev =>
+        inp.addEventListener(ev, e => e.stopPropagation()));
+    wrap.appendChild(inp);
+    let editing = null;   // active zone, null while the box is hidden
+
+    const hideInput = () => { editing = null; inp.style.display = 'none'; };
+
+    const commit = () => {
+        if (!editing) return;
+        const z = editing;
+        const sc = u.scales[z.cfg.scale];
+        const raw = inp.value.trim();
+        if (raw === '' && z.cfg.auto) { z.cfg.auto(); hideInput(); return; }
+        const v = parseFloat(raw);
+        if (isFinite(v) && sc) {
+            const mn = z.isMax ? sc.min : v;
+            const mx = z.isMax ? v : sc.max;
+            if (mx > mn) z.cfg.apply(mn, mx);
+        }
+        hideInput();
     };
+
+    inp.addEventListener('keydown', e => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        else if (e.key === 'Escape') hideInput();
+    });
+    inp.addEventListener('blur', () => commit());
 
     cfgs.forEach(cfg => {
         const axis = u.axes.find(a => a.scale === cfg.scale);
-        const onRight = !!axis && axis.side === 1;
+        if (!axis) return;
+        const onRight = axis.side === 1;
 
-        const mkBox = (isMax) => {
-            const inp = document.createElement('input');
-            inp.type = 'number';
-            inp.step = 'any';
-            inp.className = 'yaxis-edit';
-            inp.title = (isMax ? 'Y max' : 'Y min') + ' — type a value, Enter to apply'
-                + (cfg.auto ? '; clear both boxes + Enter for auto' : '');
-            inp.style[onRight ? 'right' : 'left'] = '2px';
-            // topPx pushes the max box down when a corner control (lock/auto) already lives there
-            inp.style[isMax ? 'top' : 'bottom'] = (isMax && cfg.topPx ? cfg.topPx : 2) + 'px';
-            // Keep clicks/drags on the boxes away from uPlot's cursor + zoom handling.
-            ['mousedown', 'mouseup', 'touchstart', 'click', 'dblclick'].forEach(ev =>
-                inp.addEventListener(ev, e => e.stopPropagation()));
-            u.over.appendChild(inp);
-            return inp;
-        };
-
-        const pair = { cfg, dirty: false, maxBox: mkBox(true), minBox: mkBox(false) };
-
-        const commit = () => {
-            const mnRaw = pair.minBox.value.trim(), mxRaw = pair.maxBox.value.trim();
-            if (mnRaw === '' && mxRaw === '' && cfg.auto) { cfg.auto(); setTimeout(refresh, 0); return; }
-            const mn = parseFloat(mnRaw), mx = parseFloat(mxRaw);
-            if (isFinite(mn) && isFinite(mx) && mx > mn) cfg.apply(mn, mx);
-            setTimeout(refresh, 0);
-        };
-
-        [pair.minBox, pair.maxBox].forEach(inp => {
-            inp.addEventListener('input', () => { pair.dirty = true; });
-            inp.addEventListener('keydown', e => {
+        [true, false].forEach(isMax => {
+            const hot = document.createElement('div');
+            hot.className = 'yaxis-hot';
+            hot.title = 'Click to edit axis ' + (isMax ? 'maximum' : 'minimum')
+                + (cfg.auto ? ' — clear + Enter for auto' : '');
+            // Keep clicks/drags away from uPlot's cursor + zoom handling
+            ['mousedown', 'mouseup', 'touchstart', 'dblclick'].forEach(ev =>
+                hot.addEventListener(ev, e => e.stopPropagation()));
+            const zone = { cfg, isMax, onRight, hot };
+            hot.addEventListener('click', e => {
                 e.stopPropagation();
-                if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
-                else if (e.key === 'Escape') { pair.dirty = false; inp.dataset.esc = '1'; inp.blur(); }
+                const sc = u.scales[cfg.scale];
+                if (!sc) return;
+                editing = zone;
+                inp.value = fmt(isMax ? sc.max : sc.min, cfg);
+                const w = Math.max(INP_W, hot.offsetWidth);
+                inp.style.width = w + 'px';
+                inp.style.left = (onRight ? hot.offsetLeft : (hot.offsetLeft + hot.offsetWidth - w)) + 'px';
+                inp.style.top = hot.offsetTop + 'px';
+                inp.style.display = 'block';
+                inp.focus();
+                inp.select();
             });
-            inp.addEventListener('blur', () => {
-                if (inp.dataset.esc) { delete inp.dataset.esc; refresh(); return; }
-                if (!pair.dirty) { refresh(); return; }
-                pair.dirty = false;
-                commit();
-            });
+            wrap.appendChild(hot);
+            zones.push(zone);
         });
-
-        pairs.push(pair);
     });
 
-    (u.hooks.draw = u.hooks.draw || []).push(refresh);
-    refresh();
+    // Place the zones over the extreme tick labels: vertically centered on the
+    // plot area's top/bottom edge (where uPlot centers those labels), anchored
+    // to the plot-edge side of the axis strip so a rotated axis title at the
+    // strip's far edge stays unclickable. Re-run every draw — offsets move on
+    // resize and axis-width changes.
+    const position = () => {
+        const oL = u.over.offsetLeft, oT = u.over.offsetTop,
+            oW = u.over.offsetWidth, oH = u.over.offsetHeight;
+        zones.forEach(z => {
+            const strip = z.onRight ? (wrap.clientWidth - oL - oW) : oL;
+            const w = Math.min(HOT_W, Math.max(30, strip - 2));
+            z.hot.style.width = w + 'px';
+            z.hot.style.height = HOT_H + 'px';
+            z.hot.style.left = (z.onRight ? (oL + oW + 1) : (oL - w - 1)) + 'px';
+            z.hot.style.top = Math.max(0, (z.isMax ? oT : oT + oH) - HOT_H / 2) + 'px';
+        });
+    };
+
+    (u.hooks.draw = u.hooks.draw || []).push(position);
+    position();
 }
 
 // Persist a Y-axis range to the regulator (same params the settings forms use).
@@ -6272,7 +6305,7 @@ function initCurrentTempPlot() {
                             { label: "Alternator Current (A)", color: "#2196F3" },
                             { label: "Field Current (A)", color: "#9C27B0" },
                             { label: "Field %", color: "#9E9E9E" }
-                        ]);
+                        ], u);
 
                         const resizePlot = debounce(() => {
                             const plotEl = document.getElementById("current-temp-plot");
@@ -6428,7 +6461,7 @@ function initVoltagePlot() {
                             { label: "ADS Battery (V)", color: "#FF9800" },
                             { label: "INA Battery (V)", color: "#4CAF50" },
                             { label: "Field %", color: "#9E9E9E" }
-                        ]);
+                        ], u);
 
                         const resizePlot = debounce(() => {
                             const plotEl = document.getElementById("voltage-plot");
@@ -6577,7 +6610,7 @@ function initRPMPlot() {
                         createCustomLegend('rpm-plot', [
                             { label: "RPM", color: "#E91E63" },
                             { label: "Field %", color: "#9E9E9E" }
-                        ]);
+                        ], u);
 
                         const resizePlot = debounce(() => {
                             const plotEl = document.getElementById("rpm-plot");
@@ -6725,7 +6758,7 @@ function initTemperaturePlot() {
                         createCustomLegend('temperature-plot', [
                             { label: "Alt. Temp (°F)", color: "#FF5722" },
                             { label: "Field %", color: "#9E9E9E" }
-                        ]);
+                        ], u);
 
                         const resizePlot = debounce(() => {
                             const plotEl = document.getElementById("temperature-plot");
@@ -7084,8 +7117,11 @@ function startStalenessDetection() {
 
 
 
-// Custom legend creation function
-function createCustomLegend(plotId, legendItems) {
+// Custom legend creation function. Legend item order must match series order
+// (item i → series i+1; slot 0 is the x axis). Pass the uPlot instance to make
+// entries click-to-toggle; visibility persists per plot in localStorage so it
+// survives reloads and the re-inits triggered by time-axis mode changes.
+function createCustomLegend(plotId, legendItems, u) {
     const plotContainer = document.getElementById(plotId);
     if (!plotContainer) return;
 
@@ -7094,6 +7130,10 @@ function createCustomLegend(plotId, legendItems) {
     if (existingLegend) {
         existingLegend.remove();
     }
+
+    const visKey = 'plotSeriesVis_' + plotId;
+    let vis = {};
+    try { vis = JSON.parse(localStorage.getItem(visKey)) || {}; } catch (e) { }
 
     // Create new custom legend
     const legendDiv = document.createElement('div');
@@ -7106,14 +7146,21 @@ margin-top: 10px;
 flex-wrap: wrap;
 `;
 
-    legendItems.forEach(item => {
+    const hiddenIdxs = [];
+
+    legendItems.forEach((item, i) => {
+        const seriesIdx = i + 1;
+        let shown = vis[item.label] !== false;
+
         const legendItem = document.createElement('div');
         legendItem.style.cssText = `
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
+  ${u ? 'cursor: pointer; user-select: none;' : ''}
 `;
+        if (u) legendItem.title = 'Click to show/hide';
 
         const colorBox = document.createElement('div');
         colorBox.style.cssText = `
@@ -7127,12 +7174,35 @@ flex-wrap: wrap;
         label.textContent = item.label;
         label.style.color = 'var(--text-dark)';
 
+        const paint = () => {
+            colorBox.style.opacity = shown ? '1' : '0.3';
+            label.style.opacity = shown ? '1' : '0.5';
+        };
+        paint();
+
+        if (u) {
+            if (!shown) hiddenIdxs.push(seriesIdx);
+            legendItem.addEventListener('click', () => {
+                shown = !shown;
+                u.setSeries(seriesIdx, { show: shown });
+                vis[item.label] = shown;
+                try { localStorage.setItem(visKey, JSON.stringify(vis)); } catch (e) { }
+                paint();
+            });
+        }
+
         legendItem.appendChild(colorBox);
         legendItem.appendChild(label);
         legendDiv.appendChild(legendItem);
     });
 
     plotContainer.appendChild(legendDiv);
+
+    // Apply saved hidden state after the constructor finishes — this runs from
+    // the init hook, where an immediate setSeries redraw is unsafe.
+    if (u && hiddenIdxs.length) {
+        requestAnimationFrame(() => hiddenIdxs.forEach(idx => u.setSeries(idx, { show: false })));
+    }
 }
 
 
@@ -8598,6 +8668,15 @@ window.addEventListener("load", function () {
                         "imu_heel_deviation_120s", "imu_pitch_deviation_120s"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
+                    // Thermistor -99 sentinel = no sensor connected (must precede the temperature
+                    // branch below or toDisplayTemp turns it into -73 in °C mode)
+                    else if (key === "temperatureThermistor" && num === -99) {
+                        newTextContent = "—";
+                    }
+                    // Barometric pressure mbar ×10 — whole-mbar rounding made it look frozen
+                    else if (key === "baroPressure") {
+                        newTextContent = (value / 10).toFixed(1);
+                    }
                     // Temperature fields (raw integer °F from firmware — convert to display unit)
                     else if (["MaxAlternatorTemperatureF", "temperatureThermistor", "MaxTemperatureThermistor",
                         "ambientTemp", "MaxAlternatorTemperatureF_AllTime", "MaxTemperatureThermistor_AllTime"].includes(key)) {
@@ -9105,6 +9184,8 @@ window.addEventListener("load", function () {
                 ["MaximumLoopTimeID", "MaximumLoopTime"],
                 ["ft_loop_win_ID", "loopTime5sWindow_ms"],
                 ["ft_loop_ses_ID", "MaximumLoopTime_ms"],
+                ["ft_loopFieldOn_win_ID", "loopFieldOnWin_ms"],
+                ["ft_loopFieldOn_ses_ID", "loopFieldOnSes_ms"],
                 ["ft_SendWifiData_win_ID", "ft_SendWifiData_win"],
                 ["ft_SendWifiData_ses_ID", "ft_SendWifiData_ses"],
                 ["ft_CheckAlarms_win_ID", "ft_CheckAlarms_win"],
@@ -10003,6 +10084,7 @@ function handleResetPerfCounters() {
                 'cpuLoadCore0Max_display', 'cpuLoadCore1Max_display',
                 'MaximumLoopTimeID',
                 'ft_loop_win_ID', 'ft_loop_ses_ID',
+                'ft_loopFieldOn_win_ID', 'ft_loopFieldOn_ses_ID',
                 'ft_SendWifiData_win_ID', 'ft_SendWifiData_ses_ID',
                 'ch1_worst_10s_ID', 'ch1_over2x_10s_ID', 'ch1_avg_10s_ID',
                 'ch1_worst_2m_ID', 'ch1_over2x_2m_ID', 'ch1_avg_2m_ID',
@@ -11311,32 +11393,35 @@ function queuePidTuningPlotUpdate() {
 
 // Update PID tuning configuration when parameters change
 function updatePidTuningConfiguration(data) {
-    let configChanged = false;
+    let axisChanged = false;
+    let timeChanged = false;
 
     // Check for Y-axis range changes
     if (data.yyMin !== undefined && data.yyMin !== yyMin) {
         yyMin = data.yyMin;
-        configChanged = true;
+        axisChanged = true;
     }
     if (data.yyMax !== undefined && data.yyMax !== yyMax) {
         yyMax = data.yyMax;
-        configChanged = true;
+        axisChanged = true;
     }
 
-    // Check for time window changes
     // Check for time window changes
     if (data.xTime !== undefined && !isNaN(data.xTime) && data.xTime > 0 && data.xTime !== xTime) {
         xTime = data.xTime;
-        configChanged = true;
+        timeChanged = true;
     }
 
-    if (configChanged) {
-        // Destroy and recreate
+    if (timeChanged) {
+        // Buffer length depends on xTime — full rebuild required
         if (pidTuningPlot) {
             pidTuningPlot.destroy();
         }
         initPidTuningDataStructures();
         initPidTuningPlot();
+    } else if (axisChanged && pidTuningPlot) {
+        // Re-range in place — recreate caused a page jump on every Y edit echo
+        pidTuningPlot.setScale('amps', { min: yyMin, max: yyMax });
     }
 }
 
@@ -11958,19 +12043,20 @@ const thermalZoomPlugin = {
 // ---------------------------------------------------------------------------
 // Mode decode
 // ---------------------------------------------------------------------------
-// Distinct hue per stage — no two stages should read alike (old palette had
-// shutdown≈manual red and bulk≈maintain green). antiWindup is the tick marker;
-// it sits on the background strip above the bands, so it's drawn theme-aware
-// (near-black on light, white on dark) rather than from this value.
+// Tableau 10 — one hue per stage, red reserved for Shutdown alone (old palette
+// had three warm bands: shutdown red, absorption orange, manual magenta).
+// antiWindup is the tick marker; it sits on the background strip above the
+// bands, so it's drawn theme-aware (near-black on light, white on dark)
+// rather than from this value.
 const THERMAL_MODE_COLORS = {
-    shutdown: '#e53935',    // red — alarm
-    bulk: '#2e7d32',        // dark green
-    absorption: '#fb8c00',  // orange
-    float: '#1e88e5',       // blue
-    maintain: '#00acc1',    // teal
-    targetV: '#8e24aa',     // purple
-    manual: '#d81b60',      // magenta
-    idle: '#9e9e9e',        // gray
+    shutdown: '#d62728',    // red — alarm
+    bulk: '#1f77b4',        // blue
+    absorption: '#ff7f0e',  // orange
+    float: '#2ca02c',       // green
+    maintain: '#17becf',    // cyan
+    targetV: '#9467bd',     // purple
+    manual: '#e377c2',      // pink
+    idle: '#7f7f7f',        // gray
     antiWindup: '#111111'   // tick (light mode); dark mode overrides to white
 };
 function modeFromStage(stage, flags) {
@@ -12026,38 +12112,40 @@ function renderThermalPlot1(data, tMin) {
         select: { show: true },
         series: [
             { label: null },
+            // Tableau 10 palette — one warm color per plot (filtered temp = the
+            // headline signal gets red); setpoint is a neutral gray reference line.
             {
-                label: 'Temp Filtered (°F)', stroke: '#e74c3c', width: 2,
+                label: 'Temp Filtered (°F)', stroke: '#d62728', width: 2,
                 scale: 'temp',
                 show: thermalSeriesVisible.tempFilt !== false
             },
             {
-                label: 'Temp Projected (°F)', stroke: '#e67e22', width: 1.5,
+                label: 'Temp Projected (°F)', stroke: '#e377c2', width: 1.5,
                 scale: 'temp', dash: [4, 3],
                 show: thermalSeriesVisible.tempProjected !== false
             },
             {
-                label: 'Setpoint (°F)', stroke: '#f39c12', width: 1.5,
+                label: 'Setpoint (°F)', stroke: '#7f7f7f', width: 1.5,
                 scale: 'temp', dash: [8, 4],
                 show: thermalSeriesVisible.tempSetpoint !== false
             },
             {
-                label: 'D Correction (°F)', stroke: '#1abc9c', width: 1.5,
+                label: 'D Correction (°F)', stroke: '#17becf', width: 1.5,
                 scale: 'temp', dash: [3, 3],
                 show: thermalSeriesVisible.dCorrection !== false
             },
             {
-                label: 'Penalty Amps (A)', stroke: '#2ecc71', width: 1.5,
+                label: 'Penalty Amps (A)', stroke: '#2ca02c', width: 1.5,
                 scale: 'amps',
                 show: thermalSeriesVisible.penaltyAmps !== false
             },
             {
-                label: 'Measured Amps (A)', stroke: '#3498db', width: 1.5,
+                label: 'Measured Amps (A)', stroke: '#1f77b4', width: 1.5,
                 scale: 'amps',
                 show: thermalSeriesVisible.measAmps !== false
             },
             {
-                label: 'U Target (A)', stroke: '#9b59b6', width: 2,
+                label: 'U Target (A)', stroke: '#9467bd', width: 2,
                 scale: 'amps', dash: [4, 3],
                 show: thermalSeriesVisible.uTarget !== false
             }
@@ -12086,13 +12174,13 @@ function renderThermalPlot1(data, tMin) {
     thermalLogPlots[0] = new uPlot(opts, data, el);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[0]);
     _createThermalLegend(el, 0, [
-        { key: 'tempFilt',      label: 'Temp Filtered',    color: '#e74c3c', idx: 1 },
-        { key: 'tempProjected', label: 'Temp Projected',   color: '#e67e22', idx: 2 },
-        { key: 'tempSetpoint',  label: 'Setpoint',         color: '#f39c12', idx: 3 },
-        { key: 'dCorrection',   label: 'D Correction (°F)',color: '#1abc9c', idx: 4 },
-        { key: 'penaltyAmps',   label: 'Penalty Amps',     color: '#2ecc71', idx: 5 },
-        { key: 'measAmps',      label: 'Measured Amps',    color: '#3498db', idx: 6 },
-        { key: 'uTarget',       label: 'U Target',         color: '#9b59b6', idx: 7 }
+        { key: 'tempFilt',      label: 'Temp Filtered',    color: '#d62728', idx: 1 },
+        { key: 'tempProjected', label: 'Temp Projected',   color: '#e377c2', idx: 2 },
+        { key: 'tempSetpoint',  label: 'Setpoint',         color: '#7f7f7f', idx: 3 },
+        { key: 'dCorrection',   label: 'D Correction (°F)',color: '#17becf', idx: 4 },
+        { key: 'penaltyAmps',   label: 'Penalty Amps',     color: '#2ca02c', idx: 5 },
+        { key: 'measAmps',      label: 'Measured Amps',    color: '#1f77b4', idx: 6 },
+        { key: 'uTarget',       label: 'U Target',         color: '#9467bd', idx: 7 }
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[0] && el.clientWidth > 0)
@@ -12125,10 +12213,11 @@ function renderThermalPlot2(data, tMin) {
         select: { show: true },
         series: [
             { label: null },
-            { label: 'Outer P', stroke: '#3498db', width: 1.5, scale: 'amps' },
-            { label: 'Outer I', stroke: '#e67e22', width: 1.5, scale: 'amps' },
-            { label: 'Outer D', stroke: '#9b59b6', width: 1.5, scale: 'amps' },
-            { label: 'Implied Penalty', stroke: '#2ecc71', width: 2, scale: 'amps' }
+            // Tableau 10 — P/I/D in palette order, the resulting penalty bold in red.
+            { label: 'Outer P', stroke: '#1f77b4', width: 1.5, scale: 'amps' },
+            { label: 'Outer I', stroke: '#ff7f0e', width: 1.5, scale: 'amps' },
+            { label: 'Outer D', stroke: '#2ca02c', width: 1.5, scale: 'amps' },
+            { label: 'Implied Penalty', stroke: '#d62728', width: 2, scale: 'amps' }
         ],
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
@@ -12152,10 +12241,10 @@ function renderThermalPlot2(data, tMin) {
     thermalLogPlots[2] = new uPlot(opts, data, el);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[2]);
     _createThermalLegend(el, 2, [
-        { key: 'outerP',        label: 'Outer P',         color: '#3498db', idx: 1 },
-        { key: 'outerI',        label: 'Outer I',         color: '#e67e22', idx: 2 },
-        { key: 'outerD',        label: 'Outer D',         color: '#9b59b6', idx: 3 },
-        { key: 'impliedPenalty',label: 'Implied Penalty', color: '#2ecc71', idx: 4 },
+        { key: 'outerP',        label: 'Outer P',         color: '#1f77b4', idx: 1 },
+        { key: 'outerI',        label: 'Outer I',         color: '#ff7f0e', idx: 2 },
+        { key: 'outerD',        label: 'Outer D',         color: '#2ca02c', idx: 3 },
+        { key: 'impliedPenalty',label: 'Implied Penalty', color: '#d62728', idx: 4 },
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[2] && el.clientWidth > 0)
@@ -13242,6 +13331,7 @@ function sysidInitDrag() {
         return { left: r.left, top: r.top };
     }
     function onDown(e) {
+        if (window.innerWidth <= 600) return;   // mobile = fixed bottom sheet, not draggable
         const pt = e.touches ? e.touches[0] : e;
         const pos = getPos();
         startX = pt.clientX; startY = pt.clientY;
@@ -13271,6 +13361,9 @@ function sysidInitDrag() {
     }
     handle.addEventListener('mousedown',  onDown);
     handle.addEventListener('touchstart', onDown, { passive: false });
+    // Re-clamp on window resize (e.g. laptop browser shrunk or device rotated)
+    // so the panel can't end up partly below the new viewport bottom.
+    window.addEventListener('resize', sysidClampPanel);
 }
 
 function openSystemIDModal() {
@@ -13281,17 +13374,52 @@ function openSystemIDModal() {
     // Reset panel position to default top-right on each open
     const panel = document.getElementById('sysid-modal-panel');
     if (panel) { panel.style.left = ''; panel.style.top = '80px'; panel.style.right = '20px'; }
+    const overlay = document.getElementById('sysid-modal-overlay');
+    overlay.classList.remove('sysid-min', 'sysid-running');   // always open expanded
     sysidShowScreen('preflight');
-    document.getElementById('sysid-modal-overlay').style.display = 'block';
+    overlay.style.display = 'block';
     sysidInitDrag();
     sysidUpdatePreflight();
     sysidPreflightInterval = setInterval(sysidUpdatePreflight, 1000);
 }
 
 function closeSystemIDModal() {
-    document.getElementById('sysid-modal-overlay').style.display = 'none';
+    const overlay = document.getElementById('sysid-modal-overlay');
+    overlay.style.display = 'none';
+    overlay.classList.remove('sysid-min', 'sysid-running');
     if (sysidPreflightInterval) { clearInterval(sysidPreflightInterval); sysidPreflightInterval = null; }
     if (sysidPollInterval)      { clearInterval(sysidPollInterval);      sysidPollInterval = null; }
+}
+
+// Minimize (mobile) — collapse the sheet to a progress pill and reveal the live
+// current plot behind it (same Plots-tab switch the test-start already does).
+function sysidMinimize() {
+    const ov = document.getElementById('sysid-modal-overlay');
+    if (!ov) return;
+    ov.classList.add('sysid-min');
+    if (!ov.classList.contains('sysid-running')) {
+        const resultsScreen = document.getElementById('sysid-screen-results');
+        const onResults = resultsScreen && resultsScreen.style.display !== 'none';
+        sysidUpdatePill(onResults ? 'Results ready · tap to expand' : 'tap to expand',
+                        onResults ? 100 : null);
+    }
+    if (vesselInfoComplete && typeof showMainTab === 'function') showMainTab('plots');
+}
+
+function sysidRestore() {
+    const ov = document.getElementById('sysid-modal-overlay');
+    if (ov) ov.classList.remove('sysid-min');
+}
+
+// Update the minimized pill's phase label + progress bar/percent.
+// pct null -> blank bar/percent (idle/preflight); otherwise 0-100.
+function sysidUpdatePill(phaseText, pct) {
+    const ph   = document.getElementById('sysid-pill-phase');
+    const fill = document.getElementById('sysid-pill-bar-fill');
+    const pctEl = document.getElementById('sysid-pill-pct');
+    if (ph)   ph.textContent = phaseText;
+    if (fill) fill.style.width = (pct == null ? 0 : pct) + '%';
+    if (pctEl) pctEl.textContent = (pct == null ? '' : Math.round(pct) + '%');
 }
 
 function sysidRunAgain() {
@@ -13306,6 +13434,8 @@ function sysidRunAgain() {
 }
 
 function sysidShowAborted(msg) {
+    document.getElementById('sysid-modal-overlay').classList.remove('sysid-running');
+    sysidRestore();   // auto-expand so the abort reason is visible, not buried in the pill
     const tbody = document.getElementById('sysid-results-body');
     if (tbody) tbody.innerHTML = '';
     document.getElementById('sysid-results-summary').textContent = '';
@@ -13320,6 +13450,30 @@ function sysidShowScreen(name) {
     document.getElementById('sysid-screen-preflight').style.display = (name === 'preflight') ? '' : 'none';
     document.getElementById('sysid-screen-progress').style.display  = (name === 'progress')  ? '' : 'none';
     document.getElementById('sysid-screen-results').style.display   = (name === 'results')   ? '' : 'none';
+    // Results is the tallest screen; re-clamp so a panel dragged low (while a
+    // short screen was showing) can't grow off the bottom of the viewport.
+    sysidClampPanel();
+}
+
+// Keep the floating panel fully on screen. max-height caps its height to the
+// viewport; this nudges its top (and left, once dragged) back inside the edges
+// so the bottom — and the action buttons there — never fall below the fold.
+function sysidClampPanel() {
+    if (window.innerWidth <= 600) return;   // mobile = CSS bottom sheet, no JS positioning
+    const panel = document.getElementById('sysid-modal-panel');
+    if (!panel || panel.offsetParent === null) return;   // not visible
+    const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+    let top = parseFloat(panel.style.top);
+    if (isNaN(top)) top = panel.getBoundingClientRect().top;
+    panel.style.top = Math.min(Math.max(0, top), maxTop) + 'px';
+    // Only manage left once the panel has been dragged (drag sets right:auto);
+    // otherwise leave it anchored to the right edge.
+    if (panel.style.right === 'auto') {
+        const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+        let left = parseFloat(panel.style.left);
+        if (isNaN(left)) left = panel.getBoundingClientRect().left;
+        panel.style.left = Math.min(Math.max(0, left), maxLeft) + 'px';
+    }
 }
 
 function sysidUpdatePreflight() {
@@ -13399,7 +13553,12 @@ function confirmSystemIDStart() {
             sysidPhaseStartWall = Date.now();
             sysidStartProgressPoll();
             // Switch to Plots tab so user can watch the current waveform during the test.
-            if (vesselInfoComplete) showMainTab('plots');
+            if (vesselInfoComplete) {
+                showMainTab('plots');
+                // On a phone, auto-minimize to the progress pill so the waveform is
+                // visible by default; it auto-expands again when results land.
+                if (window.innerWidth <= 600) sysidMinimize();
+            }
         })
         .catch(err => {
             alert("Failed to send start command: " + err);
@@ -13436,6 +13595,7 @@ function sysidStartProgressPoll() {
         if (el) { el.textContent = '⬜ ' + SYSID_PHASE_NAMES[i]; el.style.color = ''; }
     }
     document.getElementById('sysid-phase-bar').style.width = '0%';
+    document.getElementById('sysid-modal-overlay').classList.add('sysid-running');   // pulses the pill dot
 
     // Wall-clock phase advancement: once we know a phase started, we advance the bar
     // and labels by timer without waiting for the next CSV2 packet.
@@ -13489,14 +13649,21 @@ function sysidStartProgressPoll() {
 
         document.getElementById('sysid-elapsed').textContent = 'Elapsed: ' + (elapsed / 1000).toFixed(0) + 's';
 
+        // Mirror progress into the minimized pill (8-phase measured sequence; 9 = processing)
+        const overallPct = Math.min(100, Math.max(0, (wallPhase - 1 + phasePct / 100) / 8 * 100));
+        sysidUpdatePill((SYSID_PHASE_NAMES[wallPhase] || 'Running') + '…', overallPct);
+
         if (ready === 1) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
+            document.getElementById('sysid-modal-overlay').classList.remove('sysid-running');
             // Mark all phases complete
             for (let i = 1; i <= 9; i++) {
                 const el = document.getElementById('sysid-p' + i);
                 if (el) { el.textContent = '✅ ' + SYSID_PHASE_NAMES[i]; el.style.color = '#4caf50'; }
             }
             document.getElementById('sysid-phase-bar').style.width = '100%';
+            sysidUpdatePill('Results ready · tap to expand', 100);
+            sysidRestore();   // auto-expand the sheet so the results are front-and-centre
             setTimeout(showSystemIDResults, 400);
             return;
         }
@@ -13504,6 +13671,7 @@ function sysidStartProgressPoll() {
         // Protection layer fired mid-test — firmware aborted it, results are invalid
         if (phase === 0 && ready !== 1 && sysidEverActive) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
+            document.getElementById('sysid-modal-overlay').classList.remove('sysid-running');
             const reasonCode = parseInt(getField("systemIDAbortReason_ID") ?? 0);
             const abortPhase = parseInt(getField("systemIDAbortPhase_ID") ?? 0);
             const reasonText = SYSID_ABORT_REASONS[reasonCode] ?? ('reason code ' + reasonCode);
@@ -13809,7 +13977,7 @@ window.addEventListener('load', function () {
 
   window.updateBaroDisplay = function (data, sa) {
     if (!data) return;
-    const p = parseFloat(data.baroPressure);
+    const p = parseFloat(data.baroPressure) / 10;   // CSV2 sends mbar ×10
     if (!isFinite(p) || p < 800 || p > 1100) {
       setText('baroZoneLabel', '—');
       setText('baroZoneSub', 'sensor offline');
@@ -14584,8 +14752,10 @@ window.addEventListener('load', function () {
   function buildAllLtPlots() {
     if (!ltCharts.length) {
     // Groupings mirror the cloud "My History" viewer minus the eliminated fields
-    // (u_target_amps, temp_margin, ign_duty, eng_duty). Envelope band on each group's
-    // primary metric; secondaries as avg lines. heel/pitch (Motion) is a local-only bonus.
+    // (u_target_amps, temp_margin, ign_duty, eng_duty). Every envelope-recorded field
+    // gets band:true; line-only series (SOC, Board temp, Baro, COG, Heading, Leeway)
+    // are avg-only in the 128 B record itself, so a band would need a record-layout
+    // change. heel/pitch (Motion) is a local-only bonus.
     buildLtChart('lt-current-plot', {
       title: 'Currents (A)',
       scales: [ { name:'A', label:'Amps', side:3 } ],
@@ -14606,7 +14776,7 @@ window.addEventListener('load', function () {
                 { name:'mb', label:'mbar', side:1 } ],
       series: [ { key:'altTemp',   scale:'F',  color:'#F44336', label:'Alternator (°F)', band:true },
                 { key:'tempTherm', scale:'F',  color:'#FF9800', label:'Thermistor (°F)', band:true },
-                { key:'ambTemp',   scale:'F',  color:'#2196F3', label:'Ambient (°F)' },
+                { key:'ambTemp',   scale:'F',  color:'#2196F3', label:'Board (°F)' },
                 { key:'baro',      scale:'mb', color:'#9C27B0', label:'Baro (mbar)' } ]
     });
     buildLtChart('lt-rpm-plot', {
@@ -14614,7 +14784,7 @@ window.addEventListener('load', function () {
       scales: [ { name:'rpm', label:'RPM', side:3 },
                 { name:'pct', label:'Duty %', side:1, range:[0,100], fmt:v=>Math.round(v)+'%' } ],
       series: [ { key:'rpm',  scale:'rpm', color:'#9C27B0', label:'RPM', band:true },
-                { key:'duty', scale:'pct', color:'#9E9E9E', label:'Duty (%)' } ]
+                { key:'duty', scale:'pct', color:'#9E9E9E', label:'Duty (%)', band:true } ]
     });
     buildLtChart('lt-wind-plot', {
       title: 'Speeds (kt)',

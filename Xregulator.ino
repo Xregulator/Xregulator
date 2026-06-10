@@ -123,15 +123,30 @@ struct Episode {
   float     axMin[NAXIS], axMax[NAXIS];
   uint32_t  axSinceMs[NAXIS];   // when each axis last (re)entered its band
   bool      runQualified;       // current run has met EVERY axis's own steady time
+  // OPTIONAL output-steadiness band (outCfg.tol <= 0 → disabled, the default): the emitted
+  // quantity itself must also hold steady. Directly guards what gets recorded, which is what
+  // allows the input bands to be sized purely for transient rejection. Same independent-dwell
+  // pattern as the input axes.
+  EpAxisCfg outCfg;
+  float     outAxMin, outAxMax;     // independent dwell tracker (persists across reseeds, like axMin/axMax)
+  uint32_t  outAxSinceMs;
+  float     runOutMin, runOutMax;   // current run's output band
+  uint32_t  minRunMs;               // minimum run duration to emit (0 = no floor); closes the
+                                    // short-tail-after-reseed emit edge case
+  float     lastRunSpan[NAXIS], lastRunOutSpan;   // per-axis spread of the last EMITTED run (soak diagnostics)
 
   void init(RawSample<NAXIS> *ringBuf, int cap) {
     ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
+    outCfg = { 0, 0 }; minRunMs = 0;
+    outAxMin = outAxMax = 0; outAxSinceMs = 0; lastRunOutSpan = 0;
+    for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = 0;
     clearRun();
   }
   void clearRun() {
     sumOut = 0; count = 0; runStartMs = 0; sumEx[0] = sumEx[1] = 0;
     runQualified = false;   // NB: does NOT reset the per-axis trackers (reseed() calls clearRun);
     for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }   // they re-center on a "fresh" sample
+    runOutMin = 0; runOutMax = 0;
   }
   // Per-axis independent steadiness. `fresh` (first sample after a full reset) re-centers every
   // axis on the sample; otherwise each axis extends its own band, and restarts ONLY its own clock
@@ -144,11 +159,22 @@ struct Episode {
       if (hi - lo > cfg[a].tol) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; }   // this axis left its band → restart its own clock
       else { axMin[a] = lo; axMax[a] = hi; }
     }
+    if (outCfg.tol > 0) {   // output band tracks the same way, with its own independent clock
+      if (fresh) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
+      else {
+        float lo = outAxMin < s.out ? outAxMin : s.out;
+        float hi = outAxMax > s.out ? outAxMax : s.out;
+        if (hi - lo > outCfg.tol) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
+        else { outAxMin = lo; outAxMax = hi; }
+      }
+    }
   }
-  // True once EVERY axis has independently held within its band for at least its OWN steady time.
+  // True once EVERY axis (and the output band, if enabled) has independently held within its
+  // band for at least its OWN steady time.
   bool axesQualified(uint32_t nowMs) const {
     for (int a = 0; a < NAXIS; a++)
       if ((uint32_t)(nowMs - axSinceMs[a]) < (uint32_t)(cfg[a].steadySec * 1000.0f)) return false;
+    if (outCfg.tol > 0 && (uint32_t)(nowMs - outAxSinceMs) < (uint32_t)(outCfg.steadySec * 1000.0f)) return false;
     return true;
   }
   void ringPush(const RawSample<NAXIS> &s) {
@@ -163,12 +189,18 @@ struct Episode {
     sumOut = s.out; count = 1; runStartMs = s.tMs;
     sumEx[0] = s.ex[0]; sumEx[1] = s.ex[1];
     for (int a = 0; a < NAXIS; a++) { sumX[a] = s.x[a]; runMin[a] = runMax[a] = s.x[a]; }
+    runOutMin = runOutMax = s.out;
   }
   bool inBandWith(const RawSample<NAXIS> &s) const {
     for (int a = 0; a < NAXIS; a++) {
       float lo = runMin[a] < s.x[a] ? runMin[a] : s.x[a];
       float hi = runMax[a] > s.x[a] ? runMax[a] : s.x[a];
       if (hi - lo > cfg[a].tol) return false;
+    }
+    if (outCfg.tol > 0) {
+      float lo = runOutMin < s.out ? runOutMin : s.out;
+      float hi = runOutMax > s.out ? runOutMax : s.out;
+      if (hi - lo > outCfg.tol) return false;
     }
     return true;
   }
@@ -178,14 +210,19 @@ struct Episode {
       if (s.x[a] < runMin[a]) runMin[a] = s.x[a];
       if (s.x[a] > runMax[a]) runMax[a] = s.x[a];
     }
+    if (s.out < runOutMin) runOutMin = s.out;
+    if (s.out > runOutMax) runOutMax = s.out;
     sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
     sumOut += s.out; count++;
   }
   // Complete the current run; emit its average to `out` if it qualified — i.e. every axis
   // independently held within its band for its OWN steady time (runQualified, latched during
-  // feed). Returns true if a point was emitted. `nowMs` is the breaking sample's time.
+  // feed) AND the run itself lasted at least minRunMs (a reseed can start a run with latched
+  // qualification, so without the floor a short tail could emit). `nowMs` is the breaking
+  // sample's time. Returns true if a point was emitted.
   bool complete(uint32_t nowMs, FrontPoint<NAXIS> *out) {
-    bool emit = (count >= 1) && runQualified;
+    bool emit = (count >= 1) && runQualified
+                && (minRunMs == 0 || (uint32_t)(nowMs - runStartMs) >= minRunMs);
     if (emit && out) {
       for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(sumX[a] / (double)count);
       out->ex[0] = (float)(sumEx[0] / (double)count);
@@ -193,16 +230,20 @@ struct Episode {
       out->y = (float)(sumOut / (double)count);
       out->nSamp = count;
       out->tEmit = nowMs;
+      for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = runMax[a] - runMin[a];
+      lastRunOutSpan = runOutMax - runOutMin;
     }
     return emit;
   }
-  // Reseed a fresh run from the longest in-band tail of the ring ending at the newest sample.
+  // Reseed a fresh run from the longest in-band tail of the ring ending at the newest sample
+  // (in-band on every axis AND the output band, when enabled).
   void reseed() {
     clearRun();
     if (ringCount <= 0) return;
-    float mn[NAXIS], mx[NAXIS];
+    float mn[NAXIS], mx[NAXIS], mnO, mxO;
     { const RawSample<NAXIS> &s0 = ring[ringIdx(0)];
-      for (int a = 0; a < NAXIS; a++) mn[a] = mx[a] = s0.x[a]; }
+      for (int a = 0; a < NAXIS; a++) mn[a] = mx[a] = s0.x[a];
+      mnO = mxO = s0.out; }
     int oldestK = 0;
     for (int k = 1; k < ringCount; k++) {
       const RawSample<NAXIS> &s = ring[ringIdx(k)];
@@ -212,11 +253,19 @@ struct Episode {
         float hi = mx[a] > s.x[a] ? mx[a] : s.x[a];
         if (hi - lo > cfg[a].tol) { ok = false; break; }
       }
+      if (ok && outCfg.tol > 0) {
+        float lo = mnO < s.out ? mnO : s.out;
+        float hi = mxO > s.out ? mxO : s.out;
+        if (hi - lo > outCfg.tol) ok = false;
+      }
       if (!ok) break;
       for (int a = 0; a < NAXIS; a++) { if (s.x[a] < mn[a]) mn[a] = s.x[a]; if (s.x[a] > mx[a]) mx[a] = s.x[a]; }
+      if (s.out < mnO) mnO = s.out;
+      if (s.out > mxO) mxO = s.out;
       oldestK = k;
     }
     for (int a = 0; a < NAXIS; a++) { runMin[a] = mn[a]; runMax[a] = mx[a]; }
+    runOutMin = mnO; runOutMax = mxO;
     for (int k = oldestK; k >= 0; k--) {           // oldest → newest
       const RawSample<NAXIS> &s = ring[ringIdx(k)];
       for (int a = 0; a < NAXIS; a++) sumX[a] += s.x[a];
@@ -306,9 +355,43 @@ struct FrontStore {
   // Device keep-gate (LEARNED) — the spec's front_pushes(). Keep only runs that beat the current
   // surface; safetyMargin now defaults 0 (was a keep-bias for cloud sampling, but the cloud only
   // prunes / gets raw episodes regardless, so a margin just polluted the local eval). count==0 bootstraps.
+  // Callers should only apply this gate when hasLocalSupport() is true — far from all support the
+  // IDW blend is not a fair bar (it once locked low-RPM regions out forever).
   bool pushes(const float x[NAXIS], float y, float safetyMargin, float idwPower) const {
     if (count <= 0) return true;
     return y > eval(x, idwPower) - safetyMargin;
+  }
+  // Any support point within the same cell (the half-axisScale box add() dedupes in)? A run landing
+  // in an unvisited cell is admitted unconditionally — it opens that region at its true value, and
+  // add()'s max-per-cell keeps later, better runs.
+  bool hasLocalSupport(const float x[NAXIS]) const {
+    for (int i = 0; i < count; i++) {
+      bool sameCell = true;
+      for (int a = 0; a < NAXIS; a++) {
+        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
+        if (fabsf(x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
+      }
+      if (sameCell) return true;
+    }
+    return false;
+  }
+  // Normalized (axis-scaled) distance to the nearest support point — the "is the IDW reference
+  // trustworthy here" test. Beyond the caller's radius the live % and trend report no reference
+  // instead of a ratio against a blend of faraway points. Empty front → huge distance.
+  float nearestNormDist(const float x[NAXIS]) const {
+    if (count <= 0) return 1e9f;
+    float invSc[NAXIS];
+    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
+    float best = 1e30f;
+    for (int i = 0; i < count; i++) {
+      float d2 = 0;
+      for (int a = 0; a < NAXIS; a++) {
+        float dx = (x[a] - pts[i].x[a]) * invSc[a];
+        d2 += dx * dx;
+      }
+      if (d2 < best) best = d2;
+    }
+    return sqrtf(best);
   }
 };
 
@@ -465,6 +548,8 @@ double altTrendBaselineSec = 0.0;   // EngineRunTime_AllTime at last "Start Over
 // Live point for the dashboard gauge / trend dot, via AltLive SSE.
 static float   altLive_rpm = 0, altLive_exc = 0, altLive_amps = 0, altLive_pred = 0;
 static float   altLive_pct = 0;            // live output-% = amps ÷ front_eval (NO clamp; may exceed 100)
+static bool    altRefOk = false;           // nearest support point within altRefRadius → the % is trustworthy
+static float   altRefDist = 999.0f;        // normalized distance to nearest support point (diagnostics)
 static bool    altLiveValid = false;
 static bool    altSteady = false;          // currently inside a steady episode run (live indicator)
 static float   altWorstPctLive = 0;        // worst-bucket output-% (headline)
@@ -474,9 +559,11 @@ static uint8_t altStatusCode = 0;          // 0 learning/insufficient, 1 healthy
 // GUI-adjustable settings (Pattern B; build-then-tune). Per-axis deviation bounds (steady times +
 // front/eval knobs altRpmSec/altDutySec/altVbusSec/altThermDegF/altThermSec/altSafetyMargin/
 // altIdwPower/altPruneK live with the engine instance in 7_functions.ino):
-float altDutyTolPct    = 1.0f;   // field-duty stability band (% points)
-float altRpmTol        = 25.0f;  // RPM deviation band
-float altVbusTol       = 0.10f;  // bus-voltage deviation band (V)
+// Bands apply to the EMA-FILTERED detector inputs (altEmaSec), so they're sized for real
+// operating-point drift, not raw loop dither / sensor jitter (which the filter strips):
+float altDutyTolPct    = 1.5f;   // field-duty stability band (% points, filtered; raw CV dither is ~3 p-p)
+float altRpmTol        = 60.0f;  // RPM deviation band (filtered; raw idle jitter is ~50 p-p)
+float altVbusTol       = 0.05f;  // bus-voltage deviation band (V, filtered)
 // Admission floors:
 float altMinAmps = 2.0f;
 float altMinDuty = 5.0f;
@@ -1212,7 +1299,7 @@ uint32_t absorptionTailTimer = 0;
 uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absorption
 
 float FieldAdjustmentInterval = 50;  // The regulator field output is updated once every this many milliseconds
-float TemperatureLimitF = 150;       // the offset appears to be +40 to +50 to get true max alternator external metal temp, depending on temp sensor installation, so 150 here will produce a metal temp ~200F
+float TemperatureLimitF = 212;       // measured at the case probe; internal/metal temps run roughly +40 to +50 °F above this depending on sensor installation. Strategy rationale: docs Charging Strategy page
 int ManualFieldToggle = 0;           // 0 = Auto (PID) — fresh-flash default. Set to 1 for manual field control (debugging).
 int SwitchControlOverride = 1;       // set to 1 for web interface switches to override physical switch panel
 int MaintainMode = 0;                // Set to 1 to target 0 amps at battery
@@ -2444,6 +2531,8 @@ uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before
 const uint32_t LOOP80_IMU_LIMIT_US = 38000;  // ~38ms: accel FIFO drain budget per poll
 uint32_t loopWorst80Win = 0;           // worst 80MHz loop pass, rolling 5s window (µs)
 uint32_t loopWorst80Ses = 0;           // worst 80MHz loop pass since Reset Peak Values (µs)
+uint32_t loopFieldOnWin = 0;           // worst field-ON loop pass, rolling 5s window (µs)
+uint32_t loopFieldOnSes = 0;           // worst field-ON loop pass since Reset Peak Values (µs)
 uint32_t loopOver80ImuLimitCount = 0;  // # of 80MHz passes over LOOP80_IMU_LIMIT_US since reset
 uint32_t loop80IterCount = 0;          // total 80MHz passes since reset (denominator for the above)
 
@@ -2799,7 +2888,7 @@ float PidKi = 2.0f;   // integral gain
 float PidKd = 0.01f;  // derivative gain
 // --- Voltage (CV) PID ---
 volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)
-volatile float VoltageKi = 6.00f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
+volatile float VoltageKi = 15.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
@@ -2822,7 +2911,7 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
-float IExcessArmMarginV = 0.500f; // V below target at which iExcess voltage gate opens (decoupled from OvMeasMarginV 2026-05-23)
+float IExcessArmMarginV = 0.200f; // V below target at which iExcess voltage gate opens (decoupled from OvMeasMarginV 2026-05-23)
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
@@ -3173,7 +3262,7 @@ uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp 
 // ===== TEMPERATURE LOOP PID (replaces thermal model) =====
 // Tuning — all web UI configurable
 float TempPIDKp = 3.0f;             // A/°F proportional gain
-float TempPIDKi = 0.025f;           // Integral gain
+float TempPIDKi = 0.1f;             // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error)
 float ThermalLookaheadSec = 90.0f;  // prediction horizon: project this many seconds ahead; tune ~= thermal time constant
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
@@ -3187,7 +3276,7 @@ uint32_t TempPIDIntervalMs = 5000;  // Temperature loop update period (ms) — i
 float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
 // ThermistorFilterAlpha removed — hardcoded 0.02f in tempPID_tick IIR filter, not user-configurable
 // Runtime state — expose via telemetry
-double tempPIDInput_d = 77.0;        // Projected temp (°F) = filtered + slope × lookahead; PID process variable
+double tempPIDInput_d = 77.0;        // PID process variable (°F) = max(projected, present) — projected = filtered + slope × lookahead
 double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
@@ -4455,6 +4544,9 @@ void loop() {
   // // === END OTA UPDATE ===
   esp_task_wdt_reset();              // Feed the watchdog to prevent timeout
   starttime = esp_timer_get_time();  // Record start time for Loop
+  // Latched at the top of the pass so a pass that drops the field mid-way still counts as
+  // field-on (it ran control code). Consumed by the field-ON loop worst at the bottom of loop().
+  bool passFieldOn = !gpio4IsLow;
   currentTime = millis();
 
   // SOC and runtime update every 2 seconds (runs regardless of hardwarePresent)
@@ -5011,6 +5103,7 @@ void loop() {
     ft_altFold.worstWindow = 0;
     ft_boatPerf.worstWindow = 0;
     loopWorst80Win = 0;  // 80MHz low-power loop worst — rolling 5s window
+    loopFieldOnWin = 0;  // field-ON loop worst — rolling 5s window
 
     prev_millis7888 = millis();
   }
@@ -5023,6 +5116,13 @@ void loop() {
     if ((uint32_t)LoopTime > loopWorst80Win) loopWorst80Win = (uint32_t)LoopTime;
     if ((uint32_t)LoopTime > loopWorst80Ses) loopWorst80Ses = (uint32_t)LoopTime;
     if (LoopTime > LOOP80_IMU_LIMIT_US) loopOver80ImuLimitCount++;
+  }
+  // Field-ON loop health: same pass timer, gated to passes that started with the field gate
+  // open. Splits real control-path stalls (CV-tick / overvoltage risk) from intentional
+  // field-off background work (flash flushes, uploads) that dominates the ungated worst.
+  if (passFieldOn) {
+    if ((uint32_t)LoopTime > loopFieldOnWin) loopFieldOnWin = (uint32_t)LoopTime;
+    if ((uint32_t)LoopTime > loopFieldOnSes) loopFieldOnSes = (uint32_t)LoopTime;
   }
   if (LoopTime > 5000000) {  // 5 seconds in microseconds
     Serial.printf("WARNING: Loop took %lld - potential watchdog risk\n", LoopTime / 1000);

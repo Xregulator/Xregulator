@@ -1656,23 +1656,22 @@ void updateSensorWindow() {
     }
   }
 
-  // Alternator temperature
+  // Alternator temperature - CONDITIONAL on validity (matches thermistor pattern below).
+  // NaN (no OneWire reading yet) and the thermistor's -99 marker must never touch the
+  // window, or the long-term plot's min envelope dips to -99 after every boot.
   if (TempSource == 0) {
     TempToUse = AlternatorTemperatureF;
   } else {
     TempToUse = temperatureThermistor;
   }
-  int32_t altTemp;
-  if (isnan(TempToUse)) {
-    altTemp = -9900;  // Invalid marker (-99.00 when divided by 100)
-  } else {
-    altTemp = (int32_t)(TempToUse * 100.0);
-  }
-  if (altTemp < currentWindow->altTemp_min) currentWindow->altTemp_min = altTemp;
-  if (altTemp > currentWindow->altTemp_max) currentWindow->altTemp_max = altTemp;
-  if (shouldAccumulate && !isnan(TempToUse)) {
-    currentWindow->altTemp_area_v_us += (int64_t)altTemp * delta_us;
-    currentWindow->altTemp_valid_us += delta_us;
+  if (!isnan(TempToUse) && TempToUse != -99) {
+    int32_t altTemp = (int32_t)(TempToUse * 100.0);
+    if (altTemp < currentWindow->altTemp_min) currentWindow->altTemp_min = altTemp;
+    if (altTemp > currentWindow->altTemp_max) currentWindow->altTemp_max = altTemp;
+    if (shouldAccumulate) {
+      currentWindow->altTemp_area_v_us += (int64_t)altTemp * delta_us;
+      currentWindow->altTemp_valid_us += delta_us;
+    }
   }
 
   // Thermistor temperature - CONDITIONAL on freshness (matches baro/ambient pattern)

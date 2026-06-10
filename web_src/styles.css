@@ -791,6 +791,63 @@ input[type="submit"]:hover {
   cursor: not-allowed;
 }
 
+/* ── Plant Delay Test: minimize-to-pill + mobile bottom-sheet ────────────────
+   Minimize (mobile only) collapses the panel to a thin bottom pill carrying live
+   test progress, with the backdrop cleared so the current plot is visible and
+   tappable behind it. Desktop keeps the floating draggable panel untouched. */
+
+/* Minimize button: mobile only — desktop panel never covers the plot. */
+#sysid-min-btn { display: none; }
+
+/* Pill (minimized). Hidden until the overlay carries .sysid-min. */
+#sysid-pill {
+  display: none;
+  position: fixed;
+  left: 12px; right: 12px; bottom: 16px;
+  z-index: 9001;
+  background: #1e1e1e; color: #eee;
+  border: 1px solid #3a3a3a; border-radius: 16px;
+  padding: 10px 14px;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  align-items: center; gap: 12px;
+  cursor: pointer; font-size: 13px;
+  pointer-events: auto;   /* clickable even though the overlay is click-through when minimized */
+}
+#sysid-modal-overlay.sysid-min #sysid-pill  { display: flex; }
+#sysid-modal-overlay.sysid-min #sysid-modal-panel { display: none; }
+#sysid-modal-overlay.sysid-min { pointer-events: none; }   /* taps pass through to the plot */
+
+.sysid-pill-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: #5fd38a; }
+#sysid-modal-overlay.sysid-running .sysid-pill-dot { animation: log-pulse 1.6s infinite; }
+.sysid-pill-col   { flex: 1 1 auto; min-width: 0; }
+.sysid-pill-row   { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 5px; }
+.sysid-pill-lbl   { font-weight: 600; white-space: nowrap; }
+.sysid-pill-phase { color: #9a9a9a; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sysid-pill-bar   { height: 5px; border-radius: 3px; background: #333; overflow: hidden; }
+.sysid-pill-bar i { display: block; height: 100%; width: 0%; background: #4a9eff; border-radius: 3px; transition: width 0.4s; }
+.sysid-pill-pct   { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-weight: 600; color: #cfe6ff; min-width: 3.4ch; text-align: right; }
+.sysid-pill-exp   { flex: 0 0 auto; color: #888; font-size: 16px; }
+
+/* Mobile: floating panel becomes a bottom sheet; the overlay becomes a dimmed,
+   tap-blocking backdrop. !important overrides the panel's inline positioning. */
+@media (max-width: 600px) {
+  #sysid-min-btn { display: inline-block; }
+
+  #sysid-modal-overlay { background: rgba(0, 0, 0, 0.55); pointer-events: auto; }
+  #sysid-modal-overlay.sysid-min { background: transparent; pointer-events: none; }
+
+  #sysid-modal-panel {
+    top: auto !important; bottom: 0 !important; left: 0 !important; right: 0 !important;
+    width: auto !important; max-width: none !important;
+    max-height: 88vh !important;
+    border-radius: 18px 18px 0 0 !important;
+    border-bottom: none !important;
+    box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.5) !important;
+  }
+  /* Pin the header so minimize/close stay reachable while the sheet body scrolls. */
+  #sysid-drag-handle { cursor: default; border-radius: 18px 18px 0 0 !important; position: sticky; top: 0; z-index: 1; }
+}
+
 /* Danger (red) */
 .btn-danger {
   background: rgba(214, 69, 62, 0.13);
@@ -1361,6 +1418,14 @@ input[type="submit"]:hover {
   font-size: 20px;
   font-weight: 800;
   text-align: left;
+}
+/* Reserve width for the widest temp string ("250.5", 1 decimal) and right-align
+   the value. Without this, temp crossing 100.0°F (4->5 chars) widened this
+   content-sized chip and reflowed the whole max-content/space-evenly header
+   tier. Right-align keeps °F from shifting too. */
+.reading-duo-solo .duo-num {
+  min-width: 4.6ch;
+  text-align: right;
 }
 
 
@@ -2294,10 +2359,6 @@ hr {
     flex-wrap: wrap;
     flex-shrink: 1;          /* override the desktop flex-shrink:0 so buttons can wrap */
   }
-
-  /* Download & Logging: buttons get the full width to wrap onto */
-  .log-group { flex-wrap: wrap; }
-  .log-fresh-wrap { margin-left: 0; }   /* override margin-left:auto so it wraps inline */
 }
 
 /* Toggle switch styling */
@@ -2306,6 +2367,18 @@ hr {
   display: inline-block;
   width: 40px;
   height: 20px;
+}
+
+/* Invisible tap-target extender: the slider stays 40x20 visually, but the label's
+   clickable area reaches the 44px iOS touch minimum. Vertical only — horizontal
+   growth would swallow taps on adjacent inline labels (e.g. Manual/PID captions). */
+.switch::before {
+  content: "";
+  position: absolute;
+  top: -12px;
+  bottom: -12px;
+  left: 0;
+  right: 0;
 }
 
 .switch input {
@@ -2570,8 +2643,11 @@ input:checked+.slider:before {
   align-items: flex-start;  /* with a wrapped multi-line title, top-align the info icon instead of centering it */
 }
 
-/* title text takes the available width and wraps; the info icon keeps its own fixed column */
-.card-group-title > span:first-child {
+/* title text takes the available width and wraps; the info icon keeps its own fixed column.
+   CONTRACT: the title text must be wrapped in its own <span> — a bare text node makes the
+   tooltip/badge the first span child, and the stretchy slot turns it into a full-width blob.
+   The :not(.tooltip) guard keeps a forgotten wrapper from stretching the icon itself. */
+.card-group-title > span:first-child:not(.tooltip) {
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -2609,6 +2685,61 @@ input:checked+.slider:before {
   font-size: 11px;
   font-weight: bold;
   color: var(--reading);
+}
+
+/* Tabular min/avg/max readouts (IMU Window Stats). Replaces the old single
+   nowrap value line that overran narrow cards once numbers went negative/wide.
+   Units live in the row name or card title so value columns stay purely numeric. */
+.stat-table {
+  display: grid;
+  grid-template-columns: minmax(0, auto) repeat(3, minmax(0, 1fr));
+  column-gap: 10px;
+  align-items: baseline;
+}
+.stat-table > * {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.stat-table > :nth-last-child(-n + 4) { border-bottom: none; }   /* last data row, no separator */
+.stat-cap {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #888;
+  text-align: right;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.stat-name {
+  font-size: 12px;
+  color: #666;
+  white-space: nowrap;
+}
+.stat-cell {
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--reading);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+.dark-mode .stat-cap,
+.dark-mode .stat-name { color: #aaa; }
+
+/* When a stat card gets narrow (e.g. 3-up at the grid's 220px floor), the
+   name + 3 value columns no longer fit on one line. Drop to a per-metric
+   block: name on its own line above its three values. Container query so it
+   responds to the CARD width, not the viewport. */
+.stat-card { container-type: inline-size; }
+@container (max-width: 300px) {
+  .stat-table { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stat-table > .stat-cap:first-child { display: none; }   /* drop empty corner so Min/Avg/Max fill the 3 cols */
+  .stat-name {
+    grid-column: 1 / -1;
+    text-align: left;
+    padding: 9px 0 2px;
+    border-bottom: none;
+  }
 }
 
 .dark-mode .card-group {
@@ -3440,23 +3571,30 @@ input:checked+.slider:before {
 }
 
 /* ── Logging controls (Plots → Download & Logging) — Option 3 ────── */
-.log-controls {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-/* status + pause/resume toggle bundled — they're the "recording" concept */
-.log-group {
-    display: flex;
-    align-items: center;
+
+/* Lets a form-row span the full card width instead of the default 480px cap */
+.form-row-wide { max-width: none; }
+
+/* Logging controls: tooltip on the right, 4-cell equal grid fills the rest */
+.log-row { align-items: center; }
+.log-row .log-info { flex-shrink: 0; margin-left: 10px; cursor: pointer; }
+.log-grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
     gap: 8px;
-    background: #f7f7f7;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 7px 9px;
+    align-items: stretch;
 }
-.log-fresh-wrap { margin-left: auto; }   /* push Start Fresh Log to the right edge */
+/* equalize the cells — kill the per-button min-widths so all four match */
+.log-grid > * { width: 100%; margin: 0; }
+/* two-class specificity to beat the pill/toggle min-widths so all cells equalize */
+.log-grid > .log-pill, .log-grid > .btn-log-toggle { min-width: 0; }
+@media (max-width: 640px) {
+    .log-grid { grid-template-columns: repeat(2, 1fr); }   /* 2x2 on mobile */
+}
+
+/* Time-window buttons wrap instead of overflowing the card on narrow widths */
+.time-window-input form { flex-wrap: wrap; justify-content: flex-end; }
 
 /* status badge — fixed min-width so Recording / Paused are the same size */
 .log-pill {
@@ -3995,6 +4133,14 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
   -webkit-tap-highlight-color: transparent;
 }
 .baro-autoscale-toggle input[type="checkbox"] { cursor: pointer; }
+/* Plot autoscale checkboxes render at native ~13px — bump to a finger-usable box
+   (their parent labels are the rest of the tap target) */
+#baroAutoscaleY,
+#thermal-autoscale {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
 .baro-range-pills { display: flex; gap: 6px; flex-wrap: wrap; }
 /* .sub-tab styling already gives us pill buttons + teal active state */
 
@@ -4110,29 +4256,53 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
 .wfr-light .bl-clouds span:nth-child(1) { top: 116px; left: 24px; --s: 1; opacity: 0.9; animation: bl-cloud 90s linear infinite; }
 .wfr-light .bl-clouds span:nth-child(2) { top: 172px; left: 150px; --s: 0.58; opacity: 0.6; animation: bl-cloud 120s linear infinite; }
 
-/* On-plot Y-axis click-to-edit boxes (attachYAxisEdit in script.js).
-   Sit at the corners of every uPlot chart's plot area; faint until
-   hovered/focused so they read as axis labels, not form fields. */
+/* On-plot Y-axis editing (attachYAxisEdit in script.js). The canvas-drawn
+   min/max tick labels of each Y axis get an invisible click zone
+   (.yaxis-hot); clicking summons the edit box (.yaxis-edit) in place.
+   z-index 9 keeps the zones UNDER plot overlay controls (.autoscale-ctrl
+   lock/auto buttons, z-index 10) so those stay clickable. */
+.yaxis-hot {
+  position: absolute;
+  z-index: 9;
+  cursor: pointer;
+  border: 1px dashed transparent;
+  border-radius: 3px;
+}
+
+.yaxis-hot:hover {
+  border-color: rgba(127, 127, 127, 0.55);
+  background: rgba(127, 127, 127, 0.10);
+}
+
+/* Touch devices can't hover to discover the zones — keep a faint
+   dashed outline on them at all times instead. The edit box gets a
+   16px font there: smaller fonts make iOS auto-zoom the page on focus
+   (viewport meta doesn't lock zoom). */
+@media not ((hover: hover) and (pointer: fine)) {
+  .yaxis-hot {
+    border-color: rgba(127, 127, 127, 0.35);
+  }
+
+  .yaxis-edit {
+    font-size: 16px;
+  }
+}
+
 .yaxis-edit {
   position: absolute;
   z-index: 12;
+  display: none;
   width: 58px;
   padding: 1px 4px;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-dark, #333);
-  background: rgba(127, 127, 127, 0.10);
+  background: var(--card-dark, rgba(255, 255, 255, 0.92));
   border: 1px solid rgba(127, 127, 127, 0.45);
   border-radius: 3px;
-  opacity: 0.55;
+  outline: none;
   -moz-appearance: textfield;
   appearance: textfield;
-}
-.yaxis-edit:hover,
-.yaxis-edit:focus {
-  opacity: 1;
-  background: var(--card-dark, rgba(255, 255, 255, 0.92));
-  outline: none;
 }
 .yaxis-edit::-webkit-outer-spin-button,
 .yaxis-edit::-webkit-inner-spin-button {
