@@ -1126,9 +1126,9 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Protections continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC = 100.0f;      // ms — iExcess EMA TC, LittleFS-backed
-float OutputPIDFilterTC = 100.0f;  // ms — Output Current PID EMA TC, LittleFS-backed
-float VoltageFilterTC = 100.0f;    // ms — IBV EMA TC for CV voltage loop, LittleFS-backed
+float InputFilterTC = 12.0f;       // ms — iExcess EMA TC, NVS-backed (default 100→12, 2026-06-10: plant/3 at measured 35ms plant delay)
+float OutputPIDFilterTC = 12.0f;   // ms — Output Current PID EMA TC, NVS-backed (default 100→12, 2026-06-10: plant/3 at measured 35ms plant delay)
+float VoltageFilterTC = 35.0f;     // ms — IBV EMA TC for CV voltage loop, NVS-backed (default 100→35, 2026-06-10: full plant delay at measured 35ms)
 float MeasuredAmps_filtered = 0.0f;  // iExcess EMA signal
 float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by getFiltV()
@@ -2892,7 +2892,7 @@ volatile float VoltageKi = 15.0f;    // A/(V·s) — integral gain; above-target
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
-float SlopeBleedProxV = 0.50f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0)
+float SlopeBleedProxV = 0.20f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0); default 0.50→0.20, 2026-06-10
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
@@ -3204,7 +3204,7 @@ float innerTermD = 0.0f;
 // Values hold between computes, which is correct — the integrator state is stable.
 float outerTermP = 0.0f;
 float outerTermI = 0.0f;
-float outerTermD = 0.0f;           // probably always 0
+float outerTermLookahead = 0.0f;   // look-ahead share of outerTermP: Kp × max(0, projected − present temp), penalty-signed. Replaced always-zero outerTermD (Kd is hardwired 0; derivative action lives in the projected input)
 float thermalSlopeFPerSec = 0.0f;  // long-window slope estimate (°F/sec); replaces outerTermDExternal
 
 volatile bool tempPIDResetRequested = false;
@@ -3263,7 +3263,7 @@ uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp 
 // Tuning — all web UI configurable
 float TempPIDKp = 3.0f;             // A/°F proportional gain
 float TempPIDKi = 0.1f;             // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error)
-float ThermalLookaheadSec = 90.0f;  // prediction horizon: project this many seconds ahead; tune ~= thermal time constant
+float ThermalLookaheadSec = 60.0f;  // prediction horizon: project this many seconds ahead; size ~= plant dead time (~20s measured) + slope-estimator latency (~30s), NOT the settling time constant
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
@@ -3361,7 +3361,7 @@ struct ThermalLogEntry {
 
   int16_t outerTermP;
   int16_t outerTermI;
-  int16_t outerTermD;
+  int16_t outerTermLookahead;  // repurposed from always-zero outerTermD; CSV column renamed to "lookahead"
   int16_t impliedPenalty;
   int16_t thermalSlope;  // thermalSlopeFPerSec × 1000 (0.001 °F/sec per count)
   // gainKp/Ki/Lookahead written once in pidlog CONST row
@@ -3617,7 +3617,7 @@ enum FastOvCapReason : uint8_t {
   CAP_REASON_IEXCESS  = 3,  // iExcess supervisor
   CAP_REASON_LOADDUMP = 4,  // load-dump cutoff
 };
-uint8_t g_fastOvCapReason = CAP_REASON_NONE;
+uint8_t g_fastOvCapReason = CAP_REASON_NONE;  // exported once per full control tick alongside g_fastOvCurrentCap (see capReasonTick in AdjustFieldLearnMode)
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────
 // Written in ADS case 1, read by AdjustFieldLearnMode and cvLog_tick

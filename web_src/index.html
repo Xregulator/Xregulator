@@ -5263,7 +5263,8 @@
                 </div>
 
                 <!-- CV plot axis controls — Y ranges are edited directly on the plot
-                     (attachYAxisEdit boxes); only the X window and Auto reset live here -->
+                     (attachYAxisEdit boxes, clear + Enter returns a scale to auto);
+                     only the X window control lives here -->
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 2px 0; font-size:0.83em; color:var(--text-muted);">
                   <span style="font-weight:600; white-space:nowrap;">Plot axes:</span>
 
@@ -5274,8 +5275,6 @@
                     <button onclick="setCVXTime(document.getElementById('cvXTimeInput').value)"
                             class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
                   </span>
-
-                  <button onclick="resetCVAxisRanges()" class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Y Auto</button>
                 </div>
 
                 <!-- Live plot -->
@@ -5705,12 +5704,12 @@
                     </div>
 
                     <div class="metric-row telemetry-row">
-                      <span class="metric-label telemetry-label">Temperature D Term (library)
+                      <span class="metric-label telemetry-label">Look-Ahead Term
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Library derivative term (A). Always 0 — Kd is hardcoded to 0.0 in firmware. Derivative action is implemented via the slope-based lookahead instead: the PID input is projectedTemp = filteredTemp + slope × lookahead, not current temperature.</span>
+                          <span class="tooltip-box">Look-ahead share of the temperature response (A). The controller acts on a projected temperature (present + slope × look-ahead time) rather than the present temperature; this is the extra current reduction that projection causes. Zero when temperature is steady or falling. Shown as a contribution to the current target: negative means amps are being removed preemptively.</span>
                         </span>
                       </span>
-                      <span class="metric-value telemetry-value"><span id="outerTermD_display">?</span> A</span>
+                      <span class="metric-value telemetry-value"><span id="outerTermLookahead_display">?</span> A</span>
                     </div>
 
                     <div class="metric-row telemetry-row">
@@ -7061,7 +7060,7 @@
               Autoscale Y
             </label>
             <div class="baro-range-pills" id="baroRangePills">
-              <button class="sub-tab" data-range="3">3H</button>
+              <button class="sub-tab" data-range="1">1H</button>
               <button class="sub-tab" data-range="6">6H</button>
               <button class="sub-tab active" data-range="24">24H</button>
               <button class="sub-tab" data-range="48">48H</button>
@@ -9622,6 +9621,8 @@
             Last data: <span id="dashboard-staleness-time">—</span>
             <span id="dashboard-staleness-ago">—</span>
           </span>
+          <!-- Cadence note — JS overwrites from the .bin header (ltData.interval) on load -->
+          <span id="dashboard-sample-note">Sampled every 10 min</span>
           <span id="dashboard-crosshair-indicator" style="display:none;">
             📍 <span id="dashboard-crosshair-time">—</span>
             <button id="dashboard-crosshair-clear" title="Clear pinned time">×</button>

@@ -235,7 +235,7 @@ enum Csv2Index {
   CSV2_innerTermD,
   CSV2_outerTermP,
   CSV2_outerTermI,
-  CSV2_outerTermD,
+  CSV2_outerTermLookahead,  // look-ahead share of outerTermP (A ×100); repurposed in place from always-zero outerTermD
   CSV2_thermalSlopeFPerSec,
   CSV2_chargeStageDisplay,
   CSV2_voltageControlActive,
@@ -1618,7 +1618,7 @@ void setupServer() {
                 "rpmCap_A,voltCap_A,uTarget_A,spLimited_A,"
                 "pidErr_A,pidOut_pct,duty_pct,RPM,battV,measAmps_A,"
                 "penaltyAmps_A,flags,chargeStageDisplay,"
-                "outerP,outerI,outerD,impliedPenalty,antiWindupFired,thermalSlope_F_sec\n");
+                "outerP,outerI,lookahead,impliedPenalty,antiWindupFired,thermalSlope_F_sec\n");
             } else if (state.row == 1) {
               // Constants row — written once, Python detects via "CONST" in ts_ms field
               state.lineLen = snprintf(
@@ -1656,7 +1656,7 @@ void setupServer() {
                 (unsigned)e.chargeStageDisplay,
                 e.outerTermP / 10.0f,
                 e.outerTermI / 10.0f,
-                e.outerTermD / 10.0f,
+                e.outerTermLookahead / 10.0f,
                 e.impliedPenalty / 10.0f,
                 (unsigned)e.antiWindupFired,
                 e.thermalSlope / 1000.0f);
@@ -5965,7 +5965,7 @@ void SendWifiData() {
                                SafeInt(innerTermD, 100),
                                SafeInt(outerTermP, 100),
                                SafeInt(outerTermI, 100),
-                               SafeInt(outerTermD, 100),
+                               SafeInt(outerTermLookahead, 100),
                                SafeInt(thermalSlopeFPerSec, 1000),
                                SafeInt(chargeStageDisplay),
                                SafeInt(voltageControlActive),

@@ -1139,7 +1139,13 @@ void AdjustFieldLearnMode() {
   float uTargetRaw = (float)MaxTableValue;  // always MaxTableValue; kept for uTargetRaw_cached lineage only
   float fastOvBaseCap = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
   float fastOvCurrentCap = fastOvBaseCap;
-  g_fastOvCapReason = CAP_REASON_NONE;  // reset binding-reason tracker each tick; set at each cap-lowering site below
+  // Binding-reason tracker — LOCAL through the tick, exported to g_fastOvCapReason
+  // alongside g_fastOvCurrentCap after all supervisors. Must NOT write the global
+  // directly here: the iExcess/LoadDump supervisors sit BELOW the fresh-CH1 early
+  // return, so a global reset on every no-CH1 pass wiped their reason while the
+  // stale cap stayed exported — the CV log showed iExcess-lowered caps with
+  // capReason=0 forever (found 2026-06-10, cvlog_20260610_2115).
+  uint8_t capReasonTick = CAP_REASON_NONE;
   bool fastOvClampActive = false;
   static uint32_t ocTripStartMs = 0;
 
@@ -1258,7 +1264,7 @@ void AdjustFieldLearnMode() {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
           // record reason only when this layer actually lowers the cap (equiv. to fminf)
-          if (hardCap < fastOvCurrentCap) { fastOvCurrentCap = hardCap; g_fastOvCapReason = CAP_REASON_KHARD_G1; }
+          if (hardCap < fastOvCurrentCap) { fastOvCurrentCap = hardCap; capReasonTick = CAP_REASON_KHARD_G1; }
           fastOvClampActive = true;
           g_fastOvHardActive = true;
         }
@@ -1267,7 +1273,7 @@ void AdjustFieldLearnMode() {
       if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
         float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
-        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; g_fastOvCapReason = CAP_REASON_KHARD_G2; }
+        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
         ovActive = true;
         g_fastOvHardActive = true;
@@ -1281,7 +1287,7 @@ void AdjustFieldLearnMode() {
       else if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && ovActive && IBV > ChargingVoltageTarget) {
         float ovExcessSoft = IBV - ChargingVoltageTarget;
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcessSoft);
-        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; g_fastOvCapReason = CAP_REASON_KHARD_G2; }
+        if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
         fastOvClampActive = true;
       }
 
@@ -1967,7 +1973,7 @@ void AdjustFieldLearnMode() {
                 queueConsoleMessage("iExcess: inner PID integrator reset");
               }
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
-              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; g_fastOvCapReason = CAP_REASON_IEXCESS; }
+              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
               fastOvClampActive = true;
               iExcessActive = true;
               // One-shot cv_I drain on the rising edge only — postFastOvMismatch arms below
@@ -1989,7 +1995,7 @@ void AdjustFieldLearnMode() {
               // Re-apply proportional cap each tick of the event (fire branch runs once).
               // Deliberately not a hard 0-cap — that would deepen recovery undershoot.
               float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
-              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; g_fastOvCapReason = CAP_REASON_IEXCESS; }
+              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
               fastOvClampActive = true;  // hold govBypass during hysteresis
             } else {
               iExcessActive = false;     // release; unified reseed handles cv_I
@@ -2042,7 +2048,7 @@ void AdjustFieldLearnMode() {
             bool ldNow = (ldCount1 >= 1) || (ldCount2 >= 2) || (ldCount3 >= 3);
             if (ldNow) {
               fastOvCurrentCap = 0.0f;
-              g_fastOvCapReason = CAP_REASON_LOADDUMP;  // hard cutoff — always the binding cap
+              capReasonTick = CAP_REASON_LOADDUMP;  // hard cutoff — always the binding cap
               setpointLimited = 0.0f;
               fastOvClampActive = true;
               if (!ldWasActive) {
@@ -2290,6 +2296,7 @@ void AdjustFieldLearnMode() {
             g_fastOvClampCount++;
           }
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
+          g_fastOvCapReason = capReasonTick;      // export reason atomically with the cap — CV log reads a coherent pair
           g_fastOvClampActive = fastOvClampActive;  // commit unified flag for next tick
           bool seedProtected = (AwSeedProtectMs > 0) && ((currentMillis - awSeedProtectStartMs) < (uint32_t)AwSeedProtectMs);
 
@@ -4137,8 +4144,12 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   tempPIDSetpoint_d = (double)effectiveSetpoint;
   // PID input is the worse of projected and present temp — projection alone forgives
   // the entire present error whenever slope <= 0, releasing penalty while still hot.
+  // lookaheadDeltaF = how many °F the projection adds above present temp; its Kp-scaled
+  // amps equivalent is captured as outerTermLookahead in the pidComputed block below.
+  float lookaheadDeltaF;
   {
     float tempNowPid = (TempSource == 0) ? TempToUse : tempFiltered;
+    lookaheadDeltaF = fmaxf(0.0f, projectedTempF - tempNowPid);
     tempPIDInput_d = (double)fmaxf(projectedTempF, tempNowPid);
   }
 
@@ -4164,7 +4175,10 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalPenaltyLastValid = thermalPenaltyAmps;
 
     outerTermP = (float)tempPID.GetPterm();
-    outerTermD = (float)tempPID.GetDterm();
+    // Look-ahead share of P (Kd is hardwired 0, so GetDterm() was always 0).
+    // Updated only on Compute() so it freezes in lockstep with outerTermP —
+    // a live-derived version would show phantom derate while the loop is idle.
+    outerTermLookahead = TempPIDKp * lookaheadDeltaF;
   }
 
   // outerTermI is updated every tick (not just on pidComputed) because
@@ -4172,8 +4186,8 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // below may advance it between compute ticks, and the log must reflect
   // that movement — otherwise the log shows a stale bulk-compute value
   // while antiWindupFired shows 0, making the bleed appear inert when it
-  // isn't. outerTermP and outerTermD are only valid after a Compute() call
-  // so they remain inside the pidComputed block above.
+  // isn't. outerTermP and outerTermLookahead are only valid after a Compute()
+  // call so they remain inside the pidComputed block above.
   outerTermI = (float)tempPID.GetIterm();
 
   // CV integrator bleed: in CV stages, if iterm < 0 (stale cold-boost bias
@@ -4422,7 +4436,7 @@ void thermalLog_tick(uint32_t nowMs) {
 
   e.outerTermP = thermalLogScale10(outerTermP);
   e.outerTermI = thermalLogScale10(outerTermI);
-  e.outerTermD = thermalLogScale10(outerTermD);
+  e.outerTermLookahead = thermalLogScale10(outerTermLookahead);
   e.impliedPenalty = thermalLogScale10(outerImpliedPenalty);
   e.thermalSlope = (int16_t)(thermalSlopeFPerSec * 1000.0f);
 

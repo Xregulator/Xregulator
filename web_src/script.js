@@ -383,7 +383,7 @@ const CSV2_FIELDS = [
     "innerTermD",
     "outerTermP",
     "outerTermI",
-    "outerTermD",
+    "outerTermLookahead",
     "thermalSlopeFPerSec",
     "chargeStageDisplay",
     "voltageControlActive",
@@ -684,7 +684,7 @@ const CSV2_FIELDS = [
     "STWNMEA",                    // Speed Through Water (SOW, knots ×100); -1 = NAN/no log
     // thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
     "tempFiltered",               // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF
-    "outerImpliedPenalty",        // voltage cap as downstream amps penalty (A ×100); Plot 2 "Implied Penalty"
+    "outerImpliedPenalty",        // voltage cap as downstream amps penalty (A ×100); still streamed but no longer plotted (voltage-loop info, dropped from the thermal subtab)
     "thermalFlags",               // state-strip bitfield: bit0 tempPIDActive, bit4 AUTO, bit5 shutdown
     "outerAntiWindupFired",       // 1 = CV-bleed anti-windup fired since last frame (red ticks)
     // +10: Inner Current PID firing interval (field-on-gated), CH1-style stats (avg ÷100)
@@ -3557,9 +3557,8 @@ function processCSVDataOptimized(data) {
         }
 
         // CV voltage tuning plot data — all four series now come from CSV1 (fast rate).
-        // When the corner "lock" button is engaged, skip the shift/append so the
-        // plot stays frozen for inspection. New samples are simply dropped while paused.
-        if (cvTuningData && !cvTuningPlotPaused) {
+        // Always appends; the corner "lock" button only freezes the Y axes, never the data.
+        if (cvTuningData) {
             const voltTarget = 'voltageTarget' in data ? parseFloat(data.voltageTarget) / 100 : null;
             const battV      = 'BatteryV_raw' in data ? parseFloat(data.BatteryV_raw) / 100 : null;
             const ibvRaw     = 'IBV' in data ? parseFloat(data.IBV) / 100 : null;
@@ -3677,9 +3676,7 @@ function updatePlotConfiguration(data) {
 
         // CV plot uses xTime as its fallback window when cvXTime is null
         if (cvTuningPlot && cvXTime === null) {
-            cvTuningPlot.destroy();
-            initCVTuningDataStructures();
-            initCVTuningPlot();
+            rebuildCVTuningWindow();
         }
 
         configChanged = true;
@@ -5138,7 +5135,12 @@ document.addEventListener('DOMContentLoaded', () => {
 let cvTuningPlot = null;
 let cvTuningData = null;
 let cvTuningPlotResizeObserver = null;
-let cvTuningPlotPaused = false;  // toggled by the corner "lock" button
+// Corner "lock" button — same semantics as the Plots tab locks: freeze the Y
+// autoscale at its current ranges while data keeps streaming. _cvLockWasAuto
+// remembers which scales were auto at lock time so unlock returns only those
+// to auto (explicit manual ranges survive a lock/unlock cycle).
+let cvYAxesLocked = false;
+let _cvLockWasAuto = { volts: false, amps: false };
 
 // Cache of last-seen CSV2 values for the CV tuning plot.
 // voltageTarget and Icv are CSV2 — not available in processCSVDataOptimized's data object.
@@ -5224,18 +5226,21 @@ function initCVTuningPlot() {
                 label: 'Voltage (V)',
                 side:  3,
                 grid:  { show: true },
+                splits: edgeLabeledSplits(() => cvVoltsMin !== null),
             },
             {
                 scale: 'amps',
                 label: 'Current (A)',
                 side:  1,
                 grid:  { show: false },
+                splits: edgeLabeledSplits(() => cvAmpsMin !== null),
             },
         ],
         scales: {
-            x:     { time: false, auto: false, range: [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
-            // Range fns, not arrays: re-read each redraw so manual Y edits survive
-            // mid-capture setData re-ranging. Null globals = default autoscale fit.
+            // ALL ranges are fns, not arrays: re-read each redraw, so window changes and
+            // manual Y edits take effect via plain setData — no destroy/recreate, no
+            // layout jump. Null Y globals = default autoscale fit.
+            x:     { time: false, auto: false, range: () => [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
             volts: { range: (u, mn, mx) => (cvVoltsMin !== null && cvVoltsMax !== null) ? [cvVoltsMin, cvVoltsMax] : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
             amps:  { range: (u, mn, mx) => (cvAmpsMin  !== null && cvAmpsMax  !== null) ? [cvAmpsMin,  cvAmpsMax]  : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
         },
@@ -5246,13 +5251,12 @@ function initCVTuningPlot() {
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvTuningPlot);
     createCVTuningLegend();
 
-    // Corner lock button — style copied from the Plots tab voltage plot.
-    // When locked, the data-injection block in processCSVDataOptimized skips
-    // the shift/append, freezing the plot for inspection.
+    // Corner lock button — locks the Y axes at their current ranges (same
+    // semantics as the Plots tab lock buttons). Data keeps streaming.
     plotEl.style.position = 'relative';
     const existingLock = plotEl.querySelector('.autoscale-ctrl');
     if (existingLock) existingLock.remove();
-    cvTuningPlotPaused = false;
+    cvYAxesLocked = false;
     const lockDiv = document.createElement('div');
     lockDiv.className = 'autoscale-ctrl';
     lockDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
@@ -5260,24 +5264,42 @@ function initCVTuningPlot() {
     plotEl.appendChild(lockDiv);
     const lockBtnCV = document.getElementById('lock-cv-tuning-btn');
     lockBtnCV.addEventListener('click', () => {
-        cvTuningPlotPaused = !cvTuningPlotPaused;
-        lockBtnCV.textContent = cvTuningPlotPaused ? 'unlock' : 'lock';
-        lockBtnCV.style.opacity = cvTuningPlotPaused ? '1' : '0.6';
+        cvYAxesLocked = !cvYAxesLocked;
+        if (cvYAxesLocked) {
+            // Freeze each auto scale at its current range; manual ranges are already fixed
+            _cvLockWasAuto.volts = (cvVoltsMin === null);
+            _cvLockWasAuto.amps  = (cvAmpsMin === null);
+            if (_cvLockWasAuto.volts) { cvVoltsMin = cvTuningPlot.scales.volts.min; cvVoltsMax = cvTuningPlot.scales.volts.max; }
+            if (_cvLockWasAuto.amps)  { cvAmpsMin  = cvTuningPlot.scales.amps.min;  cvAmpsMax  = cvTuningPlot.scales.amps.max; }
+        } else {
+            // Unlock returns previously-auto scales to auto; manual ones stay manual
+            if (_cvLockWasAuto.volts) { cvVoltsMin = null; cvVoltsMax = null; }
+            if (_cvLockWasAuto.amps)  { cvAmpsMin  = null; cvAmpsMax  = null; }
+            queueCVTuningPlotUpdate();
+        }
+        lockBtnCV.textContent = cvYAxesLocked ? 'unlock' : 'lock';
+        lockBtnCV.style.opacity = cvYAxesLocked ? '1' : '0.6';
     });
 
-    // Click-to-edit Y limits — the on-plot boxes are the only Y range controls
+    // Click-to-edit Y limits — the on-plot boxes are the only Y range controls.
+    // Auto (clear + Enter) just nulls the globals: the range fns re-read them on the
+    // next redraw, so a queued setData is all it takes — never destroy/recreate.
     attachYAxisEdit(cvTuningPlot, [
         {
             scale: 'volts', decimals: 2,
             apply: (mn, mx) => setCVVoltsRange(mn, mx),
-            auto: () => { cvVoltsMin = null; cvVoltsMax = null; if (cvTuningPlot) { cvTuningPlot.destroy(); initCVTuningPlot(); } }
+            auto: () => { cvVoltsMin = null; cvVoltsMax = null; queueCVTuningPlotUpdate(); }
         },
         {
             scale: 'amps', decimals: 1,
             apply: (mn, mx) => setCVAmpsRange(mn, mx),
-            auto: () => { cvAmpsMin = null; cvAmpsMax = null; if (cvTuningPlot) { cvTuningPlot.destroy(); initCVTuningPlot(); } }
+            auto: () => { cvAmpsMin = null; cvAmpsMax = null; queueCVTuningPlotUpdate(); }
         }
     ]);
+
+    // Show the active X window in the input as a placeholder hint
+    const xInp = document.getElementById('cvXTimeInput');
+    if (xInp) xInp.placeholder = String((cvXTime && cvXTime > 0) ? cvXTime : (xTime || 30));
 
     if (cvTuningPlotResizeObserver) cvTuningPlotResizeObserver.disconnect();
     cvTuningPlotResizeObserver = new ResizeObserver(() => {
@@ -5335,19 +5357,38 @@ function queueCVTuningPlotUpdate() {
     });
 }
 
+// Resize the rolling window WITHOUT losing history or recreating the plot:
+// rebuild the x axis at the new length, right-align the newest overlapping
+// samples into it (shrink keeps the newest tail; grow pads the past with
+// nulls), and let setData re-run the range fns. The plot DOM, lock button,
+// legend, and Y-edit boxes all survive untouched.
+function rebuildCVTuningWindow() {
+    const old = cvTuningData;
+    initCVTuningDataStructures();
+    if (old) {
+        const oldN = old[1].length, newN = cvTuningData[1].length;
+        const n = Math.min(oldN, newN);
+        for (let s = 1; s <= 4; s++)
+            for (let i = 0; i < n; i++)
+                cvTuningData[s][newN - 1 - i] = old[s][oldN - 1 - i];
+    }
+    if (cvTuningPlot) cvTuningPlot.setData(cvTuningData);
+    const xInp = document.getElementById('cvXTimeInput');
+    if (xInp) xInp.placeholder = String((cvXTime && cvXTime > 0) ? cvXTime : (xTime || 30));
+}
+
 function setCVXTime(val) {
     const v = parseFloat(val);
     if (!isFinite(v) || v <= 0) return;
     cvXTime = v;
-    if (cvTuningPlot) cvTuningPlot.destroy();
-    initCVTuningDataStructures();
-    initCVTuningPlot();
+    rebuildCVTuningWindow();
 }
 
 function setCVVoltsRange(minVal, maxVal) {
     const mn = parseFloat(minVal), mx = parseFloat(maxVal);
     if (!isFinite(mn) || !isFinite(mx) || mn >= mx) return;
     cvVoltsMin = mn; cvVoltsMax = mx;
+    _cvLockWasAuto.volts = false;   // an explicit edit while locked must survive unlock
     if (cvTuningPlot) cvTuningPlot.setScale('volts', { min: mn, max: mx });
 }
 
@@ -5355,15 +5396,8 @@ function setCVAmpsRange(minVal, maxVal) {
     const mn = parseFloat(minVal), mx = parseFloat(maxVal);
     if (!isFinite(mn) || !isFinite(mx) || mn >= mx) return;
     cvAmpsMin = mn; cvAmpsMax = mx;
+    _cvLockWasAuto.amps = false;   // an explicit edit while locked must survive unlock
     if (cvTuningPlot) cvTuningPlot.setScale('amps', { min: mn, max: mx });
-}
-
-function resetCVAxisRanges() {
-    cvVoltsMin = null; cvVoltsMax = null;
-    cvAmpsMin  = null; cvAmpsMax  = null;
-    if (cvTuningPlot) cvTuningPlot.destroy();
-    initCVTuningDataStructures();
-    initCVTuningPlot();
 }
 
 function resetVoltageProtectionCounters() {
@@ -6082,6 +6116,24 @@ function initPlotDataStructures() {
     ];
 }
 
+// Splits factory for scales whose range can be user-pinned (manual). Auto mode
+// reproduces uPlot's default numeric splits exactly (multiples of the increment
+// it chose for the space), so autoscale look and perf are unchanged. Manual mode
+// keeps those nice interior ticks but labels the EXACT min/max at the plot
+// corners, dropping any interior tick that would crowd an endpoint label — the
+// printed corner values are always the user's pinned bounds, i.e. exactly what
+// the click-to-edit boxes (attachYAxisEdit) read and write.
+function edgeLabeledSplits(isManual) {
+    return (u, axisIdx, mn, mx, incr) => {
+        const ticks = [];
+        for (let i = Math.ceil(mn / incr - 1e-9); i * incr <= mx + incr * 1e-9; i++)
+            ticks.push(+(i * incr).toFixed(12));
+        if (!isManual || !isManual()) return ticks;
+        const guard = incr * 0.5;   // half a tick step keeps endpoint labels readable
+        return [mn, ...ticks.filter(v => v - mn >= guard && mx - v >= guard), mx];
+    };
+}
+
 // =====================================================================
 // On-plot Y-axis editing — makes each Y axis's extreme tick labels
 // directly editable. uPlot draws tick labels on canvas, so they can't
@@ -6278,7 +6330,8 @@ function initCurrentTempPlot() {
                 scale: "current",
                 label: "Amperes",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleCurrent)
             },
             {
                 scale: "pct",
@@ -6296,7 +6349,8 @@ function initCurrentTempPlot() {
                 scale: "current",
                 label: "Amperes",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleCurrent)
             },
             {
                 scale: "pct",
@@ -6435,7 +6489,8 @@ function initVoltagePlot() {
                 scale: "voltage",
                 label: "Volts",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleVoltage)
             },
             {
                 scale: "pct",
@@ -6453,7 +6508,8 @@ function initVoltagePlot() {
                 scale: "voltage",
                 label: "Volts",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleVoltage)
             },
             {
                 scale: "pct",
@@ -6585,7 +6641,8 @@ function initRPMPlot() {
                 scale: "rpm",
                 label: "revs/min",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleRPM)
             },
             {
                 scale: "pct",
@@ -6603,7 +6660,8 @@ function initRPMPlot() {
                 scale: "rpm",
                 label: "revs/min",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleRPM)
             },
             {
                 scale: "pct",
@@ -6733,7 +6791,8 @@ function initTemperaturePlot() {
                 scale: "temperature",
                 label: "F",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleTemp)
             },
             {
                 scale: "pct",
@@ -6751,7 +6810,8 @@ function initTemperaturePlot() {
                 scale: "temperature",
                 label: "F",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                splits: edgeLabeledSplits(() => !autoScaleTemp)
             },
             {
                 scale: "pct",
@@ -8783,7 +8843,7 @@ window.addEventListener("load", function () {
                         const seconds = Math.floor(totalSeconds % 60);
                         newTextContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
                     }
-                    else if (["innerTermP", "innerTermI", "innerTermD", "outerTermP", "outerTermI", "outerTermD"].includes(key)) {
+                    else if (["innerTermP", "innerTermI", "innerTermD", "outerTermP", "outerTermI", "outerTermLookahead"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     else if (key === "thermalSlopeFPerSec") {
@@ -9387,7 +9447,7 @@ window.addEventListener("load", function () {
             for (const [id, key] of [
                 ["outerTermP_display", "outerTermP"],
                 ["outerTermI_display", "outerTermI"],
-                ["outerTermD_display", "outerTermD"],
+                ["outerTermLookahead_display", "outerTermLookahead"],
                 ["thermalSlopeFPerSec_display", "thermalSlopeFPerSec"]
             ]) {
                 const raw = data[key];
@@ -11217,13 +11277,17 @@ function initPidTuningPlot() {
                 scale: "amps",
                 label: "Current (A) / RPM (/100)",
                 grid: { show: true },
-                side: 3
+                side: 3,
+                // always pinned to yyMin/yyMax (firmware-persisted) → corners always labeled
+                splits: edgeLabeledSplits(() => true)
             },
             {
                 scale: "duty",
                 label: "Duty Cycle (%)",
                 grid: { show: true },
-                side: 1
+                side: 1,
+                // default [-25,105] is style padding, not a user range — nice ticks for it
+                splits: edgeLabeledSplits(() => pidDutyRange != null)
             }
         ],
         legend: {
@@ -11900,11 +11964,11 @@ let thermalLogPlots = [null, null, null, null];
 let thermalLogResizeObservers = [null, null, null, null];
 let thermalWindowMin = 30;
 
-// Default visibility — hide the four requested series
+// Legend checkbox visibility state (session only, not persisted)
 let thermalSeriesVisible = {
-    tempFilt: true, tempProjected: true, tempSetpoint: true, dCorrection: true,
+    tempFilt: true, tempProjected: true, tempSetpoint: true,
     penaltyAmps: true, measAmps: true, uTarget: true,
-    outerP: true, outerI: true, outerD: true, impliedPenalty: true,
+    outerP: true, lookahead: true, outerI: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -11957,21 +12021,48 @@ function drawThermalWatermark(u) {
     ctx.restore();
 }
 
+// Direction bands for the (sign-flipped) PID decomposition plot: teal above zero =
+// more amps allowed, red below = amps being cut. Tints clamp at the zero crossing so
+// an autoscaled view that excludes zero tints as one regime; the corner labels are
+// pinned to the plot box (not the zero line) because the direction holds at any zoom.
+function drawThermalDirectionBands(u) {
+    const ctx = u.ctx;
+    const { left, top, width, height } = u.bbox;
+    const bot = top + height;
+    const y0 = Math.max(top, Math.min(bot, u.valToPos(0, 'amps', true)));
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,161,154,0.06)';
+    ctx.fillRect(left, top, width, y0 - top);
+    ctx.fillStyle = 'rgba(214,39,40,0.06)';
+    ctx.fillRect(left, y0, width, bot - y0);
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = '#666';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'right';
+    ctx.shadowColor = 'rgba(255,255,255,0.6)';
+    ctx.shadowBlur = 2;
+    ctx.textBaseline = 'top';
+    ctx.fillText('↑ MORE AMPS', left + width - 14, top + 14);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('↓ LESS AMPS', left + width - 14, bot - 14);
+    ctx.restore();
+}
+
 // ---------------------------------------------------------------------------
 // Fetch
 // ---------------------------------------------------------------------------
 // Sampled off the live CSV stream (replaces the old /thermallog.bin pull). One
 // column per THERMAL_SAMPLE_MS, driven by the CSV2 frame (~5s) so it can never
 // need a manual refresh. measAmps/uTarget ride CSV1 (cached every 10Hz frame);
-// the rest ride CSV2. dCorrection is derived; anti-windup is OR-accumulated
-// across frames so sub-sample CV-bleed events still show as ticks.
+// the rest ride CSV2. Anti-windup is OR-accumulated across frames so
+// sub-sample CV-bleed events still show as ticks.
 const THERMAL_SAMPLE_MS = 5000;          // one column per 5s (~720 cols/hr ≈ 1 pt/px on an 800px plot)
 const THERMAL_MAX_WINDOW_MIN = 60;       // longest selectable window
 const THERMAL_RING_CAP = 900;            // hard cap (>720 for cadence jitter headroom)
 
 let _thermalRing = {
     ts: [], tempFilt: [], tempProjected: [], tempSetpoint: [], penalty: [],
-    measAmps: [], uTarget: [], outerP: [], outerI: [], outerD: [], implied: [],
+    measAmps: [], uTarget: [], outerP: [], outerI: [], lookahead: [],
     flags: [], antiWindup: [], stage: []
 };
 let _thermalCsv1 = { measAmps: 0, uTarget: 0 };   // latest CSV1 values (10Hz)
@@ -12003,8 +12094,7 @@ function thermalLiveOnCsv2(data) {
     r.uTarget.push(_thermalCsv1.uTarget);
     r.outerP.push(Number(data.outerTermP) / 100);
     r.outerI.push(Number(data.outerTermI) / 100);
-    r.outerD.push(Number(data.outerTermD) / 100);
-    r.implied.push(Number(data.outerImpliedPenalty) / 100);
+    r.lookahead.push(Number(data.outerTermLookahead) / 100);
     r.flags.push(Number(data.thermalFlags) | 0);
     r.antiWindup.push(_thermalAntiWindupAccum);
     r.stage.push(Number(data.chargeStageDisplay) | 0);
@@ -12027,15 +12117,19 @@ function thermalRenderAll() {
     if (n === 0) return;
     const now = Date.now();
     const t = new Array(n);
-    const dCorrection = new Array(n);
     for (let i = 0; i < n; i++) {
         t[i] = -(now - r.ts[i]) / 60000;          // minutes ago (ascending, oldest first)
-        dCorrection[i] = r.tempProjected[i] - r.tempFilt[i];
     }
-    renderThermalPlot1([t, r.tempFilt, r.tempProjected, r.tempSetpoint, dCorrection, r.penalty, r.measAmps, r.uTarget], t[0]);
+    renderThermalPlot1([t, r.tempFilt, r.tempProjected, r.tempSetpoint, r.penalty, r.measAmps, r.uTarget], t[0]);
     // State strip gets snapshot copies so a resize-redraw can't index a grown ring against a stale time axis.
     renderThermalPlotState([t, new Array(n).fill(null)], t[0], r.flags.slice(), r.antiWindup.slice(), r.stage.slice(), t);
-    renderThermalPlot2([t, r.outerP, r.outerI, r.outerD, r.implied], t[0]);
+    // Display-layer sign flip: firmware terms are penalty-signed (+ = cut amps); the plot
+    // shows effect on the current target (+ = more amps). thermallog.csv keeps penalty sign.
+    // The firmware P term includes the look-ahead share; subtracting it out makes the three
+    // plotted series additive: present-temp + look-ahead + integrator = total penalty.
+    const flip = a => a.map(v => v == null ? null : -v);
+    const pPresent = r.outerP.map((v, i) => v == null ? null : v - (r.lookahead[i] || 0));
+    renderThermalPlot2([t, flip(pPresent), flip(r.lookahead), flip(r.outerI)], t[0]);
 }
 
 // ---------------------------------------------------------------------------
@@ -12144,11 +12238,6 @@ function renderThermalPlot1(data, tMin) {
                 show: thermalSeriesVisible.tempSetpoint !== false
             },
             {
-                label: 'D Correction (°F)', stroke: '#17becf', width: 1.5,
-                scale: 'temp', dash: [3, 3],
-                show: thermalSeriesVisible.dCorrection !== false
-            },
-            {
                 label: 'Penalty Amps (A)', stroke: '#2ca02c', width: 1.5,
                 scale: 'amps',
                 show: thermalSeriesVisible.penaltyAmps !== false
@@ -12171,8 +12260,10 @@ function renderThermalPlot1(data, tMin) {
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
-            { scale: 'temp', label: 'Temperature (°F)', side: 3, grid: { show: true } },
-            { scale: 'amps', label: 'Amps (A)', side: 1, grid: { show: false } }
+            { scale: 'temp', label: 'Temperature (°F)', side: 3, grid: { show: true },
+              splits: edgeLabeledSplits(thermalManualRange('p1-temp-min', 'p1-temp-max')) },
+            { scale: 'amps', label: 'Amps (A)', side: 1, grid: { show: false },
+              splits: edgeLabeledSplits(thermalManualRange('p1-amps-min', 'p1-amps-max')) }
         ],
         legend: { show: false },
         plugins: [
@@ -12191,10 +12282,9 @@ function renderThermalPlot1(data, tMin) {
         { key: 'tempFilt',      label: 'Temp Filtered',    color: '#d62728', idx: 1 },
         { key: 'tempProjected', label: 'Temp Projected',   color: '#e377c2', idx: 2 },
         { key: 'tempSetpoint',  label: 'Setpoint',         color: '#7f7f7f', idx: 3 },
-        { key: 'dCorrection',   label: 'D Correction (°F)',color: '#17becf', idx: 4 },
-        { key: 'penaltyAmps',   label: 'Penalty Amps',     color: '#2ca02c', idx: 5 },
-        { key: 'measAmps',      label: 'Measured Amps',    color: '#1f77b4', idx: 6 },
-        { key: 'uTarget',       label: 'U Target',         color: '#9467bd', idx: 7 }
+        { key: 'penaltyAmps',   label: 'Penalty Amps',     color: '#2ca02c', idx: 4 },
+        { key: 'measAmps',      label: 'Measured Amps',    color: '#1f77b4', idx: 5 },
+        { key: 'uTarget',       label: 'U Target',         color: '#9467bd', idx: 6 }
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[0] && el.clientWidth > 0)
@@ -12227,11 +12317,11 @@ function renderThermalPlot2(data, tMin) {
         select: { show: true },
         series: [
             { label: null },
-            // Tableau 10 — P/I/D in palette order, the resulting penalty bold in red.
-            { label: 'Outer P', stroke: '#1f77b4', width: 1.5, scale: 'amps' },
-            { label: 'Outer I', stroke: '#ff7f0e', width: 1.5, scale: 'amps' },
-            { label: 'Outer D', stroke: '#2ca02c', width: 1.5, scale: 'amps' },
-            { label: 'Implied Penalty', stroke: '#d62728', width: 2, scale: 'amps' }
+            // Additive decomposition (display-flipped, see updateThermalPlots):
+            // present-temp + look-ahead + integrator = total penalty.
+            { label: 'Present Temp (P)', stroke: '#1f77b4', width: 1.5, scale: 'amps' },
+            { label: 'Look-Ahead', stroke: '#2ca02c', width: 1.5, scale: 'amps' },
+            { label: 'Integrator (I)', stroke: '#ff7f0e', width: 1.5, scale: 'amps' }
         ],
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
@@ -12239,14 +12329,15 @@ function renderThermalPlot2(data, tMin) {
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
-            { scale: 'amps', label: 'PID Terms (A)', side: 3, grid: { show: true } }
+            { scale: 'amps', label: 'Effect on Current Target (A)', side: 3, grid: { show: true },
+              splits: edgeLabeledSplits(thermalManualRange('p3-min', 'p3-max')) }
         ],
         legend: { show: false },
         plugins: [
             {
                 hooks: {
                     init: [(u) => _thermalResizeObserver(2, elId, H)],
-                    drawClear: [(u) => { if (u.root?.offsetParent) drawThermalWatermark(u); }]
+                    drawClear: [(u) => { if (u.root?.offsetParent) { drawThermalDirectionBands(u); drawThermalWatermark(u); } }]
                 }
             },
             thermalZoomPlugin
@@ -12255,10 +12346,9 @@ function renderThermalPlot2(data, tMin) {
     thermalLogPlots[2] = new uPlot(opts, data, el);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(thermalLogPlots[2]);
     _createThermalLegend(el, 2, [
-        { key: 'outerP',        label: 'Outer P',         color: '#1f77b4', idx: 1 },
-        { key: 'outerI',        label: 'Outer I',         color: '#ff7f0e', idx: 2 },
-        { key: 'outerD',        label: 'Outer D',         color: '#2ca02c', idx: 3 },
-        { key: 'impliedPenalty',label: 'Implied Penalty', color: '#d62728', idx: 4 },
+        { key: 'outerP',    label: 'Present Temp (P)', color: '#1f77b4', idx: 1 },
+        { key: 'lookahead', label: 'Look-Ahead',       color: '#2ca02c', idx: 2 },
+        { key: 'outerI',    label: 'Integrator (I)',   color: '#ff7f0e', idx: 3 },
     ]);
     requestAnimationFrame(() => {
         if (thermalLogPlots[2] && el.clientWidth > 0)
@@ -12489,6 +12579,16 @@ function setThermalManualRange(minId, maxId, mn, mx) {
 function thermalRangesToAuto() {
     const cb = document.getElementById('thermal-autoscale');
     if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change')); }
+}
+
+// Manual-range predicate for edgeLabeledSplits: a thermal scale is pinned when
+// the autoscale checkbox is off AND its min/max fields actually hold numbers.
+function thermalManualRange(minId, maxId) {
+    return () => {
+        if (document.getElementById('thermal-autoscale')?.checked ?? true) return false;
+        return isFinite(parseFloat(document.getElementById(minId)?.value))
+            && isFinite(parseFloat(document.getElementById(maxId)?.value));
+    };
 }
 
 function applyThermalRanges() {
@@ -14109,7 +14209,8 @@ window.addEventListener('load', function () {
       },
       axes: [
         { label: 'Time', grid: { show: true }, values: (u, ticks) => ticks.map(formatAgoLabel) },
-        { scale: 'y', label: 'mbar', grid: { show: true }, side: 3 }
+        { scale: 'y', label: 'mbar', grid: { show: true }, side: 3,
+          splits: edgeLabeledSplits(() => baroYManual !== null) }
       ],
       legend: { show: false },
       cursor: { drag: { x: false, y: false } }
@@ -14555,6 +14656,9 @@ window.addEventListener('load', function () {
     const bEl = document.getElementById('dashboard-brush'); if (bEl) bEl.style.display = 'block';
     const mn = document.getElementById('dashboard-brush-data-min'); if (mn) mn.textContent = _brushFormatTime(_brushState.dataMin);
     const mx = document.getElementById('dashboard-brush-data-max'); if (mx) mx.textContent = _brushFormatTime(_brushState.dataMax);
+    // Cadence note in the sticky brush bar — true rate from the .bin header, not a hardcode
+    const sn = document.getElementById('dashboard-sample-note');
+    if (sn && ltData && ltData.interval) sn.textContent = 'Sampled every ' + Math.round(ltData.interval / 60) + ' min';
     _brushUpdateSelectionUI();
     // Re-anchored restore: apply the saved window choice relative to the NEWEST data, not an absolute old range.
     if (ltWindowPref) {
@@ -14636,6 +14740,7 @@ window.addEventListener('load', function () {
     spec.scales.forEach(sc => {
       scales[sc.name] = sc.range ? { auto: false, range: sc.range } : { auto: true };
       axes.push({ scale: sc.name, label: sc.label, side: sc.side, grid: { show: sc.side === 3 },
+                  splits: edgeLabeledSplits(() => !!(ltYOverride[id] && ltYOverride[id][sc.name])),
                   values: sc.fmt ? (u, ticks) => ticks.map(sc.fmt) : undefined });
     });
 
@@ -15228,7 +15333,8 @@ window.addEventListener('load', function () {
       ],
       axes: [
         { scale: "x", label: "RPM", values: (u, t) => t.map(v => Math.round(v)) },
-        { scale: "mpg", label: "naut mi / gal", side: 3 }
+        { scale: "mpg", label: "naut mi / gal", side: 3,
+          splits: edgeLabeledSplits(() => yManual !== null) }
       ],
       legend: { show: false }
     };

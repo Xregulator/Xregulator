@@ -176,7 +176,7 @@ numeric_cols = [
     "ts_ms", "tempFilt_F", "tempProj_F", "nominalTarget_A", "rpmCap_A",
     "voltCap_A", "uTarget_A", "spLimited_A", "pidErr_A", "pidOut_pct",
     "duty_pct", "RPM", "battV", "measAmps_A", "penaltyAmps_A", "flags",
-    "chargeStageDisplay", "outerP", "outerI", "outerD", "impliedPenalty",
+    "chargeStageDisplay", "outerP", "outerI", "lookahead", "impliedPenalty",
     "antiWindupFired", "thermalSlope_F_sec"
 ]
 
@@ -372,14 +372,30 @@ ax2  = fig2.add_subplot(gs2[0])
 ax2s = fig2.add_subplot(gs2[1], sharex=ax2)
 fig2.subplots_adjust(right=0.80)
 
-ax2.plot(df["t_plot"], df["outerP"],          color="#1565c0", lw=2.2, label="outerP")
-ax2.plot(df["t_plot"], df["outerI"],          color="#f9a825", lw=2.2, label="outerI")
-ax2.plot(df["t_plot"], df["outerD"],          color="#6a1b9a", lw=2.2, label="outerD")
-ax2.plot(df["t_plot"], df["impliedPenalty"],  color="#2e7d32", lw=2.5, label="impliedPenalty")
+# Display flip to match the dashboard decomposition plot: the CSV logs penalty sign
+# (+ = cut amps); plotted here as effect on the current target (+ = more amps).
+# The logged P term includes the look-ahead share — subtracting it makes the three
+# series additive: present + lookahead + integrator = total penalty. impliedPenalty
+# (voltage-loop info) is logged but deliberately not plotted on this thermal view.
+# thermalSlope is °F/s, not an amps contribution — it keeps its own sign.
+ax2.plot(df["t_plot"], -(df["outerP"] - df["lookahead"]), color="#1565c0", lw=2.2, label="present temp (P)")
+ax2.plot(df["t_plot"], -df["lookahead"],       color="#2e7d32", lw=2.2, label="look-ahead")
+ax2.plot(df["t_plot"], -df["outerI"],          color="#f9a825", lw=2.2, label="integrator (I)")
 ax2.plot(df["t_plot"], df["thermalSlope_F_sec"], color="#00838f", lw=2.0, linestyle=":", label="thermalSlope_F_sec")
 
-ax2.set_ylabel("PID Terms")
+ax2.set_ylabel("Effect on Current Target (A)")
 ax2.grid(**GRID_KW)
+
+# Direction bands + corner watermarks, same scheme as the dashboard: teal above zero =
+# more amps allowed, red below = amps being cut. axhspan joins autoscale, so re-pin ylim.
+_y0, _y1 = ax2.get_ylim()
+ax2.axhspan(0, max(_y1, 0), facecolor="#00a19a", alpha=0.06, zorder=0)
+ax2.axhspan(min(_y0, 0), 0, facecolor="#d62728", alpha=0.06, zorder=0)
+ax2.set_ylim(_y0, _y1)
+ax2.text(0.99, 0.97, "↑ MORE AMPS", transform=ax2.transAxes, ha="right", va="top",
+         color="#666", alpha=0.6, fontsize=12, fontweight="bold", family="monospace")
+ax2.text(0.99, 0.03, "↓ LESS AMPS", transform=ax2.transAxes, ha="right", va="bottom",
+         color="#666", alpha=0.6, fontsize=12, fontweight="bold", family="monospace")
 _h2, _ = ax2.get_legend_handles_labels()
 _leg2 = ax2.legend(loc="upper left")
 _leg2.set_draggable(True)
