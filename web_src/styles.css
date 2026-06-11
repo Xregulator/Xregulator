@@ -2020,6 +2020,10 @@ input:focus {
    the charts a bit narrower). Shrinks responsively on mobile via the viewport cap. */
 #plots-longterm .settings-card { max-width: 1100px; }
 
+/* Short Term cards slightly wider than the 600px default so the six time-window
+   buttons fit one row beside the label. Shrinks responsively on mobile. */
+#plots-displays .settings-card { max-width: 680px; }
+
 .section-title {
   background-color: #f0f0f0;
   color: var(--text-dark);
@@ -3588,7 +3592,7 @@ input:checked+.slider:before {
 
 /* Logging controls: tooltip on the right, equal grid cells fill the rest.
    auto-fit + minmax keeps every cell at least as wide as the widest nowrap
-   button ("Start Fresh Log" ~165px) and drops the column count (4→3→2→1)
+   button ("Start Fresh Log" ~165px) and drops the column count (3→2→1)
    as the card narrows — no fixed breakpoint, so labels can never overlap. */
 .log-row { align-items: center; }
 .log-row .log-info { flex-shrink: 0; margin-left: 10px; cursor: pointer; }
@@ -3599,13 +3603,13 @@ input:checked+.slider:before {
     gap: 8px;
     align-items: stretch;
 }
-/* equalize the cells — kill the per-button min-widths so all four match.
+/* equalize the cells — kill the per-button min-widths so all three match.
    border-box is mandatory here: this sheet has no global box-sizing reset, so
    width:100% alone makes padding+border overflow the grid track and each cell
-   slides under its right neighbor (the recurring pill/Pause overlap). */
+   slides under its right neighbor (the recurring button overlap). */
 .log-grid > * { width: 100%; margin: 0; box-sizing: border-box; }
-/* two-class specificity to beat the pill/toggle min-widths so all cells equalize */
-.log-grid > .log-pill, .log-grid > .btn-log-toggle { min-width: 0; }
+/* two-class specificity to beat the toggle min-width so all cells equalize */
+.log-grid > .btn-log-toggle { min-width: 0; }
 
 /* Time-window buttons wrap instead of overflowing the card on narrow widths.
    flex-shrink:1 + min-width:0 are mandatory: the base .form-input form rule is
@@ -3614,26 +3618,25 @@ input:checked+.slider:before {
 .time-window-input { min-width: 0; }
 .time-window-input form { flex-wrap: wrap; justify-content: flex-end; flex-shrink: 1; min-width: 0; }
 
-/* status badge — fixed min-width so Recording / Paused are the same size */
-.log-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 6px 13px;
-    border-radius: 14px;
-    font-size: 12.5px;
-    font-weight: 700;
-    white-space: nowrap;
-    min-width: 120px;
-    justify-content: center;
+/* the active (current setting) time-window button — solid teal, driven from the CSV3
+   echo in updateAllEchosOptimized; replaces the old "(current: N s)" text echo.
+   !important needed to beat the base .btn-primary tonal background (also !important). */
+.time-window-input .btn-primary.active {
+    background: #00a19a !important;
+    color: #fff !important;
+    border-color: #00a19a;
+    box-shadow: 0 2px 6px rgba(0, 161, 154, 0.35);
 }
-.log-pill .log-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-.log-pill-on  { background: rgba(76, 175, 80, 0.16); color: #2e7d32; }   /* recording */
-.log-pill-on  .log-dot { background: #4caf50; animation: log-pulse 1.8s infinite; }
-.log-pill-off { background: rgba(255, 167, 38, 0.18); color: #b26a00; }  /* paused / frozen */
-.log-pill-off .log-dot { background: #ffa726; }
-.dark-mode .log-pill-on  { color: #81c784; }
-.dark-mode .log-pill-off { color: #ffb74d; }
+.dark-mode .time-window-input .btn-primary.active {
+    background: #00857f !important;
+    color: #fff !important;
+    border-color: #00857f;
+}
+
+/* state dot inside the pause/resume toggle — pulsing green = recording, amber = paused */
+.log-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.btn-log-toggle.is-recording .log-dot { background: #4caf50; animation: log-pulse 1.8s infinite; }
+.btn-log-toggle.is-paused    .log-dot { background: #ffa726; }
 @keyframes log-pulse {
     0%   { box-shadow: 0 0 0 0 rgba(76,175,80,.55); }
     70%  { box-shadow: 0 0 0 7px rgba(76,175,80,0); }

@@ -713,32 +713,49 @@ let altSchema = null;
 let altSettings = {};
 let altLive = { valid:false, rpm:0, exc:0, amps:0, pred:0, pct:0, worstPct:0, overallPct:0,
                 status:0, steady:false, engHours:0, coverage:0, haveCurve:0, ptCount:0,
-                source:0, paused:0, refOk:1, refDist:0, sim:0 };
+                source:0, paused:0, refOk:1, refDist:0, state:3,
+                sessionMean:0, sessionP10:0, sessionN:0, hiFieldAlert:0, sim:0 };
 let altTrend = [];     // committed trend points: [{eng, worst, overall}]
 let _altTrendPending = false, _altTrendLastFetch = 0;
 
 function fetchAltSchema(){ return fetch('/altschema').then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
 
+// Confidence-state labels + colors (firmware FrontStore::classify; OUTPUT-BLIND \u2014 position +
+// record-book geometry only). 0/1 show the live %; 2/3 deliberately show no number.
+const ALT_STATE_LABEL = ['MEASURED','ESTIMATED','Learning this operating region','No reference here yet'];
+const ALT_STATE_COLOR = ['#5cb85c','#3a7bd5','#888','#888'];
+
 function updateAltHealth() {
-  // Status codes from firmware: 0 learning/insufficient, 1 healthy, 2 drifting, 3 disabled (Ignore Temp).
-  const STATUS = ['Learning','Healthy (flat trend)','Drifting down','Disabled (Ignore Temperature)'];
   const pctEl = document.getElementById('alt-health-pct');
   const statEl = document.getElementById('alt-health-status');
   const covEl = document.getElementById('alt-coverage');
-  const have = altLive.haveCurve >= 1;          // a usable best-ever front exists
-  // Headline = worst-bucket output % vs best-ever (NO clamp \u2014 can read > 100 vs a stale front).
-  if (pctEl) pctEl.textContent = (have && altLive.worstPct>0) ? Math.round(altLive.worstPct)+'%' : '\u2014';
+  // Headline = LIVE output % vs best-ever (NO clamp \u2014 can read > 100 vs a stale front) + the
+  // confidence state. No verdict strings \u2014 trends are read from the plots, not editorialized here.
+  const st = altLive.state|0;
+  const graded = altLive.valid && (st===0 || st===1) && altLive.pct>0;
+  if (pctEl) {
+    pctEl.textContent = graded ? Math.round(altLive.pct)+'%' : '\u2014';
+    pctEl.style.color = graded ? ALT_STATE_COLOR[st] : '';
+  }
   if (statEl) {
     const fixed = altLive.source >= 1;
-    // Only show the status word when it's worth flagging \u2014 healthy/learning is obvious from the plot.
-    statEl.textContent = altLive.status===3 ? 'Disabled (Ignore Temperature)'
-                       : fixed ? 'FIXED (loaded curve)'
-                       : altLive.paused>=1 ? 'Paused'
-                       : altLive.status===2 ? 'Drifting down'
-                       : (have && altLive.refOk===0) ? 'No reference here yet (learning this operating region)'
-                       : '';
-    statEl.style.color = altLive.status===2 ? '#d9534f' : '#888';
+    let txt = altLive.status===3 ? 'Disabled (Ignore Temperature)'
+            : !altLive.valid ? 'Not running'
+            : (ALT_STATE_LABEL[st] || '');
+    if (altLive.status!==3 && fixed) txt += ' \u00b7 FIXED reference';
+    else if (altLive.status!==3 && altLive.paused>=1) txt += ' \u00b7 paused';
+    statEl.textContent = txt;
+    statEl.style.color = graded ? ALT_STATE_COLOR[st] : '#888';
   }
+  // High-field-low-output alert (independent safety net \u2014 fires regardless of the record book)
+  const hfEl = document.getElementById('alt-hifield-alert');
+  if (hfEl) hfEl.style.display = altLive.hiFieldAlert>=1 ? '' : 'none';
+  // Session statistics over the graded 1 Hz samples (mean + P10) \u2014 a real ~5% decline shows here
+  // before the hourly trend buckets can.
+  const sessEl = document.getElementById('alt-session-stats');
+  if (sessEl) sessEl.textContent = (altLive.sessionN>=10)
+    ? ('this session: mean '+Math.round(altLive.sessionMean)+'% \u00b7 P10 '+Math.round(altLive.sessionP10)+'% \u00b7 '+Math.round(altLive.sessionN)+' graded samples')
+    : '';
   // Front size + engine-hours of data gathered (no live "now %": the plot's dot already shows it).
   if (covEl) {
     covEl.textContent = (altLive.ptCount>0)
@@ -842,8 +859,12 @@ function drawAltTrend() {
   const W = 520, H = 300, padL = 56, padR = 18, padT = 16, padB = 40, ctx = hidpiCtx(cv, W, H);
   ctx.clearRect(0,0,W,H);
   const pts = altTrend.slice();
-  if (altLive.haveCurve>=1 && altLive.worstPct>0)
-    pts.push({eng:altLive.engHours, worst:altLive.worstPct, overall:altLive.overallPct, live:true});
+  // "now" dot = the LIVE % with its state color (only while graded MEASURED/ESTIMATED) — not the
+  // ratcheted bucket-worst, which froze one bad reading on the dot for a whole engine-hour.
+  const liveSt = altLive.state|0;
+  const liveGraded = altLive.valid && (liveSt===0 || liveSt===1) && altLive.pct>0;
+  if (liveGraded)
+    pts.push({eng:altLive.engHours, worst:altLive.pct, overall:altLive.overallPct, live:true});
   if (pts.length === 0){
     ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center';
     ctx.fillText('No trend yet — one point logs per engine-hour of running', W/2, H/2); ctx.textAlign='left'; return;
@@ -860,11 +881,12 @@ function drawAltTrend() {
     ctx.fillStyle='#999'; ctx.fillText(v+'%', padL-7, y);
   }
   if (100>=minY && 100<=maxY){ const y=Y(100); ctx.strokeStyle='#cde'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke(); ctx.setLineDash([]); }
-  // X gridlines + engine-hour labels
+  // X gridlines + engine-hour labels. Integer labels only when the range gives each tick its own
+  // integer (maxE ≥ 4); small ranges get one-decimal labels (Math.round alone produced "0 0 1 1 1").
   ctx.textAlign='center'; ctx.textBaseline='top';
   for (let k=0;k<=4;k++){ const e=maxE*k/4, x=X(e);
     ctx.strokeStyle='#f3f3f3'; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,H-padB); ctx.stroke();
-    ctx.fillStyle='#999'; ctx.fillText(Math.round(e), x, H-padB+5); }
+    ctx.fillStyle='#999'; ctx.fillText(maxE>=4 ? String(Math.round(e)) : (Math.round(e*10)/10).toFixed(1), x, H-padB+5); }
   // axes
   ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,H-padB); ctx.lineTo(W-padR,H-padB); ctx.stroke();
   // axis titles \u2014 centered, no arrows, clear of the % tick labels
@@ -887,8 +909,90 @@ function drawAltTrend() {
   const last = pts[pts.length-1];
   if (last.live){ const x=X(last.eng), y=Y(Math.max(minY,Math.min(maxY,last.worst)));
     ctx.beginPath(); ctx.arc(x,y,5,0,6.2832);
-    ctx.fillStyle = '#5cb85c'; ctx.fill();   // single fixed colour (no performance bands)
+    ctx.fillStyle = ALT_STATE_COLOR[liveSt] || '#5cb85c'; ctx.fill();   // state color (MEASURED green / ESTIMATED blue)
     ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); }
+}
+
+// ── Charging-system health session plot: every 1 Hz live % since this dashboard session began,
+//    uPlot-styled like the Plots tab. Points colored by confidence state (MEASURED green,
+//    ESTIMATED blue). LEARNING/NO-REFERENCE periods carry NO value — they render as gaps with a
+//    light background tint (the suppressed number is deliberately never plotted). ──
+let altSessPlot = null;
+const ALT_SESS_MAX = 28800;   // 8 h of 1 Hz samples, then the oldest roll off
+let altSessT = [], altSessMeas = [], altSessEst = [], altSessGap = [];
+let altSessYManual = null;
+try { altSessYManual = JSON.parse(localStorage.getItem('altSessY') || 'null'); } catch(e){}
+
+function altSessYRange(){
+  if (altSessYManual) return altSessYManual;
+  let lo = Infinity, hi = -Infinity;
+  const scan = a => { for (const v of a) if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; } };
+  scan(altSessMeas); scan(altSessEst);
+  if (!isFinite(lo)) return [80, 110];
+  const pad = Math.max(2, (hi - lo) * 0.15);
+  return [Math.floor(lo - pad), Math.ceil(hi + pad)];
+}
+
+function buildAltSessPlot(){
+  const el = document.getElementById('alt-session-plot');
+  if (!el || typeof uPlot === 'undefined') return;
+  el.innerHTML = '';
+  const opts = {
+    width: Math.max(el.clientWidth, 320),
+    height: 200,
+    series: [
+      { label: 'Time' },
+      { label: 'MEASURED %',  stroke: 'transparent', paths: () => null,
+        points: { show: true, size: 5, width: 0, fill: '#5cb85c' } },
+      { label: 'ESTIMATED %', stroke: 'transparent', paths: () => null,
+        points: { show: true, size: 5, width: 0, fill: '#3a7bd5' } },
+    ],
+    scales: { x: { time: true }, y: { auto: false, range: () => altSessYRange() } },
+    axes: [
+      { grid: { show: true } },
+      { scale: 'y', grid: { show: true }, side: 3, values: (u, t) => t.map(v => v + '%') },
+    ],
+    legend: { show: false },
+    cursor: { drag: { x: false, y: false } },
+    hooks: { draw: [u => {
+      // light tint over spans where the % was suppressed (learning / no reference / not running)
+      const ctx = u.ctx; ctx.save();
+      ctx.fillStyle = 'rgba(150,150,150,0.10)';
+      let runStart = null;
+      for (let i = 0; i < altSessGap.length; i++) {
+        const gap = altSessGap[i] === 1;
+        if (gap && runStart === null) runStart = altSessT[i];
+        if ((!gap || i === altSessGap.length - 1) && runStart !== null) {
+          const x0 = u.valToPos(runStart, 'x', true);
+          const x1 = u.valToPos(altSessT[i], 'x', true);
+          ctx.fillRect(x0, u.bbox.top, Math.max(x1 - x0, 1), u.bbox.height);
+          runStart = null;
+        }
+      }
+      ctx.restore();
+    }] }
+  };
+  altSessPlot = new uPlot(opts, [altSessT, altSessMeas, altSessEst], el);
+  new ResizeObserver(() => {
+    if (altSessPlot) altSessPlot.setSize({ width: Math.max(el.clientWidth, 320), height: 200 });
+  }).observe(el);
+  attachYAxisEdit(altSessPlot, [{
+    scale: 'y', decimals: 0,
+    apply: (mn, mx) => { altSessYManual = [mn, mx]; localStorage.setItem('altSessY', JSON.stringify(altSessYManual)); altSessPlot.redraw(); },
+    auto:  ()       => { altSessYManual = null;     localStorage.removeItem('altSessY');                              altSessPlot.redraw(); }
+  }]);
+}
+
+function altSessionPush(){
+  const st = altLive.state|0;
+  const graded = altLive.valid && (st===0 || st===1) && altLive.pct>0;
+  altSessT.push(Date.now()/1000);
+  altSessMeas.push(graded && st===0 ? altLive.pct : null);
+  altSessEst.push (graded && st===1 ? altLive.pct : null);
+  altSessGap.push(graded ? 0 : 1);
+  if (altSessT.length > ALT_SESS_MAX){ altSessT.shift(); altSessMeas.shift(); altSessEst.shift(); altSessGap.shift(); }
+  if (!altSessPlot) buildAltSessPlot();
+  if (altSessPlot) altSessPlot.setData([altSessT, altSessMeas, altSessEst]);
 }
 
 // ── Boat performance (Phase 3): schema-driven live + settings, sailing polar plot ──
@@ -897,7 +1001,7 @@ function drawAltTrend() {
 // so this can't fall out of sync with the firmware tables.
 let perfSchema = null;
 let perfLive = { valid:false, pct:0, spd:0, wa:0, ws:0, best:0, pitchStd:0, src:0,
-                 coverage:0, ptCount:0, source:0, paused:0, sim:0 };
+                 coverage:0, ptCount:0, source:0, paused:0, sim:0, state:3 };
 let perfSettings = {};
 let perfCells = [];
 let _perfPlotPending = false, _perfModelLastFetch = 0;
@@ -937,7 +1041,16 @@ function renderPerf(){
   // Center-hub live speed — the dominant readable number on the plot (SOG sailing / STW motoring)
   setTxt('perf-speed-num', (L.valid && typeof L.spd === 'number') ? L.spd.toFixed(1) : '—');
   setTxt('perf-speed-unit', perfView ? 'KT · STW' : 'KT · SOG');
-  setTxt('perf-pct', (L.valid && L.best>0.1) ? Math.round(L.pct)+'%' : '—');   // % vs best-ever, NO clamp
+  // % vs best-ever (NO clamp) — shown only in the graded confidence states (MEASURED/ESTIMATED);
+  // LEARNING/NO-REFERENCE deliberately show no number, just the state label. Same engine + labels
+  // as the charging-system panel (ALT_STATE_LABEL/ALT_STATE_COLOR).
+  const pst = (L.state==null) ? 3 : L.state|0;
+  const pGraded = L.valid && (pst===0 || pst===1) && L.pct>0;
+  setTxt('perf-pct', pGraded ? Math.round(L.pct)+'%' : '—');
+  const pctEl = document.getElementById('perf-pct');
+  if (pctEl) pctEl.style.color = pGraded ? ALT_STATE_COLOR[pst] : '';
+  const pstEl = document.getElementById('perf-state');
+  if (pstEl){ pstEl.textContent = L.valid ? (ALT_STATE_LABEL[pst]||'') : ''; pstEl.style.color = ALT_STATE_COLOR[pst]||'#888'; }
   // data maturity (bottom-right quadrant): learned front points + hours spent moving in this mode
   setTxt('perf-pts', (L.ptCount|0));
   const hrs = perfView ? (motorLive.motorHours||0) : (perfLive.sailHours||0);
@@ -1144,7 +1257,7 @@ function drawPerfPlot(){
 
 // ── Motoring map (Phase 3): speed-vs-RPM, schema-driven (MotorLive) ──
 let motorLive = { valid:false, rpm:0, headwind:0, spd:0, best:0, pct:0, src:0,
-                  coverage:0, ptCount:0, source:0, paused:0, pitchStd:0 };
+                  coverage:0, ptCount:0, source:0, paused:0, pitchStd:0, state:3 };
 let motorCells = [];
 let _motorPlotPending = false, _motorModelLastFetch = 0;
 
@@ -2038,6 +2151,7 @@ function initializeEventSource() {
             altLive.valid = altLive.valid === 1;
             altLive.steady = altLive.steady === 1;
             updateAltHealth();
+            try { altSessionPush(); } catch (err) {}   // 1 Hz session plot feed
             queueAltTrendUpdate();
             updateCloudStatus();
         }, false);
@@ -3895,7 +4009,7 @@ function updateAllEchosOptimized(data) {
         { key: 'timeAxisModeChanging', id: 'timeAxisModeChanging_echo', transform: v => v == 1 ? 'UNIX' : 'Elapsed' },
         { key: 'gpsTimeSourceMode', id: 'gpsTimeSourceMode_echo', transform: v => ({0:'Auto', 1:'NMEA only', 2:'Phone only', 3:'NTP time only'}[v] ?? '?') },
         { key: 'webgaugesinterval', id: 'webgaugesinterval_echo', transform: v => v },
-        { key: 'plotTimeWindow', id: 'plotTimeWindow_echo', transform: v => v },
+        // plotTimeWindow has no text echo — its buttons highlight the active value instead (below)
         { key: 'weatherModeEnabled', id: 'weatherModeEnabled_echo', transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'SolarWatts', id: 'SolarWatts_echo', transform: v => v },
         { key: 'performanceRatio', id: 'performanceRatio_echo', transform: v => (v / 100).toFixed(2) },
@@ -4042,6 +4156,14 @@ function updateAllEchosOptimized(data) {
             if (sel && sel.value !== String(data[key])) sel.value = String(data[key]);
         }
     });
+
+    // Time-window buttons: the current setting is shown by highlighting its button
+    // (replaces the old "(current: N s)" text echo).
+    if ('plotTimeWindow' in data) {
+        document.querySelectorAll('.time-window-input button[name="plotTimeWindow"]').forEach(b => {
+            b.classList.toggle('active', Number(b.value) === Number(data.plotTimeWindow));
+        });
+    }
 
     // Update special displays
     specialDisplays.forEach(display => {
@@ -11730,20 +11852,16 @@ function startLogs() {
         .catch(() => { });
 }
 
-// Reflect live logging state (CSV2 slot 439) in the status badge + single pause/resume toggle.
+// Reflect live logging state (CSV2 slot 439) in the single pause/resume toggle —
+// its dot carries the state (pulsing green = recording, amber = paused), the label names the action.
 function updateLoggingStatus(loggingActive) {
-    const pill = document.getElementById('loggingStatusPill');
     const toggle = document.getElementById('logToggleBtn');
     g_loggingActive = Number(loggingActive);  // remembered for the log-relay capture-state stamp
-    if (!pill) return;
+    if (!toggle) return;
     const on = Number(loggingActive) === 1;
-    pill.innerHTML = '<span class="log-dot"></span>' + (on ? 'Recording' : 'Paused');
-    pill.className = 'log-pill ' + (on ? 'log-pill-on' : 'log-pill-off');
-    if (toggle) {
-        toggle.className = 'btn-log-toggle ' + (on ? 'is-recording' : 'is-paused');
-        toggle.textContent = on ? '⏸ Pause Logs' : '▶ Resume Logs';
-        toggle.dataset.recording = on ? '1' : '0';   // remembered so toggleLogs() knows which call to make
-    }
+    toggle.className = 'btn-log-toggle ' + (on ? 'is-recording' : 'is-paused');
+    toggle.innerHTML = '<span class="log-dot"></span>' + (on ? '⏸ Pause Logs' : '▶ Resume Logs');
+    toggle.dataset.recording = on ? '1' : '0';   // remembered so toggleLogs() knows which call to make
 }
 
 // Single button toggles pause/resume based on the last-known state from updateLoggingStatus().

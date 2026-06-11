@@ -1141,9 +1141,9 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
 
         // Implied-speed gate replaces the old fixed 0.1 nm jump filter, which dropped every
         // step above ~6 kt on 60 s phone-GPS fixes (zeroing distance for fast boats). A
-        // <=5 min gap at <50 kt is real motion; anything else is a GPS teleport — rebaseline
-        // without polluting the odometer.
-        if (dtMs <= 300000UL && impliedKn < 50.0f) {
+        // <=5 min gap at <150 kt is real motion (covers ~100 mph powerboats; real GPS teleports
+        // imply hundreds of kt); anything else rebaselines without polluting the odometer.
+        if (dtMs <= 300000UL && impliedKn < 150.0f) {
           static float distanceAccumulator = 0.0f;
           static float distanceAccumulator_AllTime = 0.0f;
           static float sailingDistAccumulator_AllTime = 0.0f;  // engine-off miles (leaderboard)

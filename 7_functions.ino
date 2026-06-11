@@ -16,6 +16,479 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // ============================================================
+// BEST-EVER FRONT — shared engine (Phase A). Generic over an axis count NAXIS so one C++
+// instance serves each system: alternator (4-D), sail (3-D), motor (3-D). Templates can't be
+// auto-prototyped, so this block must stay ABOVE the alt/boat front code below that instantiates
+// it (this project keeps no .h files; the FRONT_* state #defines stay in Xregulator.ino because
+// globals there use them). Design contract: BEST_EVER_FRONT_SPEC.md §2/§5 + IMPLEMENTATION_PLAN.md §2.
+//   1. Episode<NAXIS>    — backward look-back / reseed steady-run detector (replaces fixed windows).
+//   2. FrontStore<NAXIS> — sparse best-ever support points (never a grid) + IDW eval + device keep-gate.
+// ============================================================
+
+// Per-axis steadiness knobs (live-tunable): deviation bound + how long it must hold.
+struct EpAxisCfg { float tol; float steadySec; };
+
+// One raw sample fed to the detector. x[] are the steadiness axes (band-checked AND averaged);
+// ex[] are extra raw "passenger" inputs that are AVERAGED over the run but NOT band-checked — kept
+// so the cloud retains the spec's diagnostic/forensic inputs (alt raw duty; motor raw AWS/AWA) for
+// recomputing a derived axis or diagnosing a bad point. out is the measured output, averaged.
+template <int NAXIS>
+struct RawSample { float x[NAXIS]; float ex[2]; float out; uint32_t tMs; };
+
+// One emitted episode point == one front support point. x[] are the SURFACE coordinates (which may
+// be DERIVED from the steadiness axes, e.g. excitation from duty); ex[] are the retained raw extras
+// (run-averaged, uploaded to the cloud's raw history, not used by the front eval); y is the output.
+template <int NAXIS>
+struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32_t tEmit; };
+
+// A run is a contiguous tail of recent samples all mutually within band on every axis (max-min
+// ≤ tol). It grows while each new sample stays in band; on a break it emits the run's average
+// (if every axis held for its steady time) and reseeds the next run from the longest in-band
+// tail ending at the breaking sample, so compatible points are reused, never discarded.
+template <int NAXIS>
+struct Episode {
+  EpAxisCfg cfg[NAXIS];
+  // current run (running sums → cheap average, no per-sample storage):
+  double    sumX[NAXIS], sumEx[2], sumOut;
+  float     runMin[NAXIS], runMax[NAXIS];
+  uint32_t  count, runStartMs;
+  // reseed look-back ring (PSRAM, allocated by the caller):
+  RawSample<NAXIS> *ring; int ringCap, ringHead, ringCount;
+  // Per-axis INDEPENDENT steadiness trackers. Each axis keeps its own in-band window + dwell so a
+  // long steady-time on a slow axis (e.g. temperature, 30 s) does NOT force the fast axes
+  // (RPM/duty/Vbus, ~3 s) to also hold that long — the whole point of per-axis criteria. These
+  // PERSIST across reseeds (a fast-axis break must not wipe the slow axis's accumulated dwell);
+  // they re-center only on a full reset (ringCount==0 → next sample is "fresh").
+  float     axMin[NAXIS], axMax[NAXIS];
+  uint32_t  axSinceMs[NAXIS];   // when each axis last (re)entered its band
+  bool      runQualified;       // current run has met EVERY axis's own steady time
+  // OPTIONAL output-steadiness band (outCfg.tol <= 0 → disabled, the default): the emitted
+  // quantity itself must also hold steady. Directly guards what gets recorded, which is what
+  // allows the input bands to be sized purely for transient rejection. Same independent-dwell
+  // pattern as the input axes.
+  EpAxisCfg outCfg;
+  float     outAxMin, outAxMax;     // independent dwell tracker (persists across reseeds, like axMin/axMax)
+  uint32_t  outAxSinceMs;
+  float     runOutMin, runOutMax;   // current run's output band
+  uint32_t  minRunMs;               // minimum run duration to emit (0 = no floor); closes the
+                                    // short-tail-after-reseed emit edge case
+  float     lastRunSpan[NAXIS], lastRunOutSpan;   // per-axis spread of the last EMITTED run (soak diagnostics)
+
+  void init(RawSample<NAXIS> *ringBuf, int cap) {
+    ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
+    outCfg = { 0, 0 }; minRunMs = 0;
+    outAxMin = outAxMax = 0; outAxSinceMs = 0; lastRunOutSpan = 0;
+    for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = 0;
+    clearRun();
+  }
+  void clearRun() {
+    sumOut = 0; count = 0; runStartMs = 0; sumEx[0] = sumEx[1] = 0;
+    runQualified = false;   // NB: does NOT reset the per-axis trackers (reseed() calls clearRun);
+    for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }   // they re-center on a "fresh" sample
+    runOutMin = 0; runOutMax = 0;
+  }
+  // Per-axis independent steadiness. `fresh` (first sample after a full reset) re-centers every
+  // axis on the sample; otherwise each axis extends its own band, and restarts ONLY its own clock
+  // when IT leaves its band — independent of the other axes.
+  void axisTrack(const RawSample<NAXIS> &s, bool fresh) {
+    for (int a = 0; a < NAXIS; a++) {
+      if (fresh) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; continue; }
+      float lo = axMin[a] < s.x[a] ? axMin[a] : s.x[a];
+      float hi = axMax[a] > s.x[a] ? axMax[a] : s.x[a];
+      if (hi - lo > cfg[a].tol) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; }   // this axis left its band → restart its own clock
+      else { axMin[a] = lo; axMax[a] = hi; }
+    }
+    if (outCfg.tol > 0) {   // output band tracks the same way, with its own independent clock
+      if (fresh) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
+      else {
+        float lo = outAxMin < s.out ? outAxMin : s.out;
+        float hi = outAxMax > s.out ? outAxMax : s.out;
+        if (hi - lo > outCfg.tol) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
+        else { outAxMin = lo; outAxMax = hi; }
+      }
+    }
+  }
+  // True once EVERY axis (and the output band, if enabled) has independently held within its
+  // band for at least its OWN steady time.
+  bool axesQualified(uint32_t nowMs) const {
+    for (int a = 0; a < NAXIS; a++)
+      if ((uint32_t)(nowMs - axSinceMs[a]) < (uint32_t)(cfg[a].steadySec * 1000.0f)) return false;
+    if (outCfg.tol > 0 && (uint32_t)(nowMs - outAxSinceMs) < (uint32_t)(outCfg.steadySec * 1000.0f)) return false;
+    return true;
+  }
+  void ringPush(const RawSample<NAXIS> &s) {
+    ring[ringHead] = s;
+    ringHead = (ringHead + 1) % ringCap;
+    if (ringCount < ringCap) ringCount++;
+  }
+  // ring index of the k-th newest sample (k=0 = newest just pushed)
+  int ringIdx(int k) const { return ((ringHead - 1 - k) % ringCap + ringCap) % ringCap; }
+
+  void startRunWith(const RawSample<NAXIS> &s) {
+    sumOut = s.out; count = 1; runStartMs = s.tMs;
+    sumEx[0] = s.ex[0]; sumEx[1] = s.ex[1];
+    for (int a = 0; a < NAXIS; a++) { sumX[a] = s.x[a]; runMin[a] = runMax[a] = s.x[a]; }
+    runOutMin = runOutMax = s.out;
+  }
+  bool inBandWith(const RawSample<NAXIS> &s) const {
+    for (int a = 0; a < NAXIS; a++) {
+      float lo = runMin[a] < s.x[a] ? runMin[a] : s.x[a];
+      float hi = runMax[a] > s.x[a] ? runMax[a] : s.x[a];
+      if (hi - lo > cfg[a].tol) return false;
+    }
+    if (outCfg.tol > 0) {
+      float lo = runOutMin < s.out ? runOutMin : s.out;
+      float hi = runOutMax > s.out ? runOutMax : s.out;
+      if (hi - lo > outCfg.tol) return false;
+    }
+    return true;
+  }
+  void commit(const RawSample<NAXIS> &s) {
+    for (int a = 0; a < NAXIS; a++) {
+      sumX[a] += s.x[a];
+      if (s.x[a] < runMin[a]) runMin[a] = s.x[a];
+      if (s.x[a] > runMax[a]) runMax[a] = s.x[a];
+    }
+    if (s.out < runOutMin) runOutMin = s.out;
+    if (s.out > runOutMax) runOutMax = s.out;
+    sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
+    sumOut += s.out; count++;
+  }
+  // Complete the current run; emit its average to `out` if it qualified — i.e. every axis
+  // independently held within its band for its OWN steady time (runQualified, latched during
+  // feed) AND the run itself lasted at least minRunMs (a reseed can start a run with latched
+  // qualification, so without the floor a short tail could emit). `nowMs` is the breaking
+  // sample's time. Returns true if a point was emitted.
+  bool complete(uint32_t nowMs, FrontPoint<NAXIS> *out) {
+    bool emit = (count >= 1) && runQualified
+                && (minRunMs == 0 || (uint32_t)(nowMs - runStartMs) >= minRunMs);
+    if (emit && out) {
+      for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(sumX[a] / (double)count);
+      out->ex[0] = (float)(sumEx[0] / (double)count);
+      out->ex[1] = (float)(sumEx[1] / (double)count);
+      out->y = (float)(sumOut / (double)count);
+      out->nSamp = count;
+      out->tEmit = nowMs;
+      for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = runMax[a] - runMin[a];
+      lastRunOutSpan = runOutMax - runOutMin;
+    }
+    return emit;
+  }
+  // Reseed a fresh run from the longest in-band tail of the ring ending at the newest sample
+  // (in-band on every axis AND the output band, when enabled).
+  void reseed() {
+    clearRun();
+    if (ringCount <= 0) return;
+    float mn[NAXIS], mx[NAXIS], mnO, mxO;
+    { const RawSample<NAXIS> &s0 = ring[ringIdx(0)];
+      for (int a = 0; a < NAXIS; a++) mn[a] = mx[a] = s0.x[a];
+      mnO = mxO = s0.out; }
+    int oldestK = 0;
+    for (int k = 1; k < ringCount; k++) {
+      const RawSample<NAXIS> &s = ring[ringIdx(k)];
+      bool ok = true;
+      for (int a = 0; a < NAXIS; a++) {
+        float lo = mn[a] < s.x[a] ? mn[a] : s.x[a];
+        float hi = mx[a] > s.x[a] ? mx[a] : s.x[a];
+        if (hi - lo > cfg[a].tol) { ok = false; break; }
+      }
+      if (ok && outCfg.tol > 0) {
+        float lo = mnO < s.out ? mnO : s.out;
+        float hi = mxO > s.out ? mxO : s.out;
+        if (hi - lo > outCfg.tol) ok = false;
+      }
+      if (!ok) break;
+      for (int a = 0; a < NAXIS; a++) { if (s.x[a] < mn[a]) mn[a] = s.x[a]; if (s.x[a] > mx[a]) mx[a] = s.x[a]; }
+      if (s.out < mnO) mnO = s.out;
+      if (s.out > mxO) mxO = s.out;
+      oldestK = k;
+    }
+    for (int a = 0; a < NAXIS; a++) { runMin[a] = mn[a]; runMax[a] = mx[a]; }
+    runOutMin = mnO; runOutMax = mxO;
+    for (int k = oldestK; k >= 0; k--) {           // oldest → newest
+      const RawSample<NAXIS> &s = ring[ringIdx(k)];
+      for (int a = 0; a < NAXIS; a++) sumX[a] += s.x[a];
+      sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
+      sumOut += s.out; count++;
+    }
+    runStartMs = ring[ringIdx(oldestK)].tMs;        // preserves accumulated dwell
+  }
+  // Feed one sample. eligible=false → below an admission floor: hard break, no reseed across it
+  // (the ring is dropped so a later run can't look back over the gap). Returns true + fills `out`
+  // when a completed run emits a point.
+  bool feed(bool eligible, const RawSample<NAXIS> &s, FrontPoint<NAXIS> *out) {
+    if (!eligible) {
+      bool emitted = complete(s.tMs, out);
+      clearRun();
+      ringHead = 0; ringCount = 0;                  // barrier: no reseed across the ineligible gap
+      return emitted;
+    }
+    bool fresh = (ringCount == 0);                   // first eligible sample after init/barrier → re-center axis trackers
+    axisTrack(s, fresh);                             // per-axis INDEPENDENT steadiness (decoupled steady times)
+    if (!runQualified && axesQualified(s.tMs)) runQualified = true;   // latch once every axis has met its own time
+    ringPush(s);
+    if (count == 0) { startRunWith(s); return false; }   // empty run → s founds it
+    if (inBandWith(s)) { commit(s); return false; }      // grow
+    bool emitted = complete(s.tMs, out);                 // break: complete then reseed (includes s)
+    reseed();
+    return emitted;
+  }
+};
+
+// Sparse support points (never a grid). Memory scales with the data, not the input volume —
+// what makes the 4-D alternator affordable. axisScale[] normalizes each dimension's distance
+// for IDW (≈ that axis's tol or characteristic span).
+// Hard cap on neighbors entering an LWLR solve — bounds the software-double accumulation cost in
+// dense neighborhoods (~48 pts ≈ 1–2 ms worst case) independent of front size. See evalLWLR.
+#define FRONT_LWLR_KMAX 48
+template <int NAXIS>
+struct FrontStore {
+  FrontPoint<NAXIS> *pts; int count, cap;
+  uint8_t source;                                   // 0 = LEARNED, 1 = FIXED (loaded curve)
+  float   axisScale[NAXIS];
+
+  void init(FrontPoint<NAXIS> *buf, int c) {
+    pts = buf; cap = c; count = 0; source = 0;
+    for (int a = 0; a < NAXIS; a++) axisScale[a] = 1.0f;
+  }
+  // Max-per-cell insert: keep the store a true upper ENVELOPE, not a point cloud. If an incoming run
+  // lands in the same operating cell as an existing point (within half an axisScale on EVERY axis),
+  // keep only the higher-y one — so eval() interpolates between bests instead of averaging a best with
+  // also-rans. Returns true ONLY on a genuine improvement (new cell, or a higher y in an existing cell);
+  // false when an existing run already beat it — callers use that to gate cloud upload + console logs.
+  bool add(const FrontPoint<NAXIS> &p) {
+    for (int i = 0; i < count; i++) {
+      bool sameCell = true;
+      for (int a = 0; a < NAXIS; a++) {
+        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
+        if (fabsf(p.x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
+      }
+      if (sameCell) {
+        if (p.y > pts[i].y) { pts[i] = p; return true; }   // new best at this cell
+        return false;                                       // an existing run here was already better
+      }
+    }
+    if (count >= cap) return false;
+    pts[count++] = p; return true;
+  }
+  // IDW surface evaluation, O(count) — the spec's front_eval(). Float + precomputed reciprocal axis
+  // scales (4 mults/point, not 4 divides) keep this cheap on the 200 Hz fold even at the raised cap.
+  // A convex blend of the support points → the result is ALWAYS within their y-range: never extrapolates.
+  // d_i = sqrt(Σ_a ((x[a]-pts.x[a])*invSc[a])^2); exact hit → that point's y; else Σ w_i y_i / Σ w_i.
+  float eval(const float x[NAXIS], float idwPower) const {
+    if (count <= 0) return 0.0f;                     // bootstrap: no surface yet
+    float invSc[NAXIS];
+    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
+    float wsum = 0, num = 0;
+    for (int i = 0; i < count; i++) {
+      float d2 = 0;
+      for (int a = 0; a < NAXIS; a++) {
+        float dx = (x[a] - pts[i].x[a]) * invSc[a];
+        d2 += dx * dx;
+      }
+      if (d2 < 1e-12f) return pts[i].y;              // exact hit
+      // dᵢ^power. Fast-path power 2 (the default) — d2 already is dᵢ²; skip sqrt+pow (200 Hz hot path).
+      float dp = (idwPower == 2.0f) ? d2 : powf(sqrtf(d2), idwPower);
+      float w = 1.0f / (dp + 1e-9f);
+      wsum += w; num += w * pts[i].y;
+    }
+    return (wsum > 0) ? (num / wsum) : 0.0f;
+  }
+  // Device keep-gate, IDW-bar-only form — SUPERSEDED by pushesHybrid at every call site; kept as
+  // the simple reference (unused template methods cost no flash). Only apply either gate when
+  // hasLocalSupport() is true.
+  bool pushes(const float x[NAXIS], float y, float safetyMargin, float idwPower) const {
+    if (count <= 0) return true;
+    return y > eval(x, idwPower) - safetyMargin;
+  }
+  // Any support point within the same cell (the half-axisScale box add() dedupes in)? A run landing
+  // in an unvisited cell is admitted unconditionally — it opens that region at its true value, and
+  // add()'s max-per-cell keeps later, better runs.
+  bool hasLocalSupport(const float x[NAXIS]) const {
+    for (int i = 0; i < count; i++) {
+      bool sameCell = true;
+      for (int a = 0; a < NAXIS; a++) {
+        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
+        if (fabsf(x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
+      }
+      if (sameCell) return true;
+    }
+    return false;
+  }
+  // Normalized (axis-scaled) distance to the nearest support point — the "is the reference
+  // trustworthy here" test. Beyond the caller's radius the live % and trend report no reference
+  // instead of a ratio against a blend of faraway points. Empty front → huge distance.
+  float nearestNormDist(const float x[NAXIS]) const {
+    if (count <= 0) return 1e9f;
+    float invSc[NAXIS];
+    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
+    float best = 1e30f;
+    for (int i = 0; i < count; i++) {
+      float d2 = 0;
+      for (int a = 0; a < NAXIS; a++) {
+        float dx = (x[a] - pts[i].x[a]) * invSc[a];
+        d2 += dx * dx;
+      }
+      if (d2 < best) best = d2;
+    }
+    return sqrtf(best);
+  }
+  // Locally weighted linear regression (LWLR) — the display/trend evaluator. Fits the local slope
+  // y ≈ b0 + Σ slope_a·dx_a (normalized dx, same 1/(d²+1e-9) weights as eval); prediction = b0,
+  // which CAN sit below the lowest neighbor — removes IDW's edge bias. Ridge on the slope diagonal
+  // only; prediction clamped to [0.1, 1.25 × max stored y]; slopesOut feeds the slope-gap risk
+  // test. Returns false on an empty front or degenerate solve. Solve runs over only the nearest
+  // ≤ FRONT_LWLR_KMAX points — a hard radius cut was tried and REJECTED. Full rationale, validation
+  // numbers, and cost model: ALT_HEALTH_LWLR_ENGINE_SPEC.md.
+  bool evalLWLR(const float x[NAXIS], float ridgeFrac, float *predOut, float *slopesOut) const {
+    if (count <= 0) return false;
+    float invSc[NAXIS];
+    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
+    // selection pass: nearest ≤ KMAX neighbors (bounded insertion, ascending d²) + whole-front max y
+    int   selIdx[FRONT_LWLR_KMAX];
+    float selD2[FRONT_LWLR_KMAX];
+    int   nSel = 0;
+    float maxY = 0;
+    for (int i = 0; i < count; i++) {
+      float d2 = 0;
+      for (int a = 0; a < NAXIS; a++) {
+        float dx = (x[a] - pts[i].x[a]) * invSc[a];
+        d2 += dx * dx;
+      }
+      if (pts[i].y > maxY) maxY = pts[i].y;
+      if (nSel < FRONT_LWLR_KMAX) {
+        int j = nSel++;
+        while (j > 0 && selD2[j - 1] > d2) { selD2[j] = selD2[j - 1]; selIdx[j] = selIdx[j - 1]; j--; }
+        selD2[j] = d2; selIdx[j] = i;
+      } else if (d2 < selD2[FRONT_LWLR_KMAX - 1]) {
+        int j = FRONT_LWLR_KMAX - 1;
+        while (j > 0 && selD2[j - 1] > d2) { selD2[j] = selD2[j - 1]; selIdx[j] = selIdx[j - 1]; j--; }
+        selD2[j] = d2; selIdx[j] = i;
+      }
+    }
+    const int M = NAXIS + 1;                      // unknowns: [b0, slope_0..slope_{NAXIS-1}]
+    double A[NAXIS + 1][NAXIS + 1] = {};
+    double b[NAXIS + 1] = {};
+    for (int k = 0; k < nSel; k++) {
+      const FrontPoint<NAXIS> &pt = pts[selIdx[k]];
+      double phi[NAXIS + 1];
+      phi[0] = 1.0;
+      double d2 = 0;
+      for (int a = 0; a < NAXIS; a++) {
+        double dx = (double)(pt.x[a] - x[a]) * invSc[a];
+        phi[a + 1] = dx;
+        d2 += dx * dx;
+      }
+      double w = 1.0 / (d2 + 1e-9);
+      for (int r = 0; r < M; r++) {
+        for (int c = r; c < M; c++) A[r][c] += w * phi[r] * phi[c];
+        b[r] += w * phi[r] * (double)pt.y;
+      }
+    }
+    for (int r = 1; r < M; r++)
+      for (int c = 0; c < r; c++) A[r][c] = A[c][r];          // mirror the symmetric upper triangle
+    double tr = 0;
+    for (int a = 1; a < M; a++) tr += A[a][a];
+    double ridge = (double)ridgeFrac * tr / (double)NAXIS;    // slope block only — never b0
+    for (int a = 1; a < M; a++) A[a][a] += ridge;
+    for (int col = 0; col < M; col++) {                       // forward elimination, partial pivot
+      int p = col;
+      for (int r = col + 1; r < M; r++)
+        if (fabs(A[r][col]) > fabs(A[p][col])) p = r;
+      if (fabs(A[p][col]) < 1e-12) return false;              // degenerate geometry (e.g. 1 point)
+      if (p != col) {
+        for (int c = 0; c < M; c++) { double t = A[col][c]; A[col][c] = A[p][c]; A[p][c] = t; }
+        double t = b[col]; b[col] = b[p]; b[p] = t;
+      }
+      for (int r = col + 1; r < M; r++) {
+        double f = A[r][col] / A[col][col];
+        for (int c = col; c < M; c++) A[r][c] -= f * A[col][c];
+        b[r] -= f * b[col];
+      }
+    }
+    double sol[NAXIS + 1];
+    for (int r = M - 1; r >= 0; r--) {                        // back substitution
+      double s = b[r];
+      for (int c = r + 1; c < M; c++) s -= A[r][c] * sol[c];
+      sol[r] = s / A[r][r];
+    }
+    float pred = (float)sol[0];
+    float hi = 1.25f * maxY;                                  // clamp: NO neighbor-range clamp (that
+    if (pred < 0.1f) pred = 0.1f;                             // reintroduces the edge bias) — just a
+    if (pred > hi) pred = hi;                                 // sanity ceiling over the record book
+    if (predOut) *predOut = pred;
+    if (slopesOut)
+      for (int a = 0; a < NAXIS; a++) slopesOut[a] = (float)sol[a + 1];
+    return true;
+  }
+  // Slope-gap risk numerator: per axis, if every in-radius neighbor lies on ONE side of the query
+  // (beyond ±deadBand), contribution = |slope_a| × gap to the nearest populated side. OUTPUT-BLIND.
+  // Returns Σ in output units (caller divides by the prediction).
+  float slopeGapAmps(const float x[NAXIS], float radius, float deadBand, const float slopes[NAXIS]) const {
+    float invSc[NAXIS];
+    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
+    float minPos[NAXIS], minNeg[NAXIS];
+    bool hasPos[NAXIS], hasNeg[NAXIS], hasMid[NAXIS];
+    for (int a = 0; a < NAXIS; a++) { minPos[a] = minNeg[a] = 1e30f; hasPos[a] = hasNeg[a] = hasMid[a] = false; }
+    float r2 = radius * radius;
+    for (int i = 0; i < count; i++) {
+      float dx[NAXIS], d2 = 0;
+      for (int a = 0; a < NAXIS; a++) { dx[a] = (pts[i].x[a] - x[a]) * invSc[a]; d2 += dx[a] * dx[a]; }
+      if (d2 > r2) continue;                                  // risk is judged over in-radius neighbors only
+      for (int a = 0; a < NAXIS; a++) {
+        if (dx[a] > deadBand)       { hasPos[a] = true; if (dx[a]  < minPos[a]) minPos[a] = dx[a]; }
+        else if (dx[a] < -deadBand) { hasNeg[a] = true; if (-dx[a] < minNeg[a]) minNeg[a] = -dx[a]; }
+        else hasMid[a] = true;                                // a neighbor sits AT the query on this axis
+      }
+    }
+    float sum = 0;
+    for (int a = 0; a < NAXIS; a++) {
+      if (hasMid[a] || (hasPos[a] && hasNeg[a])) continue;    // two-sided (or on-point) support → no risk
+      float gap = hasPos[a] ? minPos[a] : (hasNeg[a] ? minNeg[a] : 0.0f);
+      sum += fabsf(slopes[a]) * gap;
+    }
+    return sum;
+  }
+  // Confidence-state classifier + display prediction (the 1 Hz evaluator). Test order: MEASURED
+  // (same-cell record) → NO_REFERENCE (beyond refRadius) → risk gate (slope-gap / curvature) →
+  // LEARNING_EDGE or ESTIMATED. KEY INVARIANT: OUTPUT-BLIND — measured output never enters the
+  // state decision, so degradation can't relabel itself "learning". predOut = LWLR (IDW fallback
+  // for MEASURED on a degenerate solve; 0 = show no number). barOut = min(IDW, LWLR) admission bar
+  // from the same solve. Full design: ALT_HEALTH_LWLR_ENGINE_SPEC.md.
+  int classify(const float x[NAXIS], float refRadius, float idwPower, float ridgeFrac,
+               float riskThresh, float *predOut, float *barOut = nullptr) const {
+    if (predOut) *predOut = 0;
+    if (barOut) *barOut = 0;
+    if (count <= 0) return 3;                                 // FRONT_NO_REFERENCE
+    float idw = eval(x, idwPower);                            // float whole-front pass — cheap (FPU)
+    float lp = 0, sl[NAXIS];
+    bool lwlrOk = evalLWLR(x, ridgeFrac, &lp, sl);
+    if (barOut) *barOut = (lwlrOk && lp < idw) ? lp : idw;    // conservative hybrid admission bar
+    if (hasLocalSupport(x)) {                                 // 1. MEASURED — show %
+      if (predOut) *predOut = lwlrOk ? lp : idw;              // IDW fallback ≈ the cell record itself
+      return 0;
+    }
+    if (nearestNormDist(x) > refRadius) return 3;             // 2. NO_REFERENCE — "no reference here yet"
+    if (!lwlrOk || lp <= 0.1f) return 2;                      // degenerate solve → LEARNING_EDGE
+    float slopeGapRisk = slopeGapAmps(x, refRadius, 0.05f, sl) / lp;
+    float curvRisk = fabsf(lp - idw) / lp;                    // IDW≠LWLR = local curvature the fit can't see
+    float risk = (slopeGapRisk > curvRisk) ? slopeGapRisk : curvRisk;
+    if (risk > riskThresh) return 2;                          // 3. LEARNING_EDGE — no number shown
+    if (predOut) *predOut = lp;
+    return 1;                                                 // 4. ESTIMATED — show %
+  }
+  // Cell-local admission bar for cells WITH local support: beat min(IDW, LWLR) − margin. Callers
+  // admit unconditionally when hasLocalSupport() is false (unvisited cell opens at its true value).
+  bool pushesHybrid(const float x[NAXIS], float y, float safetyMargin, float idwPower, float ridgeFrac) const {
+    if (count <= 0) return true;
+    float bar = eval(x, idwPower);
+    float lp;
+    if (evalLWLR(x, ridgeFrac, &lp, nullptr) && lp < bar) bar = lp;
+    return y > bar - safetyMargin;
+  }
+};
+
+// ============================================================
 // ALTERNATOR HEALTH — Best-Ever Front (device side). Folds one sample per control tick (~200 Hz,
 //   via the pidLog hook) into the Episode detector; an emitted steady-run average pushes the sparse
 //   best-ever output-amps front (FrontStore). The cloud prunes dominated points + retains raw
@@ -41,9 +514,9 @@ static inline float altExcitation(float duty, float vbus, float tF) {
 // Steadiness/averaging axes: {RPM, field-duty %, Vbus, tempF}. Defined here (before every function
 // that references them) so the rest of the module can use the front. Generic engine: Xregulator.ino.
 #define ALT_NAXIS        4
-#define ALT_FRONT_CAP    1024     // sparse support points; cap is headroom (float IDW eval is cheap to ~1k)
+#define ALT_FRONT_CAP    4096     // sparse support points (PSRAM); sized to be unreachable even AP-mode/no-prune — cost scales with count, not cap (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
 #define ALT_EP_RING_CAP  8192     // reseed look-back (~40 s of 200 Hz folds); PSRAM
-#define ALT_PENDING_CAP  1024     // = front cap: holds every unsynced point through weeks offline (PSRAM)
+#define ALT_PENDING_CAP  4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<ALT_NAXIS>     altEpisode;
 static FrontStore<ALT_NAXIS>  altFront2;
@@ -70,8 +543,14 @@ float altEmaSec       = 0.5f;    // EMA time constant (s) on detector inputs RPM
 float altMinRunSec    = 2.0f;    // minimum steady-run length to emit a point (s)
 float altRefRadius    = 2.0f;    // normalized nearest-support distance beyond which live % + trend report no reference
 float altSafetyMargin = 0.0f;    // amps — gate keeps only runs that strictly beat the front (no keep-bias: the cloud only prunes, so sub-front samples were pure pollution of the local eval surface)
-float altIdwPower     = 2.0f;    // IDW power for front_eval
+float altIdwPower     = 2.0f;    // IDW power for the admission-bar/curvature IDW (display prediction is LWLR)
 float altPruneK       = 6.0f;    // cloud prune neighbor count (echoed; applied cloud-side)
+float altRidgeFrac    = 0.10f;   // LWLR ridge fraction (× slope-block trace/NAXIS) — fit stability vs slope fidelity
+float altRiskThresh   = 0.15f;   // classifier risk above which an in-radius point shows "learning" instead of a %
+// High-field-low-output alert thresholds (independent safety net — see altHealth_tick):
+float altHiFieldPct   = 80.0f;   // field duty at/above this counts as high drive (%)
+float altLowOutAmps   = 10.0f;   // output at/below this counts as low (A)
+float altHiFieldSec   = 30.0f;   // both conditions must persist this long before the alert fires (s)
 
 // ---- performance-vs-engine-hours trend (engine-hour buckets: average + worst output-%) ----
 // Each emitted steady episode adds its output-% (amps ÷ best-ever-front) to the current engine-hour
@@ -83,7 +562,8 @@ static float altEngineHoursSinceBaseline() {
   return (float)(s / 3600.0);
 }
 static void altCommitTrendBucket() {
-  if (altCurEngHour < 0 || altBucket_n < 1 || !altTrend) return;
+  // n gate ≥ 5: a 1-sample hour must not commit (the old single-sample ratcheted-worst artifact)
+  if (altCurEngHour < 0 || altBucket_n < 5 || !altTrend) return;
   float overall = (float)(altBucket_sum / altBucket_n) * 100.0f;
   float worst   = altBucket_worst * 100.0f;
   if (altTrendCount >= ALT_TREND_CAP) {  // ring full → drop oldest
@@ -108,8 +588,7 @@ static void altTrendAdd(float perfFrac) {
   altBucket_sum += perfFrac; altBucket_n += 1;
   altOverallPctLive = (float)(altBucket_sum / altBucket_n) * 100.0f;
   altWorstPctLive   = altBucket_worst * 100.0f;
-  // status: healthy if worst within ~8% of best-ever; drifting if it has fallen further.
-  altStatusCode = (altFront2.count < 4) ? 0 : (altWorstPctLive >= 92.0f ? 1 : 2);
+  // (no verdict here — healthy/drifting editorializing removed; trends are read from the plots)
 }
 
 // ---- NMEA-style bench simulator (no engine) ----
@@ -160,6 +639,14 @@ static void altEpisodeSyncCfg(float ampsFilt) {
   altEpisode.minRunMs = (altMinRunSec > 0) ? (uint32_t)(altMinRunSec * 1000.0f) : 0;
 }
 
+// Emitted-run hand-off: the ~200 Hz fold only stashes here; grading/admission run in the 1 Hz
+// altProcessEmits so the control path never pays a solve. Spans ride along for the console message.
+#define ALT_EMIT_QUEUE 8
+struct AltEmitPending { FrontPoint<ALT_NAXIS> sp; float span[ALT_NAXIS]; float outSpan; };
+static AltEmitPending altEmitQ[ALT_EMIT_QUEUE];
+static int altEmitQCount = 0;
+static bool altCapWarned = false;   // once per boot OR per Start Over (cleared in resetAlternatorHealth)
+
 // ---- per-control-tick fold (THE canonical cadence) ----
 // Live: called from the pidLog hook (~200 Hz). Bench-sim: called at 1 Hz from altHealth_tick.
 // Reads the final control state, updates the live output-%, feeds the Episode detector, and on a
@@ -201,17 +688,12 @@ void altFold_tick(uint32_t nowMs) {
   // Bench-sim injects its own consistent excitation; live derives it from the filtered drive.
   float exc = (altSimMode >= 0.5f) ? altSimExc : altExcitation(fDuty, fVbus, tF);
 
-  // Live point + best-ever reference (dashboard gauge/dot). % is NOT clamped (spec §1/§6) — but it
-  // IS reference-gated: beyond altRefRadius of all support the IDW blend is fiction (a 3-point
-  // high-RPM front once "predicted" 21 A at idle → bogus 28% health), so report no reference.
-  float surf[ALT_NAXIS] = { fRpm, exc, fVbus, tF };
+  // Export the filtered live point for the 1 Hz evaluator (altHealth_tick); the fold itself keeps
+  // only the EMA filters + the episode detector feed.
   altLive_rpm = fRpm; altLive_exc = exc; altLive_amps = fAmps;
-  altLive_pred = altFront2.eval(surf, altIdwPower);
-  altRefDist   = altFront2.nearestNormDist(surf);
-  if (altRefDist > 999.0f) altRefDist = 999.0f;
-  altRefOk     = (altFront2.count > 0 && altRefDist <= altRefRadius);
-  altLive_pct  = (altRefOk && altLive_pred > 0.1f) ? (fAmps / altLive_pred * 100.0f) : 0.0f;
+  altLive_vbus = fVbus; altLive_tF = tF; altLive_duty = fDuty;
   altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V);
+  altLastFoldMs = nowMs;
 
   if (hardwarePresent != 1 && altSimMode < 0.5f) { altSteady = false; return; }    // display only
   if (altPaused >= 0.5f || altFront2.source == 1) { altSteady = false; return; }   // FIXED/paused: no learning
@@ -229,7 +711,8 @@ void altFold_tick(uint32_t nowMs) {
   altSteady = (altEpisode.count > 0);
   if (!emitted) return;
 
-  // Steady run completed → build the surface point (excitation derived from run averages).
+  // Steady run completed → build the surface point (excitation derived from run averages) and
+  // STASH it; grading/admission solves run in the 1 Hz altProcessEmits, never in the control tick.
   altFrontEmitCount++;
   FrontPoint<ALT_NAXIS> sp;
   sp.x[0] = ep.x[0];                                    // RPM
@@ -239,24 +722,51 @@ void altFold_tick(uint32_t nowMs) {
   sp.ex[0] = ep.x[1];                                   // raw run-avg duty (retained for cloud diagnosis)
   sp.ex[1] = 0;
   sp.y = ep.y; sp.nSamp = ep.nSamp; sp.tEmit = ep.tEmit;
-
-  float yref = altFront2.eval(sp.x, altIdwPower);                       // pre-add reference (trend %)
-  bool refOk = (altFront2.count > 0 && altFront2.nearestNormDist(sp.x) <= altRefRadius);
-  if (refOk && yref > 0.1f) altTrendAdd(sp.y / yref);                   // trend only vs a locally-supported reference
-  // Cell-local admit gate: a run in an unvisited cell is admitted unconditionally (opens the region
-  // at its true value); only a run with same-cell support must beat the IDW surface. The old global
-  // gate locked low-output regions out forever once high-output points existed.
-  if (altFront2.hasLocalSupport(sp.x)
-      && !altFront2.pushes(sp.x, sp.y, altSafetyMargin, altIdwPower)) return;
-  if (altFront2.add(sp)) {                                              // optimistic local front (cloud re-prunes)
-    if (altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;  // queue for upload
-    // span r/d/v/t/a = the accepted run's per-axis spread (RPM/duty/Vbus/temp/amps) — soak evidence
-    // for whether each band is doing real work or just slack.
-    queueConsoleMessageF("AltFront +pt #%d rpm=%.0f exc=%.2f V=%.2f T=%.0f amps=%.1f (ref=%.1f n=%u span r=%.0f d=%.2f v=%.3f t=%.1f a=%.2f)",
-      altFront2.count, sp.x[0], sp.x[1], sp.x[2], sp.x[3], sp.y, yref, sp.nSamp,
-      altEpisode.lastRunSpan[0], altEpisode.lastRunSpan[1], altEpisode.lastRunSpan[2],
-      altEpisode.lastRunSpan[3], altEpisode.lastRunOutSpan);
+  if (altEmitQCount < ALT_EMIT_QUEUE) {
+    AltEmitPending &q = altEmitQ[altEmitQCount++];
+    q.sp = sp;
+    for (int a = 0; a < ALT_NAXIS; a++) q.span[a] = altEpisode.lastRunSpan[a];
+    q.outSpan = altEpisode.lastRunOutSpan;
   }
+}
+
+// Drain the emit queue (1 Hz, from altHealth_tick; same task as the fold — no lock). At most 2
+// emits per tick so a single loop() pass never blocks more than a couple ms; emits arrive at least
+// one steady-run apart, so the queue drains faster than it fills.
+static void altProcessEmits() {
+  if (altEmitQCount > 0 && (altPaused >= 0.5f || altFront2.source == 1)) {
+    altEmitQCount = 0; return;   // paused/FIXED flipped after the stash → stale runs must not touch the front
+  }
+  int n = (altEmitQCount < 2) ? altEmitQCount : 2;
+  for (int k = 0; k < n; k++) {
+    FrontPoint<ALT_NAXIS> &sp = altEmitQ[k].sp;
+    // Trend feed (pre-add): only MEASURED/ESTIMATED runs enter the engine-hour buckets.
+    // yref = LWLR prediction; bar = the min(IDW, LWLR) admission bar from the SAME solve.
+    float yref = 0, bar = 0;
+    int emitState = altFront2.classify(sp.x, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &yref, &bar);
+    if ((emitState == FRONT_MEASURED || emitState == FRONT_ESTIMATED) && yref > 0.1f)
+      altTrendAdd(sp.y / yref);
+    // Cell-local admit gate: unvisited cell → unconditional; same-cell support → beat bar − margin.
+    bool localSup = altFront2.hasLocalSupport(sp.x);
+    if (localSup && !(sp.y > bar - altSafetyMargin)) continue;
+    if (!localSup && altFront2.count >= ALT_FRONT_CAP) {
+      if (!altCapWarned) {   // a genuinely NEW cell dropped at capacity (in-cell improvements still land)
+        altCapWarned = true;
+        queueConsoleMessage("WARN: alt front at capacity — new operating cells are no longer recorded");
+      }
+      continue;
+    }
+    if (altFront2.add(sp)) {                                              // optimistic local front (cloud re-prunes)
+      if (altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;  // queue for upload
+      // span r/d/v/t/a = the accepted run's per-axis spread (RPM/duty/Vbus/temp/amps) — soak evidence
+      // for whether each band is doing real work or just slack.
+      queueConsoleMessageF("AltFront +pt #%d rpm=%.0f exc=%.2f V=%.2f T=%.0f amps=%.1f (ref=%.1f n=%u span r=%.0f d=%.2f v=%.3f t=%.1f a=%.2f)",
+        altFront2.count, sp.x[0], sp.x[1], sp.x[2], sp.x[3], sp.y, yref, sp.nSamp,
+        altEmitQ[k].span[0], altEmitQ[k].span[1], altEmitQ[k].span[2], altEmitQ[k].span[3], altEmitQ[k].outSpan);
+    }
+  }
+  if (altEmitQCount > n) memmove(altEmitQ, altEmitQ + n, (size_t)(altEmitQCount - n) * sizeof(AltEmitPending));
+  altEmitQCount -= n;
 }
 
 // ---- live telemetry registry (schema-driven: one source for the AltLive payload + /altschema) ----
@@ -279,8 +789,18 @@ static float alf_haveCurve() { return (float)(altFront2.count > 0 ? 1 : 0); }   
 static float alf_ptCount()   { return (float)altFront2.count; }                 // front support points
 static float alf_source()    { return (float)altFront2.source; }                // 0 LEARNED, 1 FIXED
 static float alf_paused()    { return (altPaused >= 0.5f) ? 1.0f : 0.0f; }
-static float alf_refOk()     { return altRefOk ? 1.0f : 0.0f; }          // live % has nearby support → trustworthy
+static float alf_refOk()     { return altRefOk ? 1.0f : 0.0f; }          // state is MEASURED/ESTIMATED → % shown
 static float alf_refDist()   { return altRefDist; }                       // normalized distance to nearest support
+static float alf_state()     { return (float)altState; }                  // 0 MEASURED, 1 ESTIMATED, 2 LEARNING_EDGE, 3 NO_REFERENCE
+static float alf_sessMean()  { return (altSessN > 0) ? (float)(altSessSum / (double)altSessN) : 0.0f; }
+static float alf_sessP10()   {                                            // P10 of the session histogram (≥10 samples)
+  if (altSessN < 10) return 0.0f;
+  uint32_t target = (altSessN + 9) / 10, cum = 0;
+  for (int i = 0; i < 60; i++) { cum += altSessHist[i]; if (cum >= target) return (float)(i * 2 + 1); }
+  return 0.0f;
+}
+static float alf_sessN()     { return (float)altSessN; }
+static float alf_hiField()   { return altHiFieldAlert ? 1.0f : 0.0f; }    // high-field-low-output alert active
 static float alf_sim()       { return (altSimMode >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced) return -1.0f;
                                time_t n = time(NULL); return (n > (time_t)lastAltHealthSyncEpoch) ? (float)(n - (time_t)lastAltHealthSyncEpoch) : 0.0f; }
@@ -292,11 +812,14 @@ static AltLiveField ALT_LIVE[] = {
   {"coverage", alf_coverage}, {"haveCurve", alf_haveCurve}, {"ptCount", alf_ptCount},
   {"source", alf_source}, {"paused", alf_paused},
   {"refOk", alf_refOk}, {"refDist", alf_refDist},
+  {"state", alf_state},
+  {"sessionMean", alf_sessMean}, {"sessionP10", alf_sessP10}, {"sessionN", alf_sessN},
+  {"hiFieldAlert", alf_hiField},
   {"sim", alf_sim}, {"syncAgoS", alf_syncAgo},
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
-  char buf[256];
+  char buf[320];
   int off = 0;
   for (size_t i = 0; i < ALT_LIVE_COUNT; i++)
     off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
@@ -515,11 +1038,13 @@ void initAlternatorHealth() {
 void resetAlternatorHealth() {
   if (!altFrontBuf) return;
   altFront2.count = 0; altFront2.source = 0;
-  altPendingCount = 0; altFrontEmitCount = 0;
+  altPendingCount = 0; altFrontEmitCount = 0; altEmitQCount = 0; altCapWarned = false;
   altEpisode.clearRun(); altEpisode.ringHead = 0; altEpisode.ringCount = 0;
   altTrendCount = 0; altTrendFlushed = 0; altTrendRewrite = true;   // /alttrend.bin removed below → fresh log
   altBucket_sum = 0; altBucket_n = 0; altBucket_worst = 0; altCurEngHour = -1;
   altWorstPctLive = 0; altOverallPctLive = 0; altStatusCode = 0; altLive_pct = 0;
+  altState = FRONT_NO_REFERENCE; altHiFieldAlert = false;
+  memset(altSessHist, 0, sizeof(altSessHist)); altSessN = 0; altSessSum = 0;   // session stats restart with the data
   altTrendBaselineSec = EngineRunTime_AllTime;   // new baseline → trend X-axis restarts at 0
   fsTakeLock();
   LittleFS.remove("/altfront.bin");
@@ -542,9 +1067,10 @@ void altFrontInit() {
   altEpisode.init(altEpRing, ALT_EP_RING_CAP);
   altEpisodeSyncCfg(0.0f);   // amps band starts at the floor; resized from filtered amps every fold
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
-  // axisScale ≈ each surface axis's characteristic span (plan §8: start at the axis tol).
+  // axisScale ≈ the span of each axis that moves output a comparable amount (rationale + rebalance
+  // history: ALT_HEALTH_LWLR_ENGINE_SPEC.md). MUST match AXIS_SCALE in the update-alt-health edge fn.
   altFront2.axisScale[0] = 25.0f;   // RPM
-  altFront2.axisScale[1] = 0.5f;    // excitation (temp-normalized field volts)
+  altFront2.axisScale[1] = 0.2f;    // excitation (temp-normalized field volts)
   altFront2.axisScale[2] = 0.1f;    // Vbus
   altFront2.axisScale[3] = 5.0f;    // tempF
   queueConsoleMessageF("AltFront init: cap %d pts, ring %d, %.1fKB PSRAM",
@@ -553,9 +1079,9 @@ void altFrontInit() {
             (size_t)(ALT_FRONT_CAP + ALT_PENDING_CAP) * sizeof(FrontPoint<ALT_NAXIS>)) / 1024.0f);
 }
 
-// ---- 1 Hz housekeeping tick (NOT the fold) — sends live telemetry + settings echo. In bench-sim
-//      it also advances the simulator and folds at 1 Hz; live, the fold runs in the ~200 Hz pidLog
-//      hook (altFold_tick is called from there). ----
+// ---- 1 Hz tick (NOT the fold) — THE evaluator/classifier cadence, plus live telemetry + settings
+//      echo. In bench-sim it also advances the simulator and folds at 1 Hz; live, the fold runs in
+//      the ~200 Hz pidLog hook (altFold_tick is called from there). ----
 void altHealth_tick(uint32_t nowMs) {
   static uint32_t lastMs = 0;
   if (!altFrontBuf) return;
@@ -564,6 +1090,46 @@ void altHealth_tick(uint32_t nowMs) {
   if (altSimMode >= 0.5f) {           // bench simulator: advance synthetic point + fold at 1 Hz
     altSimTick(nowMs);
     altFold_tick(nowMs);
+  }
+  altProcessEmits();                  // grade + admit queued steady runs FIRST (front fresh for the live classify)
+  // 1 Hz evaluator + OUTPUT-BLIND state classifier. A stale fold (field off) → nothing to grade.
+  bool foldFresh = (altLastFoldMs != 0) && ((uint32_t)(nowMs - altLastFoldMs) < 3000u);
+  if (!foldFresh) altLiveValid = false;
+  if (foldFresh && altLiveValid) {
+    float surf[ALT_NAXIS] = { altLive_rpm, altLive_exc, altLive_vbus, altLive_tF };
+    altRefDist = altFront2.nearestNormDist(surf);
+    if (altRefDist > 999.0f) altRefDist = 999.0f;
+    float pred = 0;
+    altState = (uint8_t)altFront2.classify(surf, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
+    altLive_pred = pred;
+    altRefOk = (altState == FRONT_MEASURED || altState == FRONT_ESTIMATED);
+    altLive_pct = (altRefOk && pred > 0.1f) ? (altLive_amps / pred * 100.0f) : 0.0f;
+    if (altRefOk && altLive_pct > 0.0f) {     // session stats accumulate graded samples only
+      altSessSum += altLive_pct; altSessN++;
+      int bin = (int)(altLive_pct * 0.5f);    // 2%-wide histogram bins, 0..120%
+      if (bin < 0) bin = 0;
+      if (bin > 59) bin = 59;
+      if (altSessHist[bin] < 65535) altSessHist[bin]++;
+    }
+  } else {
+    altRefOk = false; altLive_pct = 0;        // nothing running → no grade (state holds its last value)
+  }
+  // High-field-low-output alert — independent of the record book (covers degradation pushed into
+  // unlearned territory where the gauge says "learning"). Self-clears when either condition lifts.
+  {
+    static uint32_t hiFieldSinceMs = 0;
+    bool cond = foldFresh && altLiveValid
+                && altLive_duty >= altHiFieldPct && altLive_amps <= altLowOutAmps;
+    if (!cond) {
+      hiFieldSinceMs = 0; altHiFieldAlert = false;
+    } else {
+      if (hiFieldSinceMs == 0) hiFieldSinceMs = nowMs;
+      if (!altHiFieldAlert && (uint32_t)(nowMs - hiFieldSinceMs) >= (uint32_t)(altHiFieldSec * 1000.0f)) {
+        altHiFieldAlert = true;
+        queueConsoleMessageF("ALERT: Low output despite high field drive (duty %.0f%%, only %.1f A for %.0f s) — check alternator, belt, wiring",
+                             altLive_duty, altLive_amps, altHiFieldSec);
+      }
+    }
   }
   altSendLive();
   static uint8_t settCtr = 0;          // resend settings ~every 5s so reconnects get echoes
@@ -586,6 +1152,8 @@ static AltSetting ALT_SETTINGS[] = {
   {"altEmaSec", &altEmaSec}, {"altMinRunSec", &altMinRunSec}, {"altRefRadius", &altRefRadius},
   {"altMinAmps", &altMinAmps}, {"altMinDuty", &altMinDuty},
   {"altSafetyMargin", &altSafetyMargin}, {"altIdwPower", &altIdwPower}, {"altPruneK", &altPruneK},
+  {"altRidgeFrac", &altRidgeFrac}, {"altRiskThresh", &altRiskThresh},
+  {"altHiFieldPct", &altHiFieldPct}, {"altLowOutAmps", &altLowOutAmps}, {"altHiFieldSec", &altHiFieldSec},
   {"altPaused", &altPaused},
 };
 static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTINGS[0]);
@@ -650,9 +1218,9 @@ String altSchemaJson() {
 #define PERF_SAILF_MAGIC 0x50534652u  // 'PSFR' sail front blob
 #define PERF_MOTF_MAGIC  0x504D4652u  // 'PMFR' motor front blob
 #define PERF_NAXIS       3
-#define PERF_FRONT_CAP   1024     // sparse support points; cap is headroom (10 Hz fold → eval cost trivial)
+#define PERF_FRONT_CAP   4096     // sparse support points (PSRAM); sized to be unreachable even for fast hulls AP-mode/no-prune (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
 #define PERF_EP_RING_CAP 2048    // reseed look-back (~200 s at 10 Hz); PSRAM
-#define PERF_PENDING_CAP 1024     // = front cap: holds every unsynced point through weeks offline (PSRAM)
+#define PERF_PENDING_CAP 4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<PERF_NAXIS>    sailEpisode,  motorEpisode;
 static FrontStore<PERF_NAXIS> sailFront,    motorFront;
@@ -661,6 +1229,7 @@ static FrontPoint<PERF_NAXIS> *sailFrontBuf = nullptr, *motorFrontBuf = nullptr;
 static FrontPoint<PERF_NAXIS> *sailPending = nullptr,  *motorPending = nullptr;
 static int sailPendingCount = 0, motorPendingCount = 0;
 static String perfPendingSeededFrom = "";   // non-empty → this pending batch is an adopted import (provenance tag)
+static bool sailCapWarned = false, motorCapWarned = false;   // once per boot OR per Clear All (cleared in resetBoatPerformance)
 
 // Steady-time + sea-state-window + headwind + front/eval + cloud-prune knobs (registry-wired below;
 // per-axis deviation bounds + floors + mode flags are in Xregulator.ino).
@@ -673,8 +1242,12 @@ float perfRpmSec = 3.0f;     // motoring RPM steady time (s)
 float perfHwTol  = 2.0f;     // headwind deviation band (kt)
 float perfHwSec  = 3.0f;     // headwind steady time (s)
 float perfSafetyMargin = 0.0f;  // kt — gate keeps only runs that strictly beat the front (no keep-bias: cloud gets raw episodes regardless, so sub-front samples only dragged down the local eval surface)
-float perfIdwPower     = 2.0f;  // IDW power for front eval
+float perfIdwPower     = 2.0f;  // IDW power for the admission-bar/curvature IDW (display prediction is LWLR)
 float perfPruneK       = 6.0f;  // cloud prune neighbor count (echoed; applied cloud-side)
+// Evaluator/classifier knobs (mirror the alternator's altRefRadius/altRidgeFrac/altRiskThresh):
+float perfRefRadius    = 2.0f;   // normalized nearest-support distance beyond which the live % reports no reference
+float perfRidgeFrac    = 0.10f;  // LWLR ridge fraction (× slope-block trace/NAXIS)
+float perfRiskThresh   = 0.15f;  // classifier risk above which an in-radius point shows "learning" instead of a %
 
 // Coverage / count accessors (CSV2 + dashboard).
 float perfCoveragePct()      { return sailFrontBuf  ? (100.0f * (float)sailFront.count  / (float)PERF_FRONT_CAP) : 0.0f; }
@@ -765,19 +1338,14 @@ void perfFold_tick(uint32_t nowMs) {
   float headwind = aws * cosf(awa * (float)PI / 180.0f);   // fore-aft apparent component (+ = headwind)
   bool motoring = (rpm > perfRpmFloor);
 
-  // ── live display (NO clamp; % may exceed 100 vs a stale front) ──
+  // ── live point export (10 Hz): conditions only; prediction/state/% run at 1 Hz in boatPerf_tick.
+  //    valid = "inputs usable" — the confidence state decides whether a % is shown. ──
   if (motoring) {
-    float surf[PERF_NAXIS] = { rpm, headwind, sea };
-    float best = motorFront.eval(surf, perfIdwPower);
     motorLive_rpm = rpm; motorLive_hw = headwind; motorLive_spd = spd; motorLive_pitch = sea;
-    motorLive_best = best; motorLive_pct = (best > 0.1f) ? (spd / best * 100.0f) : 0.0f;
-    motorLiveSrc = src; motorLiveValid = (best > 0.1f && haveSpd); perfLiveValid = false;
+    motorLiveSrc = src; motorLiveValid = haveSpd; perfLiveValid = false;
   } else {
-    float surf[PERF_NAXIS] = { aws, perfFoldAwa(awa), sea };
-    float best = sailFront.eval(surf, perfIdwPower);
     perfLive_ws = aws; perfLive_wa = awa; perfLive_spd = spd; perfLive_pitch = sea;
-    perfLive_best = best; perfLive_pct = (best > 0.1f) ? (spd / best * 100.0f) : 0.0f;
-    perfLiveSrc = src; perfLiveValid = (best > 0.1f && haveSpd && aws >= perfMinWindSpeed); motorLiveValid = false;
+    perfLiveSrc = src; perfLiveValid = (haveSpd && aws >= perfMinWindSpeed); motorLiveValid = false;
   }
 
   if (hardwarePresent != 1 && perfSimMode < 0.5f) { perfSteady = false; return; }   // display only
@@ -800,9 +1368,18 @@ void perfFold_tick(uint32_t nowMs) {
   if (sailEpisode.feed(sailElig, ss, &ep)) {
     FrontPoint<PERF_NAXIS> raw = ep;                                  // raw both-sided AWA → cloud
     if (sailPending && sailPendingCount < PERF_PENDING_CAP) sailPending[sailPendingCount++] = raw;
-    FrontPoint<PERF_NAXIS> sp = ep; sp.x[1] = perfFoldAwa(ep.x[1]);   // device front: folded AWA
-    if (sailFront.pushes(sp.x, sp.y, perfSafetyMargin, perfIdwPower)) {
-      if (sailFront.add(sp))
+    FrontPoint<PERF_NAXIS> sp = ep; sp.x[1] = perfFoldAwa(ep.x[1]);   // device front: folded AWA (gate operates on folded coords)
+    // Cell-local admit gate (alt pattern): unvisited cell → unconditional; local support → beat
+    // the min(IDW, LWLR) hybrid bar − margin.
+    bool sailLocal = sailFront.hasLocalSupport(sp.x);
+    if (!sailLocal || sailFront.pushesHybrid(sp.x, sp.y, perfSafetyMargin, perfIdwPower, perfRidgeFrac)) {
+      if (!sailLocal && sailFront.count >= PERF_FRONT_CAP) {
+        // a genuinely NEW conditions cell dropped at capacity (in-cell improvements still land)
+        if (!sailCapWarned) {
+          sailCapWarned = true;
+          queueConsoleMessage("WARN: sail front at capacity — new conditions are no longer recorded");
+        }
+      } else if (sailFront.add(sp))
         queueConsoleMessageF("SailFront +pt #%d aws=%.1f awa=%.0f sea=%.2f spd=%.2f n=%u",
           sailFront.count, sp.x[0], sp.x[1], sp.x[2], sp.y, sp.nSamp);
     }
@@ -815,8 +1392,16 @@ void perfFold_tick(uint32_t nowMs) {
   ms.ex[0] = aws; ms.ex[1] = awa;   // retain raw AWS/AWA (headwind is derived from them) for cloud diagnosis
   if (motorEpisode.feed(motorElig, ms, &ep)) {
     if (motorPending && motorPendingCount < PERF_PENDING_CAP) motorPending[motorPendingCount++] = ep;
-    if (motorFront.pushes(ep.x, ep.y, perfSafetyMargin, perfIdwPower)) {
-      if (motorFront.add(ep))
+    // Cell-local admit gate — same pattern as the sail site above.
+    bool motorLocal = motorFront.hasLocalSupport(ep.x);
+    if (!motorLocal || motorFront.pushesHybrid(ep.x, ep.y, perfSafetyMargin, perfIdwPower, perfRidgeFrac)) {
+      if (!motorLocal && motorFront.count >= PERF_FRONT_CAP) {
+        // a genuinely NEW conditions cell dropped at capacity (in-cell improvements still land)
+        if (!motorCapWarned) {
+          motorCapWarned = true;
+          queueConsoleMessage("WARN: motor front at capacity — new conditions are no longer recorded");
+        }
+      } else if (motorFront.add(ep))
         queueConsoleMessageF("MotorFront +pt #%d rpm=%.0f hw=%.1f sea=%.2f spd=%.2f n=%u",
           motorFront.count, ep.x[0], ep.x[1], ep.x[2], ep.y, ep.nSamp);
     }
@@ -921,6 +1506,7 @@ static float plf_syncAgo()  { if (lastBoatPerfSyncEpoch <= 0 || !timeIsSynced) r
                               time_t n = time(NULL); return (n > (time_t)lastBoatPerfSyncEpoch) ? (float)(n - (time_t)lastBoatPerfSyncEpoch) : 0.0f; }
 static float plf_sailHours(){ return (float)(perfSailSeconds / 3600.0); }   // data-maturity hours
 static float plf_steady()   { return (float)perfSteady; }                   // in a steady-run right now
+static float plf_state()    { return (float)perfState; }    // 0 MEASURED, 1 ESTIMATED, 2 LEARNING_EDGE, 3 NO_REFERENCE
 static PerfLiveField PERF_LIVE[] = {
   {"valid", plf_valid}, {"ws", plf_ws}, {"wa", plf_wa}, {"spd", plf_spd},
   {"best", plf_best}, {"pct", plf_pct}, {"pitchStd", plf_pitchStd}, {"src", plf_src},
@@ -928,6 +1514,7 @@ static PerfLiveField PERF_LIVE[] = {
   {"paused", plf_paused},
   {"sim", plf_sim}, {"syncAgoS", plf_syncAgo},
   {"sailHours", plf_sailHours}, {"steady", plf_steady},
+  {"state", plf_state},
 };
 static const size_t PERF_LIVE_COUNT = sizeof(PERF_LIVE) / sizeof(PERF_LIVE[0]);
 
@@ -954,12 +1541,14 @@ static float pmlf_paused()   { return (perfPaused >= 0.5f) ? 1.0f : 0.0f; }
 static float pmlf_pitchStd() { return motorLive_pitch; }
 static float pmlf_motorHours() { return (float)(perfMotorSeconds / 3600.0); }   // data-maturity hours
 static float pmlf_steady()     { return (float)perfSteady; }                    // in a steady-run right now
+static float pmlf_state()      { return (float)motorState; }   // 0 MEASURED, 1 ESTIMATED, 2 LEARNING_EDGE, 3 NO_REFERENCE
 static PerfLiveField PERF_MOTOR_LIVE[] = {
   {"valid", pmlf_valid}, {"rpm", pmlf_rpm}, {"headwind", pmlf_headwind}, {"spd", pmlf_spd},
   {"best", pmlf_best}, {"pct", pmlf_pct}, {"src", pmlf_src},
   {"coverage", pmlf_coverage}, {"ptCount", pmlf_ptCount}, {"source", pmlf_source}, {"paused", pmlf_paused},
   {"pitchStd", pmlf_pitchStd},
   {"motorHours", pmlf_motorHours}, {"steady", pmlf_steady},
+  {"state", pmlf_state},
 };
 static const size_t PERF_MOTOR_LIVE_COUNT = sizeof(PERF_MOTOR_LIVE) / sizeof(PERF_MOTOR_LIVE[0]);
 static void perfSendMotorLive() {
@@ -1128,8 +1717,10 @@ void initBoatPerformance() {
   perfEpisodeSyncCfg();
   sailFront.init(sailFrontBuf, PERF_FRONT_CAP);
   motorFront.init(motorFrontBuf, PERF_FRONT_CAP);
+  // axisScale: balanced against synthesized polar fronts (rationale: ALT_HEALTH_LWLR_ENGINE_SPEC.md
+  // item 17). MUST match SAIL_SCALE/MOTOR_SCALE in the update-boat-performance edge fn.
   sailFront.axisScale[0]  = 2.0f;   sailFront.axisScale[1]  = 12.0f; sailFront.axisScale[2]  = 1.0f;  // AWS, AWA, sea
-  motorFront.axisScale[0] = 100.0f; motorFront.axisScale[1] = 2.0f;  motorFront.axisScale[2] = 1.0f;  // RPM, headwind, sea
+  motorFront.axisScale[0] = 100.0f; motorFront.axisScale[1] = 4.0f;  motorFront.axisScale[2] = 1.0f;  // RPM, headwind, sea
   sailPendingCount = motorPendingCount = 0;
   boatPerfLoad();
   queueConsoleMessageF("BoatPerf init: sail %d pts (%s), motor %d pts (%s)",
@@ -1139,7 +1730,7 @@ void initBoatPerformance() {
 void resetBoatPerformance() {
   if (!sailFrontBuf) return;
   sailFront.count = 0; sailFront.source = 0; motorFront.count = 0; motorFront.source = 0;
-  sailPendingCount = motorPendingCount = 0;
+  sailPendingCount = motorPendingCount = 0; sailCapWarned = motorCapWarned = false;
   sailEpisode.clearRun();  sailEpisode.ringHead = 0;  sailEpisode.ringCount = 0;
   motorEpisode.clearRun(); motorEpisode.ringHead = 0; motorEpisode.ringCount = 0;
   perfPitchHead = 0; perfPitchCount = 0;
@@ -1160,6 +1751,23 @@ void boatPerf_tick(uint32_t nowMs) {
   if ((uint32_t)(nowMs - lastFold) >= 100) { lastFold = nowMs; perfFold_tick(nowMs); }   // ~10 Hz fold
   if ((uint32_t)(nowMs - lastSse) >= 1000) {                                              // ~1 Hz SSE + echo
     lastSse = nowMs;
+    // 1 Hz evaluator + OUTPUT-BLIND state classifier for the active mode (mirrors altHealth_tick).
+    // NO clamp on the % — it may exceed 100 vs a stale front.
+    if (motorLiveValid) {
+      float surf[PERF_NAXIS] = { motorLive_rpm, motorLive_hw, motorLive_pitch };
+      float pred = 0;
+      motorState = (uint8_t)motorFront.classify(surf, perfRefRadius, perfIdwPower, perfRidgeFrac, perfRiskThresh, &pred);
+      motorLive_best = pred;
+      bool graded = (motorState == FRONT_MEASURED || motorState == FRONT_ESTIMATED);
+      motorLive_pct = (graded && pred > 0.1f) ? (motorLive_spd / pred * 100.0f) : 0.0f;
+    } else if (perfLiveValid) {
+      float surf[PERF_NAXIS] = { perfLive_ws, perfFoldAwa(perfLive_wa), perfLive_pitch };
+      float pred = 0;
+      perfState = (uint8_t)sailFront.classify(surf, perfRefRadius, perfIdwPower, perfRidgeFrac, perfRiskThresh, &pred);
+      perfLive_best = pred;
+      bool graded = (perfState == FRONT_MEASURED || perfState == FRONT_ESTIMATED);
+      perfLive_pct = (graded && pred > 0.1f) ? (perfLive_spd / pred * 100.0f) : 0.0f;
+    }
     perfSendLive();
     perfSendMotorLive();
     static uint8_t sc = 0;
@@ -1180,6 +1788,7 @@ static PerfSetting PERF_SETTINGS[] = {
   {"perfMinBoatSpeed", &perfMinBoatSpeed}, {"perfMinWindSpeed", &perfMinWindSpeed},
   {"perfRpmFloor", &perfRpmFloor},
   {"perfSafetyMargin", &perfSafetyMargin}, {"perfIdwPower", &perfIdwPower}, {"perfPruneK", &perfPruneK},
+  {"perfRefRadius", &perfRefRadius}, {"perfRidgeFrac", &perfRidgeFrac}, {"perfRiskThresh", &perfRiskThresh},
   {"perfSpeedSrc", &perfSpeedSrc}, {"perfFoldSymmetric", &perfFoldSymmetric}, {"perfPaused", &perfPaused},
 };
 static const size_t PERF_SETTING_COUNT = sizeof(PERF_SETTINGS) / sizeof(PERF_SETTINGS[0]);
@@ -1221,7 +1830,7 @@ bool perfSettingsHandle(AsyncWebServerRequest *request) {
   return handled;
 }
 void sendPerfSettings() {
-  char buf[256];
+  char buf[320];   // 23 registry floats at %.4f — headroom over the worst case
   int off = 0;
   for (size_t i = 0; i < PERF_SETTING_COUNT; i++)
     off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.4f" : "%.4f"), *PERF_SETTINGS[i].ptr);
@@ -2335,3 +2944,60 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
   return true;  // test still in progress
 }
+
+
+// ============================================================
+// SMALL SHARED HELPERS moved out of Xregulator.ino (prototypes stay there).
+// ============================================================
+
+// Preload a gzipped web asset from LittleFS into PSRAM so the dashboard serves from RAM.
+CachedGzFile loadFileToRAM(const char *path) {
+  CachedGzFile result;
+  File f = webFS.open(path, "r");
+  if (!f) {
+    Serial.printf("preload FAILED: %s\n", path);
+    return result;
+  }
+  result.size = f.size();
+  // PSRAM only — no internal-heap fallback: ~300KB of web bundle on the internal
+  // heap would destroy the contiguous block TLS handshakes need. On failure
+  // serveCachedGz() returns false and the file is served from flash instead.
+  result.data = (uint8_t *)ps_malloc(result.size);
+  if (result.data) {
+    f.read(result.data, result.size);
+    Serial.printf("Preloaded %s into RAM (%d bytes)\n", path, result.size);
+  } else {
+    Serial.printf("preload malloc FAILED: %s\n", path);
+    result.size = 0;
+  }
+  f.close();
+  return result;
+}
+
+// Thermal-log scaling helpers (6_functions thermal logger packs floats into int16 ×10).
+static int16_t thermalLogScale10(float v) {
+  if (isnan(v) || isinf(v)) return 0;
+  float scaled = v * 10.0f;
+  if (scaled > 32767.0f) return 32767;
+  if (scaled < -32768.0f) return -32768;
+  return (int16_t)lroundf(scaled);
+}
+
+static int16_t thermalLogScaleRPM(float v) {
+  if (isnan(v) || isinf(v)) return 0;
+  if (v > 32767.0f) return 32767;
+  if (v < -32768.0f) return -32768;
+  return (int16_t)lroundf(v);
+}
+
+static uint8_t thermalLogGetStageCode() {
+  return getChargeStageDisplayCode();
+}
+
+// Ignition-cycle watermark helpers (IgnWatermark struct + wmIgn_* globals live in Xregulator.ino).
+inline void wmIgnUpdate(IgnWatermark &w, float v) {
+  if (!isfinite(v)) return;
+  if (isnan(w.lo) || v < w.lo) w.lo = v;
+  if (isnan(w.hi) || v > w.hi) w.hi = v;
+}
+inline float wmIgnSafe(float v) { return isnan(v) ? 0.0f : v; }

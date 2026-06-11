@@ -24,6 +24,24 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+// IMPORTANT: Firmware Version number MUST follow semantic versioning (x.y.z format)
+// - Only numeric digits and dots allowed (regex: ^\d+\.\d+\.\d+$)
+// - Examples: "1.0.0", "2.1.3", "10.5.22" ✅
+// - Invalid: "1.1.1Retry", "v2.0.0", "2.1.0-beta" ❌
+//Maximum supported version = "999.99.99" → 999*10000 + 99*100 + 99 = 9,999,999
+//         Safe Version Ranges:
+//major: 0-999   (4 digits max)
+//minor: 0-99    (2 digits max)
+//patch: 0-99    (2 digits max)
+const char *FIRMWARE_VERSION = "0.0.43";
+
+// OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
+// proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
+// firmware only ever knows this domain — to re-home OTA hosting later, we repoint the
+// proxy, no firmware/factory re-flash. URLs are built from OTA_BASE_URL in
+// performOTAUpdateToVersion(). (setInsecure on the download path; integrity is the
+// on-device RSA-4096 signature check, not TLS — see performOTAUpdate.)
+const char *OTA_BASE_URL = "https://ota.xengineering.net";
 #include <OneWire.h>            // temp sensors
 #include <DallasTemperature.h>  // temp sensors
 //#include <SPI.h>                // display- removed to save connectors space
@@ -75,327 +93,13 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <time.h>            // Supabase
 #include "esp_psram.h"       // for ESP32 health calculations
 #include "LSM6DSOXSensor.h"  //accelerometer
-
-
-// ============================================================
-// BEST-EVER FRONT — shared engine (Phase A). Generic over an axis count NAXIS so one C++
-// instance serves each system: alternator (4-D), sail (3-D), motor (3-D). Lives here in the
-// main sketch (this project keeps no .h files) so the templates are defined before any use in
-// the _functions.ino files. Design contract: BEST_EVER_FRONT_SPEC.md §2/§5 + IMPLEMENTATION_PLAN.md §2.
-//   1. Episode<NAXIS>    — backward look-back / reseed steady-run detector (replaces fixed windows).
-//   2. FrontStore<NAXIS> — sparse best-ever support points (never a grid) + IDW eval + device keep-gate.
-// ============================================================
-
-// Per-axis steadiness knobs (live-tunable): deviation bound + how long it must hold.
-struct EpAxisCfg { float tol; float steadySec; };
-
-// One raw sample fed to the detector. x[] are the steadiness axes (band-checked AND averaged);
-// ex[] are extra raw "passenger" inputs that are AVERAGED over the run but NOT band-checked — kept
-// so the cloud retains the spec's diagnostic/forensic inputs (alt raw duty; motor raw AWS/AWA) for
-// recomputing a derived axis or diagnosing a bad point. out is the measured output, averaged.
-template <int NAXIS>
-struct RawSample { float x[NAXIS]; float ex[2]; float out; uint32_t tMs; };
-
-// One emitted episode point == one front support point. x[] are the SURFACE coordinates (which may
-// be DERIVED from the steadiness axes, e.g. excitation from duty); ex[] are the retained raw extras
-// (run-averaged, uploaded to the cloud's raw history, not used by the front eval); y is the output.
-template <int NAXIS>
-struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32_t tEmit; };
-
-// A run is a contiguous tail of recent samples all mutually within band on every axis (max-min
-// ≤ tol). It grows while each new sample stays in band; on a break it emits the run's average
-// (if every axis held for its steady time) and reseeds the next run from the longest in-band
-// tail ending at the breaking sample, so compatible points are reused, never discarded.
-template <int NAXIS>
-struct Episode {
-  EpAxisCfg cfg[NAXIS];
-  // current run (running sums → cheap average, no per-sample storage):
-  double    sumX[NAXIS], sumEx[2], sumOut;
-  float     runMin[NAXIS], runMax[NAXIS];
-  uint32_t  count, runStartMs;
-  // reseed look-back ring (PSRAM, allocated by the caller):
-  RawSample<NAXIS> *ring; int ringCap, ringHead, ringCount;
-  // Per-axis INDEPENDENT steadiness trackers. Each axis keeps its own in-band window + dwell so a
-  // long steady-time on a slow axis (e.g. temperature, 30 s) does NOT force the fast axes
-  // (RPM/duty/Vbus, ~3 s) to also hold that long — the whole point of per-axis criteria. These
-  // PERSIST across reseeds (a fast-axis break must not wipe the slow axis's accumulated dwell);
-  // they re-center only on a full reset (ringCount==0 → next sample is "fresh").
-  float     axMin[NAXIS], axMax[NAXIS];
-  uint32_t  axSinceMs[NAXIS];   // when each axis last (re)entered its band
-  bool      runQualified;       // current run has met EVERY axis's own steady time
-  // OPTIONAL output-steadiness band (outCfg.tol <= 0 → disabled, the default): the emitted
-  // quantity itself must also hold steady. Directly guards what gets recorded, which is what
-  // allows the input bands to be sized purely for transient rejection. Same independent-dwell
-  // pattern as the input axes.
-  EpAxisCfg outCfg;
-  float     outAxMin, outAxMax;     // independent dwell tracker (persists across reseeds, like axMin/axMax)
-  uint32_t  outAxSinceMs;
-  float     runOutMin, runOutMax;   // current run's output band
-  uint32_t  minRunMs;               // minimum run duration to emit (0 = no floor); closes the
-                                    // short-tail-after-reseed emit edge case
-  float     lastRunSpan[NAXIS], lastRunOutSpan;   // per-axis spread of the last EMITTED run (soak diagnostics)
-
-  void init(RawSample<NAXIS> *ringBuf, int cap) {
-    ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
-    outCfg = { 0, 0 }; minRunMs = 0;
-    outAxMin = outAxMax = 0; outAxSinceMs = 0; lastRunOutSpan = 0;
-    for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = 0;
-    clearRun();
-  }
-  void clearRun() {
-    sumOut = 0; count = 0; runStartMs = 0; sumEx[0] = sumEx[1] = 0;
-    runQualified = false;   // NB: does NOT reset the per-axis trackers (reseed() calls clearRun);
-    for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }   // they re-center on a "fresh" sample
-    runOutMin = 0; runOutMax = 0;
-  }
-  // Per-axis independent steadiness. `fresh` (first sample after a full reset) re-centers every
-  // axis on the sample; otherwise each axis extends its own band, and restarts ONLY its own clock
-  // when IT leaves its band — independent of the other axes.
-  void axisTrack(const RawSample<NAXIS> &s, bool fresh) {
-    for (int a = 0; a < NAXIS; a++) {
-      if (fresh) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; continue; }
-      float lo = axMin[a] < s.x[a] ? axMin[a] : s.x[a];
-      float hi = axMax[a] > s.x[a] ? axMax[a] : s.x[a];
-      if (hi - lo > cfg[a].tol) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; }   // this axis left its band → restart its own clock
-      else { axMin[a] = lo; axMax[a] = hi; }
-    }
-    if (outCfg.tol > 0) {   // output band tracks the same way, with its own independent clock
-      if (fresh) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
-      else {
-        float lo = outAxMin < s.out ? outAxMin : s.out;
-        float hi = outAxMax > s.out ? outAxMax : s.out;
-        if (hi - lo > outCfg.tol) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
-        else { outAxMin = lo; outAxMax = hi; }
-      }
-    }
-  }
-  // True once EVERY axis (and the output band, if enabled) has independently held within its
-  // band for at least its OWN steady time.
-  bool axesQualified(uint32_t nowMs) const {
-    for (int a = 0; a < NAXIS; a++)
-      if ((uint32_t)(nowMs - axSinceMs[a]) < (uint32_t)(cfg[a].steadySec * 1000.0f)) return false;
-    if (outCfg.tol > 0 && (uint32_t)(nowMs - outAxSinceMs) < (uint32_t)(outCfg.steadySec * 1000.0f)) return false;
-    return true;
-  }
-  void ringPush(const RawSample<NAXIS> &s) {
-    ring[ringHead] = s;
-    ringHead = (ringHead + 1) % ringCap;
-    if (ringCount < ringCap) ringCount++;
-  }
-  // ring index of the k-th newest sample (k=0 = newest just pushed)
-  int ringIdx(int k) const { return ((ringHead - 1 - k) % ringCap + ringCap) % ringCap; }
-
-  void startRunWith(const RawSample<NAXIS> &s) {
-    sumOut = s.out; count = 1; runStartMs = s.tMs;
-    sumEx[0] = s.ex[0]; sumEx[1] = s.ex[1];
-    for (int a = 0; a < NAXIS; a++) { sumX[a] = s.x[a]; runMin[a] = runMax[a] = s.x[a]; }
-    runOutMin = runOutMax = s.out;
-  }
-  bool inBandWith(const RawSample<NAXIS> &s) const {
-    for (int a = 0; a < NAXIS; a++) {
-      float lo = runMin[a] < s.x[a] ? runMin[a] : s.x[a];
-      float hi = runMax[a] > s.x[a] ? runMax[a] : s.x[a];
-      if (hi - lo > cfg[a].tol) return false;
-    }
-    if (outCfg.tol > 0) {
-      float lo = runOutMin < s.out ? runOutMin : s.out;
-      float hi = runOutMax > s.out ? runOutMax : s.out;
-      if (hi - lo > outCfg.tol) return false;
-    }
-    return true;
-  }
-  void commit(const RawSample<NAXIS> &s) {
-    for (int a = 0; a < NAXIS; a++) {
-      sumX[a] += s.x[a];
-      if (s.x[a] < runMin[a]) runMin[a] = s.x[a];
-      if (s.x[a] > runMax[a]) runMax[a] = s.x[a];
-    }
-    if (s.out < runOutMin) runOutMin = s.out;
-    if (s.out > runOutMax) runOutMax = s.out;
-    sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
-    sumOut += s.out; count++;
-  }
-  // Complete the current run; emit its average to `out` if it qualified — i.e. every axis
-  // independently held within its band for its OWN steady time (runQualified, latched during
-  // feed) AND the run itself lasted at least minRunMs (a reseed can start a run with latched
-  // qualification, so without the floor a short tail could emit). `nowMs` is the breaking
-  // sample's time. Returns true if a point was emitted.
-  bool complete(uint32_t nowMs, FrontPoint<NAXIS> *out) {
-    bool emit = (count >= 1) && runQualified
-                && (minRunMs == 0 || (uint32_t)(nowMs - runStartMs) >= minRunMs);
-    if (emit && out) {
-      for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(sumX[a] / (double)count);
-      out->ex[0] = (float)(sumEx[0] / (double)count);
-      out->ex[1] = (float)(sumEx[1] / (double)count);
-      out->y = (float)(sumOut / (double)count);
-      out->nSamp = count;
-      out->tEmit = nowMs;
-      for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = runMax[a] - runMin[a];
-      lastRunOutSpan = runOutMax - runOutMin;
-    }
-    return emit;
-  }
-  // Reseed a fresh run from the longest in-band tail of the ring ending at the newest sample
-  // (in-band on every axis AND the output band, when enabled).
-  void reseed() {
-    clearRun();
-    if (ringCount <= 0) return;
-    float mn[NAXIS], mx[NAXIS], mnO, mxO;
-    { const RawSample<NAXIS> &s0 = ring[ringIdx(0)];
-      for (int a = 0; a < NAXIS; a++) mn[a] = mx[a] = s0.x[a];
-      mnO = mxO = s0.out; }
-    int oldestK = 0;
-    for (int k = 1; k < ringCount; k++) {
-      const RawSample<NAXIS> &s = ring[ringIdx(k)];
-      bool ok = true;
-      for (int a = 0; a < NAXIS; a++) {
-        float lo = mn[a] < s.x[a] ? mn[a] : s.x[a];
-        float hi = mx[a] > s.x[a] ? mx[a] : s.x[a];
-        if (hi - lo > cfg[a].tol) { ok = false; break; }
-      }
-      if (ok && outCfg.tol > 0) {
-        float lo = mnO < s.out ? mnO : s.out;
-        float hi = mxO > s.out ? mxO : s.out;
-        if (hi - lo > outCfg.tol) ok = false;
-      }
-      if (!ok) break;
-      for (int a = 0; a < NAXIS; a++) { if (s.x[a] < mn[a]) mn[a] = s.x[a]; if (s.x[a] > mx[a]) mx[a] = s.x[a]; }
-      if (s.out < mnO) mnO = s.out;
-      if (s.out > mxO) mxO = s.out;
-      oldestK = k;
-    }
-    for (int a = 0; a < NAXIS; a++) { runMin[a] = mn[a]; runMax[a] = mx[a]; }
-    runOutMin = mnO; runOutMax = mxO;
-    for (int k = oldestK; k >= 0; k--) {           // oldest → newest
-      const RawSample<NAXIS> &s = ring[ringIdx(k)];
-      for (int a = 0; a < NAXIS; a++) sumX[a] += s.x[a];
-      sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
-      sumOut += s.out; count++;
-    }
-    runStartMs = ring[ringIdx(oldestK)].tMs;        // preserves accumulated dwell
-  }
-  // Feed one sample. eligible=false → below an admission floor: hard break, no reseed across it
-  // (the ring is dropped so a later run can't look back over the gap). Returns true + fills `out`
-  // when a completed run emits a point.
-  bool feed(bool eligible, const RawSample<NAXIS> &s, FrontPoint<NAXIS> *out) {
-    if (!eligible) {
-      bool emitted = complete(s.tMs, out);
-      clearRun();
-      ringHead = 0; ringCount = 0;                  // barrier: no reseed across the ineligible gap
-      return emitted;
-    }
-    bool fresh = (ringCount == 0);                   // first eligible sample after init/barrier → re-center axis trackers
-    axisTrack(s, fresh);                             // per-axis INDEPENDENT steadiness (decoupled steady times)
-    if (!runQualified && axesQualified(s.tMs)) runQualified = true;   // latch once every axis has met its own time
-    ringPush(s);
-    if (count == 0) { startRunWith(s); return false; }   // empty run → s founds it
-    if (inBandWith(s)) { commit(s); return false; }      // grow
-    bool emitted = complete(s.tMs, out);                 // break: complete then reseed (includes s)
-    reseed();
-    return emitted;
-  }
-};
-
-// Sparse support points (never a grid). Memory scales with the data, not the input volume —
-// what makes the 4-D alternator affordable. axisScale[] normalizes each dimension's distance
-// for IDW (≈ that axis's tol or characteristic span).
-template <int NAXIS>
-struct FrontStore {
-  FrontPoint<NAXIS> *pts; int count, cap;
-  uint8_t source;                                   // 0 = LEARNED, 1 = FIXED (loaded curve)
-  float   axisScale[NAXIS];
-
-  void init(FrontPoint<NAXIS> *buf, int c) {
-    pts = buf; cap = c; count = 0; source = 0;
-    for (int a = 0; a < NAXIS; a++) axisScale[a] = 1.0f;
-  }
-  // Max-per-cell insert: keep the store a true upper ENVELOPE, not a point cloud. If an incoming run
-  // lands in the same operating cell as an existing point (within half an axisScale on EVERY axis),
-  // keep only the higher-y one — so eval() interpolates between bests instead of averaging a best with
-  // also-rans. Returns true ONLY on a genuine improvement (new cell, or a higher y in an existing cell);
-  // false when an existing run already beat it — callers use that to gate cloud upload + console logs.
-  bool add(const FrontPoint<NAXIS> &p) {
-    for (int i = 0; i < count; i++) {
-      bool sameCell = true;
-      for (int a = 0; a < NAXIS; a++) {
-        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
-        if (fabsf(p.x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
-      }
-      if (sameCell) {
-        if (p.y > pts[i].y) { pts[i] = p; return true; }   // new best at this cell
-        return false;                                       // an existing run here was already better
-      }
-    }
-    if (count >= cap) return false;
-    pts[count++] = p; return true;
-  }
-  // IDW surface evaluation, O(count) — the spec's front_eval(). Float + precomputed reciprocal axis
-  // scales (4 mults/point, not 4 divides) keep this cheap on the 200 Hz fold even at the raised cap.
-  // A convex blend of the support points → the result is ALWAYS within their y-range: never extrapolates.
-  // d_i = sqrt(Σ_a ((x[a]-pts.x[a])*invSc[a])^2); exact hit → that point's y; else Σ w_i y_i / Σ w_i.
-  float eval(const float x[NAXIS], float idwPower) const {
-    if (count <= 0) return 0.0f;                     // bootstrap: no surface yet
-    float invSc[NAXIS];
-    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
-    float wsum = 0, num = 0;
-    for (int i = 0; i < count; i++) {
-      float d2 = 0;
-      for (int a = 0; a < NAXIS; a++) {
-        float dx = (x[a] - pts[i].x[a]) * invSc[a];
-        d2 += dx * dx;
-      }
-      if (d2 < 1e-12f) return pts[i].y;              // exact hit
-      // dᵢ^power. Fast-path power 2 (the default) — d2 already is dᵢ²; skip sqrt+pow (200 Hz hot path).
-      float dp = (idwPower == 2.0f) ? d2 : powf(sqrtf(d2), idwPower);
-      float w = 1.0f / (dp + 1e-9f);
-      wsum += w; num += w * pts[i].y;
-    }
-    return (wsum > 0) ? (num / wsum) : 0.0f;
-  }
-  // Device keep-gate (LEARNED) — the spec's front_pushes(). Keep only runs that beat the current
-  // surface; safetyMargin now defaults 0 (was a keep-bias for cloud sampling, but the cloud only
-  // prunes / gets raw episodes regardless, so a margin just polluted the local eval). count==0 bootstraps.
-  // Callers should only apply this gate when hasLocalSupport() is true — far from all support the
-  // IDW blend is not a fair bar (it once locked low-RPM regions out forever).
-  bool pushes(const float x[NAXIS], float y, float safetyMargin, float idwPower) const {
-    if (count <= 0) return true;
-    return y > eval(x, idwPower) - safetyMargin;
-  }
-  // Any support point within the same cell (the half-axisScale box add() dedupes in)? A run landing
-  // in an unvisited cell is admitted unconditionally — it opens that region at its true value, and
-  // add()'s max-per-cell keeps later, better runs.
-  bool hasLocalSupport(const float x[NAXIS]) const {
-    for (int i = 0; i < count; i++) {
-      bool sameCell = true;
-      for (int a = 0; a < NAXIS; a++) {
-        float sc = (axisScale[a] > 1e-9f) ? axisScale[a] : 1.0f;
-        if (fabsf(x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
-      }
-      if (sameCell) return true;
-    }
-    return false;
-  }
-  // Normalized (axis-scaled) distance to the nearest support point — the "is the IDW reference
-  // trustworthy here" test. Beyond the caller's radius the live % and trend report no reference
-  // instead of a ratio against a blend of faraway points. Empty front → huge distance.
-  float nearestNormDist(const float x[NAXIS]) const {
-    if (count <= 0) return 1e9f;
-    float invSc[NAXIS];
-    for (int a = 0; a < NAXIS; a++) invSc[a] = (axisScale[a] > 1e-9f) ? (1.0f / axisScale[a]) : 1.0f;
-    float best = 1e30f;
-    for (int i = 0; i < count; i++) {
-      float d2 = 0;
-      for (int a = 0; a < NAXIS; a++) {
-        float dx = (x[a] - pts[i].x[a]) * invSc[a];
-        d2 += dx * dx;
-      }
-      if (d2 < best) best = d2;
-    }
-    return sqrtf(best);
-  }
-};
-
-
+// Confidence states returned by FrontStore::classify (engine lives in 7_functions.ino; shared by
+// the alternator and both boat fronts; mirrored in script.js — keep the numeric order in sync with
+// the dashboard labels). These #defines stay HERE because globals below initialize from them.
+#define FRONT_MEASURED      0
+#define FRONT_ESTIMATED     1
+#define FRONT_LEARNING_EDGE 2
+#define FRONT_NO_REFERENCE  3
 
 // Make the types visible to auto-generated prototypes, hack
 struct UpdateInfo;
@@ -425,32 +129,9 @@ struct CachedGzFile {
   size_t size = 0;
 };
 
-CachedGzFile loadFileToRAM(const char *path);  // add this line
+CachedGzFile loadFileToRAM(const char *path);  // defined in 7_functions.ino (explicit prototype: returns a custom struct)
 
 CachedGzFile cachedIndex, cachedCss, cachedJs, cachedUplotCss, cachedUplotJs;
-
-CachedGzFile loadFileToRAM(const char *path) {
-  CachedGzFile result;
-  File f = webFS.open(path, "r");
-  if (!f) {
-    Serial.printf("preload FAILED: %s\n", path);
-    return result;
-  }
-  result.size = f.size();
-  // PSRAM only — no internal-heap fallback: ~300KB of web bundle on the internal
-  // heap would destroy the contiguous block TLS handshakes need. On failure
-  // serveCachedGz() returns false and the file is served from flash instead.
-  result.data = (uint8_t *)ps_malloc(result.size);
-  if (result.data) {
-    f.read(result.data, result.size);
-    Serial.printf("Preloaded %s into RAM (%d bytes)\n", path, result.size);
-  } else {
-    Serial.printf("preload malloc FAILED: %s\n", path);
-    result.size = 0;
-  }
-  f.close();
-  return result;
-}
 
 // ============= HTTPS TASK SYSTEM =============
 int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
@@ -476,26 +157,7 @@ struct HttpsRequest {
   uint32_t payloadCap;  // allocated capacity (0 / NULL payload for the no-body request types)
 };
 
-// OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
-// proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
-// firmware only ever knows this domain — to re-home OTA hosting later, we repoint the
-// proxy, no firmware/factory re-flash. URLs are built from OTA_BASE_URL in
-// performOTAUpdateToVersion(). (setInsecure on the download path; integrity is the
-// on-device RSA-4096 signature check, not TLS — see performOTAUpdate.)
-const char *OTA_BASE_URL = "https://ota.xengineering.net";
-// IMPORTANT: Firmware Version number MUST follow semantic versioning (x.y.z format)
-// - Only numeric digits and dots allowed (regex: ^\d+\.\d+\.\d+$)
-// - Examples: "1.0.0", "2.1.3", "10.5.22" ✅
-// - Invalid: "1.1.1Retry", "v2.0.0", "2.1.0-beta" ❌
-//Maximum supported version = "999.99.99" → 999*10000 + 99*100 + 99 = 9,999,999
-//         Safe Version Ranges:
-//major: 0-999   (4 digits max)
-//minor: 0-99    (2 digits max)
-//patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.36";
-
 String currentUID;
-
 #define FUNC_TIMING_WINDOW_MS 10000  // rolling window for per-function worst-case timing (ms)
 
 
@@ -545,16 +207,25 @@ static float  altBucket_worst = 0;                  // min output-% seen this bu
 static int    altCurEngHour = -1;
 double altTrendBaselineSec = 0.0;   // EngineRunTime_AllTime at last "Start Over" (trend X-axis origin)
 
-// Live point for the dashboard gauge / trend dot, via AltLive SSE.
+// Live point for the dashboard gauge / trend dot, via AltLive SSE. The ~200 Hz fold writes only the
+// EMA-filtered inputs; prediction + state + % are computed at 1 Hz in altHealth_tick.
 static float   altLive_rpm = 0, altLive_exc = 0, altLive_amps = 0, altLive_pred = 0;
-static float   altLive_pct = 0;            // live output-% = amps ÷ front_eval (NO clamp; may exceed 100)
-static bool    altRefOk = false;           // nearest support point within altRefRadius → the % is trustworthy
+static float   altLive_vbus = 0, altLive_tF = 0, altLive_duty = 0;   // filtered fold outputs for the 1 Hz evaluator
+static float   altLive_pct = 0;            // live output-% = amps ÷ LWLR prediction (NO clamp; may exceed 100)
+static bool    altRefOk = false;           // state is MEASURED/ESTIMATED → the % is trustworthy
 static float   altRefDist = 999.0f;        // normalized distance to nearest support point (diagnostics)
 static bool    altLiveValid = false;
 static bool    altSteady = false;          // currently inside a steady episode run (live indicator)
-static float   altWorstPctLive = 0;        // worst-bucket output-% (headline)
+static uint8_t altState = FRONT_NO_REFERENCE;   // confidence state (FrontStore::classify, 1 Hz)
+static uint32_t altLastFoldMs = 0;         // last fold time — stale fold (field off) → live point not graded
+static float   altWorstPctLive = 0;        // worst output-% of the in-progress trend bucket
 static float   altOverallPctLive = 0;      // current-bucket average output-%
-static uint8_t altStatusCode = 0;          // 0 learning/insufficient, 1 healthy, 2 drifting, 3 disabled
+static uint8_t altStatusCode = 0;          // 0 normal, 3 disabled (Ignore Temperature); verdict codes 1/2 removed
+// Session statistics over the graded 1 Hz samples since boot/Start Over: mean + P10 histogram (60 × 2% bins).
+static uint16_t altSessHist[60] = {};
+static uint32_t altSessN = 0;
+static double   altSessSum = 0;
+static bool    altHiFieldAlert = false;    // high-field-low-output alert (independent of the record book)
 
 // GUI-adjustable settings (Pattern B; build-then-tune). Per-axis deviation bounds (steady times +
 // front/eval knobs altRpmSec/altDutySec/altVbusSec/altThermDegF/altThermSec/altSafetyMargin/
@@ -603,6 +274,8 @@ static bool  perfSteady = false;    // currently inside a steady-run (sail OR mo
 static uint8_t perfLiveSrc = 0;     // 1 STW, 2 SOG
 static float motorLive_rpm = 0, motorLive_hw = 0, motorLive_spd = 0, motorLive_best = 0, motorLive_pct = 0, motorLive_pitch = 0;
 static bool  motorLiveValid = false;
+// Confidence states for the live % (FrontStore::classify at 1 Hz — same engine as the alternator's).
+static uint8_t perfState = FRONT_NO_REFERENCE, motorState = FRONT_NO_REFERENCE;
 static uint8_t motorLiveSrc = 0;
 
 // GUI-adjustable settings (registry-driven; build-then-tune). Per-axis deviation bounds here;
@@ -1515,8 +1188,8 @@ bool isRegistered = false;  // Registration status
 // CLOUD FEATURES - STATIC BUFFERS// For ESP32-S3 with 16GB and OPI PSRAM
 const int PAYLOAD_BUFFER_SIZE = 4096;
 const int CONFIG_PAYLOAD_SIZE = 32768;  // bumped 8KB → 32KB for step 4 picker spec (~190 fields)
-const int ALT_UPLOAD_BUF_SIZE  = 64 * 1024;   // PSRAM upload buffer — holds a full alt front batch (≤1024 pts)
-const int PERF_UPLOAD_BUF_SIZE = 128 * 1024;  // PSRAM upload buffer — holds sail+motor batches (≤2048 pts)
+const int ALT_UPLOAD_BUF_SIZE  = 256 * 1024;  // PSRAM upload buffer — holds a full alt front batch (≤4096 pts)
+const int PERF_UPLOAD_BUF_SIZE = 512 * 1024;  // PSRAM upload buffer — holds sail+motor batches (≤4096 pts EACH)
 
 char *tempBuffer;
 
@@ -3303,24 +2976,10 @@ volatile uint32_t thermalLogPausedAtMs = 0;
 
 
 
-static int16_t thermalLogScale10(float v) {
-  if (isnan(v) || isinf(v)) return 0;
-  float scaled = v * 10.0f;
-  if (scaled > 32767.0f) return 32767;
-  if (scaled < -32768.0f) return -32768;
-  return (int16_t)lroundf(scaled);
-}
-
-static int16_t thermalLogScaleRPM(float v) {
-  if (isnan(v) || isinf(v)) return 0;
-  if (v > 32767.0f) return 32767;
-  if (v < -32768.0f) return -32768;
-  return (int16_t)lroundf(v);
-}
-
-static uint8_t thermalLogGetStageCode() {
-  return getChargeStageDisplayCode();
-}
+// Thermal-log scaling helpers — defined in 7_functions.ino (used by the 6_functions thermal logger).
+static int16_t thermalLogScale10(float v);
+static int16_t thermalLogScaleRPM(float v);
+static uint8_t thermalLogGetStageCode();
 
 struct ThermalBinDLState {
   uint8_t header[8];  // count(uint32) + intervalMs(uint32), little-endian
@@ -3715,12 +3374,9 @@ IgnWatermark wmIgn_ambient  = { NAN, NAN };   // ambientTemp (°F)
 IgnWatermark wmIgn_VMGman   = { NAN, NAN };   // VMGNMEA — VMG to manual bearing (knots)
 IgnWatermark wmIgn_VMGup    = { NAN, NAN };   // VMGUpwind — VMG to windward (knots)
 
-inline void wmIgnUpdate(IgnWatermark &w, float v) {
-  if (!isfinite(v)) return;
-  if (isnan(w.lo) || v < w.lo) w.lo = v;
-  if (isnan(w.hi) || v > w.hi) w.hi = v;
-}
-inline float wmIgnSafe(float v) { return isnan(v) ? 0.0f : v; }
+// Watermark update/read helpers — defined in 7_functions.ino.
+inline void wmIgnUpdate(IgnWatermark &w, float v);
+inline float wmIgnSafe(float v);
 
 // Universal data freshness tracking
 

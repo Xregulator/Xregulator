@@ -3037,6 +3037,17 @@ done_headers_cfg:
   return success;
 }
 
+// Shared response-body buffer for the two front sync-backs (boat + alt). PSRAM, allocated once and
+// kept (both sync paths run sequentially in the same httpsTask worker). Must hold the boat pair at
+// full cap (2 × 4096 pts). A read that fills it completely is reported and NOT parsed — a truncated
+// front must never wholesale-replace a good local one.
+static char *syncBody = nullptr;
+#define SYNC_BODY_CAP 524288u
+static char *syncBodyGet() {
+  if (!syncBody) syncBody = (char *)ps_malloc(SYNC_BODY_CAP);
+  return syncBody;
+}
+
 // Mirrors executeUploadConfig() exactly (proven HTTPS pattern) — only the endpoint + log labels
 // differ. Uploads the boat-performance aggregates to the update-boat-performance edge function.
 bool executeUploadBoatPerf(const char *payload) {
@@ -3119,13 +3130,14 @@ drain_headers_bp:
     }
   }
 done_headers_bp:
-  // Read the response BODY (the BPCURVE2 curve CSV) — assumed to arrive in one chunk (~1.4 KB).
+  // Read the response BODY (both pruned BEFRONT1 blocks) into the shared PSRAM sync buffer.
   {
-    static char bpBody[6144];   // static (not stack) — worker task only; holds both pruned front blocks
+    char *bpBody = syncBodyGet();
+    if (!bpBody) { client.stop(); return false; }   // PSRAM alloc failed — skip, retry next cycle
     size_t bl = 0;
     uint32_t bodyStart = millis();
-    while (client.connected() && bl < sizeof(bpBody) - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
-      while (client.available() && bl < sizeof(bpBody) - 1) bpBody[bl++] = (char)client.read();
+    while (client.connected() && bl < SYNC_BODY_CAP - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      while (client.available() && bl < SYNC_BODY_CAP - 1) bpBody[bl++] = (char)client.read();
       if (millis() - start > GLOBAL_TIMEOUT) break;
       delay(1);
     }
@@ -3134,6 +3146,14 @@ done_headers_bp:
     esp_task_wdt_reset();
 
     bool success = (httpCode == 200);
+    if (success && bl >= SYNC_BODY_CAP - 1) {
+      // Buffer filled completely → the front CSV may be cut mid-stream. Never parse a possibly-
+      // truncated front (the ingest replaces the local front wholesale).
+      queueConsoleMessage("WARN: boat-perf sync response overran the sync buffer — front NOT updated");
+      if (timeIsSynced) lastBoatPerfSyncEpoch = (int64_t)time(NULL);
+      perfClearPending();   // upload itself succeeded; only the sync-back is unusable
+      return success;
+    }
     if (success) {
       if (timeIsSynced) lastBoatPerfSyncEpoch = (int64_t)time(NULL);   // for the "synced N ago" badge
       perfClearPending();   // cloud accepted the batch (raw history) → drop the pending points
@@ -3237,13 +3257,14 @@ drain_headers_ah:
     }
   }
 done_headers_ah:
-  // Read the response BODY (the pruned BEFRONT1 front CSV) — assumed to arrive in one chunk.
+  // Read the response BODY (the pruned BEFRONT1 front CSV) into the shared PSRAM sync buffer.
   {
-    static char ahBody[4096];   // static (not stack) — worker task only
+    char *ahBody = syncBodyGet();
+    if (!ahBody) { client.stop(); return false; }   // PSRAM alloc failed — skip, retry next cycle
     size_t bl = 0;
     uint32_t bodyStart = millis();
-    while (client.connected() && bl < sizeof(ahBody) - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
-      while (client.available() && bl < sizeof(ahBody) - 1) ahBody[bl++] = (char)client.read();
+    while (client.connected() && bl < SYNC_BODY_CAP - 1 && (millis() - bodyStart < READ_TIMEOUT)) {
+      while (client.available() && bl < SYNC_BODY_CAP - 1) ahBody[bl++] = (char)client.read();
       if (millis() - start > GLOBAL_TIMEOUT) break;
       delay(1);
     }
@@ -3252,6 +3273,14 @@ done_headers_ah:
     esp_task_wdt_reset();
 
     bool success = (httpCode == 200);
+    if (success && bl >= SYNC_BODY_CAP - 1) {
+      // Buffer filled completely → the front CSV may be cut mid-stream. Never parse a possibly-
+      // truncated front (the ingest replaces the local front wholesale).
+      queueConsoleMessage("WARN: alt-health sync response overran the sync buffer — front NOT updated");
+      if (timeIsSynced) lastAltHealthSyncEpoch = (int64_t)time(NULL);
+      altClearPending();   // upload itself succeeded; only the sync-back is unusable
+      return success;
+    }
     if (success) {
       if (timeIsSynced) lastAltHealthSyncEpoch = (int64_t)time(NULL);   // for the "synced N ago" badge
       altClearPending();   // cloud accepted the batch (raw history) → drop the pending points

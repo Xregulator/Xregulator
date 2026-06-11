@@ -1840,6 +1840,69 @@
                   </div>
                 </div>
                 <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Local fit stiffness (<span id="altRidgeFrac_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How strongly the local trend fit (the one-per-second health comparison) is held flat when the recorded points around the live point line up poorly. Higher = steadier but less responsive to real local slope; lower = follows the records more exactly but can wobble where data is thin. Default 0.10.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRidgeFrac" type="number" step="0.05" min="0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Learning-state risk threshold (<span id="altRiskThresh_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much could-be-wrong (as a fraction of the predicted output) is tolerated before the panel says "Learning this operating region" instead of showing a %. Raise to show numbers in more places at the cost of less trustworthy ones; lower to be stricter. Default 0.15 — values 0.10–0.20 classified the validation data identically.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altRiskThresh" type="number" step="0.05" min="0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <p class="card-group-title" style="margin:12px 0 4px;">High-Field Alert</p>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Independent safety net: flags low output despite high field drive, even where the health gauge is still learning.</div>
+                <div class="form-row">
+                  <div class="form-label"><span>Alert: field drive at least (%) (<span id="altHiFieldPct_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altHiFieldPct" type="number" step="5" min="0" max="100" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Alert: output at or below (A) (<span id="altLowOutAmps_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altLowOutAmps" type="number" step="1" min="0" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label"><span>Alert: must persist (s) (<span id="altHiFieldSec_echo">?</span>):</span></div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altHiFieldSec" type="number" step="5" min="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
                 <p class="card-group-title" style="margin:12px 0 4px;">Reference &amp; Data</p>
                 <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Learn or freeze the reference, back it up, simulate, or reset.</div>
                 <div class="form-row">
@@ -4375,6 +4438,30 @@
                 </div>
                 <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfPruneK" type="number" step="1" min="5" max="20" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
               </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Reference validity radius (<span id="perfRefRadius_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close (in normalized axis units) the nearest recorded point must be for the % of best to be trusted. Operating farther than this from everything recorded shows "No reference here yet" instead of comparing against a guess.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfRefRadius" type="number" step="0.5" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Local fit stiffness (<span id="perfRidgeFrac_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How strongly the local trend fit (the once-per-second % of best comparison) is held flat when the recorded points around the live point line up poorly. Higher = steadier; lower = follows the records more exactly. Default 0.10.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfRidgeFrac" type="number" step="0.05" min="0" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
+              <hr>
+              <div class="form-row">
+                <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                  <span>Learning-state risk threshold (<span id="perfRiskThresh_echo">?</span>)</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much could-be-wrong (as a fraction of the predicted speed) is tolerated before the panel says "Learning this operating region" instead of showing a %. Raise to show numbers in more conditions at the cost of less trustworthy ones. Default 0.15.</span></span>
+                </div>
+                <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="perfRiskThresh" type="number" step="0.05" min="0" /><input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" /></form></div>
+              </div>
             </details>
           </div>
 
@@ -6575,19 +6662,27 @@
         <!-- Charging-system health summary (v2) — sits directly above the trend plot -->
         <div style="display:flex;align-items:center;gap:18px;margin:4px 0 10px;flex-wrap:wrap;">
           <div style="min-width:96px;text-align:center;flex-shrink:0;">
-            <div style="font-size:11px;color:var(--text-muted);">Charging-System Health <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions.</span></span></div>
+            <div style="font-size:11px;color:var(--text-muted);">Charging-System Health <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Output amps as a percentage of the best the charging system has done in the past under these same conditions. Both sides of that comparison are smoothed over several seconds (the Signal smoothing filter setting), so this reads steady-state performance — momentary dips and spikes are deliberately filtered out and never move this number. The label under the number tells you what the comparison is based on: MEASURED means a recorded best exists at this operating point (within a small matching window); ESTIMATED means it's interpolated between nearby records; "learning" means there isn't enough recorded here yet to grade fairly, so no number is shown.</span></span></div>
             <div id="alt-health-pct" style="font-size:30px;font-weight:800;line-height:1.1;">—</div>
             <div id="alt-health-status" style="font-size:12px;color:#888;">Learning</div>
+            <div id="alt-hifield-alert" style="display:none;font-size:11px;font-weight:700;color:#d9534f;">Low output despite high field drive</div>
           </div>
           <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
             <div><span id="alt-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture</div>
             <div id="alt-coverage" style="font-size:10px;">no front points yet</div>
+            <div id="alt-session-stats" style="font-size:10px;"></div>
           </div>
         </div>
         <hr />
         <p class="card-group-title">
+          <span>This Session</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Every second's health reading since this page was opened. Green points are measured comparisons (a recorded best exists at that operating point); blue points are estimated (interpolated between nearby records). Shaded spans are periods with no fair comparison — learning a new operating region, no reference recorded yet, or not running — where no number is shown on purpose. Click the axis numbers to set the plot range.</span></span>
+        </p>
+        <div id="alt-session-plot" style="width:100%;max-width:560px;margin:0 auto;"></div>
+        <hr />
+        <p class="card-group-title">
           <span>Charging-System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only graded readings enter a point: comparisons made while learning a new operating region or with no reference recorded nearby are excluded, and an engine-hour needs at least 5 graded steady-state runs before it commits a point — a single noisy reading can no longer stamp a whole hour. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
         </p>
         <canvas id="alt-trend" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
         <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
@@ -6602,13 +6697,18 @@
             <p><b>What it measures.</b> The highest output the alternator has ever produced at a given steady-state operating
               point — engine speed (RPM), field drive (excitation), bus voltage, and temperature — and
               whether today's output is sliding below that best over time. </p>
-            <p><b>Learned on the device.</b> Every control tick (~200 Hz), when conditions are steady, the
-              regulator compares the present output against its best-ever surface — an interpolation
-              (inverse-distance weighting) over a sparse set of best-ever support points. "Steady" means
-              the smoothed engine speed, field drive, voltage, temperature, AND output current all hold
-              within their bands for their set times (tunable in Settings). Comparisons only count where
-              a recorded point exists nearby — far from anything recorded, the panel shows "no reference"
-              rather than guessing, and a steady run there records a new point instead.</p>
+            <p><b>Learned on the device.</b> Steady-state capture runs every control tick (~200 Hz):
+              when the smoothed engine speed, field drive, voltage, temperature, AND output current
+              all hold within their bands for their set times (tunable in Settings), the run's average
+              is recorded as a best-ever point. The health comparison itself runs once per second.
+              Instead of averaging nearby records (which reads falsely low at the edge of what has
+              been visited), it fits the local slope of the best-ever surface through the nearby
+              records and compares today's output against that fit. The label under the headline says
+              what the comparison is based on: <b>MEASURED</b> — a recorded best exists at this
+              operating point; <b>ESTIMATED</b> — interpolated between trustworthy nearby records;
+              <b>Learning this operating region</b> — the recorded data around this point is too
+              one-sided to grade fairly, so no number is shown; <b>No reference here yet</b> — nothing
+              recorded nearby, and a steady run here records a new point instead of guessing.</p>
             <p><b>Pruned in the cloud (optional).</b> About every 15 minutes, engine off and device online, any new
               frontier points upload. The cloud then drops points that
               have become redundant (sitting below the envelope of their neighbours) and returns the cleaned
@@ -7195,10 +7295,11 @@
             <div id="perf-sea-val" style="font-size:30px;font-weight:800;line-height:1.05;">&mdash;</div>
             <div id="perf-sea-sub" style="font-size:13px;color:var(--text-muted);"></div>
           </div>
-          <!-- BL: % of best -->
+          <!-- BL: % of best + confidence state -->
           <div style="grid-column:1;grid-row:3;text-align:left;align-self:end;">
             <div><span id="perf-pct" style="font-size:30px;font-weight:800;">&mdash;</span></div>
             <div style="font-size:12px;color:var(--text-muted);">of best</div>
+            <div id="perf-state" style="font-size:10px;color:#888;line-height:1.3;"></div>
           </div>
           <!-- BR: data maturity (front points + sailing/motoring hours) -->
           <div style="grid-column:3;grid-row:3;text-align:right;align-self:end;">
@@ -7221,10 +7322,15 @@
               wind speed and angle when sailing, engine speed (RPM) when motoring — corrected for sea state
               (measured as how much the bow pitches) and wind. A sustained shortfall against best may point to a
               dirty bottom, poor sail trim, or adverse current (if not using STW).</p>
-            <p><b>Learned on the device.</b> About 10 times a second, when the inputs are steady, it compares
-             speed against the best-ever surface — an interpolation (inverse-distance weighting)
-              over a sparse set of best-ever points — for those same conditions. Two surfaces are learned independently: a sailing polar and a motoring speed-vs-RPM map.
-              </p>
+            <p><b>Learned on the device.</b> Steady-state capture runs about 10 times a second; the
+              % of best comparison runs once per second. Instead of averaging nearby records (which
+              reads falsely low at the edge of the conditions sailed so far), it fits the local slope
+              of the best-ever surface through the nearby records and compares the present speed
+              against that fit. The label under the % says what the comparison is based on — MEASURED
+              (a recorded best exists for these conditions), ESTIMATED (interpolated between nearby
+              records), or "learning" / "no reference" when there isn't enough recorded here to grade
+              fairly (no number is shown). Two surfaces are learned independently: a sailing polar
+              and a motoring speed-vs-RPM map.</p>
             <p><b>Pruned in the cloud (optional).</b> About every
               15 minutes, engine off and system online, new points upload and the cloud <b>prunes</b> redundant
               interior points back to the envelope, then returns the cleaned set. </p>
@@ -9472,11 +9578,10 @@
     <!-- Plot Displays Sub-tab - This should be active by default -->
     <div id="plots-displays" class="sub-tab-content active">
       <div class="settings-card">
-        <!-- Equal 4-cell grid: status pill, pause/resume, download, start-fresh; tooltip sits to the right -->
+        <!-- Equal 3-cell grid: pause/resume toggle (its dot carries the recording state), download, start-fresh; tooltip sits to the right -->
         <div class="form-row form-row-wide log-row">
           <div class="log-grid">
-            <span id="loggingStatusPill" class="log-pill log-pill-on"><span class="log-dot"></span>Recording</span>
-            <button type="button" id="logToggleBtn" class="btn-log-toggle is-recording" onclick="toggleLogs()">⏸ Pause Logs</button>
+            <button type="button" id="logToggleBtn" class="btn-log-toggle is-recording" onclick="toggleLogs()"><span class="log-dot"></span>⏸ Pause Logs</button>
             <button type="button" class="btn-log-primary" onclick="downloadLogs()">⬇ Download Logs</button>
             <button type="button" class="btn-log-fresh" onclick="resetLogs()">↻ Start Fresh Log</button>
           </div>
@@ -9487,17 +9592,20 @@
               control-loop log (the last ~11 seconds at the full control-loop rate, ~200 Hz), and a
               voltage-tuning log (the last ~28 seconds, also ~200 Hz). Logs are automatically cleared after
               download. Pause Logs freezes the log buffers so their contents stay fixed; Resume Logs continues
-              recording. Start Fresh Log clears the buffers and begins a new log.</span>
+              recording — the dot on the button shows the state (pulsing green = recording, amber = paused).
+              Start Fresh Log clears the buffers and begins a new log.</span>
           </span>
         </div>
       </div>
       <!-- X-axis time window — buttons set plotTimeWindow (seconds) for all four live plots.
-           Replaces the old Plot Controls numeric input. Y axis is set by dragging on a plot (double-click resets). -->
+           The current setting is shown by highlighting its button (driven from the CSV3 echo
+           in updateAllEchosOptimized), not by a text echo. Y axis is set by dragging on a plot
+           (double-click resets). -->
       <div class="settings-card">
         <div class="form-row form-row-wide">
           <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-            <span style="white-space: nowrap;">Time Window (current: <span id="plotTimeWindow_echo" style="font-variant-numeric: tabular-nums;">?</span> s):</span>
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how many seconds of live data all four short-term plots show on the X axis. To zoom the Y axis, drag a box directly on a plot; double-click a plot to reset its zoom.</span></span>
+            <span style="white-space: nowrap;">Time Window:</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how many seconds of live data all four short-term plots show on the X axis. The highlighted button is the current setting. To zoom the Y axis, drag a box directly on a plot; double-click a plot to reset its zoom.</span></span>
           </div>
           <div class="form-input time-window-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -9941,7 +10049,6 @@
     <span id="BatteryCurrentSource_echo" style="display:none;">0</span>
     <span id="timeAxisModeChanging_echo" style="display:none;">0</span>
     <span id="webgaugesinterval_echo" style="display:none;">0</span>
-    <span id="plotTimeWindow_echo" style="display:none;">0</span>
     <span id="weatherModeEnabled_echo" style="display:none;">0</span>
     <span id="SolarWatts_echo" style="display:none;">0</span>
     <span id="performanceRatio_echo" style="display:none;">0</span>
