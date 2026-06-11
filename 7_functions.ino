@@ -72,13 +72,11 @@ struct Episode {
   float     runOutMin, runOutMax;   // current run's output band
   uint32_t  minRunMs;               // minimum run duration to emit (0 = no floor); closes the
                                     // short-tail-after-reseed emit edge case
-  float     lastRunSpan[NAXIS], lastRunOutSpan;   // per-axis spread of the last EMITTED run (soak diagnostics)
 
   void init(RawSample<NAXIS> *ringBuf, int cap) {
     ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
     outCfg = { 0, 0 }; minRunMs = 0;
-    outAxMin = outAxMax = 0; outAxSinceMs = 0; lastRunOutSpan = 0;
-    for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = 0;
+    outAxMin = outAxMax = 0; outAxSinceMs = 0;
     clearRun();
   }
   void clearRun() {
@@ -169,8 +167,6 @@ struct Episode {
       out->y = (float)(sumOut / (double)count);
       out->nSamp = count;
       out->tEmit = nowMs;
-      for (int a = 0; a < NAXIS; a++) lastRunSpan[a] = runMax[a] - runMin[a];
-      lastRunOutSpan = runOutMax - runOutMin;
     }
     return emit;
   }
@@ -254,8 +250,9 @@ struct FrontStore {
   // Max-per-cell insert: keep the store a true upper ENVELOPE, not a point cloud. If an incoming run
   // lands in the same operating cell as an existing point (within half an axisScale on EVERY axis),
   // keep only the higher-y one — so eval() interpolates between bests instead of averaging a best with
-  // also-rans. Returns true ONLY on a genuine improvement (new cell, or a higher y in an existing cell);
-  // false when an existing run already beat it — callers use that to gate cloud upload + console logs.
+  // also-rans. Returns true ONLY on a meaningful improvement (new cell, or beating the cell's record
+  // by ≥0.5% — a bare float compare re-admitted every +0.01A creep at steady state, churning the cloud
+  // upload queue; rationale in BEST_EVER_FRONT_SPEC.md §5b); callers use that to gate cloud upload.
   bool add(const FrontPoint<NAXIS> &p) {
     for (int i = 0; i < count; i++) {
       bool sameCell = true;
@@ -264,8 +261,8 @@ struct FrontStore {
         if (fabsf(p.x[a] - pts[i].x[a]) > 0.5f * sc) { sameCell = false; break; }
       }
       if (sameCell) {
-        if (p.y > pts[i].y) { pts[i] = p; return true; }   // new best at this cell
-        return false;                                       // an existing run here was already better
+        if (p.y > pts[i].y * 1.005f + 0.01f) { pts[i] = p; return true; }   // meaningfully better at this cell
+        return false;                                                        // the existing record stands
       }
     }
     if (count >= cap) return false;
@@ -640,9 +637,9 @@ static void altEpisodeSyncCfg(float ampsFilt) {
 }
 
 // Emitted-run hand-off: the ~200 Hz fold only stashes here; grading/admission run in the 1 Hz
-// altProcessEmits so the control path never pays a solve. Spans ride along for the console message.
+// altProcessEmits so the control path never pays a solve.
 #define ALT_EMIT_QUEUE 8
-struct AltEmitPending { FrontPoint<ALT_NAXIS> sp; float span[ALT_NAXIS]; float outSpan; };
+struct AltEmitPending { FrontPoint<ALT_NAXIS> sp; };
 static AltEmitPending altEmitQ[ALT_EMIT_QUEUE];
 static int altEmitQCount = 0;
 static bool altCapWarned = false;   // once per boot OR per Start Over (cleared in resetAlternatorHealth)
@@ -722,12 +719,7 @@ void altFold_tick(uint32_t nowMs) {
   sp.ex[0] = ep.x[1];                                   // raw run-avg duty (retained for cloud diagnosis)
   sp.ex[1] = 0;
   sp.y = ep.y; sp.nSamp = ep.nSamp; sp.tEmit = ep.tEmit;
-  if (altEmitQCount < ALT_EMIT_QUEUE) {
-    AltEmitPending &q = altEmitQ[altEmitQCount++];
-    q.sp = sp;
-    for (int a = 0; a < ALT_NAXIS; a++) q.span[a] = altEpisode.lastRunSpan[a];
-    q.outSpan = altEpisode.lastRunOutSpan;
-  }
+  if (altEmitQCount < ALT_EMIT_QUEUE) altEmitQ[altEmitQCount++].sp = sp;
 }
 
 // Drain the emit queue (1 Hz, from altHealth_tick; same task as the fold — no lock). At most 2
@@ -756,13 +748,10 @@ static void altProcessEmits() {
       }
       continue;
     }
+    // No console message on accept — the dashboard front-point counters show growth; logging every
+    // accept spammed the console with same-cell improvements at steady state.
     if (altFront2.add(sp)) {                                              // optimistic local front (cloud re-prunes)
       if (altPending && altPendingCount < ALT_PENDING_CAP) altPending[altPendingCount++] = sp;  // queue for upload
-      // span r/d/v/t/a = the accepted run's per-axis spread (RPM/duty/Vbus/temp/amps) — soak evidence
-      // for whether each band is doing real work or just slack.
-      queueConsoleMessageF("AltFront +pt #%d rpm=%.0f exc=%.2f V=%.2f T=%.0f amps=%.1f (ref=%.1f n=%u span r=%.0f d=%.2f v=%.3f t=%.1f a=%.2f)",
-        altFront2.count, sp.x[0], sp.x[1], sp.x[2], sp.x[3], sp.y, yref, sp.nSamp,
-        altEmitQ[k].span[0], altEmitQ[k].span[1], altEmitQ[k].span[2], altEmitQ[k].span[3], altEmitQ[k].outSpan);
     }
   }
   if (altEmitQCount > n) memmove(altEmitQ, altEmitQ + n, (size_t)(altEmitQCount - n) * sizeof(AltEmitPending));
@@ -1379,9 +1368,7 @@ void perfFold_tick(uint32_t nowMs) {
           sailCapWarned = true;
           queueConsoleMessage("WARN: sail front at capacity — new conditions are no longer recorded");
         }
-      } else if (sailFront.add(sp))
-        queueConsoleMessageF("SailFront +pt #%d aws=%.1f awa=%.0f sea=%.2f spd=%.2f n=%u",
-          sailFront.count, sp.x[0], sp.x[1], sp.x[2], sp.y, sp.nSamp);
+      } else sailFront.add(sp);   // no console message on accept (counter on the dashboard)
     }
   }
 
@@ -1401,9 +1388,7 @@ void perfFold_tick(uint32_t nowMs) {
           motorCapWarned = true;
           queueConsoleMessage("WARN: motor front at capacity — new conditions are no longer recorded");
         }
-      } else if (motorFront.add(ep))
-        queueConsoleMessageF("MotorFront +pt #%d rpm=%.0f hw=%.1f sea=%.2f spd=%.2f n=%u",
-          motorFront.count, ep.x[0], ep.x[1], ep.x[2], ep.y, ep.nSamp);
+      } else motorFront.add(ep);   // no console message on accept (counter on the dashboard)
     }
   }
 

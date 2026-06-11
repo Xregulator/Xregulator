@@ -1850,7 +1850,8 @@ void AdjustFieldLearnMode() {
         //      Integrator anti-windup: upward integration frozen when P+I saturates at uTargetAmps ceiling;
         //      slope-aware bleed (SlopeBleedK) also drains cv_I when voltage rises fast, scaled by
         //      proximity to setpoint (SlopeBleedProxV) so it is inactive far below target.
-        //   In idle/MaintainMode: setpointCommand = uTargetAmps directly.
+        //   In idle: setpointCommand = uTargetAmps directly. (MaintainMode runs the CV path
+        //      instead: uTargetAmps=0 caps Icv to 0 — see the MaintainMode branch below.)
 
         float I_cap;
         if (capLimitMode == 1 && tick.currentBatteryVoltage > 0.5f) {
@@ -2103,8 +2104,9 @@ void AdjustFieldLearnMode() {
           }
         }
 
-        // voltageControlActive: true in bulk, absorption, float, and TargetVoltageMode (= !inIdleStage).
-        // False only in idle (UseFloat=0 post-absorption) and MaintainMode.
+        // voltageControlActive: true in bulk, absorption, float, TargetVoltageMode (= !inIdleStage),
+        // and MaintainMode (forced true below — ceiling-enforcer pattern, Groups 1/2 stay armed).
+        // False only in idle (UseFloat=0 post-absorption).
         voltageControlActive = !inIdleStage;
         if (TargetVoltageMode == 1) voltageControlActive = true;  // force CV active even from idle
         if (MaintainMode == 1) {
@@ -3993,6 +3995,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalSlopeLastPushMs = 0;
     thermalSlopeFPerSec = 0.0f;
     projectedTempF = NAN;
+    thermalIntegratorReleased = false;  // fresh approach — integrator frozen until present temp reaches setpoint again
     queueConsoleMessage("ThermalPID: manual reset requested - integrator and filter cleared");
     return;
   }
@@ -4127,6 +4130,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     prevThermalPenalty = resumePenalty;
     thermalPenaltyLastValid = resumePenalty;
 
+    // Re-init the approach gate from present state: resume hot = released, resume
+    // cool = treat as a fresh approach. A frozen positive seed can still unwind —
+    // the gate only blocks UPWARD integration (see freeze logic below).
+    thermalIntegratorReleased = (projectedTempF >= activeTempLimit - 5.0f);
+
     tempPIDActive = true;
     queueConsoleMessageF("TempPID: resumed | projTemp=%.1f°F setpoint=%.1f°F penalty=%.1fA (was %.1fA) stage=%s",
                          projectedTempF, reEnableSetpoint, resumePenalty,
@@ -4147,13 +4155,49 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // lookaheadDeltaF = how many °F the projection adds above present temp; its Kp-scaled
   // amps equivalent is captured as outerTermLookahead in the pidComputed block below.
   float lookaheadDeltaF;
+  float tempNowPid;
   {
-    float tempNowPid = (TempSource == 0) ? TempToUse : tempFiltered;
+    tempNowPid = (TempSource == 0) ? TempToUse : tempFiltered;
     lookaheadDeltaF = fmaxf(0.0f, projectedTempF - tempNowPid);
     tempPIDInput_d = (double)fmaxf(projectedTempF, tempNowPid);
   }
 
-  tempPID.SetTunings((double)TempPIDKp, (double)TempPIDKi, 0.0);
+  // One-shot approach gate: released the first time PRESENT temp (not the
+  // projection) reaches the regulation setpoint. Until then the projected error
+  // is positive for the entire climb and the integrator would wind ~2.5× past
+  // equilibrium (measured 2026-06-11), buying a deep post-peak sag. P + the
+  // projection handle the approach cut on their own.
+  if (!thermalIntegratorReleased && tempNowPid >= (activeTempLimit - 5.0f)) {
+    thermalIntegratorReleased = true;
+    queueConsoleMessageF("TempPID: integrator released — present temp %.1f°F reached setpoint", tempNowPid);
+  }
+
+  // Integrator freeze — blocks UPWARD winding only (error > 0); unwinding below
+  // setpoint is never blocked. Implemented by forcing Ki to 0 for the tick: the
+  // library's integrator holds exactly, P and the projection stay live, and the
+  // logged outerI shows the true frozen value. Two freeze cases:
+  //   1. Approach gate not yet released (above).
+  //   2. Saturation vs live authority: the applied penalty already covers the
+  //      live RPM-table cap, so further winding is dead authority that must
+  //      bleed before any current returns after cool-through (2026-06-10 run:
+  //      +20.6A past rpmCap). Deliberately NOT a hard output clamp at capCurrent —
+  //      that would force the integrator down on every RPM dip and cause a
+  //      reheat transient when RPM returns.
+  bool freezeIntegrator = (tempPIDInput_d > (double)effectiveSetpoint)
+                          && (!thermalIntegratorReleased || prevThermalPenalty >= capCurrent - 0.5f);
+  {
+    static bool satFreezeLogged = false;
+    if (freezeIntegrator && thermalIntegratorReleased) {
+      if (!satFreezeLogged) {
+        satFreezeLogged = true;
+        queueConsoleMessageF("TempPID: integrator frozen at %.1fA — penalty covers live rpm cap %.1fA", (float)tempPID.GetIterm(), capCurrent);
+      }
+    } else {
+      satFreezeLogged = false;  // re-log on next distinct saturation episode
+    }
+  }
+
+  tempPID.SetTunings((double)TempPIDKp, freezeIntegrator ? 0.0 : (double)TempPIDKi, 0.0);
   tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);
 
   bool pidComputed = tempPID.Compute();

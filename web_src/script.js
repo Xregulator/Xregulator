@@ -851,7 +851,8 @@ function hidpiCtx(cv, W, H) {
 }
 
 // Performance-%-vs-engine-hours trend. Bold line = worst operating region (early warning);
-// faint line = overall. Live in-progress bucket appended as a dot. Empty \u2192 local "no trend yet" notice
+// faint line = overall. Live "now" dot appended once at least one bucket has committed. Empty \u2192
+// local "no trend yet" notice for the whole first engine-hour
 // (the trend is built on-device from engine-hours \u2014 NOT from the cloud; don't reintroduce a cloud message).
 function drawAltTrend() {
   const cv = document.getElementById('alt-trend');
@@ -861,9 +862,11 @@ function drawAltTrend() {
   const pts = altTrend.slice();
   // "now" dot = the LIVE % with its state color (only while graded MEASURED/ESTIMATED) — not the
   // ratcheted bucket-worst, which froze one bad reading on the dot for a whole engine-hour.
+  // Suppressed until the first committed bucket exists: before then the plot's only content would
+  // be a wandering/recoloring/vanishing dot, which reads as broken. The session plot covers live %.
   const liveSt = altLive.state|0;
   const liveGraded = altLive.valid && (liveSt===0 || liveSt===1) && altLive.pct>0;
-  if (liveGraded)
+  if (liveGraded && pts.length > 0)
     pts.push({eng:altLive.engHours, worst:altLive.pct, overall:altLive.overallPct, live:true});
   if (pts.length === 0){
     ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center';

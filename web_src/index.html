@@ -4840,7 +4840,7 @@
                       <span class="metric-label telemetry-label">PID Input
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                           <span class="tooltip-box">Measured alternator current (A) from the selected amp source. This
-                            is the process variable fed to the output current PID each sample cycle (~16Hz).</span>
+                            is the process variable fed to the output current PID on every fresh current sample (~200 Hz, ~5 ms).</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="pidInput_display">?</span> A</span>
@@ -5176,7 +5176,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>PID Kd (Derivative) (<span id="PidKd_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dampens
-                        rapid changes to reduce overshoot. Usually kept at 0.0.</span></span>
+                        rapid changes to reduce overshoot. Usually kept at or near zero (default 0.01).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5191,8 +5191,8 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>PID Sample Divisor (<span id="PidSampleDivisor_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A 2
-                        makes it update half as often, etc. Don't adjust.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The output current PID normally updates on every fresh current sample (~200 Hz). A 2
+                        makes it update every other sample (~100 Hz), etc. Don't adjust.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5309,7 +5309,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Icv
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">CV voltage loop output (Icv) — the current setpoint the voltage loop wants to deliver. Used as the actual setpoint in absorption, float, and Target Voltage mode. Seeded on CV entry for bumpless transfer; clamped to [0, current ceiling]. Pulled down by Groups 1/2 when measured battery voltage is approaching or above target. In bulk this value is stale and has no effect on the output current loop.</span>
+                          <span class="tooltip-box">CV voltage loop output (Icv) — the current setpoint the voltage loop wants to deliver. Used as the actual setpoint whenever voltage control is active: bulk, absorption, float, Target Voltage mode, and Maintain Mode. Seeded on CV entry for bumpless transfer; clamped to [0, current ceiling]. Pulled down by Groups 1/2 when measured battery voltage is approaching or above target. In bulk the voltage error is large, so this value simply sits at the current ceiling — the loop behaves current-limited until voltage approaches target.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="Icv_display">?</span> A</span>
@@ -5318,7 +5318,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">CV Integrator
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Voltage loop integrator (cv_I). Units are amps. Seeded on CV entry so the CV loop output starts at the live current setpoint with no step. Groups 1/2 drive this down when correcting a predicted overshoot, and force it to ≤ 0 while measured battery voltage is above target — preventing the integrator from rebuilding the loop output immediately after a pullback. Should drift slowly toward the value that holds voltage at target. Large sustained values mean Voltage Loop Kp alone cannot reach target — Voltage Loop Ki is carrying the load.</span>
+                          <span class="tooltip-box">Voltage loop integrator (cv_I). Units are amps. Seeded on CV entry so the CV loop output starts at the live current setpoint with no step. Above target it unwinds 7× faster than it builds (hard-coded asymmetry on Voltage Loop Ki). During a protection event it is actively drained (anti-windup bleed) and blocked from building back up while the protection is capping current; on release it restarts at a fraction of its pre-event value (Recovery Seed Fraction). Should drift slowly toward the value that holds voltage at target. Large sustained values mean Voltage Loop Kp alone cannot reach target — Voltage Loop Ki is carrying the load.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="cv_I_display">?</span> A</span>
@@ -5327,7 +5327,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Voltage Ctrl Active
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Whether the CV loop is running this tick. True in bulk, absorption, float, Target Voltage mode, and Maintain Mode. False only in idle (UseFloat=0 post-absorption rest).</span>
+                          <span class="tooltip-box">Whether the CV loop is running this tick. True in bulk, absorption, float, Target Voltage mode, and Maintain Mode. False in idle (UseFloat=0 post-absorption rest) and in Manual field mode.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="voltageCtrlActive_display">?</span></span>
@@ -5625,7 +5625,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× multiplier is hard-coded — only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Start small — try 0.1.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× multiplier is hard-coded — only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Higher values reach target faster after a target change or disturbance; too high causes overshoot at the target crossing. The default suits a typical AGM bank — large lithium banks (stiffer voltage) may need more.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5802,7 +5802,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Temp Slope (°F/s)
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Temperature rate of change in °F/s, computed as a backward difference over a 60-second window (12 intervals × TempPIDInterval). Zero while the buffer fills after startup or reset. Clamped to ±0.5 °F/s to reject sensor faults. Used to compute: projectedTemp = currentTemp + slope × ThermalLookaheadSec.</span>
+                          <span class="tooltip-box">Temperature rate of change in °F/s, computed as a backward difference over a 60-second window (12 intervals × Temp PID Interval). Zero while the buffer fills after startup or reset. Readings implying more than ±0.5 °F/s are rejected as sensor noise and the previous rate is held. Used to compute: projected temperature = current temperature + rate × Thermal Lookahead.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="thermalSlopeFPerSec_display">?</span> <span class="temp-rate-label">°F/s</span></span>
@@ -6087,7 +6087,7 @@
                 <!-- Reset Thermal PID -->
                 <div style="margin:8px 0;">
                   <button onclick="resetThermalPID()" class="btn-secondary">Reset Thermal PID</button>
-                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeros the penalty output, integrator, IIR filter, and 60-second slope buffer; sets PID to MANUAL (inactive). The slope buffer takes ~65s to refill before full lookahead prediction resumes. Use if the integrator has wound up or the filter is stuck on a bad reading.</span></span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeros the penalty output, integrator, IIR filter, and 60-second slope buffer; sets PID to MANUAL (inactive). The slope buffer takes ~65s to refill before full lookahead prediction resumes, and the integral term stays paused until the measured temperature next reaches the control target. Use if the integrator has wound up or the filter is stuck on a bad reading.</span></span>
                 </div>
 
                 <hr />
@@ -6095,7 +6095,7 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Kp (A/°F) (<span id="TempPIDKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the temperature limit. Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
+                        class="tooltip-box">Proportional gain (A per °F of temperature error). The error is the controlled temperature — the higher of projected and present — minus the control target (5 °F below the temperature limit). Higher values derate current more aggressively as the controlled temperature approaches the limit.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6110,7 +6110,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Ki (<span id="TempPIDKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Builds penalty while the controlled temperature (higher of projected and present) stays above the limit. This term carries nearly all of the steady-state penalty — it sets how fast the loop converges to its holding level after the initial approach. Bounded by the penalty output limits (0 up to the cap-table maximum).</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain (A per °F·s of accumulated error). Carries nearly all of the steady-state penalty — it sets how fast the loop converges to its holding level and how well it tracks slow engine-compartment heat buildup. To prevent overshoot it stays paused until the measured temperature first reaches the control target (the initial approach is handled by the proportional and lookahead action), and pauses again whenever the penalty already exceeds what the RPM cap table can deliver at the current speed. Unwinding is never paused. Bounded by the penalty output limits (0 up to the cap-table maximum).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6125,7 +6125,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. Projected temperature = current temperature + rate of rise × this lookahead, where the current temperature is the raw sensor reading (DS18B20) or the smoothed reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Clamped to 0–300s.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. Projected temperature = current temperature + rate of rise × this lookahead, where the current temperature is the raw sensor reading (DS18B20) or the smoothed reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Works best when sized to the sensor's heat-conduction delay plus the rate-measurement window (~50–60 s for a typical case-mounted sensor); oversizing causes a slow temperature oscillation around the target. Clamped to 0–300s.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">

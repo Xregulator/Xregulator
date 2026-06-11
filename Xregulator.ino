@@ -2561,7 +2561,7 @@ float PidKi = 2.0f;   // integral gain
 float PidKd = 0.01f;  // derivative gain
 // --- Voltage (CV) PID ---
 volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)
-volatile float VoltageKi = 15.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi
+volatile float VoltageKi = 40.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi. 15→40 2026-06-11: Ki=15 step test settled ~9.7s (TC ~4.4s at measured ~15mV/A plant gain); 40 targets ~1.7s
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
@@ -2584,7 +2584,7 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
-float IExcessArmMarginV = 0.200f; // V below target at which iExcess voltage gate opens (decoupled from OvMeasMarginV 2026-05-23)
+float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. 0.2→0.1 2026-06-11: blocks recovery double-fires (belt-resonance peaks fired iExcess at target−0.16V mid-recovery) while keeping all real catches (fired at target+0.04..0.07)
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
 // --- Anti-windup ---
 float AwBleedRate = 2.0f;        // fraction of MaxTableValue/s — cv_I bleed rate while fastOV active (2.0×50A=100A/s)
@@ -2815,20 +2815,20 @@ int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100,
 // ===== TARGET CURRENT TABLE =====
 // Maximum amps the regulator will command at each RPM breakpoint in Normal mode (HiLow=1).
 // In Low mode (HiLow=0) the regulator quarters these values before sending to the PID,
-// so Normal=50A → Low=12A (closest integer) automatically — no separate Low-mode table is needed.
+// so Normal=100A → Low=25A automatically — no separate Low-mode table is needed.
 // The first entry (≤100 RPM = effectively stopped) is 0 to guarantee no field
 // current when the alternator is not spinning. The factory reset button restores
 // defaultCurrentValues below.
-float rpmCurrentTable[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
-float defaultCurrentValues[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float rpmCurrentTable[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
+float defaultCurrentValues[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
 
 // ===== CAP CURRENT TABLE =====
 // Hard ceiling on commanded current at each RPM, always enforced regardless of
 // mode or PID output. Exists to protect the belt, shaft, and mounting hardware
 // from mechanical overload at any RPM. The target table above cannot push current
 // above this ceiling. Factory reset restores defaultCapCurrentValues.
-float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
-float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 50, 50, 50, 50, 50, 50, 50, 50, 50 };
+float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
+float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
 
 // ===== CAP POWER TABLE =====
 // Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
@@ -2953,6 +2953,7 @@ double tempPIDInput_d = 77.0;        // PID process variable (°F) = max(project
 double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
+bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the integrator cannot wind UP (P + projection alone handle the approach — prevents approach windup overshoot)
 
 float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted from target table
 double thermalPenaltyAmps_d = 0.0;  // double version for PID library
