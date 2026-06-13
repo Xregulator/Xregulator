@@ -581,7 +581,21 @@ enum Csv2Index {
   CSV2_dumpLongTermRing_win,  // worst µs of the flush, rolling 5s window
   CSV2_dumpLongTermRing_ses,  // worst µs of the flush since last Reset Peak Values
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522
+  // +10: fast alternator-current channel (GPIO3) — timers, status, detector, session worsts
+  CSV2_fastAltDrain_win,    // worst µs of the bounded DMA drain, rolling 5s window
+  CSV2_fastAltDrain_ses,    // ...since last Reset Peak Values
+  CSV2_faMatrixFlush_win,   // worst µs of the disturbance-matrix/flipbook flash flush, rolling 5s window
+  CSV2_faMatrixFlush_ses,   // ...since last Reset Peak Values
+  CSV2_faDetector_win,      // worst µs of one failure-detector analysis slice, rolling 5s window
+  CSV2_faDetector_ses,      // ...since last Reset Peak Values
+  CSV2_faChanState,         // 0 = off, 1 = sampling, 2 = railed/dormant (jumper open)
+  CSV2_faCellsUsed,         // disturbance-matrix cells with ≥1 qualified window
+  CSV2_faDetectK,           // failure detector: fault class of the last FAULT verdict, 0 = quiet
+  CSV2_faSesPkpkWorst,      // session-worst broadband pk-pk, A ×100
+  CSV2_faSesPeakWorst,      // session-worst spectral peak, A ×100
+  CSV2_faSesPeakWorstHz,    // ...its frequency, Hz ×10
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534
 };
 
 enum Csv3Index {
@@ -1924,6 +1938,117 @@ void setupServer() {
     request->send(response);
   });
 
+  // ── Fast alternator-current channel: live scope dump ──
+  // 250 ms raw ring (20 kSPS, calibrated mV) + 16 B header — see faScopeSnapshot for layout.
+  // Snapshot is copied into a PSRAM buffer up front (spinlock vs the loop() drain), then
+  // streamed; the shared_ptr deleter frees it on any completion path including client abort.
+  server.on("/fastscope.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const size_t cap = 16 + (size_t)FA_RAW_RING_N * 2;  // header + full scope ring
+    uint8_t *buf = (uint8_t *)ps_malloc(cap);
+    if (!buf) {
+      request->send(503, "text/plain", "no mem");
+      return;
+    }
+    size_t n = faScopeSnapshot(buf, cap);
+    if (n == 0) {
+      free(buf);
+      request->send(503, "text/plain", "snapshot failed");
+      return;
+    }
+    std::shared_ptr<uint8_t> sp(buf, free);
+    AsyncWebServerResponse *response = request->beginResponse("application/octet-stream", n,
+      [sp, n](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= n) return 0;
+        size_t tw = n - index;
+        if (tw > maxLen) tw = maxLen;
+        memcpy(out, sp.get() + index, tw);
+        return tw;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // ── Fast alternator-current channel: reference flipbook dump ──
+  // Header (8 B LE): u32 magic 'FFLP', u8 refSlots, u8 anomSlots, u16 sampleRate/10.
+  // Then (refSlots+anomSlots) × FaFlipPage verbatim (2020 B each, layout pinned by
+  // static_assert in 2_functions.ino). Pages freeze once captured, so no lock is needed;
+  // `used` is set last on capture so a mid-capture read just sees an empty slot.
+  server.on("/faflip.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const size_t pgSize = sizeof(FaFlipPage);
+    const size_t total = 8 + pgSize * FA_FLIP_SLOTS;
+    uint8_t *buf = (uint8_t *)ps_malloc(total);
+    if (!buf || !faFlip) {
+      if (buf) free(buf);
+      request->send(503, "text/plain", "no data");
+      return;
+    }
+    uint32_t magic = 0x46464C50UL;  // 'FFLP'
+    uint16_t rateDiv10 = 500;       // 5 kSPS
+    memcpy(buf + 0, &magic, 4);
+    buf[4] = FA_FLIP_BANDS;
+    buf[5] = FA_FLIP_ANOM;
+    memcpy(buf + 6, &rateDiv10, 2);
+    memcpy(buf + 8, faFlip, pgSize * FA_FLIP_SLOTS);
+    std::shared_ptr<uint8_t> sp(buf, free);
+    AsyncWebServerResponse *response = request->beginResponse("application/octet-stream", total,
+      [sp, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t tw = total - index;
+        if (tw > maxLen) tw = maxLen;
+        memcpy(out, sp.get() + index, tw);
+        return tw;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // ── Fast alternator-current channel: disturbance matrix CSV export ──
+  // One row per populated cell (RPM bin × amps bin): top-6 mean-accumulated peaks +
+  // broadband pk-pk + window count. Chunked like /alttrend.csv. Reads race the Core-1
+  // merge harmlessly (diagnostic export — a torn cell is one stale row).
+  server.on("/famatrix.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    struct FmExp { int idx; bool header, done; char line[280]; int len, pos; };
+    FmExp st;
+    st.idx = 0; st.header = true; st.done = false; st.len = 0; st.pos = 0;
+    AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+      [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (st.done) return 0;
+        size_t written = 0;
+        const int NCELLS = FA_RPM_BINS * FA_AMP_BINS;
+        while (written < maxLen) {
+          if (st.pos >= st.len) {
+            if (st.header) {
+              st.len = snprintf(st.line, sizeof(st.line),
+                                "rpmLo,ampLo,windows,pkpkA,f1Hz,a1A,n1,f2Hz,a2A,n2,f3Hz,a3A,n3,f4Hz,a4A,n4,f5Hz,a5A,n5,f6Hz,a6A,n6\n");
+              st.header = false;
+            } else {
+              while (st.idx < NCELLS && faMatrix && faMatrix[st.idx].windows == 0) st.idx++;
+              if (st.idx >= NCELLS || !faMatrix) { st.done = true; return written; }
+              FaCell *c = &faMatrix[st.idx];
+              int rpmLo = (st.idx / FA_AMP_BINS) * FA_RPM_BIN_W;
+              int ampLo = FA_AMP_BIN_LO + (st.idx % FA_AMP_BINS) * FA_AMP_BIN_W;
+              int l = snprintf(st.line, sizeof(st.line), "%d,%d,%u,%.2f",
+                               rpmLo, ampLo, (unsigned)c->windows, c->pkpkAX100 / 100.0);
+              for (int s = 0; s < FA_CELL_PEAKS; s++)
+                l += snprintf(st.line + l, sizeof(st.line) - l, ",%.1f,%.2f,%u",
+                              c->pk[s].freqHzX10 / 10.0, c->pk[s].ampAX100 / 100.0, (unsigned)c->pk[s].nAcc);
+              l += snprintf(st.line + l, sizeof(st.line) - l, "\n");
+              st.len = l;
+              st.idx++;
+            }
+            st.pos = 0;
+          }
+          size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+          memcpy(buf + written, st.line + st.pos, tw);
+          written += tw;
+          st.pos += (int)tw;
+        }
+        return written;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   // ── Alternator (charging-system) health v2 — schema + curve + records + trend exports ──
   // Self-describing schema; the dashboard zips these names against AltLive/AltSettings SSE values.
   server.on("/altschema", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2550,6 +2675,14 @@ void setupServer() {
     else if (request->hasParam("ResetAlternatorHealth")) {
       foundParameter = true;
       pendingResetAlternatorHealth = true;  // deferred to Core 1 to avoid SSE gap (Start Over)
+    }
+    else if (request->hasParam("FastAltClearMatrix")) {
+      foundParameter = true;
+      faPendingMatrixClear = true;  // deferred to Core 1 (flash remove) — fast alt-current disturbance matrix wipe
+    }
+    else if (request->hasParam("FastAltRebaseline")) {
+      foundParameter = true;
+      faPendingRebaseline = true;  // deferred to Core 1 — clears the reference flipbook (freeze-once pages re-capture)
     }
     else if (request->hasParam("altSimMode")) {
       foundParameter = true;
@@ -4296,6 +4429,13 @@ void setupServer() {
       ft_ch1_compute_stats.worstSession = 0;
       ft_uploadSensorHistory.worstSession = 0;
       ft_dumpLongTermRing.worstSession = 0;
+      ft_fastAltDrain.worstSession = 0;
+      ft_faMatrixFlush.worstSession = 0;
+      ft_faDetector.worstSession = 0;
+      // Fast alt-current per-session worsts (fleet scalars) follow the same session
+      faSesPkpkWorstA = 0;
+      faSesPeakWorstA = 0;
+      faSesPeakWorstHz = 0;
       ft_uploadBufferedRecords.worstSession = 0;
       ft_buildConfigPayload.worstSession = 0;
       ft_UpdateEngineRuntime.worstSession = 0;
@@ -4621,14 +4761,16 @@ void setupServer() {
     TaskHandle_t hLwip = xTaskGetHandle("tiT");
     int asyncTcpCore = hAsyncTcp ? (int)xTaskGetCoreID(hAsyncTcp) : -99;
     int lwipCore = hLwip ? (int)xTaskGetCoreID(hLwip) : -99;
-    char out[768];
+    const char *faStateName = (faChanState == 1) ? "live" : (faChanState == 2) ? "RAILED-dormant (jumper open?)" : "off";
+    char out[1024];
     snprintf(out, sizeof(out),
              "Partition: %s\nVersion: %s\nFree heap: %lu\n"
              "Net task cores (0/1=pinned, 2147483647=floating, -99=not found): async_tcp=%d lwIP=%d\n"
              "AdjustField worst full pass (ms): total=%.1f | thermal=%.1f snapshot=%.1f fastov=%.1f modes=%.1f control=%.1f duty=%.1f tail=%.1f\n"
              "Time source: %s (NMEA last sync: %lus ago, Phone last: %lus ago)\n"
              "GPS source:  %s (NMEA last fix: %lus ago, Phone last: %lus ago)\n"
-             "Lat/Lon: %.6f, %.6f\n",
+             "Lat/Lon: %.6f, %.6f\n"
+             "FastAlt: %s range=%sdB windows ok=%lu disc=%lu matrixCells=%u sesPkpk=%.1fA sesPeak=%.1fA@%.0fHz\n",
              (running && running->label) ? running->label : "unknown",
              FIRMWARE_VERSION,
              (unsigned long)ESP.getFreeHeap(),
@@ -4643,7 +4785,10 @@ void setupServer() {
              gpsSrcName,
              lastNmea2kGnssMs       ? (now - lastNmea2kGnssMs)       / 1000UL : 0UL,
              lastPhoneGpsMs         ? (now - lastPhoneGpsMs)         / 1000UL : 0UL,
-             LatitudeNMEA, LongitudeNMEA);
+             LatitudeNMEA, LongitudeNMEA,
+             faStateName, faAttenIs12 ? "12" : "6",
+             (unsigned long)faWindowsAccepted, (unsigned long)faWindowsDiscarded,
+             (unsigned)faCellsUsed, faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
     request->send(200, "text/plain", out);
   });
 
@@ -5779,7 +5924,9 @@ void SendWifiData() {
                                // +1: imuFifoWorstSamples (sample count at the worst IMU fetch — bus-stall vs transfer-size diag)
                                "%d,"
                                // +2: long-term-ring flash-flush timer (worst window / session, µs)
-                               "%d,%d",
+                               "%d,%d,"
+                               // +12: fast alt-current channel (drain timer ×2, flush timer ×2, detector timer ×2, state, cells, detectK, session worsts ×3)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -6290,8 +6437,20 @@ void SendWifiData() {
                                SafeInt(ina228ErrorCount),                // CSV2_ina228ErrorCount
                                SafeInt(imuFifoFetchWorstUs),             // CSV2_imuFifoFetchWorstUs
                                SafeInt(imuFifoWorstSamples),             // CSV2_imuFifoWorstSamples
-                               SafeInt(ft_dumpLongTermRing.worstWindow),  // CSV2_dumpLongTermRing_win
-                               SafeInt(ft_dumpLongTermRing.worstSession)  // CSV2_dumpLongTermRing_ses
+                               SafeInt(ft_dumpLongTermRing.worstWindow),   // CSV2_dumpLongTermRing_win
+                               SafeInt(ft_dumpLongTermRing.worstSession),  // CSV2_dumpLongTermRing_ses
+                               SafeInt(ft_fastAltDrain.worstWindow),       // CSV2_fastAltDrain_win
+                               SafeInt(ft_fastAltDrain.worstSession),      // CSV2_fastAltDrain_ses
+                               SafeInt(ft_faMatrixFlush.worstWindow),      // CSV2_faMatrixFlush_win
+                               SafeInt(ft_faMatrixFlush.worstSession),     // CSV2_faMatrixFlush_ses
+                               SafeInt(ft_faDetector.worstWindow),         // CSV2_faDetector_win
+                               SafeInt(ft_faDetector.worstSession),        // CSV2_faDetector_ses
+                               SafeInt(faChanState),                       // CSV2_faChanState
+                               SafeInt(faCellsUsed),                       // CSV2_faCellsUsed
+                               SafeInt(faDetectLastK),                     // CSV2_faDetectK (fault class of last FAULT verdict)
+                               SafeInt(faSesPkpkWorstA, 100),              // CSV2_faSesPkpkWorst
+                               SafeInt(faSesPeakWorstA, 100),              // CSV2_faSesPeakWorst
+                               SafeInt(faSesPeakWorstHz, 10)               // CSV2_faSesPeakWorstHz
     );
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
     thermalAntiWindupLatch = false;

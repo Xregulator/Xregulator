@@ -2893,6 +2893,15 @@ bool buildConfigPayload() {
     ",\"current_weather_mode\":%d,\"uv_today\":%.2f",
     currentWeatherMode, UVToday);
 
+  // Fast alt-current channel: per-session worst scalars (fleet aggregation, consumer 5).
+  // CLOUD CONTRACT: update-config-snapshot spreads EVERY state key into the
+  // device_state_daily INSERT (flattenForInsert) — an unknown key 500s the whole daily
+  // snapshot. The fa_pkpk_worst_session / fa_peak_worst_a_session / fa_peak_worst_hz_session
+  // columns MUST exist in device_state_daily before this firmware is flashed.
+  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+    ",\"fa_pkpk_worst_session\":%.2f,\"fa_peak_worst_a_session\":%.2f,\"fa_peak_worst_hz_session\":%.1f",
+    faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
+
   // Close state, close root object
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "}}");
 
@@ -3353,4 +3362,957 @@ bool canUploadNow() {
   if (WiFi.status() != WL_CONNECTED) return false;
   if (WiFi.RSSI() < -76) return false;
   return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAST ALTERNATOR-CURRENT CHANNEL — GPIO3 / ADC1_CH2
+// Hardware: CH1 buffer output (U9 pins 6+7) jumpered to J3 pin 11 (net EXTRA6, C66
+// removed). 3.33 mV/A at the node for the 300 A sensor; zero amps = 1.25 V. Spec:
+// Working Markdown Docs/CV_Loop_Dev_Summary.md, "Fast alternator-current ADC channel".
+// This channel is an INSTRUMENT — never a control input; nothing here may couple
+// into control or protections. Sampling is hardware-timed continuous DMA (crystal-
+// derived, ~ppm); CPU stalls can only delay the drain, never bend sample spacing.
+// Consumers: disturbance matrix, failure detector (plug-in stub), live scope,
+// reference flipbook, fleet scalars.
+// A board with a broken/missing jumper reads pegged full-scale through the R110
+// pullup (fail-obvious by design) — the subsystem detects that and goes dormant.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define FA_ADC_CHANNEL ADC_CHANNEL_2  // GPIO3
+#define FA_SAMPLE_RATE_HZ 20000
+#define FA_RAW_RING_N 5000  // 250 ms @ 20 kSPS — live scope depth (≥2 engine revs above ~480 RPM)
+#define FA_FRAME_SAMPLES 256
+#define FA_FRAME_BYTES (FA_FRAME_SAMPLES * SOC_ADC_DIGI_RESULT_BYTES)
+#define FA_POOL_BYTES (FA_FRAME_BYTES * 12)  // ~150 ms of driver-pool slack (internal RAM — the DMA pool must be DRAM)
+#define FA_DRAIN_BUDGET_US 1000              // hard cap per loop() pass (the loop-budget contract)
+#define FA_ZERO_MV 1250.0f                   // hall sensor 2.5 V @ 0 A → ÷2 divider
+#define FA_RAILED_RAW 4090                   // 12-bit code treated as railed full-scale
+#define FA_DECIM 16                          // boxcar-16 → 1.25 kSPS effective (nulls at 1.25 kHz)
+#define FA_WIN_DECIM_N 2500                  // 2 s measurement window, counted in decimated samples (crystal-timed)
+// 6 dB ceiling ≈ +150..+210 A above zero (S3 sources spec full-scale anywhere 1.75–1.95 V).
+// BENCH-VERIFY the real rail point, then set switch-up ~30 A below the measured ceiling,
+// switch-down ~30 A below that (hysteresis). Defaults assume the conservative 1.75 V end.
+#define FA_ATTEN_UP_AMPS 120.0f   // mean amps (ADS path) above this → switch to 12 dB
+#define FA_ATTEN_DOWN_AMPS 90.0f  // mean amps below this → back to 6 dB
+#define FA_ATTEN_DWELL_MS 5000UL  // min spacing between attenuation switches
+#define FA_ABSENT_RAILED_SEC 10   // consistently railed this long (at low ADS amps) → channel absent
+#define FA_REPROBE_MS 300000UL    // dormant channel re-probe interval
+
+// Channel state: 0 = off (init failed / no driver), 1 = present (sampling), 2 = absent
+// (railed full-scale → jumper open/missing; driver stopped, periodic re-probe).
+uint8_t faChanState = 0;
+uint8_t faAttenIs12 = 0;          // 0 = 6 dB (default floor), 1 = 12 dB (high-current range)
+uint32_t faTotalSamples = 0;      // lifetime drained samples (diagnostics)
+uint32_t faWindowsAccepted = 0;   // windows that survived railed/switch screening (steady-state gate applies on top)
+uint32_t faWindowsDiscarded = 0;  // windows thrown out: railed codes, atten switch
+
+static adc_continuous_handle_t faAdcHandle = NULL;
+static portMUX_TYPE faRingMux = portMUX_INITIALIZER_UNLOCKED;
+static int16_t *faRawRing = NULL;   // PSRAM — calibrated mV, int16
+static uint16_t faRingHead = 0;     // next write index
+static int16_t *faDecimWin = NULL;  // PSRAM — current window's decimated stream (detector + pk-pk input)
+static uint16_t faDecimWinN = 0;
+static int32_t faBoxAcc = 0;  // boxcar-16 accumulator
+static uint8_t faBoxN = 0;
+static bool faWinRailed = false;         // any railed code this window → discard
+static bool faWinAttenSwitched = false;  // window started on a fresh range → discard
+static uint8_t faAttenPending = 0xFF;    // requested range (0/1); 0xFF = none. Applied ONLY between windows.
+static unsigned long faAttenLastSwitchMs = 0;
+static uint32_t faRailedStreak = 0;  // consecutive railed samples (presence detection)
+static bool faAbsentWarned = false;
+static unsigned long faLastProbeMs = 0;
+// eFuse-corrected linear scaling raw→mV, precomputed per attenuation at init (the factory
+// curve is near-linear; a 2-point fit keeps the correction at zero per-sample cost).
+static float faMvSlope = 1750.0f / 4095.0f, faMvOff = 0.0f;
+static float faMvSlope6 = 1750.0f / 4095.0f, faMvOff6 = 0.0f;
+static float faMvSlope12 = 3100.0f / 4095.0f, faMvOff12 = 0.0f;
+
+// ── Disturbance matrix (consumer 1) ──
+// 80 RPM bins (50 RPM, 0–4000) × 15 amps bins (20 A starting at 5 A) = 1200 cells in
+// PSRAM. Each cell holds the top-6 (frequency, amplitude) peaks — matched across windows
+// by frequency ±5% and RECENT-AVERAGED (a running 1/N mean, N = FA_CELL_AVG_N windows:
+// cumulative while warming up, then a fixed 1/N weight so the cell tracks the machine
+// lately and never freezes — smooths single-window noise without the outlier-blindness of
+// a max-envelope) — plus ONE broadband pk-pk (the composite envelope an iExcess threshold
+// must actually clear; if pk-pk ≫ sum of stored bands, energy exists outside the surveyed
+// 10–400 Hz range) and a saturating window count (trustworthiness, independent of N).
+#define FA_RPM_BIN_W 50
+#define FA_RPM_BINS 80
+#define FA_AMP_BIN_W 20
+#define FA_AMP_BIN_LO 5
+#define FA_AMP_BINS 15
+#define FA_CELL_PEAKS 6
+#define FA_PEAK_MIN_A 0.5f  // peaks below this never enter a cell
+#define FA_CELL_AVG_N 4     // recent-average depth: cell value = running 1/min(n,N) mean (never freezes)
+#define FA_MATRIX_PATH "/famatrix.bin"
+#define FA_MATRIX_MAGIC 0x46414D58u  // 'FAMX'
+#define FA_MATRIX_VER 1
+#define FA_MATRIX_FLUSH_MS 900000UL  // 15-min field-off cadence, like the long-term ring
+
+struct FaPeak {
+  uint16_t freqHzX10;  // band center, Hz ×10 (parabolic-refined)
+  uint16_t ampAX100;   // mean amplitude, A ×100
+  uint16_t nAcc;       // windows folded into this peak's mean (0 = slot free)
+};
+struct FaCell {
+  FaPeak pk[FA_CELL_PEAKS];
+  uint16_t pkpkAX100;  // mean broadband pk-pk of the decimated stream, A ×100
+  uint16_t windows;    // qualified windows merged (saturating)
+};
+static FaCell *faMatrix = NULL;  // PSRAM — 1200 × 16 B
+uint16_t faCellsUsed = 0;        // cells with ≥1 qualified window (diagnostics)
+static uint32_t faMatrixDirtyWindows = 0;
+static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core 0), executed on Core 1
+
+// ── Constant-Q Goertzel bank ──
+// 16 log-spaced bins 10–400 Hz on the decimated 1.25 kSPS stream. Each bin integrates
+// 10 cycles OF ITS OWN CENTER FREQUENCY (design-time constant, crystal-timed, zero
+// machine reference): 1.0 s at 10 Hz … 25 ms at 400 Hz; bin width ≈ center/10; spacing
+// ~28%. Streaming, 2 multiply-adds/sample/bin — no transform buffer, no blocking call,
+// NO FFT anywhere. Completed passes within a window are averaged at finalize.
+#define FA_NBINS 16
+static float faBinFreq[FA_NBINS];   // center Hz
+static float faBinCoeff[FA_NBINS];  // 2·cos(2π·f/1250)
+static uint16_t faBinLen[FA_NBINS]; // integration length, samples (10 cycles at center f)
+static float faBinS1[FA_NBINS], faBinS2[FA_NBINS];
+static uint16_t faBinIdx[FA_NBINS];
+static float faBinMagSum[FA_NBINS];  // completed-pass amplitudes summed within current window
+static uint16_t faBinMagCnt[FA_NBINS];
+
+// ── Steady-state gate (independent of the alt-health detector, deliberately cheap) ──
+// 1 s-TC EMAs on RPM and on this channel's own amps. The 1 s constant kills the 10 Hz
+// band ~60× and the 28 Hz band ~175× — the gate must not see the resonances being
+// measured. Over the 2 s window: RPM EMA inside one bin with ≥10 RPM edge margin; amps
+// EMA drift ≤ max(2 A, 5% of mean); no protection active; no attenuation switch; no
+// railed codes; no sample loss (wall-clock audit vs the crystal-timed sample count).
+#define FA_EMA_ALPHA (1.0f / 1250.0f)  // 1 s TC at the decimated rate
+#define FA_RPM_EDGE_MARGIN 10.0f
+#define FA_WIN_WALL_MAX_MS 2080UL  // 2.0 s nominal; beyond this the window lost samples (DMA pool overflow)
+static float faAmpsEma = 0.0f, faRpmEma = 0.0f;
+static bool faEmaSeeded = false;
+static float faWinRpmEmaMin, faWinRpmEmaMax;
+static float faWinAmpsEmaMin, faWinAmpsEmaMax;
+static float faWinDAmpMin, faWinDAmpMax;  // decimated-stream extremes → broadband pk-pk
+static double faWinAmpsSum = 0.0;
+static bool faWinProtection = false;
+static unsigned long faWinStartMs = 0;
+
+// Per-session worsts (fleet scalars, consumer 5) — faSesPkpkWorstA / faSesPeakWorstA /
+// faSesPeakWorstHz are declared in Xregulator.ino (buildConfigPayload above reads them).
+
+// ── Reference flipbook (consumer 4) ──
+// ONE axis: 1000-RPM bands. A page is captured when its band has no snapshot, amps are
+// 20–100 A, and the steady-state gate passed. ~5 kSPS (boxcar-4 of the raw ring), 200 ms,
+// ~2 KB/page. Pages FREEZE once captured; only the re-baseline button clears the book.
+// Anomaly-triggered captures (detector fired) are stored alongside for before/after.
+#define FA_FLIP_BANDS 5  // 1000-RPM bands, 0–4999
+#define FA_FLIP_ANOM 4   // anomaly capture slots (round-robin)
+#define FA_FLIP_SLOTS (FA_FLIP_BANDS + FA_FLIP_ANOM)
+#define FA_FLIP_NSAMP 1000  // 200 ms @ 5 kSPS
+#define FA_FLIP_PATH "/faflip.bin"
+#define FA_FLIP_MAGIC 0x46414642u  // 'FAFB'
+#define FA_FLIP_VER 1
+struct FaFlipPage {
+  uint16_t rpm;       // tach at capture
+  uint16_t ampsX10;   // window mean amps ×10
+  uint32_t epoch;     // unix time at capture (0 = clock not yet synced)
+  uint8_t used;       // 0 = slot empty (set LAST on capture so readers never see a torn page)
+  uint8_t isAnomaly;  // 0 = reference page, 1 = detector-fired capture
+  uint8_t patternK;   // anomaly: winning modulo-k fault class
+  uint8_t attenIs12;  // range at capture (scaling context)
+  float score;        // anomaly: detector score
+  uint16_t zeroMv;    // amps conversion at capture: (mv − zeroMv) × apv / 1000
+  uint16_t apv;
+  int16_t mv[FA_FLIP_NSAMP];
+};
+static_assert(sizeof(FaFlipPage) == 2020, "FaFlipPage layout is parsed byte-by-byte in script.js — keep in sync");
+static FaFlipPage *faFlip = NULL;  // PSRAM: slots 0..4 = reference bands, 5..8 = anomaly ring
+static bool faFlipDirty = false;
+static uint8_t faAnomNext = 0;
+static volatile bool faPendingRebaseline = false;  // set by /get handler (Core 0), executed on Core 1
+
+// Detector outputs for the dashboard (CSV2) + console rate limiting
+uint8_t faDetectLastK = 0;  // dashboard field: winning fault class of the last FAULT verdict, 0 = quiet
+static unsigned long faDetectMsgMs = 0, faAnomCapMs = 0, faDetTrendMsgMs = 0;
+
+// Failure detector (consumer 2) — IMPLEMENTED 2026-06-12 (replaced the plug-in stub).
+// The algorithm is the FAD core further down: a faithful port of rect_fault_detector.py,
+// gated 18/18 against the synthetic set on desktop both before and after integration.
+// It does NOT read the scope ring or the decimated stream — crest picking needs the raw
+// 20 kSPS stream — so each measurement window's raw samples are also captured into
+// faDetWin (window-aligned to within one boxcar-16 group). A qualified window ARMS a job
+// on that buffer; faDetectorPoll() advances it from loop() in ≤1 ms slices and the verdict
+// lands ~1-2 s later (latency is irrelevant — a human response takes minutes). Division of
+// labor per the 2026-06-12 layering decision: first-line pk-pk-vs-cell-history detection
+// belongs to the disturbance matrix (consumer 1); this detector covers cold start (no cell
+// history yet), fault classification (winning k), and triggering the flipbook capture.
+#define FA_DET_WIN_N (FA_WIN_DECIM_N * FA_DECIM)  // 40000 raw samples = exactly one 2 s window
+#define FA_DET_MIN_PERIOD_MS 60000UL              // one analysis per minute is plenty
+static int16_t *faDetWin = NULL;  // PSRAM — window-aligned raw capture (detector input)
+static int faDetWinN = 0;
+static bool faDetFilling = false;  // faWinReset opens the fill; arming freezes the buffer
+static bool faDetBusy = false;     // a job owns faDetWin until its verdict lands
+static unsigned long faDetLastStartMs = 0;
+static uint16_t faDetCtxRpm = 0;  // gate context at arm time (flipbook page metadata)
+static float faDetCtxAmps = 0.0f;
+
+static inline float faAmpsPerVolt() {
+  // AmpSensorRange 0/1/2 = 200/300/500 A sensors — all are 200/300/500 A per ADC volt
+  static const float t[3] = { 200.0f, 300.0f, 500.0f };
+  return (AmpSensorRange >= 0 && AmpSensorRange <= 2) ? t[AmpSensorRange] : 300.0f;
+}
+
+static inline float faMvToAmps(float mv) {
+  return (mv - FA_ZERO_MV) * (faAmpsPerVolt() * 0.001f);
+}
+
+// 2-point linear fit through the eFuse factory calibration curve for one attenuation.
+// Falls back to nominal full-scale scaling if the chip lacks curve-fitting data.
+static void faCaliCompute(adc_atten_t atten, float nominalFsMv, float *slope, float *off) {
+  *slope = nominalFsMv / 4095.0f;
+  *off = 0.0f;
+  adc_cali_handle_t h = NULL;
+  adc_cali_curve_fitting_config_t cfg = {};
+  cfg.unit_id = ADC_UNIT_1;
+  cfg.chan = FA_ADC_CHANNEL;
+  cfg.atten = atten;
+  cfg.bitwidth = ADC_BITWIDTH_12;
+  if (adc_cali_create_scheme_curve_fitting(&cfg, &h) == ESP_OK) {
+    int mvLo = 0, mvHi = 0;
+    if (adc_cali_raw_to_voltage(h, 400, &mvLo) == ESP_OK && adc_cali_raw_to_voltage(h, 3600, &mvHi) == ESP_OK && mvHi > mvLo) {
+      *slope = (float)(mvHi - mvLo) / 3200.0f;
+      *off = (float)mvLo - (*slope) * 400.0f;
+    }
+    adc_cali_delete_scheme_curve_fitting(h);
+  }
+}
+
+// (Re)configure the continuous driver for one attenuation and start it. Caller must have
+// stopped the driver first (or never started it). ~ms — only ever runs at init or between
+// measurement windows, never inside one.
+static bool faConfigAndStart(bool atten12) {
+  adc_digi_pattern_config_t pat = {};
+  pat.atten = atten12 ? ADC_ATTEN_DB_12 : ADC_ATTEN_DB_6;
+  pat.channel = FA_ADC_CHANNEL;
+  pat.unit = ADC_UNIT_1;
+  pat.bit_width = ADC_BITWIDTH_12;
+  adc_continuous_config_t dig = {};
+  dig.pattern_num = 1;
+  dig.adc_pattern = &pat;
+  dig.sample_freq_hz = FA_SAMPLE_RATE_HZ;
+  dig.conv_mode = ADC_CONV_SINGLE_UNIT_1;
+  dig.format = ADC_DIGI_OUTPUT_FORMAT_TYPE2;
+  if (adc_continuous_config(faAdcHandle, &dig) != ESP_OK) return false;
+  if (atten12) {
+    faMvSlope = faMvSlope12;
+    faMvOff = faMvOff12;
+  } else {
+    faMvSlope = faMvSlope6;
+    faMvOff = faMvOff6;
+  }
+  return adc_continuous_start(faAdcHandle) == ESP_OK;
+}
+
+static void faGoertzelInit() {
+  for (int k = 0; k < FA_NBINS; k++) {
+    faBinFreq[k] = 10.0f * powf(40.0f, (float)k / (FA_NBINS - 1));  // 10 → 400 Hz, log-spaced
+    faBinLen[k] = (uint16_t)(10.0f * 1250.0f / faBinFreq[k] + 0.5f);
+    faBinCoeff[k] = 2.0f * cosf(2.0f * (float)M_PI * faBinFreq[k] / 1250.0f);
+    faBinS1[k] = faBinS2[k] = 0.0f;
+    faBinIdx[k] = 0;
+    faBinMagSum[k] = 0.0f;
+    faBinMagCnt[k] = 0;
+  }
+}
+
+static void faWinReset() {
+  faDecimWinN = 0;
+  // Detector capture buffer: refill window-aligned, but never while a job owns it. The
+  // boxcar-16 group may straddle the boundary, so the raw and decimated windows can skew
+  // by up to 15 samples (0.75 ms) — immaterial for a self-referenced detector.
+  if (!faDetBusy) {
+    faDetWinN = 0;
+    faDetFilling = (faDetWin != NULL);
+  } else {
+    faDetFilling = false;
+  }
+  faWinRailed = false;
+  faWinProtection = false;
+  faWinRpmEmaMin = faWinAmpsEmaMin = faWinDAmpMin = 1e9f;
+  faWinRpmEmaMax = faWinAmpsEmaMax = faWinDAmpMax = -1e9f;
+  faWinAmpsSum = 0.0;
+  faWinStartMs = millis();
+  for (int k = 0; k < FA_NBINS; k++) {
+    faBinS1[k] = faBinS2[k] = 0.0f;
+    faBinIdx[k] = 0;
+    faBinMagSum[k] = 0.0f;
+    faBinMagCnt[k] = 0;
+  }
+}
+
+// Fold one found peak into a cell: ±5% frequency match → recent-average (1/min(n+1,N)); else take a
+// free slot; else displace the weakest stored peak only if the newcomer is stronger
+// (restarting that slot's mean — the cell keeps its 6 most energetic bands over time).
+static void faCellFoldPeak(int cellIdx, float fHz, float ampA) {
+  FaCell *c = &faMatrix[cellIdx];
+  int freeSlot = -1, weakest = -1;
+  for (int s = 0; s < FA_CELL_PEAKS; s++) {
+    if (c->pk[s].nAcc == 0) {
+      if (freeSlot < 0) freeSlot = s;
+      continue;
+    }
+    float F = c->pk[s].freqHzX10 / 10.0f;
+    if (fabsf(fHz - F) <= 0.05f * F) {  // matched: recent-average freq + amplitude (1/min(n+1,N))
+      uint32_t n = c->pk[s].nAcc;
+      float w = (float)((n + 1 < FA_CELL_AVG_N) ? (n + 1) : FA_CELL_AVG_N);
+      float fMean = F + (fHz - F) / w;
+      float aMean = c->pk[s].ampAX100 / 100.0f;
+      aMean += (ampA - aMean) / w;
+      c->pk[s].freqHzX10 = (uint16_t)(fMean * 10.0f + 0.5f);
+      c->pk[s].ampAX100 = (uint16_t)fminf(aMean * 100.0f + 0.5f, 65535.0f);
+      if (c->pk[s].nAcc < 65535) c->pk[s].nAcc++;
+      return;
+    }
+    if (weakest < 0 || c->pk[s].ampAX100 < c->pk[weakest].ampAX100) weakest = s;
+  }
+  int slot = (freeSlot >= 0) ? freeSlot : ((weakest >= 0 && ampA * 100.0f > c->pk[weakest].ampAX100) ? weakest : -1);
+  if (slot < 0) return;
+  c->pk[slot].freqHzX10 = (uint16_t)(fHz * 10.0f + 0.5f);
+  c->pk[slot].ampAX100 = (uint16_t)fminf(ampA * 100.0f + 0.5f, 65535.0f);
+  c->pk[slot].nAcc = 1;
+}
+
+// Window finalize — runs every FA_WIN_DECIM_N decimated samples (2.0 s, crystal-timed).
+// Microseconds of work. Applies the steady-state gate, merges Goertzel peaks into the
+// disturbance matrix, and (further down the chain) feeds the flipbook + detector.
+static void faWindowFinalize() {
+  bool clean = !(faWinRailed || faWinAttenSwitched);
+  // Sample-loss audit: the window is exactly 2.0 s of crystal-timed samples; if more wall
+  // time than that passed, the DMA pool overflowed during a loop stall and samples are gone.
+  if (millis() - faWinStartMs > FA_WIN_WALL_MAX_MS) clean = false;
+
+  bool gated = false;
+  float winMeanAmps = (faDecimWinN > 0) ? (float)(faWinAmpsSum / faDecimWinN) : 0.0f;
+  if (clean && !faWinProtection && faEmaSeeded) {
+    int rpmBinLo = (int)(faWinRpmEmaMin / FA_RPM_BIN_W);
+    int rpmBinHi = (int)(faWinRpmEmaMax / FA_RPM_BIN_W);
+    bool rpmSteady = (rpmBinLo == rpmBinHi)
+                     && (faWinRpmEmaMin - rpmBinLo * FA_RPM_BIN_W >= FA_RPM_EDGE_MARGIN)
+                     && ((rpmBinLo + 1) * FA_RPM_BIN_W - faWinRpmEmaMax >= FA_RPM_EDGE_MARGIN);
+    float ampsDriftMax = fmaxf(2.0f, 0.05f * fabsf(winMeanAmps));
+    bool ampsSteady = (faWinAmpsEmaMax - faWinAmpsEmaMin) <= ampsDriftMax;
+    gated = rpmSteady && ampsSteady && rpmBinLo >= 0 && rpmBinLo < FA_RPM_BINS;
+    if (gated && faMatrix) {
+      int ampBin = (int)((winMeanAmps - FA_AMP_BIN_LO) / FA_AMP_BIN_W);
+      if (winMeanAmps >= FA_AMP_BIN_LO && ampBin >= 0 && ampBin < FA_AMP_BINS) {
+        // Bin averages (completed Goertzel passes only), then local maxima with parabolic
+        // interpolation across log-spaced neighbors — refines a band center to a few %.
+        float binAmp[FA_NBINS];
+        for (int k = 0; k < FA_NBINS; k++)
+          binAmp[k] = (faBinMagCnt[k] > 0) ? faBinMagSum[k] / faBinMagCnt[k] : 0.0f;
+        float pf[FA_NBINS], pa[FA_NBINS];
+        int np = 0;
+        for (int k = 0; k < FA_NBINS; k++) {
+          float aL = (k > 0) ? binAmp[k - 1] : -1.0f;
+          float aR = (k < FA_NBINS - 1) ? binAmp[k + 1] : -1.0f;
+          if (binAmp[k] < FA_PEAK_MIN_A || binAmp[k] <= aL || binAmp[k] < aR) continue;
+          float fHz = faBinFreq[k], aPk = binAmp[k];
+          if (k > 0 && k < FA_NBINS - 1) {
+            float denom = aL - 2.0f * binAmp[k] + aR;
+            if (fabsf(denom) > 1e-9f) {
+              float delta = 0.5f * (aL - aR) / denom;
+              if (delta > -0.5f && delta < 0.5f) {
+                fHz = faBinFreq[k] * powf(faBinFreq[k + 1] / faBinFreq[k], delta);
+                aPk = binAmp[k] - 0.25f * (aL - aR) * delta;
+              }
+            }
+          }
+          pf[np] = fHz;
+          pa[np] = aPk;
+          np++;
+        }
+        // Top-6 by amplitude (selection sort over ≤16 entries)
+        for (int i = 0; i < np && i < FA_CELL_PEAKS; i++) {
+          int best = i;
+          for (int j = i + 1; j < np; j++)
+            if (pa[j] > pa[best]) best = j;
+          float tf = pf[i], ta = pa[i];
+          pf[i] = pf[best]; pa[i] = pa[best];
+          pf[best] = tf; pa[best] = ta;
+        }
+        if (np > FA_CELL_PEAKS) np = FA_CELL_PEAKS;
+        int cellIdx = rpmBinLo * FA_AMP_BINS + ampBin;
+        FaCell *c = &faMatrix[cellIdx];
+        float apvK = faAmpsPerVolt() * 0.001f;
+        float pkpkA = (faWinDAmpMax > faWinDAmpMin) ? (faWinDAmpMax - faWinDAmpMin) * apvK : 0.0f;
+        // pk-pk recent-averaged like the peaks (consistency for drift comparison): windows
+        // here is the pre-increment count, so windows+1 is this window's ordinal, capped at N
+        float pkMean = c->pkpkAX100 / 100.0f;
+        uint32_t pw = (uint32_t)c->windows + 1;
+        if (pw > FA_CELL_AVG_N) pw = FA_CELL_AVG_N;
+        pkMean += (pkpkA - pkMean) / (float)pw;
+        c->pkpkAX100 = (uint16_t)fminf(pkMean * 100.0f + 0.5f, 65535.0f);
+        for (int i = 0; i < np; i++) faCellFoldPeak(cellIdx, pf[i], pa[i]);
+        if (c->windows == 0) faCellsUsed++;
+        if (c->windows < 65535) c->windows++;
+        faMatrixDirtyWindows++;
+        // Fleet scalars: per-session worsts
+        if (pkpkA > faSesPkpkWorstA) faSesPkpkWorstA = pkpkA;
+        if (np > 0 && pa[0] > faSesPeakWorstA) {
+          faSesPeakWorstA = pa[0];
+          faSesPeakWorstHz = pf[0];
+        }
+        // Flipbook capture + detector run hang here (qualified window, RPM/amps known)
+        faQualifiedWindowHook(rpmBinLo * FA_RPM_BIN_W, winMeanAmps);
+      }
+    }
+  }
+  if (clean) faWindowsAccepted++;
+  else faWindowsDiscarded++;
+
+  bool switchedNow = false;
+  // Attenuation switch executes ONLY here, between windows. The first window on the new
+  // range is discarded (conservative — reconfig gap + fresh range mid-stream).
+  if (faAttenPending != 0xFF) {
+    uint8_t want = faAttenPending;
+    faAttenPending = 0xFF;
+    if (want != faAttenIs12) {
+      adc_continuous_stop(faAdcHandle);
+      faAttenIs12 = want;
+      if (!faConfigAndStart(want != 0)) {
+        faChanState = 0;
+        queueConsoleMessage("Fast alt-current channel: range switch failed -- channel off");
+        return;
+      }
+      faAttenLastSwitchMs = millis();
+      switchedNow = true;
+      faBoxAcc = 0;
+      faBoxN = 0;
+    }
+  }
+  faWinReset();
+  faWinAttenSwitched = switchedNow;
+}
+
+static void faProcessDecimated(int16_t dmv) {
+  if (faDecimWinN == 0) faWinStartMs = millis();
+  if (faDecimWin && faDecimWinN < FA_WIN_DECIM_N) faDecimWin[faDecimWinN] = dmv;
+  // Gate EMAs (1 s TC). RPM comes from the existing tach value — binning is labeling,
+  // per-install consistency is all that matters. Amps EMA doubles as the DC reference
+  // the Goertzel input is measured against.
+  float ampsNow = faMvToAmps((float)dmv);
+  if (!faEmaSeeded) {
+    faAmpsEma = ampsNow;
+    faRpmEma = RPM;
+    faEmaSeeded = true;
+  } else {
+    faAmpsEma += FA_EMA_ALPHA * (ampsNow - faAmpsEma);
+    faRpmEma += FA_EMA_ALPHA * (RPM - faRpmEma);
+  }
+  if (faRpmEma < faWinRpmEmaMin) faWinRpmEmaMin = faRpmEma;
+  if (faRpmEma > faWinRpmEmaMax) faWinRpmEmaMax = faRpmEma;
+  if (faAmpsEma < faWinAmpsEmaMin) faWinAmpsEmaMin = faAmpsEma;
+  if (faAmpsEma > faWinAmpsEmaMax) faWinAmpsEmaMax = faAmpsEma;
+  if ((float)dmv < faWinDAmpMin) faWinDAmpMin = (float)dmv;
+  if ((float)dmv > faWinDAmpMax) faWinDAmpMax = (float)dmv;
+  faWinAmpsSum += ampsNow;
+  if (g_loadDumpActive || alarmLatch) faWinProtection = true;  // "no protection active" gate leg
+  // Goertzel bank — AC component only (EMA as DC reference), amps units
+  float x = ampsNow - faAmpsEma;
+  for (int k = 0; k < FA_NBINS; k++) {
+    float s0 = x + faBinCoeff[k] * faBinS1[k] - faBinS2[k];
+    faBinS2[k] = faBinS1[k];
+    faBinS1[k] = s0;
+    if (++faBinIdx[k] >= faBinLen[k]) {  // 10 cycles of this bin's center frequency done
+      float p = faBinS1[k] * faBinS1[k] + faBinS2[k] * faBinS2[k] - faBinCoeff[k] * faBinS1[k] * faBinS2[k];
+      faBinMagSum[k] += 2.0f * sqrtf(fmaxf(p, 0.0f)) / faBinLen[k];  // sine amplitude, amps
+      faBinMagCnt[k]++;
+      faBinS1[k] = faBinS2[k] = 0.0f;
+      faBinIdx[k] = 0;
+    }
+  }
+  faDecimWinN++;
+  if (faDecimWinN >= FA_WIN_DECIM_N) faWindowFinalize();
+}
+
+static inline void faProcessSample(int16_t mv) {
+  if (faDetFilling && faDetWinN < FA_DET_WIN_N) faDetWin[faDetWinN++] = mv;  // detector raw capture
+  faBoxAcc += mv;
+  if (++faBoxN >= FA_DECIM) {
+    int16_t dmv = (int16_t)(faBoxAcc / FA_DECIM);
+    faBoxAcc = 0;
+    faBoxN = 0;
+    faProcessDecimated(dmv);
+  }
+}
+
+// Bounded drain — called from loop() every pass via TIMED_CALL(ft_fastAltDrain, ...).
+// Empties the driver's DMA pool in ≤256-sample chunks, hard-capped at ~1 ms. Pool overflow
+// during a long loop stall silently drops samples; a window that lost samples is junk
+// spectrally, but it is also time-dilated and non-steady, so the steady-state gate
+// rejects it before anything is recorded.
+void faDrain() {
+  if (faChanState == 0 || !faAdcHandle) return;
+  if (faChanState == 2) {  // dormant — near-zero cost; re-probe occasionally
+    if (millis() - faLastProbeMs >= FA_REPROBE_MS) {
+      faLastProbeMs = millis();
+      if (adc_continuous_start(faAdcHandle) == ESP_OK) {
+        faChanState = 1;
+        faRailedStreak = 0;
+      }
+    }
+    return;
+  }
+  // Range-switch request keys on mean amps from the ADS path (the firmware's authoritative
+  // slow current). Request only — the switch itself waits for a window boundary.
+  if (millis() - faAttenLastSwitchMs >= FA_ATTEN_DWELL_MS && faAttenPending == 0xFF) {
+    if (!faAttenIs12 && MeasuredAmps > FA_ATTEN_UP_AMPS) faAttenPending = 1;
+    else if (faAttenIs12 && MeasuredAmps < FA_ATTEN_DOWN_AMPS) faAttenPending = 0;
+  }
+  uint32_t t0 = (uint32_t)esp_timer_get_time();
+  static uint8_t dmaBuf[FA_FRAME_BYTES];
+  int16_t staged[FA_FRAME_SAMPLES];
+  while ((uint32_t)esp_timer_get_time() - t0 < FA_DRAIN_BUDGET_US) {
+    uint32_t outLen = 0;
+    if (adc_continuous_read(faAdcHandle, dmaBuf, sizeof(dmaBuf), &outLen, 0) != ESP_OK || outLen == 0) break;
+    int n = (int)(outLen / SOC_ADC_DIGI_RESULT_BYTES);
+    int stagedN = 0;
+    for (int i = 0; i < n; i++) {
+      adc_digi_output_data_t *p = (adc_digi_output_data_t *)&dmaBuf[i * SOC_ADC_DIGI_RESULT_BYTES];
+      if (p->type2.channel != FA_ADC_CHANNEL) continue;  // defensive — single-pattern config
+      uint16_t raw = p->type2.data;
+      if (raw >= FA_RAILED_RAW) {
+        faRailedStreak++;
+        faWinRailed = true;
+      } else {
+        faRailedStreak = 0;
+      }
+      int16_t mv = (int16_t)(faMvSlope * raw + faMvOff);
+      staged[stagedN++] = mv;
+      faProcessSample(mv);
+    }
+    if (stagedN > 0 && faRawRing) {
+      portENTER_CRITICAL(&faRingMux);
+      int idx = faRingHead;
+      for (int k = 0; k < stagedN; k++) {
+        faRawRing[idx] = staged[k];
+        if (++idx >= FA_RAW_RING_N) idx = 0;
+      }
+      faRingHead = (uint16_t)idx;
+      portEXIT_CRITICAL(&faRingMux);
+      faTotalSamples += (uint32_t)stagedN;
+    }
+    // Presence: consistently railed for ~10 s while the ADS path agrees current is low
+    // (a 6 dB over-range at high output also rails — that is NOT a missing jumper).
+    if (faRailedStreak >= (uint32_t)FA_SAMPLE_RATE_HZ * FA_ABSENT_RAILED_SEC && fabsf(MeasuredAmps) < 50.0f) {
+      adc_continuous_stop(faAdcHandle);
+      faChanState = 2;
+      faLastProbeMs = millis();
+      faWinReset();  // clears window stats AND Goertzel state — no stale spectra on resume
+      faBoxAcc = 0;
+      faBoxN = 0;
+      if (!faAbsentWarned) {
+        faAbsentWarned = true;
+        queueConsoleMessage("Fast alt-current channel reads railed full-scale -- jumper open/missing? Channel dormant, re-probing every 5 min");
+      }
+      return;
+    }
+  }
+}
+
+// Capture one flipbook page from the raw ring: most-recent 200 ms, boxcar-4 → 5 kSPS.
+// `used` is written last so a concurrent /faflip.bin read never serves a torn page.
+static void faCapturePage(int slot, uint16_t rpm, float amps, uint8_t isAnom, uint8_t patternK, float score) {
+  if (!faFlip || !faRawRing || slot < 0 || slot >= FA_FLIP_SLOTS) return;
+  FaFlipPage *pg = &faFlip[slot];
+  pg->used = 0;
+  portENTER_CRITICAL(&faRingMux);
+  int idx = (int)faRingHead - FA_FLIP_NSAMP * 4;
+  while (idx < 0) idx += FA_RAW_RING_N;
+  for (int i = 0; i < FA_FLIP_NSAMP; i++) {
+    int32_t acc = 0;
+    for (int j = 0; j < 4; j++) {
+      acc += faRawRing[idx];
+      if (++idx >= FA_RAW_RING_N) idx = 0;
+    }
+    pg->mv[i] = (int16_t)(acc / 4);
+  }
+  portEXIT_CRITICAL(&faRingMux);
+  pg->rpm = rpm;
+  pg->ampsX10 = (uint16_t)fminf(fmaxf(amps, 0.0f) * 10.0f + 0.5f, 65535.0f);
+  pg->epoch = timeIsSynced ? (uint32_t)time(NULL) : 0;
+  pg->isAnomaly = isAnom;
+  pg->patternK = patternK;
+  pg->attenIs12 = faAttenIs12;
+  pg->score = score;
+  pg->zeroMv = (uint16_t)FA_ZERO_MV;
+  pg->apv = (uint16_t)faAmpsPerVolt();
+  pg->used = 1;
+  faFlipDirty = true;
+}
+
+// ── Failure detector (consumer 2) — algorithm core ──
+// Faithful C++ port of the offline prototype (rect_fault_detector.py, 18/18 on the synthetic
+// gate). The algorithm bodies live in 8_functions.ino; the type definitions it shares with the
+// consumers below (FadJob / FadResult / FADV_* / FADS_*) are defined here because they are used
+// by value/sizeof in this file, which precedes 8_functions.ino in the Arduino build.
+// FAD_NOW_US() is defined in 8_functions.ino next to its only users.
+// Verdicts. QUIET doubles as "no-signal" (too little periodicity/crests to analyze) —
+// every consumer treats it as silence.
+#define FADV_QUIET 0
+#define FADV_HEALTHY 1
+#define FADV_TREND 2
+#define FADV_FAULT 3
+
+struct FadResult {
+  uint8_t verdict;
+  uint8_t winningK;      // modulo-k fault class (5-6 diode-class, 2-4 phase-class)
+  uint8_t featInterval;  // 1 = interval stream made the call, 0 = height stream
+  uint8_t sync;          // gap-anchored sync mode supplied the winner
+  float score;           // winning effect size D
+  float marginThr;       // D / its FAULT threshold
+  float marginRunner;    // D / runner-up D
+  float Dheight, Dinterval, Fwin;
+  float acfRatio, periodRatio;
+  float pitch;     // median crest interval, samples
+  float subtrain;  // wye-tap minor-train density (first-session topology signature)
+  int nCrests;
+};
+
+// Stages (one switch case each; J->pos / J->lag / J->seg / J->acc carry intra-stage progress)
+enum {
+  FADS_IDLE = 0,
+  FADS_CONVERT,        // int16 source → xf (skipped when the harness pre-fills xf)
+  FADS_S3,             // s = boxcar-3 of xf
+  FADS_PRE_S,          // pre = prefix(s)
+  FADS_R1,             // r1 = s − movavg(s, nRough)        (into buffer rr)
+  FADS_R1_MEAN,
+  FADS_R1_VAR,
+  FADS_REGIME_ACF,     // acf[] over lags 4..lagMaxCls of r1
+  FADS_REGIME_PEAK,    // cycle period → idle/cruise ladder
+  FADS_P1_PICK,        // bootstrap crest pick on r1, conservative rung (0.75, 0.65)
+  FADS_PITCH,          // P = median crest interval; 4..400 or bail
+  FADS_R2,             // r = s − movavg(s, nCyc)           (overwrites rr; pre still prefix(s))
+  FADS_R_RMS,
+  FADS_PRE_ABSR,       // pre = prefix(|r|)
+  FADS_ENV,            // env = max(movavg(|r|, envN), 0.2·rms)
+  FADS_RN,             // rn = r / env (into s — s is dead after R2) + mean accumulation
+  FADS_RN_VAR,
+  FADS_RUNG_PICK,      // per-rung crest pick on r
+  FADS_RUNG_WEAK,      // tall-height reference + weak-crest floor
+  FADS_RUNG_SUBTRAIN,
+  FADS_RUNG_FEATURES,  // parabolic (tt, hh) → hn, iv, dn
+  FADS_RUNG_BLOCKS,    // modulo-k ANOVA per 48-crest block, medians over blocks
+  FADS_RUNG_SYNC_PREP, // gaps; skip sync when < 12
+  FADS_RUNG_SYNC_ACF,  // acf[] over lags lagLo..lagHi of rn
+  FADS_RUNG_SYNC_MATCH,// period partners → modal segments → position-in-period ANOVA
+  FADS_RUNG_CONFIRM,   // ACF period-ratio spans (span_p then span_t)
+  FADS_RUNG_VERDICT,   // rung result; keep best (sane, headroom); next rung or done
+  FADS_DONE
+};
+
+// Crest-pick sub-stages (shared by FADS_P1_PICK and FADS_RUNG_PICK)
+enum { FADP_MAXIMA = 0, FADP_CONTRAST, FADP_CONTRAST_SEL, FADP_MERGE, FADP_FINISH };
+
+struct FadJob {
+  // carved buffers (one external block; fadCarve lays them out)
+  float *xf;     // input as float, n
+  float *s;      // boxcar-3 smoothed; becomes rn after FADS_RN
+  float *rr;     // r1 (rough-detrended) then r (cycle-detrended)
+  float *env;    // 2-cycle envelope
+  double *pre;   // prefix sums, n+1
+  float *acf;    // FAD_ACF_LAG_CAP entries, indexed lag − lagLo
+  int32_t *idx;  // raw local maxima
+  int32_t *kept; // merged (then weak-filtered) crests
+  int32_t *gpos, *instA, *instB, *cnts;
+  float *tt, *hh, *hn, *iv, *dn, *scratch;
+  float *rowsH, *rowsI;  // sync-mode phase-aligned segment rows, concatenated
+  float *blkStats;       // block stats: 4 planes × 7 k × blocksCap
+  int n, crestCap, blocksCap, rowsCap;
+  const int16_t *src;  // NULL = xf pre-filled by caller
+  float fs;
+
+  // generic intra-stage progress
+  uint8_t stage, pickStage;
+  int pos, lag, seg;
+  double acc;
+
+  // regime
+  int nRough, lagMaxCls, lagLo, lagHi;
+  float Tcycle;
+  uint8_t cruise;
+  float rungW[3], rungF[3];
+  int nRungs, rung;
+
+  // stats
+  double r1Mean, r1Var, rnMean, rnVar;
+
+  // pick state
+  int nIdx, nKept;
+  float mergeDelta, vmin;
+  int scanFrom;
+  uint8_t pickSane, idxOverflow;
+
+  float P;
+  int nCyc, envN;
+  float rms;
+
+  // per-rung analysis
+  uint8_t sane2;
+  float tallThr, medTall, scaleH, medIv, refIv;
+  int nGap;
+  float subtrain;
+  float Dh[9], Fh[9], Di[9], Fi[9];  // medians over blocks, indexed by k = 2..8
+  int kH, kI;
+  float dH, dI, runH, runI;
+  uint8_t syncUsed;
+  float T0, Tsync;
+  int nInst, nRows;
+  float Twin, aP, aT;
+  uint8_t confirmPhase;
+
+  // best-rung selection (Python: lexicographic (sane, headroom) max, first wins ties)
+  uint8_t haveBest, bestSane;
+  float bestHeadroom;
+  FadResult best;
+};
+
+static FadJob *faDetJob = NULL;   // PSRAM — analysis state machine (alloc'd once in faInit)
+static uint8_t *faDetMem = NULL;  // PSRAM — ~1.9 MB carved workspace (fadCarve)
+
+// Chunked job driver — called from loop() every pass via TIMED_CALL(ft_faDetector, ...).
+// Advances the armed analysis ≤1 ms per pass (idle cost: one flag check); consumers fire
+// here when the verdict lands. TREND verdicts are log-only (user decision 2026-06-12).
+void faDetectorPoll() {
+  if (!faDetBusy || !faDetJob) return;
+  FadResult res;
+  if (!fadStep(faDetJob, (int64_t)esp_timer_get_time() + (int64_t)FA_DRAIN_BUDGET_US, &res)) return;
+  faDetBusy = false;
+  faDetWinN = 0;  // buffer consumed — refills window-aligned at the next faWinReset
+  faDetectLastK = (res.verdict == FADV_FAULT) ? res.winningK : 0;
+  if (res.verdict == FADV_FAULT) {
+    if (millis() - faDetectMsgMs > 60000UL) {  // console alert, once a minute max
+      faDetectMsgMs = millis();
+      char m[176];
+      snprintf(m, sizeof(m),
+               "ALERT: alternator current pulse-pattern anomaly (class k=%u, %s pattern, %.1fx over threshold) -- check rectifier/stator",
+               res.winningK, res.featInterval ? "interval" : "height", res.marginThr);
+      queueConsoleMessage(m);
+    }
+    if (faFlip && millis() - faAnomCapMs > 300000UL) {  // anomaly capture, one per 5 min max
+      faAnomCapMs = millis();
+      // The scope ring holds "now" (~1-2 s after the analyzed window); a rectifier/stator
+      // fault persists, so the page still shows the faulted waveform.
+      faCapturePage(FA_FLIP_BANDS + faAnomNext, faDetCtxRpm, faDetCtxAmps, 1, res.winningK, res.score);
+      faAnomNext = (faAnomNext + 1) % FA_FLIP_ANOM;
+    }
+  } else if (res.verdict == FADV_TREND) {
+    if (millis() - faDetTrendMsgMs > 3600000UL) {  // log-only, once an hour max
+      faDetTrendMsgMs = millis();
+      char m[160];
+      snprintf(m, sizeof(m),
+               "Alternator current pulse-pattern trend (k=%u, D=%.2f) -- below the fault threshold, monitoring",
+               res.winningK, res.score);
+      queueConsoleMessage(m);
+    }
+  }
+}
+
+// Qualified-window hook — called only when a window passed the steady-state gate and
+// landed in a matrix cell (the matrix merge has already happened by this point).
+static void faQualifiedWindowHook(int rpmBandLo, float meanAmps) {
+  // Reference flipbook: freeze-once page per 1000-RPM band, 20–100 A only
+  if (faFlip && meanAmps >= 20.0f && meanAmps <= 100.0f) {
+    int band = rpmBandLo / 1000;
+    if (band >= 0 && band < FA_FLIP_BANDS && !faFlip[band].used) {
+      faCapturePage(band, (uint16_t)fmaxf(faRpmEma, 0.0f), meanAmps, 0, 0, 0.0f);
+      char m[96];
+      snprintf(m, sizeof(m), "Fast alt-current flipbook: reference waveform captured for %d-%d RPM band",
+               band * 1000, band * 1000 + 999);
+      queueConsoleMessage(m);
+    }
+  }
+  // Failure detector — a qualified window ARMS the chunked analysis job (the algorithm is
+  // far too heavy for this microseconds-budget context). faDetectorPoll() drains it from
+  // loop() in ≤1 ms slices and fires the consumers (console alert, CSV2 faDetectK, anomaly
+  // flipbook capture) when the verdict lands. faDetWin holds exactly this window's raw
+  // 20 kSPS stream, frozen while the job runs.
+  if (faDetJob && !faDetBusy && faDetWinN == FA_DET_WIN_N
+      && millis() - faDetLastStartMs >= FA_DET_MIN_PERIOD_MS) {
+    faDetLastStartMs = millis();
+    faDetCtxRpm = (uint16_t)fmaxf(faRpmEma, 0.0f);
+    faDetCtxAmps = meanAmps;
+    faDetBusy = true;
+    faDetFilling = false;
+    fadStart(faDetJob, faDetWin, FA_DET_WIN_N, (float)FA_SAMPLE_RATE_HZ);
+  }
+}
+
+// Disturbance matrix → flash. Whole-blob write (~19 KB) via the shared versioned-blob
+// scaffold; LittleFS, never NVS (blobs don't belong in NVS). Field-off only — caller gates.
+void faMatrixFlush() {
+  if (!faMatrix) return;
+  uint32_t n = writePsramBlob(FA_MATRIX_PATH, FA_MATRIX_MAGIC, FA_MATRIX_VER,
+                              faWindowsAccepted, faMatrix, sizeof(FaCell),
+                              FA_RPM_BINS * FA_AMP_BINS, 0, FA_RPM_BINS * FA_AMP_BINS);
+  if (n > 0) faMatrixDirtyWindows = 0;
+}
+
+// Reference flipbook → flash (whole blob, ~18 KB) via the shared versioned-blob scaffold.
+void faFlipFlush() {
+  if (!faFlip) return;
+  uint32_t n = writePsramBlob(FA_FLIP_PATH, FA_FLIP_MAGIC, FA_FLIP_VER,
+                              faAnomNext, faFlip, sizeof(FaFlipPage),
+                              FA_FLIP_SLOTS, 0, FA_FLIP_SLOTS);
+  if (n > 0) faFlipDirty = false;
+}
+
+// Field-off flush gate + deferred destructive actions (Core 1). Same policy as the
+// long-term ring: matrix + flipbook bank during charging, flush on the field-off settled
+// rising edge and every 15 min thereafter while new data has merged.
+void faMatrixMaybeFlush() {
+  if (!faMatrix) return;
+  if (faPendingMatrixClear) {  // user-clicked (password-gated /get) — runs here on Core 1
+    faPendingMatrixClear = false;
+    memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
+    faCellsUsed = 0;
+    faMatrixDirtyWindows = 0;
+    fsTakeLock();
+    LittleFS.remove(FA_MATRIX_PATH);
+    fsReleaseLock();
+    queueConsoleMessage("Fast alt-current disturbance matrix cleared");
+    return;
+  }
+  if (faPendingRebaseline) {  // user-clicked (password-gated /get) — clears the whole book
+    faPendingRebaseline = false;
+    if (faFlip) {
+      memset(faFlip, 0, sizeof(FaFlipPage) * FA_FLIP_SLOTS);
+      faAnomNext = 0;
+      faFlipDirty = false;
+      fsTakeLock();
+      LittleFS.remove(FA_FLIP_PATH);
+      fsReleaseLock();
+      queueConsoleMessage("Fast alt-current flipbook re-baselined -- reference pages will re-capture on the next steady runs");
+    }
+    return;
+  }
+  static bool prevOff = false;
+  static unsigned long lastFlushMs = 0;
+  bool off = fieldOffSettled(0);
+  bool rising = off && !prevOff;
+  bool periodic = off && (millis() - lastFlushMs >= FA_MATRIX_FLUSH_MS);
+  prevOff = off;
+  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty)) {
+    if (faMatrixDirtyWindows > 0) faMatrixFlush();
+    if (faFlipDirty) faFlipFlush();
+    lastFlushMs = millis();
+  }
+}
+
+// Snapshot the scope ring for the /fastscope.bin endpoint. Header (16 B, little-endian):
+// u32 magic 'FSC1', u16 sampleRate/10, u16 count, u16 zero-amps mV, u16 ampsPerVolt,
+// u8 attenIs12, u8 chanState, u16 reserved. Then count × int16 calibrated mV, oldest-first.
+// Returns total bytes filled (0 = caller buffer too small).
+size_t faScopeSnapshot(uint8_t *buf, size_t cap) {
+  uint16_t count = (faChanState == 1 && faRawRing)
+                     ? ((faTotalSamples >= FA_RAW_RING_N) ? (uint16_t)FA_RAW_RING_N : (uint16_t)faTotalSamples)
+                     : 0;
+  size_t need = 16 + (size_t)count * 2;
+  if (!buf || cap < need) return 0;
+  uint32_t magic = 0x46534331UL;  // 'FSC1'
+  uint16_t rateDiv10 = FA_SAMPLE_RATE_HZ / 10;
+  uint16_t zeroMv = (uint16_t)FA_ZERO_MV;
+  uint16_t apv = (uint16_t)faAmpsPerVolt();
+  memcpy(buf + 0, &magic, 4);
+  memcpy(buf + 4, &rateDiv10, 2);
+  memcpy(buf + 6, &count, 2);
+  memcpy(buf + 8, &zeroMv, 2);
+  memcpy(buf + 10, &apv, 2);
+  buf[12] = faAttenIs12;
+  buf[13] = faChanState;
+  buf[14] = 0;
+  buf[15] = 0;
+  if (count > 0) {
+    int16_t *out = (int16_t *)(buf + 16);
+    portENTER_CRITICAL(&faRingMux);
+    uint16_t head = faRingHead;
+    if (count >= FA_RAW_RING_N) {  // full ring: oldest sample sits at head
+      size_t tail = (size_t)(FA_RAW_RING_N - head);
+      memcpy(out, faRawRing + head, tail * 2);
+      if (head > 0) memcpy(out + tail, faRawRing, (size_t)head * 2);
+    } else {  // partial: data is [0, head)
+      memcpy(out, faRawRing, (size_t)count * 2);
+    }
+    portEXIT_CRITICAL(&faRingMux);
+  }
+  return need;
+}
+
+// Boot init. PSRAM buffers + continuous driver, 6 dB default range. Any failure leaves the
+// subsystem off (faChanState 0) — every consumer checks that, so a failed init is silent
+// beyond one serial line.
+void faInit() {
+  faRawRing = (int16_t *)ps_malloc(FA_RAW_RING_N * sizeof(int16_t));
+  faDecimWin = (int16_t *)ps_malloc(FA_WIN_DECIM_N * sizeof(int16_t));
+  faMatrix = (FaCell *)ps_malloc(sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
+  faFlip = (FaFlipPage *)ps_malloc(sizeof(FaFlipPage) * FA_FLIP_SLOTS);
+  if (!faRawRing || !faDecimWin || !faMatrix || !faFlip) {
+    Serial.println("faInit: ps_malloc failed -- fast alt-current channel off");
+    return;
+  }
+  memset(faRawRing, 0, FA_RAW_RING_N * sizeof(int16_t));
+  memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
+  memset(faFlip, 0, sizeof(FaFlipPage) * FA_FLIP_SLOTS);
+  // Failure-detector buffers: 2 s raw capture (80 KB) + carved analysis workspace
+  // (~1.9 MB), all PSRAM. Failure leaves only the detector off — the channel, matrix,
+  // scope and flipbook all keep running.
+  faDetWin = (int16_t *)ps_malloc(FA_DET_WIN_N * sizeof(int16_t));
+  faDetJob = (FadJob *)ps_malloc(sizeof(FadJob));
+  uint8_t *detMem = NULL;
+  if (faDetWin && faDetJob) {
+    size_t detNeed = fadCarve(faDetJob, NULL, FA_DET_WIN_N);
+    detMem = (uint8_t *)ps_malloc(detNeed);
+  }
+  if (faDetWin && faDetJob && detMem) {
+    memset(faDetJob, 0, sizeof(FadJob));
+    fadCarve(faDetJob, detMem, FA_DET_WIN_N);
+    faDetJob->stage = FADS_IDLE;
+    faDetMem = detMem;
+  } else {
+    if (faDetWin) { free(faDetWin); faDetWin = NULL; }
+    if (faDetJob) { free(faDetJob); faDetJob = NULL; }
+    Serial.println("faInit: detector workspace ps_malloc failed -- failure detector off");
+  }
+  uint32_t priorWindows = 0;
+  uint32_t restored = readPsramBlob(FA_MATRIX_PATH, FA_MATRIX_MAGIC, FA_MATRIX_VER,
+                                    faMatrix, sizeof(FaCell), FA_RPM_BINS * FA_AMP_BINS,
+                                    &priorWindows, false);
+  if (restored > 0) {
+    for (int i = 0; i < FA_RPM_BINS * FA_AMP_BINS; i++)
+      if (faMatrix[i].windows > 0) faCellsUsed++;
+    Serial.printf("faInit: disturbance matrix restored, %u cells populated\n", (unsigned)faCellsUsed);
+  }
+  uint32_t anomNext32 = 0;
+  if (readPsramBlob(FA_FLIP_PATH, FA_FLIP_MAGIC, FA_FLIP_VER,
+                    faFlip, sizeof(FaFlipPage), FA_FLIP_SLOTS, &anomNext32, false) > 0)
+    faAnomNext = (uint8_t)(anomNext32 % FA_FLIP_ANOM);
+  faGoertzelInit();
+  faWinReset();
+  adc_continuous_handle_cfg_t hcfg = {};
+  hcfg.max_store_buf_size = FA_POOL_BYTES;
+  hcfg.conv_frame_size = FA_FRAME_BYTES;
+  if (adc_continuous_new_handle(&hcfg, &faAdcHandle) != ESP_OK) {
+    Serial.println("faInit: adc_continuous_new_handle failed -- fast alt-current channel off");
+    faAdcHandle = NULL;
+    return;
+  }
+  faCaliCompute(ADC_ATTEN_DB_6, 1750.0f, &faMvSlope6, &faMvOff6);
+  faCaliCompute(ADC_ATTEN_DB_12, 3100.0f, &faMvSlope12, &faMvOff12);
+  if (!faConfigAndStart(false)) {
+    Serial.println("faInit: ADC config/start failed -- fast alt-current channel off");
+    return;
+  }
+  faChanState = 1;
+  faAttenLastSwitchMs = millis();
+  Serial.printf("faInit: fast alt-current channel sampling GPIO3 @ %d Hz, 6 dB\n", FA_SAMPLE_RATE_HZ);
 }

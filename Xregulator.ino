@@ -73,6 +73,7 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <mbedtls/md.h>                  // security
 #include <vector>                        // Console message queue system
 #include <String>                        // Console message queue system
+#include <memory>                        // shared_ptr lifetime for streamed binary endpoint buffers (/fastscope.bin)
 #include "esp_task_wdt.h"                //Watch dog to prevent hung up code from wreaking havoc
 #include "esp_log.h"                     // get rid of spam in serial monitor
 #include <TinyGPSPlus.h>                 // used for NMEA0183, was working great but not currently implemented
@@ -92,7 +93,10 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include "esp_heap_caps.h"
 #include <time.h>            // Supabase
 #include "esp_psram.h"       // for ESP32 health calculations
-#include "LSM6DSOXSensor.h"  //accelerometer
+#include "LSM6DSOXSensor.h"      //accelerometer
+#include "esp_adc/adc_continuous.h"   // fast alternator-current channel (GPIO3/ADC1_CH2) — hardware-timed DMA sampling
+#include "esp_adc/adc_cali.h"         // eFuse factory gain correction for the fast channel (nominal scaling, NOT user calibration)
+#include "esp_adc/adc_cali_scheme.h"
 // Confidence states returned by FrontStore::classify (engine lives in 7_functions.ino; shared by
 // the alternator and both boat fronts; mirrored in script.js — keep the numeric order in sync with
 // the dashboard labels). These #defines stay HERE because globals below initialize from them.
@@ -109,6 +113,10 @@ struct SensorSnapshot;  // full definition near line 1334 (PSRAM sensor ring)
 struct IgnWatermark;    // full definition further down; needed here so the
                         // auto-prototype of wmIgnUpdate(IgnWatermark&, float)
                         // doesn't precede the struct declaration
+struct FaDetectResult;  // fast alt-current channel detector contract (full definition in 2_functions.ino)
+struct FadJob;          // pulse-pattern detector state machine (full definition in 2_functions.ino;
+struct FadResult;       // function bodies in 8_functions.ino) — forward-declared so their
+                        // auto-generated prototypes (FadJob*/FadResult* params) compile
 // Auto-prototype generator fails on default-argument functions defined in later .ino files.
 bool fieldOffSettled(uint32_t extraMs = 0);
 
@@ -2169,6 +2177,16 @@ FuncTiming ft_ReadVEData;
 FuncTiming ft_altHealth;
 FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from ft_altHealth (SSE wrapper)
 FuncTiming ft_boatPerf;
+FuncTiming ft_fastAltDrain;     // fast alt-current channel bounded DMA drain (~1 ms cap per loop pass)
+FuncTiming ft_faMatrixFlush;    // fast alt-current disturbance matrix → flash (field-off gated, like the long-term ring)
+FuncTiming ft_faDetector;       // fast alt-current failure-detector analysis slices (~1 ms cap per loop pass)
+
+// Fast alt-current per-session worst scalars (fleet upload, consumer 5). Declared HERE
+// (not in the 2_functions.ino fa section) because buildConfigPayload() reads them and
+// sits earlier in that file. Updated at qualified-window finalize; reset by Reset Peak Values.
+float faSesPkpkWorstA = 0.0f;   // worst broadband pk-pk seen this session, amps
+float faSesPeakWorstA = 0.0f;   // strongest single spectral peak this session, amps
+float faSesPeakWorstHz = 0.0f;  // ...and its frequency, Hz
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -3941,6 +3959,9 @@ void setup() {
   memset(&ft_altHealth, 0, sizeof(FuncTiming));
   memset(&ft_altFold, 0, sizeof(FuncTiming));
   memset(&ft_boatPerf, 0, sizeof(FuncTiming));
+  memset(&ft_fastAltDrain, 0, sizeof(FuncTiming));
+  memset(&ft_faMatrixFlush, 0, sizeof(FuncTiming));
+  memset(&ft_faDetector, 0, sizeof(FuncTiming));
   memset(&ft_rai_total, 0, sizeof(FuncTiming));
   memset(&ft_rai_ina228, 0, sizeof(FuncTiming));
   memset(&ft_rai_ads_state, 0, sizeof(FuncTiming));
@@ -3963,6 +3984,7 @@ void setup() {
   altSettingsLoad();
   initBoatPerformance();
   perfSettingsLoad();
+  faInit();  // fast alt-current channel: continuous-ADC driver + PSRAM buffers (dormant if GPIO3 rails — broken/missing jumper)
   setCpuFrequencyMhz(240);
   pinMode(4, OUTPUT);     // This pin is used to provide a high signal to Field Enable pin
   digitalWrite(4, LOW);   // Start with field off
@@ -4248,8 +4270,19 @@ void loop() {
       lastLongTermDumpMs = millis();
     }
     prevLongTermFieldOff = ltFieldOff;
+    // Fast alt-current disturbance matrix → flash, same field-off policy as the ring
+    // above (banks during charging, flushes when safe). Timed: it's a flash writer.
+    TIMED_CALL(ft_faMatrixFlush, faMatrixMaybeFlush());
   }
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
+  // Fast alt-current channel: bounded DMA drain (~1 ms hard cap). Unconditional and
+  // out-of-band of all control — sampling is hardware-timed (DMA fills itself), this
+  // only empties the driver pool. Runs engine-off too (noise-floor scope view) and
+  // self-suspends when the channel reads railed (broken/missing jumper).
+  TIMED_CALL(ft_fastAltDrain, faDrain());
+  // Failure-detector job drain: advances the armed pulse-pattern analysis (if any) in
+  // ~1 ms slices; idle cost is a flag check. Verdict consumers live in faDetectorPoll().
+  TIMED_CALL(ft_faDetector, faDetectorPoll());
   // Periodic NVS save removed: nvs_commit() can block Core 1 for hundreds of ms during
   // flash sector erase, which collides with the voltage loop and risks OV on transients.
   // NVS now persists only at the field-off edge (saveNVSDataFull() further down in loop)
@@ -4736,6 +4769,9 @@ void loop() {
     ft_ch1_compute_stats.worstWindow = 0;
     ft_uploadSensorHistory.worstWindow = 0;
     ft_dumpLongTermRing.worstWindow = 0;
+    ft_fastAltDrain.worstWindow = 0;
+    ft_faMatrixFlush.worstWindow = 0;
+    ft_faDetector.worstWindow = 0;
     ft_uploadBufferedRecords.worstWindow = 0;
     ft_buildConfigPayload.worstWindow = 0;
     ft_UpdateEngineRuntime.worstWindow = 0;

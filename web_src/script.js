@@ -705,6 +705,19 @@ const CSV2_FIELDS = [
     "imuFifoWorstSamples",
     "ft_dumpLongTermRing_win",
     "ft_dumpLongTermRing_ses",
+    // +12: fast alternator-current channel (GPIO3)
+    "ft_fastAltDrain_win",     // bounded DMA drain worst, rolling 5s (µs, displayed ms)
+    "ft_fastAltDrain_ses",     // ...since Reset Peak Values
+    "ft_faMatrixFlush_win",    // disturbance-matrix/flipbook flash flush worst, rolling 5s
+    "ft_faMatrixFlush_ses",    // ...since Reset Peak Values
+    "ft_faDetector_win",       // failure-detector analysis slice worst, rolling 5s
+    "ft_faDetector_ses",       // ...since Reset Peak Values
+    "faChanState",             // 0 = off, 1 = sampling, 2 = railed/dormant
+    "faCellsUsed",             // matrix cells with ≥1 qualified window
+    "faDetectK",               // detector fault class of last FAULT verdict, 0 = quiet
+    "faSesPkpkWorst",          // session-worst broadband pk-pk, A ×100
+    "faSesPeakWorst",          // session-worst spectral peak, A ×100
+    "faSesPeakWorstHz",        // ...its frequency, Hz ×10
 ];
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -9347,6 +9360,12 @@ window.addEventListener("load", function () {
                 ["ft_uploadSensorHistory_ses_ID", "ft_uploadSensorHistory_ses"],
                 ["ft_dumpLongTermRing_win_ID", "ft_dumpLongTermRing_win"],
                 ["ft_dumpLongTermRing_ses_ID", "ft_dumpLongTermRing_ses"],
+                ["ft_fastAltDrain_win_ID", "ft_fastAltDrain_win"],
+                ["ft_fastAltDrain_ses_ID", "ft_fastAltDrain_ses"],
+                ["ft_faMatrixFlush_win_ID", "ft_faMatrixFlush_win"],
+                ["ft_faMatrixFlush_ses_ID", "ft_faMatrixFlush_ses"],
+                ["ft_faDetector_win_ID", "ft_faDetector_win"],
+                ["ft_faDetector_ses_ID", "ft_faDetector_ses"],
                 ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
@@ -15506,5 +15525,279 @@ window.addEventListener('load', function () {
     }
   };
 })();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fast alternator-current scope (Plots → Scope). Pulls /fastscope.bin — a 250 ms
+// raw capture at 20 kSPS — and renders it as amps vs milliseconds. Zoom buttons
+// show the LAST N ms of the capture (ms is ground truth); the cycle hint estimates
+// one electrical cycle from the measured rectifier pulse spacing.
+// ─────────────────────────────────────────────────────────────────────────────
+let fastScopePlot = null;
+let fastScopeData = null;
+let fastScopeViewMs = 250;
+let fastScopeResizeObserver = null;
+
+function parseFastScope(buf) {
+    const dv = new DataView(buf);
+    if (buf.byteLength < 16 || dv.getUint32(0, true) !== 0x46534331) return null;  // 'FSC1'
+    const rate = dv.getUint16(4, true) * 10;
+    const count = dv.getUint16(6, true);
+    const zeroMv = dv.getUint16(8, true);
+    const apv = dv.getUint16(10, true);
+    const atten = dv.getUint8(12);
+    const state = dv.getUint8(13);
+    if (buf.byteLength < 16 + count * 2) return null;
+    const tMs = new Array(count), amps = new Array(count);
+    for (let i = 0; i < count; i++) {
+        const mv = dv.getInt16(16 + i * 2, true);
+        amps[i] = (mv - zeroMv) * apv / 1000;
+        tMs[i] = i * 1000 / rate;
+    }
+    return { rate, count, zeroMv, apv, atten, state, tMs, amps };
+}
+
+// One electrical cycle from the waveform's own pulse spacing: count rising crossings
+// of the mean (with hysteresis so noise doesn't double-count), average the spacing,
+// then ×6 — a 3-phase full-wave rectifier puts 6 ripple pulses in each electrical cycle.
+function fastScopeCycleHint(d) {
+    const n = d.amps.length;
+    if (n < 200) return '';
+    let mean = 0, mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < n; i++) {
+        mean += d.amps[i];
+        if (d.amps[i] < mn) mn = d.amps[i];
+        if (d.amps[i] > mx) mx = d.amps[i];
+    }
+    mean /= n;
+    const pkpk = mx - mn;
+    if (pkpk < 0.8) return 'Signal too quiet to measure a pulse period.';
+    const hyst = Math.max(0.2, pkpk * 0.15);
+    let armed = false, first = -1, last = -1, crossings = 0;
+    for (let i = 0; i < n; i++) {
+        if (d.amps[i] < mean - hyst) armed = true;
+        else if (armed && d.amps[i] > mean + hyst) {
+            armed = false;
+            crossings++;
+            if (first < 0) first = i;
+            last = i;
+        }
+    }
+    if (crossings < 3) return '';
+    const periodMs = ((last - first) / (crossings - 1)) / d.rate * 1000;
+    return '1 electrical cycle ≈ ' + (periodMs * 6).toFixed(1) + ' ms (pulse period ' + periodMs.toFixed(2) + ' ms)';
+}
+
+function initFastScopePlot() {
+    const plotEl = document.getElementById('fastscope-plot');
+    if (!plotEl || fastScopePlot) return;
+    const opts = {
+        width: Math.min(plotEl.clientWidth || 360, 800),
+        height: 300,
+        title: "Alternator Current — 250 ms Capture",
+        series: [
+            {},
+            { label: "Alternator Current (A)", stroke: "#2196F3", width: 1, points: { show: false }, scale: "amps" }
+        ],
+        scales: {
+            x: { time: false },
+            amps: { auto: true }
+        },
+        axes: [
+            { label: "Milliseconds", grid: { show: true } },
+            { scale: "amps", label: "Amperes", grid: { show: true }, side: 3 }
+        ],
+        legend: { show: false }
+    };
+    fastScopePlot = new uPlot(opts, [[], []], plotEl);
+    if (document.body.classList.contains('dark-mode')) updateUplotTheme(fastScopePlot);
+    const resizePlot = debounce(() => {
+        const el = document.getElementById('fastscope-plot');
+        if (el && fastScopePlot) fastScopePlot.setSize({ width: Math.min(el.clientWidth || 360, 800), height: 300 });
+    }, 1000);
+    if (fastScopeResizeObserver) fastScopeResizeObserver.disconnect();
+    fastScopeResizeObserver = new ResizeObserver(resizePlot);
+    fastScopeResizeObserver.observe(plotEl);
+}
+
+function fastScopeStatusText(d) {
+    if (!d) return 'Bad response from regulator.';
+    if (d.state === 0) return 'Channel off (sampler failed to start).';
+    if (d.state === 2) return 'Channel dormant — input reads railed full-scale (sense jumper open?).';
+    const range = d.atten ? 'high range' : 'standard range';
+    return 'Captured ' + d.count + ' samples at ' + (d.rate / 1000) + ' kHz, ' + range + '.';
+}
+
+function fastScopeApplyZoom() {
+    if (!fastScopePlot || !fastScopeData || fastScopeData.count === 0) return;
+    const tEnd = fastScopeData.tMs[fastScopeData.count - 1];
+    const min = Math.max(0, tEnd - fastScopeViewMs);
+    fastScopePlot.setScale('x', { min: min, max: tEnd });
+}
+
+function fastScopeZoom(ms, btn) {
+    fastScopeViewMs = ms;
+    document.querySelectorAll('.fastscope-zoom').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    fastScopeApplyZoom();
+}
+
+function fetchFastScope() {
+    const status = document.getElementById('fastscope-status');
+    if (status) status.textContent = 'Fetching…';
+    fetch(buildURL('/fastscope.bin'), { cache: 'no-cache' })
+        .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+        .then(buf => {
+            const d = parseFastScope(buf);
+            fastScopeData = d;
+            if (status) status.textContent = fastScopeStatusText(d);
+            const hint = document.getElementById('fastscope-cycle-hint');
+            if (hint) hint.textContent = (d && d.count > 0) ? fastScopeCycleHint(d) : '';
+            if (!d || d.count === 0) return;
+            initFastScopePlot();
+            if (fastScopePlot) {
+                fastScopePlot.setData([d.tMs, d.amps]);
+                fastScopeApplyZoom();
+            }
+        })
+        .catch(e => { if (status) status.textContent = 'Capture unavailable (' + e.message + ').'; });
+}
+
+function fastScopeOnOpen() {
+    if (!fastScopeData) fetchFastScope();
+    else if (fastScopePlot) setTimeout(() => fastScopePlot.setSize({ width: Math.min(document.getElementById('fastscope-plot').clientWidth || 360, 800), height: 300 }), 50);
+    if (!fastFlipPages) fetchFastFlip();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reference flipbook (Plots → Scope, second card). Pulls /faflip.bin: 8-byte header
+// then fixed 2020-byte pages — slots 0..refSlots-1 are the per-1000-RPM reference
+// pages, the rest are anomaly captures. Layout pinned by static_assert in firmware.
+// ─────────────────────────────────────────────────────────────────────────────
+let fastFlipPages = null;
+let fastFlipPlot = null;
+let fastFlipSelected = -1;
+const FASTFLIP_PAGE_BYTES = 2020;
+const FASTFLIP_NSAMP = 1000;
+
+function parseFastFlip(buf) {
+    const dv = new DataView(buf);
+    if (buf.byteLength < 8 || dv.getUint32(0, true) !== 0x46464C50) return null;  // 'FFLP'
+    const refSlots = dv.getUint8(4);
+    const anomSlots = dv.getUint8(5);
+    const rate = dv.getUint16(6, true) * 10;
+    const total = refSlots + anomSlots;
+    if (buf.byteLength < 8 + total * FASTFLIP_PAGE_BYTES) return null;
+    const pages = [];
+    for (let i = 0; i < total; i++) {
+        const o = 8 + i * FASTFLIP_PAGE_BYTES;
+        const used = dv.getUint8(o + 8);
+        const pg = {
+            slot: i,
+            isRef: i < refSlots,
+            band: i < refSlots ? i : null,
+            used: used === 1,
+            rpm: dv.getUint16(o, true),
+            amps: dv.getUint16(o + 2, true) / 10,
+            epoch: dv.getUint32(o + 4, true),
+            isAnomaly: dv.getUint8(o + 9),
+            patternK: dv.getUint8(o + 10),
+            score: dv.getFloat32(o + 12, true),
+            zeroMv: dv.getUint16(o + 16, true),
+            apv: dv.getUint16(o + 18, true),
+            rate: rate,
+            amps_t: null, t_ms: null
+        };
+        if (pg.used) {
+            pg.amps_t = new Array(FASTFLIP_NSAMP);
+            pg.t_ms = new Array(FASTFLIP_NSAMP);
+            for (let s = 0; s < FASTFLIP_NSAMP; s++) {
+                const mv = dv.getInt16(o + 20 + s * 2, true);
+                pg.amps_t[s] = (mv - pg.zeroMv) * pg.apv / 1000;
+                pg.t_ms[s] = s * 1000 / rate;
+            }
+        }
+        pages.push(pg);
+    }
+    return pages;
+}
+
+function initFastFlipPlot() {
+    const plotEl = document.getElementById('fastflip-plot');
+    if (!plotEl || fastFlipPlot) return;
+    fastFlipPlot = new uPlot({
+        width: Math.min(plotEl.clientWidth || 360, 800),
+        height: 260,
+        title: "Reference Waveform — 200 ms @ 5 kHz",
+        series: [
+            {},
+            { label: "Alternator Current (A)", stroke: "#9C27B0", width: 1, points: { show: false }, scale: "amps" }
+        ],
+        scales: { x: { time: false }, amps: { auto: true } },
+        axes: [
+            { label: "Milliseconds", grid: { show: true } },
+            { scale: "amps", label: "Amperes", grid: { show: true }, side: 3 }
+        ],
+        legend: { show: false }
+    }, [[], []], plotEl);
+    if (document.body.classList.contains('dark-mode')) updateUplotTheme(fastFlipPlot);
+}
+
+function fastFlipRender(slot) {
+    if (!fastFlipPages) return;
+    const pg = fastFlipPages[slot];
+    if (!pg || !pg.used) return;
+    fastFlipSelected = slot;
+    document.querySelectorAll('.fastflip-band').forEach(b => b.classList.toggle('active', +b.dataset.slot === slot));
+    const meta = document.getElementById('fastflip-meta');
+    if (meta) {
+        const when = pg.epoch ? new Date(pg.epoch * 1000).toLocaleDateString() : 'clock not set';
+        meta.textContent = (pg.isAnomaly
+            ? 'Anomaly capture (class k=' + pg.patternK + ', score ' + pg.score.toFixed(2) + ')'
+            : 'Reference, ' + (pg.band * 1000) + '–' + (pg.band * 1000 + 999) + ' RPM band')
+            + ' — captured at ' + pg.rpm + ' RPM, ' + pg.amps.toFixed(1) + ' A, ' + when + '.';
+    }
+    initFastFlipPlot();
+    if (fastFlipPlot) fastFlipPlot.setData([pg.t_ms, pg.amps_t]);
+}
+
+function fastFlipBuildButtons() {
+    const wrap = document.getElementById('fastflip-bands');
+    if (!wrap || !fastFlipPages) return;
+    wrap.innerHTML = '';
+    fastFlipPages.forEach(pg => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn-secondary btn-sm fastscope-zoom fastflip-band';  // reuse the .active highlight
+        b.dataset.slot = pg.slot;
+        b.textContent = pg.isRef ? (pg.band) + '–' + (pg.band + 1) + 'k RPM' : 'Anomaly ' + (pg.slot - 4);
+        if (!pg.used) {
+            b.disabled = true;
+            b.style.opacity = '0.4';
+            b.title = pg.isRef ? 'No steady run captured in this band yet' : 'Empty anomaly slot';
+        } else {
+            b.onclick = () => fastFlipRender(pg.slot);
+        }
+        wrap.appendChild(b);
+    });
+}
+
+function fetchFastFlip() {
+    const status = document.getElementById('fastflip-status');
+    if (status) status.textContent = 'Fetching…';
+    fetch(buildURL('/faflip.bin'), { cache: 'no-cache' })
+        .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+        .then(buf => {
+            fastFlipPages = parseFastFlip(buf);
+            if (!fastFlipPages) { if (status) status.textContent = 'Bad response from regulator.'; return; }
+            const nUsed = fastFlipPages.filter(p => p.used).length;
+            if (status) status.textContent = nUsed === 0
+                ? 'No pages captured yet — references freeze automatically on steady runs (20–100 A).'
+                : nUsed + ' page' + (nUsed > 1 ? 's' : '') + ' captured.';
+            fastFlipBuildButtons();
+            const first = fastFlipPages.find(p => p.used && (fastFlipSelected < 0 || p.slot === fastFlipSelected)) || fastFlipPages.find(p => p.used);
+            if (first) fastFlipRender(first.slot);
+        })
+        .catch(e => { if (status) status.textContent = 'Flipbook unavailable (' + e.message + ').'; });
+}
 
 /* XREG_END */

@@ -8767,6 +8767,61 @@
                 </div>
               </div>
 
+              <!-- Fast Alt-Current Drain -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Fast Alt-Current Drain
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Empties the fast current-waveform sampler's hardware buffer and updates its
+                      frequency analysis. Hard-capped at about 1 ms per pass by design — values above that mean the cap
+                      logic is broken. Sampling itself is hardware-timed and costs no processor time.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_fastAltDrain_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_fastAltDrain_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Rectifier Fault Detector -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Rectifier Fault Detector
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">One slice of the rectifier/stator fault analysis. The detector studies a
+                      2-second current recording in roughly one-millisecond pieces spread over the following second or
+                      two, at most once a minute. Hard-capped at about 1 ms per pass by design — values above that mean
+                      the cap logic is broken. 0ms is normal between analyses.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_faDetector_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_faDetector_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Disturbance Matrix Flash Flush -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Disturbance Matrix Flash Flush
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Writes the current-waveform survey matrix and reference flipbook to flash
+                      storage. Runs only with the alternator field off, on a 15-minute cycle, same policy as the
+                      long-term ring flush above. 0ms is normal while charging.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_faMatrixFlush_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_faMatrixFlush_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- Upload Buffered Records -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
@@ -9573,6 +9628,7 @@
     <div class="sub-tabs">
       <button class="sub-tab active" onclick="showSubTab('plots', 'displays', event)">Short Term</button>
       <button class="sub-tab" onclick="showSubTab('plots', 'longterm', event)">Long Term</button>
+      <button class="sub-tab" onclick="showSubTab('plots', 'scope', event); fastScopeOnOpen();">Scope</button>
     </div>
 
     <!-- Plot Displays Sub-tab - This should be active by default -->
@@ -9764,6 +9820,71 @@
       </div>
       <div class="settings-card">
         <div class="plot-container" id="lt-motion-plot"></div>
+      </div>
+    </div>
+
+    <!-- Scope Sub-tab — fast alternator-current channel (250 ms raw capture, 20 kSPS) -->
+    <div id="plots-scope" class="sub-tab-content">
+      <div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <button type="button" class="btn-secondary" onclick="fetchFastScope()">↺ Refresh Capture</button>
+          <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet — press Refresh.</span>
+        </div>
+        <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:6px;">
+          <span style="font-size:13px; font-weight:600;">View:</span>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom active" data-ms="250" onclick="fastScopeZoom(250, this)">250 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="100" onclick="fastScopeZoom(100, this)">100 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="50" onclick="fastScopeZoom(50, this)">50 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="20" onclick="fastScopeZoom(20, this)">20 ms</button>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="5" onclick="fastScopeZoom(5, this)">5 ms</button>
+          <span id="fastscope-cycle-hint" style="font-size:13px; color:#666;"></span>
+        </div>
+        <div class="plot-container" id="fastscope-plot" style="margin-top:8px;"></div>
+        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
+          <div style="margin-top:8px;line-height:1.5;">
+            <p><b>What you are seeing.</b> A quarter-second snapshot of alternator output current, sampled
+              20,000 times per second — fast enough to show the individual ripple pulses the rectifier
+              produces, belt and mounting vibration, and electrical noise that the normal once-per-tick
+              current reading averages away. Press Refresh to grab the most recent quarter second.</p>
+            <p><b>Reading the trace.</b> A healthy alternator shows an even comb of small ripple pulses
+              riding on the average current. The view buttons set how many milliseconds of the capture
+              are shown; the hint above the plot estimates how long one electrical cycle lasts from the
+              measured pulse spacing, so you can tell mechanical wobble (slower than a cycle) from
+              rectifier ripple (several pulses per cycle).</p>
+            <p><b>Measurement-only.</b> This channel is a diagnostic instrument. It plays no part in
+              voltage or current regulation, and if its sense wire is broken the regulator notes it in
+              the Console and simply stops sampling.</p>
+          </div>
+        </details>
+      </div>
+
+      <!-- Reference flipbook: one frozen page per 1000-RPM band + anomaly captures -->
+      <div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Reference Flipbook</span>
+          <button type="button" class="btn-secondary btn-sm" onclick="fetchFastFlip()">↺ Refresh</button>
+          <button type="button" class="btn-danger-ghost btn-sm"
+            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear ALL saved reference waveforms and anomaly captures? Fresh references will be captured automatically on the next steady runs. Do this after replacing the alternator or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltRebaseline=1'),{},5000).then(()=>{setTimeout(fetchFastFlip,3000);}).catch(()=>{});}">Re-baseline</button>
+          <span id="fastflip-status" style="font-size:13px; color:#666;"></span>
+        </div>
+        <div id="fastflip-bands" class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:6px;"></div>
+        <div id="fastflip-meta" style="font-size:13px; color:#666; margin-top:4px;"></div>
+        <div class="plot-container" id="fastflip-plot" style="margin-top:8px;"></div>
+        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
+          <div style="margin-top:8px;line-height:1.5;">
+            <p><b>A photo album of healthy waveforms.</b> The first time the engine runs steadily in each
+              1000-RPM band (with output between 20 and 100 amps), the regulator freezes a 200-millisecond
+              snapshot of the current waveform as that band's reference page. Pages never change once
+              captured — they are the "known good" record to compare against later in life.</p>
+            <p><b>Anomaly captures.</b> If the rectifier/stator monitor ever flags an abnormal pulse
+              pattern, it saves a snapshot alongside the references so you can see before-and-after on
+              the same screen.</p>
+            <p><b>Re-baseline</b> wipes the album (after an alternator or belt replacement, for example);
+              fresh references are captured automatically on the next steady runs.</p>
+          </div>
+        </details>
       </div>
     </div>
 

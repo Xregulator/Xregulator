@@ -4331,4 +4331,11 @@ body.dark-mode .baro-tendency-delta { color: #aaa; }
   margin: 0;
 }
 
+/* Fast alt-current scope: highlighted zoom button (selected ms window) */
+.fastscope-zoom.active {
+  background: rgba(0, 161, 154, 0.22) !important;
+  color: #00867f !important;
+  border-color: rgba(0, 161, 154, 0.4) !important;
+}
+
 /* XREG_END */
