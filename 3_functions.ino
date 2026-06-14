@@ -604,11 +604,20 @@ enum Csv2Index {
   // gate-tuning 10s live readouts (firmware Roll10s extreme; ROLL_EMPTY sentinel when no sample in window)
   CSV2_faRpmEdge10sMin,     // RPM edge margin, 10s trough (RPM ×10)
   CSV2_faAmpsDrift10sMax,   // amps-drift EMA spread, 10s peak (A ×100)
+  CSV2_faAmpsDriftExc10sMax,// drift spread minus its effective gate limit, 10s peak (A ×100); <=0 = drift gate passing
   CSV2_faTonePk10sMax,      // largest spectral peak, 10s peak (A ×100)
   CSV2_ldSlew10sMax,        // current slew g_dBcur_dt, 10s peak (A/s ×10)
   CSV2_cvSlope10sMax,       // voltage rise cvDSlope, 10s peak (V/s ×10000)
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — verified count is 545)
+  // Lifetime nav/sailing records (so the Lifetime Statistics panel can show + individually reset
+  // them). Persisted in NVS + uploaded to the leaderboards; previously had no live readout.
+  CSV2_LongestTripAT,       // longest single trip, nm ×10
+  CSV2_Max24hrDistAT,       // max 24-hour distance, nm ×10
+  CSV2_DeepestAnchorAT,     // deepest anchorage, ft ×10
+  CSV2_BestUpwindVmgAT,     // best upwind VMG, kts ×100
+  CSV2_LongestGaleAT,       // longest gale duration, hours ×100
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — verified count is 551)
 };
 
 enum Csv3Index {
@@ -851,8 +860,8 @@ enum Csv3Index {
   CSV3_TargetVoltageSetpoint,
   CSV3_RebulkCurrent_A,
   CSV3_UseFloat,
-  CSV3_altSpare0,   // reserved (was anomalyMarginAmps; alt-health settings now via AltSettings SSE)
-  CSV3_altSpare1,   // reserved (was anomalyAlarmThreshold)
+  CSV3_IExcessKBulk,   // Group 3 BULK sub-mode threshold (A ×10) — was altSpare0 (was anomalyMarginAmps)
+  CSV3_IExcessNBulk,   // Group 3 BULK sub-mode persistence (ticks) — was altSpare1 (was anomalyAlarmThreshold)
   CSV3_altSpare2,   // reserved (was anomalyAlarmEnable)
   CSV3_altSpare3,   // reserved (was degradationThreshold)
   CSV3_TempAlarmLow,
@@ -1148,15 +1157,15 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
 
   unsigned long startTime = millis();
   int attempts = 0;
-  const int maxAttempts = timeout / 500;  // Check every 500ms
+  const int maxAttempts = timeout / 100;  // Check every 100ms — detects connect up to ~400ms sooner on wake
 
   while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-    delay(500);
+    delay(100);
     esp_task_wdt_reset();
     attempts++;
 
-    // Print progress every 2 seconds
-    if (attempts % 4 == 0) {
+    // Print progress every 5 seconds — a normal ~2s connect stays silent; only slow/stuck connects log
+    if (attempts % 50 == 0) {
       Serial.printf("WiFi Status: %d, attempt %d/%d\n", WiFi.status(), attempts, maxAttempts);
     }
   }
@@ -1167,11 +1176,14 @@ bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout
     Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());  // PRESERVES: Your IP logging
     Serial.printf("Signal strength: %d dBm\n", WiFi.RSSI());               // PRESERVES: Your signal logging
 
-    // mDNS setup
-    MDNS.end();
-    if (MDNS.begin("alternator")) {
+    // mDNS setup — start once and never MDNS.end() on reconnect: ESP32 core 3.3.8's mdns
+    // teardown null-derefs the netif (LoadProhibited crash on wake/reconnect). mDNS stays bound
+    // to the persistent STA netif across reconnects, so it keeps working without a restart.
+    static bool mdnsStarted = false;
+    if (!mdnsStarted && MDNS.begin("alternator")) {
       Serial.println("mDNS responder started");
       MDNS.addService("http", "tcp", 80);
+      mdnsStarted = true;
     }
 
     return true;
@@ -1253,12 +1265,14 @@ void setupAccessPoint() {
     Serial.println("DNS server started for captive portal");
 
     // **FIX: Start mDNS in AP mode too (best-effort for alternator.local)**
-    MDNS.end();  // Ensure clean state
-    if (MDNS.begin("alternator")) {
+    // No MDNS.end() — core 3.3.8 mdns teardown null-derefs the netif (see client path); start once.
+    static bool apMdnsStarted = false;
+    if (!apMdnsStarted && MDNS.begin("alternator")) {
       MDNS.addService("http", "tcp", 80);
-      Serial.println("✅ mDNS started - alternator.local available (may not work on all devices in AP mode)");
-    } else {
-      Serial.println("⚠️ mDNS failed to start in AP mode");
+      apMdnsStarted = true;
+      Serial.println("mDNS started - alternator.local available (may not work on all devices in AP mode)");
+    } else if (!apMdnsStarted) {
+      Serial.println("mDNS failed to start in AP mode");
     }
 
     Serial.println("=== AP SETUP COMPLETE ===");
@@ -2705,6 +2719,17 @@ void setupServer() {
       foundParameter = true;
       faPendingMatrixClear = true;  // deferred to Core 1 (flash remove) — fast alt-current disturbance matrix wipe
     }
+    else if (request->hasParam("ResetRipplePeaks")) {
+      // Ripple analyzer's own worst-value reset (Session Worst Pk-Pk / Worst Peak / Worst Hz).
+      // These persist across reboot, so clear + commit now; prev_* shadows left alone so the
+      // cleared values actually write (prev != 0 → saveNVSDataFull writes).
+      foundParameter = true;
+      faSesPkpkWorstA = 0.0f;
+      faSesPeakWorstA = 0.0f;
+      faSesPeakWorstHz = 0.0f;
+      nvsPersistNow = true;
+      queueConsoleMessage("Ripple analyzer worst values: Reset requested from web interface");
+    }
     else if (request->hasParam("FastAltRebaseline")) {
       foundParameter = true;
       faPendingRebaseline = true;  // deferred to Core 1 — clears the reference flipbook (freeze-once pages re-capture)
@@ -3356,6 +3381,51 @@ void setupServer() {
       MaxSpeed = 0;
       nvsPersistNow = true;
       queueConsoleMessage("Max Speed: Reset requested from web interface");
+    }
+    // Lifetime nav/sailing records — individual resets (moved off the diagnostics "Reset Peak
+    // Values" button). prev_* shadows are intentionally NOT touched so saveNVSDataFull() sees the
+    // change and actually persists the cleared value.
+    if (request->hasParam("ResetLongestTrip")) {
+      foundParameter = true;
+      LongestSingleTrip_Nm_AllTime = 0.0f;   // in-progress trip (currentTripDistanceNm) intentionally preserved
+      nvsPersistNow = true;
+      queueConsoleMessage("Longest Single Trip: Reset requested from web interface");
+    }
+    if (request->hasParam("ResetMax24hrDist")) {
+      foundParameter = true;
+      // clear watermark + the 24-bucket ring, else the pre-reset window keeps the old peak alive
+      Max24hrDistance_AllTime = 0.0f;
+      for (uint8_t i = 0; i < 24; i++) distHourBuckets[i] = 0.0f;
+      distHourHead = 0;
+      distHourStartMs = millis();
+      nvsPersistNow = true;
+      queueConsoleMessage("Max 24-Hour Distance: Reset requested from web interface");
+    }
+    if (request->hasParam("ResetDeepestAnchor")) {
+      foundParameter = true;
+      // clear watermark + anchorage ring (same rationale as the 24h window)
+      DeepestAnchorage_Ft_AllTime = 0.0f;
+      if (anchorageRing) memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
+      anchorageRingHead = 0;
+      anchorageRingCount = 0;
+      lastAnchorageSampleMs = 0;
+      nvsPersistNow = true;
+      queueConsoleMessage("Deepest Anchorage: Reset requested from web interface");
+    }
+    if (request->hasParam("ResetBestUpwindVMG")) {
+      foundParameter = true;
+      best_upwind_vmg_alltime = 0.0f;
+      nvsPersistNow = true;
+      queueConsoleMessage("Best Upwind VMG: Reset requested from web interface");
+    }
+    if (request->hasParam("ResetLongestGale")) {
+      foundParameter = true;
+      // clear the watermark AND the in-progress gale run so it can't keep extending post-reset
+      longest_gale_duration_hours_alltime = 0.0f;
+      galeActive = false;
+      currentGaleMinutes = 0;
+      nvsPersistNow = true;
+      queueConsoleMessage("Longest Gale Duration: Reset requested from web interface");
     }
     if (request->hasParam("ResetEngineFuelUsed")) {
       foundParameter = true;
@@ -4200,6 +4270,20 @@ void setupServer() {
       queueConsoleMessageF("IExcess persistence set to: %d ticks", IExcessN);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    if (request->hasParam("IExcessKBulk")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessKBulk")->value();
+      IExcessKBulk = inputMessage.toFloat();
+      settingWrite(NK_IExcessKBulk, String(IExcessKBulk, 1).c_str());
+      queueConsoleMessageF("IExcess bulk threshold set to: %.1fA above ceiling", IExcessKBulk);
+    }
+    if (request->hasParam("IExcessNBulk")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessNBulk")->value();
+      IExcessNBulk = (int)inputMessage.toInt();
+      settingWrite(NK_IExcessNBulk, String(IExcessNBulk).c_str());
+      queueConsoleMessageF("IExcess bulk persistence set to: %d ticks", IExcessNBulk);
+    }
     if (request->hasParam("IExcessKBleed")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessKBleed")->value();
@@ -4525,10 +4609,10 @@ void setupServer() {
       ft_faMatrixFlush.worstSession = 0;
       ft_faDetector.worstSession = 0;
       ft_faWindowFinalize.worstSession = 0;
-      // Fast alt-current per-session worsts (fleet scalars) follow the same session
-      faSesPkpkWorstA = 0;
-      faSesPeakWorstA = 0;
-      faSesPeakWorstHz = 0;
+      // NOTE: the ripple analyzer's per-session worsts (faSesPkpkWorstA / faSesPeakWorstA /
+      // faSesPeakWorstHz) used to be cleared here too. They now persist across reboot and are
+      // cleared only by the ripple panel's own reset (ResetRipplePeaks handler below), so a
+      // diagnostics "Reset Peak Values" press no longer wipes the ripple worsts.
       ft_uploadBufferedRecords.worstSession = 0;
       ft_buildConfigPayload.worstSession = 0;
       ft_UpdateEngineRuntime.worstSession = 0;
@@ -4638,28 +4722,11 @@ void setupServer() {
       vlBkt1sCurrent = { 0, 0, 0, 0 };
       vlBkt1sStart = millis();
       vlHasPrev = false;
-      // Longest single trip — clear the lifetime max. In-progress trip (currentTripDistanceNm) is intentionally preserved.
-      LongestSingleTrip_Nm_AllTime = 0.0f;
-      // 24-hour rolling distance — clear watermark + ring (otherwise post-reset window keeps the pre-reset peak alive).
-      Max24hrDistance_AllTime = 0.0f;
-      for (uint8_t i = 0; i < 24; i++) distHourBuckets[i] = 0.0f;
-      distHourHead = 0;
-      distHourStartMs = millis();
-      // Deepest anchorage — clear watermark + ring (same rationale: pre-reset window shouldn't keep winning post-reset).
-      DeepestAnchorage_Ft_AllTime = 0.0f;
-      if (anchorageRing) memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
-      anchorageRingHead = 0;
-      anchorageRingCount = 0;
-      lastAnchorageSampleMs = 0;
-      // Best upwind VMG + longest gale duration — clear lifetime watermarks (same rationale as the others).
-      // Reset the in-progress gale run too, so a pre-reset gale can't keep extending the post-reset record.
-      best_upwind_vmg_alltime = 0.0f;
-      longest_gale_duration_hours_alltime = 0.0f;
-      galeActive = false;
-      currentGaleMinutes = 0;
-      prev_BestUpVMG_AT = 0;
-      prev_GaleHrs_AT = 0;
-      nvsPersistNow = true;   // commit the cleared lifetime watermarks (LongTrip/Max24h/DeepAnchor/BestUpVMG/GaleHrs) now, not at the next field-off edge.
+      // NOTE: the lifetime nav/sailing records (Longest Single Trip, Max 24-hour Distance,
+      // Deepest Anchorage, Best Upwind VMG, Longest Gale Duration) used to be wiped here too.
+      // They are NOW reset individually from the Lifetime Statistics panel (ResetLongestTrip /
+      // ResetMax24hrDist / ResetDeepestAnchor / ResetBestUpwindVMG / ResetLongestGale handlers
+      // below) — a diagnostics "Reset Peak Values" press must never nuke leaderboard records.
       // 80MHz low-power loop instrumentation — clear session worst + near-miss counters
       loopWorst80Ses = 0;
       loopOver80ImuLimitCount = 0;
@@ -5697,25 +5764,21 @@ void dnsHandleRequest() {  // process dns request for captive portals
     }
   }
 }
-// Engine-off standby power drop. Normally powers the radio fully off, suspends the temp task,
-// and slows the CPU to 80MHz. With WiFi Napping enabled in Client mode it instead keeps WiFi
-// associated in modem-sleep (dashboard stays reachable, no button) until 12h with no connected
-// dashboard, then falls back to full radio-off. Ordering matters: do the WiFi op, then suspend
-// tasks, then drop the clock — same sequence the original inline code relied on.
+// Engine-off standby power drop. Normally powers WiFi fully off, suspends the temp task, and
+// slows the CPU to 80MHz. With WiFi Napping enabled in Client mode it instead keeps WiFi
+// associated in modem-sleep so the dashboard stays reachable with no button press — indefinitely
+// while the regulator stays on the router. Nap costs only ~1mA over full-off (measured), so there
+// is no idle timeout. While napping the CPU bumps to 240MHz whenever a dashboard is connected
+// (snappy UI) and drops to 80MHz when idle; the temp task stays suspended either way, so alt
+// temperature goes stale while napping (intentional — engine is off). Modem-sleep stays on, so
+// there's still ~100-300ms beacon latency on the first packet, which is fine. Ordering matters:
+// do the WiFi op, then suspend tasks, then set the clock.
 void enterLowPowerStandby() {
-  if (wifiNapEnabled && currentMode == MODE_CLIENT && !wifiNapTimedOut) {
+  if (wifiNapEnabled && currentMode == MODE_CLIENT) {
     if (!wifiNapActive) {
-      WiFi.setSleep(true);           // modem sleep — radio naps between DTIM beacons
+      WiFi.setSleep(true);           // modem sleep — WiFi naps between DTIM beacons
       wifiNapActive = true;
-      lastNapActivityMs = millis();  // start the 12h no-activity clock
       queueConsoleMessage("WiFi napping: dashboard stays reachable at low power (no button needed)");
-    }
-    if (events.count() > 0) lastNapActivityMs = millis();  // a connected dashboard = activity
-    if (millis() - lastNapActivityMs > WIFI_NAP_TIMEOUT) {
-      WiFi.mode(WIFI_OFF);
-      wifiNapActive = false;
-      wifiNapTimedOut = true;        // stay fully off until ignition or wake button
-      queueConsoleMessage("WiFi napping timed out (12h idle) - radio off; press wake button or start engine");
     }
   } else {
     WiFi.mode(WIFI_OFF);             // THIS MUST BE DONE FIRST
@@ -5725,7 +5788,12 @@ void enterLowPowerStandby() {
     vTaskSuspend(tempTaskHandle);    // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
     tempTaskSuspended = true;        // intentional suspend — health monitor must not read this as a hang
   }
-  setCpuFrequencyMhz(80);            // THIS MUST BE DONE SECOND
+  // While napping, run 240MHz when a dashboard is actually connected (snappy UI), else 80MHz.
+  // WiFi-off standby always stays 80MHz. Guarded so the PLL isn't reconfigured every loop pass.
+  uint32_t targetMhz = (wifiNapActive && events.count() > 0) ? 240 : 80;
+  if (getCpuFrequencyMhz() != targetMhz) {
+    setCpuFrequencyMhz(targetMhz);   // THIS MUST BE DONE AFTER SUSPENDING TASKS
+  }
 }
 void checkWiFiConnection() {
   // Only attempt reconnection in client mode
@@ -6053,7 +6121,9 @@ void SendWifiData() {
                                "%d,%d,"
                                // +18: fast alt-current channel (drain timer ×2, flush timer ×2, detector timer ×2, window-finalize timer ×2, state, cells, detectK, session worsts ×3, anomaly count, Highest Tone in Map ×3 [freq, amp, rpm])
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               // +5: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, tone peak, current slew, voltage slope)
+                               // +6: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope)
+                               "%d,%d,%d,%d,%d,%d,"
+                               // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
                                "%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
@@ -6588,9 +6658,16 @@ void SendWifiData() {
                                // +5: gate-tuning 10s live readouts (ROLL_EMPTY when no sample in window)
                                rollCsv(ROLL_RPMEDGE, 10),                  // CSV2_faRpmEdge10sMin  (RPM ×10, trough)
                                rollCsv(ROLL_AMPSDRIFT, 100),               // CSV2_faAmpsDrift10sMax (A ×100, peak)
+                               rollCsv(ROLL_AMPSDRIFTEXC, 100),            // CSV2_faAmpsDriftExc10sMax (A ×100, peak; <=0 = passing)
                                rollCsv(ROLL_TONEPK, 100),                  // CSV2_faTonePk10sMax    (A ×100, peak)
                                rollCsv(ROLL_LDSLEW, 10),                   // CSV2_ldSlew10sMax      (A/s ×10, peak)
-                               rollCsv(ROLL_CVSLOPE, 10000)                // CSV2_cvSlope10sMax     (V/s ×10000, peak)
+                               rollCsv(ROLL_CVSLOPE, 10000),               // CSV2_cvSlope10sMax     (V/s ×10000, peak)
+                               // Lifetime nav/sailing records (NVS-persisted; shown read-only in Lifetime Statistics)
+                               SafeInt(LongestSingleTrip_Nm_AllTime, 10),  // CSV2_LongestTripAT     (nm ×10)
+                               SafeInt(Max24hrDistance_AllTime, 10),       // CSV2_Max24hrDistAT     (nm ×10)
+                               SafeInt(DeepestAnchorage_Ft_AllTime, 10),   // CSV2_DeepestAnchorAT   (ft ×10)
+                               SafeInt(best_upwind_vmg_alltime, 100),      // CSV2_BestUpwindVmgAT   (kts ×100)
+                               SafeInt(longest_gale_duration_hours_alltime, 100) // CSV2_LongestGaleAT (hr ×100)
     );
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
     thermalAntiWindupLatch = false;
@@ -6890,8 +6967,8 @@ void SendWifiData() {
                                SafeInt(TargetVoltageSetpoint, 100),
                                SafeInt(RebulkCurrent_A, 100),
                                SafeInt(UseFloat),
-                               SafeInt(0),   // CSV3_altSpare0 (reserved)
-                               SafeInt(0),   // CSV3_altSpare1 (reserved)
+                               SafeInt(IExcessKBulk, 10),   // CSV3_IExcessKBulk (×10, 1 decimal)
+                               SafeInt(IExcessNBulk),       // CSV3_IExcessNBulk (raw int)
                                SafeInt(0),   // CSV3_altSpare2 (reserved)
                                SafeInt(0),   // CSV3_altSpare3 (reserved)
                                SafeInt(TempAlarmLow),

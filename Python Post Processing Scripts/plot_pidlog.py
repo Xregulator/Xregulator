@@ -195,6 +195,49 @@ print(f"Delimiter: {repr(_sep)}  |  Columns ({len(_col_names)}): {_col_names}")
 
 from io import StringIO
 _data_text = "".join(_lines[_header_idx + 1:])
+
+# ── FIX 3: recover a merged header+first-data line ──────────────────────────
+# Some downloaded pidlogs lose the newline after the header: the header's last
+# column name gets its tail chopped and the first data row is glued straight
+# onto it (e.g. "...,voltLoopIntervalMs,inaI971296,6,1,12.586,..."). That makes
+# the header split produce 2N-1 tokens (N-1 clean names + 1 garbled name+ts_ms +
+# N-1 numeric values), and pandas chokes on the duplicate numeric "names".
+# Detect that case, restore the canonical firmware header, and peel the embedded
+# first data row back out (ts_ms is the trailing integer on the garbled token).
+import re
+# Canonical pidlog header — must match the firmware header in 3_functions.ino.
+EXPECTED_HEADER = [
+    "ts_ms", "chargeStageDisplay", "TargetVoltageMode", "battV",
+    "ChargingVoltageTarget", "vError", "Icv", "cv_I", "tableThermalLimit",
+    "setpointCmd", "voltageLoopRanThisTick", "pidSetpoint", "pidInput",
+    "pidUnsatOutput", "pidOutput", "innerTermP", "innerTermI", "innerTermD",
+    "dutyRequest", "dutyApplied", "enteringCV", "enteringTargetVoltageMode",
+    "rpm", "measAmps", "innerKp", "innerKi", "innerKd", "voltageKp",
+    "voltageKi", "voltageKd", "battV_filt_V", "iMeas_filt_A", "flags",
+    "ovFlags", "dBcur_dt", "battI", "ch1IntervalMs", "voltLoopIntervalMs",
+    "inaIntervalMs",
+]
+_N = len(EXPECTED_HEADER)
+if _sep == "," and len(_col_names) != _N:
+    if len(_col_names) == 2 * _N - 1:
+        _garbled = _col_names[_N - 1]            # last header name + glued ts_ms
+        _data_tail = _col_names[_N:]             # the remaining N-1 data values
+        _m = re.search(r"(\d+)$", _garbled)      # ts_ms is the trailing integer
+        if _m:
+            _first_row = ",".join([_m.group(1)] + _data_tail)
+            _data_text = _first_row + "\n" + _data_text
+            print(f"Recovered merged header line: restored canonical {_N}-col "
+                  f"header and re-injected first data row (ts_ms={_m.group(1)}).")
+            _col_names = list(EXPECTED_HEADER)
+        else:
+            raise SystemExit(
+                f"ERROR: header line looks merged ({len(_col_names)} tokens) but "
+                f"could not extract ts_ms from garbled token {_garbled!r}."
+            )
+    else:
+        print(f"WARNING: header has {len(_col_names)} columns, expected {_N}. "
+              f"Firmware schema may have changed — using the file's header as-is.")
+
 df = pd.read_csv(
     StringIO(_data_text),
     sep=_sep,           # ← FIX 1: was always comma

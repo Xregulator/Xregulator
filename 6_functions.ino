@@ -2011,6 +2011,93 @@ void AdjustFieldLearnMode() {
           g_iExcessDutyCap = 100.0f;  // retired
         }
 
+        // ── iExcess supervisor — BULK sub-mode (Group 3, current-control phase) ──────
+        // Sibling of the iExcess block above, for when battery voltage is FAR below the
+        // charge target (bulk). The CV iExcess above is gated off here (its IBV > target −
+        // IExcessArmMarginV gate is false), and Groups 1/2 have nothing to do (voltage is
+        // below target by design). The only fast supervisor otherwise active in bulk is the
+        // load-dump detector, which catches sharp battery-current steps — not a gradually
+        // building current-over-ceiling excess from an RPM blip. This block fills that hole.
+        //
+        // GATE = strict complement of the CV iExcess gate (shares IExcessArmMarginV as the
+        // handoff line) — above target−ArmMargin the CV detector runs; at/below it, this one
+        // does. No coverage gap, no overlap.
+        //
+        // COMPARE TARGET = i_ceiling_pre_ov (the commanded current ceiling: RPM cap −
+        // thermal − warmup − MaxTableValue, before any protection cap), NOT setpointLimited.
+        // In bulk setpointLimited lags a rising cap during RPM ramps, but the ceiling itself
+        // rises with RPM, so a normal ramp produces no excess — only a true overshoot above
+        // the mechanical ceiling does. Looser knobs (IExcessKBulk/IExcessNBulk) tolerate the
+        // command-vs-actual error we accept far from the voltage limit.
+        //
+        // RESPONSE binds via fastOvCurrentCap RELATIVE TO THE CEILING (not fastOvBaseCap=
+        // MaxTableValue like the CV block): in bulk the voltage-loop proportional term alone
+        // saturates Icv to the ceiling, so zeroing cv_I cannot collapse the setpoint — only
+        // pulling the cap below the ceiling forces uTargetAmps (and thus Icv's clamp) down.
+        // Recovery is fully shared with the CV path via the unified fastOvClampActive flag
+        // (govBypass, cv_I reseed, fast-rise window) downstream.
+        {
+          const float IEXCESS_HYST = 2.0f;
+          const float K_IE = 1.0f;
+          static bool iExBulkActive = false;
+          static int iExBulkPersistCount = 0;
+          static bool postBulkMismatch = false;  // block re-count while field TC keeps current high after this block's own collapse
+
+          if (testProtectionsEnabled && !TuningMode && voltageControlActive
+              && (IBV <= ChargingVoltageTarget - IExcessArmMarginV)) {
+            float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
+                           : (IExcessSigSrc == 1) ? getFiltI()
+                                                  : g_iMA_N;
+            float excess = iSigEx - i_ceiling_pre_ov - IExcessKBulk;  // vs commanded ceiling, not slewed setpoint
+            bool aboveThreshold = (excess > 0.0f);
+            bool belowHysteresis = (iSigEx < i_ceiling_pre_ov + IExcessKBulk - IEXCESS_HYST);
+
+            // Release the self-mismatch gate once current has physically fallen back to the
+            // ceiling band. Groups 1/2 and the CV iExcess can't be active in this voltage
+            // regime, so this block's own collapse is the only thing that can elevate iSigEx
+            // above the ceiling without a real event — hence a self-gate, not a fastOV gate.
+            if (postBulkMismatch && (iSigEx <= i_ceiling_pre_ov + IExcessKBulk)) {
+              postBulkMismatch = false;
+            }
+
+            if (aboveThreshold && !postBulkMismatch) {
+              iExBulkPersistCount++;
+            } else {
+              iExBulkPersistCount = 0;
+            }
+
+            if (iExBulkPersistCount >= IExcessNBulk) {
+              if (iExBulkPersistCount == IExcessNBulk) {
+                cv_I_aw_cap = cv_I;         // cap bumpless tracker ceiling to pre-event level
+                postBulkMismatch = true;    // collapses the command; block re-trigger during field TC wind-down
+                g_iExcessCount++;           // shared Group 3 trip counter
+                currentPID.ResetIntegratorTo(0.0);
+                queueConsoleMessage("iExcess (bulk): inner PID integrator reset");
+              }
+              float ieCap = fmaxf(0.0f, i_ceiling_pre_ov - K_IE * excess);  // ceiling-relative — must bite below the bulk ceiling
+              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
+              fastOvClampActive = true;
+              iExBulkActive = true;
+              if (IExcessKBleed <= 0.0f) {
+                cv_I = 0.0f;
+              } else {
+                cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * excess * actualDtSec);
+              }
+            } else if (iExBulkActive && !belowHysteresis) {
+              float ieCap = fmaxf(0.0f, i_ceiling_pre_ov - K_IE * excess);
+              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
+              fastOvClampActive = true;  // hold govBypass through hysteresis
+            } else {
+              iExBulkActive = false;     // release; unified reseed handles cv_I
+            }
+          } else {
+            // Gate closed (near/above target — CV iExcess owns this regime, or protections off).
+            iExBulkPersistCount = 0;
+            iExBulkActive = false;
+            postBulkMismatch = false;
+          }
+        }
+
         // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
         // Three-tier cascade: N=1 above LoadDumpDtThresh1, N=2 above LoadDumpDtThresh, N=3 above LoadDumpDtThresh3.
         // INA228 noise is alternating-sign (high/low/high/low) — two consecutive same-direction crossings
@@ -4176,7 +4263,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // Integrator freeze — blocks UPWARD winding only (error > 0); unwinding below
   // setpoint is never blocked. Implemented by forcing Ki to 0 for the tick: the
   // library's integrator holds exactly, P and the projection stay live, and the
-  // logged outerI shows the true frozen value. Two freeze cases:
+  // logged outerI shows the true frozen value. Three freeze cases:
   //   1. Approach gate not yet released (above).
   //   2. Saturation vs live authority: the applied penalty already covers the
   //      live RPM-table cap, so further winding is dead authority that must
@@ -4184,11 +4271,27 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //      +20.6A past rpmCap). Deliberately NOT a hard output clamp at capCurrent —
   //      that would force the integrator down on every RPM dip and cause a
   //      reheat transient when RPM returns.
-  bool freezeIntegrator = (tempPIDInput_d > (double)effectiveSetpoint)
-                          && (!thermalIntegratorReleased || prevThermalPenalty >= capCurrent - 0.5f);
+  //   3. Descent (added 2026-06-14): temp above setpoint but already falling
+  //      (slope < 0). P + the penalty already on the table are bringing it down;
+  //      more I just overshoots the holding level and buys a post-peak undershoot
+  //      (the −5°F sag in the step-down log). Self-releasing — if the descent
+  //      stalls above setpoint, slope >= 0 lifts the freeze so I can top up, so it
+  //      can never park the loop above setpoint; and it never fires while temp is
+  //      rising, so it adds zero risk in the toward-the-limit direction. Bite is
+  //      limited by the 60s slope-estimator latency (~30s) at the current window
+  //      — safe but partial until the shorter-window future work lands.
+  const bool aboveSetpoint = (tempPIDInput_d > (double)effectiveSetpoint);
+  const bool satFreeze     = aboveSetpoint && thermalIntegratorReleased
+                             && (prevThermalPenalty >= capCurrent - 0.5f);
+  const bool descentFreeze = aboveSetpoint && thermalIntegratorReleased
+                             && (thermalSlopeFPerSec < 0.0f);
+  bool freezeIntegrator = aboveSetpoint
+                          && (!thermalIntegratorReleased || satFreeze || descentFreeze);
   {
+    // Log the saturation case only (descent fires every cycle — its signature is
+    // outerI flat-while-falling in the thermal log, no console spam needed).
     static bool satFreezeLogged = false;
-    if (freezeIntegrator && thermalIntegratorReleased) {
+    if (satFreeze) {
       if (!satFreezeLogged) {
         satFreezeLogged = true;
         queueConsoleMessageF("TempPID: integrator frozen at %.1fA — penalty covers live rpm cap %.1fA", (float)tempPID.GetIterm(), capCurrent);

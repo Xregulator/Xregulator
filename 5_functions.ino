@@ -4028,6 +4028,10 @@ void saveNVSDataFull() {
   if (prev_DeepAnchor_AT != (int32_t)(DeepestAnchorage_Ft_AllTime * 10))    { nvs_set_i32(h, "DeepAnchor_AT",  (int32_t)(DeepestAnchorage_Ft_AllTime * 10));    prev_DeepAnchor_AT = (int32_t)(DeepestAnchorage_Ft_AllTime * 10);    chg = true; }
   if (prev_BestUpVMG_AT != (int32_t)(best_upwind_vmg_alltime * 100))           { nvs_set_i32(h, "BestUpVMG_AT",   (int32_t)(best_upwind_vmg_alltime * 100));           prev_BestUpVMG_AT = (int32_t)(best_upwind_vmg_alltime * 100);           chg = true; }
   if (prev_GaleHrs_AT != (int32_t)(longest_gale_duration_hours_alltime * 100)) { nvs_set_i32(h, "GaleHrs_AT",     (int32_t)(longest_gale_duration_hours_alltime * 100)); prev_GaleHrs_AT = (int32_t)(longest_gale_duration_hours_alltime * 100); chg = true; }
+  // Ripple analyzer worsts — persisted so they survive reboot; cleared only by the ripple panel reset
+  if (prev_faSesPkpk   != (int32_t)(faSesPkpkWorstA * 100))                    { nvs_set_i32(h, "faSesPkpk",     (int32_t)(faSesPkpkWorstA * 100));                    prev_faSesPkpk   = (int32_t)(faSesPkpkWorstA * 100);                  chg = true; }
+  if (prev_faSesPeakA  != (int32_t)(faSesPeakWorstA * 100))                    { nvs_set_i32(h, "faSesPeakA",    (int32_t)(faSesPeakWorstA * 100));                    prev_faSesPeakA  = (int32_t)(faSesPeakWorstA * 100);                  chg = true; }
+  if (prev_faSesPeakHz != (int32_t)(faSesPeakWorstHz * 10))                    { nvs_set_i32(h, "faSesPeakHz",   (int32_t)(faSesPeakWorstHz * 10));                    prev_faSesPeakHz = (int32_t)(faSesPeakWorstHz * 10);                  chg = true; }
   if (prev_MeasAmpsMax != MeasuredAmpsMax)                                  { nvs_set_blob(h, "MAmpsMax",      &MeasuredAmpsMax,                   sizeof(float));    prev_MeasAmpsMax = MeasuredAmpsMax;                                  chg = true; }
   if (prev_MeasAmpsMax_AllTime != MeasuredAmpsMax_AllTime)                  { nvs_set_blob(h, "MAmpsMax_AT",   &MeasuredAmpsMax_AllTime,           sizeof(float));    prev_MeasAmpsMax_AllTime = MeasuredAmpsMax_AllTime;                  chg = true; }
   if (prev_RPMMax != RPMMax)                                                { nvs_set_blob(h, "RPMMax",        &RPMMax,                            sizeof(float));    prev_RPMMax = RPMMax;                                                chg = true; }
@@ -4155,6 +4159,9 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "DeepAnchor_AT", &temp_int32) == ESP_OK) DeepestAnchorage_Ft_AllTime = temp_int32 / 10.0f;
   if (nvs_get_i32(nvs_handle, "BestUpVMG_AT", &temp_int32) == ESP_OK) best_upwind_vmg_alltime = temp_int32 / 100.0f;
   if (nvs_get_i32(nvs_handle, "GaleHrs_AT", &temp_int32) == ESP_OK) longest_gale_duration_hours_alltime = temp_int32 / 100.0f;
+  if (nvs_get_i32(nvs_handle, "faSesPkpk", &temp_int32) == ESP_OK) faSesPkpkWorstA = temp_int32 / 100.0f;
+  if (nvs_get_i32(nvs_handle, "faSesPeakA", &temp_int32) == ESP_OK) faSesPeakWorstA = temp_int32 / 100.0f;
+  if (nvs_get_i32(nvs_handle, "faSesPeakHz", &temp_int32) == ESP_OK) faSesPeakWorstHz = temp_int32 / 10.0f;
 
   // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
   required_size = sizeof(double);
@@ -4427,6 +4434,9 @@ void initNVSCache() {
   prev_DeepAnchor_AT        = (int32_t)(DeepestAnchorage_Ft_AllTime * 10);
   prev_BestUpVMG_AT         = (int32_t)(best_upwind_vmg_alltime * 100);
   prev_GaleHrs_AT           = (int32_t)(longest_gale_duration_hours_alltime * 100);
+  prev_faSesPkpk            = (int32_t)(faSesPkpkWorstA * 100);
+  prev_faSesPeakA           = (int32_t)(faSesPeakWorstA * 100);
+  prev_faSesPeakHz          = (int32_t)(faSesPeakWorstHz * 10);
   prev_MeasAmpsMax          = MeasuredAmpsMax;
   prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;
   prev_RPMMax               = RPMMax;

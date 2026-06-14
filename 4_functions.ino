@@ -1730,6 +1730,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     IExcessN = (int)settingRead(NK_IExcessN).toInt();
   }
+  if (!settingExists(NK_IExcessKBulk)) {
+    settingWrite(NK_IExcessKBulk, String(IExcessKBulk, 1).c_str());
+  } else {
+    IExcessKBulk = settingRead(NK_IExcessKBulk).toFloat();
+  }
+  if (!settingExists(NK_IExcessNBulk)) {
+    settingWrite(NK_IExcessNBulk, String(IExcessNBulk).c_str());
+  } else {
+    IExcessNBulk = (int)settingRead(NK_IExcessNBulk).toInt();
+  }
   if (!settingExists(NK_IExcessKBleed)) {
     settingWrite(NK_IExcessKBleed, String(IExcessKBleed, 2).c_str());
   } else {

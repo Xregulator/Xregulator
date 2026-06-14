@@ -2048,6 +2048,22 @@ input:focus {
   margin-right: auto;
 }
 
+/* Live Oscilloscope + Reference Flipbook are stacked into one visual unit so the
+   shared-length time axes read as obviously back-to-back: the top card drops its
+   bottom margin/corners, the bottom card drops its top margin/corners and gets a
+   seam line. They keep the same 600px width so the X axes align column-for-column. */
+.fa-paired-top {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.fa-paired-bottom {
+  margin-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top: 1px solid var(--border);
+}
+
 /* Long Term plots get roomier cards on wide screens (the brush above is full-width;
    the charts a bit narrower). Shrinks responsively on mobile via the viewport cap. */
 #plots-longterm .settings-card { max-width: 1100px; }
@@ -2836,6 +2852,21 @@ input:checked+.slider:before {
   font-weight: bold;
   color: var(--reading);
   text-align: right;
+}
+/* Headline row (Worst All-Time pinned to top) — a tick bolder/bigger than the rest */
+.interval-row-headline {
+  border-bottom: 2px solid var(--border);
+}
+.interval-row-headline .interval-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+.interval-row-headline .interval-val {
+  font-size: 16px;
+}
+.dark-mode .interval-row-headline .interval-label {
+  color: #e0e0e0;
 }
 .dark-mode .interval-label {
   color: #aaa;

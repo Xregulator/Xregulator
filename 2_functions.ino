@@ -194,8 +194,10 @@ bool fsRemove(const char *path) {
 #define NK_IExcessArmMarginV "IExcessArmMrgnV"
 #define NK_IExcessK "IExcessK"
 #define NK_IExcessKBleed "IExcessKBleed"
+#define NK_IExcessKBulk "IExcessKBulk"
 #define NK_IExcessMA_N "IExcessMA_N"
 #define NK_IExcessN "IExcessN"
+#define NK_IExcessNBulk "IExcessNBulk"
 #define NK_IExcessReseedFrac "IExcessResedFrc"
 #define NK_IExcessSigSrc "IExcessSigSrc"
 #define NK_IgnitionOverride "IgnitionOverrid"
@@ -3400,7 +3402,10 @@ bool canUploadNow() {
 #define FA_ZERO_MV 1250.0f                   // hall sensor 2.5 V @ 0 A → ÷2 divider
 #define FA_RAILED_RAW 4090                   // 12-bit code treated as railed full-scale
 #define FA_DECIM 16                          // boxcar-16 → 1.25 kSPS effective (nulls at 1.25 kHz)
-#define FA_WIN_DECIM_N 2500                  // 2 s measurement window, counted in decimated samples (crystal-timed)
+#define FA_WIN_DECIM_N 625                   // 0.5 s tone/gate/matrix window, decimated samples (crystal-timed).
+                                             // Was 2 s; shortened so the per-window flat-top FFT below tracks
+                                             // RPM with less drift smear. The DETECTOR window is decoupled
+                                             // (FA_DET_WIN_N, fixed 2 s) so its analysis length is unchanged.
 // 6 dB ceiling ≈ +150..+210 A above zero (S3 sources spec full-scale anywhere 1.75–1.95 V).
 // BENCH-VERIFY the real rail point, then set switch-up ~30 A below the measured ceiling,
 // switch-down ~30 A below that (hysteresis). Defaults assume the conservative 1.75 V end.
@@ -3477,35 +3482,35 @@ uint16_t faCellsUsed = 0;        // cells with ≥1 qualified window (diagnostic
 // Highest Tone in Map (dashboard headline) — strongest single tone across the whole learned map,
 // rescanned whenever the map changes. Read by the CSV2 builder in 3_functions.ino.
 uint16_t faDomFreqHzX10 = 0;     // frequency, Hz ×10
-uint16_t faDomAmpAX100 = 0;      // amplitude, A ×100
+uint16_t faDomAmpAX100 = 0;      // pk-pk amplitude (2 × sine amplitude), A ×100
 uint16_t faDomRpm = 0;           // RPM (bin center) where it occurs
 static uint32_t faMatrixDirtyWindows = 0;
 static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core 0), executed on Core 1
 
-// ── Constant-Q Goertzel bank ──
-// 16 log-spaced bins 10–400 Hz on the decimated 1.25 kSPS stream. Each bin integrates
-// 10 cycles OF ITS OWN CENTER FREQUENCY (design-time constant, crystal-timed, zero
-// machine reference): 1.0 s at 10 Hz … 25 ms at 400 Hz; bin width ≈ center/10; spacing
-// ~28%. Streaming, 2 multiply-adds/sample/bin — no transform buffer, no blocking call,
-// NO FFT anywhere. Completed passes within a window are averaged at finalize.
-#define FA_NBINS 16
-static float faBinFreq[FA_NBINS];   // center Hz
-static float faBinCoeff[FA_NBINS];  // 2·cos(2π·f/1250)
-static uint16_t faBinLen[FA_NBINS]; // integration length, samples (10 cycles at center f)
-static float faBinS1[FA_NBINS], faBinS2[FA_NBINS];
-static uint16_t faBinIdx[FA_NBINS];
-static float faBinMagSum[FA_NBINS];  // completed-pass amplitudes summed within current window
-static uint16_t faBinMagCnt[FA_NBINS];
+// ── Flat-top windowed FFT (replaced the constant-Q Goertzel bank 2026-06-14) ──
+// One FFT per 0.5 s window over the decimated 1.25 kSPS AC stream. Replaces the 16-bin log
+// Goertzel bank, which scalloped: its bins spaced ~28% apart with main lobes only ~f/10 wide
+// left gaps a tone could fall into and read up to ~6x low (a 28 Hz, 8.7 A real tone read 4.1 A).
+// The FFT has uniform 0.5 Hz-class resolution with no gaps. Flat-top window = amplitude-accurate
+// (near-zero scalloping); single transform per window, NO run-to-run averaging. faToneBuf holds
+// this window's AC samples; faFftRe/Im are the zero-padded transform workspace. All PSRAM.
+#define FA_FFT_N 1024                       // power-of-2 transform size (zero-padded from 625)
+static float *faToneBuf = NULL;             // PSRAM — FA_WIN_DECIM_N AC samples (this window)
+static float *faFftRe = NULL, *faFftIm = NULL;  // PSRAM — FA_FFT_N transform workspace
+static float *faFtWin = NULL;               // PSRAM — FA_WIN_DECIM_N flat-top window table
+static float faFtWinSum = 1.0f;             // Σ window (single-sided amplitude normalization)
+static float *faTwidRe = NULL, *faTwidIm = NULL;  // PSRAM — FA_FFT_N/2 twiddle table (float32-safe, no recurrence drift)
+static uint16_t *faBitRev = NULL;           // PSRAM — FA_FFT_N bit-reversal permutation
 
 // ── Steady-state gate (independent of the alt-health detector, deliberately cheap) ──
 // 1 s-TC EMAs on RPM and on this channel's own amps. The 1 s constant kills the 10 Hz
 // band ~60× and the 28 Hz band ~175× — the gate must not see the resonances being
-// measured. Over the 2 s window: RPM EMA inside one bin with ≥10 RPM edge margin; amps
+// measured. Over the 0.5 s window: RPM EMA inside one bin with ≥10 RPM edge margin; amps
 // EMA drift ≤ max(2 A, 5% of mean); no protection active; no attenuation switch; no
 // railed codes; no sample loss (wall-clock audit vs the crystal-timed sample count).
 #define FA_EMA_ALPHA (1.0f / 1250.0f)  // 1 s TC at the decimated rate
 #define FA_RPM_EDGE_MARGIN 10.0f
-#define FA_WIN_WALL_MAX_MS 2080UL  // 2.0 s nominal; beyond this the window lost samples (DMA pool overflow)
+#define FA_WIN_WALL_MAX_MS 580UL   // 0.5 s nominal (625 @ 1250 SPS) + ~80 ms loop-jitter margin; beyond this the window lost samples (DMA pool overflow)
 
 // ── User-tunable knobs (Pattern B settings — NVS-backed, echoed on CSV3) ──
 // Converted from the design-time #defines above so the bench rail point and the steady-state
@@ -3585,7 +3590,10 @@ static unsigned long faDetectMsgMs = 0, faAnomCapMs = 0, faDetTrendMsgMs = 0;
 // labor per the 2026-06-12 layering decision: first-line pk-pk-vs-cell-history detection
 // belongs to the disturbance matrix (consumer 1); this detector covers cold start (no cell
 // history yet), fault classification (winning k), and triggering the flipbook capture.
-#define FA_DET_WIN_N (FA_WIN_DECIM_N * FA_DECIM)  // 40000 raw samples = exactly one 2 s window
+#define FA_DET_WIN_N 40000  // 2 s raw detector capture. DECOUPLED from the 0.5 s tone window
+                            // (FA_WIN_DECIM_N) so the detector keeps its 2 s analysis length: it now
+                            // fills across 4 consecutive CLEAN tone windows (faWindowFinalize resets the
+                            // capture on any non-clean window), preserving "one contiguous clean 2 s capture".
 #define FA_DET_MIN_PERIOD_MS 60000UL              // one analysis per minute is plenty
 static int16_t *faDetWin = NULL;  // PSRAM — window-aligned raw capture (detector input)
 static int faDetWinN = 0;
@@ -3652,41 +3660,77 @@ static bool faConfigAndStart(bool atten12) {
   return adc_continuous_start(faAdcHandle) == ESP_OK;
 }
 
-static void faGoertzelInit() {
-  for (int k = 0; k < FA_NBINS; k++) {
-    faBinFreq[k] = 10.0f * powf(40.0f, (float)k / (FA_NBINS - 1));  // 10 → 400 Hz, log-spaced
-    faBinLen[k] = (uint16_t)(10.0f * 1250.0f / faBinFreq[k] + 0.5f);
-    faBinCoeff[k] = 2.0f * cosf(2.0f * (float)M_PI * faBinFreq[k] / 1250.0f);
-    faBinS1[k] = faBinS2[k] = 0.0f;
-    faBinIdx[k] = 0;
-    faBinMagSum[k] = 0.0f;
-    faBinMagCnt[k] = 0;
+// Build the flat-top window, twiddle and bit-reversal tables (once, from faInit). Tables are
+// precomputed so the per-window transform does no cos/sf and no float32 twiddle recurrence
+// (which drifts over 512 stages) — keeps amplitude accuracy.
+static void faFftInit() {
+  if (!faFtWin || !faTwidRe || !faTwidIm || !faBitRev) return;
+  // 5-term flat-top (matches the validated Python prototype)
+  const float a0 = 0.21557895f, a1 = 0.41663158f, a2 = 0.277263158f,
+              a3 = 0.083578947f, a4 = 0.006947368f;
+  float sum = 0.0f;
+  for (int i = 0; i < FA_WIN_DECIM_N; i++) {
+    float th = 2.0f * (float)M_PI * (float)i / (float)(FA_WIN_DECIM_N - 1);
+    float w = a0 - a1 * cosf(th) + a2 * cosf(2.0f * th) - a3 * cosf(3.0f * th) + a4 * cosf(4.0f * th);
+    faFtWin[i] = w;
+    sum += w;
+  }
+  faFtWinSum = (sum > 1e-6f) ? sum : 1.0f;
+  for (int i = 0; i < FA_FFT_N / 2; i++) {
+    float ang = -2.0f * (float)M_PI * (float)i / (float)FA_FFT_N;
+    faTwidRe[i] = cosf(ang);
+    faTwidIm[i] = sinf(ang);
+  }
+  for (int i = 0; i < FA_FFT_N; i++) {
+    int j = 0, x = i;
+    for (int b = 1; b < FA_FFT_N; b <<= 1) { j = (j << 1) | (x & 1); x >>= 1; }
+    faBitRev[i] = (uint16_t)j;
+  }
+}
+
+// In-place iterative radix-2 DIT FFT on faFftRe/faFftIm (length FA_FFT_N), table-driven twiddles.
+// Validated against numpy (max err 7e-12) recovering 8.72 A on the real capture.
+static void faFft() {
+  const int n = FA_FFT_N;
+  for (int i = 0; i < n; i++) {       // bit-reversal permutation
+    int j = faBitRev[i];
+    if (i < j) {
+      float tr = faFftRe[i]; faFftRe[i] = faFftRe[j]; faFftRe[j] = tr;
+      float ti = faFftIm[i]; faFftIm[i] = faFftIm[j]; faFftIm[j] = ti;
+    }
+  }
+  for (int len = 2; len <= n; len <<= 1) {     // butterfly stages
+    int half = len >> 1;
+    int step = n / len;                        // twiddle stride into the table
+    for (int start = 0; start < n; start += len) {
+      int ti = 0;
+      for (int k = 0; k < half; k++, ti += step) {
+        float wr = faTwidRe[ti], wi = faTwidIm[ti];
+        int a = start + k, b = a + half;
+        float tr = wr * faFftRe[b] - wi * faFftIm[b];
+        float tj = wr * faFftIm[b] + wi * faFftRe[b];
+        faFftRe[b] = faFftRe[a] - tr; faFftIm[b] = faFftIm[a] - tj;
+        faFftRe[a] += tr;             faFftIm[a] += tj;
+      }
+    }
   }
 }
 
 static void faWinReset() {
   faDecimWinN = 0;
-  // Detector capture buffer: refill window-aligned, but never while a job owns it. The
-  // boxcar-16 group may straddle the boundary, so the raw and decimated windows can skew
-  // by up to 15 samples (0.75 ms) — immaterial for a self-referenced detector.
-  if (!faDetBusy) {
-    faDetWinN = 0;
-    faDetFilling = (faDetWin != NULL);
-  } else {
-    faDetFilling = false;
-  }
+  // Detector capture is DECOUPLED from this 0.5 s window (FA_DET_WIN_N = 2 s): it accumulates
+  // ACROSS windows and is NOT zeroed here. We only resume/pause filling around an active job;
+  // faWindowFinalize zeroes faDetWinN on a non-clean window (restart contiguous-clean capture),
+  // and faDetectorPoll zeroes it on completion. The boxcar-16 group may straddle a boundary
+  // (raw/decimated skew ≤15 samples, 0.75 ms) — immaterial for a self-referenced detector.
+  faDetFilling = (!faDetBusy && faDetWin != NULL);
   faWinRailed = false;
   faWinProtection = false;
   faWinRpmEmaMin = faWinAmpsEmaMin = faWinDAmpMin = 1e9f;
   faWinRpmEmaMax = faWinAmpsEmaMax = faWinDAmpMax = -1e9f;
   faWinAmpsSum = 0.0;
   faWinStartMs = millis();
-  for (int k = 0; k < FA_NBINS; k++) {
-    faBinS1[k] = faBinS2[k] = 0.0f;
-    faBinIdx[k] = 0;
-    faBinMagSum[k] = 0.0f;
-    faBinMagCnt[k] = 0;
-  }
+  // (No Goertzel state to clear — the FFT reads faToneBuf[0..faDecimWinN-1] fresh each window.)
 }
 
 // Fold one found peak into a cell: ±5% frequency match → recent-average (1/min(n+1,N)); else take a
@@ -3721,16 +3765,17 @@ static void faCellFoldPeak(int cellIdx, float fHz, float ampA) {
   c->pk[slot].nAcc = 1;
 }
 
-// Window finalize — runs every FA_WIN_DECIM_N decimated samples (2.0 s, crystal-timed).
-// Microseconds of work. Applies the steady-state gate, merges Goertzel peaks into the
+// Window finalize — runs every FA_WIN_DECIM_N decimated samples (0.5 s, crystal-timed).
+// Applies the steady-state gate, runs the flat-top FFT and merges its peaks into the
 // disturbance matrix, and (further down the chain) feeds the flipbook + detector.
 static void faWindowFinalize() {
   bool clean = !(faWinRailed || faWinAttenSwitched);
-  // Sample-loss audit: the window is exactly 2.0 s of crystal-timed samples; if more wall
+  // Sample-loss audit: the window is exactly 0.5 s of crystal-timed samples; if more wall
   // time than that passed, the DMA pool overflowed during a loop stall and samples are gone.
   if (millis() - faWinStartMs > FA_WIN_WALL_MAX_MS) clean = false;
 
   bool gated = false;
+  bool detWindowOk = false;  // this window suitable to extend the detector's contiguous-clean 2 s capture
   float winMeanAmps = (faDecimWinN > 0) ? (float)(faWinAmpsSum / faDecimWinN) : 0.0f;
   if (clean && !faWinProtection && faEmaSeeded) {
     int rpmBinLo = (int)(faWinRpmEmaMin / FA_RPM_BIN_W);
@@ -3746,45 +3791,59 @@ static void faWindowFinalize() {
     rollUpdate(ROLL_RPMEDGE, fminf(faWinRpmEmaMin - rpmBinLo * FA_RPM_BIN_W,
                                    (rpmBinLo + 1) * FA_RPM_BIN_W - faWinRpmEmaMax));
     rollUpdate(ROLL_AMPSDRIFT, faWinAmpsEmaMax - faWinAmpsEmaMin);
+    // Same EMA spread minus this window's own effective limit (floor vs pct-of-mean, whichever binds).
+    // <=0 means the drift gate passed; the 10s peak of this is the dashboard's exact pass/fail signal —
+    // no client-side recompute or raw-INA proxy for the mean current.
+    rollUpdate(ROLL_AMPSDRIFTEXC, (faWinAmpsEmaMax - faWinAmpsEmaMin) - ampsDriftMax);
     gated = rpmSteady && ampsSteady && rpmBinLo >= 0 && rpmBinLo < FA_RPM_BINS;
     // Detector arming is RPM-FREE (see faMaybeArmDetector): a clean, current-steady window with
     // real current flowing is enough — no RPM-steadiness or valid-bin requirement. This keeps
     // fault detection working when the tach is dead or erratic, the failure modes that motivated
     // a self-referenced detector. The matrix/flipbook below still require the full RPM gate.
-    if (ampsSteady && winMeanAmps >= FA_AMP_BIN_LO) faMaybeArmDetector(winMeanAmps);
+    detWindowOk = (ampsSteady && winMeanAmps >= FA_AMP_BIN_LO);
+    if (detWindowOk) faMaybeArmDetector(winMeanAmps);
     if (gated && faMatrix) {
       int ampBin = (int)((winMeanAmps - FA_AMP_BIN_LO) / FA_AMP_BIN_W);
       if (winMeanAmps >= FA_AMP_BIN_LO && ampBin >= 0 && ampBin < FA_AMP_BINS) {
-        // Bin averages (completed Goertzel passes only), then local maxima with parabolic
-        // interpolation across log-spaced neighbors — refines a band center to a few %.
-        float binAmp[FA_NBINS];
-        for (int k = 0; k < FA_NBINS; k++)
-          binAmp[k] = (faBinMagCnt[k] > 0) ? faBinMagSum[k] / faBinMagCnt[k] : 0.0f;
-        // Gate-tuning readout: largest spectral bin amplitude this window (what faPeakMinA floors out).
-        float winTonePk = 0.0f;
-        for (int k = 0; k < FA_NBINS; k++) if (binAmp[k] > winTonePk) winTonePk = binAmp[k];
-        rollUpdate(ROLL_TONEPK, winTonePk);
-        float pf[FA_NBINS], pa[FA_NBINS];
+        // Flat-top windowed FFT of this window's AC samples (zero-padded to FA_FFT_N), single-
+        // sided amplitude spectrum, then local maxima with 3-bin parabolic interpolation. Uniform
+        // resolution, no scalloping gaps — the bug the log Goertzel bank had (a 28 Hz tone read
+        // ~2x low). Magnitudes are taken on the fly to avoid a full 512-bin spectrum buffer.
+        for (int i = 0; i < FA_WIN_DECIM_N; i++) faFftRe[i] = faToneBuf[i] * faFtWin[i];
+        for (int i = FA_WIN_DECIM_N; i < FA_FFT_N; i++) faFftRe[i] = 0.0f;
+        for (int i = 0; i < FA_FFT_N; i++) faFftIm[i] = 0.0f;
+        faFft();
+        const int half = FA_FFT_N / 2;
+        const float binHz = 1250.0f / (float)FA_FFT_N;
+        const float ampScale = 2.0f / faFtWinSum;  // single-sided amplitude, window-corrected
+        float pf[FA_CELL_PEAKS * 4], pa[FA_CELL_PEAKS * 4];
+        const int paCap = (int)(sizeof(pf) / sizeof(pf[0]));
         int np = 0;
-        for (int k = 0; k < FA_NBINS; k++) {
-          float aL = (k > 0) ? binAmp[k - 1] : -1.0f;
-          float aR = (k < FA_NBINS - 1) ? binAmp[k + 1] : -1.0f;
-          if (binAmp[k] < faPeakMinA || binAmp[k] <= aL || binAmp[k] < aR) continue;
-          float fHz = faBinFreq[k], aPk = binAmp[k];
-          if (k > 0 && k < FA_NBINS - 1) {
-            float denom = aL - 2.0f * binAmp[k] + aR;
+        float winTonePk = 0.0f;
+        float aPrev = 0.0f;  // DC excluded
+        float aCur = ampScale * sqrtf(faFftRe[1] * faFftRe[1] + faFftIm[1] * faFftIm[1]);
+        for (int i = 1; i < half - 1; i++) {
+          float aNext = ampScale * sqrtf(faFftRe[i + 1] * faFftRe[i + 1] + faFftIm[i + 1] * faFftIm[i + 1]);
+          if (aCur > winTonePk) winTonePk = aCur;
+          if (aCur >= faPeakMinA && aCur > aPrev && aCur >= aNext && np < paCap) {
+            float fHz = (float)i * binHz, aPk = aCur;
+            float denom = aPrev - 2.0f * aCur + aNext;
             if (fabsf(denom) > 1e-9f) {
-              float delta = 0.5f * (aL - aR) / denom;
+              float delta = 0.5f * (aPrev - aNext) / denom;
               if (delta > -0.5f && delta < 0.5f) {
-                fHz = faBinFreq[k] * powf(faBinFreq[k + 1] / faBinFreq[k], delta);
-                aPk = binAmp[k] - 0.25f * (aL - aR) * delta;
+                fHz = ((float)i + delta) * binHz;
+                aPk = aCur - 0.25f * (aPrev - aNext) * delta;
               }
             }
+            pf[np] = fHz;
+            pa[np] = aPk;
+            np++;
           }
-          pf[np] = fHz;
-          pa[np] = aPk;
-          np++;
+          aPrev = aCur;
+          aCur = aNext;
         }
+        // Gate-tuning readout: largest spectral amplitude this window (what faPeakMinA floors out).
+        rollUpdate(ROLL_TONEPK, winTonePk);
         // Top-6 by amplitude (selection sort over ≤16 entries)
         for (int i = 0; i < np && i < FA_CELL_PEAKS; i++) {
           int best = i;
@@ -3821,6 +3880,10 @@ static void faWindowFinalize() {
       }
     }
   }
+  // Detector capture is contiguous-clean: a window unsuitable for the detector (not clean, under
+  // protection, or current not steady/flowing) discards the partial 2 s capture so the analyzed
+  // buffer is always one uninterrupted clean stretch assembled from consecutive 0.5 s windows.
+  if (!detWindowOk && !faDetBusy) faDetWinN = 0;
   if (clean) faWindowsAccepted++;
   else faWindowsDiscarded++;
 
@@ -3870,20 +3933,9 @@ static void faProcessDecimated(int16_t dmv) {
   if ((float)dmv > faWinDAmpMax) faWinDAmpMax = (float)dmv;
   faWinAmpsSum += ampsNow;
   if (g_loadDumpActive || alarmLatch) faWinProtection = true;  // "no protection active" gate leg
-  // Goertzel bank — AC component only (EMA as DC reference), amps units
-  float x = ampsNow - faAmpsEma;
-  for (int k = 0; k < FA_NBINS; k++) {
-    float s0 = x + faBinCoeff[k] * faBinS1[k] - faBinS2[k];
-    faBinS2[k] = faBinS1[k];
-    faBinS1[k] = s0;
-    if (++faBinIdx[k] >= faBinLen[k]) {  // 10 cycles of this bin's center frequency done
-      float p = faBinS1[k] * faBinS1[k] + faBinS2[k] * faBinS2[k] - faBinCoeff[k] * faBinS1[k] * faBinS2[k];
-      faBinMagSum[k] += 2.0f * sqrtf(fmaxf(p, 0.0f)) / faBinLen[k];  // sine amplitude, amps
-      faBinMagCnt[k]++;
-      faBinS1[k] = faBinS2[k] = 0.0f;
-      faBinIdx[k] = 0;
-    }
-  }
+  // Buffer the AC sample (DC reference = the 1 s amps EMA) for this window's flat-top FFT,
+  // computed in one shot at finalize. No per-sample transform work here anymore.
+  if (faToneBuf && faDecimWinN < FA_WIN_DECIM_N) faToneBuf[faDecimWinN] = ampsNow - faAmpsEma;
   faDecimWinN++;
   if (faDecimWinN >= FA_WIN_DECIM_N) TIMED_CALL(ft_faWindowFinalize, faWindowFinalize());
 }
@@ -4220,6 +4272,8 @@ void faDetectorPoll() {
 // Highest Tone in Map — scan every learned cell's stored peaks for the single loudest tone,
 // recording its amplitude, frequency, and the RPM bin center where it lives. Cheap
 // (1200 cells × 6 peaks); run only when the map changes (from faQualifiedWindowHook).
+// faDomAmpAX100 is reported as PEAK-TO-PEAK (2 × the stored sine amplitude) so the headline
+// matches the max−min a user eyeballs on the live waveform.
 static void faScanDominant() {
   if (!faMatrix) return;
   uint16_t bestAmp = 0, bestFreq = 0;
@@ -4235,7 +4289,7 @@ static void faScanDominant() {
       }
     }
   }
-  faDomAmpAX100 = bestAmp;
+  faDomAmpAX100 = (uint16_t)fminf((float)bestAmp * 2.0f, 65535.0f);  // amplitude → pk-pk
   faDomFreqHzX10 = bestFreq;
   // cellIdx = rpmBinLo * FA_AMP_BINS + ampBin → rpmBinLo = cellIdx / FA_AMP_BINS
   faDomRpm = (bestCell >= 0) ? (uint16_t)((bestCell / FA_AMP_BINS) * FA_RPM_BIN_W + FA_RPM_BIN_W / 2) : 0;
@@ -4392,7 +4446,16 @@ void faInit() {
   faRawRing = (int16_t *)ps_malloc(FA_RAW_RING_N * sizeof(int16_t));
   faMatrix = (FaCell *)ps_malloc(sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
   faFlip = (FaFlipPage *)ps_malloc(sizeof(FaFlipPage) * FA_FLIP_SLOTS);
-  if (!faRawRing || !faMatrix || !faFlip) {
+  // Flat-top FFT workspace (PSRAM, ~19 KB): tone buffer + transform + window/twiddle/bitrev tables.
+  faToneBuf = (float *)ps_malloc(FA_WIN_DECIM_N * sizeof(float));
+  faFftRe = (float *)ps_malloc(FA_FFT_N * sizeof(float));
+  faFftIm = (float *)ps_malloc(FA_FFT_N * sizeof(float));
+  faFtWin = (float *)ps_malloc(FA_WIN_DECIM_N * sizeof(float));
+  faTwidRe = (float *)ps_malloc((FA_FFT_N / 2) * sizeof(float));
+  faTwidIm = (float *)ps_malloc((FA_FFT_N / 2) * sizeof(float));
+  faBitRev = (uint16_t *)ps_malloc(FA_FFT_N * sizeof(uint16_t));
+  if (!faRawRing || !faMatrix || !faFlip || !faToneBuf || !faFftRe || !faFftIm
+      || !faFtWin || !faTwidRe || !faTwidIm || !faBitRev) {
     Serial.println("faInit: ps_malloc failed -- fast alt-current channel off");
     return;
   }
@@ -4432,7 +4495,7 @@ void faInit() {
   if (readPsramBlob(FA_FLIP_PATH, FA_FLIP_MAGIC, FA_FLIP_VER,
                     faFlip, sizeof(FaFlipPage), FA_FLIP_SLOTS, &anomNext32, false) > 0)
     faAnomNext = (uint8_t)(anomNext32 % FA_FLIP_ANOM);
-  faGoertzelInit();
+  faFftInit();
   faWinReset();
   // Global ON/OFF (Pattern B, item 4). InitSystemSettings() runs AFTER faInit() in setup(),
   // so read the persisted value straight from NVS here. Buffers above stay allocated either

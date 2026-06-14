@@ -394,35 +394,10 @@
                   style="cursor:pointer;font-weight:bold;font-size:16px;padding:10px 0;border-bottom:2px solid var(--accent);margin-bottom:10px;">
                   Physical Regulator Installation
                 </summary>
-                <!-- Mounting Alignment Check Subsection -->
-                <div class="pri-subsection">
-                  <h4 class="pri-subsection-title">Mounting Alignment Check</h4>
-
-                  <table class="pri-alignment-table">
-                    <thead>
-                      <tr>
-                        <th>X</th>
-                        <th>Y</th>
-                        <th>Z</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr id="imu_gravity_vector_display">
-                        <td>--</td>
-                        <td>--</td>
-                        <td>--</td>
-                      </tr>
-                    </tbody>
-                  </table>
-
-                  <div class="pri-status-message" id="imu_alignment_status_display">
-                    Waiting for sensor data...
-                  </div>
-
-                  <div class="pri-info-note">
-                    This works best when the boat is calm and level.
-                  </div>
-                </div>
+                <!-- Mounting Alignment Check removed 2026-06-14: superseded by the Level Zero
+                     button below, which measures and corrects residual mount tilt directly so
+                     a perfectly square install is no longer required. The old gravity-vector
+                     "tilt" math could only detect acceleration, never actual mounting angle. -->
                 <!-- Alignment Selection Subsection -->
                 <div class="pri-subsection">
                   <h4 class="pri-subsection-title">Alignment Selection</h4>
@@ -1987,7 +1962,7 @@
                   <p data-intro="cl">When measured current exceeds the safe system limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum across the whole system — including alternator continuous rating, battery acceptance, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. The trip threshold is automatically 10 A above Command Limit.</p>
                   <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> turns the whole layer off.</p>
                   <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> turns the whole layer off.</p>
-                  <p data-intro="g3">Engages when measured alternator current exceeds the commanded setpoint by <strong>K_excess</strong> amps for the <strong>N — Persistence</strong> count of consecutive ticks (~5 ms each). <strong>Signal Filter</strong> selects how the current signal is filtered before comparison — Raw, MA(N), or EMA(TC). <strong>MA Window</strong> sets the moving-average window when MA(N) is selected; the EMA time constant is the <strong>Excess current detection filter</strong> shown read-only here (lives in Tuning → Plant Delay). Arming requires the CV loop to be active AND measured voltage to be within the <strong>Arming Margin</strong> below target.</p>
+                  <p data-intro="g3">Two regimes, split at the <strong>Arming Margin</strong> below target. <strong>Near the target</strong> (within Arming Margin): engages when measured current exceeds the commanded <strong>setpoint</strong> by <strong>K_excess</strong> amps for the <strong>N — Persistence</strong> count of consecutive ticks (~5 ms each). <strong>Below the Arming Margin (Bulk / current-control phase):</strong> the main detector is off and the bulk sub-mode takes over — it engages when measured current exceeds the commanded <strong>ceiling</strong> (RPM cap minus thermal/warmup) by <strong>K_excess (Bulk)</strong> amps for <strong>N (Bulk)</strong> ticks. Comparing to the ceiling rather than the slewed setpoint means normal RPM ramps don't false-fire. <strong>Signal Filter</strong> selects how the current signal is filtered before comparison (shared by both) — Raw, MA(N), or EMA(TC). <strong>MA Window</strong> sets the moving-average window when MA(N) is selected; the EMA time constant is the <strong>Excess current detection filter</strong> shown read-only here (lives in Tuning → Plant Delay).</p>
                   <p data-intro="g4">Three tiered thresholds on the rate-of-change of battery current. <strong>Tier 1</strong> fires when one sample exceeds its threshold. <strong>Tier 2</strong> fires when two consecutive samples exceed its threshold. <strong>Tier 3</strong> fires when three consecutive samples exceed its threshold.</p>
                 </div>
 
@@ -2208,6 +2183,38 @@
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
                         <input name="IExcessN" type="number" step="1" min="1" max="20" />
+                        <span class="protections-unit">ticks</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      K_excess (Bulk) — Threshold (A above ceiling) (<span id="IExcessKBulk_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Bulk sub-mode of Group 3, active in the current-control phase — battery voltage far below the charge target, where the main K_excess above is gated off. How many amps above the commanded current <strong>ceiling</strong> (RPM cap minus thermal/warmup limits) the measured current must exceed before it fires. Looser than the main K_excess on purpose: far from the voltage limit we tolerate more command-vs-actual error and only catch absurd RPM-blip overshoots before they trip a hard protection. The handoff between this and the main K_excess is the Arming Margin (set above).</span></span>
+                      <span id="IExcessKBulk_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak over ceiling: —</span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="IExcessKBulk" type="number" step="0.1" min="0.5" max="50" />
+                        <span class="protections-unit">A</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      N (Bulk) — Persistence (consecutive ticks) (<span id="IExcessNBulk_echo">?</span>)
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="IExcessNBulk" type="number" step="1" min="1" max="20" />
                         <span class="protections-unit">ticks</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
@@ -3859,7 +3866,7 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label">WiFi Standby (Keep Reachable) (<span id="wifiNapEnabled_echo">?</span>):
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When the engine is off, the regulator normally shuts WiFi off completely to save power, and you must press the wake button (or start the engine) to check it. Turn this On and it instead keeps WiFi connected to your boat's router in a low-power napping state, so you can open the dashboard from your phone any time with no button press. It uses a little more power than full-off, and after 12 hours with nobody connected it drops WiFi entirely (button or engine to wake). Only works when the regulator is joined to a router (Client mode), not when it is its own hotspot.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When the engine is off, the regulator normally shuts WiFi off completely to save power, and you must press the wake button (or switch the ignition on) to reach it. Turn this On and it instead keeps WiFi connected to your boat's router in a low-power napping state, so you can open the dashboard any time with no button press. It uses only about a milliamp more than full-off, so it can stay reachable indefinitely while the regulator is on your router.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4023,20 +4030,21 @@
                     <span>Ignition Override (<span id="IgnitionOverride_echo">0</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">
                       ℹ️
-                      <span class="tooltip-box">Don't depend on this setting- troubleshooting only! This is a great way
-                        to drain battery by leaving Wifi functions on, and accidentally energize field.</span>
+                      <span class="tooltip-box">Auto follows the physical ignition wire (the normal setting). Force On ignores the wire and
+                        treats the ignition as always on — for bench testing or when no ignition wire is connected. It keeps WiFi up and can
+                        energize the field with the engine off, which drains the battery, so leave this on Auto in normal use.</span>
                     </span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
+                      <span class="toggle-label">Auto</span>
                       <label class="switch">
                         <input id="IgnitionOverride_checkbox" type="checkbox"
                           onchange="if(handleUserToggle('IgnitionOverride_checkbox', 'IgnitionOverride', 'IgnitionOverride')) { this.form.submit(); submitMessage(); }" />
                         <span class="slider round"></span>
                       </label>
-                      <span class="toggle-label">On</span>
+                      <span class="toggle-label">Force On</span>
                       <input id="IgnitionOverride" name="IgnitionOverride" type="number" value=""
                         style="display:none;" />
                     </form>
@@ -5840,39 +5848,6 @@
               <details open id="thermallog-details" class="tuning-section">
                 <summary class="tuning-section-title">Live Plot View</summary>
                 <div>
-
-                <div style="display:flex; justify-content:space-between; align-items:center;
-              margin: 8px 0 12px 0;">
-                  <span style="font-size:12px; color:var(--text-muted);">Live — streams from the regulator, no
-                    refresh needed.</span>
-                </div>
-
-                <div
-                  style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin:8px 0 12px 0;font-size:13px;">
-
-                  <label style="display:flex;align-items:center;gap:6px;color:var(--text-dark);">
-                    <input type="checkbox" id="thermal-autoscale" checked>
-                    Autoscale Y axes
-                  </label>
-
-                  <div id="thermal-manual-ranges" style="display:none;flex-wrap:wrap;gap:12px;">
-
-                    <span style="color:var(--text-muted);">Plot 1 Temp:</span>
-                    <input id="p1-temp-min" type="number" value="100" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
-                    <input id="p1-temp-max" type="number" value="250" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
-
-                    <span style="color:var(--text-muted);">Plot 1 Amps:</span>
-                    <input id="p1-amps-min" type="number" value="-5" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
-                    <input id="p1-amps-max" type="number" value="50" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
-
-                    <span style="color:var(--text-muted);">PID Terms:</span>
-                    <input id="p3-min" type="number" value="0" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="min">
-                    <input id="p3-max" type="number" value="100" style="width:60px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);" placeholder="max">
-
-                    <button type="button" class="btn-secondary" onclick="applyThermalRanges()">Apply</button>
-                  </div>
-
-                </div>
 
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px 0;">
                   <span style="font-size:13px;color:var(--text-muted);">Window:</span>
@@ -7779,6 +7754,151 @@
             </div>
           </div>
         </div>
+        <!-- Longest Single Trip -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Longest Single Trip</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">The longest single continuous voyage you've ever logged, in
+                nautical miles (a trip ends after the boat sits stationary long enough). Feeds the
+                leaderboards. Resetting does not affect the trip currently in progress.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="LongestTripAT_ID">0.0</span><span>nm</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetLongestTrip" id="ResetLongestTrip" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetLongestTrip')"
+                    id="ResetLongestTrip_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Max 24-Hour Distance -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Max 24-Hour Distance</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">The most distance you've ever covered in any rolling 24-hour
+                window, in nautical miles. Feeds the leaderboards. Resetting clears the watermark and
+                the rolling-window history.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="Max24hrDistAT_ID">0.0</span><span>nm</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetMax24hrDist" id="ResetMax24hrDist" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetMax24hrDist')"
+                    id="ResetMax24hrDist_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Deepest Anchorage -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Deepest Anchorage</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">The deepest water you've ever sat anchored in, in feet (requires
+                a depth sensor; detected when the boat holds position with little swing). Feeds the
+                leaderboards. Resetting clears the watermark and the anchorage history.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="DeepestAnchorAT_ID">0.0</span><span>ft</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetDeepestAnchor" id="ResetDeepestAnchor" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetDeepestAnchor')"
+                    id="ResetDeepestAnchor_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Best Upwind VMG -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Best Upwind VMG</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">The best velocity made good toward the wind you've ever achieved
+                under sail (engine off), in knots — how fast you were truly progressing upwind, not just
+                boat speed. Feeds the leaderboards.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="BestUpwindVmgAT_ID">0.00</span><span>kts</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetBestUpwindVMG" id="ResetBestUpwindVMG" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetBestUpwindVMG')"
+                    id="ResetBestUpwindVMG_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Longest Gale Duration -->
+        <hr />
+        <div class="form-row">
+          <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+            <span>Longest Gale Duration</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">
+              ℹ️
+              <span class="tooltip-box">The longest continuous stretch of gale-force wind you've ridden
+                out, in hours. Feeds the leaderboards. Resetting clears the record and any gale currently
+                being timed.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <div class="dual-counter">
+              <div class="dual-counter-row" style="position:relative;">
+                <span class="counter-label">Lifetime</span>
+                <span class="counter-value" id="LongestGaleAT_ID">0.00</span><span>hr</span>
+                <form action="/get" method="GET" target="hidden-form"
+                  style="position:absolute;left:100%;margin-left:8px;">
+                  <input type="hidden" name="ResetLongestGale" id="ResetLongestGale" value="0" />
+                  <input type="hidden" name="password" class="password_field" />
+                  <button type="button" class="btn-secondary" onclick="resetParameter('ResetLongestGale')"
+                    id="ResetLongestGale_button">Reset</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- engine lifetime stats continue in the same Lifetime Statistics panel (RPM + fuel flow now live in Vital Signs) -->
 
         <!-- Engine Fuel Consumed -->
@@ -8657,11 +8777,11 @@
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Alt-Current Window Finalize
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">The once-per-2-second wrap-up of the fast alternator-current channel: it
-                      closes out the frequency-tone filter bank, folds the result into the Resonance &amp; Ripple Map, and arms
-                      the fault detector on the just-finished window. Runs inside the drain pass, so its time is already
-                      part of the Fast Alt-Current Drain row above — this row breaks it out so a spike there can be
-                      attributed. Normally well under a millisecond.</span>
+                    <span class="tooltip-box">The once-per-0.5-second wrap-up of the fast alternator-current channel: it
+                      runs the frequency-tone FFT, folds the peaks into the Resonance &amp; Ripple Map, and extends the
+                      fault detector's 2-second capture (arming it once that capture is complete). Runs inside the drain
+                      pass, so its time is already part of the Fast Alt-Current Drain row above — this row breaks it out so
+                      a spike there can be attributed. Normally well under a millisecond.</span>
                   </span>
                 </div>
                 <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
@@ -8956,6 +9076,13 @@
               <span class="interval-colhead">Always On <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time between reads of the alternator-current sensor channel (CH1 on the ADS1115 ADC). Tracked continuously, field on or off. Important: this ADC is shared — it rotates through four measurements, and alternator current gets 3 of every 6 conversion slots — so even on a perfect run, samples naturally arrive about every 10 ms. That slower natural spacing means the worst value here will normally read HIGHER than the Field On column's worst. That is not a stall and the columns are not comparable to each other: they count different event streams with different natural speeds. Judge each column against its own Avg rows (the Over 2× rows do exactly that). A real control freeze stops the whole loop, so it stretches BOTH columns at once — that pairing is the stall signature.</span></span></span>
               <span class="interval-colhead">Field On <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time between successive firings of the fast inner current-control loop — the loop that sets field duty from the alternator current (ADS1115 CH1), running in every charge stage (bulk and CV alike). Unlike CH1 Sampling, this is gated to ticks where the field is actually being driven, and re-baselines whenever the field turns off, so it never counts idle gaps. This is the direct "is my control loop running on time while the field is on" watchdog: a worst value well above this column's own Avg rows means a tick was starved during active control — the window where a rising-voltage event could be missed. Do not compare this column's worst against Always On's: Always On tracks the shared ADC's slower natural sample spacing (~10 ms) and normally reads higher even when nothing is wrong. A real freeze stretches both columns together.</span></span></span>
             </div>
+            <div class="interval-row interval-row-headline">
+              <span class="interval-label">Worst All-Time (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Longest interval since boot or last Reset Peak Values, ms — the headline number.</span></span>
+              </span>
+              <span class="interval-val"><span id="ch1_worst_at_ID">0</span></span>
+              <span class="interval-val"><span id="pf_worst_at_ID">0</span></span>
+            </div>
             <div class="interval-row">
               <span class="interval-label">Last Interval (ms)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Most recent gap between firings, ms. Wall-clock across several loop iterations, so it can exceed the worst single Loop Time without any one loop being blocked.</span></span>
@@ -9013,13 +9140,6 @@
               <span class="interval-val"><span id="pf_avg_at_ID">0</span></span>
             </div>
             <div class="interval-row">
-              <span class="interval-label">Worst All-Time (ms)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Longest interval since boot or last Reset Peak Values, ms — the headline number.</span></span>
-              </span>
-              <span class="interval-val"><span id="ch1_worst_at_ID">0</span></span>
-              <span class="interval-val"><span id="pf_worst_at_ID">0</span></span>
-            </div>
-            <div class="interval-row">
               <span class="interval-label">Over 2× All-Time (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Count of intervals exceeding 2× the running mean since boot or last Reset Peak Values.</span></span>
               </span>
@@ -9034,6 +9154,13 @@
               <span class="interval-label"></span>
               <span class="interval-colhead">Field On <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time between reads of the battery voltage/current sensor (INA228). These stats only count while the field is on. With the field on the sensor runs in fast mode (about a 5 ms cycle) and these values update live; with the field off it drops to a slow ~1 second cycle and the values freeze at their last field-on reading — so a dash or 0 here means the field has not been on yet this session. A large gap here means the loop was starved while actively controlling — a real concern. Each interval is wall-clock time across several loop iterations, so it normally reads higher than the worst single Loop Time without anything being blocked; cross-check the worst Loop Time in the Function Timing table to tell a single freeze from accumulated jitter.</span></span></span>
               <span class="interval-colhead">CV Mode On <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time between consecutive fires of the constant-voltage (CV) loop's slow integral-correction term. This only updates while the field is on AND the regulator is actively holding a voltage target (bulk, absorption, float, Target Voltage mode, or Maintain Mode); it stays frozen otherwise, and reads a dash until CV has fired at least twice. The target spacing is set by Voltage Loop Interval (default 100 ms) — a value well above that means a loop tick was starved during active voltage control, which is the case that risks overvoltage. Each value is wall-clock time across several loop iterations, so it can exceed the worst single Loop Time without any one loop being blocked (check the worst Loop Time to tell a single freeze from accumulated jitter). The interval re-baselines whenever CV turns off, so an off-then-on gap is never counted.</span></span></span>
+            </div>
+            <div class="interval-row interval-row-headline">
+              <span class="interval-label">Worst All-Time (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Longest interval since boot or last Reset Peak Values, ms — the headline number.</span></span>
+              </span>
+              <span class="interval-val"><span id="ina_worst_at_ID">—</span></span>
+              <span class="interval-val"><span id="vl_worst_at_ID">—</span></span>
             </div>
             <div class="interval-row">
               <span class="interval-label">Last Interval (ms)
@@ -9090,13 +9217,6 @@
               </span>
               <span class="interval-val"><span id="ina_avg_at_ID">—</span></span>
               <span class="interval-val"><span id="vl_avg_at_ID">—</span></span>
-            </div>
-            <div class="interval-row">
-              <span class="interval-label">Worst All-Time (ms)
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Longest interval since boot or last Reset Peak Values, ms — the headline number.</span></span>
-              </span>
-              <span class="interval-val"><span id="ina_worst_at_ID">—</span></span>
-              <span class="interval-val"><span id="vl_worst_at_ID">—</span></span>
             </div>
             <div class="interval-row">
               <span class="interval-label">Over 2× All-Time (count)
@@ -9386,7 +9506,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">iExcess Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: current excess supervisor trips. Fires when measured current exceeds setpoint + IExcessK for IExcessN consecutive ticks while in CV mode. Active in all charge stages, not just CV.</span>
+              <span class="tooltip-box">Rising-edge count: Group 3 current-excess supervisor trips (both regimes combined). Near the voltage target it fires when measured current exceeds setpoint + K_excess for N ticks; in the bulk / current-control phase the bulk sub-mode fires when measured current exceeds the commanded ceiling + K_excess (Bulk) for N (Bulk) ticks.</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="iExcessCountID">?</span></span>
@@ -9502,7 +9622,6 @@
             <div id="alt-hifield-alert" style="display:none;font-size:11px;font-weight:700;color:#d9534f;">Low output despite high field drive</div>
           </div>
           <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
-            <div><span id="alt-steady-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ccc;margin-right:6px;vertical-align:middle;"></span>Steady-state capture</div>
             <div id="alt-coverage" style="font-size:10px;">no front points yet</div>
             <div id="alt-session-stats" style="font-size:10px;"></div>
           </div>
@@ -9510,7 +9629,7 @@
         <hr />
         <p class="card-group-title">
           <span>This Session</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Every second's health reading since this page was opened. Green points are measured comparisons (a recorded best exists at that operating point); blue points are estimated (interpolated between nearby records). Shaded spans are periods with no fair comparison — learning a new operating region, no reference recorded yet, or not running — where no number is shown on purpose. Click the axis numbers to set the plot range.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Every second's health reading since this page was opened. Green dots are measured comparisons (a recorded best exists at that operating point); amber dashes are estimated (interpolated between nearby records). Shaded spans are periods with no fair comparison — learning a new operating region, no reference recorded yet, or not running — where no number is shown on purpose. Click the axis numbers to set the plot range.</span></span>
         </p>
         <div id="alt-session-plot" style="width:100%;max-width:560px;margin:0 auto;"></div>
         <hr />
@@ -9670,13 +9789,19 @@
           <div class="card"><p>Last Fault Class <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to open the Live Oscilloscope panel and look at the waveform yourself. 0 or blank means no fault detected.</span></span></p><p class="reading" style="font-size:20px;"><span id="faDetectK_ID">?</span></p></div>
           <div class="card"><p>Lifetime Anomalies</p><p class="reading" style="font-size:20px;"><span id="faAnomalyCount_ID">?</span></p></div>
           <div class="card"><p>Session Worst Ripple Pk-Pk (A)</p><p class="reading" style="font-size:20px;"><span id="faSesPkpkWorst_ID">?</span></p></div>
-          <div class="card"><p>Highest Tone in Map <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single strongest ripple tone in the learned map, and the engine speed/load where it occurs. A strong tone that stays at a fixed frequency across different RPM points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is normal rectifier ripple.</span></span></p><p class="reading" style="font-size:16px;"><span id="faDomAmp_ID">?</span> A @ <span id="faDomFreq_ID">?</span> Hz · <span id="faDomRpm_ID">?</span> RPM</p></div>
+          <div class="card"><p>Highest Tone in Map <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single strongest ripple tone in the learned map, and the engine speed/load where it occurs. A strong tone that stays at a fixed frequency across different RPM points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is normal rectifier ripple.</span></span></p><p class="reading" style="font-size:16px;"><span id="faDomAmp_ID">?</span> A pk-pk @ <span id="faDomFreq_ID">?</span> Hz · <span id="faDomRpm_ID">?</span> RPM</p></div>
         </div>
         <hr />
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:13px; font-weight:600;">Resonance &amp; Ripple Map</span>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
           <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadCsv('/famatrix.csv','Resonance and Ripple Map')">Download CSV</button>
+          <form action="/get" method="GET" target="hidden-form" style="display:inline;margin:0;">
+            <input type="hidden" name="ResetRipplePeaks" id="ResetRipplePeaks" value="0" />
+            <input type="hidden" name="password" class="password_field" />
+            <button type="button" class="btn-secondary btn-sm" onclick="resetParameter('ResetRipplePeaks')"
+              id="ResetRipplePeaks_button">Reset Worsts</button>
+          </form>
           <button type="button" class="btn-danger-ghost btn-sm"
             onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
         </div>
@@ -9692,8 +9817,9 @@
               of those cells, and where it occurs.</p>
             <p><b>Last Fault Class / Lifetime Anomalies / Session Worst Ripple Pk-Pk</b> summarize the
               rectifier/stator monitor: the most recent fault category, the running count of fault
-              detections over the unit's life, and the largest broadband ripple seen since the last
-              Reset Peak Values.</p>
+              detections over the unit's life, and the largest broadband ripple seen since you last
+              pressed <b>Reset Worsts</b> on this panel. The worst value persists across reboots, so
+              it only clears when you press that button.</p>
           </div>
         </details>
       </div>
@@ -9723,7 +9849,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State RPM Margin (RPM) (<span id="faRpmEdgeMargin_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed engine speed — a 1-second-averaged RPM, not the raw tach. A 2-second window is discarded unless that smoothed RPM stays at least this many RPM inside one speed band for the whole window. The 1-second averaging is deliberate: it removes the ripple and resonance being measured, so the gate judges only whether the engine is holding speed.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed engine speed — a 1-second-averaged RPM, not the raw tach. A 0.5-second window is discarded unless that smoothed RPM stays at least this many RPM inside one speed band for the whole window. The 1-second averaging is deliberate: it removes the ripple and resonance being measured, so the gate judges only whether the engine is holding speed.</span></span>
             <span id="faRpmEdgeMargin_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s worst margin: —</span>
           </div>
           <div class="form-input">
@@ -9809,7 +9935,7 @@
         </div>
       </div>
 
-      <div class="settings-card">
+      <div class="settings-card fa-paired-top">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Live Oscilloscope</span>
           <button type="button" class="btn-secondary" onclick="fetchFastScope()">↺ Refresh Capture</button>
@@ -9828,10 +9954,12 @@
           <button type="button" class="btn-secondary btn-sm" onclick="downloadFaScopeCsv()">Download CSV</button>
           <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet — press Refresh Capture. Refreshes every 5 seconds; each capture is a 20,000-per-second snapshot.</span>
         </div>
+        <!-- Shared time window: these buttons re-window BOTH the scope and the Reference Flipbook
+             below, so the two X axes always span the same milliseconds. Capped at 200 ms because
+             a flipbook page is only 200 ms long. -->
         <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:6px;">
-          <span style="font-size:13px; font-weight:600;">View:</span>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="500" onclick="fastScopeZoom(500, this)">500 ms</button>
-          <button type="button" class="btn-secondary btn-sm fastscope-zoom active" data-ms="250" onclick="fastScopeZoom(250, this)">250 ms</button>
+          <span style="font-size:13px; font-weight:600;">Time window (both plots):</span>
+          <button type="button" class="btn-secondary btn-sm fastscope-zoom active" data-ms="200" onclick="fastScopeZoom(200, this)">200 ms</button>
           <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="100" onclick="fastScopeZoom(100, this)">100 ms</button>
           <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="50" onclick="fastScopeZoom(50, this)">50 ms</button>
           <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="20" onclick="fastScopeZoom(20, this)">20 ms</button>
@@ -9859,8 +9987,9 @@
         </details>
       </div>
 
-      <!-- Reference flipbook: one frozen page per 1000-RPM band + anomaly captures -->
-      <div class="settings-card">
+      <!-- Reference flipbook: one frozen page per 1000-RPM band + anomaly captures.
+           Paired back-to-back under the Live Oscilloscope; shares its Time window buttons. -->
+      <div class="settings-card fa-paired-bottom">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Reference Flipbook</span>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadFaFlipPageCsv()">Download CSV</button>

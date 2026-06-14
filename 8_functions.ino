@@ -1,23 +1,7 @@
 // ── 8_functions.ino ── Fast alternator-current failure detector (consumer 2): algorithm bodies.
-// Moved here 2026-06-12 from the former fad_core.h (the project keeps no .h files). The shared
-// type definitions (FadJob / FadResult / FADV_* / FADS_*) live at the top of the detector
-// section in 2_functions.ino, which precedes this file in the Arduino build; this file holds
-// only the tuning constants and the function bodies. FAD_NOW_US() is defined below.
-//
+
 // Rectifier/stator pulse-pattern fault detector (consumer 2 of the fast alternator-current
-// channel) — faithful C++ port of rect_fault_detector.py (offline prototype, 18/18 on the
-// synthetic gate; that module's docstring is the architecture reference). Pipeline: regime
-// split from the ACF cycle period → boxcar smooth + rough high-pass → crest picking by
-// valley-depth merging (idle: one rung; cruise: 3-rung ladder, best SANE rung wins by
-// trigger headroom) → cycle-exact re-detrend + 2-cycle envelope → per-crest height/interval
-// features → modulo-k ANOVA effect sizes (k=2..8) per 48-crest block → gap-anchored sync
-// mode → ACF period-ratio confirmation → FAULT/TREND/healthy + winning k.
-// Constants mirror the prototype's TUNING dict — do NOT retune against the synthetic set;
-// real boat captures are the validation set (DETECTOR_DEV_NOTES.md).
-// Execution: resumable state machine — fadStep() advances until FAD_NOW_US() passes the
-// caller's deadline (the ~1 ms loop-budget contract), so a full analysis spreads over many
-// loop() passes. Heavy items (direct-form ACFs, ≤400 lags) run in 8 K-sample segments.
-// float32 buffers, double accumulators (prefix sums / dot products) for numpy parity.
+// channel) — 
 
 #include <stdint.h>
 #include <string.h>

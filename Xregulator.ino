@@ -988,7 +988,7 @@ int TargetVoltageMode = 0;
 float TargetVoltageSetpoint = 12.6f;
 int OnOff = 0;             // 0 is charger off, 1 is charger On (corresponds to Alternator Enable in Basic Settings)
 int Ignition = 0;          // Digital Input      NEED THIS TO HAVE WIFI ON , FOR NOW
-int IgnitionOverride = 1;  // to fake the ignition signal w/ software
+int IgnitionOverride = 2;  // Auto (any value != 1) = follow real GPIO1 ignition wire (default); 1 = force ON. Cannot force off.
 int HiLow = 1;             // 0 will be a low setting, 1 a high setting
 int AmpSensorRange = 1;    // 0=±200A, 1=±300A (default), 2=±500A — hall effect sensor range
 int LimpHome = 0;          // 1 will set to limp home mode, whatever that gets set up to be
@@ -2184,10 +2184,15 @@ FuncTiming ft_faWindowFinalize; // fast alt-current per-2s-window finalize (Goer
 
 // Fast alt-current per-session worst scalars (fleet upload, consumer 5). Declared HERE
 // (not in the 2_functions.ino fa section) because buildConfigPayload() reads them and
-// sits earlier in that file. Updated at qualified-window finalize; reset by Reset Peak Values.
-float faSesPkpkWorstA = 0.0f;   // worst broadband pk-pk seen this session, amps
-float faSesPeakWorstA = 0.0f;   // strongest single spectral peak this session, amps
-float faSesPeakWorstHz = 0.0f;  // ...and its frequency, Hz
+// sits earlier in that file. Updated at qualified-window finalize; persisted across reboot
+// and cleared only by the ripple panel's own "Reset Worsts" button (ResetRipplePeaks).
+float faSesPkpkWorstA = 0.0f;   // worst broadband pk-pk since last manual reset, amps (persisted)
+float faSesPeakWorstA = 0.0f;   // strongest single spectral peak since last manual reset, amps (persisted)
+float faSesPeakWorstHz = 0.0f;  // ...and its frequency, Hz (persisted)
+// NVS change-detection shadows for the persisted ripple worsts (auto-fire scalar path)
+int32_t prev_faSesPkpk = 0;
+int32_t prev_faSesPeakA = 0;
+int32_t prev_faSesPeakHz = 0;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -2580,7 +2585,7 @@ float PidKi = 2.0f;   // integral gain
 float PidKd = 0.01f;  // derivative gain
 // --- Voltage (CV) PID ---
 volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)
-volatile float VoltageKi = 40.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi. 15→40 2026-06-11: Ki=15 step test settled ~9.7s (TC ~4.4s at measured ~15mV/A plant gain); 40 targets ~1.7s
+volatile float VoltageKi = 25.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi. 15→40 2026-06-11: Ki=15 step test settled ~9.7s (TC ~4.4s at measured ~15mV/A plant gain); 40 targeted ~1.7s. 40→25 2026-06-14: idle up-step at Ki=40 showed +50mV windup overshoot + ~3s ring (cv_I wound to ~59A vs ~50A hold eq — integrator winding against the idle current ceiling, not a too-high-Ki failure); 25 is a user trial that trades some blip cv_I-deficit recovery speed for less up-step overshoot — proper fix is the deferred cv_I anti-windup (see CV_Loop_Dev_Summary.md Future Work)
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
@@ -2602,6 +2607,8 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // --- iExcess current supervisor ---
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
 int IExcessN = 4;                // consecutive ticks required (was 3, 28Hz-belt install); raised 2026-06-13 — MA(2) smear padded clean 2-tick belt-ripple peaks to exactly 3, false-firing iExcess. Install-specific (tracks resonance freq), NOT universal — see CV_Loop_Dev_Summary.
+float IExcessKBulk = 10.0f;      // Group 3 BULK sub-mode: A above the commanded current ceiling (i_ceiling_pre_ov) to arm, in the current-control phase (voltage far below target, where the CV iExcess above is gated off). Looser than IExcessK — tolerate more command-vs-actual error far from the voltage limit, catching only absurd RPM-blip overshoots before they trip a hard protection.
+int IExcessNBulk = 4;            // Group 3 BULK sub-mode: consecutive ticks above threshold required before firing.
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
 float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. 0.2→0.1 2026-06-11: blocks recovery double-fires (belt-resonance peaks fired iExcess at target−0.16V mid-recovery) while keeping all real catches (fired at target+0.04..0.07)
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
@@ -3137,7 +3144,11 @@ struct PidDLState {
   int oldest;
   int row;
   bool done;
-  char line[440];  // header row = 402 chars; comment block = ~711 chars (truncated fine); was 320, too small
+  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header=449B (39 cols).
+                    // snprintf truncation is NOT harmless here — it eats the row's trailing '\n', gluing
+                    // that row onto the next one in the download (was 440 → header lost "ntervalMs\n" and
+                    // merged with the first data row; comment lost 7 lines + its '\n' and merged with header).
+                    // Grow this whenever a column or comment line is added. Was 320→440 (both too small).
   int lineLen;
   int linePos;
 };
@@ -3293,7 +3304,7 @@ uint32_t g_fastOvHardCount = 0;
 // gaps. Float buckets are written from sensor/control tasks and read by the web task without a
 // lock; a torn read only blurs a tuning display, never control. Direction per gate: peak for
 // trip-type gates (slew/drift/tone), trough for the RPM edge-margin pass-gate.
-enum { ROLL_RPMEDGE = 0, ROLL_AMPSDRIFT, ROLL_TONEPK, ROLL_LDSLEW, ROLL_CVSLOPE, ROLL_COUNT };
+enum { ROLL_RPMEDGE = 0, ROLL_AMPSDRIFT, ROLL_AMPSDRIFTEXC, ROLL_TONEPK, ROLL_LDSLEW, ROLL_CVSLOPE, ROLL_COUNT };
 #define ROLL_EMPTY (-2000000000)   // CSV sentinel: no sample in the 10s window (distinct from SafeInt's -1)
 struct Roll10s {
   float v[10];
@@ -3602,15 +3613,11 @@ unsigned long wifiWakeStart = 0;                  // millis() when wake was trig
 // from there only the wake button or ignition brings it back. Inert in AP mode (a SoftAP can't sleep).
 bool wifiNapEnabled = false;          // System Setting (Client only); default off
 bool wifiNapActive = false;           // true while modem-sleep nap is active
-bool wifiNapTimedOut = false;         // true after the 12h idle timeout — stay fully off until ignition/button
-unsigned long lastNapActivityMs = 0;  // millis() of last dashboard activity (a connected SSE client)
-const unsigned long WIFI_NAP_TIMEOUT = 43200000UL;  // 12h with no dashboard activity → radio fully off
 
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
 AsyncEventSource events("/events");         // Create an Event Source on /events
 unsigned long webgaugesinterval = 100;      // delay in ms between sensor updates on webpage
 int plotTimeWindow = 60;                    // Plot time window in seconds
-unsigned long healthystuffinterval = 5000;  // check hardware health parameters only every 5 seconds, not that they consume much   THIS IS DEAD CODE, REMOVE LATER
 
 // WiFi provisioning settings persist in NVS as NK_ssid / NK_pass
 // Cached WiFi client credentials (loaded once, reused for reconnects)
@@ -3789,7 +3796,7 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "</div>"
 
   "<div class=\"info-box\">"
-  "To return to this Wifi Configuration page at any time, connect the WifiReset wire (pin 11, RJ3, Orange/White) to Ground during a restart."
+  "To return to this Wifi Configuration page at any time, connect the WifiReset wire (pin 11, RJ3, Green/White) to Ground during a restart."
   "</div>"
 
   "<button type=\"submit\">Save Configuration</button>"
@@ -4054,7 +4061,7 @@ void setup() {
   gpio4IsLow = true;      // keep the shadow in sync — field starts off
   pinMode(5, INPUT);      // WiFi wake button
   pinMode(2, OUTPUT);     // This pin is used to provide a field PWM indicator (pin 2 of ESP32 is the LED)
-  pinMode(1, INPUT);      // Ignition
+  pinMode(1, INPUT_PULLUP);      // Ignition — pull-up so optocoupler-off floats HIGH (= ignition off); opto pulls LOW = on
   pinMode(21, OUTPUT);    // Alarm/Buzzer output (was 33)
   digitalWrite(21, LOW);  // Start with alarm off
   alarmOutputState = false;
@@ -4210,12 +4217,11 @@ void loop() {
     Serial.println("=== REMOTE REBOOT (/get?RebootRegulator) ===");
     ESP.restart();
   }
-  Ignition = !digitalRead(1);  // ! is for optocoupler
+  Ignition = !digitalRead(1);  // ! is for optocoupler (LOW = ignition ON)
   if (IgnitionOverride == 1) {
-    Ignition = 1;  // force ON  (bench testing, normal default)
-  } else if (IgnitionOverride == 0) {
-    Ignition = 0;  // force OFF (test shutdown sequence — change from 1 to 0 to trigger)
+    Ignition = 1;  // force ON (bench / no ignition wire) — override can ONLY force on, never off
   }
+  // IgnitionOverride != 1 (Auto, default): no override — honor the real GPIO1 reading above
  
   WiFiWakeButton = !digitalRead(5);  // Read WiFi wake button state. Active LOW (button pulls to ground)
 
@@ -4425,7 +4431,6 @@ void loop() {
           WiFi.setSleep(false);
           wifiNapActive = false;
         }
-        wifiNapTimedOut = false;   // a button press re-arms napping for the next idle period
         if (WiFi.getMode() == WIFI_OFF) {  // WiFi was turned off, need to reconnect
           setupWiFi();
         }
@@ -4483,7 +4488,7 @@ void loop() {
               saveVesselInfoToFile();
             }
             shutdownNVSFlushDone = true;
-            shutdownCloudDeadlineMs = millis() + 1800000;  // 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain
+            shutdownCloudDeadlineMs = millis() + 1800000;  // TEMP BENCH POWER TEST  5000 Original: 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain
           } else if (millis() < shutdownCloudDeadlineMs) {
             // Phase 3: hold 240MHz and WiFi for the full 30-min window unconditionally.
             // Lets the CloudFeatures block continue uploading, and keeps WiFi open to verify the drain.
@@ -4546,7 +4551,6 @@ void loop() {
         WiFi.setSleep(false);
         wifiNapActive = false;
       }
-      wifiNapTimedOut = false;   // ignition on re-arms napping for the next shutdown
       // Reconnect WiFi if needed (works for both AP and CLIENT modes)
       if (WiFi.getMode() == WIFI_OFF) {
         setupWiFi();  // Reconnects in current mode

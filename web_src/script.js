@@ -722,14 +722,21 @@ const CSV2_FIELDS = [
     "faSesPeakWorstHz",        // ...its frequency, Hz ×10
     "faAnomalyCount",          // lifetime detector FAULT-verdict count
     "faDomFreqHz",             // Highest Tone in Map: frequency, Hz ×10
-    "faDomAmp",                // ...amplitude, A ×100
+    "faDomAmp",                // ...pk-pk amplitude (2× sine amp), A ×100
     "faDomRpm",                // ...RPM where it occurs
     // gate-tuning 10s live readouts (ROLL_EMPTY sentinel = no sample in window; see attachLiveReadout)
     "faRpmEdge10sMin",         // RPM edge margin, 10s trough (RPM ×10)
     "faAmpsDrift10sMax",       // amps-drift EMA spread, 10s peak (A ×100)
+    "faAmpsDriftExc10sMax",    // drift spread minus its effective gate limit, 10s peak (A ×100); <=0 = passing
     "faTonePk10sMax",          // largest spectral peak, 10s peak (A ×100)
     "ldSlew10sMax",            // current slew, 10s peak (A/s ×10)
     "cvSlope10sMax",           // voltage rise, 10s peak (V/s ×10000)
+    // lifetime nav/sailing records (read-only display in Lifetime Statistics; reset individually)
+    "LongestTripAT",           // longest single trip, nm ×10
+    "Max24hrDistAT",           // max 24-hour distance, nm ×10
+    "DeepestAnchorAT",         // deepest anchorage, ft ×10
+    "BestUpwindVmgAT",         // best upwind VMG, kts ×100
+    "LongestGaleAT",           // longest gale duration, hours ×100
 ];
 
 // ── Gate-tuning live readouts ───────────────────────────────────────────────
@@ -746,6 +753,20 @@ const GATE_READOUTS_CSV2 = [
     { spans: ['LoadDumpDtThresh1_live', 'LoadDumpDtThresh_live', 'LoadDumpDtThresh3_live'],  f: 'ldSlew10sMax',     s: 10,    lbl: '10s peak slew',    u: 'A/s', d: 1 },
     { spans: ['SlopeBleedThresh_live'],                                                      f: 'cvSlope10sMax',    s: 10000, lbl: '10s peak rise',    u: 'V/s', d: 3 },
 ];
+// Pass/fail styling for the anomaly steady-state gate readouts: green+bold when the last-10s extreme
+// currently satisfies the gate, red+bold when it doesn't, neutral (muted gray) when the window had no
+// sample. Colors match the local convention (#5cb85c pass, #ef4444 fail used elsewhere in this file).
+const GATE_PASS_COLOR = '#5cb85c';
+const GATE_FAIL_COLOR = '#ef4444';
+function gateColor(id, pass) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (pass === null) { el.style.color = ''; el.style.fontWeight = 'normal'; el.style.opacity = '0.7'; return; }
+    el.style.color = pass ? GATE_PASS_COLOR : GATE_FAIL_COLOR;
+    el.style.fontWeight = '700';
+    el.style.opacity = '1';
+}
+function gateEchoNum(id) { const el = document.getElementById(id); return el ? parseFloat(el.textContent) : NaN; }
 function gateReadoutOnCsv2(data) {
     for (const r of GATE_READOUTS_CSV2) {
         const raw = Number(data[r.f]);
@@ -754,23 +775,57 @@ function gateReadoutOnCsv2(data) {
             : `${r.lbl}: ${(raw / r.s).toFixed(r.d)} ${r.u}`;
         for (const id of r.spans) { const el = document.getElementById(id); if (el) el.textContent = txt; }
     }
+    // Mirror the firmware gate (2_functions.ino faWindowFinalize) so the user sees pass/fail at a glance.
+    // RPM: worst edge margin (signed; negative = straddled a band boundary) passes when >= the set margin.
+    const rpmRaw = Number(data.faRpmEdge10sMin);
+    if (!isFinite(rpmRaw) || rpmRaw <= ROLL_EMPTY_SENTINEL) gateColor('faRpmEdgeMargin_live', null);
+    else { const set = gateEchoNum('faRpmEdgeMargin_echo'); gateColor('faRpmEdgeMargin_live', isFinite(set) ? (rpmRaw / 10) >= set : null); }
+    // Drift: the firmware streams the EMA spread minus its own effective limit (max of floor / pct-of-mean),
+    // computed from the exact filtered window mean — no client recompute. <=0 means the drift gate passed.
+    // Both rows reflect the one gate. (faAmpsDriftExc10sMax is the 10s peak, i.e. the worst window.)
+    const drExc = Number(data.faAmpsDriftExc10sMax);
+    const drPass = (!isFinite(drExc) || drExc <= ROLL_EMPTY_SENTINEL) ? null : (drExc / 100) <= 0;
+    gateColor('faAmpsDriftFloorA_live', drPass);
+    gateColor('faAmpsDriftPct_live', drPass);
 }
 // IExcessK: peak of (measured amps − active setpoint) over the last 10s, from CSV1 (both sent A×100).
+// IExcessKBulk: peak of (measured amps − commanded ceiling uTargetAmps) over 10s, same CSV1 source.
 let _iExcessRing10s = [];
+let _iExcessBulkRing10s = [];
 function gateReadoutOnCsv1(data) {
+    const now = (window.performance && performance.now) ? performance.now() : Date.now();
+    const cut = now - 10000;
+    const ma = Number(data.MeasuredAmps);
+
     const el = document.getElementById('IExcessK_live');
-    if (!el) return;
-    const ma = Number(data.MeasuredAmps), sp = Number(data.setpointLimited);
-    if (isFinite(ma) && isFinite(sp)) {
-        const now = (window.performance && performance.now) ? performance.now() : Date.now();
-        _iExcessRing10s.push([now, (ma - sp) / 100]);
-        const cut = now - 10000;
-        while (_iExcessRing10s.length && _iExcessRing10s[0][0] < cut) _iExcessRing10s.shift();
+    if (el) {
+        const sp = Number(data.setpointLimited);
+        if (isFinite(ma) && isFinite(sp)) {
+            _iExcessRing10s.push([now, (ma - sp) / 100]);
+            while (_iExcessRing10s.length && _iExcessRing10s[0][0] < cut) _iExcessRing10s.shift();
+        }
+        if (!_iExcessRing10s.length) { el.textContent = '10s peak over setpoint: —'; }
+        else {
+            let pk = -Infinity;
+            for (const s of _iExcessRing10s) if (s[1] > pk) pk = s[1];
+            el.textContent = `10s peak over setpoint: ${pk.toFixed(2)} A`;
+        }
     }
-    if (!_iExcessRing10s.length) { el.textContent = '10s peak over setpoint: —'; return; }
-    let pk = -Infinity;
-    for (const s of _iExcessRing10s) if (s[1] > pk) pk = s[1];
-    el.textContent = `10s peak over setpoint: ${pk.toFixed(2)} A`;
+
+    const elB = document.getElementById('IExcessKBulk_live');
+    if (elB) {
+        const ceil = Number(data.uTargetAmps);  // commanded ceiling, A×100
+        if (isFinite(ma) && isFinite(ceil)) {
+            _iExcessBulkRing10s.push([now, (ma - ceil) / 100]);
+            while (_iExcessBulkRing10s.length && _iExcessBulkRing10s[0][0] < cut) _iExcessBulkRing10s.shift();
+        }
+        if (!_iExcessBulkRing10s.length) { elB.textContent = '10s peak over ceiling: —'; }
+        else {
+            let pkB = -Infinity;
+            for (const s of _iExcessBulkRing10s) if (s[1] > pkB) pkB = s[1];
+            elB.textContent = `10s peak over ceiling: ${pkB.toFixed(2)} A`;
+        }
+    }
 }
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -789,7 +844,7 @@ function fetchAltSchema(){ return fetch('/altschema').then(r=>r.json()).then(j=>
 // Confidence-state labels + colors (firmware FrontStore::classify; OUTPUT-BLIND \u2014 position +
 // record-book geometry only). 0/1 show the live %; 2/3 deliberately show no number.
 const ALT_STATE_LABEL = ['MEASURED','ESTIMATED','Learning this operating region','No reference here yet'];
-const ALT_STATE_COLOR = ['#5cb85c','#3a7bd5','#888','#888'];
+const ALT_STATE_COLOR = ['#2e9e4f','#f0ad4e','#888','#888'];   // measured green / estimated amber (was blue — read as "another series", not "less certain")
 
 function updateAltHealth() {
   const pctEl = document.getElementById('alt-health-pct');
@@ -828,8 +883,6 @@ function updateAltHealth() {
       ? (Math.round(altLive.ptCount)+' front points \u00b7 '+Math.round(altLive.engHours)+' engine-hr')
       : 'no front points yet';
   }
-  const dot = document.getElementById('alt-steady-dot');
-  if (dot) { dot.style.background = altLive.steady ? '#5cb85c' : '#ccc'; dot.title = altLive.steady?'in a steady run (folding)':'not steady'; }
   const modeLbl = document.getElementById('alt-mode-label');
   if (modeLbl) modeLbl.textContent = altLive.source>=1 ? 'FIXED' : (altLive.paused>=1 ? 'LEARNED (paused)' : 'LEARNED');
   setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Settings (segmented, mirrors Vessel Performance)
@@ -978,13 +1031,14 @@ function drawAltTrend() {
   const last = pts[pts.length-1];
   if (last.live){ const x=X(last.eng), y=Y(Math.max(minY,Math.min(maxY,last.worst)));
     ctx.beginPath(); ctx.arc(x,y,5,0,6.2832);
-    ctx.fillStyle = ALT_STATE_COLOR[liveSt] || '#5cb85c'; ctx.fill();   // state color (MEASURED green / ESTIMATED blue)
+    ctx.fillStyle = ALT_STATE_COLOR[liveSt] || '#2e9e4f'; ctx.fill();   // state color (MEASURED green / ESTIMATED amber)
     ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); }
 }
 
 // ── Charging-system health session plot: every 1 Hz live % since this dashboard session began,
-//    uPlot-styled like the Plots tab. Points colored by confidence state (MEASURED green,
-//    ESTIMATED blue). LEARNING/NO-REFERENCE periods carry NO value — they render as gaps with a
+//    uPlot-styled like the Plots tab. Marked by confidence state: MEASURED = filled green dot,
+//    ESTIMATED = amber dash (shape + color both encode confidence, so it survives colorblindness).
+//    LEARNING/NO-REFERENCE periods carry NO value — they render as gaps with a
 //    light background tint (the suppressed number is deliberately never plotted). ──
 let altSessPlot = null;
 const ALT_SESS_MAX = 28800;   // 8 h of 1 Hz samples, then the oldest roll off
@@ -1012,10 +1066,10 @@ function buildAltSessPlot(){
     height: 200,
     series: [
       { label: 'Time' },
-      { label: 'MEASURED %',  stroke: 'transparent', paths: () => null,
-        points: { show: true, size: 5, width: 0, fill: '#5cb85c' } },
-      { label: 'ESTIMATED %', stroke: 'transparent', paths: () => null,
-        points: { show: true, size: 5, width: 0, fill: '#3a7bd5' } },
+      // Markers are hand-drawn in the draw hook below so estimated can be a dash, not a dot
+      // (shape + color both encode confidence). Built-in points off for both.
+      { label: 'Measured',  stroke: 'transparent', paths: () => null, points: { show: false } },
+      { label: 'Estimated', stroke: 'transparent', paths: () => null, points: { show: false } },
     ],
     scales: {
       x: { time: false, range: () => { const now = Date.now() / 1000; return [now - ALT_SESS_WINDOW_S, now]; } },
@@ -1046,6 +1100,19 @@ function buildAltSessPlot(){
           runStart = null;
         }
       }
+      // Measured = filled green dot; Estimated = amber horizontal dash. Shape + color both carry
+      // the confidence so it reads in grayscale / red-green colorblindness. Legend overlay below.
+      for (let i = 0; i < altSessMeas.length; i++) {
+        if (altSessMeas[i] == null) continue;
+        const x = u.valToPos(altSessT[i], 'x', true), y = u.valToPos(altSessMeas[i], 'y', true);
+        ctx.beginPath(); ctx.arc(x, y, 2.7, 0, 6.2832); ctx.fillStyle = ALT_STATE_COLOR[0]; ctx.fill();
+      }
+      ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.strokeStyle = ALT_STATE_COLOR[1];
+      for (let i = 0; i < altSessEst.length; i++) {
+        if (altSessEst[i] == null) continue;
+        const x = u.valToPos(altSessT[i], 'x', true), y = u.valToPos(altSessEst[i], 'y', true);
+        ctx.beginPath(); ctx.moveTo(x - 4.3, y); ctx.lineTo(x + 4.3, y); ctx.stroke();
+      }
       ctx.restore();
     }] }
   };
@@ -1053,10 +1120,50 @@ function buildAltSessPlot(){
   new ResizeObserver(() => {
     if (altSessPlot) altSessPlot.setSize({ width: Math.max(el.clientWidth, 320), height: 200 });
   }).observe(el);
+
+  // Auto checkbox (top-right) — same convention as the other plots. No lock button:
+  // this is a slow point-per-update plot, so unchecking (which pins to what's shown)
+  // already covers the "stop it moving" case. Checked = auto-fit (null manual range);
+  // unchecked = pin to whatever is currently shown.
+  el.style.position = 'relative';
+
+  // On-plot legend (top-left, inside the plot area — mirrors the auto checkbox top-right). Replaces
+  // the old "steady-state capture" dot that was masquerading as a legend above the chart.
+  const exLeg = el.querySelector('.altsess-legend'); if (exLeg) exLeg.remove();
+  const leg = document.createElement('div');
+  leg.className = 'altsess-legend';
+  leg.style.cssText = 'position:absolute;top:6px;left:54px;z-index:10;display:flex;gap:9px;align-items:center;'
+    + 'background:rgba(255,255,255,0.88);border:1px solid var(--border-light,#e3e6e8);border-radius:7px;'
+    + 'padding:4px 8px;font-size:11px;line-height:1;box-shadow:0 1px 3px rgba(0,0,0,0.07);pointer-events:none;';
+  leg.innerHTML =
+    '<span style="display:flex;align-items:center;gap:5px;white-space:nowrap;">'
+    + '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + ALT_STATE_COLOR[0] + ';"></span>'
+    + '<b style="font-weight:600;">Measured</b><span style="color:var(--text-muted,#8a9097);">real reading here</span></span>'
+    + '<span style="width:1px;height:13px;background:var(--border-light,#e3e6e8);"></span>'
+    + '<span style="display:flex;align-items:center;gap:5px;white-space:nowrap;">'
+    + '<span style="display:inline-block;width:11px;height:2.4px;border-radius:2px;background:' + ALT_STATE_COLOR[1] + ';"></span>'
+    + '<b style="font-weight:600;">Estimated</b><span style="color:var(--text-muted,#8a9097);">interpolated</span></span>';
+  el.appendChild(leg);
+
+  const exAltAs = el.querySelector('.autoscale-ctrl'); if (exAltAs) exAltAs.remove();
+  const altAsDiv = document.createElement('div');
+  altAsDiv.className = 'autoscale-ctrl';
+  altAsDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;align-items:center;gap:3px;font-size:11px;opacity:0.6;';
+  altAsDiv.innerHTML = '<input type="checkbox" id="autoscale-altsess-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-altsess-cb" style="cursor:pointer;user-select:none;">auto</label>';
+  el.appendChild(altAsDiv);
+  const altAsCb = document.getElementById('autoscale-altsess-cb');
+  altAsCb.checked = (altSessYManual == null);   // null manual range = auto-fit
+  altAsCb.addEventListener('change', e => {
+    if (e.target.checked) { altSessYManual = null; localStorage.removeItem('altSessY'); }
+    else if (altSessPlot) { altSessYManual = [altSessPlot.scales.y.min, altSessPlot.scales.y.max]; localStorage.setItem('altSessY', JSON.stringify(altSessYManual)); }
+    if (altSessPlot) altSessPlot.redraw();
+  });
+
+  // Click-to-edit Y limits. Typing pins the axis and unchecks auto; the checkbox
+  // is the only way back to auto-fit — no hidden clear-the-box gesture.
   attachYAxisEdit(altSessPlot, [{
     scale: 'y', decimals: 0,
-    apply: (mn, mx) => { altSessYManual = [mn, mx]; localStorage.setItem('altSessY', JSON.stringify(altSessYManual)); altSessPlot.redraw(); },
-    auto:  ()       => { altSessYManual = null;     localStorage.removeItem('altSessY');                              altSessPlot.redraw(); }
+    apply: (mn, mx) => { altSessYManual = [mn, mx]; altAsCb.checked = false; localStorage.setItem('altSessY', JSON.stringify(altSessYManual)); altSessPlot.redraw(); }
   }]);
 }
 
@@ -1627,8 +1734,8 @@ const CSV3_FIELDS = [
     "TargetVoltageSetpoint",
     "RebulkCurrent_A",
     "UseFloat",
-    "altSpare0",
-    "altSpare1",
+    "IExcessKBulk",
+    "IExcessNBulk",
     "altSpare2",
     "altSpare3",
     "TempAlarmLow",
@@ -3049,7 +3156,7 @@ function displayAvailableVersions() {
 // Confirm update
 function confirmUpdate(version) {
     // Password is guaranteed to exist because button can only be clicked after unlock
-    const confirmed = confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Green/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
+    const confirmed = confirm(`⚠️ ALTERNATOR WILL BE AUTOMATICALLY DISABLED FOR SAFETY ⚠️\n\nUpdate process takes 2-3 minutes. Do not interfere with auto-reboots. When finished, the web interface will be accessible in the usual way, but you must HARD-REFRESH your browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux) to load the new web files — otherwise your browser will keep showing the old cached UI. The Software Update sub-tab in Cloud Features will then confirm the new version.\n\nIf process fails, you may try again with better internet. If the whole thing bricks, you may always start fresh with the factory golden image (connect FactoryReset wire, pin 9 in RJ3, Orange/White to GND), which will never force updates.\n\nAlternator will remain OFF after update - you must manually re-enable it.`);
     if (confirmed) {
         kickOffAppWebUpdate(version);  // No-op in browser; in iOS app downloads matching web bundle in parallel
         showUpdateInProgressOverlay(version);  // Same modal the forced-update path shows
@@ -4078,7 +4185,7 @@ function updateAllEchosOptimized(data) {
         { key: 'Beta', id: 'Beta_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'T0_C', id: 'T0_C_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'TempSource', id: 'TempSource_echo', transform: v => v == 0 ? 'Digital' : 'Thermistor' },
-        { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'IgnitionOverride', id: 'IgnitionOverride_echo', transform: v => v == 1 ? 'Force On' : 'Auto' },
         { key: 'AmpSensorRange', id: 'AmpSensorRange_echo', transform: v => (['±200A', '±300A', '±500A'][v] ?? v) },
         { key: 'AlarmLatchEnabled', id: 'AlarmLatchEnabled_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'AlarmTest', id: 'AlarmTest_echo', transform: v => v == 1 ? 'Active' : '---' },
@@ -4124,6 +4231,8 @@ function updateAllEchosOptimized(data) {
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
         { key: 'IExcessK', id: 'IExcessK_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'IExcessN', id: 'IExcessN_echo', transform: v => Math.round(v) },
+        { key: 'IExcessKBulk', id: 'IExcessKBulk_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'IExcessNBulk', id: 'IExcessNBulk_echo', transform: v => Math.round(v) },
         { key: 'IExcessKBleed', id: 'IExcessKBleed_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'IExcessArmMarginV', id: 'IExcessArmMarginV_echo', transform: v => v.toFixed(3) },
         { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => (v / 100).toFixed(2) },
@@ -5473,8 +5582,10 @@ function initCVTuningPlot() {
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(cvTuningPlot);
     createCVTuningLegend();
 
-    // Corner lock button — locks the Y axes at their current ranges (same
-    // semantics as the Plots tab lock buttons). Data keeps streaming.
+    // Corner auto checkbox + lock button — same convention as the Plots tab.
+    // Checkbox controls both Y axes (volts + amps): checked = auto-fit (null globals),
+    // unchecked = pin to what's shown. Lock freezes the current auto range while data
+    // keeps streaming (auto stays on). Checkbox is the only way back to auto-fit.
     plotEl.style.position = 'relative';
     const existingLock = plotEl.querySelector('.autoscale-ctrl');
     if (existingLock) existingLock.remove();
@@ -5482,9 +5593,25 @@ function initCVTuningPlot() {
     const lockDiv = document.createElement('div');
     lockDiv.className = 'autoscale-ctrl';
     lockDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
-    lockDiv.innerHTML = '<button id="lock-cv-tuning-btn" style="font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    lockDiv.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-cv-tuning-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-cv-tuning-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="lock-cv-tuning-btn" style="font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
     plotEl.appendChild(lockDiv);
+    const cvAsCb = document.getElementById('autoscale-cv-tuning-cb');
     const lockBtnCV = document.getElementById('lock-cv-tuning-btn');
+    const cvResetLockBtn = () => { cvYAxesLocked = false; lockBtnCV.textContent = 'lock'; lockBtnCV.style.opacity = '0.6'; lockBtnCV.style.display = ''; };
+    cvAsCb.checked = (cvVoltsMin === null && cvAmpsMin === null);   // null globals = auto-fit
+    lockBtnCV.style.display = cvAsCb.checked ? '' : 'none';         // lock only relevant while auto is on
+    cvAsCb.addEventListener('change', e => {
+        if (e.target.checked) {
+            cvVoltsMin = null; cvVoltsMax = null; cvAmpsMin = null; cvAmpsMax = null;
+            cvResetLockBtn();
+        } else {
+            // Pin each still-auto axis to what's currently shown
+            if (cvVoltsMin === null && cvTuningPlot) { cvVoltsMin = cvTuningPlot.scales.volts.min; cvVoltsMax = cvTuningPlot.scales.volts.max; }
+            if (cvAmpsMin === null && cvTuningPlot)  { cvAmpsMin  = cvTuningPlot.scales.amps.min;  cvAmpsMax  = cvTuningPlot.scales.amps.max; }
+            cvResetLockBtn(); lockBtnCV.style.display = 'none';
+        }
+        queueCVTuningPlotUpdate();
+    });
     lockBtnCV.addEventListener('click', () => {
         cvYAxesLocked = !cvYAxesLocked;
         if (cvYAxesLocked) {
@@ -5503,19 +5630,21 @@ function initCVTuningPlot() {
         lockBtnCV.style.opacity = cvYAxesLocked ? '1' : '0.6';
     });
 
-    // Click-to-edit Y limits — the on-plot boxes are the only Y range controls.
-    // Auto (clear + Enter) just nulls the globals: the range fns re-read them on the
-    // next redraw, so a queued setData is all it takes — never destroy/recreate.
+    // Click-to-edit Y limits. Typing pins that axis and unchecks auto (also pinning
+    // the other axis if it was still auto); the checkbox is the only way back to auto-fit.
+    const cvDropAuto = otherIsVolts => {
+        if (otherIsVolts) { if (cvVoltsMin === null && cvTuningPlot) { cvVoltsMin = cvTuningPlot.scales.volts.min; cvVoltsMax = cvTuningPlot.scales.volts.max; } }
+        else { if (cvAmpsMin === null && cvTuningPlot) { cvAmpsMin = cvTuningPlot.scales.amps.min; cvAmpsMax = cvTuningPlot.scales.amps.max; } }
+        cvAsCb.checked = false; cvResetLockBtn(); lockBtnCV.style.display = 'none';
+    };
     attachYAxisEdit(cvTuningPlot, [
         {
             scale: 'volts', decimals: 2,
-            apply: (mn, mx) => setCVVoltsRange(mn, mx),
-            auto: () => { cvVoltsMin = null; cvVoltsMax = null; queueCVTuningPlotUpdate(); }
+            apply: (mn, mx) => { setCVVoltsRange(mn, mx); cvDropAuto(false); }
         },
         {
             scale: 'amps', decimals: 1,
-            apply: (mn, mx) => setCVAmpsRange(mn, mx),
-            auto: () => { cvAmpsMin = null; cvAmpsMax = null; queueCVTuningPlotUpdate(); }
+            apply: (mn, mx) => { setCVAmpsRange(mn, mx); cvDropAuto(true); }
         }
     ]);
 
@@ -6163,6 +6292,10 @@ function updateInlineStatus(isConnected) {
         } else {
             cornerStatus.className = 'corner-status corner-status-disconnected';
             cornerStatus.textContent = 'WIFI DISCONNECTED';
+            // Kill the "WiFi off in M:SS" countdown — once the radio drops, no more updates
+            // arrive to tick it to zero, so it would otherwise freeze on screen as a stale artifact
+            const wifiWakeStatus = document.getElementById('wifi-wake-status');
+            if (wifiWakeStatus) wifiWakeStatus.style.display = 'none';
         }
     }
 }
@@ -7808,7 +7941,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("AlarmActivate_checkbox", data.AlarmActivate, "AlarmActivate");
         updateCheckbox("InvertAltAmps_checkbox", data.InvertAltAmps, "InvertAltAmps");
         updateCheckbox("InvertBattAmps_checkbox", data.InvertBattAmps, "InvertBattAmps");
-        updateCheckbox("IgnitionOverride_checkbox", data.IgnitionOverride, "IgnitionOverride");
+        updateCheckbox("IgnitionOverride_checkbox", data.IgnitionOverride, "IgnitionOverride");  // unchecked = Auto (0/2), checked = Force On (1)
         updateCheckbox("TempSource_checkbox", data.TempSource, "TempSource");
         updateCheckbox("AlarmLatchEnabled_checkbox", data.AlarmLatchEnabled, "AlarmLatchEnabled");
         updateCheckbox("MaintainMode_checkbox", data.MaintainMode, "MaintainMode");
@@ -8479,8 +8612,6 @@ window.addEventListener("load", function () {
                 });
             }
 
-            updateIMUAlignmentDisplayFromData(data);
-
             if (data.stateRevision !== undefined) {
                 lastSeenRev = data.stateRevision;
             }
@@ -8682,14 +8813,13 @@ window.addEventListener("load", function () {
             ];
 
             // Throttle noisy gauge DOM writes to GAUGE_RENDER_INTERVAL_MS so the last digit
-            // is readable. Plots, IMU alignment, and echoes still update every cycle below.
+            // is readable. Plots and echoes still update every cycle below.
             const _gaugeNow = performance.now();
             if (!window._lastGaugeRender || (_gaugeNow - window._lastGaugeRender) >= GAUGE_RENDER_INTERVAL_MS) {
                 updateFields(criticalFields);
                 window._lastGaugeRender = _gaugeNow;
             }
             processCSVDataOptimized(data); // this is for plotting
-            updateIMUAlignmentDisplayFromData(data);
             if (data.BatteryV_raw !== undefined) {
                 _lastBatteryV = data.BatteryV_raw / 100;
                 if (_testPanelCurrentTest === 'cv') updateCVPanelDelta();
@@ -8962,11 +9092,18 @@ window.addEventListener("load", function () {
                     else if (key === "faSesPkpkWorst" || key === "faSesPeakWorst") {
                         newTextContent = (value / 100).toFixed(2);  // A ×100
                     }
+                    // Lifetime nav/sailing records (read-only display in Lifetime Statistics)
+                    else if (key === "LongestTripAT" || key === "Max24hrDistAT" || key === "DeepestAnchorAT") {
+                        newTextContent = (value / 10).toFixed(1);   // nm / nm / ft, ×10
+                    }
+                    else if (key === "BestUpwindVmgAT" || key === "LongestGaleAT") {
+                        newTextContent = (value / 100).toFixed(2);  // kts / hours, ×100
+                    }
                     else if (key === "faSesPeakWorstHz" || key === "faDomFreqHz") {
                         newTextContent = (value / 10).toFixed(1);   // Hz ×10
                     }
                     else if (key === "faDomAmp") {
-                        newTextContent = (value / 100).toFixed(2);  // A ×100
+                        newTextContent = (value / 100).toFixed(2);  // A ×100 (pk-pk)
                     }
                     // Time values that need conversion from minutes to days/hours/minutes
                     else if (["timeToFullChargeMin", "timeToFullDischargeMin"].includes(key)) {
@@ -9488,6 +9625,11 @@ window.addEventListener("load", function () {
                 ["faDetectK_ID", "faDetectK"],
                 ["faAnomalyCount_ID", "faAnomalyCount"],
                 ["faSesPkpkWorst_ID", "faSesPkpkWorst"],
+                ["LongestTripAT_ID", "LongestTripAT"],
+                ["Max24hrDistAT_ID", "Max24hrDistAT"],
+                ["DeepestAnchorAT_ID", "DeepestAnchorAT"],
+                ["BestUpwindVmgAT_ID", "BestUpwindVmgAT"],
+                ["LongestGaleAT_ID", "LongestGaleAT"],
                 ["faDomAmp_ID", "faDomAmp"],
                 ["faDomFreq_ID", "faDomFreqHz"],
                 ["faDomRpm_ID", "faDomRpm"],
@@ -11525,6 +11667,11 @@ function initPidTuningDataStructures() {
 // the left amps axis persists on the regulator as yyMin/yyMax).
 let pidDutyRange = null;
 try { pidDutyRange = JSON.parse(localStorage.getItem('pidDutyRange')) || null; } catch (e) { }
+// Auto checkbox state for the PID plot's left amps axis. When on, the amps axis
+// auto-fits the data instead of using the firmware yyMin/yyMax. pidAmpsLock pins
+// the auto range at a frozen value (lock button) while auto stays on.
+let pidAmpsAuto = localStorage.getItem('pidAmpsAuto') === 'true';
+let pidAmpsLock = null;   // [min,max] frozen by the lock button, or null
 
 function initPidTuningPlot() {
     const plotEl = document.getElementById('pid-tuning-plot');
@@ -11591,8 +11738,11 @@ function initPidTuningPlot() {
                 range: [pidTuningData[0][0], pidTuningData[0][pidTuningData[0].length - 1]]
             },
             amps: {
-                auto: false,
-                range: () => [yyMin, yyMax]   // fn, not array: re-read each redraw so Y edits survive setData re-ranging
+                // Default auto (NOT auto:false): uPlot only refreshes the data min/max it
+                // passes here when the scale is auto, which the auto-fit branch needs.
+                // Manual (auto off) returns the firmware yyMin/yyMax; lock pins the frozen range.
+                range: (u, mn, mx) => pidAmpsLock ? pidAmpsLock
+                    : (pidAmpsAuto ? (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) : [yyMin, yyMax])
             },
             duty: {
                 auto: false,
@@ -11609,7 +11759,7 @@ function initPidTuningPlot() {
                 label: "Current (A) / RPM (/100)",
                 grid: { show: true },
                 side: 3,
-                // always pinned to yyMin/yyMax (firmware-persisted) → corners always labeled
+                // corners always labeled (manual yyMin/yyMax or the auto-fit endpoints)
                 splits: edgeLabeledSplits(() => true)
             },
             {
@@ -11657,13 +11807,58 @@ function initPidTuningPlot() {
     pidTuningPlot = new uPlot(opts, pidTuningData, plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(pidTuningPlot);
 
+    // Corner auto checkbox + lock — same convention as the Plots tab. The checkbox
+    // drives the left Current axis: checked = auto-fit, unchecked = the firmware
+    // yyMin/yyMax. Checking also returns the right Duty axis to its default range.
+    // Lock freezes the current auto range while data streams. The checkbox is the
+    // only way back to auto-fit — no hidden clear-the-box gesture.
+    plotEl.style.position = 'relative';
+    const exPidAs = plotEl.querySelector('.autoscale-ctrl'); if (exPidAs) exPidAs.remove();
+    pidAmpsLock = null;
+    const pidAsDiv = document.createElement('div');
+    pidAsDiv.className = 'autoscale-ctrl';
+    pidAsDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    pidAsDiv.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-pid-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-pid-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="lock-pid-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(pidAsDiv);
+    const pidAsCb = document.getElementById('autoscale-pid-cb');
+    const pidLockBtn = document.getElementById('lock-pid-btn');
+    const pidResetLock = () => { pidAmpsLock = null; pidLockBtn.textContent = 'lock'; pidLockBtn.style.opacity = '0.6'; };
+    pidAsCb.checked = pidAmpsAuto;
+    pidLockBtn.style.display = pidAmpsAuto ? '' : 'none';   // lock only relevant while auto is on
+    pidAsCb.addEventListener('change', e => {
+        pidAmpsAuto = e.target.checked;
+        localStorage.setItem('pidAmpsAuto', pidAmpsAuto);
+        pidResetLock();
+        if (pidAmpsAuto) {
+            pidDutyRange = null; localStorage.removeItem('pidDutyRange');   // duty back to default
+            pidLockBtn.style.display = '';
+        } else if (pidTuningPlot) {
+            // leaving auto: amps falls back to firmware yyMin/yyMax; pin duty to what's shown
+            pidDutyRange = [pidTuningPlot.scales.duty.min, pidTuningPlot.scales.duty.max];
+            localStorage.setItem('pidDutyRange', JSON.stringify(pidDutyRange));
+            pidLockBtn.style.display = 'none';
+        }
+        if (pidTuningPlot) pidTuningPlot.setData(pidTuningData);
+    });
+    pidLockBtn.addEventListener('click', () => {
+        if (!pidAmpsAuto) return;            // lock only applies while auto is on
+        if (pidAmpsLock) { pidResetLock(); }
+        else if (pidTuningPlot) {            // freeze the current auto range
+            pidAmpsLock = [pidTuningPlot.scales.amps.min, pidTuningPlot.scales.amps.max];
+            pidLockBtn.textContent = 'unlock'; pidLockBtn.style.opacity = '1';
+        }
+        if (pidTuningPlot) pidTuningPlot.setData(pidTuningData);
+    });
+
     // Click-to-edit Y limits: amps axis saves to the regulator (yyMin/yyMax,
-    // same as the form fields below), duty axis is a local override.
+    // same as the form fields below) and unchecks auto; duty axis is a local override.
     attachYAxisEdit(pidTuningPlot, [
         {
             scale: 'amps', decimals: 0,
             apply: (mn, mx) => {
                 yyMin = Math.round(mn); yyMax = Math.round(mx);
+                pidAmpsAuto = false; localStorage.setItem('pidAmpsAuto', 'false');
+                pidAsCb.checked = false; pidResetLock(); pidLockBtn.style.display = 'none';
                 pidTuningPlot.setScale('amps', { min: yyMin, max: yyMax });
                 sendYAxisSetting({ yyMin: yyMin, yyMax: yyMax });
             }
@@ -11674,11 +11869,6 @@ function initPidTuningPlot() {
                 pidDutyRange = [mn, mx];
                 localStorage.setItem('pidDutyRange', JSON.stringify(pidDutyRange));
                 pidTuningPlot.setScale('duty', { min: mn, max: mx });
-            },
-            auto: () => {
-                pidDutyRange = null;
-                localStorage.removeItem('pidDutyRange');
-                pidTuningPlot.setScale('duty', { min: -25, max: 105 });
             }
         }
     ]);
@@ -11832,64 +12022,6 @@ function updatePidTuningConfiguration(data) {
         pidTuningPlot.setScale('amps', { min: yyMin, max: yyMax });
     }
 }
-
-//IMU
-function updateIMUAlignmentDisplayFromData(data) {
-    const gx = Number(data.imu_accel_x_raw);
-    const gy = Number(data.imu_accel_y_raw);
-    const gz = Number(data.imu_accel_z_raw);
-
-    const gravityVectorEl = document.getElementById("imu_gravity_vector_display");
-    const statusEl = document.getElementById("imu_alignment_status_display");
-    if (!gravityVectorEl || !statusEl) return;
-
-    // Handle invalid/missing data
-    if (!Number.isFinite(gx) || !Number.isFinite(gy) || !Number.isFinite(gz)) {
-        gravityVectorEl.innerHTML = `
-            <td>--</td>
-            <td>--</td>
-            <td>--</td>
-        `;
-        statusEl.textContent = "Waiting for sensor data...";
-        statusEl.style.borderLeftColor = "#ffa726";
-        statusEl.style.color = "#666666";
-        return;
-    }
-
-    // Calculate total magnitude and tilt
-    const totalG = Math.sqrt(gx * gx + gy * gy + gz * gz);
-    const deviation = Math.abs(totalG - 1.0);
-    const tiltDegrees = Math.asin(Math.min(deviation, 1.0)) * 180 / Math.PI;
-
-    // Determine status based on tilt
-    let color, statusText, borderColor;
-    if (tiltDegrees < 5) {
-        color = "#00a19a";
-        borderColor = "#00a19a";
-        statusText = `Good alignment (${tiltDegrees.toFixed(1)}° tilt)`;
-    } else if (tiltDegrees < 10) {
-        color = "#ff9800";
-        borderColor = "#ff9800";
-        statusText = `Acceptable alignment (${tiltDegrees.toFixed(1)}° tilt)`;
-    } else {
-        color = "#d32f2f";
-        borderColor = "#d32f2f";
-        statusText = `Poor alignment (${tiltDegrees.toFixed(1)}° tilt) - remount squarely`;
-    }
-
-    // Update table cells
-    gravityVectorEl.innerHTML = `
-        <td style="color: ${color};">${gx.toFixed(2)}</td>
-        <td style="color: ${color};">${gy.toFixed(2)}</td>
-        <td style="color: ${color};">${gz.toFixed(2)}</td>
-    `;
-
-    // Update status message
-    statusEl.textContent = statusText;
-    statusEl.style.borderLeftColor = borderColor;
-    statusEl.style.color = "#333333";
-}
-
 
 // Sync dual-control parameters between tabs
 function syncDualControlParameters(batteryAh, solarWatts) {
@@ -12297,6 +12429,11 @@ let thermalLogPlots = [null, null, null, null];
 let thermalLogResizeObservers = [null, null, null, null];
 let thermalWindowMin = 30;
 
+// Per-plot Y-axis manual ranges for the thermal-log plots. null = auto-fit (the
+// default). Each plot has its own corner "auto" checkbox + on-plot edit boxes,
+// same self-contained model as every other plot — no external controls.
+let thermalY = { p0: { temp: null, amps: null }, p2: { amps: null } };
+
 // Legend checkbox visibility state (session only, not persisted)
 let thermalSeriesVisible = {
     tempFilt: true, tempProjected: true, tempSetpoint: true,
@@ -12537,6 +12674,49 @@ function _thermalResizeObserver(plotIdx, elId, h) {
 // ---------------------------------------------------------------------------
 // Plot 1 
 // ---------------------------------------------------------------------------
+// Corner "auto" checkbox + "lock" button for a thermal-log plot — same convention
+// as the Plots-tab and PID/CV tuning plots. These now live-stream off CSV2 (not the
+// old static /thermallog.bin replay), so the auto-fit axes crawl as data arrives and
+// a lock is needed. `bucket` is the thermalY entry for this plot; `keys` are its axis
+// names within that bucket. Checked = auto-fit (null ranges); unchecked = pin each
+// axis to what's shown. Lock freezes the current auto range while data keeps streaming
+// (auto stays on). The lock button's id is `<id>-lock` so thermalPinAxis can reset it.
+function addThermalAutoBox(el, id, getPlot, bucket, keys) {
+    if (!el) return;
+    el.style.position = 'relative';
+    const ex = el.querySelector('.autoscale-ctrl'); if (ex) ex.remove();
+    const div = document.createElement('div');
+    div.className = 'autoscale-ctrl';
+    div.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    const lockId = id + '-lock';
+    div.innerHTML = '<div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="' + id + '" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="' + id + '" style="cursor:pointer;user-select:none;">auto</label></div><button id="' + lockId + '" style="font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    el.appendChild(div);
+    const cb = document.getElementById(id);
+    const lockBtn = document.getElementById(lockId);
+    const wasAuto = {};   // per-key memory of which axes were auto at lock time
+    const resetLock = () => { lockBtn.textContent = 'lock'; lockBtn.style.opacity = '0.6'; };
+    cb.checked = keys.every(k => bucket[k] == null);   // null range = auto-fit
+    lockBtn.style.display = cb.checked ? '' : 'none';  // lock only relevant while auto is on
+    cb.addEventListener('change', () => {
+        const u = getPlot();
+        if (cb.checked) { keys.forEach(k => bucket[k] = null); resetLock(); lockBtn.style.display = ''; }
+        else if (u) { keys.forEach(k => bucket[k] = [u.scales[k].min, u.scales[k].max]); resetLock(); lockBtn.style.display = 'none'; }
+        if (u) u.setData(u.data);   // re-runs the range fns
+    });
+    // Lock state lives in the button text so thermalPinAxis (Y-edit) can fully reset it.
+    lockBtn.addEventListener('click', () => {
+        const u = getPlot();
+        if (lockBtn.textContent === 'lock') {            // freeze each still-auto axis at its current range
+            keys.forEach(k => { wasAuto[k] = (bucket[k] == null); if (wasAuto[k] && u) bucket[k] = [u.scales[k].min, u.scales[k].max]; });
+            lockBtn.textContent = 'unlock'; lockBtn.style.opacity = '1';
+        } else {                                         // unlock returns previously-auto axes to auto
+            keys.forEach(k => { if (wasAuto[k]) bucket[k] = null; });
+            resetLock();
+            if (u) u.setData(u.data);
+        }
+    });
+}
+
 function renderThermalPlot1(data, tMin) {
     if (thermalLogPlots[0]) {
         if (data.every(d => d !== undefined)) thermalLogPlots[0].setData(data);
@@ -12588,15 +12768,16 @@ function renderThermalPlot1(data, tMin) {
         ],
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
-            temp: { auto: true },
-            amps: { auto: true }
+            // null manual range = auto-fit (default); a typed range pins the axis
+            temp: { range: (u, mn, mx) => thermalY.p0.temp || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
+            amps: { range: (u, mn, mx) => thermalY.p0.amps || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) }
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
             { scale: 'temp', label: 'Temperature (°F)', side: 3, grid: { show: true },
-              splits: edgeLabeledSplits(thermalManualRange('p1-temp-min', 'p1-temp-max')) },
+              splits: edgeLabeledSplits(() => thermalY.p0.temp !== null) },
             { scale: 'amps', label: 'Amps (A)', side: 1, grid: { show: false },
-              splits: edgeLabeledSplits(thermalManualRange('p1-amps-min', 'p1-amps-max')) }
+              splits: edgeLabeledSplits(() => thermalY.p0.amps !== null) }
         ],
         legend: { show: false },
         plugins: [
@@ -12624,11 +12805,13 @@ function renderThermalPlot1(data, tMin) {
             thermalLogPlots[0].setSize({ width: el.clientWidth, height: H });
     });
 
-    // Click-to-edit Y limits (clear both boxes + Enter returns to autoscale)
+    // Click-to-edit Y limits. Typing pins the axis and unchecks the corner auto
+    // box; that checkbox is the only way back to auto — no hidden gesture.
     attachYAxisEdit(thermalLogPlots[0], [
-        { scale: 'temp', decimals: 0, apply: (mn, mx) => setThermalManualRange('p1-temp-min', 'p1-temp-max', mn, mx), auto: thermalRangesToAuto },
-        { scale: 'amps', decimals: 0, apply: (mn, mx) => setThermalManualRange('p1-amps-min', 'p1-amps-max', mn, mx), auto: thermalRangesToAuto }
+        { scale: 'temp', decimals: 0, apply: (mn, mx) => thermalPinAxis(0, 'p0', 'temp', 'autoscale-thermal0-cb', mn, mx) },
+        { scale: 'amps', decimals: 0, apply: (mn, mx) => thermalPinAxis(0, 'p0', 'amps', 'autoscale-thermal0-cb', mn, mx) }
     ]);
+    addThermalAutoBox(el, 'autoscale-thermal0-cb', () => thermalLogPlots[0], thermalY.p0, ['temp', 'amps']);
 }
 
 // ---------------------------------------------------------------------------
@@ -12658,12 +12841,13 @@ function renderThermalPlot2(data, tMin) {
         ],
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
-            amps: { auto: true }
+            // null manual range = auto-fit (default); a typed range pins the axis
+            amps: { range: (u, mn, mx) => thermalY.p2.amps || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) }
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
             { scale: 'amps', label: 'Effect on Current Target (A)', side: 3, grid: { show: true },
-              splits: edgeLabeledSplits(thermalManualRange('p3-min', 'p3-max')) }
+              splits: edgeLabeledSplits(() => thermalY.p2.amps !== null) }
         ],
         legend: { show: false },
         plugins: [
@@ -12688,10 +12872,12 @@ function renderThermalPlot2(data, tMin) {
             thermalLogPlots[2].setSize({ width: el.clientWidth, height: H });
     });
 
-    // Click-to-edit Y limits (clear both boxes + Enter returns to autoscale)
+    // Click-to-edit Y limits. Typing pins the axis and unchecks the corner auto
+    // box; that checkbox is the only way back to auto — no hidden gesture.
     attachYAxisEdit(thermalLogPlots[2], [
-        { scale: 'amps', decimals: 0, apply: (mn, mx) => setThermalManualRange('p3-min', 'p3-max', mn, mx), auto: thermalRangesToAuto }
+        { scale: 'amps', decimals: 0, apply: (mn, mx) => thermalPinAxis(2, 'p2', 'amps', 'autoscale-thermal2-cb', mn, mx) }
     ]);
+    addThermalAutoBox(el, 'autoscale-thermal2-cb', () => thermalLogPlots[2], thermalY.p2, ['amps']);
 }
 
 // ---------------------------------------------------------------------------
@@ -12898,51 +13084,16 @@ function _createThermalLegend(container, plotIdx, items) {
 // ---------------------------------------------------------------------------
 // Y axis range controls
 // ---------------------------------------------------------------------------
-// On-plot Y boxes write into the existing manual-range fields, switch the
-// thermal autoscale checkbox off, and re-apply — so both UIs stay in agreement.
-function setThermalManualRange(minId, maxId, mn, mx) {
-    const minEl = document.getElementById(minId), maxEl = document.getElementById(maxId);
-    if (minEl) minEl.value = mn;
-    if (maxEl) maxEl.value = mx;
-    const cb = document.getElementById('thermal-autoscale');
-    if (cb && cb.checked) { cb.checked = false; cb.dispatchEvent(new Event('change')); }
-    else applyThermalRanges();
-}
-
-function thermalRangesToAuto() {
-    const cb = document.getElementById('thermal-autoscale');
-    if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change')); }
-}
-
-// Manual-range predicate for edgeLabeledSplits: a thermal scale is pinned when
-// the autoscale checkbox is off AND its min/max fields actually hold numbers.
-function thermalManualRange(minId, maxId) {
-    return () => {
-        if (document.getElementById('thermal-autoscale')?.checked ?? true) return false;
-        return isFinite(parseFloat(document.getElementById(minId)?.value))
-            && isFinite(parseFloat(document.getElementById(maxId)?.value));
-    };
-}
-
-function applyThermalRanges() {
-    const auto = document.getElementById('thermal-autoscale')?.checked ?? true;
-    const get = (id) => parseFloat(document.getElementById(id)?.value);
-
-    if (thermalLogPlots[0]) {
-        thermalLogPlots[0].scales.temp.range = auto
-            ? (u, min, max) => [min, max]
-            : () => [get('p1-temp-min'), get('p1-temp-max')];
-        thermalLogPlots[0].scales.amps.range = auto
-            ? (u, min, max) => [min, max]
-            : () => [get('p1-amps-min'), get('p1-amps-max')];
-        thermalLogPlots[0].redraw();
-    }
-    if (thermalLogPlots[2]) {
-        thermalLogPlots[2].scales.amps.range = auto
-            ? (u, min, max) => [min, max]
-            : () => [get('p3-min'), get('p3-max')];
-        thermalLogPlots[2].redraw();
-    }
+// On-plot Y box → pin one axis: store the manual range in thermalY, uncheck this
+// plot's corner auto box, and apply it. The scale range fn reads thermalY on every
+// redraw, so this sticks across data updates.
+function thermalPinAxis(plotIdx, bucketKey, axis, cbId, mn, mx) {
+    thermalY[bucketKey][axis] = [mn, mx];
+    const cb = document.getElementById(cbId); if (cb) cb.checked = false;
+    // Typing a limit leaves auto — hide and reset the lock button (lock only applies while auto is on)
+    const lockBtn = document.getElementById(cbId + '-lock');
+    if (lockBtn) { lockBtn.textContent = 'lock'; lockBtn.style.opacity = '0.6'; lockBtn.style.display = 'none'; }
+    if (thermalLogPlots[plotIdx]) thermalLogPlots[plotIdx].setScale(axis, { min: mn, max: mx });
 }
 
 // ---------------------------------------------------------------------------
@@ -12959,12 +13110,6 @@ function applyThermalRanges() {
         // current ring on open; thermalLiveOnCsv2() keeps it updating while open.
         det.addEventListener('toggle', () => {
             if (det.open) setTimeout(() => { thermalRenderAll(); }, 50);
-        });
-
-        document.getElementById('thermal-autoscale')?.addEventListener('change', function () {
-            document.getElementById('thermal-manual-ranges').style.display =
-                this.checked ? 'none' : 'flex';
-            applyThermalRanges();
         });
     }
 
@@ -13200,7 +13345,7 @@ function updateFloatVisibility() {
 // CV / Voltage Tuner Log — JavaScript
 //
 // Decodes /cvlog.bin and downloads as CSV.
-// Binary layout: 36-byte header + N × 50-byte CvLogEntry structs (little-endian).
+// Binary layout: 36-byte header + N × 51-byte CvLogEntry structs (little-endian).
 //
 // Header (36 bytes):
 //   offset  0  uint32  count
@@ -13213,7 +13358,7 @@ function updateFloatVisibility() {
 //   offset 28  float32 SlopeBleedK (A/(V/s))
 //   offset 32  float32 SlopeBleedProxV (V)
 //
-// Entry (50 bytes):
+// Entry (51 bytes, packed — see static_assert(sizeof(CvLogEntry)==51) in firmware):
 //   offset  0  uint32   ts
 //   offset  4  int16    battV       / 100  → V
 //   offset  6  int16    targV       / 100  → V
@@ -14554,18 +14699,15 @@ window.addEventListener('load', function () {
       if (baroPlot) baroPlot.setSize({ width: el.clientWidth, height: el.clientHeight || 280 });
     }).observe(el);
 
-    // Click-to-edit Y limits (clear both boxes + Enter returns to the
-    // default/autoscale behavior picked by the checkbox below the plot)
+    // Click-to-edit Y limits. Typing pins the axis; the Autoscale checkbox below
+    // the plot is the only way back to auto — no hidden clear-the-box gesture.
     attachYAxisEdit(baroPlot, [{
       scale: 'y', decimals: 0,
       apply: (mn, mx) => {
         baroYManual = [mn, mx];
+        autoscaleY = false;                       // typing pins the axis and unchecks auto
+        const cb = document.getElementById('baroAutoscaleY'); if (cb) cb.checked = false;
         localStorage.setItem('baroYManual', JSON.stringify(baroYManual));
-        refreshPlot();
-      },
-      auto: () => {
-        baroYManual = null;
-        localStorage.removeItem('baroYManual');
         refreshPlot();
       }
     }]);
@@ -15676,18 +15818,34 @@ window.addEventListener('load', function () {
     const ro = new ResizeObserver(() => { if (plot) plot.setSize({ width: el.clientWidth || 600, height: 300 }); });
     ro.observe(el);
 
-    // Click-to-edit Y limits (clear both boxes + Enter returns to auto-fit)
+    // Auto checkbox (top-right) — same convention as the other plots. No lock button:
+    // this is an RPM-domain curve that redraws on new fuel data, not a streaming
+    // time-series, so unchecking (pin to what's shown) covers the freeze case.
+    // Checked = auto-fit (null manual range); unchecked = pin to what's shown.
+    el.style.position = 'relative';
+    const exFuelAs = el.querySelector('.autoscale-ctrl'); if (exFuelAs) exFuelAs.remove();
+    const fuelAsDiv = document.createElement('div');
+    fuelAsDiv.className = 'autoscale-ctrl';
+    fuelAsDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;align-items:center;gap:3px;font-size:11px;opacity:0.6;';
+    fuelAsDiv.innerHTML = '<input type="checkbox" id="autoscale-fuel-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-fuel-cb" style="cursor:pointer;user-select:none;">auto</label>';
+    el.appendChild(fuelAsDiv);
+    const fuelAsCb = document.getElementById('autoscale-fuel-cb');
+    fuelAsCb.checked = (yManual == null);   // null manual range = auto-fit
+    fuelAsCb.addEventListener('change', e => {
+      if (e.target.checked) { yManual = null; localStorage.removeItem('fuelCurveYRange'); }
+      else if (plot) { yManual = [plot.scales.mpg.min, plot.scales.mpg.max]; localStorage.setItem('fuelCurveYRange', JSON.stringify(yManual)); }
+      if (plot) plot.setData(plot.data);   // re-runs the range function
+    });
+
+    // Click-to-edit Y limits. Typing pins the axis and unchecks auto; the checkbox
+    // is the only way back to auto-fit — no hidden clear-the-box gesture.
     attachYAxisEdit(plot, [{
       scale: 'mpg', decimals: 2,
       apply: (mn, mx) => {
         yManual = [mn, mx];
+        fuelAsCb.checked = false;
         localStorage.setItem('fuelCurveYRange', JSON.stringify(yManual));
         plot.setData(plot.data);   // re-runs the range function
-      },
-      auto: () => {
-        yManual = null;
-        localStorage.removeItem('fuelCurveYRange');
-        plot.setData(plot.data);
       }
     }]);
   }
@@ -15727,7 +15885,7 @@ window.addEventListener('load', function () {
 // ─────────────────────────────────────────────────────────────────────────────
 let fastScopePlot = null;
 let fastScopeData = null;
-let fastScopeViewMs = 250;
+let fastScopeViewMs = 200;   // shared X window (ms) for BOTH the scope and the Reference Flipbook; capped at the 200 ms flipbook page length
 let fastScopeAmpsMin = null, fastScopeAmpsMax = null;  // null = auto-scale; set via the click-to-edit Y widget, persisted to localStorage like the other plots
 let fastScopePaused = false;
 // Raw and Filtered are independent show/hide toggles (plot series 1 and 2), not an A/B switch.
@@ -15871,11 +16029,10 @@ function initFastScopePlot() {
     });
 
     // Click-to-edit Y limits — the same shared widget every other plot uses; persisted to localStorage.
-    // Editing pins the range (uncheck auto); clearing the boxes returns to auto-fit (re-check).
+    // Editing pins the range and unchecks auto; the auto checkbox is the only way back to auto-fit.
     attachYAxisEdit(fastScopePlot, [{
         scale: 'amps', decimals: 2,
-        apply: (mn, mx) => { fastScopeAmpsMin = mn; fastScopeAmpsMax = mx; faCb.checked = false; fastScopeSaveAmpsRange(); if (fastScopePlot) fastScopePlot.setData(fastScopePlot.data); },
-        auto: () => { fastScopeAmpsMin = null; fastScopeAmpsMax = null; faCb.checked = true; fastScopeSaveAmpsRange(); if (fastScopePlot) fastScopePlot.setData(fastScopePlot.data); }
+        apply: (mn, mx) => { fastScopeAmpsMin = mn; fastScopeAmpsMax = mx; faCb.checked = false; fastScopeSaveAmpsRange(); if (fastScopePlot) fastScopePlot.setData(fastScopePlot.data); }
     }]);
     const resizePlot = debounce(() => {
         const el = document.getElementById('fastscope-plot');
@@ -15901,9 +16058,14 @@ function fastScopeApplyZoom() {
 
 function fastScopeZoom(ms, btn) {
     fastScopeViewMs = ms;
-    document.querySelectorAll('.fastscope-zoom').forEach(b => b.classList.remove('active'));
+    // Only the window buttons carry data-ms; flipbook page buttons share .fastscope-zoom for
+    // styling but use data-slot, so scope the deselect here or it clears the selected page.
+    document.querySelectorAll('.fastscope-zoom[data-ms]').forEach(b => b.classList.remove('active'));
     if (btn) btn.classList.add('active');
     fastScopeApplyZoom();
+    // Same window drives the Reference Flipbook below — re-trigger its x range fn so both
+    // plots span identical milliseconds (each shows the trailing N ms of its own capture).
+    if (fastFlipPlot && fastFlipSelected >= 0) fastFlipPlot.setData(fastFlipPlot.data);
     // Revs shown scale with the window width, so refresh the hint on every view change.
     const hint = document.getElementById('fastscope-cycle-hint');
     if (hint && fastScopeData && fastScopeData.count > 0) hint.textContent = fastScopeRevHint();
@@ -16146,12 +16308,27 @@ function initFastFlipPlot() {
     fastFlipPlot = new uPlot({
         width: Math.min(plotEl.clientWidth || 360, 800),
         height: 260,
-        title: "Reference Waveform — 200 ms @ 5 kHz",
+        // No fixed-ms title: the shared Time window buttons re-window this page, so any "200 ms"
+        // label is wrong once zoomed (mirrors the scope, which titles via the Y axis instead).
+        title: "Reference Waveform — 5 kHz",
         series: [
             {},
             { label: "Alternator Current (A)", stroke: "#9C27B0", width: 1, points: { show: false }, scale: "amps" }
         ],
-        scales: { x: { time: false }, amps: { auto: true } },
+        scales: {
+            // x pinned to the trailing fastScopeViewMs of the 200 ms page — the SAME shared window
+            // the scope uses, so the two stacked plots always span identical milliseconds.
+            x: {
+                time: false,
+                auto: false,
+                range: () => {
+                    const pg = fastFlipPages && fastFlipPages[fastFlipSelected];
+                    const tEnd = (pg && pg.t_ms && pg.t_ms.length) ? pg.t_ms[pg.t_ms.length - 1] : 200;
+                    return [Math.max(0, tEnd - fastScopeViewMs), tEnd];
+                }
+            },
+            amps: { auto: true }
+        },
         axes: [
             { label: "Milliseconds", grid: { show: true } },
             { scale: "amps", label: "Amperes", grid: { show: true }, side: 3 }
@@ -16193,15 +16370,9 @@ function initFastFlipPlot() {
 
     attachYAxisEdit(fastFlipPlot, [{
         scale: 'amps', decimals: 1,
-        apply: (mn, mx) => {                 // typing a number → manual for this page only
+        apply: (mn, mx) => {                 // typing a number → manual for this page only (the auto checkbox is the way back)
             const st = faFlipAxisState(fastFlipSelected);
             st.auto = false; st.locked = false; st.min = mn; st.max = mx;
-            faFlipApplyAxis(fastFlipSelected);
-            faFlipSyncControls(fastFlipSelected);
-        },
-        auto: () => {                        // clear + Enter → back to auto for this page
-            const st = faFlipAxisState(fastFlipSelected);
-            st.auto = true; st.locked = false;
             faFlipApplyAxis(fastFlipSelected);
             faFlipSyncControls(fastFlipSelected);
         }
