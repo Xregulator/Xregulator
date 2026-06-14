@@ -653,6 +653,38 @@ details.tuning-section[open] > summary.tuning-section-title::after {
   transform: rotate(-180deg);
 }
 
+/* Live Data -> Diag — collapsible top-level sections (header reveals its content cards) */
+details.diag-section {
+  max-width: 600px;
+  margin: 0 auto 16px;
+}
+details.diag-section > summary.diag-section-title {
+  cursor: pointer;
+  list-style: none;
+  position: relative;
+  font-weight: 700;
+  font-size: 15px;
+  padding: 6px 22px 6px 0;
+  margin-bottom: 10px;
+  border-bottom: 2px solid var(--accent);
+  -webkit-user-select: none;
+  user-select: none;
+}
+details.diag-section > summary.diag-section-title::-webkit-details-marker { display: none; }
+details.diag-section > summary.diag-section-title::marker { display: none; }
+details.diag-section > summary.diag-section-title::after {
+  content: '▾';
+  position: absolute;
+  right: 2px;
+  top: 6px;
+  font-size: 13px;
+  transition: transform 0.2s;
+  opacity: 0.6;
+}
+details.diag-section[open] > summary.diag-section-title::after {
+  transform: rotate(-180deg);
+}
+
 /* History Row (bucket stats) */
 .history-row td {
   padding: 10px 10px;

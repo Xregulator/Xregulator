@@ -302,7 +302,8 @@ df["capReason"]      = _to_int("capReason")   # 0=none 1=KHard_G1 2=KHard_G2 3=i
 # capReason: which protection layer was the BINDING current cap each tick. This answers
 # "does KHard actually do anything?" — KHard only matters when capReason is 1 or 2.
 CAP_REASON_LABELS = {0: "none", 1: "KHard_G1", 2: "KHard_G2", 3: "iExcess", 4: "loadDump"}
-CAP_REASON_COLORS = {0: "#cccccc", 1: "#8e24aa", 2: "#6a1b9a", 3: "#00838f", 4: "#f57c00"}
+CAP_REASON_COLORS = {0: "#cccccc", 1: "#1f77b4", 2: "#ff7f0e", 3: "#9467bd", 4: "#d62728"}  # G1 blue / G2 orange / iExc purple / LD red
+CAP_REASON_SHORT  = {1: "G1", 2: "G2", 3: "iExc", 4: "LD"}  # compact on-plot event tags
 _have_capreason = "capReason" in _col_names  # present only in newer CV-binary logs
 if _have_capreason:
     _n = len(df)
@@ -375,9 +376,9 @@ print(f"Slope bleed params: {_sb_label}")
 GRID_KW    = dict(alpha=0.4, linewidth=0.7)
 DUTY_COLOR = "#78909c"   # field duty % line — neutral grey-blue on all plots
 
-EV_COLOR_VLOOP = "#aeea00"   # voltLoopFired ticks  (lime)
+EV_COLOR_VLOOP = "#757575"   # voltLoopFired ticks  (neutral grey)
 EV_COLOR_HARD  = "#6a1b9a"   # hardClamp ticks      (purple)
-EV_COLOR_FAST  = "#00838f"   # iExcess ticks        (teal)
+EV_COLOR_FAST  = "#9467bd"   # iExcess ticks        (purple, matches capReason iExc)
 EV_COLOR_LDUMP = "#f57c00"   # loadDumpActive ticks (orange)
 
 _checkbox_refs = []  # keep CheckButtons alive — GC drops them without this
@@ -503,12 +504,14 @@ def draw_flag_bars(ax, df):
 
     # --- Row 6 (top): capReason — which layer was the BINDING cap (colored segments) ---
     # Only non-"none" segments are drawn, so any color here = a protection actually set
-    # the current ceiling. KHard shows as purple (G1 lighter, G2 darker).
+    # the current ceiling. Colours are max-distinct: G1 blue, G2 orange, iExcess purple, loadDump red.
     cr_offset = 6 * spacing
     if "capReason" in df.columns:
         cr_vals = df["capReason"].values
         t_arr   = df["t_plot"].values
         seg_start = 0
+        episodes  = []        # [t_start, [codes in order], t_end] — merged protection bursts
+        EPISODE_GAP_S = 0.20  # bursts closer than this merge into one labelled episode
         for i in range(1, len(cr_vals) + 1):
             last = (i == len(cr_vals))
             if last or cr_vals[i] != cr_vals[seg_start]:
@@ -518,11 +521,25 @@ def draw_flag_bars(ax, df):
                     ax.barh(cr_offset + flag_h / 2, seg_end - t_arr[seg_start],
                             left=t_arr[seg_start], height=flag_h,
                             color=CAP_REASON_COLORS.get(code, "#000000"), alpha=0.85, align="center")
+                    # accumulate into an episode (merge tightly-spaced bursts so one event = one label)
+                    if episodes and (t_arr[seg_start] - episodes[-1][2]) < EPISODE_GAP_S:
+                        if code not in episodes[-1][1]:
+                            episodes[-1][1].append(code)
+                        episodes[-1][2] = seg_end
+                    else:
+                        episodes.append([t_arr[seg_start], [code], seg_end])
                 if not last:
                     seg_start = i
-    ax.text(df["t_plot"].iloc[0], cr_offset + flag_h / 2,
-            "  binding cap (purple=KHard, teal=iExcess, orange=loadDump)",
-            va="center", fontsize=7, color="#4a148c", fontweight="bold")
+        # Inline tag above each episode so a protection event is self-explanatory on every plot.
+        for ep_t, codes, ep_end in episodes:
+            tag    = ">".join(CAP_REASON_SHORT.get(c, str(c)) for c in codes)
+            ep_mid = 0.5 * (ep_t + ep_end)
+            tcol   = CAP_REASON_COLORS.get(codes[-1], "#000000")
+            ax.plot([ep_mid, ep_mid], [cr_offset + flag_h, cr_offset + flag_h + 0.10],
+                    color=tcol, lw=0.8, alpha=0.7, clip_on=False)
+            ax.text(ep_mid, cr_offset + flag_h + 0.12, tag,
+                    va="bottom", ha="center", fontsize=7, fontweight="bold",
+                    color=tcol, clip_on=False)
 
     # --- Row 5: cvActive mode bar — green/grey segments ---
     cv_offset = 5 * spacing
@@ -538,23 +555,19 @@ def draw_flag_bars(ax, df):
                     color=color, alpha=0.85, align="center")
             prev_t   = t
             prev_val = val
-    ax.text(df["t_plot"].iloc[0], cv_offset + flag_h / 2, "  cvActive (mode)",
-            va="center", fontsize=7, color="#ffffff", fontweight="bold")
 
     # --- Row 4: voltLoopFired — tick marks (fires every loop tick) ---
     vl_offset = 4 * spacing
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
         ax.axvline(x=t, ymin=vl_offset / top, ymax=(vl_offset + flag_h) / top,
                    color=EV_COLOR_VLOOP, linewidth=0.8, alpha=0.7)
-    ax.text(df["t_plot"].iloc[0], vl_offset + flag_h / 2, "  voltLoopFired (voltage loop tick)",
-            va="center", fontsize=7, color="#212121", fontweight="bold")
 
     # --- Rows 3–0: protection duration bars ---
     bar_rows = [
-        (3 * spacing, "fastOvActive",   "#c62828", "fastOvActive  (FastOV or iExcess; load dump separate)"),
-        (2 * spacing, "hardClamp",      "#6a1b9a", "hardClamp     (layer 2/3 — hard ceiling)"),
-        (1 * spacing, "iExcess",        "#00838f", "iExcess       (current excess protection)"),
-        (0 * spacing, "loadDumpActive", "#f57c00", "loadDumpActive (sudden load drop detected)"),
+        (3 * spacing, "fastOvActive",   "#17becf", "fastOvActive  (FastOV or iExcess; load dump separate)"),
+        (2 * spacing, "hardClamp",      "#8c564b", "hardClamp     (layer 2/3 — hard ceiling)"),
+        (1 * spacing, "iExcess",        "#9467bd", "iExcess       (current excess protection)"),
+        (0 * spacing, "loadDumpActive", "#d62728", "loadDumpActive (sudden load drop detected)"),
     ]
     for offset, col, color, label in bar_rows:
         vals = df[col].values
@@ -574,11 +587,62 @@ def draw_flag_bars(ax, df):
             ax.barh(offset + flag_h / 2, t[-1] - flag_start,
                     left=flag_start, height=flag_h,
                     color=color, alpha=0.80, align="center")
-        ax.text(df["t_plot"].iloc[0], offset + flag_h / 2, f"  {label}",
-                va="center", fontsize=7, color=color)
 
-    ax.set_ylim(-0.03, top)
-    ax.set_yticks([])
+    ax.set_ylim(-0.03, top + 0.30)   # headroom for inline capReason episode tags
+    # Row names in the left gutter (y-tick labels) — never painted over the data.
+    row_centers = [k * spacing + flag_h / 2 for k in range(n_rows)]
+    row_names   = ["loadDump", "iExcess", "hardClamp", "fastOV",
+                   "voltLoop", "cvActive", "binding cap"]   # rows 0..6, bottom -> top
+    ax.set_yticks(row_centers)
+    ax.set_yticklabels(row_names, fontsize=7.5)
+    ax.tick_params(axis="y", length=0, pad=2)
+
+    # Floating, draggable colour key for the protection-event tags (drag it off the data).
+    from matplotlib.patches import Patch
+    _key = [
+        Patch(color=CAP_REASON_COLORS[1], label="G1 KHard predictive"),
+        Patch(color=CAP_REASON_COLORS[2], label="G2 KHard measured"),
+        Patch(color=CAP_REASON_COLORS[3], label="iExcess (current excess)"),
+        Patch(color=CAP_REASON_COLORS[4], label="LD load dump"),
+        Patch(color="#17becf",            label="fastOvActive"),
+        Patch(color="#8c564b",            label="hardClamp"),
+        Patch(color="#2e7d32",            label="cvActive (CV on)"),
+        Patch(color=EV_COLOR_VLOOP,       label="voltLoop tick"),
+    ]
+    _evleg = ax.figure.legend(handles=_key, loc="upper right", bbox_to_anchor=(0.995, 0.995),
+                              ncol=2, fontsize=7, framealpha=0.9, borderpad=0.4,
+                              handlelength=1.3, columnspacing=1.2, title="Events key")
+    _evleg.get_title().set_fontsize(7)
+    _evleg.set_draggable(True)
+
+    # Hover read-out: name the row (and nearest capReason tag) under the cursor.
+    try:
+        _annot = ax.annotate("", xy=(0, 0), xytext=(12, 14), textcoords="offset points",
+                             fontsize=8, fontweight="bold", zorder=30,
+                             bbox=dict(boxstyle="round,pad=0.3", fc="#ffffcc", ec="#888888", alpha=0.95))
+        _annot.set_visible(False)
+        _eps = episodes if "capReason" in df.columns else []
+        def _hover(event, _ax=ax, _ann=_annot, _centers=row_centers, _names=row_names,
+                   _eps=_eps, _sp=spacing, _ntop=n_rows - 1):
+            if event.inaxes is not _ax or event.ydata is None:
+                if _ann.get_visible():
+                    _ann.set_visible(False); _ax.figure.canvas.draw_idle()
+                return
+            row = min(range(len(_centers)), key=lambda k: abs(_centers[k] - event.ydata))
+            if abs(_centers[row] - event.ydata) > _sp * 0.6:
+                if _ann.get_visible():
+                    _ann.set_visible(False); _ax.figure.canvas.draw_idle()
+                return
+            txt = _names[row]
+            if row == _ntop and _eps:
+                near = min(_eps, key=lambda e: abs(0.5 * (e[0] + e[2]) - (event.xdata or 0)))
+                if near[0] - _sp <= (event.xdata or -1e9) <= near[2] + _sp:
+                    txt += ": " + ">".join(CAP_REASON_SHORT.get(c, str(c)) for c in near[1])
+            _ann.xy = (event.xdata, event.ydata)
+            _ann.set_text(txt); _ann.set_visible(True); _ax.figure.canvas.draw_idle()
+        ax.figure.canvas.mpl_connect("motion_notify_event", _hover)
+    except Exception:
+        pass
     ax.set_xlim(df["t_plot"].iloc[0], df["t_plot"].iloc[-1])
     ax.set_xlabel(time_label, fontsize=13)
     ax.set_ylabel("Events", fontsize=9)
@@ -592,7 +656,7 @@ def draw_flag_bars(ax, df):
 # PLOT 1 — Voltage
 # ---------------------------------------------------------------------------
 fig1 = plt.figure(figsize=(18, 8), num="Plot 1 — Voltage")
-gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 0.6], hspace=0.08)
+gs1  = gridspec.GridSpec(2, 1, height_ratios=[5, 0.9], hspace=0.08)
 ax1  = fig1.add_subplot(gs1[0])
 ax1s = fig1.add_subplot(gs1[1], sharex=ax1)
 plt.setp(ax1.get_xticklabels(), visible=False)
@@ -631,7 +695,7 @@ draw_flag_bars(ax1s, df)
 # PLOT 2 — Current command chain (top) + protection layers (bottom)
 # ---------------------------------------------------------------------------
 fig2 = plt.figure(figsize=(18, 12), num="Plot 2 — Command Chain & Protections")
-gs2  = gridspec.GridSpec(2, 1, height_ratios=[4, 0.6], hspace=0.12)
+gs2  = gridspec.GridSpec(2, 1, height_ratios=[4, 0.9], hspace=0.12)
 ax2a = fig2.add_subplot(gs2[0])
 ax2b = fig2.add_subplot(gs2[1], sharex=ax2a)
 plt.setp(ax2a.get_xticklabels(), visible=False)
@@ -741,7 +805,7 @@ _cb2 = _make_checkbox_panel(fig2, _h2a + _h2a_duty)
 # PLOT 3 — Engine & scheduling context
 # ---------------------------------------------------------------------------
 fig3 = plt.figure(figsize=(18, 9), num="Plot 3 — RPM & Context")
-gs3  = gridspec.GridSpec(3, 1, height_ratios=[2, 1.5, 0.6], hspace=0.10)
+gs3  = gridspec.GridSpec(3, 1, height_ratios=[2, 1.5, 0.9], hspace=0.10)
 ax3  = fig3.add_subplot(gs3[0])
 ax3b = fig3.add_subplot(gs3[1], sharex=ax3)
 ax3s = fig3.add_subplot(gs3[2], sharex=ax3)
@@ -814,7 +878,7 @@ draw_flag_bars(ax3s, df)
 # when voltage is rising. P + I − D should equal Icv_A (before clamping).
 # ---------------------------------------------------------------------------
 fig4 = plt.figure(figsize=(18, 9), num="Plot 4 — PID Term Decomposition")
-gs4  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 0.6], hspace=0.10)
+gs4  = gridspec.GridSpec(3, 1, height_ratios=[4, 1.5, 0.9], hspace=0.10)
 ax4  = fig4.add_subplot(gs4[0])
 ax4b = fig4.add_subplot(gs4[1], sharex=ax4)
 ax4s = fig4.add_subplot(gs4[2], sharex=ax4)

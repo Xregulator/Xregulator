@@ -712,13 +712,66 @@ const CSV2_FIELDS = [
     "ft_faMatrixFlush_ses",    // ...since Reset Peak Values
     "ft_faDetector_win",       // failure-detector analysis slice worst, rolling 5s
     "ft_faDetector_ses",       // ...since Reset Peak Values
+    "ft_faWindowFinalize_win", // per-2s-window finalize worst, rolling 5s
+    "ft_faWindowFinalize_ses", // ...since Reset Peak Values
     "faChanState",             // 0 = off, 1 = sampling, 2 = railed/dormant
     "faCellsUsed",             // matrix cells with ≥1 qualified window
     "faDetectK",               // detector fault class of last FAULT verdict, 0 = quiet
     "faSesPkpkWorst",          // session-worst broadband pk-pk, A ×100
     "faSesPeakWorst",          // session-worst spectral peak, A ×100
     "faSesPeakWorstHz",        // ...its frequency, Hz ×10
+    "faAnomalyCount",          // lifetime detector FAULT-verdict count
+    "faDomFreqHz",             // Highest Tone in Map: frequency, Hz ×10
+    "faDomAmp",                // ...amplitude, A ×100
+    "faDomRpm",                // ...RPM where it occurs
+    // gate-tuning 10s live readouts (ROLL_EMPTY sentinel = no sample in window; see attachLiveReadout)
+    "faRpmEdge10sMin",         // RPM edge margin, 10s trough (RPM ×10)
+    "faAmpsDrift10sMax",       // amps-drift EMA spread, 10s peak (A ×100)
+    "faTonePk10sMax",          // largest spectral peak, 10s peak (A ×100)
+    "ldSlew10sMax",            // current slew, 10s peak (A/s ×10)
+    "cvSlope10sMax",           // voltage rise, 10s peak (V/s ×10000)
 ];
+
+// ── Gate-tuning live readouts ───────────────────────────────────────────────
+// Several thresholds gate on a live/windowed quantity the user can't otherwise see (RPM edge
+// margin, current-drift spread, spectral tone peak, current slew, voltage slope). The firmware
+// streams a 10s rolling extreme of each on CSV2 (ROLL_EMPTY = no sample in the window); IExcessK's
+// quantity rides CSV1 at 10Hz so its 10s peak is computed here. Each readout shows the number to
+// set the threshold relative to. Spans live next to each threshold input in index.html.
+const ROLL_EMPTY_SENTINEL = -1999999999;   // firmware sends -2000000000 when a 10s window had no sample
+const GATE_READOUTS_CSV2 = [
+    { spans: ['faRpmEdgeMargin_live'],                                                       f: 'faRpmEdge10sMin',  s: 10,    lbl: '10s worst margin', u: 'RPM', d: 1 },
+    { spans: ['faAmpsDriftFloorA_live', 'faAmpsDriftPct_live'],                              f: 'faAmpsDrift10sMax', s: 100,  lbl: '10s peak drift',   u: 'A',   d: 2 },
+    { spans: ['faPeakMinA_live'],                                                            f: 'faTonePk10sMax',   s: 100,   lbl: '10s peak tone',    u: 'A',   d: 2 },
+    { spans: ['LoadDumpDtThresh1_live', 'LoadDumpDtThresh_live', 'LoadDumpDtThresh3_live'],  f: 'ldSlew10sMax',     s: 10,    lbl: '10s peak slew',    u: 'A/s', d: 1 },
+    { spans: ['SlopeBleedThresh_live'],                                                      f: 'cvSlope10sMax',    s: 10000, lbl: '10s peak rise',    u: 'V/s', d: 3 },
+];
+function gateReadoutOnCsv2(data) {
+    for (const r of GATE_READOUTS_CSV2) {
+        const raw = Number(data[r.f]);
+        const txt = (!isFinite(raw) || raw <= ROLL_EMPTY_SENTINEL)
+            ? r.lbl + ': —'
+            : `${r.lbl}: ${(raw / r.s).toFixed(r.d)} ${r.u}`;
+        for (const id of r.spans) { const el = document.getElementById(id); if (el) el.textContent = txt; }
+    }
+}
+// IExcessK: peak of (measured amps − active setpoint) over the last 10s, from CSV1 (both sent A×100).
+let _iExcessRing10s = [];
+function gateReadoutOnCsv1(data) {
+    const el = document.getElementById('IExcessK_live');
+    if (!el) return;
+    const ma = Number(data.MeasuredAmps), sp = Number(data.setpointLimited);
+    if (isFinite(ma) && isFinite(sp)) {
+        const now = (window.performance && performance.now) ? performance.now() : Date.now();
+        _iExcessRing10s.push([now, (ma - sp) / 100]);
+        const cut = now - 10000;
+        while (_iExcessRing10s.length && _iExcessRing10s[0][0] < cut) _iExcessRing10s.shift();
+    }
+    if (!_iExcessRing10s.length) { el.textContent = '10s peak over setpoint: —'; return; }
+    let pk = -Infinity;
+    for (const s of _iExcessRing10s) if (s[1] > pk) pk = s[1];
+    el.textContent = `10s peak over setpoint: ${pk.toFixed(2)} A`;
+}
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
 // Schema-driven (fetch /altschema ONCE, zip names against AltLive/AltSettings) — no hardcoded array.
@@ -935,6 +988,7 @@ function drawAltTrend() {
 //    light background tint (the suppressed number is deliberately never plotted). ──
 let altSessPlot = null;
 const ALT_SESS_MAX = 28800;   // 8 h of 1 Hz samples, then the oldest roll off
+const ALT_SESS_WINDOW_S = 1800;  // X axis shows a fixed last-30-minutes window, labelled "minutes ago"
 let altSessT = [], altSessMeas = [], altSessEst = [], altSessGap = [];
 let altSessYManual = null;
 try { altSessYManual = JSON.parse(localStorage.getItem('altSessY') || 'null'); } catch(e){}
@@ -963,9 +1017,15 @@ function buildAltSessPlot(){
       { label: 'ESTIMATED %', stroke: 'transparent', paths: () => null,
         points: { show: true, size: 5, width: 0, fill: '#3a7bd5' } },
     ],
-    scales: { x: { time: true }, y: { auto: false, range: () => altSessYRange() } },
+    scales: {
+      x: { time: false, range: () => { const now = Date.now() / 1000; return [now - ALT_SESS_WINDOW_S, now]; } },
+      y: { auto: false, range: () => altSessYRange() }
+    },
     axes: [
-      { grid: { show: true } },
+      // Fixed last-30-minutes window labelled "minutes ago" — a static axis that doesn't crawl like a clock.
+      { grid: { show: true },
+        splits: () => { const now = Date.now() / 1000, a = []; for (let m = 30; m >= 0; m -= 5) a.push(now - m * 60); return a; },
+        values: (u, sp) => { const now = Date.now() / 1000; return sp.map(t => { const m = Math.round((now - t) / 60); return m === 0 ? 'now' : m + 'm'; }); } },
       { scale: 'y', grid: { show: true }, side: 3, values: (u, t) => t.map(v => v + '%') },
     ],
     legend: { show: false },
@@ -973,6 +1033,7 @@ function buildAltSessPlot(){
     hooks: { draw: [u => {
       // light tint over spans where the % was suppressed (learning / no reference / not running)
       const ctx = u.ctx; ctx.save();
+      ctx.beginPath(); ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height); ctx.clip();  // keep tint inside the plot when old points fall left of the 30-min window
       ctx.fillStyle = 'rgba(150,150,150,0.10)';
       let runStart = null;
       for (let i = 0; i < altSessGap.length; i++) {
@@ -1611,6 +1672,17 @@ const CSV3_FIELDS = [
     "NMEA2KData",                     // moved from CSV2 (0/1)
     "timeAxisModeChanging",           // moved from CSV2 (0/1)
     "gpsTimeSourceMode",              // 0=auto, 1=NMEA, 2=Phone, 3=NTP (time only)
+    // Fast alt-current diagnostic knobs (Pattern B echo)
+    "faEnabled",                     // 0/1 — global ON/OFF
+    "faAlarmEnable",                 // 0/1 — FAULT drives audible alarm
+    "faAnomPause",                   // 0/1 — freeze anomaly flipbook slots
+    "faRpmEdgeMargin",               // RPM ×10
+    "faAmpsDriftFloorA",             // A ×100
+    "faAmpsDriftPct",                // percent ×10
+    "faAttenUpAmps",                 // A ×10
+    "faAttenDownAmps",               // A ×10
+    "faPeakMinA",                    // A ×100
+    "wifiNapEnabled",                // 0/1 — WiFi Napping standby toggle (Client only)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3991,7 +4063,7 @@ function updateAllEchosOptimized(data) {
         { key: 'LoadDumpDtThresh1',   id: 'LoadDumpDtThresh1_echo',   transform: v => v },
         { key: 'LoadDumpDtThresh',    id: 'LoadDumpDtThresh_echo',    transform: v => v },
         { key: 'LoadDumpDtThresh3',   id: 'LoadDumpDtThresh3_echo',   transform: v => v },
-        { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v },
+        { key: 'ManualSOCPoint', id: 'ManualSOCPoint_echo', transform: v => v / 100 },
         { key: 'ShuntResistanceMicroOhm', id: 'ShuntResistanceMicroOhm_echo', transform: v => v },
         { key: 'InvertAltAmps', id: 'InvertAltAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
         { key: 'InvertBattAmps', id: 'InvertBattAmps_echo', transform: v => v == 1 ? 'Yes' : 'No' },
@@ -4128,6 +4200,16 @@ function updateAllEchosOptimized(data) {
         { key: 'thermalKUndershoot',        id: 'thermalKUndershoot_echo',        transform: v => (v / 100).toFixed(2) },
         { key: 'thermalSettleThreshF',      id: 'thermalSettleThreshF_echo',      transform: v => (v / 10).toFixed(1) },
         { key: 'thermalConsecutiveReads',   id: 'thermalConsecutiveReads_echo',   transform: v => v },
+        { key: 'wifiNapEnabled',            id: 'wifiNapEnabled_echo',            transform: v => v == 1 ? 'On' : 'Off' },
+        // Fast alt-current diagnostic knob echoes (Pattern B). Scales mirror the SafeInt() factors in firmware.
+        { key: 'faEnabled',                 id: 'faEnabled_echo',                 transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'faAlarmEnable',             id: 'faAlarmEnable_echo',             transform: v => v == 1 ? 'On' : 'Off' },
+        { key: 'faRpmEdgeMargin',           id: 'faRpmEdgeMargin_echo',           transform: v => (v / 10) },
+        { key: 'faAmpsDriftFloorA',         id: 'faAmpsDriftFloorA_echo',         transform: v => (v / 100) },
+        { key: 'faAmpsDriftPct',            id: 'faAmpsDriftPct_echo',            transform: v => (v / 10) },
+        { key: 'faAttenUpAmps',             id: 'faAttenUpAmps_echo',             transform: v => (v / 10) },
+        { key: 'faAttenDownAmps',           id: 'faAttenDownAmps_echo',           transform: v => (v / 10) },
+        { key: 'faPeakMinA',                id: 'faPeakMinA_echo',                transform: v => (v / 100) },
 
     ];
 
@@ -4163,7 +4245,6 @@ function updateAllEchosOptimized(data) {
     // Sync <select> elements to current firmware values
     const selectSyncs = [
         { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
-        { key: 'BatteryCurrentSource',  name: 'BatteryCurrentSource' },
         { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
     ];
     selectSyncs.forEach(({ key, name }) => {
@@ -4172,6 +4253,9 @@ function updateAllEchosOptimized(data) {
             if (sel && sel.value !== String(data[key])) sel.value = String(data[key]);
         }
     });
+
+    // BatteryCurrentSource is a segmented A/B control (not a <select>)
+    if ('BatteryCurrentSource' in data) syncSegmentedSelect('BatteryCurrentSource', data.BatteryCurrentSource);
 
     // Time-window buttons: the current setting is shown by highlighting its button
     // (replaces the old "(current: N s)" text echo).
@@ -4712,11 +4796,11 @@ function renderTuningLog(data) {
     // Update live score displays (Settings panel + Live Data → Alternator mirror)
     const liveLabels = ['1m', '10m', '100m', '1000m'];
     (data.live || []).forEach((v, i) => {
-        const txt = v > 0 ? liveLabels[i] + ': ' + v.toFixed(2) : liveLabels[i] + ': —';
+        const val = v > 0 ? v.toFixed(2) : '—';
         const el = document.getElementById('liveScore' + i);
-        if (el) el.textContent = txt;
+        if (el) el.textContent = liveLabels[i] + ': ' + val;
         const elAlt = document.getElementById('liveScoreAlt' + i);
-        if (elAlt) elAlt.textContent = txt;
+        if (elAlt) elAlt.textContent = val;   // Diag row header already lists the windows — no per-value prefix
     });
 
     // Active test score
@@ -4965,11 +5049,11 @@ function renderCVTuningLog(data) {
     // Update CV live score displays (Score Log + Live Data mirror)
     const cvLiveLabels = ['1m', '10m', '100m', '1000m'];
     (data.live || []).forEach((v, i) => {
-        const txt = v > 0 ? cvLiveLabels[i] + ': ' + v.toFixed(2) : cvLiveLabels[i] + ': —';
+        const val = v > 0 ? v.toFixed(2) : '—';
         const el = document.getElementById('cvLiveScore' + i);
-        if (el) el.textContent = txt;
+        if (el) el.textContent = cvLiveLabels[i] + ': ' + val;
         const elAlt = document.getElementById('cvLiveScoreAlt' + i);
-        if (elAlt) elAlt.textContent = txt;
+        if (elAlt) elAlt.textContent = val;   // Diag row header already lists the windows — no per-value prefix
     });
 
     // Active test score banner
@@ -5105,12 +5189,12 @@ function renderThermalTuningLog(data) {
     // Update thermal live score displays (4 windows: 30m, 3h, 24h, 7d)
     const labels = ['30m', '3h', '24h', '7d'];
     (data.live || []).forEach((v, i) => {
-        const txt = v > 0 ? labels[i] + ': ' + v.toFixed(4) : labels[i] + ': —';
+        const val = v > 0 ? v.toFixed(4) : '—';
         const el = document.getElementById('thermalLiveScore' + i);
-        if (el) el.textContent = txt;
-        // Also update the always-on Alternator Live Data tab spans
+        if (el) el.textContent = labels[i] + ': ' + val;
+        // Diag mirror: row header already lists the windows — show the bare value, no per-value prefix
         const altEl = document.getElementById('thermalLiveScoreAlt' + i);
-        if (altEl) altEl.textContent = txt;
+        if (altEl) altEl.textContent = val;
     });
 
     // Active test score banner
@@ -7703,6 +7787,7 @@ function updateTogglesFromData(data) {
                 checkbox.checked = shouldBeChecked;
                 toggleStates[dataKey] = value;
             }
+            syncSegmented(id); // keep any segmented A/B control mirrored to firmware state (no-op if none)
         };
 
         // Update all toggle checkboxes with their data keys (keep existing calls)
@@ -7732,6 +7817,10 @@ function updateTogglesFromData(data) {
         updateCheckbox("AutoAltCurrentZero_checkbox", data.AutoAltCurrentZero, "AutoAltCurrentZero");
         updateCheckbox("CVTuningMode_checkbox", data.CVTuningMode, "CVTuningMode");
         updateCheckbox("ThermalTuningMode_checkbox", data.ThermalTuningMode, "ThermalTuningMode");
+        // Fast alt-current diagnostic toggles (Pattern B)
+        updateSegToggle("faEnabled", data.faEnabled);
+        updateSegToggle("faAlarmEnable", data.faAlarmEnable);
+        faUpdatePauseBtn(data.faAnomPause);
         // Three checkboxes share the same firmware flag — all three reflect data.testProtectionsEnabled.
         updateCheckbox("testProtectionsEnabled_plant_checkbox",   data.testProtectionsEnabled, "testProtectionsEnabled");
         updateCheckbox("testProtectionsEnabled_current_checkbox", data.testProtectionsEnabled, "testProtectionsEnabled");
@@ -7749,6 +7838,10 @@ function updateTogglesFromData(data) {
         updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
+        updateCheckbox("wifiNapEnabled_checkbox", data.wifiNapEnabled, "wifiNapEnabled");
+        // WiFi Napping only applies in Client mode (a SoftAP can't sleep) — hide the row in AP mode.
+        const napRow = document.getElementById("wifiNapEnabled_row");
+        if (napRow) napRow.style.display = (window._lastKnownMode === 1) ? "none" : "";  // 1 = MODE_AP
         updateCloudStatus();
         if (data.CloudFeatures !== undefined) {
             updateCloudFeaturesTabVisibility(data.CloudFeatures === 1);
@@ -7963,7 +8056,7 @@ window.addEventListener("load", function () {
     // IDs that are intentionally absent at times (created on demand, or only present
     // while a transient dialog is open) — these are checked-then-created/guarded, so a
     // null lookup is expected, not a stale reference. Don't flag them.
-    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint']);
+    const optionalElementIds = new Set(['recoveryDialog', 'lt-cloud-hint', 'faflip-pause-btn']);
 
     document.getElementById = function (id) {
         const element = originalGetElementById.call(document, id);
@@ -8373,6 +8466,9 @@ window.addEventListener("load", function () {
             // Thermal tuning plot: cache the two fast (CSV1) series for the live ring.
             try { thermalLiveOnCsv1(data); } catch (e) { }
 
+            // Gate-tuning readout: IExcessK rides CSV1 (amps − setpoint); compute its 10s peak here.
+            try { gateReadoutOnCsv1(data); } catch (e) { }
+
             // Update all "session window" labels with the current elapsed time since
             // "Reset Peak Values" was pressed (or boot). One CSV1 field drives every
             // .session-window-label span on the diagnostics page in one pass.
@@ -8686,6 +8782,9 @@ window.addEventListener("load", function () {
             // Thermal tuning plot: sample the live ring off this CSV2 frame (~5s).
             try { thermalLiveOnCsv2(data); } catch (e) { }
 
+            // Gate-tuning readouts: render the firmware 10s extremes next to each threshold.
+            try { gateReadoutOnCsv2(data); } catch (e) { }
+
             // IMU zero/level calibration status (offsets sent deg ×100)
             try {
                 const hOff = Number(data.imuHeelOffset) / 100;
@@ -8852,6 +8951,22 @@ window.addEventListener("load", function () {
                     // Bus-only worst read timers: firmware sends µs; display in ms to match the rest of this page
                     else if (key === "inaBusReadWorstUs" || key === "imuFifoFetchWorstUs") {
                         newTextContent = (value / 1000).toFixed(2);
+                    }
+                    // Fast alt-current diagnostics status strip (item 10)
+                    else if (key === "faChanState") {
+                        newTextContent = value === 1 ? "Sampling" : (value === 2 ? "Dormant (no signal)" : "Off");
+                    }
+                    else if (key === "faDetectK") {
+                        newTextContent = value === 0 ? "None" : ("k=" + value);
+                    }
+                    else if (key === "faSesPkpkWorst" || key === "faSesPeakWorst") {
+                        newTextContent = (value / 100).toFixed(2);  // A ×100
+                    }
+                    else if (key === "faSesPeakWorstHz" || key === "faDomFreqHz") {
+                        newTextContent = (value / 10).toFixed(1);   // Hz ×10
+                    }
+                    else if (key === "faDomAmp") {
+                        newTextContent = (value / 100).toFixed(2);  // A ×100
                     }
                     // Time values that need conversion from minutes to days/hours/minutes
                     else if (["timeToFullChargeMin", "timeToFullDischargeMin"].includes(key)) {
@@ -9366,6 +9481,16 @@ window.addEventListener("load", function () {
                 ["ft_faMatrixFlush_ses_ID", "ft_faMatrixFlush_ses"],
                 ["ft_faDetector_win_ID", "ft_faDetector_win"],
                 ["ft_faDetector_ses_ID", "ft_faDetector_ses"],
+                ["ft_faWindowFinalize_win_ID", "ft_faWindowFinalize_win"],
+                ["ft_faWindowFinalize_ses_ID", "ft_faWindowFinalize_ses"],
+                ["faChanState_ID", "faChanState"],
+                ["faCellsUsed_ID", "faCellsUsed"],
+                ["faDetectK_ID", "faDetectK"],
+                ["faAnomalyCount_ID", "faAnomalyCount"],
+                ["faSesPkpkWorst_ID", "faSesPkpkWorst"],
+                ["faDomAmp_ID", "faDomAmp"],
+                ["faDomFreq_ID", "faDomFreqHz"],
+                ["faDomRpm_ID", "faDomRpm"],
                 ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
@@ -9606,15 +9731,14 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // Update thermal live score spans in Alternator Live Data tab (always-on)
-            // thermalLiveScore0-3 are ×10000 in CSV2; display with window labels
+            // Update thermal live score spans in the Diag Control Accuracy table (always-on).
+            // thermalLiveScore0-3 are ×10000 in CSV2; show the bare value — the row header lists the windows.
             {
-                const thermalAltLabels = ['30m', '3h', '24h', '7d'];
                 for (let i = 0; i < 4; i++) {
                     const raw = data['thermalLiveScore' + i];
                     if (raw === undefined) continue;
                     const v = raw / 10000;
-                    const txt = v > 0 ? thermalAltLabels[i] + ': ' + v.toFixed(4) : thermalAltLabels[i] + ': —';
+                    const txt = v > 0 ? v.toFixed(4) : '—';
                     const cacheKey = 'thermalLiveScoreAlt_' + i;
                     if (lastValues.get(cacheKey) !== txt) {
                         lastValues.set(cacheKey, txt);
@@ -10225,6 +10349,10 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("AutoAltCurrentZero_checkbox").checked = (document.getElementById("AutoAltCurrentZero").value === "1");
     document.getElementById("HardwarePresent_checkbox").checked = (document.getElementById("hardwarePresent").value === "1");
 
+    // Mirror the segmented A/B controls to their hidden checkbox state on load
+    ['ManualFieldToggle_checkbox', 'TempSource_checkbox', 'bmsLogicLevelOff_checkbox',
+        'AlarmLatchEnabled_checkbox', 'timeAxisModeChanging_checkbox'].forEach(syncSegmented);
+
     setupInputValidation(); // Client side input validation of settings
     setupKWInputListeners();
 
@@ -10523,6 +10651,12 @@ function showSubTab(parentTab, subTabName, evt = null) {
     // Initialize / refresh the barometer panel whenever the Weather/Solar tab is opened (baro lives there now)
     if (parentTab === 'livedata' && subTabName === 'weathersolar') {
         if (typeof window.initBaroPanel === 'function') window.initBaroPanel();
+    }
+
+    // Resume the Fast Alt-Current scope only if its (collapsed-by-default) section is already expanded
+    if (parentTab === 'livedata' && subTabName === 'diag') {
+        const faDet = document.getElementById('fa-monitor-details');
+        if (faDet && faDet.open && typeof fastDiagOnOpen === 'function') fastDiagOnOpen();
     }
 
     // Initialize profile tab when switching to My Profile
@@ -11191,6 +11325,59 @@ function handleManualFieldToggle(checkboxId) {
     if (hiddenInput) hiddenInput.value = invertedVal;
 
     return result;
+}
+
+// ===== Segmented A/B controls =====
+// Render peer-choice settings (mode A vs mode B) as a segmented control instead of
+// an on/off slider, reusing the existing hidden checkbox plumbing untouched. The
+// visible buttons drive the hidden checkbox; firmware sync, pendingToggles, the
+// onchange handler and form submit all still flow through that checkbox.
+// data-seg-for names the hidden checkbox; each button's data-checked is the
+// checked-state ("0"/"1") that button represents.
+function syncSegmented(checkboxId) {
+    const cb = document.getElementById(checkboxId);
+    if (!cb) return;
+    const wrap = document.querySelector('.ab-seg[data-seg-for="' + checkboxId + '"]');
+    if (!wrap) return;
+    wrap.querySelectorAll('.cap-mode-btn').forEach(b => {
+        b.classList.toggle('cap-mode-active', (b.dataset.checked === '1') === cb.checked);
+    });
+}
+
+function abSegClick(btn) {
+    const wrap = btn.closest('.ab-seg');
+    if (!wrap) return;
+    const cbId = wrap.dataset.segFor;
+    const cb = document.getElementById(cbId);
+    if (!cb) return;
+    const want = (btn.dataset.checked === '1');
+    if (cb.checked !== want) {
+        cb.checked = want;
+        cb.dispatchEvent(new Event('change')); // runs the checkbox's existing onchange (handler + form submit)
+    }
+    syncSegmented(cbId);
+}
+
+// Segmented control over a hidden value input (no checkbox) for multi-value peer
+// settings like BatteryCurrentSource. data-seg-name names the hidden input
+// (id="<name>_val", name="<name>"); each button's data-val is the value to send.
+function syncSegmentedSelect(name, val) {
+    const wrap = document.querySelector('.ab-seg-select[data-seg-name="' + name + '"]');
+    if (!wrap) return;
+    wrap.querySelectorAll('.cap-mode-btn').forEach(b => {
+        b.classList.toggle('cap-mode-active', b.dataset.val === String(val));
+    });
+}
+
+function abSegSelectClick(btn) {
+    const wrap = btn.closest('.ab-seg-select');
+    if (!wrap) return;
+    const name = wrap.dataset.segName;
+    const hidden = document.getElementById(name + '_val');
+    if (hidden) hidden.value = btn.dataset.val;
+    syncSegmentedSelect(name, btn.dataset.val);
+    const form = btn.closest('form');
+    if (form) { updatePasswordFields(); form.submit(); }
 }
 
 // ==================== PID TUNING PLOT (SEPARATE SYSTEM) ====================
@@ -11988,7 +12175,7 @@ async function pollLogRequest() {
         g_logRelayBusy = true;
 
         // Fetch every log from the device over LAN (tolerate individual failures).
-        const [thermal, pid, cvB64, systemid, tuning, cvtuning, thermaltuning] = await Promise.all([
+        const [thermal, pid, cvB64, systemid, tuning, cvtuning, thermaltuning, famatrix, fascopeB64, faflipB64] = await Promise.all([
             fetchLogText('/thermallog.csv'),
             fetchLogText('/pidlog.csv'),
             fetchLogBase64('/cvlog.bin'),
@@ -11996,6 +12183,9 @@ async function pollLogRequest() {
             fetchLogJson('/tuninglog'),
             fetchLogJson('/cvtuninglog'),
             fetchLogJson('/thermaltuninglog'),
+            fetchLogText('/famatrix.csv'),    // Resonance & Ripple Map (alt-current disturbance matrix) rides along
+            fetchLogBase64('/fastscope.bin'), // Live Oscilloscope capture (raw FSC1 blob, like cvlog)
+            fetchLogBase64('/faflip.bin'),    // Reference Flipbook — reference pages + anomaly captures (FFLP blob)
         ]);
 
         const logsIncluded = [];
@@ -12007,6 +12197,9 @@ async function pollLogRequest() {
         if (tuning != null) { logs.tuning = tuning; logsIncluded.push('tuning'); }
         if (cvtuning != null) { logs.cvtuning = cvtuning; logsIncluded.push('cvtuning'); }
         if (thermaltuning != null) { logs.thermaltuning = thermaltuning; logsIncluded.push('thermaltuning'); }
+        if (famatrix != null) { logs.famatrix = famatrix; logsIncluded.push('famatrix'); }
+        if (fascopeB64 != null) { logs.fastscope_base64 = fascopeB64; logsIncluded.push('fastscope'); }
+        if (faflipB64 != null) { logs.faflip_base64 = faflipB64; logsIncluded.push('faflip'); }
 
         const deviceUid = ((document.getElementById('profile-device-uid') || {}).textContent
             || (document.getElementById('systemDeviceUID_ID') || {}).textContent || 'unknown').trim();
@@ -14954,8 +15147,8 @@ window.addEventListener('load', function () {
       const wrap = document.createElement('span');
       wrap.style.cssText = 'display:inline-flex;align-items:center;gap:3px;';
       const lbl = document.createElement('span'); lbl.textContent = sc.label;
-      const mn = document.createElement('input'); mn.type = 'number'; mn.placeholder = 'min'; mn.style.width = '54px';
-      const mx = document.createElement('input'); mx.type = 'number'; mx.placeholder = 'max'; mx.style.width = '54px';
+      const mn = document.createElement('input'); mn.type = 'number'; mn.placeholder = 'min'; mn.style.width = '70px';
+      const mx = document.createElement('input'); mx.type = 'number'; mx.placeholder = 'max'; mx.style.width = '70px';
       if (saved[sc.name]) { mn.value = saved[sc.name][0]; mx.value = saved[sc.name][1]; }
       wrap.appendChild(lbl); wrap.appendChild(mn); wrap.appendChild(mx);
       ctrl.appendChild(wrap);
@@ -15527,14 +15720,52 @@ window.addEventListener('load', function () {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fast alternator-current scope (Plots → Scope). Pulls /fastscope.bin — a 250 ms
+// Fast alternator-current scope (Plots → Scope). Pulls /fastscope.bin — a 500 ms
 // raw capture at 20 kSPS — and renders it as amps vs milliseconds. Zoom buttons
-// show the LAST N ms of the capture (ms is ground truth); the cycle hint estimates
-// one electrical cycle from the measured rectifier pulse spacing.
+// show the LAST N ms of the capture (ms is ground truth); the hint reports how many engine
+// and alternator revolutions that window spans, from the live RPM and PulleyRatio.
 // ─────────────────────────────────────────────────────────────────────────────
 let fastScopePlot = null;
 let fastScopeData = null;
 let fastScopeViewMs = 250;
+let fastScopeAmpsMin = null, fastScopeAmpsMax = null;  // null = auto-scale; set via the click-to-edit Y widget, persisted to localStorage like the other plots
+let fastScopePaused = false;
+// Raw and Filtered are independent show/hide toggles (plot series 1 and 2), not an A/B switch.
+// Raw = the full 20 kHz samples; Filtered = the boxcar-16 the analysis uses (≈550 Hz bandwidth).
+// Any combination is allowed, including both or neither. Default: Raw on, Filtered off.
+let fastScopeShowRaw = true;
+let fastScopeShowFilt = false;
+const FA_SCOPE_BOXCAR_N = 16;   // matches the firmware FA_DECIM — first null 20 kHz/16 = 1.25 kHz, −3 dB ≈ 550 Hz
+
+// Trailing N-sample moving average (same shape as the firmware boxcar-16 decimation, but kept
+// at full sample positions so the time axis is unchanged — a single-sample glitch shrinks ~Nx).
+function fastScopeBoxcar(amps, N) {
+    const n = amps.length, out = new Array(n);
+    let acc = 0;
+    for (let i = 0; i < n; i++) {
+        acc += amps[i];
+        if (i >= N) acc -= amps[i - N];
+        out[i] = acc / Math.min(i + 1, N);
+    }
+    return out;
+}
+// Plot data is always [tMs, rawAmps, filteredAmps] — both series columns are present every
+// frame; the toggles control series visibility (show), not which column is computed. The
+// boxcar over ~5 k samples is cheap, so we compute it unconditionally.
+function fastScopeViewData() {
+    if (!fastScopeData) return [[], [], []];
+    return [fastScopeData.tMs, fastScopeData.amps, fastScopeBoxcar(fastScopeData.amps, FA_SCOPE_BOXCAR_N)];
+}
+function fastScopeLoadAmpsRange() {
+    try { const s = JSON.parse(localStorage.getItem('faScopeAmpsRange')); if (s && isFinite(s.min) && isFinite(s.max)) { fastScopeAmpsMin = s.min; fastScopeAmpsMax = s.max; } } catch (e) { }
+}
+function fastScopeSaveAmpsRange() {
+    try {
+        if (fastScopeAmpsMin != null && fastScopeAmpsMax != null) localStorage.setItem('faScopeAmpsRange', JSON.stringify({ min: fastScopeAmpsMin, max: fastScopeAmpsMax }));
+        else localStorage.removeItem('faScopeAmpsRange');
+    } catch (e) { }
+}
+fastScopeLoadAmpsRange();
 let fastScopeResizeObserver = null;
 
 function parseFastScope(buf) {
@@ -15556,35 +15787,21 @@ function parseFastScope(buf) {
     return { rate, count, zeroMv, apv, atten, state, tMs, amps };
 }
 
-// One electrical cycle from the waveform's own pulse spacing: count rising crossings
-// of the mean (with hysteresis so noise doesn't double-count), average the spacing,
-// then ×6 — a 3-phase full-wave rectifier puts 6 ripple pulses in each electrical cycle.
-function fastScopeCycleHint(d) {
-    const n = d.amps.length;
-    if (n < 200) return '';
-    let mean = 0, mn = Infinity, mx = -Infinity;
-    for (let i = 0; i < n; i++) {
-        mean += d.amps[i];
-        if (d.amps[i] < mn) mn = d.amps[i];
-        if (d.amps[i] > mx) mx = d.amps[i];
-    }
-    mean /= n;
-    const pkpk = mx - mn;
-    if (pkpk < 0.8) return 'Signal too quiet to measure a pulse period.';
-    const hyst = Math.max(0.2, pkpk * 0.15);
-    let armed = false, first = -1, last = -1, crossings = 0;
-    for (let i = 0; i < n; i++) {
-        if (d.amps[i] < mean - hyst) armed = true;
-        else if (armed && d.amps[i] > mean + hyst) {
-            armed = false;
-            crossings++;
-            if (first < 0) first = i;
-            last = i;
-        }
-    }
-    if (crossings < 3) return '';
-    const periodMs = ((last - first) / (crossings - 1)) / d.rate * 1000;
-    return '1 electrical cycle ≈ ' + (periodMs * 6).toFixed(1) + ' ms (pulse period ' + periodMs.toFixed(2) + ' ms)';
+// How many engine and alternator turns the currently-shown window spans. Engine speed is the
+// live tach reading (window._debugData.RPM); the alternator turns PulleyRatio times faster
+// (Alt_RPM = RPM × PulleyRatio, matching the firmware's Alt_RPM). The count scales with the View
+// buttons because the window is fastScopeViewMs wide. Approximate — RPM is a live reading, not
+// measured off this trace, so a sudden RPM change mid-capture won't be reflected exactly.
+function fastScopeRevHint() {
+    const rpm = parseFloat((window._debugData || {}).RPM);
+    if (!isFinite(rpm) || rpm < 1) return 'Engine stopped — no revolutions to show.';
+    const fmt = v => v < 1 ? v.toFixed(2) : v.toFixed(1);
+    const engineRevs = rpm / 60 * (fastScopeViewMs / 1000);
+    const pulleyEl = document.getElementById('PulleyRatio_echo');
+    const pulley = pulleyEl ? parseFloat(pulleyEl.textContent) : NaN;
+    let s = '≈ ' + fmt(engineRevs) + ' engine revs';
+    if (isFinite(pulley) && pulley > 0) s += ' · ' + fmt(engineRevs * pulley) + ' alternator revs';
+    return s + ' in this ' + fastScopeViewMs + ' ms window';
 }
 
 function initFastScopePlot() {
@@ -15593,23 +15810,73 @@ function initFastScopePlot() {
     const opts = {
         width: Math.min(plotEl.clientWidth || 360, 800),
         height: 300,
-        title: "Alternator Current — 250 ms Capture",
+        // No title: the view buttons re-window one capture, so any fixed "250 ms" label is wrong once zoomed. Signal is named on the Y axis instead.
         series: [
             {},
-            { label: "Alternator Current (A)", stroke: "#2196F3", width: 1, points: { show: false }, scale: "amps" }
+            { label: "Raw (A)", stroke: "#2196F3", width: 1, points: { show: false }, scale: "amps", show: fastScopeShowRaw },
+            { label: "Filtered (A)", stroke: "#FF9800", width: 1.5, points: { show: false }, scale: "amps", show: fastScopeShowFilt }
         ],
         scales: {
-            x: { time: false },
-            amps: { auto: true }
+            // x window pinned by a range fn (re-read each redraw) to the last fastScopeViewMs of the
+            // capture — so a refresh or zoom never flashes through the full 250 ms range. auto:false
+            // keeps setData from re-fitting x. dEnd = newest sample time.
+            x: {
+                time: false,
+                auto: false,
+                range: () => {
+                    const d = fastScopeData;
+                    const tEnd = (d && d.count > 0) ? d.tMs[d.count - 1] : fastScopeViewMs;
+                    return [Math.max(0, tEnd - fastScopeViewMs), tEnd];
+                }
+            },
+            // Default auto (NOT auto:false): uPlot only recomputes the data min/max it passes to
+            // this fn when the scale is auto, so the auto-fit branch AND the "auto" checkbox need
+            // fresh extents on each setData. Manual pin returns the saved range. Mirrors the CV plot.
+            amps: {
+                range: (u, mn, mx) => (fastScopeAmpsMin != null && fastScopeAmpsMax != null)
+                    ? [fastScopeAmpsMin, fastScopeAmpsMax]
+                    : (mn == null ? [-1, 1] : uPlot.rangeNum(mn, mx, 0.1, true))
+            }
         },
         axes: [
             { label: "Milliseconds", grid: { show: true } },
-            { scale: "amps", label: "Amperes", grid: { show: true }, side: 3 }
+            {
+                scale: "amps", label: "Alternator Current (A)", grid: { show: true }, side: 3,
+                splits: edgeLabeledSplits(() => fastScopeAmpsMin != null)  // show the editable min/max at the edges when manually ranged
+            }
         ],
         legend: { show: false }
     };
-    fastScopePlot = new uPlot(opts, [[], []], plotEl);
+    fastScopePlot = new uPlot(opts, [[], [], []], plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(fastScopePlot);
+
+    // Auto checkbox (top-right) — same convention as the other plots. No "lock" button:
+    // this is a one-shot capture, not a streaming autoscale loop. Checked = auto-fit (null
+    // range vars); unchecked = pin to whatever is currently shown.
+    plotEl.style.position = 'relative';
+    const existingAs = plotEl.querySelector('.autoscale-ctrl');
+    if (existingAs) existingAs.remove();
+    const asDiv = document.createElement('div');
+    asDiv.className = 'autoscale-ctrl';
+    asDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;align-items:center;gap:3px;font-size:11px;opacity:0.6;';
+    asDiv.innerHTML = '<input type="checkbox" id="autoscale-fastscope-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-fastscope-cb" style="cursor:pointer;user-select:none;">auto</label>';
+    plotEl.appendChild(asDiv);
+    const faCb = document.getElementById('autoscale-fastscope-cb');
+    faCb.checked = (fastScopeAmpsMin == null);  // null range vars = auto-fit
+    faCb.addEventListener('change', e => {
+        if (e.target.checked) { fastScopeAmpsMin = null; fastScopeAmpsMax = null; }
+        else if (fastScopePlot) { fastScopeAmpsMin = fastScopePlot.scales.amps.min; fastScopeAmpsMax = fastScopePlot.scales.amps.max; }
+        fastScopeSaveAmpsRange();
+        if (fastScopePlot) fastScopePlot.setData(fastScopePlot.data);
+    });
+
+    // Click-to-edit Y limits — the same shared widget every other plot uses; persisted to localStorage.
+    // Editing pins the range (uncheck auto); clearing the boxes returns to auto-fit (re-check).
+    attachYAxisEdit(fastScopePlot, [{
+        scale: 'amps', decimals: 2,
+        apply: (mn, mx) => { fastScopeAmpsMin = mn; fastScopeAmpsMax = mx; faCb.checked = false; fastScopeSaveAmpsRange(); if (fastScopePlot) fastScopePlot.setData(fastScopePlot.data); },
+        auto: () => { fastScopeAmpsMin = null; fastScopeAmpsMax = null; faCb.checked = true; fastScopeSaveAmpsRange(); if (fastScopePlot) fastScopePlot.setData(fastScopePlot.data); }
+    }]);
     const resizePlot = debounce(() => {
         const el = document.getElementById('fastscope-plot');
         if (el && fastScopePlot) fastScopePlot.setSize({ width: Math.min(el.clientWidth || 360, 800), height: 300 });
@@ -15624,14 +15891,12 @@ function fastScopeStatusText(d) {
     if (d.state === 0) return 'Channel off (sampler failed to start).';
     if (d.state === 2) return 'Channel dormant — input reads railed full-scale (sense jumper open?).';
     const range = d.atten ? 'high range' : 'standard range';
-    return 'Captured ' + d.count + ' samples at ' + (d.rate / 1000) + ' kHz, ' + range + '.';
+    return 'Captured ' + d.count + ' samples at ' + (d.rate / 1000) + ' kHz, ' + range + '. Auto-updates every 5 seconds while this panel is open.';
 }
 
 function fastScopeApplyZoom() {
-    if (!fastScopePlot || !fastScopeData || fastScopeData.count === 0) return;
-    const tEnd = fastScopeData.tMs[fastScopeData.count - 1];
-    const min = Math.max(0, tEnd - fastScopeViewMs);
-    fastScopePlot.setScale('x', { min: min, max: tEnd });
+    // Re-run the x range fn with the current fastScopeViewMs — a queued setData is all it takes.
+    if (fastScopePlot && fastScopeData && fastScopeData.count > 0) fastScopePlot.setData(fastScopePlot.data);
 }
 
 function fastScopeZoom(ms, btn) {
@@ -15639,11 +15904,16 @@ function fastScopeZoom(ms, btn) {
     document.querySelectorAll('.fastscope-zoom').forEach(b => b.classList.remove('active'));
     if (btn) btn.classList.add('active');
     fastScopeApplyZoom();
+    // Revs shown scale with the window width, so refresh the hint on every view change.
+    const hint = document.getElementById('fastscope-cycle-hint');
+    if (hint && fastScopeData && fastScopeData.count > 0) hint.textContent = fastScopeRevHint();
 }
 
-function fetchFastScope() {
+// silent=true (the 5 s auto-refresh) skips the "Fetching…" status flash so the panel updates in
+// place. The x range fn pins the view, so setData alone re-windows without a full-range flash.
+function fetchFastScope(silent) {
     const status = document.getElementById('fastscope-status');
-    if (status) status.textContent = 'Fetching…';
+    if (status && !silent) status.textContent = 'Fetching…';
     fetch(buildURL('/fastscope.bin'), { cache: 'no-cache' })
         .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
         .then(buf => {
@@ -15651,13 +15921,10 @@ function fetchFastScope() {
             fastScopeData = d;
             if (status) status.textContent = fastScopeStatusText(d);
             const hint = document.getElementById('fastscope-cycle-hint');
-            if (hint) hint.textContent = (d && d.count > 0) ? fastScopeCycleHint(d) : '';
+            if (hint) hint.textContent = (d && d.count > 0) ? fastScopeRevHint() : '';
             if (!d || d.count === 0) return;
             initFastScopePlot();
-            if (fastScopePlot) {
-                fastScopePlot.setData([d.tMs, d.amps]);
-                fastScopeApplyZoom();
-            }
+            if (fastScopePlot) fastScopePlot.setData(fastScopeViewData());  // x range fn pins the window — no flash
         })
         .catch(e => { if (status) status.textContent = 'Capture unavailable (' + e.message + ').'; });
 }
@@ -15665,7 +15932,90 @@ function fetchFastScope() {
 function fastScopeOnOpen() {
     if (!fastScopeData) fetchFastScope();
     else if (fastScopePlot) setTimeout(() => fastScopePlot.setSize({ width: Math.min(document.getElementById('fastscope-plot').clientWidth || 360, 800), height: 300 }), 50);
-    if (!fastFlipPages) fetchFastFlip();
+    fetchFastFlip();   // always re-pull on open so freshly-frozen reference pages show without a manual Refresh
+}
+
+// Pause freezes the displayed capture by halting the ~5 s auto-refresh; the manual Refresh
+// Capture button still works while paused so you can step to a fresh frame on demand.
+function fastScopePauseToggle(btn) {
+    fastScopePaused = !fastScopePaused;
+    if (btn) { btn.textContent = fastScopePaused ? 'Resume' : 'Pause'; btn.classList.toggle('active', fastScopePaused); }
+    const status = document.getElementById('fastscope-status');
+    if (status && fastScopePaused) status.textContent = 'Paused — showing a frozen capture.';
+}
+
+// Export the currently-shown scope capture as CSV. Always includes BOTH the raw 20 kHz samples
+// and the boxcar-16 filtered version (what the analysis sees), regardless of the Raw/Filtered view.
+function downloadFaScopeCsv() {
+    if (!fastScopeData || !fastScopeData.count) { alert('No scope capture yet — press Refresh Capture first.'); return; }
+    const d = fastScopeData;
+    const filt = fastScopeBoxcar(d.amps, FA_SCOPE_BOXCAR_N);
+    let csv = 'ms,amps_raw,amps_filtered\n';
+    for (let i = 0; i < d.count; i++) csv += d.tMs[i].toFixed(4) + ',' + d.amps[i].toFixed(3) + ',' + filt[i].toFixed(3) + '\n';
+    const dt = new Date(), p = n => String(n).padStart(2, '0');
+    const stamp = dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + ' ' + p(dt.getHours()) + '-' + p(dt.getMinutes()) + '-' + p(dt.getSeconds());
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = 'Alt Scope Capture ' + stamp + '.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// Live Data → Diag sub-tab (item 1). Opens the relocated scope/flipbook and starts the
+// ~5 s scope auto-refresh (item 2). The refresh polls /fastscope.bin only while the Diag
+// panel is the active sub-tab AND the page is visible; it stops itself otherwise. The fetch
+// runs on the Core-0 web task — the only control-loop cost is the ~0.1–0.2 ms ring-snapshot
+// spinlock wait (verified safe in the audit).
+let fastDiagAutoTimer = null;
+function fastDiagIsVisible() {
+    if (document.visibilityState !== 'visible') return false;
+    const panel = document.getElementById('livedata-diag');
+    if (!panel || !panel.classList.contains('active')) return false;
+    // Fast Alt-Current Monitor now lives in a collapsed-by-default <details>; only live when expanded
+    const det = document.getElementById('fa-monitor-details');
+    return !!(det && det.open);
+}
+let fastDiagFlipTick = 0;
+function fastDiagStartAuto() {
+    if (fastDiagAutoTimer) return;
+    fastDiagFlipTick = 0;
+    fastDiagAutoTimer = setInterval(() => {
+        if (!fastDiagIsVisible()) { fastDiagStopAuto(); return; }
+        if (!fastScopePaused) fetchFastScope(true);  // silent: no "Fetching…" flash on the 5 s tick. Pause freezes auto-refresh; manual Refresh still works
+        // Flipbook poll every 6th tick (~30 s): reference bands freeze themselves, so their
+        // buttons light up here with no manual press. Silent + non-disruptive (see fetchFastFlip).
+        if (++fastDiagFlipTick % 6 === 0) fetchFastFlip(true);
+    }, 5000);
+}
+function fastDiagStopAuto() {
+    if (fastDiagAutoTimer) { clearInterval(fastDiagAutoTimer); fastDiagAutoTimer = null; }
+}
+function fastDiagOnOpen() {
+    if (!fastScopeData) fetchFastScope();
+    else if (fastScopePlot) setTimeout(() => fastScopePlot.setSize({ width: Math.min(document.getElementById('fastscope-plot').clientWidth || 360, 800), height: 300 }), 50);
+    fetchFastFlip();   // always re-pull on open so freshly-frozen reference pages show without a manual Refresh
+    fastDiagStartAuto();
+}
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { if (fastDiagIsVisible()) fastDiagStartAuto(); }
+    else fastDiagStopAuto();
+});
+
+// Per-page CSV export of the currently-shown flipbook waveform (item 8).
+function downloadFaFlipPageCsv() {
+    if (!fastFlipPages || fastFlipSelected < 0) { alert('Select a flipbook page first.'); return; }
+    const pg = fastFlipPages[fastFlipSelected];
+    if (!pg || !pg.used) { alert('That flipbook page is empty.'); return; }
+    let csv = 'ms,amps\n';
+    for (let s = 0; s < pg.t_ms.length; s++) csv += pg.t_ms[s].toFixed(3) + ',' + pg.amps_t[s].toFixed(3) + '\n';
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    const stamp = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds());
+    const tag = pg.isAnomaly ? ('anomaly k' + pg.patternK) : (pg.band + 'k-' + (pg.band + 1) + 'k RPM');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = 'Alt Waveform ' + tag + ' ' + stamp + '.csv';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15673,9 +16023,78 @@ function fastScopeOnOpen() {
 // then fixed 2020-byte pages — slots 0..refSlots-1 are the per-1000-RPM reference
 // pages, the rest are anomaly captures. Layout pinned by static_assert in firmware.
 // ─────────────────────────────────────────────────────────────────────────────
+// ── Current Ripple Analyzer: segmented Off/On toggles + the chart Pause/Resume (faAnomPause) ──
+// updateSegToggle mirrors updateCheckbox's pending-toggle reconciliation so an in-flight
+// optimistic press isn't reverted by a stale echo before the regulator confirms.
+function updateSegToggle(key, value) {
+    if (value === undefined) return;
+    const pending = pendingToggles.get(key);
+    if (pending) {
+        if (pending.deadlineMs === undefined) pending.deadlineMs = Date.now() + 2500;
+        if (value !== pending.desiredValue) { if (Date.now() <= pending.deadlineMs) return; pendingToggles.delete(key); }
+        else pendingToggles.delete(key);
+    }
+    const off = document.getElementById(key + '_off');
+    const on = document.getElementById(key + '_on');
+    const v = value | 0;
+    if (off) off.classList.toggle('cap-mode-active', v === 0);
+    if (on) on.classList.toggle('cap-mode-active', v === 1);
+}
+function faSegSet(key, value, form) {
+    const inp = document.getElementById(key);
+    if (inp) inp.value = value;
+    pendingToggles.set(key, { desiredValue: value, baseRev: lastSeenRev });
+    const off = document.getElementById(key + '_off');
+    const on = document.getElementById(key + '_on');
+    if (off) off.classList.toggle('cap-mode-active', value === 0);
+    if (on) on.classList.toggle('cap-mode-active', value === 1);
+    if (form) form.submit();
+    submitMessage();
+}
+let _faAnomPause = 0;
+function faUpdatePauseBtn(value) {
+    if (value === undefined) return;
+    const pending = pendingToggles.get('faAnomPause');
+    if (pending) {
+        if (pending.deadlineMs === undefined) pending.deadlineMs = Date.now() + 2500;
+        if (value !== pending.desiredValue) { if (Date.now() <= pending.deadlineMs) return; pendingToggles.delete('faAnomPause'); }
+        else pendingToggles.delete('faAnomPause');
+    }
+    _faAnomPause = value | 0;
+    const b = document.getElementById('faflip-pause-btn');
+    if (b) {
+        b.textContent = _faAnomPause ? 'Resume' : 'Pause';
+        b.title = _faAnomPause ? 'Anomaly captures paused — click to resume saving new fault snapshots'
+            : 'Pause — stop new fault snapshots from overwriting the saved ones';
+    }
+}
+function faAnomPauseToggle() {
+    if (!currentAdminPassword) { alert('Please unlock settings first'); return; }
+    const next = _faAnomPause ? 0 : 1;
+    pendingToggles.set('faAnomPause', { desiredValue: next, baseRev: lastSeenRev });
+    faUpdatePauseBtn(next);
+    fetchWithTimeout(buildURL('/get?password=' + encodeURIComponent(currentAdminPassword) + '&faAnomPause=' + next), {}, 5000).then(() => {}).catch(() => {});
+}
+// Live Oscilloscope: Raw and Filtered are independent show/hide toggles (depress/return per
+// click) — any combination including both traces at once or neither. Each button drives its
+// own plot series' visibility; the button's cap-mode-active class mirrors the shown state.
+function fastScopeViewToggle(which, btn) {
+    if (which === 'raw') fastScopeShowRaw = !fastScopeShowRaw;
+    else fastScopeShowFilt = !fastScopeShowFilt;
+    const raw = document.getElementById('faScopeRawBtn');
+    const filt = document.getElementById('faScopeFiltBtn');
+    if (raw) raw.classList.toggle('cap-mode-active', fastScopeShowRaw);
+    if (filt) filt.classList.toggle('cap-mode-active', fastScopeShowFilt);
+    if (fastScopePlot) {
+        fastScopePlot.setSeries(1, { show: fastScopeShowRaw });
+        fastScopePlot.setSeries(2, { show: fastScopeShowFilt });
+    }
+}
+
 let fastFlipPages = null;
 let fastFlipPlot = null;
 let fastFlipSelected = -1;
+let faFlipAxis = {};   // per-slot Y-axis state, in-session only: { auto, locked, min, max }
 const FASTFLIP_PAGE_BYTES = 2020;
 const FASTFLIP_NSAMP = 1000;
 
@@ -15740,6 +16159,84 @@ function initFastFlipPlot() {
         legend: { show: false }
     }, [[], []], plotEl);
     if (document.body.classList.contains('dark-mode')) updateUplotTheme(fastFlipPlot);
+
+    // Per-page Y-axis controls — same auto / lock / click-to-edit widget as the other plots,
+    // but each flipbook slot remembers its own state for the session (faFlipAxis keyed by slot).
+    // The waveform is absolute current (not AC-coupled), so each page sits at its own DC level
+    // and is auto-fit independently rather than sharing one scale.
+    plotEl.style.position = 'relative';
+    const existing = plotEl.querySelector('.autoscale-ctrl');
+    if (existing) existing.remove();
+    const ctrl = document.createElement('div');
+    ctrl.className = 'autoscale-ctrl';
+    ctrl.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    ctrl.innerHTML = '<button id="faflip-pause-btn" title="Pause — stop new fault snapshots from overwriting the saved ones" style="font-size:10px;padding:0 6px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;line-height:16px;" onclick="faAnomPauseToggle()">Pause</button><div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="faflip-auto-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="faflip-auto-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="faflip-lock-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
+    plotEl.appendChild(ctrl);
+    faUpdatePauseBtn(_faAnomPause);  // reflect last-known pause state on (re)build
+
+    document.getElementById('faflip-auto-cb').addEventListener('change', e => {
+        const st = faFlipAxisState(fastFlipSelected);
+        st.auto = e.target.checked;
+        if (!st.auto) { const sc = fastFlipPlot.scales.amps; st.min = sc.min; st.max = sc.max; }  // seed manual from what's shown
+        st.locked = false;
+        faFlipApplyAxis(fastFlipSelected);
+        faFlipSyncControls(fastFlipSelected);
+    });
+    document.getElementById('faflip-lock-btn').addEventListener('click', () => {
+        const st = faFlipAxisState(fastFlipSelected);
+        if (!st.auto) return;               // lock only applies while auto is on
+        st.locked = !st.locked;
+        if (st.locked) { const sc = fastFlipPlot.scales.amps; st.min = sc.min; st.max = sc.max; }  // freeze current auto range
+        faFlipApplyAxis(fastFlipSelected);
+        faFlipSyncControls(fastFlipSelected);
+    });
+
+    attachYAxisEdit(fastFlipPlot, [{
+        scale: 'amps', decimals: 1,
+        apply: (mn, mx) => {                 // typing a number → manual for this page only
+            const st = faFlipAxisState(fastFlipSelected);
+            st.auto = false; st.locked = false; st.min = mn; st.max = mx;
+            faFlipApplyAxis(fastFlipSelected);
+            faFlipSyncControls(fastFlipSelected);
+        },
+        auto: () => {                        // clear + Enter → back to auto for this page
+            const st = faFlipAxisState(fastFlipSelected);
+            st.auto = true; st.locked = false;
+            faFlipApplyAxis(fastFlipSelected);
+            faFlipSyncControls(fastFlipSelected);
+        }
+    }]);
+}
+
+function faFlipAxisState(slot) {
+    if (!faFlipAxis[slot]) faFlipAxis[slot] = { auto: true, locked: false, min: null, max: null };
+    return faFlipAxis[slot];
+}
+
+function faFlipApplyAxis(slot) {
+    if (!fastFlipPlot) return;
+    const st = faFlipAxisState(slot);
+    if (st.auto && !st.locked) {             // auto-fit to this page's own data
+        const pg = fastFlipPages && fastFlipPages[slot];
+        let lo = Infinity, hi = -Infinity;
+        if (pg && pg.amps_t) for (const v of pg.amps_t) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        if (!isFinite(lo)) { lo = 0; hi = 1; }
+        const pad = Math.max(1, (hi - lo) * 0.1);
+        fastFlipPlot.setScale('amps', { min: lo - pad, max: hi + pad });
+    } else if (isFinite(st.min) && isFinite(st.max) && st.max > st.min) {
+        fastFlipPlot.setScale('amps', { min: st.min, max: st.max });
+    }
+}
+
+function faFlipSyncControls(slot) {
+    const autoCb = document.getElementById('faflip-auto-cb');
+    const lockBtn = document.getElementById('faflip-lock-btn');
+    if (!autoCb || !lockBtn) return;
+    const st = faFlipAxisState(slot);
+    autoCb.checked = st.auto;
+    lockBtn.style.display = st.auto ? 'block' : 'none';
+    lockBtn.textContent = st.locked ? 'unlock' : 'lock';
+    lockBtn.style.opacity = st.locked ? '1' : '0.6';
 }
 
 function fastFlipRender(slot) {
@@ -15751,25 +16248,41 @@ function fastFlipRender(slot) {
     const meta = document.getElementById('fastflip-meta');
     if (meta) {
         const when = pg.epoch ? new Date(pg.epoch * 1000).toLocaleDateString() : 'clock not set';
+        // Band 0 reads "100–1000" (engines don't idle below ~100 RPM); higher bands span full 1000-RPM ranges
+        const bandLabel = pg.band === 0 ? '100–1000' : (pg.band * 1000) + '–' + (pg.band * 1000 + 999);
         meta.textContent = (pg.isAnomaly
             ? 'Anomaly capture (class k=' + pg.patternK + ', score ' + pg.score.toFixed(2) + ')'
-            : 'Reference, ' + (pg.band * 1000) + '–' + (pg.band * 1000 + 999) + ' RPM band')
+            : 'Reference, ' + bandLabel + ' RPM band')
             + ' — captured at ' + pg.rpm + ' RPM, ' + pg.amps.toFixed(1) + ' A, ' + when + '.';
     }
     initFastFlipPlot();
-    if (fastFlipPlot) fastFlipPlot.setData([pg.t_ms, pg.amps_t]);
+    if (fastFlipPlot) {
+        fastFlipPlot.setData([pg.t_ms, pg.amps_t]);
+        faFlipApplyAxis(slot);
+        faFlipSyncControls(slot);
+    }
 }
 
 function fastFlipBuildButtons() {
     const wrap = document.getElementById('fastflip-bands');
+    const anomWrap = document.getElementById('fastflip-anoms');
     if (!wrap || !fastFlipPages) return;
     wrap.innerHTML = '';
+    if (anomWrap) anomWrap.innerHTML = '';
+    const nRef = fastFlipPages.filter(p => p.isRef).length;   // ref-slot count straight from the payload header
     fastFlipPages.forEach(pg => {
         const b = document.createElement('button');
         b.type = 'button';
-        b.className = 'btn-secondary btn-sm fastscope-zoom fastflip-band';  // reuse the .active highlight
+        // Both rows share the same class — only one button is ever .active (green) across both,
+        // because fastFlipRender toggles it on every .fastflip-band by matching slot.
+        b.className = 'btn-secondary btn-sm fastscope-zoom fastflip-band';
         b.dataset.slot = pg.slot;
-        b.textContent = pg.isRef ? (pg.band) + '–' + (pg.band + 1) + 'k RPM' : 'Anomaly ' + (pg.slot - 4);
+        if (pg.isRef) {
+            // Band 0 reads "100–1000 RPM" (engines don't idle below ~100); higher bands "N–N+1k RPM"
+            b.textContent = pg.band === 0 ? '100–1000 RPM' : pg.band + '–' + (pg.band + 1) + 'k RPM';
+        } else {
+            b.textContent = 'Anomaly ' + (pg.slot - nRef);
+        }
         if (!pg.used) {
             b.disabled = true;
             b.style.opacity = '0.4';
@@ -15777,27 +16290,37 @@ function fastFlipBuildButtons() {
         } else {
             b.onclick = () => fastFlipRender(pg.slot);
         }
-        wrap.appendChild(b);
+        (pg.isRef ? wrap : (anomWrap || wrap)).appendChild(b);
     });
 }
 
-function fetchFastFlip() {
+// auto=true is the silent background poll (from the Diag auto-loop): it refreshes the page
+// buttons so freshly-frozen reference bands light up on their own, but never flashes the
+// status line and never yanks the plot away from a page you're currently examining. Manual
+// Refresh / open / re-baseline call it without auto, so they always re-render.
+function fetchFastFlip(auto) {
     const status = document.getElementById('fastflip-status');
-    if (status) status.textContent = 'Fetching…';
+    if (status && !auto) status.textContent = 'Fetching…';
     fetch(buildURL('/faflip.bin'), { cache: 'no-cache' })
         .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
         .then(buf => {
             fastFlipPages = parseFastFlip(buf);
-            if (!fastFlipPages) { if (status) status.textContent = 'Bad response from regulator.'; return; }
+            if (!fastFlipPages) { if (status && !auto) status.textContent = 'Bad response from regulator.'; return; }
             const nUsed = fastFlipPages.filter(p => p.used).length;
             if (status) status.textContent = nUsed === 0
                 ? 'No pages captured yet — references freeze automatically on steady runs (20–100 A).'
                 : nUsed + ' page' + (nUsed > 1 ? 's' : '') + ' captured.';
             fastFlipBuildButtons();
-            const first = fastFlipPages.find(p => p.used && (fastFlipSelected < 0 || p.slot === fastFlipSelected)) || fastFlipPages.find(p => p.used);
-            if (first) fastFlipRender(first.slot);
+            const cur = (fastFlipSelected >= 0) ? fastFlipPages.find(p => p.slot === fastFlipSelected && p.used) : null;
+            if (!(auto && cur)) {   // auto poll leaves an open page alone; otherwise show the selected-or-first used page
+                const first = cur || fastFlipPages.find(p => p.used);
+                if (first) fastFlipRender(first.slot);
+            } else {
+                // Buttons were just rebuilt (highlight cleared) but we skipped the re-render — re-mark the open page.
+                document.querySelectorAll('.fastflip-band').forEach(b => b.classList.toggle('active', +b.dataset.slot === fastFlipSelected));
+            }
         })
-        .catch(e => { if (status) status.textContent = 'Flipbook unavailable (' + e.message + ').'; });
+        .catch(e => { if (status && !auto) status.textContent = 'Flipbook unavailable (' + e.message + ').'; });
 }
 
 /* XREG_END */

@@ -2383,6 +2383,7 @@ void AdjustFieldLearnMode() {
               } else {
                 float vNow = getFiltV();
                 if (dtSec > 0.001f) cvDSlope = constrain((vNow - vPrevCV) / dtSec, -4.0f, 4.0f);
+                rollUpdate(ROLL_CVSLOPE, cvDSlope);   // slope-bleed gate-tuning readout
                 vPrevCV = vNow;
               }
             }

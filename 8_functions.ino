@@ -866,6 +866,12 @@ static int fadStep(FadJob *J,
       }
 
       case FADS_RUNG_SYNC_MATCH: {
+        // This stage runs as one indivisible unit (qsort + partner-match + row-build over up to
+        // nInst entries) — it can't be sliced mid-way without saving partial state. Instead give
+        // it a FRESH full budget: if this loop() slice is already spent, yield and re-enter at the
+        // top next pass. No state has been mutated yet, so re-entry is idempotent. Worst-case
+        // duration still surfaces on ft_faDetector.worstWindow.
+        if (FAD_NOW_US() >= deadline) return 0;
         int m = J->lagHi - J->lagLo + 1;
         int bestP = -1;
         for (int p = 1; p < m - 1; p++)

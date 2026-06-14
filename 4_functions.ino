@@ -1260,7 +1260,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (!settingExists(NK_ManualSOCPoint)) {
     settingWrite(NK_ManualSOCPoint, String(ManualSOCPoint).c_str());
   } else {
-    ManualSOCPoint = settingRead(NK_ManualSOCPoint).toInt();
+    ManualSOCPoint = settingRead(NK_ManualSOCPoint).toFloat();
   }
   if (!settingExists(NK_ManualLifePercentage)) {  // manual override of alterantor lifetime estimates this is pointless
     settingWrite(NK_ManualLifePercentage, String(ManualLifePercentage).c_str());
@@ -1899,6 +1899,61 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_SLAM_THRESHOLD_G, String(SLAM_THRESHOLD_G, 2).c_str());
   } else {
     SLAM_THRESHOLD_G = settingRead(NK_SLAM_THRESHOLD_G).toFloat();
+  }
+
+  // Fast alt-current diagnostic knobs (Pattern B). Defaults = the #define values, so a fresh
+  // device behaves exactly as before the knobs existed. faInit() also reads NK_faEnabled
+  // directly (it runs before this), but writing the default here creates the key on day one.
+  if (!settingExists(NK_faEnabled)) {
+    settingWrite(NK_faEnabled, faEnabled ? "1" : "0");
+  } else {
+    faEnabled = (settingRead(NK_faEnabled).toInt() != 0);
+  }
+  // WiFi Napping standby toggle (Client-mode only; default off)
+  if (!settingExists(NK_wifiNapEnabled)) {
+    settingWrite(NK_wifiNapEnabled, wifiNapEnabled ? "1" : "0");
+  } else {
+    wifiNapEnabled = (settingRead(NK_wifiNapEnabled).toInt() != 0);
+  }
+  if (!settingExists(NK_faAlarmEnable)) {
+    settingWrite(NK_faAlarmEnable, faAlarmEnable ? "1" : "0");
+  } else {
+    faAlarmEnable = (settingRead(NK_faAlarmEnable).toInt() != 0);
+  }
+  if (!settingExists(NK_faAnomPause)) {
+    settingWrite(NK_faAnomPause, faAnomPause ? "1" : "0");
+  } else {
+    faAnomPause = (settingRead(NK_faAnomPause).toInt() != 0);
+  }
+  if (!settingExists(NK_faRpmEdgeMargin)) {
+    settingWrite(NK_faRpmEdgeMargin, String(faRpmEdgeMargin, 1).c_str());
+  } else {
+    faRpmEdgeMargin = settingRead(NK_faRpmEdgeMargin).toFloat();
+  }
+  if (!settingExists(NK_faAmpsDriftFloorA)) {
+    settingWrite(NK_faAmpsDriftFloorA, String(faAmpsDriftFloorA, 2).c_str());
+  } else {
+    faAmpsDriftFloorA = settingRead(NK_faAmpsDriftFloorA).toFloat();
+  }
+  if (!settingExists(NK_faAmpsDriftPct)) {
+    settingWrite(NK_faAmpsDriftPct, String(faAmpsDriftPct, 1).c_str());
+  } else {
+    faAmpsDriftPct = settingRead(NK_faAmpsDriftPct).toFloat();
+  }
+  if (!settingExists(NK_faAttenUpAmps)) {
+    settingWrite(NK_faAttenUpAmps, String(faAttenUpAmps, 1).c_str());
+  } else {
+    faAttenUpAmps = settingRead(NK_faAttenUpAmps).toFloat();
+  }
+  if (!settingExists(NK_faAttenDownAmps)) {
+    settingWrite(NK_faAttenDownAmps, String(faAttenDownAmps, 1).c_str());
+  } else {
+    faAttenDownAmps = settingRead(NK_faAttenDownAmps).toFloat();
+  }
+  if (!settingExists(NK_faPeakMinA)) {
+    settingWrite(NK_faPeakMinA, String(faPeakMinA, 2).c_str());
+  } else {
+    faPeakMinA = settingRead(NK_faPeakMinA).toFloat();
   }
 }
 

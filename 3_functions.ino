@@ -588,14 +588,27 @@ enum Csv2Index {
   CSV2_faMatrixFlush_ses,   // ...since last Reset Peak Values
   CSV2_faDetector_win,      // worst µs of one failure-detector analysis slice, rolling 5s window
   CSV2_faDetector_ses,      // ...since last Reset Peak Values
+  CSV2_faWindowFinalize_win, // worst µs of one per-2s-window finalize (Goertzel/matrix-fold/detector-arm), rolling 5s
+  CSV2_faWindowFinalize_ses, // ...since last Reset Peak Values
   CSV2_faChanState,         // 0 = off, 1 = sampling, 2 = railed/dormant (jumper open)
   CSV2_faCellsUsed,         // disturbance-matrix cells with ≥1 qualified window
   CSV2_faDetectK,           // failure detector: fault class of the last FAULT verdict, 0 = quiet
   CSV2_faSesPkpkWorst,      // session-worst broadband pk-pk, A ×100
   CSV2_faSesPeakWorst,      // session-worst spectral peak, A ×100
   CSV2_faSesPeakWorstHz,    // ...its frequency, Hz ×10
+  CSV2_faAnomalyCount,      // lifetime detector FAULT-verdict count (persisted fleet scalar)
+  CSV2_faDomFreqHz,         // Highest Tone in Map: frequency, Hz ×10
+  CSV2_faDomAmp,            // ...amplitude, A ×100
+  CSV2_faDomRpm,            // ...RPM (bin center) where it occurs
 
-  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534
+  // gate-tuning 10s live readouts (firmware Roll10s extreme; ROLL_EMPTY sentinel when no sample in window)
+  CSV2_faRpmEdge10sMin,     // RPM edge margin, 10s trough (RPM ×10)
+  CSV2_faAmpsDrift10sMax,   // amps-drift EMA spread, 10s peak (A ×100)
+  CSV2_faTonePk10sMax,      // largest spectral peak, 10s peak (A ×100)
+  CSV2_ldSlew10sMax,        // current slew g_dBcur_dt, 10s peak (A/s ×10)
+  CSV2_cvSlope10sMax,       // voltage rise cvDSlope, 10s peak (V/s ×10000)
+
+  CSV2_FIELD_COUNT  // auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — verified count is 545)
 };
 
 enum Csv3Index {
@@ -884,8 +897,19 @@ enum Csv3Index {
   CSV3_NMEA2KData,              // moved from CSV2 (0/1)
   CSV3_timeAxisModeChanging,    // moved from CSV2 (0/1)
   CSV3_gpsTimeSourceMode,       // 0=auto, 1=NMEA-forced, 2=Phone-forced, 3=NTP-time-forced
+  // Fast alt-current diagnostic knobs (Pattern B echo)
+  CSV3_faEnabled,               // 0/1 — global ON/OFF
+  CSV3_faAlarmEnable,           // 0/1 — FAULT drives audible alarm
+  CSV3_faAnomPause,             // 0/1 — freeze anomaly flipbook slots
+  CSV3_faRpmEdgeMargin,         // RPM ×10
+  CSV3_faAmpsDriftFloorA,       // A ×100
+  CSV3_faAmpsDriftPct,          // percent ×10
+  CSV3_faAttenUpAmps,           // A ×10
+  CSV3_faAttenDownAmps,         // A ×10
+  CSV3_faPeakMinA,              // A ×100
+  CSV3_wifiNapEnabled,          // 0/1 — WiFi Napping standby toggle (Client only)
 
-  CSV3_FIELD_COUNT  // = 281 (280 prior + gpsTimeSourceMode)
+  CSV3_FIELD_COUNT  // = 291 (281 prior + 9 fast-alt knobs + 1 wifiNapEnabled)
 };
 
 
@@ -1939,7 +1963,7 @@ void setupServer() {
   });
 
   // ── Fast alternator-current channel: live scope dump ──
-  // 250 ms raw ring (20 kSPS, calibrated mV) + 16 B header — see faScopeSnapshot for layout.
+  // 500 ms raw ring (20 kSPS, calibrated mV) + 16 B header — see faScopeSnapshot for layout.
   // Snapshot is copied into a PSRAM buffer up front (spinlock vs the loop() drain), then
   // streamed; the shared_ptr deleter frees it on any completion path including client abort.
   server.on("/fastscope.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2484,6 +2508,7 @@ void setupServer() {
 
   server.on("/get", HTTP_GET, [](AsyncWebServerRequest *request) {
     bool foundParameter = false;
+    bool nvsPersistNow = false;   // set by discrete reset/set handlers that write saveNVSDataFull()-owned vars; forces ONE immediate persist at the end so a reboot before the next field-off edge can't revert the action
     String inputMessage;
 
     if (request->hasParam("UpdateToVersion")) {
@@ -2683,6 +2708,58 @@ void setupServer() {
     else if (request->hasParam("FastAltRebaseline")) {
       foundParameter = true;
       faPendingRebaseline = true;  // deferred to Core 1 — clears the reference flipbook (freeze-once pages re-capture)
+    }
+    // Fast alt-current diagnostic knobs (Pattern B). Globals are updated live so faDrain()
+    // and the steady-state gate react immediately; no reboot needed (faEnabled toggles the driver).
+    else if (request->hasParam("faEnabled")) {
+      foundParameter = true;
+      faEnabled = (request->getParam("faEnabled")->value().toInt() != 0);
+      settingWrite(NK_faEnabled, faEnabled ? "1" : "0");
+    }
+    else if (request->hasParam("faAlarmEnable")) {
+      foundParameter = true;
+      faAlarmEnable = (request->getParam("faAlarmEnable")->value().toInt() != 0);
+      settingWrite(NK_faAlarmEnable, faAlarmEnable ? "1" : "0");
+    }
+    else if (request->hasParam("faAnomPause")) {
+      foundParameter = true;
+      faAnomPause = (request->getParam("faAnomPause")->value().toInt() != 0);
+      settingWrite(NK_faAnomPause, faAnomPause ? "1" : "0");
+    }
+    else if (request->hasParam("faRpmEdgeMargin")) {
+      foundParameter = true;
+      faRpmEdgeMargin = request->getParam("faRpmEdgeMargin")->value().toFloat();
+      settingWrite(NK_faRpmEdgeMargin, String(faRpmEdgeMargin, 1).c_str());
+    }
+    else if (request->hasParam("faAmpsDriftFloorA")) {
+      foundParameter = true;
+      faAmpsDriftFloorA = request->getParam("faAmpsDriftFloorA")->value().toFloat();
+      settingWrite(NK_faAmpsDriftFloorA, String(faAmpsDriftFloorA, 2).c_str());
+    }
+    else if (request->hasParam("faAmpsDriftPct")) {
+      foundParameter = true;
+      faAmpsDriftPct = request->getParam("faAmpsDriftPct")->value().toFloat();
+      settingWrite(NK_faAmpsDriftPct, String(faAmpsDriftPct, 1).c_str());
+    }
+    else if (request->hasParam("faAttenUpAmps")) {
+      foundParameter = true;
+      faAttenUpAmps = request->getParam("faAttenUpAmps")->value().toFloat();
+      settingWrite(NK_faAttenUpAmps, String(faAttenUpAmps, 1).c_str());
+    }
+    else if (request->hasParam("faAttenDownAmps")) {
+      foundParameter = true;
+      faAttenDownAmps = request->getParam("faAttenDownAmps")->value().toFloat();
+      settingWrite(NK_faAttenDownAmps, String(faAttenDownAmps, 1).c_str());
+    }
+    else if (request->hasParam("faPeakMinA")) {
+      foundParameter = true;
+      faPeakMinA = request->getParam("faPeakMinA")->value().toFloat();
+      settingWrite(NK_faPeakMinA, String(faPeakMinA, 2).c_str());
+    }
+    else if (request->hasParam("wifiNapEnabled")) {
+      foundParameter = true;
+      wifiNapEnabled = (request->getParam("wifiNapEnabled")->value().toInt() != 0);
+      settingWrite(NK_wifiNapEnabled, wifiNapEnabled ? "1" : "0");
     }
     else if (request->hasParam("altSimMode")) {
       foundParameter = true;
@@ -3201,36 +3278,43 @@ void setupServer() {
     if (request->hasParam("ResetEngineRunTime")) {
       foundParameter = true;
       EngineRunTime = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Engine Run Time: Reset requested from web interface");
     }
     if (request->hasParam("ResetAlternatorOnTime")) {
       foundParameter = true;
       AlternatorOnTime = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Alternator On Time: Reset requested from web interface");
     }
     if (request->hasParam("ResetEnergy")) {
       foundParameter = true;
       ChargedEnergy = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Battery Charged Energy: Reset requested from web interface");
     }
     if (request->hasParam("ResetDischargedEnergy")) {
       foundParameter = true;
       DischargedEnergy = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Battery Discharged Energy: Reset requested from web interface");
     }
     if (request->hasParam("ResetFuelUsed")) {
       foundParameter = true;
       AlternatorFuelUsed = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Fuel Used: Reset requested from web interface");
     }
     if (request->hasParam("ResetAlternatorChargedEnergy")) {
       foundParameter = true;
       AlternatorChargedEnergy = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Alternator Charged Energy: Reset requested from web interface");
     }
     if (request->hasParam("ResetEngineCycles")) {
       foundParameter = true;
       EngineCycles = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Engine Cycles: Reset requested from web interface");
     }
     if (request->hasParam("ResetRPMMax")) {
@@ -3241,11 +3325,13 @@ void setupServer() {
     if (request->hasParam("ResetSolarEnergy")) {
       foundParameter = true;
       SolarChargedEnergy = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Solar Energy: Reset requested from web interface");
     }
     if (request->hasParam("ResetChargeCycles")) {
       foundParameter = true;
       ChargeCycles = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Charge Cycles: Reset requested from web interface");
     }
     if (request->hasParam("ResetMinVoltage")) {
@@ -3256,21 +3342,25 @@ void setupServer() {
     if (request->hasParam("ResetTotalDistance")) {
       foundParameter = true;
       TotalDistance = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Total Distance: Reset requested from web interface");
     }
     if (request->hasParam("ResetAvgSpeed")) {
       foundParameter = true;
       AvgSpeed = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Average Speed: Reset requested from web interface");
     }
     if (request->hasParam("ResetMaxSpeed")) {
       foundParameter = true;
       MaxSpeed = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Max Speed: Reset requested from web interface");
     }
     if (request->hasParam("ResetEngineFuelUsed")) {
       foundParameter = true;
       EngineFuelUsed = 0;
+      nvsPersistNow = true;
       queueConsoleMessage("Engine Fuel Used: Reset requested from web interface");
     }
     if (request->hasParam("ResetFuelCurve")) {
@@ -3307,10 +3397,11 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("ManualSOCPoint")->value();
       settingWrite(NK_ManualSOCPoint, inputMessage.c_str());
-      ManualSOCPoint = inputMessage.toInt();
-      SOC_percent = ManualSOCPoint * 100;
+      ManualSOCPoint = inputMessage.toFloat();
+      SOC_percent = (int)roundf(ManualSOCPoint * 100.0f);   // SOC_percent is percent x100; round so decimals seed exactly
       CoulombCount_Ah_scaled = (ManualSOCPoint * BatteryCapacity_Ah);
-      queueConsoleMessageF("SoC manually set to: %d%%", ManualSOCPoint);
+      nvsPersistNow = true;  // persist SoC + coulomb count NOW (single save at end of handler). NVS otherwise only saves at the field-off edge, so a reboot before then (e.g. a forced OTA) would revert the manual seed and the loop would re-derive SoC from the stale/zero coulomb count.
+      queueConsoleMessageF("SoC manually set to: %.2f%%", ManualSOCPoint);
     }
     if (request->hasParam("BatteryCapacity_Ah")) {
       foundParameter = true;
@@ -3441,7 +3532,7 @@ void setupServer() {
       CumulativeInsulationDamage = 1.0 - life_fraction;
       CumulativeGreaseDamage = 1.0 - life_fraction;
       CumulativeBrushDamage = 1.0 - life_fraction;
-      // Persistence handled at next field-off edge by saveNVSDataFull() (InsulDamage/GreaseDamage/BrushDamage).
+      nvsPersistNow = true;   // commit InsulDamage/GreaseDamage/BrushDamage now (single save at end of handler) instead of waiting for the next field-off edge.
       queueConsoleMessageF("Alternator life manually set to %d%%", ManualLifePercentage);
     }
     if (request->hasParam("webgaugesinterval")) {
@@ -3465,6 +3556,7 @@ void setupServer() {
       inputMessage = request->getParam("totalPowerCycles")->value();
       settingWrite(NK_totalPowerCycles, inputMessage.c_str());
       totalPowerCycles = inputMessage.toInt();
+      nvsPersistNow = true;   // also commit the storage-namespace "PowerCycles" (what loadNVSData reads at boot) now, not at the field-off edge.
     }
     if (request->hasParam("timeAxisModeChanging")) {
       foundParameter = true;
@@ -4432,6 +4524,7 @@ void setupServer() {
       ft_fastAltDrain.worstSession = 0;
       ft_faMatrixFlush.worstSession = 0;
       ft_faDetector.worstSession = 0;
+      ft_faWindowFinalize.worstSession = 0;
       // Fast alt-current per-session worsts (fleet scalars) follow the same session
       faSesPkpkWorstA = 0;
       faSesPeakWorstA = 0;
@@ -4566,6 +4659,7 @@ void setupServer() {
       currentGaleMinutes = 0;
       prev_BestUpVMG_AT = 0;
       prev_GaleHrs_AT = 0;
+      nvsPersistNow = true;   // commit the cleared lifetime watermarks (LongTrip/Max24h/DeepAnchor/BestUpVMG/GaleHrs) now, not at the next field-off edge.
       // 80MHz low-power loop instrumentation — clear session worst + near-miss counters
       loopWorst80Ses = 0;
       loopOver80ImuLimitCount = 0;
@@ -4639,9 +4733,11 @@ void setupServer() {
       prev_imu_slam_count_lifetime = UINT32_MAX;
       prev_imu_capsize_count       = UINT32_MAX;
       prev_imu_pitchpole_count     = UINT32_MAX;
+      nvsPersistNow = true;   // commit the cleared IMU lifetime stats now, not at the next field-off edge.
       queueConsoleMessage("Accel lifetime stats reset from web interface");
     }
 
+    if (nvsPersistNow) saveNVSDataFull();   // commit storage-namespace resets/sets now (at most one save per request); otherwise they'd wait for the field-off edge and a reboot/power-cut before then would revert them
     if (foundParameter) {
       stateRevision++;      // Increment whenever any setting changed
       settingsDirty = true; // trigger immediate CSV3 settings echo
@@ -5601,6 +5697,36 @@ void dnsHandleRequest() {  // process dns request for captive portals
     }
   }
 }
+// Engine-off standby power drop. Normally powers the radio fully off, suspends the temp task,
+// and slows the CPU to 80MHz. With WiFi Napping enabled in Client mode it instead keeps WiFi
+// associated in modem-sleep (dashboard stays reachable, no button) until 12h with no connected
+// dashboard, then falls back to full radio-off. Ordering matters: do the WiFi op, then suspend
+// tasks, then drop the clock — same sequence the original inline code relied on.
+void enterLowPowerStandby() {
+  if (wifiNapEnabled && currentMode == MODE_CLIENT && !wifiNapTimedOut) {
+    if (!wifiNapActive) {
+      WiFi.setSleep(true);           // modem sleep — radio naps between DTIM beacons
+      wifiNapActive = true;
+      lastNapActivityMs = millis();  // start the 12h no-activity clock
+      queueConsoleMessage("WiFi napping: dashboard stays reachable at low power (no button needed)");
+    }
+    if (events.count() > 0) lastNapActivityMs = millis();  // a connected dashboard = activity
+    if (millis() - lastNapActivityMs > WIFI_NAP_TIMEOUT) {
+      WiFi.mode(WIFI_OFF);
+      wifiNapActive = false;
+      wifiNapTimedOut = true;        // stay fully off until ignition or wake button
+      queueConsoleMessage("WiFi napping timed out (12h idle) - radio off; press wake button or start engine");
+    }
+  } else {
+    WiFi.mode(WIFI_OFF);             // THIS MUST BE DONE FIRST
+    wifiNapActive = false;           // napping disabled (or AP mode) — clear stale nap state
+  }
+  if (tempTaskHandle != NULL) {
+    vTaskSuspend(tempTaskHandle);    // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
+    tempTaskSuspended = true;        // intentional suspend — health monitor must not read this as a hang
+  }
+  setCpuFrequencyMhz(80);            // THIS MUST BE DONE SECOND
+}
 void checkWiFiConnection() {
   // Only attempt reconnection in client mode
   if (currentMode != MODE_CLIENT) return;
@@ -5638,7 +5764,7 @@ void checkWiFiConnection() {
 
   // Use cached values for early returns (no ipc0!)
   if (cachedWiFiMode == WIFI_OFF) return;
-  if (cachedCpuFreq < 81) return;
+  if (cachedCpuFreq < 81 && !wifiNapActive) return;  // napping reconnects at 80MHz so a router drop can't strand it
 
   // === END THROTTLE ===
 
@@ -5925,8 +6051,10 @@ void SendWifiData() {
                                "%d,"
                                // +2: long-term-ring flash-flush timer (worst window / session, µs)
                                "%d,%d,"
-                               // +12: fast alt-current channel (drain timer ×2, flush timer ×2, detector timer ×2, state, cells, detectK, session worsts ×3)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               // +18: fast alt-current channel (drain timer ×2, flush timer ×2, detector timer ×2, window-finalize timer ×2, state, cells, detectK, session worsts ×3, anomaly count, Highest Tone in Map ×3 [freq, amp, rpm])
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +5: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, tone peak, current slew, voltage slope)
+                               "%d,%d,%d,%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -6445,12 +6573,24 @@ void SendWifiData() {
                                SafeInt(ft_faMatrixFlush.worstSession),     // CSV2_faMatrixFlush_ses
                                SafeInt(ft_faDetector.worstWindow),         // CSV2_faDetector_win
                                SafeInt(ft_faDetector.worstSession),        // CSV2_faDetector_ses
+                               SafeInt(ft_faWindowFinalize.worstWindow),   // CSV2_faWindowFinalize_win
+                               SafeInt(ft_faWindowFinalize.worstSession),  // CSV2_faWindowFinalize_ses
                                SafeInt(faChanState),                       // CSV2_faChanState
                                SafeInt(faCellsUsed),                       // CSV2_faCellsUsed
                                SafeInt(faDetectLastK),                     // CSV2_faDetectK (fault class of last FAULT verdict)
                                SafeInt(faSesPkpkWorstA, 100),              // CSV2_faSesPkpkWorst
                                SafeInt(faSesPeakWorstA, 100),              // CSV2_faSesPeakWorst
-                               SafeInt(faSesPeakWorstHz, 10)               // CSV2_faSesPeakWorstHz
+                               SafeInt(faSesPeakWorstHz, 10),              // CSV2_faSesPeakWorstHz
+                               SafeInt(faAnomalyCount),                    // CSV2_faAnomalyCount
+                               SafeInt(faDomFreqHzX10),                    // CSV2_faDomFreqHz (already Hz×10; JS divides by 10)
+                               SafeInt(faDomAmpAX100),                     // CSV2_faDomAmp (already A×100; JS divides by 100)
+                               SafeInt(faDomRpm),                          // CSV2_faDomRpm (raw RPM)
+                               // +5: gate-tuning 10s live readouts (ROLL_EMPTY when no sample in window)
+                               rollCsv(ROLL_RPMEDGE, 10),                  // CSV2_faRpmEdge10sMin  (RPM ×10, trough)
+                               rollCsv(ROLL_AMPSDRIFT, 100),               // CSV2_faAmpsDrift10sMax (A ×100, peak)
+                               rollCsv(ROLL_TONEPK, 100),                  // CSV2_faTonePk10sMax    (A ×100, peak)
+                               rollCsv(ROLL_LDSLEW, 10),                   // CSV2_ldSlew10sMax      (A/s ×10, peak)
+                               rollCsv(ROLL_CVSLOPE, 10000)                // CSV2_cvSlope10sMax     (V/s ×10000, peak)
     );
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
     thermalAntiWindupLatch = false;
@@ -6508,7 +6648,9 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // 9 fast-alt diagnostic knobs
+                               "%d",  // wifiNapEnabled
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -6728,7 +6870,7 @@ void SendWifiData() {
                                SafeInt(AlarmTest),
                                SafeInt(AlarmLatchEnabled),
                                SafeInt(MaintainMode),
-                               SafeInt(ManualSOCPoint),
+                               SafeInt(ManualSOCPoint, 100),
                                SafeInt(IgnoreLearningDuringPenalty),
                                SafeInt(LogAllLearningEvents),
                                SafeInt(CloudFeatures),
@@ -6793,7 +6935,18 @@ void SendWifiData() {
                                SafeInt(NMEA0183Data),                           // moved from CSV2
                                SafeInt(NMEA2KData),                             // moved from CSV2
                                SafeInt(timeAxisModeChanging),                   // moved from CSV2
-                               (int)gpsTimeSourceMode                           // 0=auto,1=NMEA,2=Phone,3=NTP
+                               (int)gpsTimeSourceMode,                          // 0=auto,1=NMEA,2=Phone,3=NTP
+                               // Fast alt-current diagnostic knobs (Pattern B echo)
+                               (int)faEnabled,                                  // 0/1
+                               (int)faAlarmEnable,                              // 0/1
+                               (int)faAnomPause,                                // 0/1
+                               SafeInt(faRpmEdgeMargin, 10),                    // RPM ×10
+                               SafeInt(faAmpsDriftFloorA, 100),                 // A ×100
+                               SafeInt(faAmpsDriftPct, 10),                     // percent ×10
+                               SafeInt(faAttenUpAmps, 10),                      // A ×10
+                               SafeInt(faAttenDownAmps, 10),                    // A ×10
+                               SafeInt(faPeakMinA, 100),                        // A ×100
+                               (int)wifiNapEnabled                              // 0/1
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

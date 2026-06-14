@@ -1105,7 +1105,7 @@ float currentNMPG = 0.0f;     // live fuel economy, nautical miles per gallon (S
 // UNIVERSAL SCALE: bins span [0, top configured fuel-table RPM], so binWidth auto-fits the engine
 // (default table top 4500 -> 250-RPM bins; an 8000-RPM engine -> 444-RPM bins). No hardcoded ceiling.
 #define FUELCURVE_BINS 18           // number of RPM bins (fixed); width = currentFuelTopRPM / FUELCURVE_BINS
-float fuelCurveNMPG[FUELCURVE_BINS] = { 0 };  // per-bin naut mi/gal; 0 = no qualified reading yet
+float fuelCurveNMPG[FUELCURVE_BINS] = { 0 };  // per-bin naut mi/gal; 0 = no qualified reading yet. Intentionally session-only — never persisted (RAM, cleared on reboot by design; UI labels it "this session").
 float currentFuelTopRPM = 0.0f;     // top configured fuel-table RPM; sent to the chart for x-axis scaling
 // Settle-then-measure gate: RPM+speed must hold within band for the settle time (boat speed lags throttle
 // by tens of seconds), THEN mpg is averaged over the sample window and that average freezes the bin.
@@ -1663,7 +1663,7 @@ const unsigned long BUFFER_STATUS_INTERVAL = 60000;  // 60 seconds
 // Battery SOC Monitoring Variables
 int BatteryCapacity_Ah = 200;         // Battery capacity in Amp-hours
 int SOC_percent = 5000;               // State of Charge percentage (0-100) but have to multiply by 100 for annoying reasons, but go with it
-int ManualSOCPoint = 25;              // Used to set it manually
+float ManualSOCPoint = 25.0f;              // Used to set it manually (decimals allowed)
 int CoulombCount_Ah_scaled = 7500;    // Current energy in battery (Ah × 100 for precision)
 float PeukertRatedCurrent_A = 15.0f;  // Standard discharge rate for Peukert (C/20), will be calculated from capacity
 bool FullChargeDetected = false;      // Flag for full charge detection
@@ -2180,6 +2180,7 @@ FuncTiming ft_boatPerf;
 FuncTiming ft_fastAltDrain;     // fast alt-current channel bounded DMA drain (~1 ms cap per loop pass)
 FuncTiming ft_faMatrixFlush;    // fast alt-current disturbance matrix → flash (field-off gated, like the long-term ring)
 FuncTiming ft_faDetector;       // fast alt-current failure-detector analysis slices (~1 ms cap per loop pass)
+FuncTiming ft_faWindowFinalize; // fast alt-current per-2s-window finalize (Goertzel finalize + matrix fold + detector arm), runs inside faDrain
 
 // Fast alt-current per-session worst scalars (fleet upload, consumer 5). Declared HERE
 // (not in the 2_functions.ino fa section) because buildConfigPayload() reads them and
@@ -2600,7 +2601,7 @@ float OvPredMarginV  = 0.150f;  // Group 1 prediction trigger margin above targe
 float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed into Vpred. dt-aware: alpha = dt/(TC+dt). Was DvdtAlpha (constant alpha); renamed 2026-05-22.
 // --- iExcess current supervisor ---
 float IExcessK = 5.0f;           // A above setpoint to arm supervisor
-int IExcessN = 3;                // consecutive ticks required (3 ≈ 15ms, tuned for 28Hz belt resonance on this install)
+int IExcessN = 4;                // consecutive ticks required (was 3, 28Hz-belt install); raised 2026-06-13 — MA(2) smear padded clean 2-tick belt-ripple peaks to exactly 3, false-firing iExcess. Install-specific (tracks resonance freq), NOT universal — see CV_Loop_Dev_Summary.
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
 float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. 0.2→0.1 2026-06-11: blocks recovery double-fires (belt-resonance peaks fired iExcess at target−0.16V mid-recovery) while keeping all real catches (fired at target+0.04..0.07)
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
@@ -3285,6 +3286,49 @@ float g_fastOvVpred = 0.0f;       // predicted voltage, updated when voltageCont
 bool g_fastOvHardActive = false;  // K_HARD or hysteresis block fired this tick
 uint32_t g_fastOvHardCount = 0;
 
+// ---- Gate-tuning live readouts: 10s rolling extreme per gated quantity (PSRAM) ----
+// Each gate compares a live/windowed quantity against a user threshold; the dashboard shows the
+// extreme that quantity reached in the last 10s so the threshold can be set relative to it. Ten
+// 1-second buckets, read = extreme over buckets stamped within the last 10s — robust to update
+// gaps. Float buckets are written from sensor/control tasks and read by the web task without a
+// lock; a torn read only blurs a tuning display, never control. Direction per gate: peak for
+// trip-type gates (slew/drift/tone), trough for the RPM edge-margin pass-gate.
+enum { ROLL_RPMEDGE = 0, ROLL_AMPSDRIFT, ROLL_TONEPK, ROLL_LDSLEW, ROLL_CVSLOPE, ROLL_COUNT };
+#define ROLL_EMPTY (-2000000000)   // CSV sentinel: no sample in the 10s window (distinct from SafeInt's -1)
+struct Roll10s {
+  float v[10];
+  uint32_t sec[10];
+  bool isMin;        // true = track minimum (trough); false = maximum (peak)
+};
+Roll10s *gRoll = nullptr;   // ps_malloc'd [ROLL_COUNT] in setup()
+
+void rollUpdate(int idx, float x) {
+  if (!gRoll || idx < 0 || idx >= ROLL_COUNT || isnan(x)) return;
+  Roll10s &r = gRoll[idx];
+  uint32_t nowSec = millis() / 1000;
+  int b = nowSec % 10;
+  if (r.sec[b] != nowSec) { r.sec[b] = nowSec; r.v[b] = x; }   // entered a new second → reset bucket
+  else r.v[b] = r.isMin ? fminf(r.v[b], x) : fmaxf(r.v[b], x);
+}
+
+float rollRead(int idx) {   // NAN when no sample in the last 10s
+  if (!gRoll || idx < 0 || idx >= ROLL_COUNT) return NAN;
+  Roll10s &r = gRoll[idx];
+  uint32_t nowSec = millis() / 1000;
+  float ext = NAN;
+  for (int i = 0; i < 10; i++) {
+    if (r.sec[i] == 0 || (uint32_t)(nowSec - r.sec[i]) >= 10) continue;   // sec==0 = unwritten (first boot second only)
+    if (isnan(ext)) ext = r.v[i];
+    else ext = r.isMin ? fminf(ext, r.v[i]) : fmaxf(ext, r.v[i]);
+  }
+  return ext;
+}
+
+int rollCsv(int idx, int scale) {   // CSV2 emitter — ROLL_EMPTY sentinel when no data this window
+  float x = rollRead(idx);
+  return isnan(x) ? ROLL_EMPTY : (int)lroundf(x * scale);
+}
+
 // Which protection layer actually set the final fastOvCurrentCap this tick (the BINDING
 // constraint — lowest cap wins). Lets the CV log distinguish "KHard fired" from "KHard
 // fired but iExcess/loadDump was the real limit". 0 = cap left at base (unclamped).
@@ -3552,6 +3596,16 @@ const unsigned long WIFI_WAKE_DURATION = 300000;  // 5 minutes
 bool wifiWakeActive = false;                      // Tracking wake mode state
 unsigned long wifiWakeStart = 0;                  // millis() when wake was triggered; 0 = inactive. Never store millis()+constant — use elapsed-time comparisons to survive 49.7-day wraparound.
 
+// WiFi Napping (Client-mode engine-off standby). When enabled, instead of powering the radio
+// fully off at 80MHz we keep WiFi associated in modem-sleep so the dashboard stays reachable
+// with no button press. Falls back to full radio-off after 12h with no dashboard connected;
+// from there only the wake button or ignition brings it back. Inert in AP mode (a SoftAP can't sleep).
+bool wifiNapEnabled = false;          // System Setting (Client only); default off
+bool wifiNapActive = false;           // true while modem-sleep nap is active
+bool wifiNapTimedOut = false;         // true after the 12h idle timeout — stay fully off until ignition/button
+unsigned long lastNapActivityMs = 0;  // millis() of last dashboard activity (a connected SSE client)
+const unsigned long WIFI_NAP_TIMEOUT = 43200000UL;  // 12h with no dashboard activity → radio fully off
+
 AsyncWebServer server(80);                  // Create AsyncWebServer object on port 80
 AsyncEventSource events("/events");         // Create an Event Source on /events
 unsigned long webgaugesinterval = 100;      // delay in ms between sensor updates on webpage
@@ -3664,6 +3718,7 @@ uint32_t readPsramBlob(const char *path, uint32_t magic, uint32_t version,
                        void *destBase, size_t recordSize, uint32_t destCapacity,
                        uint32_t *userWordOut, bool deleteAfter);
 void setupWiFi();
+void enterLowPowerStandby();
 bool connectToWiFi(const char *ssid, const char *password, unsigned long timeout);
 void setupAccessPoint();
 void setupWiFiConfigServer();
@@ -3841,6 +3896,13 @@ void setup() {
   systemIDLog = (SystemIDRecord *)ps_malloc(50 * sizeof(SystemIDRecord));
   if (!systemIDLog) Serial.println("FATAL: systemIDLog ps_malloc failed");
   else memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
+  // Gate-tuning 10s live-readout trackers — ROLL_COUNT × ~84 bytes PSRAM
+  gRoll = (Roll10s *)ps_malloc(sizeof(Roll10s) * ROLL_COUNT);
+  if (!gRoll) Serial.println("FATAL: gRoll ps_malloc failed");
+  else {
+    memset(gRoll, 0, sizeof(Roll10s) * ROLL_COUNT);
+    gRoll[ROLL_RPMEDGE].isMin = true;   // worst (smallest) RPM edge margin is the binding case
+  }
   // Thermal live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
   for (int i = 0; i < 4; i++) {
     thermalLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
@@ -3962,6 +4024,7 @@ void setup() {
   memset(&ft_fastAltDrain, 0, sizeof(FuncTiming));
   memset(&ft_faMatrixFlush, 0, sizeof(FuncTiming));
   memset(&ft_faDetector, 0, sizeof(FuncTiming));
+  memset(&ft_faWindowFinalize, 0, sizeof(FuncTiming));
   memset(&ft_rai_total, 0, sizeof(FuncTiming));
   memset(&ft_rai_ina228, 0, sizeof(FuncTiming));
   memset(&ft_rai_ads_state, 0, sizeof(FuncTiming));
@@ -4358,6 +4421,11 @@ void loop() {
       if (wifiWakeActive) {
         // Wake mode active - full power for user monitoring
         setCpuFrequencyMhz(240);
+        if (wifiNapActive) {       // was napping — radio is associated, just exit modem sleep
+          WiFi.setSleep(false);
+          wifiNapActive = false;
+        }
+        wifiNapTimedOut = false;   // a button press re-arms napping for the next idle period
         if (WiFi.getMode() == WIFI_OFF) {  // WiFi was turned off, need to reconnect
           setupWiFi();
         }
@@ -4437,14 +4505,9 @@ void loop() {
             shutdownCloudDeadlineMs = 0;
           }
         } else if (!core0Busy && uxQueueMessagesWaiting(httpsQueue) == 0) {
-          // Queue drained — go low power
+          // Queue drained — go low power (naps WiFi instead of full-off when enabled in Client mode)
           queueDrainHoldStart = 0;
-          WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
-          if (tempTaskHandle != NULL) {
-            vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
-            tempTaskSuspended = true;      // intentional suspend — health monitor must not read this as a hang
-          }
-          setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
+          enterLowPowerStandby();
         } else {
           // Upload in flight — hold at 240MHz/WiFi-on, but cap the wait to 5 minutes
           // so a stuck upload (bad WiFi, server error, malformed payload) can't hold
@@ -4453,12 +4516,7 @@ void loop() {
           if (millis() - queueDrainHoldStart > 300000UL) {
             queueDrainHoldStart = 0;
             queueConsoleMessage("Upload drain timeout - forcing low power");
-            WiFi.mode(WIFI_OFF);  // THIS MUST BE DONE FIRST
-            if (tempTaskHandle != NULL) {
-              vTaskSuspend(tempTaskHandle);  // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
-              tempTaskSuspended = true;      // intentional suspend — health monitor must not read this as a hang
-            }
-            setCpuFrequencyMhz(80);  // THIS MUST BE DONE SECOND
+            enterLowPowerStandby();
           }
           // else: within 5-min window — retry next tick
         }
@@ -4484,6 +4542,11 @@ void loop() {
         tempTaskSuspended = false;
         lastTempTaskHeartbeat = millis();  // restart the 20s window so the health check doesn't trip before the task posts its first beat
       }
+      if (wifiNapActive) {       // was napping — radio is associated, just exit modem sleep
+        WiFi.setSleep(false);
+        wifiNapActive = false;
+      }
+      wifiNapTimedOut = false;   // ignition on re-arms napping for the next shutdown
       // Reconnect WiFi if needed (works for both AP and CLIENT modes)
       if (WiFi.getMode() == WIFI_OFF) {
         setupWiFi();  // Reconnects in current mode
@@ -4729,7 +4792,7 @@ void loop() {
 
       // Client-specific connection monitoring
       // if (currentMode == MODE_CLIENT) {  // moved the gating check into the checkwificonnection function WAS NOT SUFFICIENT FOR WHATEVER REASON
-      if (currentMode == MODE_CLIENT && (Ignition == 1 || (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION))) {
+      if (currentMode == MODE_CLIENT && (Ignition == 1 || (wifiWakeStart > 0 && (millis() - wifiWakeStart) < WIFI_WAKE_DURATION) || wifiNapActive)) {
         // if (currentMode == MODE_CLIENT && (Ignition == 1 || wifiWakeActive)) { // can't try to do anything wifi related unless ignition is on and clock speed is fast enough to not crash
         TIMED_CALL(ft_checkWiFiConnection, checkWiFiConnection());
 
@@ -4772,6 +4835,7 @@ void loop() {
     ft_fastAltDrain.worstWindow = 0;
     ft_faMatrixFlush.worstWindow = 0;
     ft_faDetector.worstWindow = 0;
+    ft_faWindowFinalize.worstWindow = 0;
     ft_uploadBufferedRecords.worstWindow = 0;
     ft_buildConfigPayload.worstWindow = 0;
     ft_UpdateEngineRuntime.worstWindow = 0;

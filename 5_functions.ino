@@ -1627,6 +1627,21 @@ void CheckAlarms() {
 
     // (Alternator-health is advisory-only now — no audible alarm. See Phase 2 redesign.)
 
+    // Fast alt-current pulse-pattern fault (rectifier/stator) — opt-in audible alarm (item 5).
+    // Sounds while a FAULT verdict is fresh (seen within the last 2 min); default OFF until
+    // real-capture validation. AlarmActivate-gated like every other condition in this block.
+    static unsigned long lastFaFaultAlarmMsgMs = 0;
+    if (faAlarmEnable && faLastFaultMs != 0 && (millis() - faLastFaultMs < 120000UL)) {
+      currentAlarmCondition = true;
+      alarmReason = "Alternator current pulse-pattern fault";
+      if (millis() - lastFaFaultAlarmMsgMs >= 30000) {
+        lastFaFaultAlarmMsgMs = millis();
+        queueConsoleMessageF("Alternator current pulse-pattern fault (class k=%u) -- check rectifier/stator", faDetectLastK);
+      }
+    } else {
+      lastFaFaultAlarmMsgMs = 0;
+    }
+
     float currentVoltage = getBatteryVoltage();
 
     static unsigned long lastVoltHighMsgMs = 0;
@@ -2417,6 +2432,7 @@ void _ReadAnalogInputs_inner() {
                            uint32_t dtBcur = nowIna - bcurPrevMs;
                            if (dtBcur >= 3 && dtBcur < 2000) {
                              g_dBcur_dt = (Bcur - bcurPrev) / ((float)dtBcur * 0.001f);
+                             rollUpdate(ROLL_LDSLEW, g_dBcur_dt);   // load-dump slew gate-tuning readout
                            }
                          }
                          bcurPrev = Bcur;
@@ -3984,6 +4000,8 @@ void saveNVSDataFull() {
   if (prev_imu_capsize_count != imu_capsize_count)                          { nvs_set_u32(h,  "IMU_Capsize",   imu_capsize_count);                              prev_imu_capsize_count = imu_capsize_count;                          chg = true; }
   if (prev_imu_pitchpole_count != imu_pitchpole_count)                      { nvs_set_u32(h,  "IMU_Pitchpol",  imu_pitchpole_count);                           prev_imu_pitchpole_count = imu_pitchpole_count;                      chg = true; }
   if (prev_imu_slam_count_lifetime != imu_slam_count_lifetime)              { nvs_set_u32(h,  "IMU_SlamLife",  imu_slam_count_lifetime);                        prev_imu_slam_count_lifetime = imu_slam_count_lifetime;              chg = true; }
+  // Fast alt-current detector lifetime FAULT count (fleet scalar)
+  if (prev_faAnomalyCount != faAnomalyCount)                                { nvs_set_u32(h,  "faAnomalyCnt",  faAnomalyCount);                                 prev_faAnomalyCount = faAnomalyCount;                                chg = true; }
   // Sea state minute counters (NVS save).
   if (prev_imu_min_moving_gentle != imu_min_moving_gentle)                  { nvs_set_u32(h,  "IMU_MinMvGnt",  imu_min_moving_gentle);                          prev_imu_min_moving_gentle = imu_min_moving_gentle;                  chg = true; }
   if (prev_imu_min_moving_moderate != imu_min_moving_moderate)              { nvs_set_u32(h,  "IMU_MinMvMod",  imu_min_moving_moderate);                        prev_imu_min_moving_moderate = imu_min_moving_moderate;              chg = true; }
@@ -4247,6 +4265,7 @@ void loadNVSData() {
   if (nvs_get_u32(nvs_handle, "IMU_Capsize", &temp_uint32) == ESP_OK) imu_capsize_count = temp_uint32;
   if (nvs_get_u32(nvs_handle, "IMU_Pitchpol", &temp_uint32) == ESP_OK) imu_pitchpole_count = temp_uint32;
   if (nvs_get_u32(nvs_handle, "IMU_SlamLife", &temp_uint32) == ESP_OK) imu_slam_count_lifetime = temp_uint32;
+  if (nvs_get_u32(nvs_handle, "faAnomalyCnt", &temp_uint32) == ESP_OK) faAnomalyCount = temp_uint32;
 
   // Sea state minute counters (NVS load).
   if (nvs_get_u32(nvs_handle, "IMU_MinMvGnt",  &temp_uint32) == ESP_OK) imu_min_moving_gentle   = temp_uint32;
@@ -4386,6 +4405,7 @@ void initNVSCache() {
   prev_imu_capsize_count = imu_capsize_count;
   prev_imu_pitchpole_count = imu_pitchpole_count;
   prev_imu_slam_count_lifetime = imu_slam_count_lifetime;
+  prev_faAnomalyCount = faAnomalyCount;
   prev_imu_heel_max_lifetime = imu_heel_max_lifetime;
   prev_imu_pitch_max_lifetime = imu_pitch_max_lifetime;
   prev_imu_slam_peak_lifetime = imu_slam_peak_lifetime;
