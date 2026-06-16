@@ -43,6 +43,50 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 
+// Quantize every Y-axis gutter so sub-pixel re-measures stop shivering the X ticks.
+(function stabilizeUPlotAxisSizes() {
+    if (typeof uPlot === 'undefined' || uPlot.__shiverWrapped) return;
+    const _origUPlot = uPlot;
+    const _measureCtx = document.createElement('canvas').getContext('2d');
+    let _fontFamily = null;
+
+    function quantizedAxisSize(hasLabel) {
+        const QUANTUM = 8;
+        const GAP     = 10;
+        const LABELPX = hasLabel ? 30 : 0;  // uPlot labelSize default
+        return (u, values) => {
+            if (_fontFamily === null) {
+                try { _fontFamily = getComputedStyle(u.root).fontFamily || 'sans-serif'; }
+                catch (e) { _fontFamily = 'sans-serif'; }
+            }
+            _measureCtx.font = '12px ' + _fontFamily;
+            let maxW = 0;
+            for (let i = 0; i < values.length; i++) {
+                const w = _measureCtx.measureText(String(values[i])).width;
+                if (w > maxW) maxW = w;
+            }
+            const raw = maxW + GAP + LABELPX + 4;
+            return Math.ceil(raw / QUANTUM) * QUANTUM;
+        };
+    }
+
+    const Wrapped = function (opts, data, el) {
+        if (opts && Array.isArray(opts.axes)) {
+            opts.axes.forEach(ax => {
+                if (ax && (ax.side === 1 || ax.side === 3) && ax.size === undefined) {   // Y axes only
+                    ax.size = quantizedAxisSize(!!ax.label);
+                }
+            });
+        }
+        return new _origUPlot(opts, data, el);
+    };
+    Object.assign(Wrapped, _origUPlot);   // preserve uPlot.rangeNum/assign/etc.
+    Wrapped.__shiverWrapped = true;
+    uPlot = Wrapped;
+    try { window.uPlot = Wrapped; } catch (e) {}
+})();
+
+
 // ============================================================
 // STALENESS DISPLAY THRESHOLDS
 // These control when sensor readings gray out in the UI only.
@@ -90,14 +134,9 @@ function updateAllTempUnitLabels() {
     // Update toggle button states
     const fBtn = document.getElementById('tempUnitF_btn');
     const cBtn = document.getElementById('tempUnitC_btn');
-    if (fBtn && cBtn) {
-        if (displayTempUnit === 1) {
-            fBtn.className = 'btn-secondary';
-            cBtn.className = 'btn-primary';
-        } else {
-            fBtn.className = 'btn-primary';
-            cBtn.className = 'btn-secondary';
-        }
+    if (fBtn && cBtn) {                              // segmented-control active pill
+        fBtn.classList.toggle('on', displayTempUnit === 0);
+        cBtn.classList.toggle('on', displayTempUnit === 1);
     }
 }
 
@@ -155,6 +194,9 @@ let isOfflineMode = false; // True after user clicks "Continue Offline"; cleared
 let activeTimers = []; // Track all active timers
 
 let g_lastCsv3 = null; // Last received CSV3 data object — used by cvBinToCsv for header constants
+let g_lastCsv1 = null; // Last received CSV1 (live numbers) — for the diagnostics snapshot in log exports
+let g_lastCsv2 = null; // Last received CSV2 (diagnostics/timing/health) — for the diagnostics snapshot
+let g_lastTs = null;   // Last received TS (staleness ages) — for the diagnostics snapshot
 
 const CSV1_FIELDS = [
     "AlternatorTemperatureF",
@@ -192,6 +234,10 @@ const CSV1_FIELDS = [
     "voltageTarget",
     "Icv",
     "WaterDepth_ft",
+    "Ignition",   // moved from CSV2 so the banner IGN indicator tracks at ~10 Hz
+    "mExcessEma",        // iExcess detector: averaged current excess over command (A ×10) — tuning trace
+    "iExcessThreshold",  // iExcess detector: fire threshold E (A ×10) — tuning trace
+    "protEventMask",     // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
 ];
 
 // Format elapsed seconds since "Reset Peak Values" press into a short window descriptor.
@@ -220,7 +266,6 @@ const CSV2_FIELDS = [
     "MaxAlternatorTemperatureF",
     "temperatureThermistor",
     "MaxTemperatureThermistor",
-    "VictronCurrent",
     "timeToFullChargeMin",
     "timeToFullDischargeMin",
     "LatitudeNMEA",
@@ -290,20 +335,12 @@ const CSV2_FIELDS = [
     "MaxTemperatureThermistor_AllTime",
     "MeasuredAmpsMax_AllTime",
     "RPMMax_AllTime",
-    "Ignition",
+    "reserved_Ignition",   // moved to CSV1 (banner needs ~10 Hz)
     "BulkStage",
     "WifiWakeSecondsRemaining",
     "BufferedRecordCount",
     "BufferedRecordPercent",
     "BufferedRecordCap",
-    "COGNMEA",
-    "SOGNMEA",
-    "ApparentWindSpeedNMEA",
-    "ApparentWindAngleNMEA",
-    "TrueWindSpeedNMEA",
-    "TrueWindAngleNMEA",
-    "LeewayNMEA",
-    "VMGNMEA",
     "VMGTargetBearing",
     "reserved_VMGUseTrueWind",             // 98 reserved — moved to CSV3
     "cpuLoadCore0",
@@ -440,7 +477,6 @@ const CSV2_FIELDS = [
     "AnalogReadTime",
     "VeTime",
     "MaximumLoopTime",
-    "HeadingNMEA",
     "EngineCycles",
     "CurrentSessionDuration",
     "reserved_timeAxisModeChanging",  // moved to CSV3
@@ -644,7 +680,6 @@ const CSV2_FIELDS = [
     "currentGpsSource",                        // 0=none, 1=NMEA, 2=Phone, 3=Manual
     "currentTimeSource",                       // 0=none, 1=GPS, 2=Phone, 3=NTP, 4=drifting
     "loggingActive",                           // 439 — 1=logging active, 0=stopped (Stop/Start Logs)
-    "VMGUpwind",                               // VMG to windward, knots ×100
     "sustainedTWS",                            // 2-min sustained true wind, knots ×10 (Beaufort + gale basis)
     "currentGaleMinutes",                      // live minutes continuously in a gale (sustained ≥34kt), int
     "wmIgn_VMGman_lo",   "wmIgn_VMGman_hi",    // VMG manual session min/max (knots ×10)
@@ -653,12 +688,9 @@ const CSV2_FIELDS = [
     "altHealthStatus",     // 0 learn,1 healthy,2 drift-hi,3 drift-lo,4 low-coverage
     "altCoveragePct",      // frozen/with-data % ×10
     "altObsCount",         // scored observations since freeze
-    "imuHeelOffset",       // IMU zero rest heel offset (deg ×100)
-    "imuPitchOffset",      // IMU zero rest pitch offset (deg ×100)
-    // Victron VE.Direct solar/MPPT live block (10 fields)
-    "VictronSolarPower_W",        // PPV panel power (W ×1)
-    "VictronSolarVoltage_V",      // VPV panel voltage (V ×100)
-    "VictronSolarCurrent_A",      // derived panel current (A ×100)
+    "reserved_imuHeelOffset",   // moved to CSV3 (fast Level Zero echo)
+    "reserved_imuPitchOffset",  // moved to CSV3
+    // Victron VE.Direct solar/MPPT live block (7 fields — PPV/VPV/derived-current moved to CSV4/NavStream)
     "VictronChargeState",         // CS code (×1)
     "VictronMPPTMode",            // MPPT tracker code (×1)
     "VictronError",               // ERR code (×1)
@@ -666,8 +698,7 @@ const CSV2_FIELDS = [
     "VictronMaxPowerToday_W",     // H21 max power today (W ×1)
     "VictronYieldYesterday_kWh",  // H22 yield yesterday (kWh ×100)
     "VictronMaxPowerYesterday_W", // H23 max power yesterday (W ×1)
-    "currentFuelGPH",             // live fuel flow (gal/hr ×100)
-    "currentNMPG",                // live fuel economy (naut mi/gal ×100)
+    // (currentFuelGPH/currentNMPG moved to CSV4/NavStream)
     // session fuel-economy curve: mpg per RPM bin (18 bins spanning 0..fuelCurveTopRPM), naut mi/gal ×100, 0 = empty
     "fuelCurveNMPG_0", "fuelCurveNMPG_1", "fuelCurveNMPG_2", "fuelCurveNMPG_3", "fuelCurveNMPG_4", "fuelCurveNMPG_5",
     "fuelCurveNMPG_6", "fuelCurveNMPG_7", "fuelCurveNMPG_8", "fuelCurveNMPG_9", "fuelCurveNMPG_10", "fuelCurveNMPG_11",
@@ -681,7 +712,6 @@ const CSV2_FIELDS = [
     // field-ON loop instrumentation (2 fields) — worst pass while actually regulating
     "loopFieldOnWin_ms",          // worst field-ON loop pass, rolling 5s (ms)
     "loopFieldOnSes_ms",          // worst field-ON loop pass since Reset Peak Values (ms)
-    "STWNMEA",                    // Speed Through Water (SOW, knots ×100); -1 = NAN/no log
     // thermal tuning plot live-stream fields (replaces the old /thermallog.bin pull)
     "tempFiltered",               // IIR-filtered alt temp (°F ×100); distinct from raw AlternatorTemperatureF
     "outerImpliedPenalty",        // voltage cap as downstream amps penalty (A ×100); still streamed but no longer plotted (voltage-loop info, dropped from the thermal subtab)
@@ -710,8 +740,8 @@ const CSV2_FIELDS = [
     "ft_fastAltDrain_ses",     // ...since Reset Peak Values
     "ft_faMatrixFlush_win",    // disturbance-matrix/flipbook flash flush worst, rolling 5s
     "ft_faMatrixFlush_ses",    // ...since Reset Peak Values
-    "ft_faDetector_win",       // failure-detector analysis slice worst, rolling 5s
-    "ft_faDetector_ses",       // ...since Reset Peak Values
+    "ft_faDetector_win",       // detector whole-analysis compute (Core 0): LAST run (kept ft_ name so the /1000 ms format applies)
+    "ft_faDetector_ses",       // detector whole-analysis compute: WORST since Reset Peak Values
     "ft_faWindowFinalize_win", // per-2s-window finalize worst, rolling 5s
     "ft_faWindowFinalize_ses", // ...since Reset Peak Values
     "faChanState",             // 0 = off, 1 = sampling, 2 = railed/dormant
@@ -737,13 +767,49 @@ const CSV2_FIELDS = [
     "DeepestAnchorAT",         // deepest anchorage, ft ×10
     "BestUpwindVmgAT",         // best upwind VMG, kts ×100
     "LongestGaleAT",           // longest gale duration, hours ×100
+    // Inner-current-loop live accuracy (amps²×10000) + CV RMS error (mV) + CV peak overshoot (mV); 1m/10m/100m/1000m windows each
+    "liveScore0",
+    "liveScore1",
+    "liveScore2",
+    "liveScore3",
+    "cvRmsErr0",
+    "cvRmsErr1",
+    "cvRmsErr2",
+    "cvRmsErr3",
+    "cvPeakOver0",
+    "cvPeakOver1",
+    "cvPeakOver2",
+    "cvPeakOver3",
+];
+
+// CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
+// and CSV2 (5 s). These rode the slow CSV2 cadence before and looked frozen on the dial/helm.
+// Order MUST match the firmware Csv4Index enum in 3_functions.ino.
+const CSV4_FIELDS = [
+    "HeadingNMEA",                // heading (deg, int)
+    "SOGNMEA",                    // speed over ground (knots ×100)
+    "COGNMEA",                    // course over ground (deg, int)
+    "STWNMEA",                    // speed through water (SOW, knots ×100); -1/0 = NAN/no log
+    "ApparentWindSpeedNMEA",      // AWS (knots ×100)
+    "ApparentWindAngleNMEA",      // AWA (deg, int)
+    "TrueWindSpeedNMEA",          // TWS (knots ×100)
+    "TrueWindAngleNMEA",          // TWA (deg, int)
+    "LeewayNMEA",                 // leeway (deg, int)
+    "VMGNMEA",                    // VMG (knots ×100)
+    "VMGUpwind",                  // VMG to windward, knots ×100
+    "VictronSolarPower_W",        // PPV panel power (W ×1)
+    "VictronSolarVoltage_V",      // VPV panel voltage (V ×100)
+    "VictronSolarCurrent_A",      // derived panel current (A ×100)
+    "VictronCurrent",             // Victron battery current (A ×100)
+    "currentFuelGPH",             // live fuel flow (gal/hr ×100)
+    "currentNMPG",                // live fuel economy (naut mi/gal ×100)
 ];
 
 // ── Gate-tuning live readouts ───────────────────────────────────────────────
 // Several thresholds gate on a live/windowed quantity the user can't otherwise see (RPM edge
 // margin, current-drift spread, spectral tone peak, current slew, voltage slope). The firmware
-// streams a 10s rolling extreme of each on CSV2 (ROLL_EMPTY = no sample in the window); IExcessK's
-// quantity rides CSV1 at 10Hz so its 10s peak is computed here. Each readout shows the number to
+// streams a 10s rolling extreme of each on CSV2 (ROLL_EMPTY = no sample in the window); the iExcess
+// peak-over-command rides CSV1 at 10Hz so its 10s peak is computed here. Each readout shows the number to
 // set the threshold relative to. Spans live next to each threshold input in index.html.
 const ROLL_EMPTY_SENTINEL = -1999999999;   // firmware sends -2000000000 when a 10s window had no sample
 const GATE_READOUTS_CSV2 = [
@@ -788,8 +854,8 @@ function gateReadoutOnCsv2(data) {
     gateColor('faAmpsDriftFloorA_live', drPass);
     gateColor('faAmpsDriftPct_live', drPass);
 }
-// IExcessK: peak of (measured amps − active setpoint) over the last 10s, from CSV1 (both sent A×100).
-// IExcessKBulk: peak of (measured amps − commanded ceiling uTargetAmps) over 10s, same CSV1 source.
+// IExcessK_live: peak of (measured amps − active setpoint) over the last 10s, from CSV1 (both sent A×100).
+// IExcessKBulk_live: peak of (measured amps − commanded ceiling uTargetAmps) over 10s, same CSV1 source.
 let _iExcessRing10s = [];
 let _iExcessBulkRing10s = [];
 function gateReadoutOnCsv1(data) {
@@ -871,17 +937,17 @@ function updateAltHealth() {
   // High-field-low-output alert (independent safety net \u2014 fires regardless of the record book)
   const hfEl = document.getElementById('alt-hifield-alert');
   if (hfEl) hfEl.style.display = altLive.hiFieldAlert>=1 ? '' : 'none';
-  // Session statistics over the graded 1 Hz samples (mean + P10) \u2014 a real ~5% decline shows here
-  // before the hourly trend buckets can.
+  // Session statistics over the graded 1 Hz samples (mean + 10th-percentile weak tail) \u2014 a real
+  // ~5% decline shows here before the hourly trend buckets can.
   const sessEl = document.getElementById('alt-session-stats');
   if (sessEl) sessEl.textContent = (altLive.sessionN>=10)
-    ? ('this session: mean '+Math.round(altLive.sessionMean)+'% \u00b7 P10 '+Math.round(altLive.sessionP10)+'% \u00b7 '+Math.round(altLive.sessionN)+' graded samples')
+    ? ('this session: mean '+Math.round(altLive.sessionMean)+'% \u00b7 10th percentile '+Math.round(altLive.sessionP10)+'% \u00b7 '+Math.round(altLive.sessionN)+' graded samples')
     : '';
-  // Front size + engine-hours of data gathered (no live "now %": the plot's dot already shows it).
+  // Best-surface size + engine-hours of data gathered (no live "now %": the plot's dot already shows it).
   if (covEl) {
     covEl.textContent = (altLive.ptCount>0)
-      ? (Math.round(altLive.ptCount)+' front points \u00b7 '+Math.round(altLive.engHours)+' engine-hr')
-      : 'no front points yet';
+      ? (Math.round(altLive.ptCount)+' best surface points \u00b7 '+Math.round(altLive.engHours)+' engine-hr')
+      : 'no best surface points yet';
   }
   const modeLbl = document.getElementById('alt-mode-label');
   if (modeLbl) modeLbl.textContent = altLive.source>=1 ? 'FIXED' : (altLive.paused>=1 ? 'LEARNED (paused)' : 'LEARNED');
@@ -1138,11 +1204,11 @@ function buildAltSessPlot(){
   leg.innerHTML =
     '<span style="display:flex;align-items:center;gap:5px;white-space:nowrap;">'
     + '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:' + ALT_STATE_COLOR[0] + ';"></span>'
-    + '<b style="font-weight:600;">Measured</b><span style="color:var(--text-muted,#8a9097);">real reading here</span></span>'
+    + '<b style="font-weight:600;">Measured</b></span>'
     + '<span style="width:1px;height:13px;background:var(--border-light,#e3e6e8);"></span>'
     + '<span style="display:flex;align-items:center;gap:5px;white-space:nowrap;">'
     + '<span style="display:inline-block;width:11px;height:2.4px;border-radius:2px;background:' + ALT_STATE_COLOR[1] + ';"></span>'
-    + '<b style="font-weight:600;">Estimated</b><span style="color:var(--text-muted,#8a9097);">interpolated</span></span>';
+    + '<b style="font-weight:600;">Interpolated Estimate</b></span>';
   el.appendChild(leg);
 
   const exAltAs = el.querySelector('.autoscale-ctrl'); if (exAltAs) exAltAs.remove();
@@ -1235,7 +1301,7 @@ function renderPerf(){
   if (pctEl) pctEl.style.color = pGraded ? ALT_STATE_COLOR[pst] : '';
   const pstEl = document.getElementById('perf-state');
   if (pstEl){ pstEl.textContent = L.valid ? (ALT_STATE_LABEL[pst]||'') : ''; pstEl.style.color = ALT_STATE_COLOR[pst]||'#888'; }
-  // data maturity (bottom-right quadrant): learned front points + hours spent moving in this mode
+  // data maturity (bottom-right quadrant): learned best surface points + hours spent moving in this mode
   setTxt('perf-pts', (L.ptCount|0));
   const hrs = perfView ? (motorLive.motorHours||0) : (perfLive.sailHours||0);
   setTxt('perf-hours-val', hrs>=10 ? Math.round(hrs) : hrs.toFixed(1));
@@ -1671,8 +1737,8 @@ const CSV3_FIELDS = [
     "SystemIDStepAmplitude",
     "HardOCTripAmps",
     "HardOCDebounceMs",
-    "IExcessK",
-    "IExcessN",
+    "IExcessFrac",
+    "IExcessFloorA",
     "IExcessKBleed",
     "IgnoreRPM",
     "MinRPMForField",
@@ -1686,8 +1752,8 @@ const CSV3_FIELDS = [
     "WarmupRampRate",                  // 189 (shifted -1 from prev)
     "OvGroup1Enable",                  // 190 (was 191; 190 reserved — was OvLayer1Enable)
     "OvGroup2Enable",
-    "IExcessSigSrc",
-    "IExcessMA_N",
+    "IExcessCeilA",
+    "IExcessTau",
     "OutputPIDSigSrc",
     "TdPred",                          // raw float (%.3f)
     "OvMeasMarginV",                   // raw float (%.3f)
@@ -1734,8 +1800,8 @@ const CSV3_FIELDS = [
     "TargetVoltageSetpoint",
     "RebulkCurrent_A",
     "UseFloat",
-    "IExcessKBulk",
-    "IExcessNBulk",
+    "IExcessFracBulk",
+    "IExcessRelFrac",
     "altSpare2",
     "altSpare3",
     "TempAlarmLow",
@@ -1790,6 +1856,17 @@ const CSV3_FIELDS = [
     "faAttenDownAmps",               // A ×10
     "faPeakMinA",                    // A ×100
     "wifiNapEnabled",                // 0/1 — WiFi Napping standby toggle (Client only)
+    "imuHeelOffset",                 // captured rest heel offset (deg ×100) — moved from CSV2
+    "imuPitchOffset",                // captured rest pitch offset (deg ×100)
+    "systemIDTestType",              // 0=step, 1=sine sweep (Plant Delay test type)
+    "systemIDSineFreqStart",         // Hz ×10
+    "systemIDSineFreqEnd",           // Hz ×10
+    "systemIDSineCycles",            // analysed cycles per sweep frequency
+    "tuningWaveform",                // 0=square, 1=sine manual, 2=sine auto-sweep
+    "tuningSineFreq",                // Hz ×10 (manual sine frequency)
+    "tuningSweepStart",              // Hz ×10
+    "tuningSweepEnd",                // Hz ×10
+    "tuningSweepCycles",             // analysed cycles per sweep frequency
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -1980,19 +2057,21 @@ async function getPhoneLocation() {
 }
 
 async function postPhoneDataToDevice() {
+    // Time (epochMs) is sent ALWAYS, with no password — it's the device's primary clock source
+    // on NMEA-less boats in AP mode (browser or app). GPS (lat/lon) overrides navigation data, so
+    // it's only sent once Settings is unlocked (and the firmware ignores lat/lon without auth).
     const pwField = document.querySelector('.password_field');
     const pw = pwField ? pwField.value : '';
-    if (!pw) return;  // settings still locked; don't POST without auth
-
-    const loc = await getPhoneLocation();
-    const epochMs = Date.now();
 
     const params = new URLSearchParams();
-    params.set('password', pw);
-    params.set('epochMs', String(epochMs));
-    if (loc) {
-        params.set('lat', loc.latitude.toFixed(6));
-        params.set('lon', loc.longitude.toFixed(6));
+    params.set('epochMs', String(Date.now()));
+    if (pw) {
+        params.set('password', pw);
+        const loc = await getPhoneLocation();
+        if (loc) {
+            params.set('lat', loc.latitude.toFixed(6));
+            params.set('lon', loc.longitude.toFixed(6));
+        }
     }
     try {
         await fetch(buildURL('/set_phone_data') + '?' + params.toString(), { method: 'GET' });
@@ -2003,8 +2082,9 @@ async function postPhoneDataToDevice() {
 
 function startPhoneDataPoster() {
     if (phoneDataPosterTimer) return;  // already running
-    // Fire once after a short delay (let SSE establish first), then on interval.
-    setTimeout(postPhoneDataToDevice, 5000);
+    // Fire immediately so the device gets the client clock within ~1s of connecting (AP mode has
+    // no other time source), then refresh on interval.
+    postPhoneDataToDevice();
     phoneDataPosterTimer = setInterval(postPhoneDataToDevice, PHONE_DATA_POST_INTERVAL_MS);
 }
 
@@ -2701,6 +2781,10 @@ let liveWindowSec = 8;         // currently-visible X span (sec); driven by plot
 
 // Efficient circular buffer structure - no timestamps needed
 let currentTempData, voltageData, rpmData, temperatureData;
+// Protection-event marker bitmask, one slot per buffer sample, shared by all four short-term
+// plots (they share the same x-axis basis and scroll in lockstep). 0 = no event; bits match
+// firmware: 1=OV 2=iExcess 4=LoadDump. Shifted with the data series each CSV1 frame.
+let protEventData = [];
 
 //from chatgpt: Every call to init*Plot() attaches a new ResizeObserver with a 1000 ms debounce. 
 //But these functions are reentrant if called twice, and you don't unregister observers. This can stack up and cause redundant resizing logic at runtime.
@@ -3821,6 +3905,17 @@ function processCSVDataOptimized(data) {
             _autoScaleTempRight = computeScaleRange(temperatureData, [2], 20, 0.10, 0);
         }
 
+        // ALWAYS UPDATE DATA STRUCTURES - protection-event markers
+        // Shift the marker bitmask in lockstep with the data series (always, regardless of
+        // useTimestamps — the data scrolls left through the buffer either way) and append
+        // this frame's mask at the end so each marker stays pinned to its sample.
+        const bufLen = currentTempData ? currentTempData[1].length : 0;
+        if (bufLen > 0) {
+            if (protEventData.length !== bufLen) protEventData = new Array(bufLen).fill(0);
+            for (let i = 1; i < bufLen; i++) protEventData[i - 1] = protEventData[i];
+            protEventData[bufLen - 1] = 'protEventMask' in data ? (parseInt(data.protEventMask) || 0) : 0;
+        }
+
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
         // ALWAYS UPDATE DATA STRUCTURES - PID Tuning plot data
         if (pidTuningData) {
@@ -3995,6 +4090,48 @@ function updatePlotConfiguration(data) {
     }
 }
 
+// uPlot draw hook — paint a thin vertical line at every buffer sample where a protection
+// fired this frame, plus a tiny abbreviation at the top (OV / iX / LD). Shared by all four
+// short-term plots; protEventData is index-aligned to u.data[0]. Labels are de-cluttered by
+// a minimum pixel gap and never touch the series legend.
+function drawProtectionMarkers(u) {
+    if (!protEventData || !protEventData.length) return;
+    const xd = u.data[0];
+    if (!xd) return;
+    const ctx = u.ctx;
+    const xmin = u.scales.x.min, xmax = u.scales.x.max;
+    const top = u.bbox.top, bot = u.bbox.top + u.bbox.height;
+    const n = Math.min(protEventData.length, xd.length);
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    let lastLabelX = -1e9;
+    for (let i = 0; i < n; i++) {
+        const m = protEventData[i];
+        if (!m) continue;
+        const xv = xd[i];
+        if (xv == null || !isFinite(xv) || xv < xmin || xv > xmax) continue;
+        const x = Math.round(u.valToPos(xv, 'x', true)) + 0.5;
+        ctx.strokeStyle = 'rgba(244,67,54,0.50)';
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bot); ctx.stroke();
+        if (x - lastLabelX >= 22) {
+            let lbl = '';
+            if (m & 1) lbl += 'OV';
+            if (m & 2) lbl += (lbl ? '·' : '') + 'iX';
+            if (m & 4) lbl += (lbl ? '·' : '') + 'LD';
+            ctx.setLineDash([]);
+            ctx.fillStyle = 'rgba(244,67,54,0.95)';
+            ctx.fillText(lbl, x + 2, top + 2);
+            lastLabelX = x;
+        }
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+}
+
 // Re-apply the visible X window to all four short-term plots by re-running their x range fn (no data change).
 function applyLiveWindowToPlots() {
     [currentTempPlot, voltagePlot, rpmPlot, temperaturePlot].forEach(p => {
@@ -4050,6 +4187,9 @@ function reinitializePlotsWithNewTiming(data) {
         new Array(newMaxPoints).fill(0), // Temperature
         new Array(newMaxPoints).fill(0)  // Field% (duty cycle)
     ];
+
+    // Protection-event marker buffer — same length, scrolls with the data series
+    protEventData = new Array(newMaxPoints).fill(0);
 
     // Reset circular buffer indices
     currentTempIndex = 0;
@@ -4229,10 +4369,12 @@ function updateAllEchosOptimized(data) {
         { key: 'AlternatorHardShutdownV', id: 'AlternatorHardShutdownV_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'HardOCTripAmps', id: 'HardOCTripAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'HardOCDebounceMs', id: 'HardOCDebounceMs_echo', transform: v => Math.round(v) },
-        { key: 'IExcessK', id: 'IExcessK_echo', transform: v => (v / 10).toFixed(1) },
-        { key: 'IExcessN', id: 'IExcessN_echo', transform: v => Math.round(v) },
-        { key: 'IExcessKBulk', id: 'IExcessKBulk_echo', transform: v => (v / 10).toFixed(1) },
-        { key: 'IExcessNBulk', id: 'IExcessNBulk_echo', transform: v => Math.round(v) },
+        { key: 'IExcessFrac', id: 'IExcessFrac_echo', transform: v => (v / 10).toFixed(1) },          // ×1000 → % of command
+        { key: 'IExcessFracBulk', id: 'IExcessFracBulk_echo', transform: v => (v / 10).toFixed(1) },  // ×1000 → % of ceiling
+        { key: 'IExcessFloorA', id: 'IExcessFloorA_echo', transform: v => (v / 10).toFixed(1) },      // ×10 → A
+        { key: 'IExcessCeilA', id: 'IExcessCeilA_echo', transform: v => (v / 10).toFixed(1) },        // ×10 → A
+        { key: 'IExcessTau', id: 'IExcessTau_echo', transform: v => Math.round(v) },                  // raw ms
+        { key: 'IExcessRelFrac', id: 'IExcessRelFrac_echo', transform: v => (v / 10).toFixed(1) },    // ×1000 → % of threshold
         { key: 'IExcessKBleed', id: 'IExcessKBleed_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'IExcessArmMarginV', id: 'IExcessArmMarginV_echo', transform: v => v.toFixed(3) },
         { key: 'VoltageDisagreeThreshold', id: 'VoltageDisagreeThreshold_echo', transform: v => (v / 100).toFixed(2) },
@@ -4273,8 +4415,6 @@ function updateAllEchosOptimized(data) {
         { key: 'TdPred',            id: 'TdPred_echo',            transform: v => v.toFixed(3) },
         { key: 'OvMeasMarginV',     id: 'OvMeasMarginV_echo',     transform: v => v.toFixed(3) },
         { key: 'OvPredMarginV',     id: 'OvPredMarginV_echo',     transform: v => v.toFixed(3) },
-        { key: 'IExcessSigSrc',       id: 'IExcessSigSrc_echo',       transform: v => (['MA(N)', 'EMA(TC)', 'Raw'][v] ?? v) },
-        { key: 'IExcessMA_N',         id: 'IExcessMA_N_echo',         transform: v => Math.round(v) },
         { key: 'OutputPIDSigSrc',     id: 'OutputPIDSigSrc_echo',     transform: v => (['EMA(TC)', 'MA(N)', 'Raw'][v] ?? v) },
         { key: 'OutputPIDMA_N',       id: 'OutputPIDMA_N_echo',       transform: v => Math.round(v) },
         { key: 'OutputPIDFilterTC',   id: 'OutputPIDFilterTC_echo',   transform: v => v },
@@ -4287,7 +4427,6 @@ function updateAllEchosOptimized(data) {
         { key: 'capLimitMode', id: 'capLimitMode_echo', transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_echo',      transform: v => v },
         { key: 'InputFilterTC', id: 'InputFilterTC_ID',        transform: v => v },
-        { key: 'InputFilterTC', id: 'InputFilterTC_echo_grp3', transform: v => v },
         { key: 'OutputPIDFilterTC', id: 'OutputPIDFilterTC_echo_pid', transform: v => v },
         { key: 'SlopeBleedThresh',      id: 'SlopeBleedThresh_echo',          transform: v => (v / 100).toFixed(2) },
         { key: 'SlopeBleedK',           id: 'SlopeBleedK_echo',               transform: v => v },
@@ -4295,6 +4434,15 @@ function updateAllEchosOptimized(data) {
         { key: 'SlopeBleedProxV',       id: 'SlopeBleedProxV_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'StartupRiseRate',       id: 'StartupRiseRate_echo',           transform: v => (v / 100).toFixed(2) },
         { key: 'SystemIDStepAmplitude', id: 'SystemIDStepAmplitude_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'systemIDTestType',      id: 'systemIDTestType_echo',      transform: v => v == 1 ? 'Sine sweep' : 'Step' },
+        { key: 'systemIDSineFreqStart', id: 'systemIDSineFreqStart_echo', transform: v => (v / 10).toFixed(1) },
+        { key: 'systemIDSineFreqEnd',   id: 'systemIDSineFreqEnd_echo',   transform: v => (v / 10).toFixed(1) },
+        { key: 'systemIDSineCycles',    id: 'systemIDSineCycles_echo',    transform: v => v },
+        { key: 'tuningWaveform',        id: 'tuningWaveform_echo',        transform: v => v == 2 ? 'Sine sweep' : (v == 1 ? 'Sine manual' : 'Square') },
+        { key: 'tuningSineFreq',        id: 'tuningSineFreq_echo',        transform: v => (v / 10).toFixed(1) },
+        { key: 'tuningSweepStart',      id: 'tuningSweepStart_echo',      transform: v => (v / 10).toFixed(1) },
+        { key: 'tuningSweepEnd',        id: 'tuningSweepEnd_echo',        transform: v => (v / 10).toFixed(1) },
+        { key: 'tuningSweepCycles',     id: 'tuningSweepCycles_echo',     transform: v => v },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'cvWaveAmplitudeV',  id: 'cvWaveAmplitudeV_echo',  transform: v => (v / 100).toFixed(2) },
@@ -4964,7 +5112,7 @@ function renderTuningLog(data) {
     if (!tbody) return;
 
     tbody.innerHTML = records.map(r => {
-        const scoreColor = r.s < 2 ? '#22c55e' : r.s < 6 ? '#eab308' : '#ef4444';
+        const scoreColor = r.s < 5 ? '#22c55e' : r.s < 10 ? '#eab308' : '#ef4444';   // current loop: good < 5
         const isMatch = !isNaN(curKp) &&
             Math.abs(r.kp - curKp) < 0.0001 &&
             Math.abs(r.ki - curKi) < 0.0001 &&
@@ -5154,15 +5302,33 @@ function fetchCVTuningLog() {
         .catch(() => {});
 }
 
+// CV live-score cell: write a value in mV and color it green/orange/red by its thresholds.
+// mv <= 0 means "no disturbance scored in this window yet" → dash, muted. Greens are good.
+// Caches the last render on the element itself so it works regardless of dispatcher scope.
+function cvScoreCell(elId, _ck, mv, greenMax, orangeMax) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    let txt, color;
+    if (!(mv > 0)) { txt = '—'; color = 'var(--text-muted)'; }
+    else {
+        txt = Math.round(mv) + ' mV';
+        color = mv < greenMax ? '#21c25e' : (mv < orangeMax ? '#f08c1d' : '#ef4444');
+    }
+    const stamp = txt + '|' + color;
+    if (el.dataset.stamp === stamp) return;
+    el.dataset.stamp = stamp;
+    el.textContent = txt;
+    el.style.color = color;
+}
+
 function renderCVTuningLog(data) {
-    // Update CV live score displays (Score Log + Live Data mirror)
+    // CV Tuning panel's own live readout = RMS error in mV (data.live is mV; the Diag mirror is
+    // fed separately off CSV2 with color, so we don't touch cvRmsErrAlt/cvPeakOverAlt here).
     const cvLiveLabels = ['1m', '10m', '100m', '1000m'];
     (data.live || []).forEach((v, i) => {
-        const val = v > 0 ? v.toFixed(2) : '—';
+        const val = v > 0 ? (Math.round(v) + ' mV') : '—';
         const el = document.getElementById('cvLiveScore' + i);
         if (el) el.textContent = cvLiveLabels[i] + ': ' + val;
-        const elAlt = document.getElementById('cvLiveScoreAlt' + i);
-        if (elAlt) elAlt.textContent = val;   // Diag row header already lists the windows — no per-value prefix
     });
 
     // Active test score banner
@@ -5208,7 +5374,7 @@ function renderCVTuningLog(data) {
     if (!tbody) return;
 
     tbody.innerHTML = records.map(r => {
-        const scoreColor = r.s < 2 ? '#22c55e' : r.s < 10 ? '#eab308' : '#ef4444';
+        const scoreColor = r.s < 10 ? '#22c55e' : r.s < 20 ? '#eab308' : '#ef4444';   // CV loop: good < 10
         const isMatch = !isNaN(curVkp) &&
             Math.abs(r.vkp - curVkp) < 0.001 &&
             Math.abs(r.vki - curVki) < 0.001 &&
@@ -5216,7 +5382,7 @@ function renderCVTuningLog(data) {
             r.wp === curWp && r.cr === curCr;
         const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
 
-        const lowScoreColor = (r.ls || 0) < 2 ? '#22c55e' : (r.ls || 0) < 10 ? '#eab308' : '#ef4444';
+        const lowScoreColor = (r.ls || 0) < 10 ? '#22c55e' : (r.ls || 0) < 20 ? '#eab308' : '#ef4444';   // CV loop: good < 10
         return `<tr style="${rowStyle}">
             <td style="padding:2px 4px;">${r.n}</td>
             <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
@@ -5238,8 +5404,8 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${r.irf.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.ks.toFixed(1)}</td>
             <td style="padding:2px 4px;">${r.kh.toFixed(1)}</td>
-            <td style="padding:2px 4px;">${r.iek.toFixed(1)}</td>
-            <td style="padding:2px 4px;">${r.ien}</td>
+            <td style="padding:2px 4px;">${(r.iefr * 100).toFixed(1)}</td>
+            <td style="padding:2px 4px;">${r.ietau.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.iekb.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.lddt.toFixed(0)}</td>
             <td style="padding:2px 4px;">${r.ldt1.toFixed(0)}</td>
@@ -5648,9 +5814,7 @@ function initCVTuningPlot() {
         }
     ]);
 
-    // Show the active X window in the input as a placeholder hint
-    const xInp = document.getElementById('cvXTimeInput');
-    if (xInp) xInp.placeholder = String((cvXTime && cvXTime > 0) ? cvXTime : (xTime || 30));
+    updateCVXButtons();
 
     if (cvTuningPlotResizeObserver) cvTuningPlotResizeObserver.disconnect();
     cvTuningPlotResizeObserver = new ResizeObserver(() => {
@@ -5724,8 +5888,6 @@ function rebuildCVTuningWindow() {
                 cvTuningData[s][newN - 1 - i] = old[s][oldN - 1 - i];
     }
     if (cvTuningPlot) cvTuningPlot.setData(cvTuningData);
-    const xInp = document.getElementById('cvXTimeInput');
-    if (xInp) xInp.placeholder = String((cvXTime && cvXTime > 0) ? cvXTime : (xTime || 30));
 }
 
 function setCVXTime(val) {
@@ -5733,6 +5895,15 @@ function setCVXTime(val) {
     if (!isFinite(v) || v <= 0) return;
     cvXTime = v;
     rebuildCVTuningWindow();
+    updateCVXButtons();
+}
+
+// Light the button matching the active window (cvXTime, else global xTime).
+function updateCVXButtons() {
+    const eff = (cvXTime && cvXTime > 0) ? cvXTime : (xTime || 30);
+    document.querySelectorAll('#cvXTimeButtons button').forEach(b => {
+        b.classList.toggle('on', Number(b.value) === Number(eff));   // segmented-control active pill
+    });
 }
 
 function setCVVoltsRange(minVal, maxVal) {
@@ -6329,6 +6500,104 @@ function resetParameter(parameterName) {
 // Console state
 let consolePaused = false;
 
+// ── Console buffer (persistent, coalesced) ───────────────────────────────────
+// The console is no longer DOM-only. Every line is kept in a 1000-entry ring
+// (window.consoleLog) so Download Logs and the remote log relay can export the
+// whole session. Consecutive identical messages coalesce into one line with a
+// (xN) count instead of flooding the log (e.g. repeated integrator resets).
+// Persisted to localStorage (throttled) so a page refresh or a backgrounded
+// Capacitor app keeps the history. Each entry stores an epoch so the live view
+// shows time-only while the export shows date + time.
+const CONSOLE_MAX_LINES = 1000;
+const CONSOLE_LS_KEY = 'xreg_console_v1';
+window.consoleLog = window.consoleLog || [];   // [{ t: epochMs, msg, count }]
+let consoleLsDirty = false;
+
+function loadConsoleLog() {
+    try {
+        const raw = localStorage.getItem(CONSOLE_LS_KEY);
+        if (!raw) return;
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) window.consoleLog = arr.slice(-CONSOLE_MAX_LINES);
+    } catch (e) { /* corrupt/absent — start empty */ }
+}
+
+function saveConsoleLogNow() {
+    try { localStorage.setItem(CONSOLE_LS_KEY, JSON.stringify(window.consoleLog)); } catch (e) { }
+    consoleLsDirty = false;
+}
+
+// Render one buffer entry to a string. withDate = full date+time (export); else time-only (live view).
+function formatConsoleEntry(e, withDate) {
+    const d = new Date(e.t);
+    const stamp = withDate ? d.toLocaleString() : d.toLocaleTimeString();
+    const suffix = (e.count > 1) ? ` (x${e.count})` : '';
+    return `[${stamp}] ${e.msg}${suffix}`;
+}
+
+// Append one raw firmware message (no timestamp). updateDisplay=false while paused —
+// the line is still buffered so the export stays complete; the screen catches up on resume.
+function appendConsoleLine(msg, updateDisplay) {
+    const buf = window.consoleLog;
+    const last = buf[buf.length - 1];
+    const coalesced = (last && last.msg === msg);
+
+    if (coalesced) {
+        last.count++;
+        last.t = Date.now();
+    } else {
+        buf.push({ t: Date.now(), msg: msg, count: 1 });
+        while (buf.length > CONSOLE_MAX_LINES) buf.shift();
+    }
+    consoleLsDirty = true;
+
+    if (!updateDisplay) return;
+    const consoleDiv = document.getElementById("consoleOutput");
+    if (!consoleDiv) return;
+    const cur = buf[buf.length - 1];
+    if (coalesced && consoleDiv.lastElementChild) {
+        consoleDiv.lastElementChild.textContent = formatConsoleEntry(cur, false);
+    } else {
+        const line = document.createElement("div");
+        line.textContent = formatConsoleEntry(cur, false);
+        consoleDiv.appendChild(line);
+        while (consoleDiv.children.length > CONSOLE_MAX_LINES) {
+            consoleDiv.removeChild(consoleDiv.firstChild);
+        }
+    }
+    // Defer scroll to avoid forced synchronous reflow on every message
+    requestAnimationFrame(() => { consoleDiv.scrollTop = consoleDiv.scrollHeight; });
+}
+
+// Full session as text — used by Download Logs and the remote relay (date + time + counts).
+function getConsoleText() {
+    return window.consoleLog.map(e => formatConsoleEntry(e, true)).join('\n');
+}
+
+// Repaint the on-screen console from the buffer (after a localStorage restore or un-pause).
+function renderConsoleFromBuffer() {
+    const consoleDiv = document.getElementById("consoleOutput");
+    if (!consoleDiv) return;
+    consoleDiv.innerHTML = "";
+    for (const e of window.consoleLog) {
+        const line = document.createElement("div");
+        line.textContent = formatConsoleEntry(e, false);
+        consoleDiv.appendChild(line);
+    }
+    requestAnimationFrame(() => { consoleDiv.scrollTop = consoleDiv.scrollHeight; });
+}
+
+// Throttled persistence: flush at most every 3s, plus on tab hide / unload.
+loadConsoleLog();
+setInterval(() => { if (consoleLsDirty) saveConsoleLogNow(); }, 3000);
+document.addEventListener('visibilitychange', () => { if (document.hidden && consoleLsDirty) saveConsoleLogNow(); });
+window.addEventListener('pagehide', () => { if (consoleLsDirty) saveConsoleLogNow(); });
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderConsoleFromBuffer);
+} else {
+    renderConsoleFromBuffer();
+}
+
 function copyConsole() {
     const consoleDiv = document.getElementById("consoleOutput");
     if (!consoleDiv) {
@@ -6372,6 +6641,9 @@ function fallbackCopy(text) {
 
 
 function clearConsole() {
+    window.consoleLog = [];
+    consoleLsDirty = false;
+    try { localStorage.removeItem(CONSOLE_LS_KEY); } catch (e) { }
     const el = document.getElementById("consoleOutput");
     if (el) el.innerHTML = "";
 }
@@ -6383,6 +6655,7 @@ function toggleConsolePause() {
         btn.textContent = consolePaused ? "Resume" : "Pause";
         btn.style.backgroundColor = consolePaused ? "#ff6b6b" : "";
     }
+    if (!consolePaused) renderConsoleFromBuffer();  // catch the display up with anything buffered while paused
 }
 
 //Mirror for Alarm
@@ -6742,7 +7015,8 @@ function initCurrentTempPlot() {
                         currentTempResizeObserver = new ResizeObserver(resizePlot);
                         currentTempResizeObserver.observe(plotEl);
                     }
-                ]
+                ],
+                draw: [(u) => drawProtectionMarkers(u)]
             }
         }]
     };
@@ -6900,7 +7174,8 @@ function initVoltagePlot() {
                         voltageResizeObserver = new ResizeObserver(resizePlot);
                         voltageResizeObserver.observe(plotEl);
                     }
-                ]
+                ],
+                draw: [(u) => drawProtectionMarkers(u)]
             }
         }]
     };
@@ -7051,7 +7326,8 @@ function initRPMPlot() {
                         rpmResizeObserver = new ResizeObserver(resizePlot);
                         rpmResizeObserver.observe(plotEl);
                     }
-                ]
+                ],
+                draw: [(u) => drawProtectionMarkers(u)]
             }
         }]
     };
@@ -7201,7 +7477,8 @@ function initTemperaturePlot() {
                         temperatureResizeObserver = new ResizeObserver(resizePlot);
                         temperatureResizeObserver.observe(plotEl);
                     }
-                ]
+                ],
+                draw: [(u) => drawProtectionMarkers(u)]
             }
         }]
     };
@@ -7461,10 +7738,8 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("STWNMEA_ID", sa.stwNMEA);
     applyStaleStyleByAge("VMGNMEA_ID", sa.vmg);
     applyStaleStyleByAge("LeewayNMEA_ID", sa.leeway);
-    applyStaleStyleByAge("ApparentWindSpeedNMEA_ID", sa.appWindSpeed);
-    applyStaleStyleByAge("ApparentWindAngleNMEA_ID", sa.appWindAngle);
-    applyStaleStyleByAge("TrueWindSpeedNMEA_ID", sa.trueWindSpeed);
-    applyStaleStyleByAge("TrueWindAngleNMEA_ID", sa.trueWindAngle);
+    // Apparent/true wind staleness: the old text rows were replaced by the Wind dial +
+    // trend plot (which read these fields directly), so there are no per-field spans to grey.
 
     // --- Baro / ambient — dedicated timestamps ---
     // Both come from the BMP388 on an 8s read cycle. Use the 12s threshold for
@@ -7971,7 +8246,20 @@ function updateTogglesFromData(data) {
         updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
+        updateUploadNowButtonState();  // re-gray "Upload Now" if cloud just turned off/on
         updateCheckbox("wifiNapEnabled_checkbox", data.wifiNapEnabled, "wifiNapEnabled");
+        // SystemID test-type selector: reflect saved value + show/hide sine params (skip while user is picking).
+        const sysidTypeSel = document.getElementById('systemIDTestType_sel');
+        if (sysidTypeSel && data.systemIDTestType !== undefined && document.activeElement !== sysidTypeSel) {
+            sysidTypeSel.value = String(data.systemIDTestType);
+            sysidToggleSineParams(data.systemIDTestType);
+        }
+        // Tuning waveform selector: reflect saved value + show/hide sine rows (skip while user is picking).
+        const tWaveSel = document.getElementById('tuningWaveform_sel');
+        if (tWaveSel && data.tuningWaveform !== undefined && document.activeElement !== tWaveSel) {
+            tWaveSel.value = String(data.tuningWaveform);
+            tuningToggleWaveformUI(data.tuningWaveform);
+        }
         // WiFi Napping only applies in Client mode (a SoftAP can't sleep) — hide the row in AP mode.
         const napRow = document.getElementById("wifiNapEnabled_row");
         if (napRow) napRow.style.display = (window._lastKnownMode === 1) ? "none" : "";  // 1 = MODE_AP
@@ -7982,7 +8270,6 @@ function updateTogglesFromData(data) {
         updateCheckbox("HardwarePresent_checkbox", data.hardwarePresent, "hardwarePresent");
         updateCheckbox("OvGroup1Enable_checkbox", data.OvGroup1Enable, "OvGroup1Enable");
         updateCheckbox("OvGroup2Enable_checkbox", data.OvGroup2Enable, "OvGroup2Enable");
-        if (data.IExcessSigSrc !== undefined)   updateTripleBtn('iExcessSigSrc_',   data.IExcessSigSrc);
         if (data.OutputPIDSigSrc !== undefined)  updateTripleBtn('outputPIDSigSrc_', data.OutputPIDSigSrc);
         // // Apply the ESP32 state to the plot system
         // if (data.timeAxisModeChanging !== undefined) {
@@ -8104,9 +8391,29 @@ function submitSimpleParam(paramName, val) {
         .catch(err => diagLog(paramName + ' submit failed: ' + err));
 }
 
-function setIExcessSigSrc(val) {
-    updateTripleBtn('iExcessSigSrc_', val);
-    submitSimpleParam('IExcessSigSrc', val);
+// Level Zero: the offsets are averaged over ~2s on the device before they echo back, so show a
+// quiet inline "calculating…" instead of a dead label. The window also suppresses the immediate
+// CSV3 echo of the OLD offsets (see the CSV3 listener); the capture-complete frame lands after it.
+// 4.5s comfortably covers the ~2s capture and the firmware's 5s timeout safety net.
+function renderImuZeroLabel(data) {
+    const el = document.getElementById('imuZeroStatus_ID');
+    if (!el || !data) return;
+    const hOff = Number(data.imuHeelOffset) / 100;
+    const pOff = Number(data.imuPitchOffset) / 100;
+    el.textContent = (Number.isFinite(hOff) && Number.isFinite(pOff) && (hOff !== 0 || pOff !== 0))
+        ? `heel ${hOff.toFixed(1)}° / pitch ${pOff.toFixed(1)}°`
+        : 'not set';
+}
+function startImuZero() {
+    const el = document.getElementById('imuZeroStatus_ID');
+    if (el) el.textContent = 'calculating…';
+    window._imuZeroCalcUntil = Date.now() + 4500;
+    submitSimpleParam('ZeroIMU', 1);
+    // The firmware fires exactly one capture-complete CSV3 frame; if it lands inside the suppress
+    // window above it gets skipped, and the next event-driven frame may be 60s away — leaving the
+    // label stuck on "calculating…". So resolve from the cached CSV3 once the window closes rather
+    // than waiting for a fresh frame.
+    setTimeout(() => renderImuZeroLabel(g_lastCsv3), 4600);
 }
 
 function setOutputPIDSigSrc(val) {
@@ -8310,6 +8617,7 @@ window.addEventListener("load", function () {
     if (cloudFeaturesCheckbox) {
         cloudFeaturesCheckbox.addEventListener('change', function () {
             updateCloudFeaturesTabVisibility(this.checked);
+            updateUploadNowButtonState();  // toggling cloud here also re-grays "Upload Now"
         });
     }
 
@@ -8451,6 +8759,18 @@ window.addEventListener("load", function () {
         });
     });
 
+    // Enter inside a table cell should behave like clicking out: blur the field (leaving the
+    // Save button visible for a deliberate click), NOT submit the form. A native Enter-submit
+    // fired "Saving..." immediately and bypassed the intended Save-button step.
+    document.querySelectorAll('#learning-table-form input[type="number"], #fuel-table-form input[type="number"]').forEach(input => {
+        input.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                input.blur();
+            }
+        });
+    });
+
     // Hide save button after form submission
     document.getElementById('learning-table-form').addEventListener('submit', function (e) {
         if (!validateLearningTable()) {
@@ -8525,22 +8845,8 @@ window.addEventListener("load", function () {
         // Timestamp = time received by app (not time sent by regulator).
         // Messages throttled by firmware: max 5 per 700ms (adjustable).
         source.addEventListener("console", function (event) {
-            if (consolePaused) return; // Don't add messages while paused
-
-            const timestamp = new Date().toLocaleTimeString();
-            const consoleDiv = document.getElementById("consoleOutput");
-            if (!consoleDiv) return;
-
-            const line = document.createElement("div");
-            line.textContent = `[${timestamp}] ${event.data}`;
-            consoleDiv.appendChild(line);
-
-            // Defer scroll to avoid forced synchronous reflow on every message
-            requestAnimationFrame(() => { consoleDiv.scrollTop = consoleDiv.scrollHeight; });
-
-            while (consoleDiv.children.length > 100) {
-                consoleDiv.removeChild(consoleDiv.firstChild);
-            }
+            // Always buffer (so the export stays complete); only touch the screen when not paused.
+            appendConsoleLine(event.data, !consolePaused);
         });
 
         // Staleness detection - check if data is still flowing
@@ -8595,11 +8901,15 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV1_FIELDS.map((key, i) => [key, values[i]]));
+            g_lastCsv1 = data;  // cache for the diagnostics snapshot in log exports
 
             // Thermal tuning plot: cache the two fast (CSV1) series for the live ring.
             try { thermalLiveOnCsv1(data); } catch (e) { }
 
-            // Gate-tuning readout: IExcessK rides CSV1 (amps − setpoint); compute its 10s peak here.
+            // Wind dial + trend plot: cache the fast (CSV1) wind series, drive the dial.
+            try { windLiveOnCsv1(data); } catch (e) { }
+
+            // Gate-tuning readout: iExcess peak-over-command rides CSV1 (amps − setpoint); compute its 10s peak here.
             try { gateReadoutOnCsv1(data); } catch (e) { }
 
             // Update all "session window" labels with the current elapsed time since
@@ -8614,6 +8924,22 @@ window.addEventListener("load", function () {
 
             if (data.stateRevision !== undefined) {
                 lastSeenRev = data.stateRevision;
+            }
+
+            // Banner ignition indicator — driven off CSV1 (~10 Hz) so toggling the override
+            // (or the real ignition wire changing) shows in the banner within ~0.1 s instead
+            // of waiting up to 5 s for a CSV2 frame. Was in the CSV2 listener before.
+            if (data.Ignition !== undefined) {
+                const ignitionStatus = document.getElementById('ignition-status');
+                if (ignitionStatus) {
+                    if (parseInt(data.Ignition) === 1) {
+                        ignitionStatus.textContent = 'ON';
+                        ignitionStatus.className = 'duo-num ignition-on';
+                    } else {
+                        ignitionStatus.textContent = 'OFF';
+                        ignitionStatus.className = 'duo-num ignition-off';
+                    }
+                }
             }
 
             //i'm in the CSV handler here (webgaugesinterval/plotTimeWindow now come from CSVData3)
@@ -8908,59 +9234,21 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(CSV2_FIELDS.map((key, i) => [key, values[i]]));
+            g_lastCsv2 = data;  // cache for the diagnostics snapshot in log exports
 
             // Thermal tuning plot: sample the live ring off this CSV2 frame (~5s).
             try { thermalLiveOnCsv2(data); } catch (e) { }
 
+            // Wind trend plot: refresh Beaufort/gale watermark + bank one ring column (~5s).
+            try { windLiveOnCsv2(data); } catch (e) { }
+
             // Gate-tuning readouts: render the firmware 10s extremes next to each threshold.
             try { gateReadoutOnCsv2(data); } catch (e) { }
 
-            // IMU zero/level calibration status (offsets sent deg ×100)
-            try {
-                const hOff = Number(data.imuHeelOffset) / 100;
-                const pOff = Number(data.imuPitchOffset) / 100;
-                const el = document.getElementById("imuZeroStatus_ID");
-                if (el) {
-                    el.textContent = (Number.isFinite(hOff) && Number.isFinite(pOff) && (hOff !== 0 || pOff !== 0))
-                        ? `heel ${hOff.toFixed(1)}° / pitch ${pOff.toFixed(1)}°`
-                        : "not set";
-                }
-            } catch (e) { }
+            // IMU zero/level status moved to the CSV3 listener (offsets now ride CSV3 for a fast echo)
 
-            // Beaufort scale + gale duration: derived from the 2-min SUSTAINED true wind (data.sustainedTWS,
-            // sent ×10) — never the instantaneous gust — so a gust isn't a gale and a lull doesn't end one.
-            try {
-                const twsKt = Number(data.sustainedTWS) / 10;
-                const bEl = document.getElementById('BeaufortID');
-                if (bEl) {
-                    if (Number.isFinite(twsKt) && twsKt > 0) {
-                        let n, nm;
-                        if (twsKt < 1) { n = 0; nm = 'Calm'; }
-                        else if (twsKt <= 3) { n = 1; nm = 'Light air'; }
-                        else if (twsKt <= 6) { n = 2; nm = 'Light breeze'; }
-                        else if (twsKt <= 10) { n = 3; nm = 'Gentle breeze'; }
-                        else if (twsKt <= 16) { n = 4; nm = 'Moderate breeze'; }
-                        else if (twsKt <= 21) { n = 5; nm = 'Fresh breeze'; }
-                        else if (twsKt <= 27) { n = 6; nm = 'Strong breeze'; }
-                        else if (twsKt <= 33) { n = 7; nm = 'Near gale'; }
-                        else if (twsKt <= 40) { n = 8; nm = 'Gale'; }
-                        else if (twsKt <= 47) { n = 9; nm = 'Strong gale'; }
-                        else if (twsKt <= 55) { n = 10; nm = 'Storm'; }
-                        else if (twsKt <= 63) { n = 11; nm = 'Violent storm'; }
-                        else { n = 12; nm = 'Hurricane'; }
-                        bEl.textContent = n + ' (' + nm + ')';
-                    } else {
-                        bEl.textContent = '—';
-                    }
-                }
-                const gEl = document.getElementById('GaleDurationID');
-                if (gEl) {
-                    const gm = Math.round(Number(data.currentGaleMinutes));
-                    if (!Number.isFinite(gm) || gm <= 0) gEl.textContent = '0';
-                    else if (gm < 60) gEl.textContent = gm + ' min';
-                    else gEl.textContent = Math.floor(gm / 60) + 'h ' + (gm % 60 < 10 ? '0' : '') + (gm % 60) + 'm';
-                }
-            } catch (e) { /* derived wind display is best-effort */ }
+            // Beaufort scale + gale duration (from the 2-min SUSTAINED true wind, never the
+            // gust) now drive the Wind Trend plot watermark — computed in windLiveOnCsv2().
 
             // voltageTarget and Icv moved to CSV1 (fast stream) — cvPlotCache is updated in handleCSVData
 
@@ -9021,11 +9309,7 @@ window.addEventListener("load", function () {
                 }
             } catch (err) { /* never let pill logic break CSV2 dispatch */ }
 
-            // Update GPS moving state for IMU mode graying (SOGNMEA is scaled ×100)
-            if (data.SOGNMEA !== undefined) {
-                updateIMUMovingState(data.SOGNMEA);
-                updateIMUModeStyles();
-            }
+            // (SOGNMEA-driven IMU moving-state graying moved to the CSVData4 / NavStream handler)
 
             updateAnchorColorCoding(data);
 
@@ -9130,6 +9414,18 @@ window.addEventListener("load", function () {
                         "imu_heel_max_lifetime", "imu_pitch_max_lifetime",
                         "imu_heel_deviation_120s", "imu_pitch_deviation_120s"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
+                    }
+                    // IMU comfort scores sent ×100 (0–100 scale, already constrained in firmware) — these
+                    // moved here from CSV1; their /100 scaling branch had to move with them or they render
+                    // raw (e.g. 99.4 → 9940). 1 decimal, matching the old CSV1 formatting.
+                    else if (["imu_msi_score", "imu_vomit_pct", "imu_anchorage_comfort"].includes(key)) {
+                        newTextContent = (value / 100).toFixed(1);
+                    }
+                    // Sea-state exposure counters — firmware sends raw minutes, displayed as hours. Also
+                    // moved from CSV1; without /60 here the raw minutes show as "hours" (76 min → "76 hr").
+                    else if (["imu_min_moving_gentle", "imu_min_moving_moderate", "imu_min_moving_rough", "imu_min_moving_extreme",
+                              "imu_min_stat_gentle", "imu_min_stat_moderate", "imu_min_stat_rough", "imu_min_stat_extreme"].includes(key)) {
+                        newTextContent = (value / 60).toFixed(1);
                     }
                     // Thermistor -99 sentinel = no sensor connected (must precede the temperature
                     // branch below or toDisplayTemp turns it into -73 in °C mode)
@@ -9300,20 +9596,8 @@ window.addEventListener("load", function () {
                 }
             };
 
-            //stuff for wifi wake countdown, charging mode, and ignition indicator:
-            // Update ignition status
-            const ignitionStatus = document.getElementById('ignition-status');
-            const ignitionValue = document.getElementById('IgnitionID');
-            if (ignitionStatus && ignitionValue) {
-                const ign = parseInt(ignitionValue.textContent);
-                if (ign === 1) {
-                    ignitionStatus.textContent = 'ON';
-                    ignitionStatus.className = 'duo-num ignition-on';
-                } else {
-                    ignitionStatus.textContent = 'OFF';
-                    ignitionStatus.className = 'duo-num ignition-off';
-                }
-            }
+            //stuff for wifi wake countdown and charging mode:
+            // (ignition indicator moved to the CSV1 handler so the banner updates at ~10 Hz)
             // Update charging mode
             const chargingMode = document.getElementById('charging-mode');
             const bulkStageValue = document.getElementById('BulkStageID');
@@ -9351,7 +9635,7 @@ window.addEventListener("load", function () {
                 ["MaxAlternatorTemperatureF_ID", "MaxAlternatorTemperatureF"],
                 ["temperatureThermistorID", "temperatureThermistor"],
                 ["MaxTemperatureThermistorID", "MaxTemperatureThermistor"],
-                ["VictronCurrentID", "VictronCurrent"],
+                // VictronCurrent readout moved to the CSVData4 / NavStream handler
                 ["LatitudeNMEA_ID", "LatitudeNMEA"],
                 ["LongitudeNMEA_ID", "LongitudeNMEA"],
                 ["SatelliteCountNMEA_ID", "SatelliteCountNMEA"],
@@ -9412,22 +9696,13 @@ window.addEventListener("load", function () {
                 ["MaxTemperatureThermistor_AllTimeID", "MaxTemperatureThermistor_AllTime"],
                 ["MeasuredAmpsMax_AllTimeID", "MeasuredAmpsMax_AllTime"],
                 ["RPMMax_AllTimeID", "RPMMax_AllTime"],
-                ["IgnitionID", "Ignition"],
                 ["BulkStageID", "BulkStage"],
                 ["WifiWakeSecondsRemainingID", "WifiWakeSecondsRemaining"],
                 ["BufferedRecordCountID", "BufferedRecordCount"],
                 ["BufferedRecordPercentID", "BufferedRecordPercent"],
                 ["BufferedRecordCapID", "BufferedRecordCap"],
-                ["COGNMEA_ID", "COGNMEA"],
-                ["SOGNMEA_ID", "SOGNMEA"],
-                ["STWNMEA_ID", "STWNMEA"],
-                ["ApparentWindSpeedNMEA_ID", "ApparentWindSpeedNMEA"],
-                ["ApparentWindAngleNMEA_ID", "ApparentWindAngleNMEA"],
-                ["TrueWindSpeedNMEA_ID", "TrueWindSpeedNMEA"],
-                ["TrueWindAngleNMEA_ID", "TrueWindAngleNMEA"],
-                ["LeewayNMEA_ID", "LeewayNMEA"],
-                ["VMGNMEA_ID", "VMGNMEA"],
-                ["VMGUpwind_ID", "VMGUpwind"],
+                // COG/SOG/STW/Leeway/VMG/VMGUpwind readouts moved to the CSVData4 / NavStream handler.
+                // Apparent/true wind render in the Wind dial + trend plot (windLiveOnCsv1/2/4).
                 ["VMGTargetBearing_echo", "VMGTargetBearing"],
                 ["cpuLoadCore0_display", "cpuLoadCore0"],
                 ["cpuLoadCore0Max_display", "cpuLoadCore0Max"],
@@ -9708,7 +9983,7 @@ window.addEventListener("load", function () {
                 ["ft_updateSensorWindow_ses_ID", "ft_updateSensorWindow_ses"],
                 ["ft_checkTimeSync_win_ID", "ft_checkTimeSync_win"],
                 ["ft_checkTimeSync_ses_ID", "ft_checkTimeSync_ses"],
-                ["HeadingNMEAID", "HeadingNMEA"],
+                // HeadingNMEA readout moved to the CSVData4 / NavStream handler
                 ["EngineCyclesID", "EngineCycles"],
                 ["WifiStrengthID", "WifiStrength"],
                 ["CurrentSessionDurationID", "CurrentSessionDuration"],
@@ -9786,18 +10061,15 @@ window.addEventListener("load", function () {
                 ["SOGNMEA_ID_hi",                "wmIgn_SOG_hi"],      ["SOGNMEA_ID_lo",                "wmIgn_SOG_lo"],
                 ["VMGNMEA_ID_hi",                "wmIgn_VMGman_hi"],   ["VMGNMEA_ID_lo",                "wmIgn_VMGman_lo"],
                 ["VMGUpwind_ID_hi",              "wmIgn_VMGup_hi"],    ["VMGUpwind_ID_lo",              "wmIgn_VMGup_lo"],
-                ["ApparentWindSpeedNMEA_ID_hi",  "wmIgn_AWS_hi"],      ["ApparentWindSpeedNMEA_ID_lo",  "wmIgn_AWS_lo"],
-                ["TrueWindSpeedNMEA_ID_hi",      "wmIgn_TWS_hi"],      ["TrueWindSpeedNMEA_ID_lo",      "wmIgn_TWS_lo"],
+                // AWS/TWS hi/lo watermarks dropped with the old wind text rows (now the dial + trend plot).
                 ["imu_heel_deg_ID_hi",           "wmIgn_heel_hi"],     ["imu_heel_deg_ID_lo",           "wmIgn_heel_lo"],
                 ["imu_pitch_deg_ID_hi",          "wmIgn_pitch_hi"],    ["imu_pitch_deg_ID_lo",          "wmIgn_pitch_lo"],
                 ["imu_vertical_accel_g_ID_hi",   "wmIgn_vacc_hi"],     ["imu_vertical_accel_g_ID_lo",   "wmIgn_vacc_lo"],
                 ["baroPressureID_hi",            "wmIgn_baro_hi"],     ["baroPressureID_lo",            "wmIgn_baro_lo"],
                 ["ambientTempID_hi",             "wmIgn_ambient_hi"],  ["ambientTempID_lo",             "wmIgn_ambient_lo"],
 
-                // Victron VE.Direct solar/MPPT live (CS/MPPT/ERR codes decoded separately below)
-                ["VictronSolarPowerID",         "VictronSolarPower_W"],
-                ["VictronSolarVoltageID",       "VictronSolarVoltage_V"],
-                ["VictronSolarCurrentID",       "VictronSolarCurrent_A"],
+                // Victron VE.Direct solar/MPPT live (CS/MPPT/ERR codes decoded separately below).
+                // Solar power/voltage/derived-current readouts moved to the CSVData4 / NavStream handler.
                 ["VictronYieldTodayID",         "VictronYieldToday_kWh"],
                 ["VictronMaxPowerTodayID",      "VictronMaxPowerToday_W"],
                 ["VictronYieldYesterdayID",     "VictronYieldYesterday_kWh"],
@@ -9827,18 +10099,7 @@ window.addEventListener("load", function () {
                 }
             })();
 
-            // Live engine fuel flow + economy (both ×100; firmware sends 0 when engine off / no GPS speed)
-            (function () {
-                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
-                if (data.currentFuelGPH !== undefined) {
-                    const gph = Number(data.currentFuelGPH) / 100;
-                    setText('fuelGPHID', gph > 0 ? gph.toFixed(2) : '—');
-                }
-                if (data.currentNMPG !== undefined) {
-                    const nmpg = Number(data.currentNMPG) / 100;
-                    setText('fuelNMPGID', nmpg > 0 ? nmpg.toFixed(2) : '—');
-                }
-            })();
+            // (live engine fuel flow + economy GPH/NMPG readouts moved to the CSVData4 / NavStream handler)
 
             // Session fuel-economy curve (mpg vs RPM). try/catch so a chart bug can't break the dispatcher.
             try { if (typeof window.updateFuelCurve === 'function') window.updateFuelCurve(data); }
@@ -9887,6 +10148,32 @@ window.addEventListener("load", function () {
                         const el = document.getElementById('thermalLiveScoreAlt' + i);
                         if (el) el.textContent = txt;
                     }
+                }
+            }
+
+            // Update inner-current-loop & CV-voltage-loop live score spans in the Diag Control Accuracy
+            // table (always-on, fed off CSV2 — no panel-poll needed). Inner score is amps²×10000 (show 2dp).
+            // CV is split into two color-coded mV readouts: RMS error and peak overshoot.
+            {
+                for (let i = 0; i < 4; i++) {
+                    const ri = data['liveScore' + i];
+                    if (ri !== undefined) {
+                        const v = ri / 10000;
+                        const txt = v > 0 ? v.toFixed(2) : '—';
+                        const ck = 'liveScoreAlt_' + i;
+                        if (lastValues.get(ck) !== txt) {
+                            lastValues.set(ck, txt);
+                            const el = document.getElementById('liveScoreAlt' + i);
+                            if (el) el.textContent = txt;
+                        }
+                    }
+                    // CV loop: two intuitive readouts, both in mV. RMS error (both directions) and
+                    // peak overshoot above target (the battery-damaging side). Each cell is colored
+                    // green/orange/red by its own thresholds — see cvScoreCell().
+                    const rms = data['cvRmsErr' + i];
+                    if (rms !== undefined) cvScoreCell('cvRmsErrAlt' + i, 'cvRmsErrAlt_' + i, rms, 50, 150);
+                    const pk = data['cvPeakOver' + i];
+                    if (pk !== undefined) cvScoreCell('cvPeakOverAlt' + i, 'cvPeakOverAlt_' + i, pk, 100, 250);
                 }
             }
 
@@ -9962,6 +10249,88 @@ window.addEventListener("load", function () {
             updateDeviceId();
         }, false);
 
+        // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). These rode the slow
+        // 5 s CSV2 cadence before and looked frozen; this handler updates the dial/compass/speed/
+        // solar/fuel gauges at ~2 Hz. Order/scaling of CSV4_FIELDS must match the firmware Csv4Index enum.
+        source.addEventListener('CSVData4', function (e) {
+            const raw = e.data.split(',').map(Number);
+            const declaredCount = raw[0];
+            const values = raw.slice(1);
+
+            if (values.length !== declaredCount) {
+                if (!window.lastCsv4WarnTime || Date.now() - window.lastCsv4WarnTime > 10000) {
+                    console.warn(`[CSV4] length mismatch: declared=${declaredCount}, actual=${values.length}`);
+                    window.lastCsv4WarnTime = Date.now();
+                }
+                return;
+            }
+            if (declaredCount !== CSV4_FIELDS.length) {
+                if (!window.lastCsv4WarnTime || Date.now() - window.lastCsv4WarnTime > 10000) {
+                    console.warn(`[CSV4] schema mismatch: ESP32=${declaredCount}, UI=${CSV4_FIELDS.length}`);
+                    window.lastCsv4WarnTime = Date.now();
+                }
+                return;
+            }
+
+            const data = Object.fromEntries(CSV4_FIELDS.map((key, i) => [key, values[i]]));
+
+            // Cache raw nav values for cross-listener consumers (baro Zambretti forecast on CSV2).
+            Object.assign(window._navLast, data);
+
+            // Cache apparent/true wind for the 10 Hz dial redraw + CSV2 trend-ring banking.
+            try { windLiveOnCsv4(data); } catch (err) { }
+
+            // GPS moving state for IMU mode graying (SOGNMEA is ×100)
+            if (data.SOGNMEA !== undefined) {
+                try { updateIMUMovingState(data.SOGNMEA); updateIMUModeStyles(); } catch (err) { }
+            }
+
+            // NavStream numeric readouts. Compact renderer sharing the module-level DOM-diff cache
+            // (lastValues + scheduleDOMUpdateOptimized). Scaling mirrors the old CSV2 formatter.
+            const navFields = [
+                ["HeadingNMEAID",         "HeadingNMEA"],          // deg, int
+                ["SOGNMEA_ID",            "SOGNMEA"],              // knots ×100
+                ["COGNMEA_ID",            "COGNMEA"],              // deg, int
+                ["STWNMEA_ID",            "STWNMEA"],              // knots ×100, <0 = NAN
+                ["LeewayNMEA_ID",         "LeewayNMEA"],           // deg, int
+                ["VMGNMEA_ID",            "VMGNMEA"],              // knots ×100
+                ["VMGUpwind_ID",          "VMGUpwind"],            // knots ×100
+                ["VictronCurrentID",      "VictronCurrent"],       // A ×100
+                ["VictronSolarPowerID",   "VictronSolarPower_W"],  // W, int
+                ["VictronSolarVoltageID", "VictronSolarVoltage_V"],// V ×100
+                ["VictronSolarCurrentID", "VictronSolarCurrent_A"],// A ×100
+            ];
+            const navScale100 = new Set(["SOGNMEA", "VMGNMEA", "VMGUpwind", "VictronCurrent", "VictronSolarVoltage_V", "VictronSolarCurrent_A"]);
+            for (const [elementId, key] of navFields) {
+                const value = data[key];
+                if (value === undefined) continue;
+                const num = Number(value);
+                let txt;
+                if (!Number.isFinite(num)) txt = "—";
+                else if (key === "STWNMEA") txt = num < 0 ? "—" : (num / 100).toFixed(2);
+                else if (navScale100.has(key)) txt = (num / 100).toFixed(2);
+                else txt = Math.round(num);
+                const cacheKey = `${elementId}_${key}`;
+                if (lastValues.get(cacheKey) !== txt) {
+                    lastValues.set(cacheKey, txt);
+                    scheduleDOMUpdateOptimized(elementId, txt);
+                }
+            }
+
+            // Live engine fuel flow + economy (both ×100; firmware sends 0 when engine off / no GPS speed)
+            try {
+                const setText = (id, txt) => { const el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+                if (data.currentFuelGPH !== undefined) {
+                    const gph = Number(data.currentFuelGPH) / 100;
+                    setText('fuelGPHID', gph > 0 ? gph.toFixed(2) : '—');
+                }
+                if (data.currentNMPG !== undefined) {
+                    const nmpg = Number(data.currentNMPG) / 100;
+                    setText('fuelNMPGID', nmpg > 0 ? nmpg.toFixed(2) : '—');
+                }
+            } catch (err) { /* never let fuel readout break NavStream dispatch */ }
+        }, false);
+
         source.addEventListener('CSVData3', function (e) {
             const raw = e.data.split(',').map(Number);
 
@@ -9985,6 +10354,17 @@ window.addEventListener("load", function () {
 
             const data = Object.fromEntries(CSV3_FIELDS.map((key, i) => [key, values[i]]));
             g_lastCsv3 = data;  // cache for cvBinToCsv header
+
+            // IMU zero/level calibration status (offsets sent deg ×100). Moved here from CSV2 so
+            // it echoes within ~one tick of capture instead of waiting up to 5s. While a capture
+            // is running we hold the "calculating…" label (set on the Zero Now click) and skip the
+            // immediate /get echo of the OLD offsets; the capture-complete CSV3 frame lands after
+            // the window and shows the new value (or restores the prior value on a firmware abort).
+            try {
+                if (Date.now() >= (window._imuZeroCalcUntil || 0)) {
+                    renderImuZeroLabel(data);
+                }
+            } catch (e) { }
 
             //CSVData3
             /*             ## 🎯 **Summary**
@@ -10377,6 +10757,7 @@ window.addEventListener("load", function () {
             }
 
             const data = Object.fromEntries(TS_FIELDS.map((key, i) => [key, values[i]]));
+            g_lastTs = data;  // cache for the diagnostics snapshot in log exports
 
             window.sensorAges = {
                 heading: data.ts_HeadingNMEA,
@@ -10793,6 +11174,8 @@ function showSubTab(parentTab, subTabName, evt = null) {
     // Initialize / refresh the barometer panel whenever the Weather/Solar tab is opened (baro lives there now)
     if (parentTab === 'livedata' && subTabName === 'weathersolar') {
         if (typeof window.initBaroPanel === 'function') window.initBaroPanel();
+        // Draw the Wind Trend plot now it's visible (it needs a non-zero width to size).
+        if (typeof windTrendRender === 'function') setTimeout(() => { try { windTrendRender(); } catch (e) { } }, 60);
     }
 
     // Resume the Fast Alt-Current scope only if its (collapsed-by-default) section is already expanded
@@ -11252,6 +11635,31 @@ function updateCloudFeaturesToggleState(currentMode) {
             if (formRow) formRow.style.opacity = '1';
         }
     }
+
+    updateUploadNowButtonState(currentMode);
+}
+
+// "Upload Now" (forceCloudFlush) is a dead button unless cloud uploads can actually happen:
+// the loop() drain is gated behind CloudFeatures==1 + client mode + WiFi. So gray it out in
+// AP mode (no internet) OR when Cloud Features is OFF. Records keep buffering either way and
+// upload automatically once on WiFi with cloud on; "Clear" stays enabled (purely local wipe).
+// mode is optional — falls back to the last known currentMode for cloud-toggle/CSV callers.
+function updateUploadNowButtonState(mode) {
+    const uploadBtn = document.getElementById('cloudUploadNowBtn');
+    if (!uploadBtn) return;
+    const isAPMode = ((mode !== undefined ? mode : window._lastKnownMode) === 1); // 1 = MODE_AP
+    const cb = document.getElementById('CloudFeatures_checkbox');
+    const cloudOn = cb ? !!cb.checked : false;
+    const blocked = isAPMode || !cloudOn;
+    if (!uploadBtn.dataset.titleDefault) uploadBtn.dataset.titleDefault = uploadBtn.title;
+    uploadBtn.disabled = blocked;
+    uploadBtn.style.opacity = blocked ? '0.5' : '1';
+    uploadBtn.style.cursor = blocked ? 'not-allowed' : '';
+    uploadBtn.title = isAPMode
+        ? 'Cloud upload is unavailable in AP mode (no internet). Records keep buffering and upload automatically once the regulator is on WiFi.'
+        : (!cloudOn
+            ? 'Cloud upload requires Cloud Features ON (Settings). Records keep buffering locally; turn Cloud Features on and they upload automatically.'
+            : uploadBtn.dataset.titleDefault);
 }
 
 
@@ -12171,6 +12579,31 @@ function downloadLogs() {
     // CV log is binary→CSV converted client-side
     downloadCvLog();
 
+    // Console session log (event history) rides along as a plain text file.
+    const consoleText = getConsoleText();
+    if (consoleText) {
+        const blob = new Blob([consoleText], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `console_${ts}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+
+    // Diagnostics snapshot (frozen dashboard state) as JSON.
+    {
+        const blob = new Blob([JSON.stringify(getDiagnosticsSnapshot(), null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `snapshot_${ts}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+
     setTimeout(() => {
         fetch(buildURL('/resetlogs'), { method: 'POST' })
             .catch(err => console.warn('Log reset failed:', err));
@@ -12287,6 +12720,29 @@ async function fetchLogBase64(path) {
         return (buf && buf.byteLength) ? arrayBufferToBase64(buf) : null;
     } catch (e) { return null; }
 }
+async function fetchLogArrayBuffer(path) {
+    try {
+        const r = await fetchWithTimeout(buildURL(path), {}, 20000);
+        if (!r.ok) return null;
+        const buf = await r.arrayBuffer();
+        return (buf && buf.byteLength) ? buf : null;
+    } catch (e) { return null; }
+}
+
+// Frozen diagnostics snapshot — last-received telemetry objects, no device fetch.
+// csv1 = live numbers, csv2 = diagnostics/timing/health, csv3 = settings echo, ts = staleness ages.
+// NOTE: values are RAW as transmitted (display /N scaling is applied later per-field), so e.g.
+// BatteryV reads 1401, not 14.01 — see the CSV field map for per-field scale factors.
+function getDiagnosticsSnapshot() {
+    return {
+        captured_at: new Date().toISOString(),
+        note: 'raw as-transmitted values (pre display scaling)',
+        csv1: g_lastCsv1 || null,
+        csv2: g_lastCsv2 || null,
+        csv3: g_lastCsv3 || null,
+        ts: g_lastTs || null,
+    };
+}
 
 async function pollLogRequest() {
     if (g_logRelayBusy) return;
@@ -12307,7 +12763,8 @@ async function pollLogRequest() {
         g_logRelayBusy = true;
 
         // Fetch every log from the device over LAN (tolerate individual failures).
-        const [thermal, pid, cvB64, systemid, tuning, cvtuning, thermaltuning, famatrix, fascopeB64, faflipB64] = await Promise.all([
+        const [thermal, pid, cvB64, systemid, tuning, cvtuning, thermaltuning, famatrix, fascopeBuf, faflipBuf,
+               debugText, vesselInfo, longtermB64, alttrendCsv] = await Promise.all([
             fetchLogText('/thermallog.csv'),
             fetchLogText('/pidlog.csv'),
             fetchLogBase64('/cvlog.bin'),
@@ -12316,8 +12773,12 @@ async function pollLogRequest() {
             fetchLogJson('/cvtuninglog'),
             fetchLogJson('/thermaltuninglog'),
             fetchLogText('/famatrix.csv'),    // Resonance & Ripple Map (alt-current disturbance matrix) rides along
-            fetchLogBase64('/fastscope.bin'), // Live Oscilloscope capture (raw FSC1 blob, like cvlog)
-            fetchLogBase64('/faflip.bin'),    // Reference Flipbook — reference pages + anomaly captures (FFLP blob)
+            fetchLogArrayBuffer('/fastscope.bin'), // Live Oscilloscope capture (FSC1) — parsed to metadata-rich CSV below
+            fetchLogArrayBuffer('/faflip.bin'),    // Reference Flipbook (FFLP) — parsed to per-page metadata-rich CSV below
+            fetchLogText('/debug'),           // diagnostics dump (net-task cores, loop profiler sections)
+            fetchLogJson('/vessel_info.json'),// boat/alternator/battery config + identity
+            fetchLogBase64('/longTermPlots.bin'), // multi-day trend ring (whole-trip context)
+            fetchLogText('/alttrend.csv'),    // alternator health vs engine-hours (decimated ≤200 pts)
         ]);
 
         const logsIncluded = [];
@@ -12330,8 +12791,37 @@ async function pollLogRequest() {
         if (cvtuning != null) { logs.cvtuning = cvtuning; logsIncluded.push('cvtuning'); }
         if (thermaltuning != null) { logs.thermaltuning = thermaltuning; logsIncluded.push('thermaltuning'); }
         if (famatrix != null) { logs.famatrix = famatrix; logsIncluded.push('famatrix'); }
-        if (fascopeB64 != null) { logs.fastscope_base64 = fascopeB64; logsIncluded.push('fastscope'); }
-        if (faflipB64 != null) { logs.faflip_base64 = faflipB64; logsIncluded.push('faflip'); }
+        // Oscilloscope + reference-flipbook waveforms as metadata-rich CSV (commented header with
+        // per-capture RPM/temp/time + both raw and boxcar-16 filtered columns) — the same content the
+        // Download CSV buttons produce, lossless at mV resolution and self-describing without the blob.
+        if (fascopeBuf) {
+            const sd = parseFastScope(fascopeBuf);
+            if (sd && sd.count) { logs.fastscope_csv = buildFaScopeCsv(sd); logsIncluded.push('fastscope'); }
+        }
+        if (faflipBuf) {
+            const pages = parseFastFlip(faflipBuf);
+            if (pages) {
+                const flip = {};
+                for (const pg of pages) {
+                    if (!pg.used) continue;
+                    const tag = pg.isAnomaly ? ('anomaly_k' + pg.patternK + '_slot' + pg.slot) : ('ref_band' + pg.band);
+                    flip[tag] = buildFaFlipPageCsv(pg);
+                }
+                if (Object.keys(flip).length) { logs.faflip_csv = flip; logsIncluded.push('faflip'); }
+            }
+        }
+
+        // Console session log (browser-side event history) — no device fetch, just the buffer.
+        const consoleText = getConsoleText();
+        if (consoleText) { logs.console = consoleText; logsIncluded.push('console'); }
+
+        // Device state + identity (Tier 1/2): diagnostics dump, vessel config, long-term trend ring,
+        // alt-health-vs-hours, and a frozen telemetry snapshot (always present, no fetch).
+        if (debugText != null) { logs.debug = debugText; logsIncluded.push('debug'); }
+        if (vesselInfo != null) { logs.vessel_info = vesselInfo; logsIncluded.push('vessel_info'); }
+        if (longtermB64 != null) { logs.longterm_base64 = longtermB64; logsIncluded.push('longterm'); }
+        if (alttrendCsv != null) { logs.alttrend = alttrendCsv; logsIncluded.push('alttrend'); }
+        logs.snapshot = getDiagnosticsSnapshot(); logsIncluded.push('snapshot');
 
         const deviceUid = ((document.getElementById('profile-device-uid') || {}).textContent
             || (document.getElementById('systemDeviceUID_ID') || {}).textContent || 'unknown').trim();
@@ -12447,8 +12937,7 @@ let thermalSeriesVisible = {
 function highlightThermalWindowBtn(minutes) {
     [5, 10, 30, 60].forEach(v => {
         const btn = document.getElementById(`tw-${v}`);
-        if (btn) btn.classList.toggle('btn-primary', v === minutes);
-        if (btn) btn.classList.toggle('btn-secondary', v !== minutes);
+        if (btn) btn.classList.toggle('on', v === minutes);   // segmented-control active pill
     });
 }
 
@@ -13123,6 +13612,275 @@ function thermalPinAxis(plotIdx, bucketKey, axis, cbId, mn, mx) {
 
 
 
+// ==================== WIND DIAL + TREND PLOT ====================
+// Apparent-wind dial (B&G-style: needle = apparent angle, two LCD readouts) plus a
+// True/Apparent trend plot sampled off the CSV stream like the Temp Tuning plot:
+// wind speed/angle ride CSV1 (10Hz, cached) and one ring column is banked per
+// WIND_SAMPLE_MS off the CSV2 frame (~5s). Last 60 min, ~720 points.
+const WIND_SAMPLE_MS = 5000;          // one column per 5s
+const WIND_MAX_WINDOW_MIN = 60;       // longest selectable window
+const WIND_RING_CAP = 900;            // hard cap (>720 for cadence jitter headroom)
+
+let _windRing = { ts: [], tDir: [], tSpd: [], aDir: [], aSpd: [] };
+let _windCsv1 = { aDir: 0, aSpd: 0, tDir: 0, tSpd: 0 };   // latest CSV1 wind (already scaled)
+// Latest NavStream (CSV4) raw values cached for cross-listener consumers — e.g. the barometer
+// Zambretti forecast, which runs on the CSV2 cadence but needs live heading + true wind angle.
+window._navLast = window._navLast || {};
+let _windLastSampleMs = 0;
+let windTrendPlot = null;
+let windTrendResizeObs = null;
+let windWindowMin = 30;
+let windTrendMode = 'true';           // 'true' | 'app'
+let windY = { dir: null, spd: null }; // per-axis manual range; null = auto-fit
+let _windWmBeaufort = '';             // watermark strings, refreshed on CSV2
+let _windWmGale = '';
+
+// CSV1 (10Hz): redraw the dial (needle + LCDs) from the cached wind values so the
+// needle animates smoothly at frame rate. The wind values themselves ride CSV2 (the
+// NMEA wind fields are in the CSV2 payload), so they're cached in windLiveOnCsv2 below.
+function windLiveOnCsv1(data) {
+    const needle = document.getElementById('windNeedle');
+    if (needle) needle.setAttribute('transform', 'rotate(' + _windCsv1.aDir + ' 60 60)');
+    const lcdS = document.getElementById('windLcdSpd'); if (lcdS) lcdS.textContent = _windCsv1.aSpd.toFixed(1);
+    const lcdA = document.getElementById('windLcdAng'); if (lcdA) lcdA.textContent = Math.round(_windCsv1.aDir) + '°';
+}
+
+// CSV4 / NavStream (~2Hz): cache the scaled wind values (the NMEA wind fields now ride CSV4).
+// The dial redraws off this cache at 10Hz in windLiveOnCsv1; the trend ring banks off it in
+// windLiveOnCsv2. Field location and reader location MUST agree — the reads moved here with the
+// fields when AWS/AWA/TWS/TWA moved CSV2 → CSV4.
+function windLiveOnCsv4(data) {
+    if ('ApparentWindSpeedNMEA' in data) _windCsv1.aSpd = Number(data.ApparentWindSpeedNMEA) / 100;  // ×100 → knots
+    if ('ApparentWindAngleNMEA' in data) _windCsv1.aDir = Number(data.ApparentWindAngleNMEA);        // integer degrees
+    if ('TrueWindSpeedNMEA' in data) _windCsv1.tSpd = Number(data.TrueWindSpeedNMEA) / 100;
+    if ('TrueWindAngleNMEA' in data) _windCsv1.tDir = Number(data.TrueWindAngleNMEA);
+}
+
+// CSV2 (~5s): refresh the Beaufort/gale watermark (sustainedTWS/currentGaleMinutes stay on CSV2),
+// then bank one ring column from the wind cache filled by windLiveOnCsv4. The dial redraws off the
+// same cache at 10Hz in windLiveOnCsv1.
+function windLiveOnCsv2(data) {
+    // Beaufort + gale from the 2-min SUSTAINED true wind (sustainedTWS ×10), never the gust.
+    const twsKt = Number(data.sustainedTWS) / 10;
+    if (Number.isFinite(twsKt) && twsKt > 0) {
+        let n, nm;
+        if (twsKt < 1) { n = 0; nm = 'Calm'; }
+        else if (twsKt <= 3) { n = 1; nm = 'Light air'; }
+        else if (twsKt <= 6) { n = 2; nm = 'Light breeze'; }
+        else if (twsKt <= 10) { n = 3; nm = 'Gentle breeze'; }
+        else if (twsKt <= 16) { n = 4; nm = 'Moderate breeze'; }
+        else if (twsKt <= 21) { n = 5; nm = 'Fresh breeze'; }
+        else if (twsKt <= 27) { n = 6; nm = 'Strong breeze'; }
+        else if (twsKt <= 33) { n = 7; nm = 'Near gale'; }
+        else if (twsKt <= 40) { n = 8; nm = 'Gale'; }
+        else if (twsKt <= 47) { n = 9; nm = 'Strong gale'; }
+        else if (twsKt <= 55) { n = 10; nm = 'Storm'; }
+        else if (twsKt <= 63) { n = 11; nm = 'Violent storm'; }
+        else { n = 12; nm = 'Hurricane'; }
+        _windWmBeaufort = 'F' + n + ' · ' + nm;
+    } else {
+        _windWmBeaufort = '';
+    }
+    const gm = Math.round(Number(data.currentGaleMinutes));
+    if (!Number.isFinite(gm) || gm <= 0) _windWmGale = '';
+    else if (gm < 60) _windWmGale = 'Gale ' + gm + ' min';
+    else _windWmGale = 'Gale ' + Math.floor(gm / 60) + 'h ' + (gm % 60 < 10 ? '0' : '') + (gm % 60) + 'm';
+
+    // Dial-card readouts: Beaufort badge + gust/lull (ignition-cycle apparent-wind hi/lo,
+    // whole knots) + live true wind dir/spd. All real CSV2/cache fields; show — when absent.
+    const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    setTxt('windBeaufort', _windWmBeaufort || '—');
+    const gust = Number(data.wmIgn_AWS_hi), lull = Number(data.wmIgn_AWS_lo);
+    setTxt('windGust', Number.isFinite(gust) && gust > 0 ? gust + ' kt' : '—');
+    setTxt('windLull', Number.isFinite(lull) && lull >= 0 ? lull + ' kt' : '—');
+    setTxt('windTrueDir', Number.isFinite(_windCsv1.tDir) ? Math.round(_windCsv1.tDir) + '°' : '—');
+    setTxt('windTrueSpd', Number.isFinite(_windCsv1.tSpd) ? _windCsv1.tSpd.toFixed(1) + ' kt' : '—');
+
+    const now = Date.now();
+    if (now - _windLastSampleMs < WIND_SAMPLE_MS) return;
+    _windLastSampleMs = now;
+    const r = _windRing;
+    r.ts.push(now);
+    r.tDir.push(_windCsv1.tDir); r.tSpd.push(_windCsv1.tSpd);
+    r.aDir.push(_windCsv1.aDir); r.aSpd.push(_windCsv1.aSpd);
+    const cutoff = now - (WIND_MAX_WINDOW_MIN * 60000 + WIND_SAMPLE_MS);
+    while (r.ts.length && r.ts[0] < cutoff) { for (const k in r) r[k].shift(); }
+    while (r.ts.length > WIND_RING_CAP) { for (const k in r) r[k].shift(); }
+
+    // Only touch the chart when the Weather/Solar sub-tab is actually visible.
+    const el = document.getElementById('windtrend-plot');
+    if (el && el.offsetParent) windTrendRender();
+}
+
+function _windDirArr() { return windTrendMode === 'true' ? _windRing.tDir : _windRing.aDir; }
+function _windSpdArr() { return windTrendMode === 'true' ? _windRing.tSpd : _windRing.aSpd; }
+
+// Legend shows the value under the cursor; with no cursor it shows the latest ("now") sample.
+function updateWindLegend(idx) {
+    const d = _windDirArr(), s = _windSpdArr();
+    if (idx == null || idx < 0 || idx >= d.length) idx = d.length - 1;
+    if (idx < 0) return;
+    const eD = document.getElementById('windLgD'); if (eD) eD.textContent = Math.round(d[idx]);
+    const eS = document.getElementById('windLgS'); if (eS) eS.textContent = s[idx].toFixed(1);
+}
+
+function drawWindWatermark(u) {
+    if (!_windWmBeaufort && !_windWmGale) return;
+    const ctx = u.ctx;
+    ctx.save();
+    ctx.font = 'bold 18px monospace';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    ctx.shadowColor = 'rgba(255,255,255,0.6)';
+    ctx.shadowBlur = 2;
+    let y = u.bbox.top + 14;
+    if (_windWmBeaufort) {
+        ctx.globalAlpha = 0.30; ctx.fillStyle = '#666';
+        ctx.fillText(_windWmBeaufort, u.bbox.left + 14, y); y += 24;
+    }
+    if (_windWmGale) {
+        ctx.globalAlpha = 0.55; ctx.fillStyle = '#d6453e';
+        ctx.fillText(_windWmGale, u.bbox.left + 14, y);
+    }
+    ctx.restore();
+}
+
+function windTrendRender() {
+    const r = _windRing, n = r.ts.length;
+    if (n === 0) return;
+    const now = Date.now();
+    const t = new Array(n);
+    for (let i = 0; i < n; i++) t[i] = -(now - r.ts[i]) / 60000;   // minutes ago (oldest first)
+    const data = [t, _windDirArr().slice(), _windSpdArr().slice()];
+    if (windTrendPlot) {
+        windTrendPlot.setData(data);
+        windTrendPlot.setScale('x', { min: -windWindowMin, max: 0 });
+        updateWindLegend(null);
+        return;
+    }
+    const elId = 'windtrend-plot';
+    const el = document.getElementById(elId);
+    if (!el) return;
+    const dirLabel = windTrendMode === 'true' ? 'Direction (°)' : 'Angle off bow (°)';
+    const nameEl = document.getElementById('windLgDName');
+    if (nameEl) nameEl.textContent = windTrendMode === 'true' ? 'Direction' : 'Angle';
+    const H = 300;
+    const opts = {
+        width: _windPlotW(el), height: H,
+        cursor: { drag: { x: true, y: false, setScale: true } },
+        select: { show: true },
+        series: [
+            { label: null },
+            { label: 'Direction', stroke: '#e07b39', width: 2, scale: 'dir', points: { show: false } },
+            { label: 'Speed', stroke: '#00a19a', width: 2, scale: 'spd', points: { show: false } }
+        ],
+        scales: {
+            x: { time: false, auto: false, range: [-windWindowMin, 0] },
+            // null manual range = auto-fit (default); a typed/locked range pins the axis
+            dir: { range: (u, mn, mx) => windY.dir || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.18, true)) },
+            spd: { range: (u, mn, mx) => windY.spd || (mn == null ? [0, 5] : uPlot.rangeNum(Math.min(0, mn), mx, 0.15, true)) }
+        },
+        axes: [
+            { label: 'Minutes Ago', grid: { show: true } },
+            { scale: 'dir', label: dirLabel, side: 3, grid: { show: true },
+              splits: edgeLabeledSplits(() => windY.dir !== null) },
+            { scale: 'spd', label: 'Speed (kt)', side: 1, grid: { show: false },
+              splits: edgeLabeledSplits(() => windY.spd !== null) }
+        ],
+        legend: { show: false },
+        plugins: [{
+            hooks: {
+                init: [(u) => _windResizeObserver(elId, H)],
+                drawClear: [(u) => { if (u.root?.offsetParent) drawWindWatermark(u); }],
+                setCursor: [(u) => updateWindLegend(u.cursor.idx)]
+            }
+        }]
+    };
+    windTrendPlot = new uPlot(opts, data, el);
+    if (document.body.classList.contains('dark-mode')) updateUplotTheme(windTrendPlot);
+    requestAnimationFrame(() => { const w = _windPlotW(el); if (windTrendPlot && w > 0) windTrendPlot.setSize({ width: w, height: H }); });
+    // Click-to-edit Y limits — typing pins the axis and unchecks the corner auto box.
+    attachYAxisEdit(windTrendPlot, [
+        { scale: 'dir', decimals: 0, apply: (mn, mx) => windPinAxis('dir', mn, mx) },
+        { scale: 'spd', decimals: 1, apply: (mn, mx) => windPinAxis('spd', mn, mx) }
+    ]);
+    addThermalAutoBox(el, 'autoscale-wind-cb', () => windTrendPlot, windY, ['dir', 'spd']);
+    updateWindLegend(null);
+}
+
+function windPinAxis(axis, mn, mx) {
+    windY[axis] = [mn, mx];
+    const cb = document.getElementById('autoscale-wind-cb'); if (cb) cb.checked = false;
+    const lockBtn = document.getElementById('autoscale-wind-cb-lock');
+    if (lockBtn) { lockBtn.textContent = 'lock'; lockBtn.style.opacity = '0.6'; lockBtn.style.display = 'none'; }
+    if (windTrendPlot) windTrendPlot.setScale(axis, { min: mn, max: mx });
+}
+
+// Plot width. #windtrend-plot is width:100% + overflow:hidden, so its clientWidth is now
+// stable (a stale-wide uPlot canvas is clipped and can't inflate the box) and already
+// accounts for card padding. That self-feedback via clientWidth is what made the trend
+// plot grow without bound; the parent card-group is only a fallback before layout settles.
+function _windPlotW(el) {
+    if (!el) return 0;
+    return el.clientWidth || (el.parentElement && el.parentElement.clientWidth) || 0;
+}
+
+function _windResizeObserver(elId, h) {
+    if (windTrendResizeObs) windTrendResizeObs.disconnect();
+    const el = document.getElementById(elId);
+    if (!el || !el.parentElement) return;
+    const obs = new ResizeObserver(debounce(() => {
+        const e = document.getElementById(elId);
+        const w = _windPlotW(e);
+        if (windTrendPlot && e && w > 0) windTrendPlot.setSize({ width: w, height: h });
+    }, 1000));
+    obs.observe(el.parentElement);   // watch the constrained parent, not the plot (avoids self-feedback)
+    windTrendResizeObs = obs;
+}
+
+function highlightWindWindowBtn(minutes) {
+    [5, 15, 30, 60].forEach(v => {
+        const btn = document.getElementById('ww-' + v);
+        if (btn) btn.classList.toggle('on', v === minutes);   // segmented-control active pill
+    });
+}
+function setWindWindow(minutes) {
+    windWindowMin = minutes;
+    highlightWindWindowBtn(minutes);
+    if (windTrendPlot) { windTrendPlot.destroy(); windTrendPlot = null; }
+    windTrendRender();
+}
+function setWindTrendMode(mode) {
+    windTrendMode = mode;
+    const tb = document.getElementById('wind-mode-true'), ab = document.getElementById('wind-mode-app');
+    if (tb) tb.classList.toggle('on', mode === 'true');   // segmented-control active pill
+    if (ab) ab.classList.toggle('on', mode === 'app');
+    windY = { dir: null, spd: null };   // true direction and apparent angle span different ranges — back to auto
+    if (windTrendPlot) { windTrendPlot.destroy(); windTrendPlot = null; }
+    windTrendRender();
+}
+
+// Build the dial's static geometry (ticks, port/starboard sectors, boat silhouette) once.
+(function windDialInit() {
+    function pt(cx, cy, r, deg) { const a = (deg - 90) * Math.PI / 180; return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) }; }
+    function arc(cx, cy, r, a0, a1) { const s = pt(cx, cy, r, a0), e = pt(cx, cy, r, a1); const lg = ((a1 - a0 + 360) % 360) > 180 ? 1 : 0; return 'M ' + s.x + ' ' + s.y + ' A ' + r + ' ' + r + ' 0 ' + lg + ' 1 ' + e.x + ' ' + e.y; }
+    function boat(cx, cy, r) { const top = cy - r, bot = cy + r * 0.9, w = r * 0.46; return 'M ' + cx + ' ' + top + ' C ' + (cx + w) + ' ' + (cy - r * 0.35) + ',' + (cx + w) + ' ' + (cy + r * 0.3) + ',' + (cx + w * 0.55) + ' ' + bot + ' L ' + (cx - w * 0.55) + ' ' + bot + ' C ' + (cx - w) + ' ' + (cy + r * 0.3) + ',' + (cx - w) + ' ' + (cy - r * 0.35) + ',' + cx + ' ' + top + ' Z'; }
+    function build() {
+        const ticks = document.getElementById('windTicks');
+        if (!ticks) return;
+        let s = '';
+        for (let k = 0; k < 12; k++) { const d = k * 30, o = pt(60, 60, 52, d), i = pt(60, 60, 46, d); s += '<line x1="' + o.x + '" y1="' + o.y + '" x2="' + i.x + '" y2="' + i.y + '" stroke="#cfd3d6" stroke-width="' + (d % 90 === 0 ? 3.4 : 2.2) + '" stroke-linecap="round" opacity="0.82"/>'; }
+        ticks.innerHTML = s;
+        const ap = document.getElementById('windArcPort'); if (ap) ap.setAttribute('d', arc(60, 60, 50, 305, 335));
+        const as = document.getElementById('windArcStbd'); if (as) as.setAttribute('d', arc(60, 60, 50, 25, 55));
+        const bt = document.getElementById('windBoat'); if (bt) bt.setAttribute('d', boat(60, 60, 34));
+        highlightWindWindowBtn(30);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', build);
+    else build();
+})();
+
+
 function getEchoNumber(id) {
     const el = document.getElementById(id);
     if (!el) return NaN;
@@ -13373,7 +14131,7 @@ function updateFloatVisibility() {
 //   offset 24  int16    iMeas       / 10   → A
 //   offset 26  int16    duty        / 10   → %
 //   offset 28  uint8    flags       (b0=fastOvActive b1=voltLoopFired b2=cvActive
-//                                    b3=soft b4=hard b5=iExcess b6=loadDumpActive)
+//                                    b3=iExcessBulk b4=hard b5=iExcess b6=loadDumpActive)
 //   offset 29  uint8    awState     (0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless)
 //   offset 30  int16    rpm
 //   offset 32  int16    battV_filt_x100 / 100 → V  (IBV, raw battery voltage)
@@ -13455,6 +14213,7 @@ function parseCvBin(buf) {
     const inaInterval = new Array(count);
     const slopeBleedAmps = new Array(count);
     const capReason = new Array(count);
+    const iExcessBulk = new Array(count);
 
     const tsBase = view.getUint32(CV_LOG_HEADER_SIZE, true);
 
@@ -13479,7 +14238,7 @@ function parseCvBin(buf) {
         fastOvActive[i] = (f >> 0) & 1;
         voltLoopFired[i] = (f >> 1) & 1;
         cvActive[i] = (f >> 2) & 1;
-        // bit 3 reserved (was softClamp — old soft-cap removed)
+        iExcessBulk[i] = (f >> 3) & 1;  // iExcess BULK sub-mode (current-control phase)
         hardClamp[i] = (f >> 4) & 1;
         awState[i] = view.getUint8(b + 29);
         rpm[i] = view.getInt16(b + 30, true);
@@ -13506,7 +14265,7 @@ function parseCvBin(buf) {
         fastOvActive, voltLoopFired, cvActive, hardClamp,
         rpm, battV_filt, iMeas_filt, ch1Interval, cvDSlope, iExcess, battI,
         dBcur_dt, loadDumpActive, awState, voltLoopInterval, inaInterval,
-        slopeBleedAmps, capReason,
+        slopeBleedAmps, capReason, iExcessBulk,
     };
 }
 
@@ -13532,13 +14291,14 @@ function cvBinToCsv(d, csv3) {
         ` TdPred=${fmtRaw(c.TdPred, 3)}s DvdtTC=${fmtDiv(c.DvdtTC, 10, 1)}ms` +
         ` KHard=${fmtDiv(c.KHard, 10, 1)}A/V` +
         ` AwBleedRate=${fmtDiv(c.AwBleedRate, 10, 1)}A/s` +  // AwRecoverRate removed from header — hardcoded to 0.1 in firmware
-        ` IExcessArmMarginV=${fmtRaw(c.IExcessArmMarginV, 3)}V`
+        ` IExcessArmMarginV=${fmtRaw(c.IExcessArmMarginV, 3)}V` +
+        ` IExcessFrac=${fmtDiv(c.IExcessFrac, 10, 1)}% IExcessTau=${fmtRaw(c.IExcessTau, 0)}ms`
     );
     lines.push(
         `# SlopeBleed: SlopeBleedThresh=${d.sbThresh.toFixed(3)}V/s SlopeBleedK=${d.sbK.toFixed(1)}A/(V/s) SlopeBleedProxV=${d.sbProxV.toFixed(3)}V`
     );
     lines.push(
-        `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump`
+        `# capReason codes: 0=none(unclamped) 1=KHard_G1(predictive) 2=KHard_G2(measured) 3=iExcess 4=loadDump 5=iExcessBulk(current-control phase)`
     );
 
     // Column headers
@@ -13549,7 +14309,7 @@ function cvBinToCsv(d, csv3) {
         'iMeas_A', 'duty_pct',
         'fastOvActive', 'voltLoopFired', 'cvActive', 'hardClamp',
         'rpm',
-        'battV_filt_V', 'iMeas_filt_A', 'ch1_last_ms', 'iExcess',
+        'battV_filt_V', 'iMeas_filt_A', 'ch1_last_ms', 'iExcess', 'iExcessBulk',
         'battI_A', 'dBcur_dt_Aps', 'loadDumpActive',
         'cvDSlope_Vps', 'awState',
         'voltLoopInterval_ms', 'inaInterval_ms',
@@ -13570,7 +14330,7 @@ function cvBinToCsv(d, csv3) {
             d.hardClamp[i],
             d.rpm[i],
             d.battV_filt[i].toFixed(2), d.iMeas_filt[i].toFixed(1),
-            d.ch1Interval[i], d.iExcess[i],
+            d.ch1Interval[i], d.iExcess[i], d.iExcessBulk[i],
             d.battI[i].toFixed(1), d.dBcur_dt[i], d.loadDumpActive[i],
             d.cvDSlope[i].toFixed(4), d.awState[i],
             d.voltLoopInterval[i], d.inaInterval[i],
@@ -13952,6 +14712,86 @@ function sysidInitDrag() {
     window.addEventListener('resize', sysidClampPanel);
 }
 
+// Show/hide the sine-sweep parameter rows on the Plant Delay tab based on test type.
+function sysidToggleSineParams(val) {
+    const el = document.getElementById('sysid-sine-params');
+    if (el) el.style.display = (parseInt(val) === 1) ? '' : 'none';
+}
+
+// ── Tuning→Current closed-loop sine (Stage 2) ──
+// Show the manual-frequency row (waveform 1) or the auto-sweep block (waveform 2).
+function tuningToggleWaveformUI(val) {
+    const v = parseInt(val);
+    const man = document.getElementById('tuning-sine-manual');
+    const swp = document.getElementById('tuning-sine-sweep');
+    if (man) man.style.display = (v === 1) ? '' : 'none';
+    if (swp) swp.style.display = (v === 2) ? '' : 'none';
+}
+
+let tuningBodePollTimer = null;
+function tuningRunSweep() {
+    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    if (parseInt(getField("TuningMode") ?? 0) !== 1) {
+        alert("Turn the Waveform On/Off toggle ON first — the sweep only runs in tuning mode.");
+        return;
+    }
+    const statusEl = document.getElementById('tuning-sweep-status');
+    const pw = encodeURIComponent(currentAdminPassword);
+    fetch(buildURL("/get?startTuningSweep=1&password=" + pw))
+        .then(r => {
+            if (!r.ok) { if (statusEl) statusEl.textContent = 'Start failed (HTTP ' + r.status + ')'; return; }
+            if (statusEl) statusEl.textContent = 'Sweep running…';
+            const bsec = document.getElementById('tuning-bode-section'); if (bsec) bsec.style.display = 'none';
+            if (tuningBodePollTimer) clearInterval(tuningBodePollTimer);
+            let waited = 0;
+            tuningBodePollTimer = setInterval(() => {
+                waited += 1500;
+                fetch(buildURL('/tuningbode'))
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => {
+                        if (!data) return;
+                        if (statusEl) statusEl.textContent = data.active
+                            ? ('Sweep running… ' + (data.pts ? data.pts.length : 0) + '/10')
+                            : (data.done ? 'Sweep complete.' : 'Idle');
+                        if (data.done && !data.active) {
+                            clearInterval(tuningBodePollTimer); tuningBodePollTimer = null;
+                            renderTuningBode(data);
+                        }
+                    })
+                    .catch(() => {});
+                if (waited > 180000) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; if (statusEl) statusEl.textContent = 'Timed out.'; }
+            }, 1500);
+        })
+        .catch(err => { if (statusEl) statusEl.textContent = 'Start failed: ' + err; });
+}
+
+function renderTuningBode(data) {
+    const sec  = document.getElementById('tuning-bode-section');
+    const body = document.getElementById('tuning-bode-body');
+    const sum  = document.getElementById('tuning-bode-summary');
+    if (sec) sec.style.display = '';
+    if (!data || !data.pts || !data.pts.length) {
+        if (body) body.innerHTML = '<tr><td colspan="3" style="padding:6px 4px; color:#f0a500;">No Bode data.</td></tr>';
+        return;
+    }
+    const pts = data.pts;
+    const g0 = Math.max(1e-9, pts[0].g);   // low-frequency reference gain (≈1 for good tracking)
+    if (body) body.innerHTML = pts.map(p => {
+        const rel   = p.g / g0;
+        const relDb = 20 * Math.log10(Math.max(1e-6, rel));
+        const col   = rel < 0.708 ? '#f0a500' : '#4caf50';
+        return '<tr style="border-bottom:1px solid #333;">' +
+            '<td style="padding:6px 4px;">' + p.f.toFixed(2) + '</td>' +
+            '<td style="padding:6px 4px; color:' + col + ';">' + rel.toFixed(2) + ' (' + relDb.toFixed(1) + ' dB)</td>' +
+            '<td style="padding:6px 4px;">' + p.ph.toFixed(0) + '</td></tr>';
+    }).join('');
+    let f3 = null;
+    for (const p of pts) { if (p.g / g0 < 0.708) { f3 = p.f; break; } }
+    if (sum) sum.innerHTML = f3
+        ? 'Closed-loop −3 dB bandwidth: <strong>~' + f3.toFixed(1) + ' Hz</strong> — the fastest setpoint motion your tuned PID can follow. Compare with the Plant Delay sine Bode: the gap is how much the feedback extended the raw plant.'
+        : 'Tracking held to the top of the sweep — raise Sweep End to find the closed-loop bandwidth.';
+}
+
 function openSystemIDModal() {
     if (!currentAdminPassword) {
         alert("Please unlock settings first.");
@@ -14183,6 +15023,26 @@ function sysidStartProgressPoll() {
     document.getElementById('sysid-phase-bar').style.width = '0%';
     document.getElementById('sysid-modal-overlay').classList.add('sysid-running');   // pulses the pill dot
 
+    // Sine sweep uses its own simple progress (no 9-phase wall model). Toggle the display
+    // and precompute an estimated total duration so the bar can advance smoothly.
+    const sysidIsSine = parseInt(getField("systemIDTestType_sel") ?? 0) === 1;
+    const sysidPhaseListEl  = document.getElementById('sysid-phase-list');
+    const sysidSineStatusEl = document.getElementById('sysid-sine-status');
+    if (sysidPhaseListEl)  sysidPhaseListEl.style.display  = sysidIsSine ? 'none' : '';
+    if (sysidSineStatusEl) sysidSineStatusEl.style.display = sysidIsSine ? '' : 'none';
+    let sysidSineEstMs = 0;
+    if (sysidIsSine) {
+        const f0 = Math.max(0.1, parseFloat(getField("systemIDSineFreqStart_echo") ?? 0.5));
+        const f1 = Math.max(f0 + 0.1, parseFloat(getField("systemIDSineFreqEnd_echo") ?? 20));
+        const cyc = Math.max(2, parseInt(getField("systemIDSineCycles_echo") ?? 6));
+        const N = 10;  // SYSID_SINE_NPOINTS
+        for (let i = 0; i < N; i++) {
+            const f = f0 * Math.pow(f1 / f0, i / (N - 1));
+            sysidSineEstMs += Math.max(1500, (1 + cyc) * 1000 / f);
+        }
+        sysidSineEstMs += 20000;  // stabilize overhead
+    }
+
     // Wall-clock phase advancement: once we know a phase started, we advance the bar
     // and labels by timer without waiting for the next CSV2 packet.
     // CSV2 is the authoritative sync signal — if it shows a higher phase we jump ahead.
@@ -14216,28 +15076,36 @@ function sysidStartProgressPoll() {
 
         if (phase > 0) sysidEverActive = true;
 
-        // Sync to firmware phase if it's ahead of our wall-clock estimate
-        if (phase > wallPhase) sysidSetWallPhase(phase);
+        if (sysidIsSine) {
+            // Sine sweep: smooth estimated bar (no per-frequency telemetry needed).
+            const pct = sysidSineEstMs > 0 ? Math.min(99, elapsed / sysidSineEstMs * 100) : 0;
+            document.getElementById('sysid-phase-bar').style.width = pct.toFixed(0) + '%';
+            document.getElementById('sysid-elapsed').textContent = 'Elapsed: ' + (elapsed / 1000).toFixed(0) + 's';
+            sysidUpdatePill('Sine sweep…', pct);
+        } else {
+            // Sync to firmware phase if it's ahead of our wall-clock estimate
+            if (phase > wallPhase) sysidSetWallPhase(phase);
 
-        // Once a non-stabilise phase is active, advance by holdMs wall time.
-        // This means the UI advances immediately even if the next CSV2 is delayed.
-        if (wallPhase >= 2 && wallPhase <= 8) {
-            const elapsed_in_phase = Date.now() - wallPhaseStart;
-            if (elapsed_in_phase >= holdMs && wallPhase < 9) {
-                sysidSetWallPhase(wallPhase + 1);
+            // Once a non-stabilise phase is active, advance by holdMs wall time.
+            // This means the UI advances immediately even if the next CSV2 is delayed.
+            if (wallPhase >= 2 && wallPhase <= 8) {
+                const elapsed_in_phase = Date.now() - wallPhaseStart;
+                if (elapsed_in_phase >= holdMs && wallPhase < 9) {
+                    sysidSetWallPhase(wallPhase + 1);
+                }
             }
+
+            // Phase bar: for stabilize use 30s estimate, for measured phases use holdMs
+            const phaseMs = (wallPhase === 1) ? 30000 : holdMs;
+            const phasePct = Math.min(100, ((Date.now() - wallPhaseStart) / phaseMs) * 100);
+            document.getElementById('sysid-phase-bar').style.width = phasePct.toFixed(0) + '%';
+
+            document.getElementById('sysid-elapsed').textContent = 'Elapsed: ' + (elapsed / 1000).toFixed(0) + 's';
+
+            // Mirror progress into the minimized pill (8-phase measured sequence; 9 = processing)
+            const overallPct = Math.min(100, Math.max(0, (wallPhase - 1 + phasePct / 100) / 8 * 100));
+            sysidUpdatePill((SYSID_PHASE_NAMES[wallPhase] || 'Running') + '…', overallPct);
         }
-
-        // Phase bar: for stabilize use 30s estimate, for measured phases use holdMs
-        const phaseMs = (wallPhase === 1) ? 30000 : holdMs;
-        const phasePct = Math.min(100, ((Date.now() - wallPhaseStart) / phaseMs) * 100);
-        document.getElementById('sysid-phase-bar').style.width = phasePct.toFixed(0) + '%';
-
-        document.getElementById('sysid-elapsed').textContent = 'Elapsed: ' + (elapsed / 1000).toFixed(0) + 's';
-
-        // Mirror progress into the minimized pill (8-phase measured sequence; 9 = processing)
-        const overallPct = Math.min(100, Math.max(0, (wallPhase - 1 + phasePct / 100) / 8 * 100));
-        sysidUpdatePill((SYSID_PHASE_NAMES[wallPhase] || 'Running') + '…', overallPct);
 
         if (ready === 1) {
             clearInterval(sysidPollInterval); sysidPollInterval = null;
@@ -14281,6 +15149,16 @@ function sysidStartProgressPoll() {
 const SYSID_STABILIZE_TIMEOUT_HINT = 30000;
 
 function showSystemIDResults() {
+    // Sine sweep has its own results view (open-loop Bode); the step tables don't apply.
+    const sysidIsSine = parseInt(getField("systemIDTestType_sel") ?? 0) === 1;
+    if (sysidIsSine) { showSysidBodeResults(); return; }
+    // Step path: restore the step sections / hide the sine Bode section (a sine run may have preceded).
+    const bodeSec0 = document.getElementById('sysid-bode-section'); if (bodeSec0) bodeSec0.style.display = 'none';
+    const qhint0   = document.getElementById('sysid-quality-hint');  if (qhint0)   qhint0.style.display = '';
+    const tlabel0  = document.getElementById('sysid-timing-label');  if (tlabel0)  tlabel0.style.display = '';
+    const rtbl0    = document.getElementById('sysid-results-table'); if (rtbl0)    rtbl0.style.display = '';
+    const applyBtn0 = document.getElementById('sysid-apply-btn');    if (applyBtn0) applyBtn0.style.display = '';
+
     const r = [
         parseFloat(getField("systemIDRiseDelay_0_ID") ?? -1),
         parseFloat(getField("systemIDRiseDelay_1_ID") ?? -1),
@@ -14376,7 +15254,7 @@ function showSystemIDResults() {
         'Measured plant delay: <strong style="color:#4a9eff;">' + sysidSuggestedTC.toFixed(0) + ' ms</strong>' +
         ' (highest single trial)<br>' +
         '<span style="font-size:0.85em; color:#aaa;">Suggested filter TCs: ' +
-        '<strong>' + tcFast + ' ms</strong> for excess-current detection &amp; PID feedback (plant/3), ' +
+        '<strong>' + tcFast + ' ms</strong> for PID feedback &amp; the filtered-amps display (plant/3), ' +
         '<strong>' + tcSlow + ' ms</strong> for voltage smoothing (full plant delay)</span>';
 
     const applyBtn = document.getElementById('sysid-apply-btn');
@@ -14404,11 +15282,60 @@ function showSystemIDResults() {
     sysidShowScreen('results');
 }
 
+// Render the open-loop plant Bode (sine sweep) results from /sysidbode.
+function showSysidBodeResults() {
+    // Hide the step-test sections; show the Bode section.
+    const qsec   = document.getElementById('sysid-quality-section'); if (qsec)   qsec.style.display = 'none';
+    const qhint  = document.getElementById('sysid-quality-hint');    if (qhint)  qhint.style.display = 'none';
+    const tlabel = document.getElementById('sysid-timing-label');    if (tlabel) tlabel.style.display = 'none';
+    const rtbl   = document.getElementById('sysid-results-table');   if (rtbl)   rtbl.style.display = 'none';
+    const summ   = document.getElementById('sysid-results-summary'); if (summ)   summ.textContent = '';
+    const warn   = document.getElementById('sysid-results-warning'); if (warn)   warn.style.display = 'none';
+    const applyBtn = document.getElementById('sysid-apply-btn');     if (applyBtn) applyBtn.style.display = 'none';
+    const bodeSec  = document.getElementById('sysid-bode-section');  if (bodeSec)  bodeSec.style.display = '';
+    sysidShowScreen('results');
+
+    const body = document.getElementById('sysid-bode-body');
+    const sum  = document.getElementById('sysid-bode-summary');
+    if (body) body.innerHTML = '<tr><td colspan="3" style="padding:6px 4px; color:#aaa;">Loading…</td></tr>';
+
+    fetch(buildURL('/sysidbode'))
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (!data || !data.pts || !data.pts.length) {
+                if (body) body.innerHTML = '<tr><td colspan="3" style="padding:6px 4px; color:#f0a500;">No Bode data returned.</td></tr>';
+                return;
+            }
+            const pts = data.pts;
+            const g0 = Math.max(1e-9, pts[0].g);  // low-frequency reference gain
+            if (body) body.innerHTML = pts.map(p => {
+                const rel   = p.g / g0;
+                const relDb = 20 * Math.log10(Math.max(1e-6, rel));
+                const col   = rel < 0.708 ? '#f0a500' : '#4caf50';
+                return '<tr style="border-bottom:1px solid #333;">' +
+                    '<td style="padding:6px 4px;">' + p.f.toFixed(2) + '</td>' +
+                    '<td style="padding:6px 4px; color:' + col + ';">' + rel.toFixed(2) + ' (' + relDb.toFixed(1) + ' dB)</td>' +
+                    '<td style="padding:6px 4px;">' + p.ph.toFixed(0) + '</td></tr>';
+            }).join('');
+            // -3 dB bandwidth: first frequency where gain falls below 0.708× the low-freq value.
+            let f3 = null;
+            for (const p of pts) { if (p.g / g0 < 0.708) { f3 = p.f; break; } }
+            if (sum) sum.innerHTML = f3
+                ? 'Plant −3 dB bandwidth: <strong>~' + f3.toFixed(1) + ' Hz</strong> — the fastest the field can move the output open-loop. Phase lag growing well past 90° beyond here is dead-time, not just L/R lag.'
+                : 'Gain had not dropped to −3 dB by the top of the sweep — raise Sweep End to find the plant bandwidth.';
+        })
+        .catch(() => {
+            if (body) body.innerHTML = '<tr><td colspan="3" style="padding:6px 4px; color:#ef4444;">Failed to fetch /sysidbode.</td></tr>';
+        });
+}
+
 function applySystemIDResults() {
     if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
-    // Excess-current detection and PID feedback get plant/3 to preserve phase margin
-    // inside the control loop. Voltage smoothing gets the full plant delay because its
-    // consumer (slope bleed dV/dt) runs on the same timescale as the voltage loop tick.
+    // PID feedback and the filtered-amps display get plant/3 to preserve phase margin
+    // inside the control loop. (iExcess no longer uses InputFilterTC — it has its own EMA on
+    // IExcessTau, sized by belt resonance, not plant delay — so this only sets the display
+    // filter now.) Voltage smoothing gets the full plant delay because its consumer
+    // (slope bleed dV/dt) runs on the same timescale as the voltage loop tick.
     const tcFast = Math.max(1, Math.round(sysidSuggestedTC / 3));
     const tcSlow = Math.max(1, Math.round(sysidSuggestedTC));
     const tcFastEnc = encodeURIComponent(tcFast);
@@ -14607,7 +15534,8 @@ window.addEventListener('load', function () {
 
     let forecastStr, methodLabel, methodSub;
     if (delta !== null && headingFresh && trueWindFresh && latFresh) {
-      const twdEarth = (parseFloat(data.HeadingNMEA) + parseFloat(data.TrueWindAngleNMEA) + 360) % 360;
+      // heading + true wind angle now ride CSV4/NavStream; read them from the nav cache (LatitudeNMEA stays on CSV2)
+      const twdEarth = (parseFloat(window._navLast.HeadingNMEA) + parseFloat(window._navLast.TrueWindAngleNMEA) + 360) % 360;
       const z = zambretti(p, delta, twdEarth, parseFloat(data.LatitudeNMEA), new Date());
       forecastStr = z.text;
       methodLabel = 'Zambretti';
@@ -15928,21 +16856,24 @@ let fastScopeResizeObserver = null;
 
 function parseFastScope(buf) {
     const dv = new DataView(buf);
-    if (buf.byteLength < 16 || dv.getUint32(0, true) !== 0x46534331) return null;  // 'FSC1'
+    if (buf.byteLength < 24 || dv.getUint32(0, true) !== 0x46534331) return null;  // 'FSC1', 24 B header
     const rate = dv.getUint16(4, true) * 10;
     const count = dv.getUint16(6, true);
     const zeroMv = dv.getUint16(8, true);
     const apv = dv.getUint16(10, true);
     const atten = dv.getUint8(12);
     const state = dv.getUint8(13);
-    if (buf.byteLength < 16 + count * 2) return null;
+    const rpm = dv.getUint16(14, true);          // tach at capture (request time = capture-end)
+    const altTempF = dv.getInt16(16, true);      // whole °F at capture
+    const epoch = dv.getUint32(18, true);        // unix time at capture (0 = clock not synced)
+    if (buf.byteLength < 24 + count * 2) return null;
     const tMs = new Array(count), amps = new Array(count);
     for (let i = 0; i < count; i++) {
-        const mv = dv.getInt16(16 + i * 2, true);
+        const mv = dv.getInt16(24 + i * 2, true);
         amps[i] = (mv - zeroMv) * apv / 1000;
         tMs[i] = i * 1000 / rate;
     }
-    return { rate, count, zeroMv, apv, atten, state, tMs, amps };
+    return { rate, count, zeroMv, apv, atten, state, rpm, altTempF, epoch, tMs, amps };
 }
 
 // How many engine and alternator turns the currently-shown window spans. Engine speed is the
@@ -16063,9 +16994,9 @@ function fastScopeZoom(ms, btn) {
     document.querySelectorAll('.fastscope-zoom[data-ms]').forEach(b => b.classList.remove('active'));
     if (btn) btn.classList.add('active');
     fastScopeApplyZoom();
-    // Same window drives the Reference Flipbook below — re-trigger its x range fn so both
-    // plots span identical milliseconds (each shows the trailing N ms of its own capture).
-    if (fastFlipPlot && fastFlipSelected >= 0) fastFlipPlot.setData(fastFlipPlot.data);
+    // Same window drives the Reference Flipbook below. A new window width changes the frame split,
+    // so reset to the first frame and re-trigger its x range fn; both plots span identical ms.
+    if (fastFlipPlot && fastFlipSelected >= 0) { faFlipFrame = 0; fastFlipPlot.setData(fastFlipPlot.data); faFlipUpdateNav(); }
     // Revs shown scale with the window width, so refresh the hint on every view change.
     const hint = document.getElementById('fastscope-cycle-hint');
     if (hint && fastScopeData && fastScopeData.count > 0) hint.textContent = fastScopeRevHint();
@@ -16106,14 +17037,29 @@ function fastScopePauseToggle(btn) {
     if (status && fastScopePaused) status.textContent = 'Paused — showing a frozen capture.';
 }
 
-// Export the currently-shown scope capture as CSV. Always includes BOTH the raw 20 kHz samples
-// and the boxcar-16 filtered version (what the analysis sees), regardless of the Raw/Filtered view.
+// Build a metadata-rich CSV for one scope capture: a commented header (capture time, RPM, alt
+// temp, rate, range — all stamped at capture in the FSC1 blob) followed by BOTH the raw 20 kHz
+// samples and the boxcar-16 filtered version (what the analysis sees). Shared by the Download CSV
+// button and the remote log relay so both carry identical, self-describing content.
+function buildFaScopeCsv(d) {
+    const filt = fastScopeBoxcar(d.amps, FA_SCOPE_BOXCAR_N);
+    const when = (d.epoch && d.epoch > 1577836800) ? new Date(d.epoch * 1000).toISOString() : 'clock not set';
+    let csv = '';
+    csv += '# Alt scope capture (fast alternator-current channel)\n';
+    csv += '# captured,' + when + '\n';
+    csv += '# rpm,' + d.rpm + '\n';
+    csv += '# alt_temp_F,' + d.altTempF + '\n';
+    csv += '# sample_rate_hz,' + d.rate + '\n';
+    csv += '# range,' + (d.atten ? '12dB' : '6dB') + '\n';
+    csv += 'ms,amps_raw,amps_filtered\n';
+    for (let i = 0; i < d.count; i++) csv += d.tMs[i].toFixed(4) + ',' + d.amps[i].toFixed(3) + ',' + filt[i].toFixed(3) + '\n';
+    return csv;
+}
+
+// Export the currently-shown scope capture as CSV (header + raw + boxcar-16 filtered).
 function downloadFaScopeCsv() {
     if (!fastScopeData || !fastScopeData.count) { alert('No scope capture yet — press Refresh Capture first.'); return; }
-    const d = fastScopeData;
-    const filt = fastScopeBoxcar(d.amps, FA_SCOPE_BOXCAR_N);
-    let csv = 'ms,amps_raw,amps_filtered\n';
-    for (let i = 0; i < d.count; i++) csv += d.tMs[i].toFixed(4) + ',' + d.amps[i].toFixed(3) + ',' + filt[i].toFixed(3) + '\n';
+    const csv = buildFaScopeCsv(fastScopeData);
     const dt = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + ' ' + p(dt.getHours()) + '-' + p(dt.getMinutes()) + '-' + p(dt.getSeconds());
     const a = document.createElement('a');
@@ -16163,13 +17109,33 @@ document.addEventListener('visibilitychange', () => {
     else fastDiagStopAuto();
 });
 
+// Build a metadata-rich CSV for one flipbook page: commented header (capture time, RPM, mean amps,
+// reference-band/anomaly type, range — all stored per page) + raw and boxcar-16 filtered columns.
+// Shared by the download button and the relay. NOTE: per-page temperature is not available — RPM
+// and capture time are stored in each FaFlipPage, but board/alt temp is not (adding it needs a
+// firmware struct change that would invalidate already-saved pages).
+function buildFaFlipPageCsv(pg) {
+    const when = (pg.epoch && pg.epoch > 1577836800) ? new Date(pg.epoch * 1000).toISOString() : 'clock not set';
+    const type = pg.isAnomaly ? ('anomaly k=' + pg.patternK + ' score=' + pg.score.toFixed(2))
+                              : ('reference band ' + pg.band + ' (' + pg.band + 'k-' + (pg.band + 1) + 'k RPM)');
+    let csv = '';
+    csv += '# Alt reference waveform (fast alternator-current channel)\n';
+    csv += '# captured,' + when + '\n';
+    csv += '# rpm,' + pg.rpm + '\n';
+    csv += '# amps_mean,' + pg.amps.toFixed(1) + '\n';
+    csv += '# type,' + type + '\n';
+    csv += '# range,' + (pg.attenIs12 ? '12dB' : '6dB') + '\n';
+    csv += 'ms,amps_raw,amps_filtered\n';
+    for (let s = 0; s < pg.t_ms.length; s++) csv += pg.t_ms[s].toFixed(3) + ',' + pg.amps_t[s].toFixed(3) + ',' + pg.filt_t[s].toFixed(3) + '\n';
+    return csv;
+}
+
 // Per-page CSV export of the currently-shown flipbook waveform (item 8).
 function downloadFaFlipPageCsv() {
     if (!fastFlipPages || fastFlipSelected < 0) { alert('Select a flipbook page first.'); return; }
     const pg = fastFlipPages[fastFlipSelected];
     if (!pg || !pg.used) { alert('That flipbook page is empty.'); return; }
-    let csv = 'ms,amps\n';
-    for (let s = 0; s < pg.t_ms.length; s++) csv += pg.t_ms[s].toFixed(3) + ',' + pg.amps_t[s].toFixed(3) + '\n';
+    const csv = buildFaFlipPageCsv(pg);
     const d = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds());
     const tag = pg.isAnomaly ? ('anomaly k' + pg.patternK) : (pg.band + 'k-' + (pg.band + 1) + 'k RPM');
@@ -16257,6 +17223,64 @@ let fastFlipPages = null;
 let fastFlipPlot = null;
 let fastFlipSelected = -1;
 let faFlipAxis = {};   // per-slot Y-axis state, in-session only: { auto, locked, min, max }
+// Raw/Filtered toggles mirror the live scope above (same two series, same colors). Default
+// matches the scope: Raw on, Filtered off. Independent show/hide, any combination allowed.
+let faFlipShowRaw = true;
+let faFlipShowFilt = false;
+// Frame paging: a page is 200 ms; the shared Time-window buttons split it into N equal frames
+// (200 ms = 1 frame = whole page; 100 ms = 2; 50 ms = 4; …). faFlipFrame is which one is shown,
+// 0 = the FIRST window. We page from the start (the scope above stays trailing/live) so the
+// reference always opens at frame 1, with the on-plot ‹ › arrows stepping through.
+let faFlipFrame = 0;
+
+// How many equal time-windows the current view splits a page into, and the [lo,hi] ms span of
+// the active frame. The last frame is clamped back so every frame keeps the full window width.
+function faFlipFrameCount() {
+    const pg = fastFlipPages && fastFlipPages[fastFlipSelected];
+    const tEnd = (pg && pg.t_ms && pg.t_ms.length) ? pg.t_ms[pg.t_ms.length - 1] : 200;
+    return Math.max(1, Math.ceil(tEnd / fastScopeViewMs));
+}
+function faFlipFrameRange() {
+    const pg = fastFlipPages && fastFlipPages[fastFlipSelected];
+    const tEnd = (pg && pg.t_ms && pg.t_ms.length) ? pg.t_ms[pg.t_ms.length - 1] : 200;
+    const n = faFlipFrameCount();
+    const f = Math.min(Math.max(0, faFlipFrame), n - 1);
+    let lo = f * fastScopeViewMs, hi = lo + fastScopeViewMs;
+    if (hi > tEnd) { hi = tEnd; lo = Math.max(0, tEnd - fastScopeViewMs); }
+    return [lo, hi];
+}
+function faFlipStep(dir) {
+    faFlipFrame = Math.min(faFlipFrameCount() - 1, Math.max(0, faFlipFrame + dir));
+    if (fastFlipPlot) fastFlipPlot.setData(fastFlipPlot.data);   // re-runs the x range fn
+    faFlipUpdateNav();
+}
+function faFlipUpdateNav() {
+    const wrap = document.getElementById('faflip-nav');
+    if (!wrap) return;
+    const n = faFlipFrameCount();
+    if (n <= 1) { wrap.style.display = 'none'; return; }   // longest window = one frame, no paging
+    wrap.style.display = 'flex';
+    const f = Math.min(Math.max(0, faFlipFrame), n - 1);
+    const lbl = document.getElementById('faflip-frame-label');
+    if (lbl) lbl.textContent = 'Frame ' + (f + 1) + ' / ' + n;
+    const prev = document.getElementById('faflip-prev'), next = document.getElementById('faflip-next');
+    if (prev) prev.disabled = (f <= 0);
+    if (next) next.disabled = (f >= n - 1);
+}
+// Raw and Filtered are independent show/hide toggles for the flipbook plot, identical in
+// behaviour to fastScopeViewToggle on the scope above.
+function faFlipViewToggle(which) {
+    if (which === 'raw') faFlipShowRaw = !faFlipShowRaw;
+    else faFlipShowFilt = !faFlipShowFilt;
+    const raw = document.getElementById('faFlipRawBtn');
+    const filt = document.getElementById('faFlipFiltBtn');
+    if (raw) raw.classList.toggle('cap-mode-active', faFlipShowRaw);
+    if (filt) filt.classList.toggle('cap-mode-active', faFlipShowFilt);
+    if (fastFlipPlot) {
+        fastFlipPlot.setSeries(1, { show: faFlipShowRaw });
+        fastFlipPlot.setSeries(2, { show: faFlipShowFilt });
+    }
+}
 const FASTFLIP_PAGE_BYTES = 2020;
 const FASTFLIP_NSAMP = 1000;
 
@@ -16282,6 +17306,7 @@ function parseFastFlip(buf) {
             epoch: dv.getUint32(o + 4, true),
             isAnomaly: dv.getUint8(o + 9),
             patternK: dv.getUint8(o + 10),
+            attenIs12: dv.getUint8(o + 11),   // range at capture (for the CSV header label)
             score: dv.getFloat32(o + 12, true),
             zeroMv: dv.getUint16(o + 16, true),
             apv: dv.getUint16(o + 18, true),
@@ -16296,6 +17321,10 @@ function parseFastFlip(buf) {
                 pg.amps_t[s] = (mv - pg.zeroMv) * pg.apv / 1000;
                 pg.t_ms[s] = s * 1000 / rate;
             }
+            // Filtered trace built client-side from the raw samples with the SAME boxcar-16 the
+            // live scope uses — the saved page only stores raw mV, so the filtered overlay costs
+            // no extra storage and matches what the analysis sees (≈550 Hz bandwidth).
+            pg.filt_t = fastScopeBoxcar(pg.amps_t, FA_SCOPE_BOXCAR_N);
         }
         pages.push(pg);
     }
@@ -16307,25 +17336,25 @@ function initFastFlipPlot() {
     if (!plotEl || fastFlipPlot) return;
     fastFlipPlot = new uPlot({
         width: Math.min(plotEl.clientWidth || 360, 800),
-        height: 260,
+        height: 300,   // match the scope plot above it so the two stacked charts read as the same size
         // No fixed-ms title: the shared Time window buttons re-window this page, so any "200 ms"
         // label is wrong once zoomed (mirrors the scope, which titles via the Y axis instead).
         title: "Reference Waveform — 5 kHz",
+        // Raw + Filtered, same two series and colors as the live scope above so the stacked plots
+        // read alike. Toggled by faFlipViewToggle; data is always [t, raw, filtered] each render.
         series: [
             {},
-            { label: "Alternator Current (A)", stroke: "#9C27B0", width: 1, points: { show: false }, scale: "amps" }
+            { label: "Raw (A)", stroke: "#2196F3", width: 1, points: { show: false }, scale: "amps", show: faFlipShowRaw },
+            { label: "Filtered (A)", stroke: "#FF9800", width: 1.5, points: { show: false }, scale: "amps", show: faFlipShowFilt }
         ],
         scales: {
-            // x pinned to the trailing fastScopeViewMs of the 200 ms page — the SAME shared window
-            // the scope uses, so the two stacked plots always span identical milliseconds.
+            // x pinned to the active frame (faFlipFrameRange) — the page is split into N windows of
+            // the shared fastScopeViewMs width and the ‹ › arrows step through them, opening at the
+            // first frame. Same window width as the scope above, so both stacked plots match.
             x: {
                 time: false,
                 auto: false,
-                range: () => {
-                    const pg = fastFlipPages && fastFlipPages[fastFlipSelected];
-                    const tEnd = (pg && pg.t_ms && pg.t_ms.length) ? pg.t_ms[pg.t_ms.length - 1] : 200;
-                    return [Math.max(0, tEnd - fastScopeViewMs), tEnd];
-                }
+                range: () => faFlipFrameRange()
             },
             amps: { auto: true }
         },
@@ -16350,6 +17379,17 @@ function initFastFlipPlot() {
     ctrl.innerHTML = '<button id="faflip-pause-btn" title="Pause — stop new fault snapshots from overwriting the saved ones" style="font-size:10px;padding:0 6px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;line-height:16px;" onclick="faAnomPauseToggle()">Pause</button><div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="faflip-auto-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="faflip-auto-cb" style="cursor:pointer;user-select:none;">auto</label></div><button id="faflip-lock-btn" style="display:none;font-size:10px;padding:0 5px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;opacity:0.6;line-height:16px;">lock</button>';
     plotEl.appendChild(ctrl);
     faUpdatePauseBtn(_faAnomPause);  // reflect last-known pause state on (re)build
+
+    // On-plot frame paging — ‹ prev / next › arrows + "Frame n / N" label, top-left so they clear
+    // the Pause/auto/lock cluster top-right. Hidden whenever the page is a single frame (200 ms).
+    const existingNav = plotEl.querySelector('#faflip-nav');
+    if (existingNav) existingNav.remove();
+    const nav = document.createElement('div');
+    nav.id = 'faflip-nav';
+    nav.style.cssText = 'position:absolute;top:6px;left:8px;z-index:10;display:none;align-items:center;gap:5px;font-size:11px;';
+    const btnCss = 'font-size:13px;line-height:16px;padding:0 7px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;';
+    nav.innerHTML = '<button id="faflip-prev" title="Previous frame" style="' + btnCss + '" onclick="faFlipStep(-1)">‹</button><span id="faflip-frame-label" style="color:#888;user-select:none;">Frame 1 / 1</span><button id="faflip-next" title="Next frame" style="' + btnCss + '" onclick="faFlipStep(1)">›</button>';
+    plotEl.appendChild(nav);
 
     document.getElementById('faflip-auto-cb').addEventListener('change', e => {
         const st = faFlipAxisState(fastFlipSelected);
@@ -16415,10 +17455,13 @@ function fastFlipRender(slot) {
     const pg = fastFlipPages[slot];
     if (!pg || !pg.used) return;
     fastFlipSelected = slot;
+    faFlipFrame = 0;   // new page always opens on the first frame
     document.querySelectorAll('.fastflip-band').forEach(b => b.classList.toggle('active', +b.dataset.slot === slot));
     const meta = document.getElementById('fastflip-meta');
     if (meta) {
-        const when = pg.epoch ? new Date(pg.epoch * 1000).toLocaleDateString() : 'clock not set';
+        // > 2020 guard (not just truthy): legacy pages froze before the libc clock was set and
+        // hold a small non-zero epoch that would render as 1/1/1970 — show "clock not set" instead.
+        const when = pg.epoch > 1577836800 ? new Date(pg.epoch * 1000).toLocaleDateString() : 'clock not set';
         // Band 0 reads "100–1000" (engines don't idle below ~100 RPM); higher bands span full 1000-RPM ranges
         const bandLabel = pg.band === 0 ? '100–1000' : (pg.band * 1000) + '–' + (pg.band * 1000 + 999);
         meta.textContent = (pg.isAnomaly
@@ -16428,9 +17471,17 @@ function fastFlipRender(slot) {
     }
     initFastFlipPlot();
     if (fastFlipPlot) {
-        fastFlipPlot.setData([pg.t_ms, pg.amps_t]);
+        // Re-fit to the real container width every render. The plot is built once (often while the
+        // Diag tab is still hidden, so clientWidth was 0 → it fell back to the tiny 360 px default
+        // and stayed stuck narrow). The scope above it does the same setSize on tab open; matching
+        // it here keeps the two stacked charts the same size. Height matches the scope (300).
+        const fpEl = document.getElementById('fastflip-plot');
+        const w = Math.min((fpEl && fpEl.clientWidth) || 360, 800);
+        if (fastFlipPlot.width !== w || fastFlipPlot.height !== 300) fastFlipPlot.setSize({ width: w, height: 300 });
+        fastFlipPlot.setData([pg.t_ms, pg.amps_t, pg.filt_t]);
         faFlipApplyAxis(slot);
         faFlipSyncControls(slot);
+        faFlipUpdateNav();
     }
 }
 

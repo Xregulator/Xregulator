@@ -534,7 +534,7 @@
                       <!-- Plain buttons, NOT nested <form>s: a nested form's </form> would
                            close the outer #vessel-info-form early and orphan the Save button.
                            submitSimpleParam handles the password + /get fetch. -->
-                      <button type="button" onclick="submitSimpleParam('ZeroIMU', 1)" class="btn-primary">Zero Now</button>
+                      <button type="button" onclick="startImuZero()" class="btn-primary">Zero Now</button>
                       <button type="button" onclick="submitSimpleParam('ClearIMUZero', 1)" class="btn-secondary">Clear</button>
                     </div>
                   </div>
@@ -974,8 +974,8 @@
 
             <div id="alt-panel-alt-setup" class="alt-panel alt-panel-primary active">
 
-              <!-- Output Control (open by default) -->
-              <details open class="alt-nested-section">
+              <!-- Output Control (closed by default) -->
+              <details class="alt-nested-section">
                 <summary class="alt-summary-nested">Output Control</summary>
 
                 <!-- Field Control -->
@@ -1227,8 +1227,8 @@
               </details><!-- END Rate Limiting -->
 
 
-              <!-- Temperature Settings (closed) -->
-              <details class="alt-nested-section">
+              <!-- Temperature Settings (open by default) -->
+              <details open class="alt-nested-section">
                 <summary class="alt-summary-nested">Temperature Settings</summary>
 
                 <!-- Alternator Temp Limit -->
@@ -1920,8 +1920,8 @@
                  Phase-first layout (Detection / Response / Recovery) with
                  group-filter pills. Each card preserves its existing
                  name=, password field, Set button, and echo span ID so
-                 all existing JS handlers (echo population, handleUserToggle,
-                 setIExcessSigSrc) continue to work unchanged.
+                 all existing JS handlers (echo population, handleUserToggle)
+                 continue to work unchanged.
                  ═══════════════════════════════════════════════════════════ -->
             <div id="alt-panel-protections" class="alt-panel alt-panel-primary">
 
@@ -1962,7 +1962,7 @@
                   <p data-intro="cl">When measured current exceeds the safe system limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum across the whole system — including alternator continuous rating, battery acceptance, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. The trip threshold is automatically 10 A above Command Limit.</p>
                   <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> turns the whole layer off.</p>
                   <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> turns the whole layer off.</p>
-                  <p data-intro="g3">Two regimes, split at the <strong>Arming Margin</strong> below target. <strong>Near the target</strong> (within Arming Margin): engages when measured current exceeds the commanded <strong>setpoint</strong> by <strong>K_excess</strong> amps for the <strong>N — Persistence</strong> count of consecutive ticks (~5 ms each). <strong>Below the Arming Margin (Bulk / current-control phase):</strong> the main detector is off and the bulk sub-mode takes over — it engages when measured current exceeds the commanded <strong>ceiling</strong> (RPM cap minus thermal/warmup) by <strong>K_excess (Bulk)</strong> amps for <strong>N (Bulk)</strong> ticks. Comparing to the ceiling rather than the slewed setpoint means normal RPM ramps don't false-fire. <strong>Signal Filter</strong> selects how the current signal is filtered before comparison (shared by both) — Raw, MA(N), or EMA(TC). <strong>MA Window</strong> sets the moving-average window when MA(N) is selected; the EMA time constant is the <strong>Excess current detection filter</strong> shown read-only here (lives in Tuning → Plant Delay).</p>
+                  <p data-intro="g3">Two regimes, split at the <strong>Arming Margin</strong> below target. <strong>Near the target</strong> (within Arming Margin): engages when the <em>time-averaged</em> measured current rises above the commanded <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong> (a percentage of the setpoint). <strong>Below the Arming Margin (Bulk / current-control phase):</strong> the main detector is off and the bulk sub-mode takes over — it engages when the averaged current rises above the commanded <strong>ceiling</strong> (RPM cap minus thermal/warmup) by more than the <strong>Detection Threshold (Bulk)</strong>. Comparing to the ceiling rather than the slewed setpoint means normal RPM ramps don't false-fire. The <strong>Averaging Time Constant</strong> is what rejects the belt-resonance shiver — any oscillation faster than that window cancels out before the threshold is checked. The percentage threshold is bounded by the <strong>Threshold Floor</strong> and <strong>Threshold Ceiling</strong> (amps), and <strong>Release Hysteresis</strong> sets how far the average must fall before the detector re-arms.</p>
                   <p data-intro="g4">Three tiered thresholds on the rate-of-change of battery current. <strong>Tier 1</strong> fires when one sample exceeds its threshold. <strong>Tier 2</strong> fires when two consecutive samples exceed its threshold. <strong>Tier 3</strong> fires when three consecutive samples exceed its threshold.</p>
                 </div>
 
@@ -2106,44 +2106,6 @@
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      Signal Filter (<span id="IExcessSigSrc_echo">?</span>)
-                    </div>
-                    <div class="protections-edit-row">
-                      <div class="cap-mode-toggle">
-                        <button type="button" id="iExcessSigSrc_0_btn" class="cap-mode-btn cap-mode-active" onclick="setIExcessSigSrc(0)">MA(N)</button>
-                        <button type="button" id="iExcessSigSrc_1_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(1)">EMA(TC)</button>
-                        <button type="button" id="iExcessSigSrc_2_btn" class="cap-mode-btn" onclick="setIExcessSigSrc(2)">Raw</button>
-                      </div>
-                    </div>
-                  </article>
-
-                  <article class="protections-param" data-groups="g3">
-                    <div class="protections-name">
-                      <span class="protections-tag g3">G3</span>
-                      MA Window — N samples (<span id="IExcessMA_N_echo">?</span>)
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="IExcessMA_N" type="number" step="1" min="1" max="10" />
-                        <span class="protections-unit">samples</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g3">
-                    <div class="protections-name">
-                      <span class="protections-tag g3">G3</span>
-                      Excess current detection filter (ms) (<span id="InputFilterTC_echo_grp3">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal used by Group 3 when Signal Filter is set to EMA(TC). A faster (lower) value lets it react sooner. <strong>Only active when Signal Filter is EMA(TC)</strong> — has no effect in MA(N) (default) or Raw modes. Set in <strong>Tuning → Plant Delay</strong> (echoed read-only here).</span></span>
-                    </div>
-                    <div class="protections-readonly-row">Read-only — set in Tuning → Plant Delay</div>
-                  </article>
-
-                  <article class="protections-param" data-groups="g3">
-                    <div class="protections-name">
-                      <span class="protections-tag g3">G3</span>
                       Arming Margin — V below target (<span id="IExcessArmMarginV_echo">?</span>)
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close to the active charge target the measured battery voltage must be before Group 3 is allowed to fire. The gate opens when <em>measured voltage &gt; target − this margin</em>. Larger values arm earlier in the ramp (more aggressive); smaller values restrict Group 3 to near-target only. <strong>Big-bank installs</strong> where voltage barely deflects above target can set this large (e.g. 1.0–5.0 V) so Group 3 remains the primary current-overshoot detector. This moves independently of the Group 2 Trigger Margin.</span></span>
                     </div>
@@ -2160,15 +2122,15 @@
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      K_excess — Threshold (A above setpoint) (<span id="IExcessK_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How many amps above the commanded current setpoint the measured alternator current must exceed before Group 3 fires. Lower = more sensitive, more lead time, higher false-alarm risk.<br><br><strong>Arming gate:</strong> Group 3 only counts ticks while the CV loop is active AND the iExcess Arming Margin (set above) is satisfied. <strong>Target-relative — works at float, bulk, Maintain Mode, and Target Voltage mode alike.</strong></span></span>
+                      Detection Threshold — % of command (<span id="IExcessFrac_echo">?</span>%)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the <strong>time-averaged</strong> alternator current must rise above the commanded current setpoint before Group 3 fires, as a percentage of that setpoint. Group 3 averages the current first (see Averaging Time Constant), so the belt-resonance shiver and other ripple cancel out before this threshold is checked — a brief spike won't trip it, only a sustained excess will. Expressing it as a percentage means the same setting works on a small or a large alternator. The averaged-vs-floor/ceiling result is what actually fires; this percentage is bounded by the Threshold Floor and Ceiling below.<br><br><strong>Arming gate:</strong> only active while the CV loop is running AND the Arming Margin above is satisfied. Works at float, bulk, Maintain Mode, and Target Voltage mode alike.</span></span>
                       <span id="IExcessK_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak over setpoint: —</span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="IExcessK" type="number" step="0.1" min="0.5" max="50" />
-                        <span class="protections-unit">A</span>
+                        <input name="IExcessFrac" type="number" step="0.5" min="2" max="50" />
+                        <span class="protections-unit">%</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -2177,29 +2139,30 @@
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      N — Persistence (consecutive ticks) (<span id="IExcessN_echo">?</span>)
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="IExcessN" type="number" step="1" min="1" max="20" />
-                        <span class="protections-unit">ticks</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g3">
-                    <div class="protections-name">
-                      <span class="protections-tag g3">G3</span>
-                      K_excess (Bulk) — Threshold (A above ceiling) (<span id="IExcessKBulk_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Bulk sub-mode of Group 3, active in the current-control phase — battery voltage far below the charge target, where the main K_excess above is gated off. How many amps above the commanded current <strong>ceiling</strong> (RPM cap minus thermal/warmup limits) the measured current must exceed before it fires. Looser than the main K_excess on purpose: far from the voltage limit we tolerate more command-vs-actual error and only catch absurd RPM-blip overshoots before they trip a hard protection. The handoff between this and the main K_excess is the Arming Margin (set above).</span></span>
+                      Detection Threshold (Bulk) — % of ceiling (<span id="IExcessFracBulk_echo">?</span>%)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Bulk sub-mode of Group 3, active in the current-control phase — battery voltage far below the charge target, where the main threshold above is gated off. How far the time-averaged current must rise above the commanded current <strong>ceiling</strong> (RPM cap minus thermal/warmup limits), as a percentage of that ceiling, before it fires. Looser than the main threshold on purpose: far from the voltage limit we tolerate more command-vs-actual error and only catch absurd RPM-blip overshoots before they trip a hard protection. The handoff between this and the main threshold is the Arming Margin above.</span></span>
                       <span id="IExcessKBulk_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak over ceiling: —</span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="IExcessKBulk" type="number" step="0.1" min="0.5" max="50" />
+                        <input name="IExcessFracBulk" type="number" step="0.5" min="2" max="60" />
+                        <span class="protections-unit">%</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      Threshold Floor — minimum amps (<span id="IExcessFloorA_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small (e.g. a depressed setpoint mid-recovery), the percentage-of-command threshold above could shrink below the residual ripple and false-fire — this floor stops that. Whichever is larger, the percentage or this floor, is used.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="IExcessFloorA" type="number" step="0.5" min="1" max="20" />
                         <span class="protections-unit">A</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
@@ -2209,13 +2172,46 @@
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      N (Bulk) — Persistence (consecutive ticks) (<span id="IExcessNBulk_echo">?</span>)
+                      Threshold Ceiling — maximum amps (<span id="IExcessCeilA_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The largest the detection threshold is ever allowed to become, in amps. On a very large commanded current the percentage-of-command threshold could grow so wide that a real overshoot slips under it — this ceiling caps it. Whichever is smaller, the percentage or this ceiling, is used.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="IExcessNBulk" type="number" step="1" min="1" max="20" />
-                        <span class="protections-unit">ticks</span>
+                        <input name="IExcessCeilA" type="number" step="1" min="5" max="80" />
+                        <span class="protections-unit">A</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      Averaging Time Constant (<span id="IExcessTau_echo">?</span> ms)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the alternator current is time-averaged before Group 3 checks it against the threshold. This is the knob that rejects the belt-resonance shiver: any oscillation faster than this averaging window cancels out, so a larger value rejects more (lower frequencies) but reacts a little slower to a real overshoot. The default (75 ms) is sized for the worst case — the slow resonance at engine idle — and covers the whole RPM range automatically.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="IExcessTau" type="number" step="5" min="20" max="300" />
+                        <span class="protections-unit">ms</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      Release Hysteresis — % of threshold (<span id="IExcessRelFrac_echo">?</span>%)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After Group 3 fires it stays latched until the averaged excess falls back below this percentage of the threshold, then it re-arms. Prevents the detector from chattering on and off during the field's current tail-off. Lower = holds longer before releasing; higher = re-arms sooner. (This replaces the old fixed 2 A release deadband, now scaled to the threshold so it works on any alternator size.)</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="IExcessRelFrac" type="number" step="5" min="10" max="90" />
+                        <span class="protections-unit">%</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -3934,10 +3930,10 @@
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
-                    <button type="button" id="tempUnitF_btn" class="btn-primary"
-                      onclick="setTempUnit(0)" style="margin-right:6px;">°F</button>
-                    <button type="button" id="tempUnitC_btn" class="btn-secondary"
-                      onclick="setTempUnit(1)">°C</button>
+                    <span class="seg accent">
+                      <button type="button" id="tempUnitF_btn" class="on" onclick="setTempUnit(0)">°F</button>
+                      <button type="button" id="tempUnitC_btn" onclick="setTempUnit(1)">°C</button>
+                    </span>
                   </form>
                 </div>
               </div>
@@ -4322,7 +4318,7 @@
             <div class="form-row">
               <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                 <span>Learned data</span>
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Clear All erases every learned point in both the sailing and motoring maps and zeroes the front-points and hours counters. Use after a major rig, sail, or propeller change. Cannot be undone.</span></span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Clear All erases every learned point in both the sailing and motoring maps and zeroes the best surface points and hours counters. Use after a major rig, sail, or propeller change. Cannot be undone.</span></span>
               </div>
               <div class="form-input">
                 <input type="button" value="Clear All" class="btn-danger-ghost" onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned boat-performance data? This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetBoatPerformance=1'),{},5000).then(()=>{perfCells=[];motorCells=[];drawPerfPlot();drawMotorPlot();}).catch(()=>{});}" />
@@ -4674,6 +4670,75 @@
           </div>
         </div>
 
+        <div class="form-row">
+          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>Test Type (<span id="systemIDTestType_echo">?</span>):</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Step = the classic rise/fall delay test (PID off, duty steps up and down). Sine Sweep = drives a swept sine on duty with the PID off and measures the plant's gain and phase lag at each frequency — an open-loop Bode plot. Use Sine Sweep to see how much of the plant delay is true dead-time versus field L/R lag, and where the plant rolls off.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <select id="systemIDTestType_sel" name="systemIDTestType" onchange="this.form.submit(); submitMessage(); sysidToggleSineParams(this.value);">
+                <option value="0">Step (rise/fall delay)</option>
+                <option value="1">Sine Sweep (Bode)</option>
+              </select>
+            </form>
+          </div>
+        </div>
+
+        <!-- Sine-sweep parameters (shown only when Test Type = Sine Sweep) -->
+        <div id="sysid-sine-params" style="display:none;">
+          <div class="form-row">
+            <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+              <span>Sweep Start (Hz) (<span id="systemIDSineFreqStart_echo">?</span>):</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                <span class="tooltip-box">Lowest frequency in the sine sweep. The sweep is log-spaced from here up to Sweep End. Lower frequencies take longer (each point holds for a fixed number of cycles). 0.5 Hz is a sensible low end.</span>
+              </span>
+            </div>
+            <div class="form-input">
+              <form action="/get" method="GET" target="hidden-form">
+                <input type="hidden" name="password" class="password_field">
+                <input name="systemIDSineFreqStart" type="number" step="0.1" min="0.1" max="50" />
+                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+              </form>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+              <span>Sweep End (Hz) (<span id="systemIDSineFreqEnd_echo">?</span>):</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                <span class="tooltip-box">Highest frequency in the sine sweep. Keep below about half your current-sample rate (~50 Hz) or the result aliases. 20 Hz is a good default for finding the plant's roll-off.</span>
+              </span>
+            </div>
+            <div class="form-input">
+              <form action="/get" method="GET" target="hidden-form">
+                <input type="hidden" name="password" class="password_field">
+                <input name="systemIDSineFreqEnd" type="number" step="0.1" min="0.5" max="60" />
+                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+              </form>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+              <span>Cycles per Frequency (<span id="systemIDSineCycles_echo">?</span>):</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                <span class="tooltip-box">Number of full sine cycles measured at each frequency (one extra settling cycle is skipped automatically). More cycles average out noise but lengthen the test. 6 is a good default.</span>
+              </span>
+            </div>
+            <div class="form-input">
+              <form action="/get" method="GET" target="hidden-form">
+                <input type="hidden" name="password" class="password_field">
+                <input name="systemIDSineCycles" type="number" step="1" min="2" max="30" />
+                <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+              </form>
+            </div>
+          </div>
+        </div>
+
         <!-- Protection toggle (per-page; all three pages share the same firmware flag) -->
         <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
           <div class="form-row" style="margin-bottom:0;">
@@ -4790,13 +4855,13 @@
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Apply Results</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measures the field coil's electrical lag (plant delay). The "Set All Filters" button inside the modal writes <strong>plant/3</strong> to the two current filters and the <strong>full plant delay</strong> to the voltage filter — see each tooltip below for the reasoning. You can also override any value individually.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">The test measures the field coil's electrical lag (plant delay). The "Set All Filters" button inside the modal writes <strong>plant/3</strong> to the two alternator-current filters (the PID feedback and the on-screen display) and the <strong>full plant delay</strong> to the voltage filter — see each tooltip below for the reasoning. You can also override any value individually.</p>
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Excess current detection filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
+            <span>Alternator current display filter (ms) (<span id="InputFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal used by the Group 3 excess-current (overcurrent trip) detector. Set All Filters writes <strong>plant/3</strong> here. The detector also stacks a persistence counter on top of this filter, so the effective trip lag is roughly the persistence count plus a few filter time constants. Filtering at the full plant delay would make the trip too sluggish to catch real transients before the fast-overvoltage supervisor has to clean them up; <strong>plant/3</strong> gives the detector a clear view of current dynamics in the plant's response band while still rejecting noise above it. <strong>Only active when Group 3 signal source is set to EMA(TC) — has no effect in MA(N) (default) or Raw modes.</strong> Echoed read-only in Current tab → OV Protection Group 3.</span>
+              <span class="tooltip-box">EMA time constant that smooths the alternator-current value shown on the dashboard and written to the logs. It does not feed any control loop, and it does not feed the Group 3 over-current detector — that detector does its own averaging (its Averaging Time Constant, on the Current tab) on the raw current signal. Set All Filters writes <strong>plant/3</strong> here, which keeps the on-screen reading responsive while taking the edge off sensor noise. Lower values track faster but look noisier; higher values are smoother but lag the real current.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4813,7 +4878,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID. Set All Filters writes <strong>plant/3</strong> here. The plant (field coil L/R) is already a first-order low-pass inside the loop; setting the sensor filter equal to it stacks two equal lags in series, which costs ~45° of phase margin at crossover and forces lower Kp than you'd otherwise get away with. A filter at roughly <code>plant/3</code> lets the controller see current dynamics in close to real time without feeding raw sensor noise into Kp/Kd. Independent from the Group 3 excess-current filter. <strong>Mostly inert when the Output PID signal source is MA(N) or Raw, but the same EMA is also used unconditionally to seed the CV integrator on the AUTO→CV handoff.</strong> Echoed read-only in Current tab → Output Current Controller.</span>
+              <span class="tooltip-box">EMA time constant for the alternator current signal fed back into the output current PID. Set All Filters writes <strong>plant/3</strong> here. The plant (field coil L/R) is already a first-order low-pass inside the loop; setting the sensor filter equal to it stacks two equal lags in series, which costs ~45° of phase margin at crossover and forces lower Kp than you'd otherwise get away with. A filter at roughly <code>plant/3</code> lets the controller see current dynamics in close to real time without feeding raw sensor noise into Kp/Kd. Separate from the alternator current display filter and from the Group 3 detector's own averaging. <strong>Mostly inert when the Output PID signal source is MA(N) or Raw, but the same EMA is also used unconditionally to seed the CV integrator on the AUTO→CV handoff.</strong> Echoed read-only in Current tab → Output Current Controller.</span>
             </span>
           </div>
           <div class="form-input">
@@ -4830,7 +4895,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Voltage sensor smoothing filter (ms) (<span id="VoltageFilterTC_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">EMA time constant applied to the measured battery voltage. Set All Filters writes the <strong>full plant delay</strong> here (not plant/3) because this filter isn't inside a control path — its dominant consumer is the slope-bleed dV/dt, computed as a backward difference of the filtered voltage over the voltage-loop tick. Filtering at roughly half the differencing interval is the standard balance: slower and the slope reacts too late, faster and the slope gets noisy. Also used by the charging stage machine (Bulk → Absorption hold timer), where the timescale is seconds and the filter TC barely matters. Voltage Loop Kp/Ki and the Group 1/2 voltage comparisons all use raw battery voltage instead — this setting doesn't affect them. Group 1's voltage rate-of-change uses its own separate EMA (dvdt EMA TC).</span>
+              <span class="tooltip-box">EMA time constant applied to the measured battery voltage. Set All Filters writes the <strong>full plant delay</strong> here (not plant/3). Its main consumer is the slope-bleed dV/dt — the voltage rise rate, computed as a backward difference of the filtered voltage over the voltage-loop tick — so filtering at roughly half that differencing interval is the standard balance: slower and the slope reacts too late, faster and the slope gets noisy. The slope bleed does feed back into the voltage loop's integrator, but not as a tight loop where extra lag would erode phase margin the way the output-current PID filter does, so it tolerates the heavier smoothing. Also used by the charging stage machine (Bulk → Absorption hold timer), where the timescale is seconds and the filter TC barely matters. Voltage Loop Kp/Ki and the Group 1/2 voltage comparisons all use raw battery voltage instead — this setting doesn't affect them. Group 1's voltage rate-of-change uses its own separate EMA (dvdt EMA TC).</span>
             </span>
           </div>
           <div class="form-input">
@@ -4845,7 +4910,7 @@
         <hr />
         <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);margin:16px 0 0 0;font-size:13px;line-height:1.55;">
           <strong>Plant Delay</strong> — the measured electrical lag between a field duty command and the resulting current response. Run the test at a steady speed within your normal operating range.
-          The two <strong>current</strong> filters sit inside control loops, so they want roughly <strong>1/3 of the plant delay</strong> — matching the full delay would stack two equal lags and erode phase margin. The <strong>voltage</strong> filter isn't in a control path, so it takes the <strong>full plant delay</strong>. See each filter's tooltip above for the full reasoning.
+          Both <strong>alternator-current</strong> filters take roughly <strong>1/3 of the plant delay</strong>: the PID feedback filter needs that to stay inside its control loop without stacking two equal lags and eroding phase margin, and the on-screen current display gets the same value to stay responsive. The <strong>voltage</strong> filter isn't in a tight control loop, so it takes the <strong>full plant delay</strong>. See each filter's tooltip above for the full reasoning.
         </div>
 
 
@@ -5033,6 +5098,24 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Waveform Type (<span id="tuningWaveform_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Square = the classic toggle test with the ISE tuning score below. Sine (manual) = drive one sine frequency you set and watch how well the current PID tracks it on the plot. Sine (auto-sweep) = step through a frequency range and measure closed-loop gain &amp; phase at each — a Bode plot of how fast your tuned loop can follow a moving setpoint. Tune with Square first, then sweep to see your tracking bandwidth.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <select id="tuningWaveform_sel" name="tuningWaveform" onchange="this.form.submit(); submitMessage(); tuningToggleWaveformUI(this.value);">
+                        <option value="0">Square (ISE score)</option>
+                        <option value="1">Sine — manual frequency</option>
+                        <option value="2">Sine — auto-sweep (Bode)</option>
+                      </select>
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Wave Period (s) (<span id="wavePeriod_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Duration
                         (s) of one complete test square wave cycle. The wave spends half the period at the low setpoint
@@ -5061,6 +5144,103 @@
                       <input name="waveAmplitude" type="number" step="1" min="1" max="500" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
+                  </div>
+                </div>
+
+                <!-- Sine manual frequency (Waveform Type = Sine — manual) -->
+                <div id="tuning-sine-manual" style="display:none;">
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Sine Frequency (Hz) (<span id="tuningSineFreq_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Frequency of the manual sine setpoint. The current PID chases it; watch the current plot to see how well it tracks. Raise it until the output can no longer keep up (amplitude shrinks, lag grows) — that edge is roughly your closed-loop bandwidth.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="tuningSineFreq" type="number" step="0.1" min="0.1" max="50" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Sine auto-sweep (Waveform Type = Sine — auto-sweep) -->
+                <div id="tuning-sine-sweep" style="display:none;">
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Sweep Start (Hz) (<span id="tuningSweepStart_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lowest frequency in the closed-loop sweep. Log-spaced up to Sweep End.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="tuningSweepStart" type="number" step="0.1" min="0.1" max="50" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Sweep End (Hz) (<span id="tuningSweepEnd_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Highest frequency in the sweep. Keep below about half the current-loop rate (~50 Hz).</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="tuningSweepEnd" type="number" step="0.1" min="0.5" max="60" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Cycles per Frequency (<span id="tuningSweepCycles_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sine cycles measured at each frequency (one settle cycle skipped). More = less noise, longer test.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="tuningSweepCycles" type="number" step="1" min="2" max="30" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
+                  </div>
+
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Run closed-loop sweep:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Turn the Waveform On/Off toggle ON first — the generator only runs in tuning mode. The sweep takes ~30–60 s; keep engine RPM steady. Results appear below.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <button onclick="tuningRunSweep()" class="btn-primary" type="button">Run Sweep</button>
+                      <span id="tuning-sweep-status" style="margin-left:8px; font-size:0.85em; color:#aaa;"></span>
+                    </div>
+                  </div>
+
+                  <!-- Closed-loop Bode results -->
+                  <div id="tuning-bode-section" style="display:none; margin-top:10px;">
+                    <div style="font-size:0.82em; color:#aaa; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+                      Closed-loop Frequency Response
+                      <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer;">ℹ️<span class="tooltip-box">How well the tuned current PID follows a sine setpoint at each frequency. Gain ≈ 1 means it tracks perfectly; the −3 dB point (gain 0.71×) is your closed-loop bandwidth — the fastest setpoint motion the loop can follow. Phase lag is how far the output trails the command.</span></span>
+                    </div>
+                    <table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-bottom:8px;">
+                      <thead>
+                        <tr style="color:#aaa; text-align:left; border-bottom:1px solid #444;">
+                          <th style="padding:6px 4px;">Freq (Hz)</th>
+                          <th style="padding:6px 4px;">Gain (rel)</th>
+                          <th style="padding:6px 4px;">Phase lag (°)</th>
+                        </tr>
+                      </thead>
+                      <tbody id="tuning-bode-body"></tbody>
+                    </table>
+                    <div id="tuning-bode-summary" style="font-size:0.88em; color:#4a9eff; line-height:1.45;"></div>
                   </div>
                 </div>
 
@@ -5150,9 +5330,9 @@
 
                 <p style="font-size:0.74em; color:var(--text-muted); margin-top:6px;">
                   Score = ISE/s (lower is better). Scored within 5s of each setpoint step, after 2 ring-in cycles.
-                  <span style="color:#22c55e;">&#9632;</span> &lt;2 &nbsp;
-                  <span style="color:#eab308;">&#9632;</span> &lt;6 &nbsp;
-                  <span style="color:#ef4444;">&#9632;</span> &ge;6.
+                  <span style="color:#22c55e;">&#9632;</span> &lt;5 &nbsp;
+                  <span style="color:#eab308;">&#9632;</span> &lt;10 &nbsp;
+                  <span style="color:#ef4444;">&#9632;</span> &ge;10.
                   Highlighted rows match current PID + wave settings.
                 </p>
                 </div>
@@ -5258,7 +5438,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Signal Source (<span id="OutputPIDSigSrc_echo">?</span>) — alternator current (ADS1115):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator output current is filtered before entering the PID as its process variable. EMA(TC): exponential moving average — default, smooth. MA(N): moving average of N samples. Raw: instantaneous ADC reading, no filtering. N and TC are set independently from the Group 3 (excess current) filter.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Selects how the alternator output current is filtered before entering the PID as its process variable. EMA(TC): exponential moving average — default, smooth. MA(N): moving average of N samples. Raw: instantaneous ADC reading, no filtering. N and TC here apply only to this PID; the Group 3 over-current detector averages the current on its own (its Averaging Time Constant), unaffected by this choice.</span></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -5274,7 +5454,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>MA Window — N samples (<span id="OutputPIDMA_N_echo">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal fed into the Output Current PID. Each sample is ~7 ms apart, so N=2 ≈ 14 ms window. Independent from the Group 3 MA window.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of alternator current samples to average for the MA(N) signal fed into the Output Current PID. Samples arrive about every 5 ms, so N=2 ≈ a 10 ms window. Applies only to this PID — the Group 3 over-current detector does its own averaging separately.</span></span>
                     </div>
                     <div class="form-input">
                       <form action="/get" method="GET" target="hidden-form">
@@ -5291,7 +5471,7 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>Output current PID feedback filter (ms) (<span id="OutputPIDFilterTC_echo_pid">?</span>):</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal fed into this PID as its feedback. Independent from the excess current detection filter. Set in Tuning → Plant Delay.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">EMA time constant for the alternator current signal fed into this PID as its feedback. Separate from the alternator current display filter. Set in Tuning → Plant Delay.</span></span>
                     </div>
                     <div class="form-input" style="font-style:italic;opacity:0.7;padding:6px 0;">
                       Read-only — set in Tuning → Plant Delay
@@ -5386,12 +5566,16 @@
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 2px 0; font-size:0.83em; color:var(--text-muted);">
                   <span style="font-weight:600; white-space:nowrap;">Plot axes:</span>
 
-                  <span style="white-space:nowrap;">
+                  <span class="time-window-input" id="cvXTimeButtons" style="white-space:nowrap; display:inline-flex; gap:6px; align-items:center;">
                     X (s):
-                    <input id="cvXTimeInput" type="number" step="1" min="1" max="3600"
-                           style="width:54px; padding:2px 4px; font-size:0.9em; border:1px solid var(--border); border-radius:3px; background:var(--card-dark); color:var(--text-dark);">
-                    <button onclick="setCVXTime(document.getElementById('cvXTimeInput').value)"
-                            class="btn-secondary" style="padding:2px 8px; font-size:0.82em;">Set</button>
+                    <span class="seg">
+                      <button type="button" value="5"   onclick="setCVXTime(5)">5S</button>
+                      <button type="button" value="10"  onclick="setCVXTime(10)">10S</button>
+                      <button type="button" value="30"  onclick="setCVXTime(30)">30S</button>
+                      <button type="button" value="60"  onclick="setCVXTime(60)">60S</button>
+                      <button type="button" value="120" onclick="setCVXTime(120)">2M</button>
+                      <button type="button" value="300" onclick="setCVXTime(300)">5M</button>
+                    </span>
                   </span>
                 </div>
 
@@ -5548,7 +5732,7 @@
 
                 <!-- Live score spans -->
                 <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
-                  <span style="color:var(--text-muted);">Live score (1/10/100/1000 min):</span>
+                  <span style="color:var(--text-muted);">Live RMS error (1/10/100/1000 min):</span>
                   <span id="cvLiveScore0" style="font-weight:bold;">—</span>
                   <span id="cvLiveScore1" style="font-weight:bold;">—</span>
                   <span id="cvLiveScore2" style="font-weight:bold;">—</span>
@@ -5580,8 +5764,8 @@
                         <th style="padding:3px 4px;" title="ReseedFrac — fraction of seed restored on integrator reseed">RsF</th>
                         <th style="padding:3px 4px;" title="SlopeBleedK — slope-aware integrator bleed gain A/(V/s)">KS</th>
                         <th style="padding:3px 4px;" title="KHard — fastOV hard-clamp gain">KH</th>
-                        <th style="padding:3px 4px;">IExK</th>
-                        <th style="padding:3px 4px;">IExN</th>
+                        <th style="padding:3px 4px;" title="IExcessFrac — iExcess detection threshold, % of command">IEx%</th>
+                        <th style="padding:3px 4px;" title="IExcessTau — iExcess averaging time constant (ms)">IEτ</th>
                         <th style="padding:3px 4px;">IKB</th>
                         <th style="padding:3px 4px;">LDT2</th>
                         <th style="padding:3px 4px;">LDT1</th>
@@ -5614,9 +5798,9 @@
                   LOW phase overshoot: squared ISE, only after voltage crosses below target (no descent-from-HIGH penalty).
                   LOW phase undershoot (↓US): squared ISE ×0.15, 1s grace from phase start then ramps to full weight over 10s.
                   Both lower is better.
-                  <span style="color:#22c55e;">&#9632;</span> &lt;2 &nbsp;
-                  <span style="color:#eab308;">&#9632;</span> &lt;10 &nbsp;
-                  <span style="color:#ef4444;">&#9632;</span> &ge;10.
+                  <span style="color:#22c55e;">&#9632;</span> &lt;10 &nbsp;
+                  <span style="color:#eab308;">&#9632;</span> &lt;20 &nbsp;
+                  <span style="color:#ef4444;">&#9632;</span> &ge;20.
                   Highlighted rows match current VKp/VKi + wave settings.
                   OVf/IEf/LDf/HOCf = protection fire counts during scored phases.
                 </p>
@@ -5851,10 +6035,12 @@
 
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px 0;">
                   <span style="font-size:13px;color:var(--text-muted);">Window:</span>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(5)" id="tw-5">5m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(10)" id="tw-10">10m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(30)" id="tw-30">30m</button>
-                  <button type="button" class="btn-secondary" onclick="setThermalWindow(60)" id="tw-60">60m</button>
+                  <span class="seg">
+                    <button type="button" onclick="setThermalWindow(5)" id="tw-5">5m</button>
+                    <button type="button" onclick="setThermalWindow(10)" id="tw-10">10m</button>
+                    <button type="button" onclick="setThermalWindow(30)" id="tw-30">30m</button>
+                    <button type="button" onclick="setThermalWindow(60)" id="tw-60">60m</button>
+                  </span>
                 </div>
 
                 <button type="button" class="btn-secondary" onclick="resetThermalZoom()" id="tw-reset">↺ Reset
@@ -6838,90 +7024,94 @@
 
 
     <div id="livedata-weathersolar" class="sub-tab-content">
-      <div class="settings-card">
-        <div class="grid">
-          <!-- Wind -->
-          <div class="card-group">
-            <p class="card-group-title">Wind</p>
-            <div class="metric-row">
-              <span class="metric-label">Apparent Wind Speed
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Wind speed as measured on the boat (includes boat motion effect)
-                  </span>
+      <div class="settings-card wind-settings-card">
+        <div class="wind-layout">
+          <!-- Apparent wind dial (B&G-style): needle = apparent angle, LCDs = speed + angle -->
+          <div class="card-group wind-dial-card">
+            <p class="card-group-title">Apparent Wind
+              <span class="tooltip" onclick="this.classList.toggle('active')">
+                ℹ️
+                <span class="tooltip-box">
+                  Wind as measured on the boat (includes boat motion). The needle points to the
+                  apparent wind angle off the bow; the two screens read apparent speed and angle.
                 </span>
               </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 20px;"><span id="ApparentWindSpeedNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="ApparentWindSpeedNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="ApparentWindSpeedNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
+            </p>
+            <div class="wind-hud">
+              <svg class="wind-dial" viewBox="0 0 120 120">
+                <defs>
+                  <radialGradient id="windFace" cx="50%" cy="42%" r="65%">
+                    <stop offset="0%" stop-color="#2a2f36" />
+                    <stop offset="62%" stop-color="#15181d" />
+                    <stop offset="100%" stop-color="#0a0c0f" />
+                  </radialGradient>
+                </defs>
+                <circle cx="60" cy="60" r="58" fill="#000" />
+                <circle cx="60" cy="60" r="56" fill="url(#windFace)" />
+                <g id="windTicks"></g>
+                <path id="windArcPort" fill="none" stroke="#d6453e" stroke-width="4" stroke-linecap="round" />
+                <path id="windArcStbd" fill="none" stroke="#2fae4f" stroke-width="4" stroke-linecap="round" />
+                <path id="windBoat" fill="none" stroke="#b9bdc0" stroke-width="1.6" opacity=".62" />
+                <!-- LCD readouts flanking the boat: speed (left), angle (right) -->
+                <text x="20" y="55" text-anchor="middle" font-size="5" fill="#cfd3d6" opacity=".7">SPEED kt</text>
+                <rect x="6" y="58" width="28" height="18" rx="3" fill="#c7cdbf" stroke="#0a0c0f" stroke-width="1.1" />
+                <text id="windLcdSpd" x="20" y="71.5" text-anchor="middle" font-family="'Courier New',monospace" font-weight="700" font-size="11" fill="#14160f">0.0</text>
+                <text x="100" y="55" text-anchor="middle" font-size="5" fill="#cfd3d6" opacity=".7">ANGLE</text>
+                <rect x="86" y="58" width="28" height="18" rx="3" fill="#c7cdbf" stroke="#0a0c0f" stroke-width="1.1" />
+                <text id="windLcdAng" x="100" y="71.5" text-anchor="middle" font-family="'Courier New',monospace" font-weight="700" font-size="11" fill="#14160f">0°</text>
+                <!-- Needle + hub painted LAST so the pointer sits in FRONT of the LCD readouts; semi-transparent cyan fill so the ANGLE value stays readable through the pointer when it crosses a screen -->
+                <g id="windNeedle"><polygon points="60,11 55.5,55 64.5,55" fill="#37d2c9" fill-opacity="0.6" /></g>
+                <circle cx="60" cy="60" r="4.5" fill="#33383e" stroke="#6b7177" stroke-width="1.5" />
+              </svg>
             </div>
-            <div class="metric-row">
-              <span class="metric-label">Apparent Wind Angle
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Direction of apparent wind relative to boat heading
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="ApparentWindAngleNMEA_ID">0</span>°</span>
+            <!-- Beaufort badge + numeric readouts fill the space below the dial so the card height
+                 matches the trend plot. All values are real CSV2 fields (gust/lull = ignition-cycle
+                 AWS hi/lo, true dir/spd = live true wind); badge text comes from _windWmBeaufort. -->
+            <div class="wind-beaufort" id="windBeaufort">—</div>
+            <div class="wind-stats">
+              <div class="wind-stat"><div class="k">Gust</div><div class="v" id="windGust">—</div></div>
+              <div class="wind-stat"><div class="k">Lull</div><div class="v" id="windLull">—</div></div>
+              <div class="wind-stat"><div class="k">True dir</div><div class="v" id="windTrueDir">—</div></div>
+              <div class="wind-stat"><div class="k">True spd</div><div class="v" id="windTrueSpd">—</div></div>
             </div>
-            <div class="metric-row">
-              <span class="metric-label">True Wind Speed
+          </div>
+
+          <!-- True/Apparent wind trend (last 60 min, sampled ~5s like the Temp Tuning plot) -->
+          <div class="card-group wind-trend-card">
+            <div class="wind-trend-head">
+              <p class="card-group-title" style="border:0;margin:0;padding:0;">Wind Trend
                 <span class="tooltip" onclick="this.classList.toggle('active')">
                   ℹ️
                   <span class="tooltip-box">
-                    Actual wind speed with boat motion removed (calculated from apparent wind and boat speed)
+                    Direction (left axis) and speed (right axis) over the last hour, so you can see
+                    wind shifts and gust trends. Toggle between true and apparent wind. The Beaufort
+                    force and gale duration (from the 2-minute sustained true wind) show as a watermark.
                   </span>
                 </span>
-              </span>
-              <span class="with-wm">
-                <span class="metric-value" style="font-size: 20px;"><span id="TrueWindSpeedNMEA_ID">0</span> kts</span>
-                <span class="wm-inline">
-                  <span><span class="arr">↑</span><span id="TrueWindSpeedNMEA_ID_hi">—</span></span>
-                  <span><span class="arr">↓</span><span id="TrueWindSpeedNMEA_ID_lo">—</span></span>
-                </span>
-              </span>
+              </p>
+              <div class="wind-trend-ctrls">
+                <div class="seg-field">
+                  <span class="seg-label">Source</span>
+                  <div class="seg accent">
+                    <button type="button" class="on" onclick="setWindTrendMode('true')" id="wind-mode-true">True</button>
+                    <button type="button" onclick="setWindTrendMode('app')" id="wind-mode-app">Apparent</button>
+                  </div>
+                </div>
+                <div class="seg-field">
+                  <span class="seg-label">Window</span>
+                  <div class="seg">
+                    <button type="button" onclick="setWindWindow(5)" id="ww-5">5m</button>
+                    <button type="button" onclick="setWindWindow(15)" id="ww-15">15m</button>
+                    <button type="button" onclick="setWindWindow(30)" id="ww-30">30m</button>
+                    <button type="button" onclick="setWindWindow(60)" id="ww-60">60m</button>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="metric-row">
-              <span class="metric-label">True Wind Direction
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Actual wind direction with boat motion removed (calculated from apparent wind and boat heading)
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="TrueWindAngleNMEA_ID">0</span>°</span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Beaufort Scale
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    Wind force on the Beaufort scale (0 Calm … 8 Gale … 12 Hurricane), from the 2-minute
-                    sustained true wind — not a single gust.
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="BeaufortID">—</span></span>
-            </div>
-            <div class="metric-row" style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px;">
-              <span class="metric-label">Gale Duration
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">
-                    How long the boat has been continuously in a gale (2-minute sustained true wind ≥ 34 kt).
-                    Shows 0 when not in a gale; brief lulls don't reset it.
-                  </span>
-                </span>
-              </span>
-              <span class="metric-value"><span id="GaleDurationID">0</span></span>
+            <div class="plot-container" id="windtrend-plot" style="min-height:300px;"></div>
+            <div class="wind-trend-legend">
+              <span><i class="wind-lg-line" style="background:#e07b39;"></i><span id="windLgDName">Direction</span> <b id="windLgD">--</b><span id="windLgDU">°</span></span>
+              <span><i class="wind-lg-line" style="background:#00a19a;"></i>Speed <b id="windLgS">--</b> kt</span>
             </div>
           </div>
         </div>
@@ -7124,10 +7314,10 @@
             <div style="font-size:12px;color:var(--text-muted);">of best</div>
             <div id="perf-state" style="font-size:10px;color:#888;line-height:1.3;"></div>
           </div>
-          <!-- BR: data maturity (front points + sailing/motoring hours) -->
+          <!-- BR: data maturity (best surface points + sailing/motoring hours) -->
           <div style="grid-column:3;grid-row:3;text-align:right;align-self:end;">
             <div id="perf-pts" style="font-size:20px;font-weight:700;line-height:1.05;">&mdash;</div>
-            <div style="font-size:12px;color:var(--text-muted);">front points</div>
+            <div style="font-size:12px;color:var(--text-muted);">best surface points</div>
             <div id="perf-hours-val" style="font-size:20px;font-weight:700;line-height:1.05;margin-top:4px;">&mdash;</div>
             <div id="perf-hours-label" style="font-size:12px;color:var(--text-muted);">sailing hours</div>
           </div>
@@ -8072,7 +8262,7 @@
                   <form action="/get" method="GET" target="hidden-form" style="display:inline;">
                     <input type="hidden" name="password" class="password_field">
                     <input type="hidden" name="forceCloudFlush" value="1">
-                    <input type="submit" value="Upload Now" class="btn-primary"
+                    <input type="submit" value="Upload Now" class="btn-primary" id="cloudUploadNowBtn"
                       title="Force-upload buffered records to the cloud immediately. RECOMMENDED with field OFF. If field is ON: control loop is held for up to 10s during each upload, banner will show WAITING CLOUD. Hardware over-voltage protection stays armed, but a load transient mid-upload could trigger a hard cut. Avoid during dynamic events (RPM ramps, sudden load changes). Bypasses the 70s field-off settle and 13s interval throttle." />
                   </form>
                   <form action="/get" method="GET" target="hidden-form" style="display:inline;">
@@ -8758,10 +8948,10 @@
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
                 <div style="padding: 6px 8px; font-size: 12px; color: #666;">Rectifier Fault Detector
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">One slice of the rectifier/stator fault analysis. The detector studies a
-                      2-second current recording in roughly one-millisecond pieces spread over the following second or
-                      two, at most once a minute. Hard-capped at about 1 ms per pass by design — values above that mean
-                      the cap logic is broken. 0ms is normal between analyses.</span>
+                    <span class="tooltip-box">Time to run the whole rectifier/stator fault analysis on a 2-second current
+                      recording, at most once a minute. This runs on the second processor core (Core 0), off the control
+                      loop, so it no longer affects charging — for this row the left value is the LAST run and the right
+                      value is the WORST since Reset Peak Values (not a 5-second window). 0ms means it has not run yet.</span>
                   </span>
                 </div>
                 <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
@@ -9506,7 +9696,7 @@
         <div class="metric-row telemetry-row">
           <span class="metric-label telemetry-label">iExcess Events
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Rising-edge count: Group 3 current-excess supervisor trips (both regimes combined). Near the voltage target it fires when measured current exceeds setpoint + K_excess for N ticks; in the bulk / current-control phase the bulk sub-mode fires when measured current exceeds the commanded ceiling + K_excess (Bulk) for N (Bulk) ticks.</span>
+              <span class="tooltip-box">Rising-edge count: Group 3 current-excess supervisor trips (both regimes combined). Near the voltage target it fires when the time-averaged current rises above the setpoint by more than the Detection Threshold (% of command); in the bulk / current-control phase the bulk sub-mode fires when the averaged current rises above the commanded ceiling by more than the Detection Threshold (Bulk).</span>
             </span>
           </span>
           <span class="metric-value telemetry-value"><span id="iExcessCountID">?</span></span>
@@ -9622,7 +9812,7 @@
             <div id="alt-hifield-alert" style="display:none;font-size:11px;font-weight:700;color:#d9534f;">Low output despite high field drive</div>
           </div>
           <div style="flex:1;min-width:210px;font-size:12px;color:var(--text-muted);line-height:1.7;">
-            <div id="alt-coverage" style="font-size:10px;">no front points yet</div>
+            <div id="alt-coverage" style="font-size:10px;">no best surface points yet</div>
             <div id="alt-session-stats" style="font-size:10px;"></div>
           </div>
         </div>
@@ -9670,12 +9860,12 @@
         </details>
         <hr />
         <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
-          <input type="button" value="Download CSV" class="btn-secondary"
+          <input type="button" value="Export Health Dataset" class="btn-secondary"
             onclick="downloadCsv('/altcurve.csv','Alternator Health Data')"
-            title="Save the complete best-ever health dataset (BEFRONT1) to your Downloads as a dated file — the full, re-importable file to back up, reproduce, or share this alternator's learned curve, then re-load with Load CSV." />
-          <input type="button" id="alt-load-btn" value="Load CSV" class="btn-secondary"
+            title="Save the alternator's learned best-ever data — the reference both charts above are graded against, not the chart image — to your Downloads as a dated CSV. Use it to back up, move to another unit, or share, then reload with Import Health Dataset." />
+          <input type="button" id="alt-load-btn" value="Import Health Dataset" class="btn-secondary"
             onclick="altLoadCsv()"
-            title="Import an alternator health CSV (BEFRONT1) from another unit or a backup. You'll choose Freeze (hold it exactly as imported, learning paused) or Learn (adopt it as your own and keep refining from your engine)." />
+            title="Load a health dataset exported from another unit or a backup. You'll choose Freeze (hold it exactly as imported, learning paused) or Learn (adopt it as your own and keep refining from your engine)." />
           <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
         </span>
         </div>
@@ -9784,12 +9974,12 @@
           <span style="font-size:14px; font-weight:600;">Status</span>
         </div>
         <div class="grid">
-          <div class="card"><p>Channel State</p><p class="reading" style="font-size:20px;"><span id="faChanState_ID">?</span></p></div>
+          <div class="card"><p>Channel State</p><p class="reading" style="font-size:20px; white-space:normal;"><span id="faChanState_ID">?</span></p></div>
           <div class="card"><p>Map Cells Learned</p><p class="reading" style="font-size:20px;"><span id="faCellsUsed_ID">?</span></p></div>
           <div class="card"><p>Last Fault Class <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to open the Live Oscilloscope panel and look at the waveform yourself. 0 or blank means no fault detected.</span></span></p><p class="reading" style="font-size:20px;"><span id="faDetectK_ID">?</span></p></div>
           <div class="card"><p>Lifetime Anomalies</p><p class="reading" style="font-size:20px;"><span id="faAnomalyCount_ID">?</span></p></div>
           <div class="card"><p>Session Worst Ripple Pk-Pk (A)</p><p class="reading" style="font-size:20px;"><span id="faSesPkpkWorst_ID">?</span></p></div>
-          <div class="card"><p>Highest Tone in Map <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single strongest ripple tone in the learned map, and the engine speed/load where it occurs. A strong tone that stays at a fixed frequency across different RPM points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is normal rectifier ripple.</span></span></p><p class="reading" style="font-size:16px;"><span id="faDomAmp_ID">?</span> A pk-pk @ <span id="faDomFreq_ID">?</span> Hz · <span id="faDomRpm_ID">?</span> RPM</p></div>
+          <div class="card"><p>Highest Tone in Map <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single strongest ripple tone in the learned map, and the engine speed/load where it occurs. A strong tone that stays at a fixed frequency across different RPM points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is normal rectifier ripple.</span></span></p><p class="reading" style="font-size:16px; white-space:normal;"><span id="faDomAmp_ID">?</span> A pk-pk @ <span id="faDomFreq_ID">?</span> Hz · <span id="faDomRpm_ID">?</span> RPM</p></div>
         </div>
         <hr />
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
@@ -9849,7 +10039,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State RPM Margin (RPM) (<span id="faRpmEdgeMargin_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed engine speed — a 1-second-averaged RPM, not the raw tach. A 0.5-second window is discarded unless that smoothed RPM stays at least this many RPM inside one speed band for the whole window. The 1-second averaging is deliberate: it removes the ripple and resonance being measured, so the gate judges only whether the engine is holding speed.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed engine speed — a 1-second-averaged RPM, not the raw tach. A 0.5-second window is discarded unless that smoothed RPM stays at least this many RPM inside one internal 50-RPM speed bin (not the wide flipbook bands) for the whole window. The 1-second averaging is deliberate: it removes the ripple and resonance being measured, so the gate judges only whether the engine is holding speed. Unlike the drift readouts below, here bigger is stricter: the "10s worst margin" line must be at or above this value to pass, so a small number (engine sitting right on a bin edge) is a fail.</span></span>
             <span id="faRpmEdgeMargin_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s worst margin: —</span>
           </div>
           <div class="form-input">
@@ -9992,6 +10182,12 @@
       <div class="settings-card fa-paired-bottom">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Reference Flipbook</span>
+          <!-- Raw/Filtered overlay toggles — mirror the Live Oscilloscope above. The filtered trace
+               is the same boxcar-16 moving average, computed in-browser from the saved raw samples. -->
+          <div class="cap-mode-toggle">
+            <button type="button" id="faFlipRawBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('raw')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
+            <button type="button" id="faFlipFiltBtn" class="cap-mode-btn" onclick="faFlipViewToggle('filt')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
+          </div>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadFaFlipPageCsv()">Download CSV</button>
           <span id="fastflip-status" style="font-size:13px; color:#666;"></span>
         </div>
@@ -10050,12 +10246,22 @@
         </div>
 
         <div class="metric-row">
-          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">CV Loop (voltage) — 1m / 10m / 100m / 1000m:</span>
+          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">CV Loop — RMS error (mV) — 1m / 10m / 100m / 1000m:</span>
           <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
-            <span id="cvLiveScoreAlt0" style="font-weight:bold;">—</span>
-            <span id="cvLiveScoreAlt1" style="font-weight:bold;">—</span>
-            <span id="cvLiveScoreAlt2" style="font-weight:bold;">—</span>
-            <span id="cvLiveScoreAlt3" style="font-weight:bold;">—</span>
+            <span id="cvRmsErrAlt0" style="font-weight:bold;">—</span>
+            <span id="cvRmsErrAlt1" style="font-weight:bold;">—</span>
+            <span id="cvRmsErrAlt2" style="font-weight:bold;">—</span>
+            <span id="cvRmsErrAlt3" style="font-weight:bold;">—</span>
+          </span>
+        </div>
+
+        <div class="metric-row">
+          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">CV Loop — Peak overshoot (mV) — 1m / 10m / 100m / 1000m:</span>
+          <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
+            <span id="cvPeakOverAlt0" style="font-weight:bold;">—</span>
+            <span id="cvPeakOverAlt1" style="font-weight:bold;">—</span>
+            <span id="cvPeakOverAlt2" style="font-weight:bold;">—</span>
+            <span id="cvPeakOverAlt3" style="font-weight:bold;">—</span>
           </span>
         </div>
 
@@ -10858,6 +11064,9 @@
           <div id="sysid-p8" class="sysid-phase-row">⬜ Step down 3/3</div>
           <div id="sysid-p9" class="sysid-phase-row">⬜ Processing results</div>
         </div>
+        <div id="sysid-sine-status" style="display:none; font-size:0.95em; margin-bottom:16px; color:#4a9eff; line-height:1.5;">
+          Sine sweep running — driving a swept sine on the field and measuring plant gain &amp; phase across the frequency range. Hold engine RPM steady.
+        </div>
         <div style="margin-bottom:8px; font-size:0.85em; color:#aaa;">Current phase progress</div>
         <div style="background:#333; border-radius:4px; height:10px; overflow:hidden; margin-bottom:16px;">
           <div id="sysid-phase-bar" style="height:100%; width:0%; background:#4a9eff; transition:width 0.5s;"></div>
@@ -10873,7 +11082,7 @@
         <h3 style="margin-top:0; color:#fff;">Results</h3>
 
         <!-- Signal quality hint -->
-        <p style="font-size:0.82em; color:#999; margin:0 0 12px; line-height:1.45;">
+        <p id="sysid-quality-hint" style="font-size:0.82em; color:#999; margin:0 0 12px; line-height:1.45;">
           Check the output current plot (behind this panel) for a clean square-wave shape.
           Ideal signals have sharp step edges with no more than ±1–2 A of ripple.
           Engines can resonate at certain RPMs — if noise is high, re-run at a slightly different speed.
@@ -10911,7 +11120,7 @@
         </div>
 
         <!-- Timing results table -->
-        <div style="font-size:0.82em; color:#aaa; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+        <div id="sysid-timing-label" style="font-size:0.82em; color:#aaa; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
           Timing Results
           <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer;">ℹ️
             <span class="tooltip-box">Time from the duty step command until output current crossed the detection threshold. Rise = step-up response, Fall = step-down response. The recommended filter time constant (TC) is the worst single trial.</span>
@@ -10927,6 +11136,28 @@
           </thead>
           <tbody id="sysid-results-body"></tbody>
         </table>
+
+        <!-- Bode results table (sine sweep only) -->
+        <div id="sysid-bode-section" style="display:none; margin-bottom:12px;">
+          <div style="font-size:0.82em; color:#aaa; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+            Frequency Response (open-loop plant Bode)
+            <span class="tooltip" onclick="this.classList.toggle('active')" style="cursor:pointer;">ℹ️
+              <span class="tooltip-box">Measured plant response at each swept frequency, PID off. Gain is shown relative to the low-frequency value; the −3 dB point (gain ≈ 0.71×) is the plant's bandwidth. Phase lag climbing well past 90° beyond the roll-off indicates true dead-time, not just field L/R lag.</span>
+            </span>
+          </div>
+          <table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-bottom:8px;">
+            <thead>
+              <tr style="color:#aaa; text-align:left; border-bottom:1px solid #444;">
+                <th style="padding:6px 4px;">Freq (Hz)</th>
+                <th style="padding:6px 4px;">Gain (rel)</th>
+                <th style="padding:6px 4px;">Phase lag (°)</th>
+              </tr>
+            </thead>
+            <tbody id="sysid-bode-body"></tbody>
+          </table>
+          <div id="sysid-bode-summary" style="font-size:0.88em; color:#4a9eff; line-height:1.45;"></div>
+        </div>
+
         <div id="sysid-results-summary" style="font-size:0.9em; margin-bottom:8px;"></div>
         <div id="sysid-results-warning" style="font-size:0.85em; color:#f0a500; margin-bottom:16px; display:none;"></div>
         <div style="display:flex; gap:10px; justify-content:flex-end;">

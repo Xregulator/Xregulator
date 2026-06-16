@@ -1393,6 +1393,14 @@ void UpdateEngineRuntime(unsigned long elapsedMillis) {
     }
   }
 
+  // Engine start/stop edge — one console line per transition. Anchors the session
+  // timeline so charging events can be read against engine state.
+  if (engineIsRunning && !engineWasRunning) {
+    queueConsoleMessageF("Engine STARTED (RPM=%d)", (int)RPM);
+  } else if (!engineIsRunning && engineWasRunning) {
+    queueConsoleMessageF("Engine STOPPED (RPM=%d)", (int)RPM);
+  }
+
   // Update engine state
   engineWasRunning = engineIsRunning;
 }
@@ -1905,9 +1913,27 @@ void CheckAlarms() {
 }
 
 
+// Human-readable boot/reset cause for the console boot line. esp_reset_reason()
+// is constant for the whole session, so it can be read lazily when the line is emitted.
+const char *resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+    case ESP_RST_EXT:       return "external";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_PANIC:     return "panic/crash";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "unknown";
+  }
+}
+
 void logDashboardValues() {
   static unsigned long lastDashboardLog = 0;
-  if (millis() - lastDashboardLog >= 120000) {  // Every 2 min
+  if (millis() - lastDashboardLog >= 300000) {  // Every 5 min — periodic time/context anchor
     lastDashboardLog = millis();
     queueConsoleMessageF("DASHBOARD: IBV=%.2fV SoC=%d%% AltI=%.1fA BattI=%.1fA AltT=%d°F RPM=%d",
                          IBV, SOC_percent / 100, MeasuredAmps, Bcur,
@@ -2645,21 +2671,16 @@ void _ReadAnalogInputs_inner() {
                              iAmpHead = (iAmpHead + 1) % I_RING_SIZE;
                              if (iAmpCount < I_RING_SIZE) iAmpCount++;
 
-                             // MA(N) — independent windows for iExcess and Output PID
+                             // MA(N) for the Output Current PID signal (iExcess no longer uses an MA —
+                             // the EMA detector reads raw MeasuredAmps into its own mExcessEma).
                              {
-                               int n_ie  = IExcessMA_N  < (int)iAmpCount ? IExcessMA_N  : (int)iAmpCount;
                                int n_pid = OutputPIDMA_N < (int)iAmpCount ? OutputPIDMA_N : (int)iAmpCount;
-                               if (n_ie  < 1) n_ie  = 1;
                                if (n_pid < 1) n_pid = 1;
-                               float sum_ie = 0.0f, sum_pid = 0.0f;
-                               int n_max = n_ie > n_pid ? n_ie : n_pid;
-                               for (int k = 0; k < n_max; k++) {
+                               float sum_pid = 0.0f;
+                               for (int k = 0; k < n_pid; k++) {
                                  uint8_t idx = (iAmpHead + I_RING_SIZE - 1 - k) % I_RING_SIZE;
-                                 float v = iAmpRing[idx].val;
-                                 if (k < n_ie)  sum_ie  += v;
-                                 if (k < n_pid) sum_pid += v;
+                                 sum_pid += iAmpRing[idx].val;
                                }
-                               g_iMA_N   = sum_ie  / (float)n_ie;
                                g_pidMA_N = sum_pid / (float)n_pid;
                              }
                            }
@@ -4032,6 +4053,10 @@ void saveNVSDataFull() {
   if (prev_faSesPkpk   != (int32_t)(faSesPkpkWorstA * 100))                    { nvs_set_i32(h, "faSesPkpk",     (int32_t)(faSesPkpkWorstA * 100));                    prev_faSesPkpk   = (int32_t)(faSesPkpkWorstA * 100);                  chg = true; }
   if (prev_faSesPeakA  != (int32_t)(faSesPeakWorstA * 100))                    { nvs_set_i32(h, "faSesPeakA",    (int32_t)(faSesPeakWorstA * 100));                    prev_faSesPeakA  = (int32_t)(faSesPeakWorstA * 100);                  chg = true; }
   if (prev_faSesPeakHz != (int32_t)(faSesPeakWorstHz * 10))                    { nvs_set_i32(h, "faSesPeakHz",   (int32_t)(faSesPeakWorstHz * 10));                    prev_faSesPeakHz = (int32_t)(faSesPeakWorstHz * 10);                  chg = true; }
+  // Highest Tone in Map headline — already pre-scaled (amp pk-pk ×100, freq ×10, rpm raw); cleared by Reset Worsts / Clear Map
+  if (prev_faDomAmp    != (int32_t)faDomAmpAX100)                              { nvs_set_i32(h, "faDomAmp",      (int32_t)faDomAmpAX100);                              prev_faDomAmp    = (int32_t)faDomAmpAX100;                            chg = true; }
+  if (prev_faDomFreq   != (int32_t)faDomFreqHzX10)                             { nvs_set_i32(h, "faDomFreq",     (int32_t)faDomFreqHzX10);                             prev_faDomFreq   = (int32_t)faDomFreqHzX10;                           chg = true; }
+  if (prev_faDomRpm    != (int32_t)faDomRpm)                                   { nvs_set_i32(h, "faDomRpm",      (int32_t)faDomRpm);                                   prev_faDomRpm    = (int32_t)faDomRpm;                                 chg = true; }
   if (prev_MeasAmpsMax != MeasuredAmpsMax)                                  { nvs_set_blob(h, "MAmpsMax",      &MeasuredAmpsMax,                   sizeof(float));    prev_MeasAmpsMax = MeasuredAmpsMax;                                  chg = true; }
   if (prev_MeasAmpsMax_AllTime != MeasuredAmpsMax_AllTime)                  { nvs_set_blob(h, "MAmpsMax_AT",   &MeasuredAmpsMax_AllTime,           sizeof(float));    prev_MeasAmpsMax_AllTime = MeasuredAmpsMax_AllTime;                  chg = true; }
   if (prev_RPMMax != RPMMax)                                                { nvs_set_blob(h, "RPMMax",        &RPMMax,                            sizeof(float));    prev_RPMMax = RPMMax;                                                chg = true; }
@@ -4162,6 +4187,9 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "faSesPkpk", &temp_int32) == ESP_OK) faSesPkpkWorstA = temp_int32 / 100.0f;
   if (nvs_get_i32(nvs_handle, "faSesPeakA", &temp_int32) == ESP_OK) faSesPeakWorstA = temp_int32 / 100.0f;
   if (nvs_get_i32(nvs_handle, "faSesPeakHz", &temp_int32) == ESP_OK) faSesPeakWorstHz = temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "faDomAmp", &temp_int32) == ESP_OK) faDomAmpAX100 = (uint16_t)temp_int32;     // Highest Tone in Map: pre-scaled, store/restore raw
+  if (nvs_get_i32(nvs_handle, "faDomFreq", &temp_int32) == ESP_OK) faDomFreqHzX10 = (uint16_t)temp_int32;
+  if (nvs_get_i32(nvs_handle, "faDomRpm", &temp_int32) == ESP_OK) faDomRpm = (uint16_t)temp_int32;
 
   // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
   required_size = sizeof(double);
@@ -4437,6 +4465,9 @@ void initNVSCache() {
   prev_faSesPkpk            = (int32_t)(faSesPkpkWorstA * 100);
   prev_faSesPeakA           = (int32_t)(faSesPeakWorstA * 100);
   prev_faSesPeakHz          = (int32_t)(faSesPeakWorstHz * 10);
+  prev_faDomAmp             = (int32_t)faDomAmpAX100;
+  prev_faDomFreq            = (int32_t)faDomFreqHzX10;
+  prev_faDomRpm             = (int32_t)faDomRpm;
   prev_MeasAmpsMax          = MeasuredAmpsMax;
   prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;
   prev_RPMMax               = RPMMax;

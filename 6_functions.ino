@@ -660,8 +660,8 @@ void commitCVTuningRecord() {
   rec.reseedFrac = ReseedFrac;
   rec.slopeBleedK = SlopeBleedK;
   rec.kHard = KHard;
-  rec.iExcessK = IExcessK;
-  rec.iExcessN = IExcessN;
+  rec.iExcessFrac = IExcessFrac;
+  rec.iExcessTau = IExcessTau;
   rec.iExcessKBleed = IExcessKBleed;
   rec.loadDumpDtThresh = LoadDumpDtThresh;
   rec.loadDumpDtThresh1 = LoadDumpDtThresh1;
@@ -728,31 +728,47 @@ static void accumulateLiveScore(float e, float dtSec, uint32_t nowMs) {
   }
 }
 
-static float computeCVLiveScore(int w) {
+// RMS voltage error (V) over the window — symmetric, both directions
+static float computeCVRmsErr(int w) {
   float e = 0.0f, t = 0.0f;
   if (!cvLiveScoreBuckets[w]) return 0.0f;
   for (int i = 0; i < LIVE_BUCKET_N; i++) {
-    e += cvLiveScoreBuckets[w][i].errorAccum;
+    e += cvLiveScoreBuckets[w][i].errorAccum;     // Σ(e²·dt)
     t += cvLiveScoreBuckets[w][i].activeTimeSec;
   }
-  return (t > 0.1f) ? (e / t) : 0.0f;
+  return (t > 0.1f) ? sqrtf(e / t) : 0.0f;
 }
 
-// Asymmetric ISE: overvoltage (filtV > target) weighted by cvKOvershoot; undervoltage by 1.0
+// Peak overshoot above target (V) over the window — max across the 60 buckets
+static float computeCVPeakOver(int w) {
+  if (!cvPeakBuckets[w]) return 0.0f;
+  float p = 0.0f;
+  for (int i = 0; i < LIVE_BUCKET_N; i++)
+    if (cvPeakBuckets[w][i] > p) p = cvPeakBuckets[w][i];
+  return p;
+}
+
+// Two intuitive readouts, both in volts, over the same disturbance-gated window:
+//   RMS error  — plain (unweighted) Σ(e²·dt)/Σdt, square-rooted → overall regulation tightness
+//   peak over  — worst single excursion ABOVE target (the battery-damaging side)
+// The asymmetric cvKOvershoot weight is deliberately NOT used here — overshoot now lives in its
+// own readout instead of being baked into the average. (cvKOvershoot still scores the CV step-test.)
 static void accumulateCVLiveScore(float vErr, float dtSec, uint32_t nowMs) {
-  float weight = (vErr > 0.0f) ? cvKOvershoot : 1.0f;
-  float contribution = weight * vErr * vErr * dtSec;
+  float overshoot = (vErr > 0.0f) ? vErr : 0.0f;
   for (int w = 0; w < 4; w++) {
-    if (!cvLiveScoreBuckets[w]) continue;
+    if (!cvLiveScoreBuckets[w] || !cvPeakBuckets[w]) continue;
     if (cvLiveBucketStartMs[w] == 0) cvLiveBucketStartMs[w] = nowMs;
     if ((nowMs - cvLiveBucketStartMs[w]) >= LIVE_BUCKET_MS[w]) {
       cvLiveScoreHead[w] = (cvLiveScoreHead[w] + 1) % LIVE_BUCKET_N;
       cvLiveBucketStartMs[w] = nowMs;
       cvLiveScoreBuckets[w][cvLiveScoreHead[w]] = { 0.0f, 0.0f };
+      cvPeakBuckets[w][cvLiveScoreHead[w]] = 0.0f;
     }
-    cvLiveScoreBuckets[w][cvLiveScoreHead[w]].errorAccum += contribution;
+    cvLiveScoreBuckets[w][cvLiveScoreHead[w]].errorAccum += vErr * vErr * dtSec;
     cvLiveScoreBuckets[w][cvLiveScoreHead[w]].activeTimeSec += dtSec;
-    cvLiveScoreVal[w] = computeCVLiveScore(w);
+    if (overshoot > cvPeakBuckets[w][cvLiveScoreHead[w]]) cvPeakBuckets[w][cvLiveScoreHead[w]] = overshoot;
+    cvRmsErrVal[w]   = computeCVRmsErr(w);
+    cvPeakOverVal[w] = computeCVPeakOver(w);
   }
 }
 
@@ -1091,14 +1107,22 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
 
   // ===== Always-on thermal live score =====
   // Fair gate: only score when thermal is the binding constraint with no other limiter active.
-  //   voltageControlActive  — CV/absorption mode; 3-min blanking after it clears (sustained bias)
+  //   voltage-binding stage  — absorption/float/TargetVoltage: there the CV loop pulls current
+  //                           to hold voltage, so thermal error no longer reflects thermal
+  //                           control quality. 3-min blanking after it clears (sustained bias).
+  //                           BULK is deliberately NOT blanked: bulk is current-limited at the
+  //                           RPM/thermal ceiling, so thermal IS the binding constraint and we
+  //                           DO want to score it. (voltageControlActive alone is the wrong
+  //                           trigger — it is just !inIdleStage, so it is true in bulk too and
+  //                           was wrongly blanking every bulk tick → thermal score stuck at 0.)
   //   g_fastOvClampActive   — OV supervisor cutting current for voltage, not thermal
   //   MaintainMode          — output forced to zero; thermal loop does nothing
   //   thermalPenaltyAmps    — must be > 2A; if near zero, RPM table or cool conditions are
   //                           the real ceiling, not thermal management
   //   g_I_cap               — RPM table ceiling must be > 10A; below that we're at near-idle
   //                           RPM and thermal management is irrelevant
-  if (voltageControlActive) thermalScoreLastExternalMs = nowMs;
+  bool voltageBindingStage = voltageControlActive && (getChargeStageDisplayCode() != CHARGE_STAGE_BULK);
+  if (voltageBindingStage) thermalScoreLastExternalMs = nowMs;
   bool liveScoreActive = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered) && !ThermalTuningMode && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f && g_I_cap > 10.0f && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
   if (liveScoreActive) {
     float liveErr = tempFiltered - TemperatureLimitF;
@@ -1205,12 +1229,10 @@ void AdjustFieldLearnMode() {
   // Direct cv_I clamp kept here because the CV loop only runs every 100ms;
   // without it cv_I builds positive for up to 100ms while battV is above target.
 
-  // Pre-event cv_I snapshot for the protection-release reseed. Refreshed every
-  // tick no protection is active; freezes the moment any supervisor asserts; used
-  // on the unified falling edge (see the reseed in the bumpless tracker block far
-  // below). g_fastOvClampActive here holds LAST tick's final value because its
-  // update has been moved to the end of the bumpless block, after every supervisor
-  // has voted — so this read reflects the true unified flag.
+  // Pre-event cv_I snapshot for the protection-release reseed (rationale: CV_Loop_Dev_Summary.md).
+  // Timing note: g_fastOvClampActive here holds LAST tick's final value — its update was moved to
+  // the end of the bumpless block, after every supervisor has voted, so this read reflects the
+  // unified flag.
   static float preEventCvI = 0.0f;
   if (!g_fastOvClampActive) {
     preEventCvI = cv_I;  // refresh while no protection is clamping
@@ -1322,7 +1344,8 @@ void AdjustFieldLearnMode() {
     // reaching MinDuty in 1–2 inner PID cycles. PID stays in AUTOMATIC —
     // recovery rebuilds from integrator=0 once fastOV clears.
     currentPID.ResetIntegratorTo(0.0);
-    queueConsoleMessage("FastOV hard: inner PID integrator reset");
+    queueConsoleMessageF("FastOV hard #%lu: V=%.2fV target=%.2fV — inner PID integrator reset",
+                         (unsigned long)g_fastOvHardCount, IBV, ChargingVoltageTarget);
   }
   g_fastOvHardActive_prev = g_fastOvHardActive;
 
@@ -1448,21 +1471,10 @@ void AdjustFieldLearnMode() {
     govMode = GOV_BYPASS_SLEW;
   }
 
-  // CV overshoot: bypass duty slew so the output current PID can reduce field current without
-  // the 80%/s governor rate limit holding it back.
-  //
-  // Trigger: fastOvClampActive (fast OV supervisor — Group 2 prediction or Group 3 measured threshold).
-  // This inherits the rate-of-rise EMA (DvdtTC=58 ms) + prediction arm zone filtering already
-  // present in the fast OV supervisor, so it does not fire on measurement noise
-  // near target — addressing the original nuisance-trigger concern that led to the
-  // old +0.12 V raw-voltage threshold.
-  //
-  // Hysteresis: latch stays set until battV falls back to within 0.02 V of target.
-  // Without this, bypass would toggle on/off rapidly as battV oscillates through the
-  // V_SOFT boundary during descent, causing duty chatter.
-  //
-  // Only active in CV stages (voltageControlActive). In bulk, voltage rising above
-  // target is expected and govBypass is not wanted.
+  // CV overshoot: bypass duty slew so the output current PID can drop field current without the
+  // governor rate limit holding it back. Triggered by fastOvClampActive, latched until battV is
+  // back within 0.02 V of target (anti-chatter), CV stages only.
+  // Rationale + "do not revert" history: CV_Loop_Dev_Summary.md (govBypass latch section).
   {
     static bool cvGovBypassLatch = false;
     if (voltageControlActive) {
@@ -1740,51 +1752,62 @@ void AdjustFieldLearnMode() {
           }
         }
 
-        uint32_t halfPeriodMs = ((uint32_t)wavePeriod * 1000) / 2;
-        if (tick.nowMs - lastTuningWaveToggle >= halfPeriodMs) {
-          tuningWaveHigh = !tuningWaveHigh;
-          lastTuningWaveToggle = tick.nowMs;
-
-          tuningScore.toggleCount++;
-          if (tuningScore.toggleCount > 4) {
-            tuningScore.ringInDone = true;  // 2 full ring-in cycles (4 half-periods) complete
-          }
-          if (tuningScore.ringInDone) {
-            tuningScore.pendingWindowOpen = true;  // open window once slew settles, not at toggle time
-            tuningScore.inScoringWindow = false;
-            tuningScore.scoredToggleCount++;
-          }
-        }
-
-        // Close scoring window 5s after it opened (lastToggleMs is set when window opens, not at toggle)
-        if (tuningScore.inScoringWindow && (tick.nowMs - tuningScore.lastToggleMs > 5000)) {
+        // ── Waveform: square (0) | sine manual (1) | sine auto-sweep (2) ──
+        static float tuningSinePhase = 0.0f;
+        if (tuningWaveform != 0) {
+          // SINE (closed-loop reference). Bypass slew so the PID sees the true sine; no ISE scoring.
           tuningScore.inScoringWindow = false;
-        }
+          float baseA = 5.0f + waveAmplitude * 0.5f;   // midpoint; swings 5 .. 5+waveAmplitude
+          float ampA  = waveAmplitude * 0.5f;
+          tuningSineStep(tick.nowMs, actualDtSec, tuningSinePhase, baseA, ampA, MeasuredAmps, setpointCommand);
+          setpointLimited = setpointCommand;           // no slew limiting → clean sine reference
+        } else {
+          uint32_t halfPeriodMs = ((uint32_t)wavePeriod * 1000) / 2;
+          if (tick.nowMs - lastTuningWaveToggle >= halfPeriodMs) {
+            tuningWaveHigh = !tuningWaveHigh;
+            lastTuningWaveToggle = tick.nowMs;
 
-        uTargetAmps = tuningWaveHigh ? (5 + waveAmplitude) : 5;
-        setpointCommand = (float)uTargetAmps;
+            tuningScore.toggleCount++;
+            if (tuningScore.toggleCount > 4) {
+              tuningScore.ringInDone = true;  // 2 full ring-in cycles (4 half-periods) complete
+            }
+            if (tuningScore.ringInDone) {
+              tuningScore.pendingWindowOpen = true;  // open window once slew settles, not at toggle time
+              tuningScore.inScoringWindow = false;
+              tuningScore.scoredToggleCount++;
+            }
+          }
+
+          // Close scoring window 5s after it opened (lastToggleMs is set when window opens, not at toggle)
+          if (tuningScore.inScoringWindow && (tick.nowMs - tuningScore.lastToggleMs > 5000)) {
+            tuningScore.inScoringWindow = false;
+          }
+
+          uTargetAmps = tuningWaveHigh ? (5 + waveAmplitude) : 5;
+          setpointCommand = (float)uTargetAmps;
+
+          setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                         SetpointRiseRate, SetpointFallRate, actualDtSec);
+
+          // Open scoring window once slew has settled (rate < 1 A/s) — fair regardless of SetpointRiseRate.
+          // lastToggleMs is set here so the 5s timeout starts from when scoring actually begins.
+          {
+            static float tuning_prevSlewed = 0.0f;
+            static bool tuning_slewInit = false;
+            float tuning_slewRate = 0.0f;
+            if (tuning_slewInit) {
+              tuning_slewRate = fabsf(setpointLimited - tuning_prevSlewed) / actualDtSec;
+            }
+            tuning_prevSlewed = setpointLimited;
+            tuning_slewInit = true;
+            if (tuningScore.pendingWindowOpen && tuning_slewRate < 1.0f) {
+              tuningScore.inScoringWindow = true;
+              tuningScore.pendingWindowOpen = false;
+              tuningScore.lastToggleMs = tick.nowMs;
+            }
+          }
+        }
         liveScore_thisCmd = setpointCommand;
-
-        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       SetpointRiseRate, SetpointFallRate, actualDtSec);
-
-        // Open scoring window once slew has settled (rate < 1 A/s) — fair regardless of SetpointRiseRate.
-        // lastToggleMs is set here so the 5s timeout starts from when scoring actually begins.
-        {
-          static float tuning_prevSlewed = 0.0f;
-          static bool tuning_slewInit = false;
-          float tuning_slewRate = 0.0f;
-          if (tuning_slewInit) {
-            tuning_slewRate = fabsf(setpointLimited - tuning_prevSlewed) / actualDtSec;
-          }
-          tuning_prevSlewed = setpointLimited;
-          tuning_slewInit = true;
-          if (tuningScore.pendingWindowOpen && tuning_slewRate < 1.0f) {
-            tuningScore.inScoringWindow = true;
-            tuningScore.pendingWindowOpen = false;
-            tuningScore.lastToggleMs = tick.nowMs;
-          }
-        }
 
         voltageControlActive = false;
 
@@ -1883,219 +1906,159 @@ void AdjustFieldLearnMode() {
         // Hoisted here so iExcess block can reset it on event onset.
         static float cv_I_aw_cap = 100.0f;
 
-        // ── iExcess supervisor ─────────────────────────────────────────
-        // IExcessK and IExcessN are user-adjustable globals (LittleFS-persisted).
-        // N consecutive ticks above threshold required before response fires —
-        // separates brief resonance peaks (~3-4 ticks) from sustained RPM-step excess.
-        //
-        // VOLTAGE GATE — iExcess is only allowed to fire when the battery voltage is
-        // close enough to the charging target. Gate opens when IBV > target − IExcessArmMarginV.
-        // Decoupled from OvMeasMarginV (Group 2's trigger) on 2026-05-23: those two knobs
-        // moved in opposite directions on the same physical preference, so raising
-        // OvMeasMarginV to calm Group 2 silently widened the iExcess arming window. Now
-        // each detector has its own threshold knob.
-        // The gate exists because during ramp-up the alternator is *supposed* to be at
-        // ceiling current and the CV loop has not engaged — firing iExcess there would
-        // be a false positive that kills the integrator and slows charging for nothing.
+        // ── iExcess supervisor (EMA / leaky-integral detector) ──────────────
+        // Fires on a SUSTAINED current excess over the CV command: an EMA of
+        // (MeasuredAmps − setpointLimited) crossing E = clamp(IExcessFrac × setpointLimited,
+        // floor, ceil). Voltage-gated to near target (IBV > target − IExcessArmMarginV) so it
+        // can't fire during ramp-up; testProtectionsEnabled=false or TuningMode=1 inhibit it
+        // (else branch releases the latch and reseeds the EMA).
+        // Full math + rationale: Working Markdown Docs/iExcess_Redesign_Spec.md.
         {
-          const float IEXCESS_HYST = 2.0f;
           const float K_IE = 1.0f;
+          static bool iExcessActive = false;   // latched fire state (held until the average clears)
+          static float mExcessEma = 0.0f;      // EMA of signed deviation iActual − setpointLimited (A)
+          // (pre-event cv_I capture and reseed are centralised — see preEventCvI above
+          //  and the unified falling-edge reseed in the bumpless tracker block.)
 
-          static bool iExcessActive = false;
-          static int iExcessPersistCount = 0;
-          // (pre-event cv_I capture and reseed now centralised — see preEventCvI
-          //  above and the unified falling-edge reseed in the bumpless tracker block.)
-
-          // Gate: CV active AND battV within IExcessArmMarginV of target.
-          // testProtectionsEnabled=false OR TuningMode=1 (current-waveform step test) also
-          // inhibits G3 firing — falls through to the else branch which clears persist count
-          // and iExcessActive, ensuring a clean release if user disables protections or ends
-          // the test mid-event.
           if (testProtectionsEnabled && !TuningMode && voltageControlActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
-            float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
-                           : (IExcessSigSrc == 1) ? getFiltI()
-                                                  : g_iMA_N;
-            float excess = iSigEx - setpointLimited - IExcessK;  // setpointLimited = previous tick — acceptable
-            bool aboveThreshold = (excess > 0.0f);
-            bool belowHysteresis = (iSigEx < setpointLimited + IExcessK - IEXCESS_HYST);
+            // Threshold: fraction of command, floor/ceiling guarded.
+            float E = fmaxf(IExcessFloorA, fminf(IExcessFrac * setpointLimited, IExcessCeilA));
 
-            // Post-fastOV mismatch gate: block iExcess counting while iSigEx is still
-            // elevated from the fastOV event itself. When fastOV fires, setpointLimited
-            // instantly collapses (1e9 A/s fall rate) but field inductance keeps iSigEx
-            // high for ~1 field TC. That mismatch looks identical to a real iExcess event
-            // but is entirely caused by fastOV's own action — firing here cascades into
-            // a spurious cv_I snap and a full oscillation cycle.
-            //
-            // Arm on fastOV rising edge. Release when iSigEx has actually fallen back to
-            // within IExcessK of setpointLimited — i.e., when the mismatch is physically
-            // gone. This is installation-agnostic: slow-TC alternators hold the gate
-            // longer naturally; fast-TC alternators release sooner. If AwBleed permanently
-            // lowers the operating point, the gate still releases once iSigEx matches the
-            // new level — a subsequent real RPM step is then correctly detected.
-            static bool postFastOvMismatch = false;
-            static bool prevFastOvActive_ie = false;
-            // fastOvFirstTick: true only on the rising edge of fastOvClampActive.
-            // Computed before prev update so we can allow iExcess to count (and fire)
-            // on the exact same tick that fastOV first asserts. Without this, a blip
-            // where iExcess conditions built for N-1 ticks and fastOV fired on tick N
-            // would block iExcess via both !fastOvClampActive and the gate arm.
-            bool fastOvFirstTick = (fastOvClampActive && !prevFastOvActive_ie);
-            prevFastOvActive_ie = fastOvClampActive;
-            if (postFastOvMismatch && !fastOvClampActive
-                && (iSigEx <= setpointLimited + IExcessK)) {
-              postFastOvMismatch = false;  // mismatch gone — release gate
-            }
-
-            // Allow counting when fastOV is not active, OR on exactly the first tick
-            // fastOV asserts (simultaneous detection case). On all subsequent fastOV
-            // ticks !fastOvClampActive blocks counting as before — prevents spurious
-            // re-fire while the field coil is still wound up from fastOV's own action.
-            if (aboveThreshold && (!fastOvClampActive || fastOvFirstTick) && !postFastOvMismatch) {
-              iExcessPersistCount++;
+            if (!iExcessActive && fastOvClampActive) {
+              // Another protection (fastOV/hardOV) already owns the clamp and has collapsed
+              // setpointLimited. The resulting actual-vs-command mismatch is THAT protection's
+              // own doing, not a real over-current — and dev would jump to ~full current,
+              // crossing E in a few ms. Hold the EMA at 0 so we don't fire a redundant iExcess
+              // during the field-TC wind-down. This subsumes the old postFastOvMismatch gate:
+              // once the other protection releases, the EMA restarts from 0 and only a genuinely
+              // sustained post-release excess can fire. (Deliberate keep vs spec §7 — verified
+              // necessary: deleting it outright re-fires ~8 ms after every fastOV event.)
+              mExcessEma = 0.0f;
             } else {
-              iExcessPersistCount = 0;
-            }
+              // dt-aware EMA of the raw-current deviation (raw MeasuredAmps; the EMA does all
+              // the filtering). dt = real elapsed control-tick seconds, so I²C jitter stretching
+              // a tick can't corrupt the time constant — same pattern as g_fastOvDvdt.
+              float tauSec = IExcessTau * 0.001f;
+              float alpha  = actualDtSec / (tauSec + actualDtSec);
+              mExcessEma  += alpha * ((MeasuredAmps - setpointLimited) - mExcessEma);  // setpointLimited = previous tick — acceptable
 
-            // Arm gate after the count check so the first-tick count runs first.
-            // If iExcess fires this tick it arms the gate itself (below);
-            // this handles the case where fastOV just started but iExcess didn't fire.
-            if (fastOvFirstTick) {
-              postFastOvMismatch = true;
-            }
-
-            if (iExcessPersistCount >= IExcessN) {
-              if (iExcessPersistCount == IExcessN) {
+              // Rising edge — fire once.
+              if (!iExcessActive && mExcessEma > E) {
                 cv_I_aw_cap = cv_I;         // cap the bumpless tracker ceiling to pre-event level — prevents current-limited rewind
-                postFastOvMismatch = true;  // iExcess collapses setpointLimited the same way fastOV does; block re-trigger during field TC wind-down
                 g_iExcessCount++;
                 // Collapse inner PID integrator (same as hard-OV reset) — without it duty authority
                 // is only innerKp × measured current, weak from low setpoints. See CV_Loop_Dev_Summary.md.
                 currentPID.ResetIntegratorTo(0.0);
-                queueConsoleMessage("iExcess: inner PID integrator reset");
+                queueConsoleMessageF("iExcess #%lu: excess=%.1fA over %.1fA cmd — inner PID integrator reset",
+                                     (unsigned long)g_iExcessCount, mExcessEma, setpointLimited);
+                // One-shot cv_I drain on the rising edge. IExcessKBleed = 0: snap cv_I to zero
+                // (deepest starting point for recovery). > 0: subtract K_bleed × averaged-excess ×
+                // dtSec from cv_I once. Both zero the current COMMAND in one tick (1e9 fall-rate
+                // override on setpointLimited); the duty collapses via the inner-PID reset above.
+                // Sustained per-tick drain for the rest of the event comes from awBleedAmpS in the
+                // bumpless tracker block. Final reseed is the unified falling-edge reseed when ALL
+                // protections clear. The IExcessKBleed knob only sets post-event recovery depth.
+                if (IExcessKBleed <= 0.0f) {
+                  cv_I = 0.0f;
+                } else {
+                  cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * mExcessEma * actualDtSec);
+                }
+                iExcessActive = true;
               }
-              float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
-              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
-              fastOvClampActive = true;
-              iExcessActive = true;
-              // One-shot cv_I drain on the rising edge only — postFastOvMismatch arms below
-              // and prevents persistCount from re-reaching IExcessN during the event, so this
-              // branch does not execute again until the gate releases. Sustained per-tick drain
-              // for the rest of the event comes from awBleedAmpS in the bumpless tracker block.
-              // IExcessKBleed = 0: snap cv_I to zero (deepest starting point for recovery).
-              // IExcessKBleed > 0: subtract K_bleed × excess × dtSec from cv_I once.
-              // Both modes zero the current COMMAND in one tick (1e9 fall-rate override on
-              // setpointLimited); the duty itself collapses via the inner-PID integrator
-              // reset above. The IExcessKBleed knob only sets the post-event recovery depth.
-              // Final reseed is via the unified falling-edge reseed when ALL protections clear.
-              if (IExcessKBleed <= 0.0f) {
-                cv_I = 0.0f;
-              } else {
-                cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * excess * actualDtSec);
+
+              // While latched: re-apply the proportional cap and hold govBypass each tick;
+              // release on hysteresis. Cap input is mExcessEma (the averaged signal) so capReason
+              // is honest without chattering on ripple. Deliberately not a hard 0-cap — that
+              // would deepen recovery undershoot. Release when the average falls below
+              // E × IExcessRelFrac (the scale-aware replacement for the old fixed 2 A IEXCESS_HYST).
+              if (iExcessActive) {
+                float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * mExcessEma);
+                if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
+                fastOvClampActive = true;
+                if (mExcessEma < E * IExcessRelFrac) {
+                  iExcessActive = false;   // release; unified reseed handles cv_I
+                }
               }
-            } else if (iExcessActive && !belowHysteresis) {
-              // Re-apply proportional cap each tick of the event (fire branch runs once).
-              // Deliberately not a hard 0-cap — that would deepen recovery undershoot.
-              float ieCap = fmaxf(0.0f, fastOvBaseCap - K_IE * excess);
-              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
-              fastOvClampActive = true;  // hold govBypass during hysteresis
-            } else {
-              iExcessActive = false;     // release; unified reseed handles cv_I
             }
+            g_mExcessEma = mExcessEma;       // tuning traces (CV detector owns the export when its gate is open)
+            g_iExcessThreshold = E;
           } else {
-            // Gate closed (battV dropped below targV - OvMeasMarginV) — release;
-            // unified reseed will fire on the falling edge of fastOvClampActive.
-            iExcessPersistCount = 0;
+            // Gate closed (battV below target − ArmMargin, or protections off / tuning) — release
+            // and reseed the EMA so a later CV entry or setpoint step doesn't carry stale charge
+            // into a startup fire. Unified reseed fires on the falling edge of fastOvClampActive.
             iExcessActive = false;
+            mExcessEma = 0.0f;
+            g_mExcessEma = 0.0f;
+            g_iExcessThreshold = 0.0f;
           }
           g_iExcessActive = iExcessActive;
           g_iExcessDutyCap = 100.0f;  // retired
         }
 
         // ── iExcess supervisor — BULK sub-mode (Group 3, current-control phase) ──────
-        // Sibling of the iExcess block above, for when battery voltage is FAR below the
-        // charge target (bulk). The CV iExcess above is gated off here (its IBV > target −
-        // IExcessArmMarginV gate is false), and Groups 1/2 have nothing to do (voltage is
-        // below target by design). The only fast supervisor otherwise active in bulk is the
-        // load-dump detector, which catches sharp battery-current steps — not a gradually
-        // building current-over-ceiling excess from an RPM blip. This block fills that hole.
-        //
-        // GATE = strict complement of the CV iExcess gate (shares IExcessArmMarginV as the
-        // handoff line) — above target−ArmMargin the CV detector runs; at/below it, this one
-        // does. No coverage gap, no overlap.
-        //
-        // COMPARE TARGET = i_ceiling_pre_ov (the commanded current ceiling: RPM cap −
-        // thermal − warmup − MaxTableValue, before any protection cap), NOT setpointLimited.
-        // In bulk setpointLimited lags a rising cap during RPM ramps, but the ceiling itself
-        // rises with RPM, so a normal ramp produces no excess — only a true overshoot above
-        // the mechanical ceiling does. Looser knobs (IExcessKBulk/IExcessNBulk) tolerate the
-        // command-vs-actual error we accept far from the voltage limit.
-        //
-        // RESPONSE binds via fastOvCurrentCap RELATIVE TO THE CEILING (not fastOvBaseCap=
-        // MaxTableValue like the CV block): in bulk the voltage-loop proportional term alone
-        // saturates Icv to the ceiling, so zeroing cv_I cannot collapse the setpoint — only
-        // pulling the cap below the ceiling forces uTargetAmps (and thus Icv's clamp) down.
-        // Recovery is fully shared with the CV path via the unified fastOvClampActive flag
-        // (govBypass, cv_I reseed, fast-rise window) downstream.
+        // Sibling of the CV iExcess above, for battV FAR below target (bulk). Gate is the
+        // strict complement (IBV ≤ target − IExcessArmMarginV), so the two hand off at that
+        // line with no gap/overlap. Compares actual against i_ceiling_pre_ov (the commanded
+        // ceiling) not setpointLimited, with a looser IExcessFracBulk, so a normal RPM ramp
+        // produces no excess — only a true overshoot above the mechanical ceiling fires it.
+        // Response binds via fastOvCurrentCap RELATIVE TO THE CEILING (zeroing cv_I can't
+        // collapse a saturated bulk setpoint); recovery shares the unified fastOvClampActive
+        // path. Full rationale: Working Markdown Docs/iExcess_Redesign_Spec.md.
         {
-          const float IEXCESS_HYST = 2.0f;
           const float K_IE = 1.0f;
-          static bool iExBulkActive = false;
-          static int iExBulkPersistCount = 0;
-          static bool postBulkMismatch = false;  // block re-count while field TC keeps current high after this block's own collapse
+          static bool iExBulkActive = false;     // latched fire state
+          static float mExcessEmaBulk = 0.0f;    // EMA of signed deviation iActual − i_ceiling_pre_ov (A)
 
           if (testProtectionsEnabled && !TuningMode && voltageControlActive
               && (IBV <= ChargingVoltageTarget - IExcessArmMarginV)) {
-            float iSigEx = (IExcessSigSrc == 2)   ? MeasuredAmps
-                           : (IExcessSigSrc == 1) ? getFiltI()
-                                                  : g_iMA_N;
-            float excess = iSigEx - i_ceiling_pre_ov - IExcessKBulk;  // vs commanded ceiling, not slewed setpoint
-            bool aboveThreshold = (excess > 0.0f);
-            bool belowHysteresis = (iSigEx < i_ceiling_pre_ov + IExcessKBulk - IEXCESS_HYST);
+            // Threshold: fraction of the commanded ceiling, floor/ceiling guarded. Looser than the
+            // CV fraction (IExcessFracBulk > IExcessFrac) — tolerate more command-vs-actual error
+            // far from the voltage limit, catching only absurd RPM-blip overshoots above ceiling.
+            float E = fmaxf(IExcessFloorA, fminf(IExcessFracBulk * i_ceiling_pre_ov, IExcessCeilA));
 
-            // Release the self-mismatch gate once current has physically fallen back to the
-            // ceiling band. Groups 1/2 and the CV iExcess can't be active in this voltage
-            // regime, so this block's own collapse is the only thing that can elevate iSigEx
-            // above the ceiling without a real event — hence a self-gate, not a fastOV gate.
-            if (postBulkMismatch && (iSigEx <= i_ceiling_pre_ov + IExcessKBulk)) {
-              postBulkMismatch = false;
-            }
-
-            if (aboveThreshold && !postBulkMismatch) {
-              iExBulkPersistCount++;
+            if (!iExBulkActive && fastOvClampActive) {
+              // Another protection (a load dump, the only other fast supervisor active in bulk)
+              // owns the clamp and has collapsed the command. Hold the EMA at 0 so we don't fire
+              // a redundant bulk iExcess during the field-TC wind-down — subsumes the old
+              // postBulkMismatch self-gate.
+              mExcessEmaBulk = 0.0f;
             } else {
-              iExBulkPersistCount = 0;
-            }
+              float tauSec = IExcessTau * 0.001f;
+              float alpha  = actualDtSec / (tauSec + actualDtSec);
+              mExcessEmaBulk += alpha * ((MeasuredAmps - i_ceiling_pre_ov) - mExcessEmaBulk);  // vs commanded ceiling, not slewed setpoint
 
-            if (iExBulkPersistCount >= IExcessNBulk) {
-              if (iExBulkPersistCount == IExcessNBulk) {
+              if (!iExBulkActive && mExcessEmaBulk > E) {
                 cv_I_aw_cap = cv_I;         // cap bumpless tracker ceiling to pre-event level
-                postBulkMismatch = true;    // collapses the command; block re-trigger during field TC wind-down
                 g_iExcessCount++;           // shared Group 3 trip counter
                 currentPID.ResetIntegratorTo(0.0);
-                queueConsoleMessage("iExcess (bulk): inner PID integrator reset");
+                queueConsoleMessageF("iExcess (bulk) #%lu: excess=%.1fA over %.1fA ceiling — inner PID integrator reset",
+                                     (unsigned long)g_iExcessCount, mExcessEmaBulk, i_ceiling_pre_ov);
+                if (IExcessKBleed <= 0.0f) {
+                  cv_I = 0.0f;
+                } else {
+                  cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * mExcessEmaBulk * actualDtSec);
+                }
+                iExBulkActive = true;
               }
-              float ieCap = fmaxf(0.0f, i_ceiling_pre_ov - K_IE * excess);  // ceiling-relative — must bite below the bulk ceiling
-              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
-              fastOvClampActive = true;
-              iExBulkActive = true;
-              if (IExcessKBleed <= 0.0f) {
-                cv_I = 0.0f;
-              } else {
-                cv_I = fmaxf(0.0f, cv_I - IExcessKBleed * excess * actualDtSec);
+
+              if (iExBulkActive) {
+                float ieCap = fmaxf(0.0f, i_ceiling_pre_ov - K_IE * mExcessEmaBulk);  // ceiling-relative — must bite below the bulk ceiling
+                if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS_BULK; }
+                fastOvClampActive = true;
+                if (mExcessEmaBulk < E * IExcessRelFrac) {
+                  iExBulkActive = false;    // release; unified reseed handles cv_I
+                }
               }
-            } else if (iExBulkActive && !belowHysteresis) {
-              float ieCap = fmaxf(0.0f, i_ceiling_pre_ov - K_IE * excess);
-              if (ieCap < fastOvCurrentCap) { fastOvCurrentCap = ieCap; capReasonTick = CAP_REASON_IEXCESS; }
-              fastOvClampActive = true;  // hold govBypass through hysteresis
-            } else {
-              iExBulkActive = false;     // release; unified reseed handles cv_I
             }
+            g_mExcessEma = mExcessEmaBulk;   // bulk owns the tuning export while its gate is open
+            g_iExcessThreshold = E;
           } else {
             // Gate closed (near/above target — CV iExcess owns this regime, or protections off).
-            iExBulkPersistCount = 0;
+            // Leave g_mExcessEma / g_iExcessThreshold untouched so the CV detector's export stands.
             iExBulkActive = false;
-            postBulkMismatch = false;
+            mExcessEmaBulk = 0.0f;
           }
+          g_iExcessBulkActive = iExBulkActive;  // export for PID/CV log flag + dashboard
         }
 
         // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
@@ -2142,6 +2105,8 @@ void AdjustFieldLearnMode() {
               if (!ldWasActive) {
                 cv_I = 0.0f;            // snap integrator on rising edge
                 g_loadDumpCount++;
+                queueConsoleMessageF("Load dump #%lu detected — output cut (dBcur/dt=%.0f A/s)",
+                                     (unsigned long)g_loadDumpCount, g_dBcur_dt);
               }
             }
             // Falling-edge cv_I reseed handled by the unified reseed in the bumpless
@@ -2387,6 +2352,17 @@ void AdjustFieldLearnMode() {
           g_fastOvCurrentCap = fastOvCurrentCap;  // export unified cap (post all supervisors)
           g_fastOvCapReason = capReasonTick;      // export reason atomically with the cap — CV log reads a coherent pair
           g_fastOvClampActive = fastOvClampActive;  // commit unified flag for next tick
+          // Latch which protection bound the cap this tick into the Plots-tab marker
+          // bitmask (consumed + cleared by the CSV1 sender). capReasonTick is a faithful
+          // proxy for fastOvClampActive — every clamp site sets both.
+          switch (capReasonTick) {
+            case CAP_REASON_KHARD_G1:
+            case CAP_REASON_KHARD_G2:     g_protEventLatch |= PROT_EVT_OV; break;
+            case CAP_REASON_IEXCESS:
+            case CAP_REASON_IEXCESS_BULK: g_protEventLatch |= PROT_EVT_IX; break;
+            case CAP_REASON_LOADDUMP:     g_protEventLatch |= PROT_EVT_LD; break;
+            default: break;
+          }
           bool seedProtected = (AwSeedProtectMs > 0) && ((currentMillis - awSeedProtectStartMs) < (uint32_t)AwSeedProtectMs);
 
           // Anti-windup ceiling: bleeds down while fastOV is active so the bumpless
@@ -4263,7 +4239,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // Integrator freeze — blocks UPWARD winding only (error > 0); unwinding below
   // setpoint is never blocked. Implemented by forcing Ki to 0 for the tick: the
   // library's integrator holds exactly, P and the projection stay live, and the
-  // logged outerI shows the true frozen value. Three freeze cases:
+  // logged outerI shows the true frozen value. Five freeze cases:
   //   1. Approach gate not yet released (above).
   //   2. Saturation vs live authority: the applied penalty already covers the
   //      live RPM-table cap, so further winding is dead authority that must
@@ -4280,13 +4256,32 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //      rising, so it adds zero risk in the toward-the-limit direction. Bite is
   //      limited by the 60s slope-estimator latency (~30s) at the current window
   //      — safe but partial until the shorter-window future work lands.
+  //   4. Rising transient (added 2026-06-15): above setpoint and slope > flat band.
+  //      Freezes integrator overbuild on the projection-inflated rising overshoot;
+  //      slow drift (<= band) still winds so heat-soak tracks. See dev summary.
+  //   5. Holding band (added 2026-06-16): present temp more than THERMAL_I_HOLD_BAND
+  //      above setpoint. Cases 3/4 gate on slope, so neither catches the quasi-flat
+  //      DWELL at the top of an overshoot — the integrator wound there to ~2x the
+  //      holding level, over-cut current, and sustained the cycle (longthermal +
+  //      moreThermal, 2026-06-16: peak grazed the limit at +5.1°F). Conditional
+  //      integration: integral corrects steady-state droop NEAR setpoint; larger
+  //      positive excursions are transients the P term already covers. Trades a
+  //      little steady-state droop tolerance (user accepts +/-5°F of the limit-5
+  //      setpoint) for killing the cycle and the limit graze.
+  const float THERMAL_I_FLAT_BAND = 0.04f;  // °F/s — heat-soak drift (track) vs loop transient (freeze)
+  const float THERMAL_I_HOLD_BAND = 1.5f;   // °F — integrate only within this band of setpoint (case 5)
   const bool aboveSetpoint = (tempPIDInput_d > (double)effectiveSetpoint);
   const bool satFreeze     = aboveSetpoint && thermalIntegratorReleased
                              && (prevThermalPenalty >= capCurrent - 0.5f);
   const bool descentFreeze = aboveSetpoint && thermalIntegratorReleased
                              && (thermalSlopeFPerSec < 0.0f);
+  const bool risingTransientFreeze = aboveSetpoint && thermalIntegratorReleased
+                             && (thermalSlopeFPerSec > THERMAL_I_FLAT_BAND);
+  // Conditional integration on PRESENT temp — implies aboveSetpoint (band > 0).
+  const bool holdBandFreeze = thermalIntegratorReleased
+                             && (tempNowPid > (float)effectiveSetpoint + THERMAL_I_HOLD_BAND);
   bool freezeIntegrator = aboveSetpoint
-                          && (!thermalIntegratorReleased || satFreeze || descentFreeze);
+                          && (!thermalIntegratorReleased || satFreeze || descentFreeze || risingTransientFreeze || holdBandFreeze);
   {
     // Log the saturation case only (descent fires every cycle — its signature is
     // outerI flat-while-falling in the thermal log, no console spam needed).
@@ -4443,7 +4438,7 @@ void pidLog_tick(uint32_t nowMs) {
   if (govMode != GOV_NORMAL_SLEW) e.flags |= (1 << 4);
   e.ovFlags = 0;
   if (g_fastOvClampActive) e.ovFlags |= (1 << 0);
-  // bit 1 reserved (was softClamp — old soft-cap removed)
+  if (g_iExcessBulkActive) e.ovFlags |= (1 << 1);  // iExcess BULK sub-mode (current-control phase)
   if (g_fastOvHardActive) e.ovFlags |= (1 << 2);
   if (g_iExcessActive) e.ovFlags |= (1 << 3);
   if (g_loadDumpActive) e.ovFlags |= (1 << 4);

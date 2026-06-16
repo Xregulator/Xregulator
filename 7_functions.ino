@@ -1928,6 +1928,7 @@ void cvLog_tick(uint32_t nowMs) {
   e.slopeBleedAmps_x1000 = (int16_t)clamp_f(g_slopeBleedAmpsThisTick * 1000.0f, 0.0f, 32767.0f);
   g_slopeBleedAmpsThisTick = 0.0f;  // clear after logging so non-VL ticks show 0
 
+  if (g_iExcessBulkActive) e.flags |= (1 << 3);  // iExcess BULK sub-mode (current-control phase)
   if (g_iExcessActive)   e.flags |= (1 << 5);
   if (g_loadDumpActive)  e.flags |= (1 << 6);
 
@@ -2482,7 +2483,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     SYSID_DOWN_2      = 6,
     SYSID_UP_3        = 7,
     SYSID_DOWN_3      = 8,
-    SYSID_PROCESSING  = 9
+    SYSID_PROCESSING  = 9,
+    SYSID_SINE        = 10   // open-loop sine sweep (plant Bode) — replaces the UP/DOWN sequence
   };
 
   static SysIDPhase phase = SYSID_IDLE;
@@ -2498,6 +2500,15 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   // phaseStartMs[0..8]: STABILIZE[0] BASELINE[1] UP_1[2] DOWN_1[3]
   //                     UP_2[4] DOWN_2[5] UP_3[6] DOWN_3[7] test-end[8]
   static uint32_t phaseStartMs[9] = { 0 };
+
+  // Sine-sweep state (open-loop plant Bode). curTestType is captured at start so a
+  // mid-test settings change can't switch the running test.
+  static uint8_t  curTestType = 0;
+  static float    sineFreq[SYSID_SINE_NPOINTS];
+  static uint32_t sineSegStartMs[SYSID_SINE_NPOINTS];
+  static uint32_t sineSweepEndMs = 0;
+  static uint8_t  sineIdx = 0;
+  static bool     sineSegStarted = false;
 
   // One-shot debug on request arrival
   static bool lastReqState = false;
@@ -2564,6 +2575,20 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     holdMs = (uint32_t)(15.0f * InputFilterTC);
     if (holdMs < 5000) holdMs = 5000;  // minimum 5 seconds per phase regardless of TC
 
+    // Capture test type for the whole run; build the log-spaced sweep frequency list.
+    curTestType = systemIDTestType;
+    if (curTestType == 1) {
+      float fLo = fmaxf(0.1f, systemIDSineFreqStart);
+      float fHi = fmaxf(fLo + 0.1f, systemIDSineFreqEnd);
+      for (int i = 0; i < SYSID_SINE_NPOINTS; i++) {
+        float frac = (float)i / (float)(SYSID_SINE_NPOINTS - 1);
+        sineFreq[i] = fLo * powf(fHi / fLo, frac);
+      }
+      sineIdx = 0;
+      sineSegStarted = false;
+      systemIDBodeCount = 0;
+    }
+
     queueConsoleMessageF(
       "SystemID: stabilizing to %.0fA | step=+%.1f%% holdMs=%u TC=%.0fms",
       SYSID_STABILIZE_AMPS, SystemIDStepAmplitude, holdMs, InputFilterTC);
@@ -2595,13 +2620,26 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
           stabRingIdx = 0;
           stabRingCount = 0;
           stabilizeLastAdjMs = 0;
-          phaseStartMs[1] = nowMs;  // BASELINE start
-          phase = SYSID_BASELINE;
-          systemIDActive = (uint8_t)SYSID_BASELINE;
-          queueConsoleMessageF(
-            "SystemID: 5s avg=%.1fA (duty=%.1f%%) within %.0fA of target — starting baseline | holdMs=%u",
-            avg, baseDuty, SYSID_STABILIZE_BAND_A, holdMs);
-          Serial.printf("SystemID: BASELINE\n");
+          if (curTestType == 1) {
+            // Sine sweep: skip the UP/DOWN sequence, go straight to the swept-sine phase.
+            sineIdx = 0;
+            sineSegStarted = false;
+            phase = SYSID_SINE;
+            systemIDActive = (uint8_t)SYSID_SINE;
+            queueConsoleMessageF(
+              "SystemID: sine sweep — %d pts %.1f–%.1f Hz, %d cycles/pt, amp=%.1f%% duty",
+              SYSID_SINE_NPOINTS, sineFreq[0], sineFreq[SYSID_SINE_NPOINTS - 1],
+              systemIDSineCycles, SystemIDStepAmplitude);
+            Serial.printf("SystemID: SINE SWEEP\n");
+          } else {
+            phaseStartMs[1] = nowMs;  // BASELINE start
+            phase = SYSID_BASELINE;
+            systemIDActive = (uint8_t)SYSID_BASELINE;
+            queueConsoleMessageF(
+              "SystemID: 5s avg=%.1fA (duty=%.1f%%) within %.0fA of target — starting baseline | holdMs=%u",
+              avg, baseDuty, SYSID_STABILIZE_BAND_A, holdMs);
+            Serial.printf("SystemID: BASELINE\n");
+          }
         }
       }
     }
@@ -2625,6 +2663,42 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       return false;
     }
 
+    return true;
+  }
+
+  // ── SINE SWEEP phase (open-loop plant Bode): swept sine on duty, PID off ──
+  // dutyOut = baseDuty + amp·sin(2π f t); record (ts,duty,amps) each tick; advance to
+  // the next log-spaced frequency after (1 settle + N analysed) cycles. Lock-in DFT
+  // in PROCESSING extracts per-frequency gain and phase.
+  if (phase == SYSID_SINE) {
+    if (!sineSegStarted) {
+      sineSegStartMs[sineIdx] = nowMs;
+      sineSegStarted = true;
+    }
+    float f = sineFreq[sineIdx];
+    float tSec = (float)(nowMs - sineSegStartMs[sineIdx]) / 1000.0f;
+    float drive = SystemIDStepAmplitude * sinf(2.0f * (float)M_PI * f * tSec);
+    float d = constrain(baseDuty + drive, 0.0f, 100.0f);
+    dutyOut = d;
+
+    if (sysIDSampleCount < SYSID_BUF_SIZE) {
+      sysIDBuffer[sysIDSampleCount++] = { nowMs, d, ampsRaw };
+    }
+
+    // Hold = 1 settle cycle + N analysed cycles, floored at 1.5 s for the fastest tones.
+    float segMs = (1.0f + (float)systemIDSineCycles) * 1000.0f / f;
+    if (segMs < 1500.0f) segMs = 1500.0f;
+    if ((uint32_t)(nowMs - sineSegStartMs[sineIdx]) >= (uint32_t)segMs) {
+      sineIdx++;
+      sineSegStarted = false;
+      if (sineIdx >= SYSID_SINE_NPOINTS) {
+        sineSweepEndMs = nowMs;
+        phase = SYSID_PROCESSING;
+        systemIDActive = (uint8_t)SYSID_PROCESSING;
+        queueConsoleMessageF("SystemID: sine sweep complete — %d samples, post-processing", sysIDSampleCount);
+        Serial.println("SystemID: sine sweep complete — post-processing");
+      }
+    }
     return true;
   }
 
@@ -2728,6 +2802,61 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   //
   // Preceding UP phase for each fall:    UP_1[2],  UP_2[4],  UP_3[6]
   // DOWN phase starts:                   DOWN_1[3],DOWN_2[5],DOWN_3[7]
+
+  // ── Sine-sweep post-process (lock-in DFT per frequency) ──────────────────
+  // For each swept frequency, correlate (amps − mean) against sin/cos at that exact
+  // frequency over its analysis window. Rejects all other tones (incl. belt ripple)
+  // to ~0. gain = output A per %duty; phase = output lag in degrees.
+  if (phase == SYSID_PROCESSING && curTestType == 1) {
+    systemIDBodeCount = 0;
+    for (int p = 0; p < SYSID_SINE_NPOINTS; p++) {
+      float f = sineFreq[p];
+      uint32_t segStart = sineSegStartMs[p];
+      uint32_t segEnd   = (p + 1 < SYSID_SINE_NPOINTS) ? sineSegStartMs[p + 1] : sineSweepEndMs;
+      uint32_t anaStart = segStart + (uint32_t)(1000.0f / f);  // skip 1 settle cycle
+
+      // Pass 1: window mean (removes DC so a partial trailing cycle can't bias the fit).
+      double mean = 0.0; int nMean = 0;
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        uint32_t ts = sysIDBuffer[s].ts;
+        if (ts < anaStart) continue;
+        if (ts >= segEnd) break;
+        mean += sysIDBuffer[s].amps; nMean++;
+      }
+      if (nMean > 0) mean /= (double)nMean;
+
+      // Pass 2: single-bin DFT (lock-in) of (amps − mean) against the drive frequency.
+      double I = 0.0, Q = 0.0; int n = 0;
+      for (int s = 0; s < sysIDSampleCount; s++) {
+        uint32_t ts = sysIDBuffer[s].ts;
+        if (ts < anaStart) continue;
+        if (ts >= segEnd) break;
+        float t = (float)(ts - segStart) / 1000.0f;
+        float ang = 2.0f * (float)M_PI * f * t;
+        double y = (double)sysIDBuffer[s].amps - mean;
+        I += y * sinf(ang);
+        Q += y * cosf(ang);
+        n++;
+      }
+      float gain = 0.0f, phaseDeg = 0.0f;
+      if (n > 0 && SystemIDStepAmplitude > 0.01f) {
+        float B = 2.0f * (float)sqrt(I * I + Q * Q) / (float)n;   // output amplitude (A)
+        gain = B / SystemIDStepAmplitude;                         // A per %duty
+        phaseDeg = atan2f(-(float)Q, (float)I) * 180.0f / (float)M_PI;  // output lag (deg)
+      }
+      systemIDBode[p].freqHz    = f;
+      systemIDBode[p].gainApPct = gain;
+      systemIDBode[p].phaseDeg  = phaseDeg;
+      systemIDBodeCount++;
+      queueConsoleMessageF("Bode %d: %.2f Hz gain=%.3f A/%% lag=%.0f deg (n=%d)", p + 1, f, gain, phaseDeg, n);
+    }
+    systemIDResultsReady = true;
+    systemIDActive = 0;
+    systemIDLastEndMs = millis();
+    phase = SYSID_IDLE;
+    dutyOut = baseDuty;
+    return false;
+  }
 
   if (phase == SYSID_PROCESSING) {
 
@@ -2928,6 +3057,94 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   }
 
   return true;  // test still in progress
+}
+
+
+// ============================================================
+// tuningSineStep() — Tuning→Current closed-loop sine generator (Stage 2)
+//
+// Emits a sine setpoint reference into *out (centred on baseA, amplitude ampA). For
+// waveform==2 (auto-sweep) it also runs an online single-bin lock-in of the MEASURED
+// current against the reference, per log-spaced frequency, filling tuningBode[]. The
+// phase accumulator is owned by the caller (passed by ref) so it persists across ticks.
+// Called every control tick from the TuningMode block while a sine waveform is selected.
+// ============================================================
+void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float ampA,
+                    float measAmps, float &out) {
+  static uint8_t  segIdx = 0;
+  static uint32_t segStartMs = 0;
+  static bool     segStarted = false;
+  static double   sAmpsSin, sAmpsCos, sAmps, sSin, sCos;
+  static uint32_t nAcc;
+  static float    freqList[TUNING_SWEEP_NPOINTS];
+
+  float f;
+  if (tuningWaveform == 2) {
+    // Start / restart the sweep on UI request.
+    if (tuningSweepRequested) {
+      tuningSweepRequested = false;
+      float fLo = fmaxf(0.1f, tuningSweepStart);
+      float fHi = fmaxf(fLo + 0.1f, tuningSweepEnd);
+      for (int i = 0; i < TUNING_SWEEP_NPOINTS; i++)
+        freqList[i] = fLo * powf(fHi / fLo, (float)i / (float)(TUNING_SWEEP_NPOINTS - 1));
+      segIdx = 0; segStarted = false; tuningBodeCount = 0;
+      tuningSweepActive = true; tuningSweepDone = false;
+      queueConsoleMessageF("Tuning sine sweep: %d pts %.1f-%.1f Hz, %d cycles/pt, amp=%.1f A",
+                           TUNING_SWEEP_NPOINTS, freqList[0], freqList[TUNING_SWEEP_NPOINTS - 1],
+                           tuningSweepCycles, ampA);
+    }
+    if (!tuningSweepActive) {
+      out = baseA;   // idle hold at midpoint until a sweep is requested / after done
+      return;
+    }
+    f = freqList[segIdx];
+    if (!segStarted) {
+      segStartMs = nowMs; segStarted = true; phase = 0.0f;
+      sAmpsSin = sAmpsCos = sAmps = sSin = sCos = 0.0; nAcc = 0;
+    }
+  } else {
+    f = fmaxf(0.1f, tuningSineFreq);   // manual sine (waveform==1)
+  }
+
+  // Advance phase, emit the sine reference.
+  phase += 2.0f * (float)M_PI * f * dt;
+  if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+  float s = sinf(phase);
+  out = baseA + ampA * s;
+
+  if (tuningWaveform == 2 && tuningSweepActive) {
+    uint32_t tElapsed = nowMs - segStartMs;
+    if (tElapsed >= (uint32_t)(1000.0f / f)) {   // accumulate after a 1-cycle settle
+      float c = cosf(phase);
+      sAmpsSin += (double)measAmps * s;
+      sAmpsCos += (double)measAmps * c;
+      sAmps += measAmps; sSin += s; sCos += c; nAcc++;
+    }
+    float segMs = (1.0f + (float)tuningSweepCycles) * 1000.0f / f;
+    if (segMs < 1500.0f) segMs = 1500.0f;
+    if (tElapsed >= (uint32_t)segMs) {
+      float gain = 0.0f, phaseDeg = 0.0f;
+      if (nAcc > 0 && ampA > 0.01f) {
+        double meanA = sAmps / (double)nAcc;
+        double Ic = sAmpsSin - meanA * sSin;   // DC-corrected in-phase
+        double Qc = sAmpsCos - meanA * sCos;   // DC-corrected quadrature
+        float B = 2.0f * (float)sqrt(Ic * Ic + Qc * Qc) / (float)nAcc;
+        gain = B / ampA;                                              // measured / reference
+        phaseDeg = atan2f(-(float)Qc, (float)Ic) * 180.0f / (float)M_PI;  // output lag (deg)
+      }
+      tuningBode[segIdx].freqHz   = f;
+      tuningBode[segIdx].gain     = gain;
+      tuningBode[segIdx].phaseDeg = phaseDeg;
+      tuningBodeCount = segIdx + 1;
+      queueConsoleMessageF("Tuning Bode %d: %.2f Hz gain=%.2f lag=%.0f deg (n=%lu)",
+                           segIdx + 1, f, gain, phaseDeg, (unsigned long)nAcc);
+      segIdx++; segStarted = false;
+      if (segIdx >= TUNING_SWEEP_NPOINTS) {
+        tuningSweepActive = false; tuningSweepDone = true;
+        queueConsoleMessage("Tuning sine sweep complete.");
+      }
+    }
+  }
 }
 
 

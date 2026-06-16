@@ -330,7 +330,7 @@ df["f_govBypass"] = (_flags_num // 16 % 2).astype(int)
 
 _ov_num = pd.to_numeric(df["ovFlags"] if "ovFlags" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
 df["f_fastOvActive"]  = (_ov_num       % 2).astype(int)   # bit 0
-# bit 1 reserved (was softClamp — Layer 1 removed)
+df["f_iExcessBulk"]   = (_ov_num // 2  % 2).astype(int)   # bit 1 — iExcess BULK sub-mode (current-control phase)
 df["f_hardClamp"]     = (_ov_num // 4  % 2).astype(int)   # bit 2
 df["f_iExcess"]       = (_ov_num // 8  % 2).astype(int)   # bit 3
 df["f_loadDump"]      = (_ov_num // 16 % 2).astype(int)   # bit 4
@@ -726,7 +726,8 @@ _spacing6 = 0.26
 for _i6, (_col, _color, _lbl) in enumerate([
     ("f_fastOvActive", "#c62828", "fastOvActive  (FastOV or iExcess)"),
     ("f_hardClamp",    "#6a1b9a", "hardClamp     (layer 2/3 — hard ceiling)"),
-    ("f_iExcess",      "#00838f", "iExcess       (current excess protection)"),
+    ("f_iExcess",      "#00838f", "iExcess       (current excess — near target)"),
+    ("f_iExcessBulk",  "#26a69a", "iExcessBulk   (current excess — bulk/CC phase)"),
     ("f_loadDump",     "#f57c00", "loadDumpActive (sudden load drop detected)"),
 ]):
     _off = (4 - _i6) * _spacing6

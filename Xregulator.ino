@@ -146,6 +146,11 @@ int lastHttpResponseCode = 0;  // Track last HTTP response for failure handling
 QueueHandle_t httpsQueue;
 TaskHandle_t httpsTaskHandle;
 
+// Fault-detector Core-0 worker handoff (defined here so setup() in this file and the worker/arm
+// in 2_functions.ino all see them). faResultSem returns the verdict; faDetTaskHandle is notified to arm.
+TaskHandle_t faDetTaskHandle = NULL;
+SemaphoreHandle_t faResultSem = NULL;
+
 SemaphoreHandle_t fsMutex = NULL;  // mutex protection for littlefs
 
 enum HttpsRequestType {
@@ -546,7 +551,13 @@ volatile bool imuZeroInProgress = false;
 double imuZeroAxSum = 0, imuZeroAySum = 0, imuZeroAzSum = 0;  // accel sums
 double imuZeroGxSum = 0, imuZeroGySum = 0, imuZeroGzSum = 0;  // gyro sums
 uint16_t imuZeroAccelN = 0, imuZeroGyroN = 0;
-const uint16_t IMU_ZERO_TARGET = 200;  // ~2s of accel samples at 104 Hz
+const uint16_t IMU_ZERO_TARGET = 200;  // ~2s of accel samples at 104 Hz (normal completion)
+// Safety margin so the capture ALWAYS resolves and never hangs on "calculating": if the target
+// isn't met within the timeout, finalize anyway on whatever was gathered (provided a sane floor),
+// else abort cleanly. updateAccelMetrics() runs every loop, so this timeout is guaranteed to fire.
+const uint16_t IMU_ZERO_MIN = 80;                 // floor (~0.8s) below which the average is too noisy to trust → abort
+const unsigned long IMU_ZERO_TIMEOUT_MS = 5000;   // capture window always closes within this
+unsigned long imuZeroStartMs = 0;                 // millis() when the capture opened (timeout reference)
 
 // --- WAVE PERIOD DETECTION STATE ---
 float wave_decimated_buffer[100];  // Circular buffer for decimated samples
@@ -823,6 +834,18 @@ float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by ge
 // Note: voltageControlActive = !inIdleStage, so it is true even in bulk — do NOT gate on !voltageControlActive.
 // Enforced in the /get startSystemID handler and in the JS preflight check.
 float SystemIDStepAmplitude = 6.0f;  // % duty step — web-configurable; 6% is a good default
+
+// ── SystemID sine-sweep (open-loop plant Bode) — Stage 1 ──────────────────────
+// Test type selects step (rise/fall delay) vs sine sweep (per-frequency gain/phase
+// of measured current vs commanded duty, PID off = the plant's own frequency response).
+uint8_t systemIDTestType   = 0;        // 0 = step delay, 1 = sine sweep
+float   systemIDSineFreqStart = 0.5f;  // Hz, sweep low end
+float   systemIDSineFreqEnd   = 20.0f; // Hz, sweep high end
+uint8_t systemIDSineCycles    = 6;     // analysed cycles per frequency (1 settle cycle skipped)
+#define SYSID_SINE_NPOINTS 10          // log-spaced sweep points
+struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // gain = A output per %duty
+SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
+uint8_t systemIDBodeCount = 0;         // valid Bode points after a sine run (served by /sysidbode)
 
 volatile bool systemIDRequested = false;       // set true by UI handler to trigger a test run
 volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
@@ -2179,7 +2202,7 @@ FuncTiming ft_altFold;     // 200 Hz alt fold (IDW eval cost) — distinct from 
 FuncTiming ft_boatPerf;
 FuncTiming ft_fastAltDrain;     // fast alt-current channel bounded DMA drain (~1 ms cap per loop pass)
 FuncTiming ft_faMatrixFlush;    // fast alt-current disturbance matrix → flash (field-off gated, like the long-term ring)
-FuncTiming ft_faDetector;       // fast alt-current failure-detector analysis slices (~1 ms cap per loop pass)
+FuncTiming ft_faDetector;       // fast alt-current failure-detector verdict consume on Core 1 (analysis runs on the Core-0 faDetTask); now ~0
 FuncTiming ft_faWindowFinalize; // fast alt-current per-2s-window finalize (Goertzel finalize + matrix fold + detector arm), runs inside faDrain
 
 // Fast alt-current per-session worst scalars (fleet upload, consumer 5). Declared HERE
@@ -2193,6 +2216,10 @@ float faSesPeakWorstHz = 0.0f;  // ...and its frequency, Hz (persisted)
 int32_t prev_faSesPkpk = 0;
 int32_t prev_faSesPeakA = 0;
 int32_t prev_faSesPeakHz = 0;
+// ...and for the Highest Tone in Map headline (faDomAmpAX100/faDomFreqHzX10/faDomRpm in 2_functions.ino)
+int32_t prev_faDomAmp = 0;
+int32_t prev_faDomFreq = 0;
+int32_t prev_faDomRpm = 0;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -2311,6 +2338,23 @@ int wavePeriod = 10;     //For PID tuning
 int waveAmplitude = 10;  //For PID tuning
 int TuningMode = 0;      //
 
+// ── Tuning→Current closed-loop sine generator (Stage 2) ───────────────────────
+// Waveform: 0 = square (existing ISE tuning), 1 = sine manual, 2 = sine auto-sweep.
+// Sine modes drive a sine setpoint (reference) and let the current PID chase it, then
+// measure measured-vs-reference gain/phase = the closed-loop frequency response.
+int     tuningWaveform     = 0;        // 0 square, 1 sine manual, 2 sine auto-sweep
+float   tuningSineFreq     = 2.0f;     // Hz — manual sine frequency
+float   tuningSweepStart   = 0.3f;     // Hz — auto-sweep low end
+float   tuningSweepEnd      = 15.0f;   // Hz — auto-sweep high end
+uint8_t tuningSweepCycles   = 6;       // analysed cycles per frequency (1 settle cycle skipped)
+volatile bool tuningSweepRequested = false;  // UI "Run Sweep" → start/restart the sweep
+bool    tuningSweepActive   = false;   // sweep in progress
+bool    tuningSweepDone     = false;   // sweep finished, tuningBode[] valid
+#define TUNING_SWEEP_NPOINTS 10        // log-spaced sweep points
+struct TuningBodePoint { float freqHz; float gain; float phaseDeg; };  // gain = measured/reference (unitless)
+TuningBodePoint tuningBode[TUNING_SWEEP_NPOINTS] = {};
+uint8_t tuningBodeCount = 0;           // valid points (served by /tuningbode)
+
 // === PID Tuning Score System ===
 struct TuningRecord {
   uint16_t runNumber;
@@ -2370,11 +2414,17 @@ float liveScore_thisCmd = 0.0f;  // setpointCommand from current tick (pre-slew)
 uint32_t liveScore_lastStepMs = 0;
 bool liveScore_inWindow = false;
 
-// CV loop always-running live score — same bucket structure as inner loop
+// CV loop live score — two intuitive readouts (both volts) over the same disturbance-gated window:
+//   cvRmsErrVal  — RMS voltage error, symmetric (overall regulation tightness)
+//   cvPeakOverVal — peak excursion ABOVE target (the battery-damaging side); peak-only, no duration
+// cvLiveScoreBuckets holds the unweighted Σ(e²·dt)/Σdt for the RMS number; cvPeakBuckets holds the
+// per-bucket peak overshoot so the window peak = max over the 60 buckets (old peaks age out on rotation).
 ScoreBucket *cvLiveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
+float *cvPeakBuckets[4] = {};             // ps_malloc'd — per-bucket peak overshoot (V); window peak = max over buckets
 uint8_t cvLiveScoreHead[4] = {};
 uint32_t cvLiveBucketStartMs[4] = {};
-float cvLiveScoreVal[4] = {};
+float cvRmsErrVal[4] = {};                // RMS voltage error (V) over the gated window
+float cvPeakOverVal[4] = {};              // peak overshoot above target (V) over the gated window
 uint32_t cvLiveScore_lastDtMs = 0;  // last time |g_dBcur_dt| crossed the gate threshold
 bool cvLiveScore_inWindow = false;
 
@@ -2413,8 +2463,8 @@ struct CVTuningRecord {
   // FastOV supervisor
   float kHard;
   // iExcess
-  float iExcessK;
-  int iExcessN;
+  float iExcessFrac;
+  float iExcessTau;
   float iExcessKBleed;
   // Load dump
   float loadDumpDtThresh, loadDumpDtThresh1, loadDumpDtThresh3;
@@ -2596,19 +2646,25 @@ float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage t
 float KHard = 35.0f;  // A/V — OV cap slope (Group 1: Vpred > target+OvPredMarginV; Group 2: IBV > target+OvMeasMarginV)
 bool  OvGroup1Enable  = true;   // Group 1 — prediction-based cap enable (Vpred > target + OvPredMarginV)
 bool  OvGroup2Enable  = true;   // Group 2 — measured-voltage threshold enable (IBV > target + OvMeasMarginV)
-int   IExcessSigSrc   = 0;      // Group 3 — 0=MA(N), 1=EMA(TC), 2=Raw
-int   IExcessMA_N     = 2;      // Group 3 — MA window size (1–10 samples)
 int   OutputPIDSigSrc = 0;      // Output current PID — 0=EMA(TC), 1=MA(N), 2=Raw
 int   OutputPIDMA_N   = 2;      // Output current PID — MA window size (1–10 samples)
 float TdPred         = 0.045f;  // Group 1 lookahead horizon (s)
 float OvMeasMarginV  = 0.100f;  // Group 2 measured-voltage trigger margin above target (V)
 float OvPredMarginV  = 0.150f;  // Group 1 prediction trigger margin above target (V)
 float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed into Vpred. dt-aware: alpha = dt/(TC+dt). Was DvdtAlpha (constant alpha); renamed 2026-05-22.
-// --- iExcess current supervisor ---
-float IExcessK = 5.0f;           // A above setpoint to arm supervisor
-int IExcessN = 4;                // consecutive ticks required (was 3, 28Hz-belt install); raised 2026-06-13 — MA(2) smear padded clean 2-tick belt-ripple peaks to exactly 3, false-firing iExcess. Install-specific (tracks resonance freq), NOT universal — see CV_Loop_Dev_Summary.
-float IExcessKBulk = 10.0f;      // Group 3 BULK sub-mode: A above the commanded current ceiling (i_ceiling_pre_ov) to arm, in the current-control phase (voltage far below target, where the CV iExcess above is gated off). Looser than IExcessK — tolerate more command-vs-actual error far from the voltage limit, catching only absurd RPM-blip overshoots before they trip a hard protection.
-int IExcessNBulk = 4;            // Group 3 BULK sub-mode: consecutive ticks above threshold required before firing.
+// --- iExcess current supervisor (EMA / leaky-integral detector, 2026-06-16) ---
+// Detection = time-averaged current excess over command (an EMA of the signed deviation),
+// thresholded against a FRACTION of the command. The averaging cancels any zero-mean
+// oscillation (belt resonance, stator imbalance, rectifier ripple) to ~0 before the
+// threshold is applied — so the consecutive-count test, the MA-smear signal, the signal
+// selector, and the post-fire mismatch gates of the old level detector are all gone.
+// See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
+float IExcessFrac     = 0.10f;   // CV threshold as fraction of setpointLimited (0.10 → 5A at a 50A command). Scales with frame size.
+float IExcessFracBulk = 0.15f;   // BULK threshold as fraction of i_ceiling_pre_ov (looser — tolerate command-vs-actual error far from the voltage limit).
+float IExcessFloorA   = 4.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual.
+float IExcessCeilA    = 25.0f;   // A — max threshold; guards against too-loose on very large commands.
+float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
+float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (replaces the old hardcoded 2A IEXCESS_HYST, now scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
 float IExcessArmMarginV = 0.100f; // V below target at which iExcess voltage gate opens. 0.2→0.1 2026-06-11: blocks recovery double-fires (belt-resonance peaks fired iExcess at target−0.16V mid-recovery) while keeping all real catches (fired at target+0.04..0.07)
 float ReseedFrac = 0.5f;  // shared: fraction of pre-event cv_I to seed on any protection recovery (was IExcessReseedFrac)
@@ -2635,7 +2691,7 @@ float g_slopeBleedAmpsThisTick = 0.0f;   // slope bleed drain applied this volta
 float Icv = 0.0f;                         // CV PID output — direct current setpoint (A)
 float cv_I = 0.0f;                        // CV integrator state (A)
 bool voltageControlActive = false;        // true when voltage PID is active (non-idle stages)
-uint32_t thermalScoreLastExternalMs = 0;  // last ms when voltageControlActive was true; gates 3-min blanking
+uint32_t thermalScoreLastExternalMs = 0;  // last ms in a voltage-binding stage (absorption/float/TV/maintain, NOT bulk); gates 3-min blanking
 // =====================================================================================
 // Table Bounds & Safety
 // "Group 0" in UI = hardware overcurrent trip (no protection-group integration yet)
@@ -3087,7 +3143,7 @@ struct PidLogEntry {
   uint8_t chargeStageDisplay;  // getChargeStageDisplayCode() enum value
   uint8_t TargetVoltageMode;   // runtime TargetVoltageMode flag (0 or 1)
   uint8_t flags;               // bit0=AUTO bit1=voltCtrl bit4=govBypass
-  uint8_t ovFlags;             // bit0=fastOvActive bit1=reserved(was softClamp) bit2=hardClamp bit3=iExcess bit4=loadDumpActive
+  uint8_t ovFlags;             // bit0=fastOvActive bit1=iExcessBulk bit2=hardClamp bit3=iExcess bit4=loadDumpActive
 
   // ── CV loop ──────────────────────────────────────────────────────
   float battV;                  // tick.currentBatteryVoltage
@@ -3239,7 +3295,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t spLimited;
   int16_t iMeas;
   int16_t duty;
-  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=reserved(was softClamp) b4=hardClamp b5=iExcess b6=loadDumpActive
+  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive
   uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV × 100    (V)
@@ -3251,7 +3307,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t voltLoopIntervalMs;      // actual voltage loop interval when fired this tick (ms); 0 if not fired
   int16_t inaIntervalMs;           // ina_last_ms at log time — INA228 read freshness (ms)
   int16_t slopeBleedAmps_x1000;    // cv_I drain applied this voltage loop tick (A × 1000); 0 on non-VL ticks
-  uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump
+  uint8_t capReason;               // which layer set fastOvCap this tick: 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk
 };
 static_assert(sizeof(CvLogEntry) == 51, "CvLogEntry must be 51 bytes");
 
@@ -3347,10 +3403,20 @@ enum FastOvCapReason : uint8_t {
   CAP_REASON_NONE     = 0,  // cap at fastOvBaseCap — no protection bound
   CAP_REASON_KHARD_G1 = 1,  // Group 1 predictive KHard (Vpred)
   CAP_REASON_KHARD_G2 = 2,  // Group 2 measured KHard / hysteresis hold (IBV)
-  CAP_REASON_IEXCESS  = 3,  // iExcess supervisor
+  CAP_REASON_IEXCESS  = 3,  // iExcess supervisor (near-target / CV regime)
   CAP_REASON_LOADDUMP = 4,  // load-dump cutoff
+  CAP_REASON_IEXCESS_BULK = 5,  // iExcess BULK sub-mode (current-control phase, vs ceiling)
 };
 uint8_t g_fastOvCapReason = CAP_REASON_NONE;  // exported once per full control tick alongside g_fastOvCurrentCap (see capReasonTick in AdjustFieldLearnMode)
+
+// Protection-event marker bitmask for the Plots-tab vertical designators. The control loop
+// ORs in a bit whenever a protection binds the current cap (momentary, single-tick events);
+// the CSV1 sender reads it at ~10 Hz and clears the bits it consumed, so events that fire
+// between sends are still captured. Visual indicator only — exact reason lives elsewhere.
+#define PROT_EVT_OV 0x01  // overvoltage hard clamp (KHard G1/G2)
+#define PROT_EVT_IX 0x02  // iExcess current-excess supervisor (CV or Bulk)
+#define PROT_EVT_LD 0x04  // load-dump cutoff
+volatile uint8_t g_protEventLatch = 0;
 
 // ── Current ring / MA / dI/dt ─────────────────────────────────────────────
 // Written in ADS case 1, read by AdjustFieldLearnMode and cvLog_tick
@@ -3363,12 +3429,14 @@ static IAmpEntry iAmpRing[I_RING_SIZE];
 static uint8_t iAmpHead = 0;
 static uint8_t iAmpCount = 0;
 
-float g_iMA_N   = 0.0f;   // MA(N) where N = IExcessMA_N (iExcess signal)
 float g_pidMA_N = 0.0f;   // MA(N) where N = OutputPIDMA_N (Output Current PID signal)
 uint16_t g_ch1LastIntervalMs = 0;  // last CH1 inter-sample gap, for cvLog
 
-bool g_iExcessActive = false;
+bool g_iExcessActive = false;      // CV iExcess LATCHED this tick
+bool g_iExcessBulkActive = false;  // Group 3 BULK sub-mode active this tick (current-control phase) — logged distinctly from CV iExcess
 float g_iExcessDutyCap = 100.0f;
+float g_mExcessEma = 0.0f;    // averaged signed current excess over command (A) — tuning trace; whichever detector gate is open writes it
+float g_iExcessThreshold = 0.0f;  // the computed fire threshold E (A) for the active detector — tuning trace
 
 // Load dump detection via dBcur/dt — three-tier cascade
 float LoadDumpDtThresh1 = 4000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
@@ -3885,11 +3953,14 @@ void setup() {
     if (!liveScoreBuckets[i]) Serial.printf("FATAL: liveScoreBuckets[%d] ps_malloc failed\n", i);
     else memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
   }
-  // CV live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
+  // CV live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM (RMS), + 4 × 60 × 4 bytes = 960 bytes (peak)
   for (int i = 0; i < 4; i++) {
     cvLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
     if (!cvLiveScoreBuckets[i]) Serial.printf("FATAL: cvLiveScoreBuckets[%d] ps_malloc failed\n", i);
     else memset(cvLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
+    cvPeakBuckets[i] = (float *)ps_malloc(LIVE_BUCKET_N * sizeof(float));
+    if (!cvPeakBuckets[i]) Serial.printf("FATAL: cvPeakBuckets[%d] ps_malloc failed\n", i);
+    else memset(cvPeakBuckets[i], 0, LIVE_BUCKET_N * sizeof(float));
   }
   // CV tuning score log — 50 records × ~120 bytes = ~6 KB PSRAM
   cvTuningLog = (CVTuningRecord *)ps_malloc(50 * sizeof(CVTuningRecord));
@@ -4115,6 +4186,13 @@ void setup() {
 
   xTaskCreatePinnedToCore(httpsTask, "HTTPS", 20480, NULL, 1, &httpsTaskHandle, 0);
   Serial.println("HTTPS task created on Core 0");
+
+  // Rectifier fault detector compute — Core 0, priority 1 (same as TempTask/HTTPS, below the
+  // network tasks). Moves the analysis off the Core-1 control loop, which used to freeze in
+  // lockstep once a minute. faResultSem returns the verdict; the task is woken by notification.
+  faResultSem = xSemaphoreCreateBinary();
+  xTaskCreatePinnedToCore(faDetTask, "faDet", 8192, NULL, 1, &faDetTaskHandle, 0);
+  Serial.println("Fault-detector task created on Core 0");
 
   if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
     Serial.println("Starting NTP sync...");
@@ -4349,8 +4427,9 @@ void loop() {
   // only empties the driver pool. Runs engine-off too (noise-floor scope view) and
   // self-suspends when the channel reads railed (broken/missing jumper).
   TIMED_CALL(ft_fastAltDrain, faDrain());
-  // Failure-detector job drain: advances the armed pulse-pattern analysis (if any) in
-  // ~1 ms slices; idle cost is a flag check. Verdict consumers live in faDetectorPoll().
+  // Failure-detector verdict consume: the heavy pulse-pattern analysis now runs on the Core-0
+  // faDetTask (it used to stall Core 1 ~30 ms once a minute). This only consumes a finished
+  // result + fires side-effects on Core 1, so ft_faDetector now reads ~0; idle cost is a flag check.
   TIMED_CALL(ft_faDetector, faDetectorPoll());
   // Periodic NVS save removed: nvs_commit() can block Core 1 for hundreds of ms during
   // flash sector erase, which collides with the voltage loop and risks OV on transients.

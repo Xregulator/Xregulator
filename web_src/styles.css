@@ -46,6 +46,14 @@
   /* Border radius */
 }
 
+/* Reserve the scrollbar gutter on every tab so the sticky header is the same width whether
+   or not a tab scrolls. Tall tabs (e.g. Console) show a vertical scrollbar that steals ~15px;
+   reserving that strip everywhere makes short non-scrolling tabs render at the same narrower
+   width, so the space-evenly chip row (Batt/SOC…IGN + Alternator Enable) packs tight on ALL
+   tabs (the wanted look) instead of only the scrolling ones. Needs classic scrollbars to take
+   effect; no effect under iOS overlay scrollbars; harmless on desktop. */
+html { scrollbar-gutter: stable; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -2001,6 +2009,171 @@ input:focus {
   }
 }
 
+/* Wind sub-tab: apparent-wind dial (narrow) beside the true/apparent trend plot (wide),
+   stacking on phones. The dial keeps its dark B&G face in both light and dark themes.
+   This card overrides the default 600px settings-card cap so the trend plot gets real
+   width on a wide screen (and stays centered/responsive below that). */
+/* ── Reusable segmented control (page-wide standard) ───────────────────────
+   A boxed group of mutually-exclusive buttons: tinted track, active button = a
+   raised pill. `.seg.accent` fills the active button with the teal accent (use for
+   primary mode toggles); plain `.seg` uses a neutral white pill (use for option
+   pickers like time windows). `.seg-field` stacks a small caps label above a control;
+   wire active state by toggling `.on` on the chosen button. Theme-aware. */
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid var(--border, #ccc);
+  border-radius: 9px;
+}
+.dark-mode .seg { background: rgba(255, 255, 255, 0.07); }
+.seg > button {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-muted, #888);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.seg > button.on {
+  background: var(--card-light, #fff);
+  color: var(--text-dark, #333);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+.dark-mode .seg > button.on { background: #3a3f44; color: #fff; }
+.seg.accent > button.on { background: var(--accent, #00a19a); color: #fff; }
+.dark-mode .seg.accent > button.on { background: var(--accent, #00a19a); color: #fff; }
+.seg-field { display: inline-flex; flex-direction: column; gap: 5px; }
+.seg-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, #888);
+  margin-left: 3px;
+}
+
+/* Two-class selector so this beats the later `.settings-card { max-width:600px }` rule
+   regardless of source order — the trend plot needs the full width on desktop. */
+.settings-card.wind-settings-card { max-width: 1180px; }
+.wind-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 215px) minmax(0, 1fr);
+  gap: 12px;
+}
+/* Stack the dial+readouts card on top of the plot card once the row gets tight. */
+@media (max-width: 760px) {
+  .wind-layout { grid-template-columns: 1fr; }
+}
+.wind-dial-card { display: flex; flex-direction: column; }
+.wind-hud {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;          /* absorb the extra height when the plot card is taller, centering the dial so the badge+stats below sit flush at the bottom instead of leaving dead space */
+  padding: 6px 0 2px;
+}
+.wind-dial {
+  width: 100%;
+  max-width: 215px;
+  height: auto;
+}
+/* Beaufort badge + 2×2 numeric grid occupy the space below the dial so the dial
+   card's height tracks the trend plot instead of leaving dead whitespace. */
+.wind-beaufort {
+  align-self: center;
+  margin-top: 10px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent, #00a19a);
+  background: rgba(0, 161, 154, 0.10);
+  border: 1px solid rgba(0, 161, 154, 0.30);
+  white-space: nowrap;
+}
+.wind-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+.wind-stat {
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid var(--border, #ddd);
+  border-radius: 7px;
+  padding: 7px 9px;
+  text-align: center;
+}
+.dark-mode .wind-stat { background: rgba(255, 255, 255, 0.05); }
+.wind-stat .k {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, #888);
+}
+.wind-stat .v {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dark);
+}
+.dark-mode .wind-stat .v { color: #f0f0f0; }
+/* Clamp the trend plot to its grid column: width:100% ties it to the (min-width:0)
+   card-group, overflow:hidden stops a stale-wide uPlot canvas from inflating the column. */
+#windtrend-plot { width: 100%; overflow: hidden; }
+.wind-trend-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-bottom: 10px;
+}
+.wind-trend-ctrls {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+/* Phones: stack the header, give each segmented control its own full-width row with
+   equal-width buttons so the Source + Window groups never overflow or clip. */
+@media (max-width: 480px) {
+  .wind-trend-head { flex-direction: column; align-items: stretch; }
+  .wind-trend-ctrls { width: 100%; gap: 10px; }
+  .wind-trend-ctrls .seg-field { width: 100%; }
+  .wind-trend-ctrls .seg { display: flex; }
+  .wind-trend-ctrls .seg > button { flex: 1 1 0; padding: 8px 4px; }
+}
+.wind-trend-legend {
+  display: flex;
+  gap: 22px;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  margin-top: 8px;
+  align-items: center;
+  justify-content: center;
+}
+.wind-trend-legend .wind-lg-line {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  vertical-align: middle;
+  margin-right: 7px;
+}
+.wind-trend-legend b {
+  color: var(--text-dark);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+}
+
 .card {
   background: var(--card-light);
   padding: 10px;
@@ -3598,23 +3771,27 @@ input:checked+.slider:before {
     cursor: pointer;
     transition: background 0.15s, color 0.15s, box-shadow 0.15s;
   }
+  /* Unified 2026-06-16 with the page-wide `.seg.accent` standard: active = accent-filled
+     pill + white text (was a tonal white/teal pill). rate-low keeps an orange fill so the
+     low-charge state stays visually distinct. Same in both themes for a flat, filled look. */
   .cap-mode-btn.cap-mode-active {
-    background: var(--card-light, #fff);
-    color: var(--teal, #00a19a);
+    background: var(--accent, #00a19a);
+    color: #fff;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   .dark-mode .cap-mode-btn.cap-mode-active {
-    background: #3a3f44;
+    background: var(--accent, #00a19a);
+    color: #fff;
   }
   #chargeRateLowBtn.cap-mode-active,
   #capModeRow.rate-low .cap-mode-btn.cap-mode-active {
-    background: var(--card-light, #fff);
-    color: #e08600;
+    background: #e08600;
+    color: #fff;
   }
   .dark-mode #chargeRateLowBtn.cap-mode-active,
   .dark-mode #capModeRow.rate-low .cap-mode-btn.cap-mode-active {
-    background: #3a3f44;
-    color: #ffb74d;
+    background: #e08600;
+    color: #fff;
   }
   /* Derived (calculated) inputs — visually subordinate, not editable */
   .learning-table input.cap-derived {

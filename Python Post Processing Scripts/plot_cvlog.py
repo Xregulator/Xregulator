@@ -231,7 +231,7 @@ elif "t_s" not in df.columns:
 if "ovFlags" in df.columns:
     _ov = pd.to_numeric(df["ovFlags"], errors="coerce").fillna(0).astype("int64")
     df["fastOvActive"]   = (_ov & 1)
-    # bit 1 reserved (was softClamp — Layer 1 removed)
+    df["iExcessBulk"]    = ((_ov & 2) > 0).astype("int64")  # bit 1 — iExcess BULK sub-mode (current-control phase)
     df["hardClamp"]      = ((_ov & 4) > 0).astype("int64")
     df["iExcess"]        = ((_ov & 8) > 0).astype("int64")
     df["loadDumpActive"] = ((_ov & 16) > 0).astype("int64")
@@ -255,7 +255,7 @@ numeric_cols = [
     "hardClamp",
     "rpm",
     "battV_filt_V", "iMeas_filt_A",
-    "ch1_last_ms", "iExcess",
+    "ch1_last_ms", "iExcess", "iExcessBulk",
     "battI_A", "dBcur_dt_Aps", "loadDumpActive",
     "cvDSlope_Vps", "awState",
     "voltLoopInterval_ms", "inaInterval_ms",
@@ -296,19 +296,20 @@ df["voltLoopFired"]  = _to_int("voltLoopFired")
 df["cvActive"]       = _to_int("cvActive")
 df["hardClamp"]      = _to_int("hardClamp")
 df["iExcess"]        = _to_int("iExcess")
+df["iExcessBulk"]    = _to_int("iExcessBulk")   # Group 3 BULK sub-mode (current-control phase); older logs lack it → all 0
 df["loadDumpActive"] = _to_int("loadDumpActive")
-df["capReason"]      = _to_int("capReason")   # 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump (binding cap; older logs lack it → all 0)
+df["capReason"]      = _to_int("capReason")   # 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk (binding cap; older logs lack it → all 0)
 
 # capReason: which protection layer was the BINDING current cap each tick. This answers
 # "does KHard actually do anything?" — KHard only matters when capReason is 1 or 2.
-CAP_REASON_LABELS = {0: "none", 1: "KHard_G1", 2: "KHard_G2", 3: "iExcess", 4: "loadDump"}
-CAP_REASON_COLORS = {0: "#cccccc", 1: "#1f77b4", 2: "#ff7f0e", 3: "#9467bd", 4: "#d62728"}  # G1 blue / G2 orange / iExc purple / LD red
-CAP_REASON_SHORT  = {1: "G1", 2: "G2", 3: "iExc", 4: "LD"}  # compact on-plot event tags
+CAP_REASON_LABELS = {0: "none", 1: "KHard_G1", 2: "KHard_G2", 3: "iExcess", 4: "loadDump", 5: "iExcessBulk"}
+CAP_REASON_COLORS = {0: "#cccccc", 1: "#1f77b4", 2: "#ff7f0e", 3: "#9467bd", 4: "#d62728", 5: "#26a69a"}  # G1 blue / G2 orange / iExc purple / LD red / iExcBulk teal
+CAP_REASON_SHORT  = {1: "G1", 2: "G2", 3: "iExc", 4: "LD", 5: "iExcB"}  # compact on-plot event tags
 _have_capreason = "capReason" in _col_names  # present only in newer CV-binary logs
 if _have_capreason:
     _n = len(df)
     print("Binding cap reason (share of all samples):")
-    for _code in (0, 1, 2, 3, 4):
+    for _code in (0, 1, 2, 3, 4, 5):
         _pct = 100.0 * (df["capReason"] == _code).sum() / _n if _n else 0.0
         print(f"    {CAP_REASON_LABELS[_code]:<9} {_pct:5.1f}%")
     _khard_share = 100.0 * df["capReason"].isin([1, 2]).sum() / _n if _n else 0.0

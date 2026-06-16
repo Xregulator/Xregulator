@@ -16,29 +16,12 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 /*
- * KNOWN HEAP EFFICIENCY ISSUE - OTA/HTTPS String Concatenation (LOW PRIORITY)
- * 
- * Several OTA and HTTPS functions use String concatenation (+) instead of snprintf:
- *   - Line ~3126: checkForSpecificOTAUpdate() - URL building
- *   - Line ~3242: executeUpdateFirmwareVersion() - URL building  
- *   - Line ~3250: executeUpdateFirmwareVersion() - Authorization header
- *   - Line ~3253: executeUpdateFirmwareVersion() - JSON payload
- *   - Line ~3300: executeCheckForcedUpdate() - URL building
- *   - Line ~3308: executeCheckForcedUpdate() - Authorization header
- *   - Line ~3311: executeCheckForcedUpdate() - JSON payload
- *   - Lines ~3147-3169: Various Serial/events.send() messages
- * 
- * This creates temporary String objects and heap fragmentation. HOWEVER:
- *   - These functions run infrequently (user-initiated OTA or periodic checks)
- *   - Not called in tight loops or critical paths
- *   - Heap impact is minimal compared to HTTPS/WiFi operations already happening
- * 
- * DECISION: Acceptable as-is. OTA operations are rare enough that the heap churn
- * doesn't matter. If OTA stability issues arise, fix by replacing String concat
- * with snprintf into char buffers (see executeFetchWeatherData() lines 241-244
- * or buildConfigPayload() for correct pattern).
- * 
- * Core telemetry, sensor, and control loops use proper snprintf - no issues there.
+ * KNOWN HEAP EFFICIENCY ISSUE (LOW PRIORITY): the OTA / forced-update HTTPS handlers
+ * (checkForSpecificOTAUpdate, executeUpdateFirmwareVersion, executeCheckForcedUpdate)
+ * build URLs / headers / JSON with String concatenation, which fragments the heap.
+ * Accepted as-is: these run rarely and never in a tight loop. If OTA stability ever
+ * suffers, convert them to snprintf into char buffers (see executeFetchWeatherData /
+ * buildConfigPayload for the pattern).
  */
 
 void updateCpuLoad() {
@@ -127,24 +110,11 @@ void updateSystemHealthStats() {
                  ? 100 - (LargestInternalBlock * 100 / FreeInternalRam)
                  : 100;
 
-    // TLS handshake needs ~32-40 KB contiguous internal RAM. Warn early so there is
-    // time to investigate before HTTPS starts silently failing.
-    // Every HTTPS handshake briefly fragments largest-block under 34 KB and recovers
-    // above 38 KB, so without throttling this would fire on every upload. Cap at
-    // one console message per 5 minutes — the underlying dip/recover cycle is still
-    // tracked by heapWarnSent so we re-fire promptly on the next dip after the throttle expires.
-    static bool heapWarnSent = false;
-    static unsigned long lastHeapWarnMs = 0;
-    const unsigned long HEAP_WARN_THROTTLE_MS = 300000UL;
-    if (LargestInternalBlock < 34 && !heapWarnSent) {
-      heapWarnSent = true;
-      if (millis() - lastHeapWarnMs >= HEAP_WARN_THROTTLE_MS) {
-        lastHeapWarnMs = millis();
-        queueConsoleMessage("WARNING: Internal RAM fragmented — HTTPS may fail. Check ESP32 Stats panel.");
-      }
-    } else if (LargestInternalBlock >= 38) {
-      heapWarnSent = false;  // Re-arm dip detector; throttle still applies on next fire
-    }
+    // Low-contiguous-RAM (TLS fragmentation) is surfaced live in the ESP32 Stats panel
+    // via the heap figures computed above. No console message is emitted: every HTTPS
+    // handshake briefly dips largest-block under 34 KB and recovers, so the warning
+    // re-fired every few minutes and crowded out one-time events without adding any
+    // actionable information.
   }
 }
 
@@ -954,6 +924,32 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     wavePeriod = settingRead(NK_wavePeriod).toInt();
   }
 
+  if (!settingExists(NK_tuningWaveform)) {
+    settingWrite(NK_tuningWaveform, String(tuningWaveform).c_str());
+  } else {
+    tuningWaveform = settingRead(NK_tuningWaveform).toInt();
+  }
+  if (!settingExists(NK_tuningSineFreq)) {
+    settingWrite(NK_tuningSineFreq, String(tuningSineFreq).c_str());
+  } else {
+    tuningSineFreq = settingRead(NK_tuningSineFreq).toFloat();
+  }
+  if (!settingExists(NK_tuningSweepStart)) {
+    settingWrite(NK_tuningSweepStart, String(tuningSweepStart).c_str());
+  } else {
+    tuningSweepStart = settingRead(NK_tuningSweepStart).toFloat();
+  }
+  if (!settingExists(NK_tuningSweepEnd)) {
+    settingWrite(NK_tuningSweepEnd, String(tuningSweepEnd).c_str());
+  } else {
+    tuningSweepEnd = settingRead(NK_tuningSweepEnd).toFloat();
+  }
+  if (!settingExists(NK_tuningSweepCycles)) {
+    settingWrite(NK_tuningSweepCycles, String(tuningSweepCycles).c_str());
+  } else {
+    tuningSweepCycles = (uint8_t)settingRead(NK_tuningSweepCycles).toInt();
+  }
+
   if (!settingExists(NK_InputFilterTC)) {
       settingWrite(NK_InputFilterTC, String(InputFilterTC).c_str());
     } else {
@@ -965,7 +961,28 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     } else {
       SystemIDStepAmplitude = settingRead(NK_SystemIDStepAmplitude).toFloat();
     }
-    
+
+    if (!settingExists(NK_systemIDTestType)) {
+      settingWrite(NK_systemIDTestType, String(systemIDTestType).c_str());
+    } else {
+      systemIDTestType = (uint8_t)settingRead(NK_systemIDTestType).toInt();
+    }
+    if (!settingExists(NK_systemIDSineFreqStart)) {
+      settingWrite(NK_systemIDSineFreqStart, String(systemIDSineFreqStart).c_str());
+    } else {
+      systemIDSineFreqStart = settingRead(NK_systemIDSineFreqStart).toFloat();
+    }
+    if (!settingExists(NK_systemIDSineFreqEnd)) {
+      settingWrite(NK_systemIDSineFreqEnd, String(systemIDSineFreqEnd).c_str());
+    } else {
+      systemIDSineFreqEnd = settingRead(NK_systemIDSineFreqEnd).toFloat();
+    }
+    if (!settingExists(NK_systemIDSineCycles)) {
+      settingWrite(NK_systemIDSineCycles, String(systemIDSineCycles).c_str());
+    } else {
+      systemIDSineCycles = (uint8_t)settingRead(NK_systemIDSineCycles).toInt();
+    }
+
   if (!settingExists(NK_SwitchingFrequency)) {
     settingWrite(NK_SwitchingFrequency, String(SwitchingFrequency).c_str());
   } else {
@@ -1720,25 +1737,35 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     WarmupRampRate = max(0.0f, settingRead(NK_WarmupRampRate).toFloat());
   }
-  if (!settingExists(NK_IExcessK)) {
-    settingWrite(NK_IExcessK, String(IExcessK, 1).c_str());
+  if (!settingExists(NK_IExcessFrac)) {
+    settingWrite(NK_IExcessFrac, String(IExcessFrac, 3).c_str());
   } else {
-    IExcessK = settingRead(NK_IExcessK).toFloat();
+    IExcessFrac = settingRead(NK_IExcessFrac).toFloat();
   }
-  if (!settingExists(NK_IExcessN)) {
-    settingWrite(NK_IExcessN, String(IExcessN).c_str());
+  if (!settingExists(NK_IExcessFracBulk)) {
+    settingWrite(NK_IExcessFracBulk, String(IExcessFracBulk, 3).c_str());
   } else {
-    IExcessN = (int)settingRead(NK_IExcessN).toInt();
+    IExcessFracBulk = settingRead(NK_IExcessFracBulk).toFloat();
   }
-  if (!settingExists(NK_IExcessKBulk)) {
-    settingWrite(NK_IExcessKBulk, String(IExcessKBulk, 1).c_str());
+  if (!settingExists(NK_IExcessFloorA)) {
+    settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
   } else {
-    IExcessKBulk = settingRead(NK_IExcessKBulk).toFloat();
+    IExcessFloorA = settingRead(NK_IExcessFloorA).toFloat();
   }
-  if (!settingExists(NK_IExcessNBulk)) {
-    settingWrite(NK_IExcessNBulk, String(IExcessNBulk).c_str());
+  if (!settingExists(NK_IExcessCeilA)) {
+    settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
   } else {
-    IExcessNBulk = (int)settingRead(NK_IExcessNBulk).toInt();
+    IExcessCeilA = settingRead(NK_IExcessCeilA).toFloat();
+  }
+  if (!settingExists(NK_IExcessTau)) {
+    settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());
+  } else {
+    IExcessTau = settingRead(NK_IExcessTau).toFloat();
+  }
+  if (!settingExists(NK_IExcessRelFrac)) {
+    settingWrite(NK_IExcessRelFrac, String(IExcessRelFrac, 3).c_str());
+  } else {
+    IExcessRelFrac = settingRead(NK_IExcessRelFrac).toFloat();
   }
   if (!settingExists(NK_IExcessKBleed)) {
     settingWrite(NK_IExcessKBleed, String(IExcessKBleed, 2).c_str());
@@ -1807,16 +1834,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
   } else {
     settingWrite(NK_OvGroup2Enable, String((int)OvGroup2Enable).c_str());
-  }
-  if (!settingExists(NK_IExcessSigSrc)) {
-    settingWrite(NK_IExcessSigSrc, String(IExcessSigSrc).c_str());
-  } else {
-    IExcessSigSrc = constrain(settingRead(NK_IExcessSigSrc).toInt(), 0, 2);
-  }
-  if (!settingExists(NK_IExcessMA_N)) {
-    settingWrite(NK_IExcessMA_N, String(IExcessMA_N).c_str());
-  } else {
-    IExcessMA_N = constrain(settingRead(NK_IExcessMA_N).toInt(), 1, I_RING_SIZE);
   }
   if (!settingExists(NK_OutputPIDSigSrc)) {
     settingWrite(NK_OutputPIDSigSrc, String(OutputPIDSigSrc).c_str());
@@ -2447,31 +2464,45 @@ void updateAccelMetrics() {
     imuRingBuffer->gyro_tail = (imuRingBuffer->gyro_tail + 1) % GYRO_RING_SIZE;
   }
 
-  // Finalize IMU zero once both accel + gyro windows are full
-  if (imuZeroInProgress && imuZeroAccelN >= IMU_ZERO_TARGET && imuZeroGyroN >= IMU_ZERO_TARGET) {
-    float ax0 = imuZeroAxSum / imuZeroAccelN;
-    float ay0 = imuZeroAySum / imuZeroAccelN;
-    float az0 = imuZeroAzSum / imuZeroAccelN;
-    imuHeelOffsetDeg = atan2(ay0, sqrt(ax0 * ax0 + az0 * az0)) * 180.0f / PI;
-    imuPitchOffsetDeg = atan2(-ax0, sqrt(ay0 * ay0 + az0 * az0)) * 180.0f / PI;
-    imuGxBias = imuZeroGxSum / imuZeroGyroN;
-    imuGyBias = imuZeroGySum / imuZeroGyroN;
-    imuGzBias = imuZeroGzSum / imuZeroGyroN;
+  // Finalize IMU zero: normally once both windows hit the target (~2s @104Hz). The timeout
+  // margin guarantees the capture always resolves — if samples arrive slowly it finalizes on
+  // whatever it gathered (provided the IMU_ZERO_MIN floor), otherwise it aborts cleanly. Either
+  // way settingsDirty fires so the CSV3 echo refreshes the dashboard "calculating" label at once.
+  if (imuZeroInProgress) {
+    bool targetMet = (imuZeroAccelN >= IMU_ZERO_TARGET && imuZeroGyroN >= IMU_ZERO_TARGET);
+    bool timedOut  = (millis() - imuZeroStartMs >= IMU_ZERO_TIMEOUT_MS);
+    if (targetMet || timedOut) {
+      if (imuZeroAccelN >= IMU_ZERO_MIN && imuZeroGyroN >= IMU_ZERO_MIN) {
+        float ax0 = imuZeroAxSum / imuZeroAccelN;
+        float ay0 = imuZeroAySum / imuZeroAccelN;
+        float az0 = imuZeroAzSum / imuZeroAccelN;
+        imuHeelOffsetDeg = atan2(ay0, sqrt(ax0 * ax0 + az0 * az0)) * 180.0f / PI;
+        imuPitchOffsetDeg = atan2(-ax0, sqrt(ay0 * ay0 + az0 * az0)) * 180.0f / PI;
+        imuGxBias = imuZeroGxSum / imuZeroGyroN;
+        imuGyBias = imuZeroGySum / imuZeroGyroN;
+        imuGzBias = imuZeroGzSum / imuZeroGyroN;
 
-    DynamicJsonDocument zdoc(256);
-    zdoc["heel_offset_deg"] = imuHeelOffsetDeg;
-    zdoc["pitch_offset_deg"] = imuPitchOffsetDeg;
-    zdoc["gx_bias"] = imuGxBias;
-    zdoc["gy_bias"] = imuGyBias;
-    zdoc["gz_bias"] = imuGzBias;
-    String zout;
-    serializeJson(zdoc, zout);
-    settingWrite(NK_imu_zero, zout.c_str());
+        DynamicJsonDocument zdoc(256);
+        zdoc["heel_offset_deg"] = imuHeelOffsetDeg;
+        zdoc["pitch_offset_deg"] = imuPitchOffsetDeg;
+        zdoc["gx_bias"] = imuGxBias;
+        zdoc["gy_bias"] = imuGyBias;
+        zdoc["gz_bias"] = imuGzBias;
+        String zout;
+        serializeJson(zdoc, zout);
+        settingWrite(NK_imu_zero, zout.c_str());
 
-    cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
-    imuZeroInProgress = false;
-    queueConsoleMessage("IMU ZERO: captured (heel " + String(imuHeelOffsetDeg, 1) +
-                        "°, pitch " + String(imuPitchOffsetDeg, 1) + "°)");
+        cf_heel = 0; cf_pitch = 0;  // snap filter to new level reference (feels instant)
+        queueConsoleMessage("IMU ZERO: captured (heel " + String(imuHeelOffsetDeg, 1) +
+                            "°, pitch " + String(imuPitchOffsetDeg, 1) +
+                            (targetMet ? "°)" : "°, partial — timed out)"));
+      } else {
+        // Not enough samples even after the timeout (IMU barely streaming) — abort, keep old offsets.
+        queueConsoleMessage("IMU ZERO: aborted — too few samples (is the IMU streaming?)");
+      }
+      imuZeroInProgress = false;
+      settingsDirty = true;   // fire CSV3 now so the echo lands ~immediately, not on the 60s heartbeat
+    }
   }
 
   // Update current display values
@@ -4150,6 +4181,10 @@ void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
     timeIsSynced = true;
     currentTimeSource = TIME_GPS;
     lastTimeSyncAttempt = millis();
+    // Set the libc clock too, so time(NULL) is valid in NMEA/AP mode — not just after NTP.
+    // Without this every time(NULL) timestamp (captures, sync badges) reads ~1970 off-grid.
+    struct timeval tv = { (time_t)gpsTime, 0 };
+    settimeofday(&tv, nullptr);
 
     if (NMEA2KVerbose) {
       Serial.println("Time synced from GPS");
@@ -4184,6 +4219,10 @@ void syncTimeFromPhone(time_t phoneEpochSec) {
   timeIsSynced = true;
   currentTimeSource = TIME_PHONE;
   lastTimeSyncAttempt = millis();
+  // Set the libc clock too, so time(NULL) is valid in AP/phone mode — not just after NTP.
+  // Without this every time(NULL) timestamp (captures, sync badges) reads ~1970 off-grid.
+  struct timeval tv = { (time_t)phoneEpochSec, 0 };
+  settimeofday(&tv, nullptr);
 }
 
 // Promote phone GPS into the effective Latitude/Longitude globals. Respects

@@ -139,16 +139,11 @@ bool fsRemove(const char *path) {
 }
 
 // ==== NVS settings layer ====
-// User settings live in the NVS "settings" namespace as strings, NOT in
-// LittleFS files. The userdata LittleFS partition is high-churn (logs, rings,
-// history) and mounts with formatOnFail — a corruption there must not wipe
-// user settings. String storage keeps exact parity with the old file contents
-// (same parse paths, e.g. ChargeEfficiency's user-readable "99.0" form).
-// NVS keys cap at 15 chars, so long setting names map to short keys via the
-// NK_* macros below (generated; doc: Working Markdown Docs/NVS_SETTINGS_KEY_MAP.md).
-// The alt*/perf* registry tables in 7_functions.ino use their entry names
-// truncated to 15 chars as keys directly — keep new registry names unique
-// in their first 15 chars.
+// Settings live in the NVS "settings" namespace as strings (not LittleFS).
+// Rationale + full key map: Working Markdown Docs/NVS_SETTINGS_KEY_MAP.md.
+// NVS keys cap at 15 chars — long names map to short NK_* keys below; the
+// alt*/perf* registry tables (7_functions.ino) key off entry names truncated
+// to 15 chars, so keep new registry names unique in their first 15 chars.
 #define NK_AbsorptionTimeoutMs "AbsorptionTmtMs"
 #define NK_AbsorptionVoltage "AbsorptionVoltg"
 #define NK_AlarmActivate "AlarmActivate"
@@ -192,14 +187,14 @@ bool fsRemove(const char *path) {
 #define NK_HardOCDebounceMs "HardOCDebouncMs"
 #define NK_HiLow "HiLow"
 #define NK_IExcessArmMarginV "IExcessArmMrgnV"
-#define NK_IExcessK "IExcessK"
+#define NK_IExcessCeilA "IExcessCeilA"
+#define NK_IExcessFloorA "IExcessFloorA"
+#define NK_IExcessFrac "IExcessFrac"
+#define NK_IExcessFracBulk "IExcessFrcBlk"
 #define NK_IExcessKBleed "IExcessKBleed"
-#define NK_IExcessKBulk "IExcessKBulk"
-#define NK_IExcessMA_N "IExcessMA_N"
-#define NK_IExcessN "IExcessN"
-#define NK_IExcessNBulk "IExcessNBulk"
+#define NK_IExcessRelFrac "IExcessRelFrac"
 #define NK_IExcessReseedFrac "IExcessResedFrc"
-#define NK_IExcessSigSrc "IExcessSigSrc"
+#define NK_IExcessTau "IExcessTau"
 #define NK_IgnitionOverride "IgnitionOverrid"
 #define NK_IgnoreLearningDuringPenalty "IgnrLrnngDrngPn"
 #define NK_IgnoreRPM "IgnoreRPM"
@@ -281,6 +276,10 @@ bool fsRemove(const char *path) {
 #define NK_SwitchControlOverride "SwtchCntrlOvrrd"
 #define NK_SwitchingFrequency "SwitchingFrqncy"
 #define NK_SystemIDStepAmplitude "SystmIDStpAmplt"
+#define NK_systemIDTestType "SysIDTestType"
+#define NK_systemIDSineFreqStart "SysIDSineFStrt"
+#define NK_systemIDSineFreqEnd "SysIDSineFEnd"
+#define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
 #define NK_TailCurrent_A "TailCurrent_A"
@@ -359,6 +358,11 @@ bool fsRemove(const char *path) {
 #define NK_totalPowerCycles "totalPowerCycls"
 #define NK_waveAmplitude "waveAmplitude"
 #define NK_wavePeriod "wavePeriod"
+#define NK_tuningWaveform "tuningWaveform"
+#define NK_tuningSineFreq "tuningSineFreq"
+#define NK_tuningSweepStart "tuningSwpStrt"
+#define NK_tuningSweepEnd "tuningSwpEnd"
+#define NK_tuningSweepCycles "tuningSwpCyc"
 #define NK_weatherDataValid "weatherDataVald"
 #define NK_weatherModeEnabled "weatherModEnbld"
 #define NK_webgaugesinterval "webgaugesintrvl"
@@ -488,12 +492,8 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/HardOCDebounceMs.txt", NK_HardOCDebounceMs },
   { "/HiLow.txt", NK_HiLow },
   { "/IExcessArmMarginV.txt", NK_IExcessArmMarginV },
-  { "/IExcessK.txt", NK_IExcessK },
   { "/IExcessKBleed.txt", NK_IExcessKBleed },
-  { "/IExcessMA_N.txt", NK_IExcessMA_N },
-  { "/IExcessN.txt", NK_IExcessN },
   { "/IExcessReseedFrac.txt", NK_IExcessReseedFrac },
-  { "/IExcessSigSrc.txt", NK_IExcessSigSrc },
   { "/IgnitionOverride.txt", NK_IgnitionOverride },
   { "/IgnoreLearningDuringPenalty.txt", NK_IgnoreLearningDuringPenalty },
   { "/IgnoreRPM.txt", NK_IgnoreRPM },
@@ -2764,8 +2764,9 @@ bool buildConfigPayload() {
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
     ",\"VoltageKp\":%.4f,\"VoltageKi\":%.4f,\"VoltageFilterTC\":%.2f,"
     "\"VoltageLoopInterval\":%lu,"
-    "\"IExcessK\":%.4f,\"IExcessN\":%d,\"IExcessKBleed\":%.4f,"
-    "\"IExcessArmMarginV\":%.2f,\"IExcessMA_N\":%d,\"IExcessSigSrc\":%d,"
+    "\"IExcessFrac\":%.4f,\"IExcessFracBulk\":%.4f,\"IExcessFloorA\":%.2f,"
+    "\"IExcessCeilA\":%.2f,\"IExcessTau\":%.1f,\"IExcessRelFrac\":%.3f,"
+    "\"IExcessKBleed\":%.4f,\"IExcessArmMarginV\":%.2f,"
     "\"AwBleedRate\":%.4f,\"AwSeedProtectMs\":%lu,"
     "\"FastSetpointRiseRate\":%.2f,\"FastSetpointRiseWindowMs\":%lu,"
     "\"FastSetpointRiseHeadroomV\":%.2f,\"KHard\":%.4f,\"TdPred\":%.4f,"
@@ -2773,8 +2774,9 @@ bool buildConfigPayload() {
     "\"SlopeBleedProxV\":%.2f,\"DvdtTC\":%.2f",
     VoltageKp, VoltageKi, VoltageFilterTC,
     (unsigned long)VoltageLoopInterval,
-    IExcessK, IExcessN, IExcessKBleed,
-    IExcessArmMarginV, IExcessMA_N, IExcessSigSrc,
+    IExcessFrac, IExcessFracBulk, IExcessFloorA,
+    IExcessCeilA, IExcessTau, IExcessRelFrac,
+    IExcessKBleed, IExcessArmMarginV,
     AwBleedRate, (unsigned long)AwSeedProtectMs,
     FastSetpointRiseRate, (unsigned long)FastSetpointRiseWindowMs,
     FastSetpointRiseHeadroomV, KHard, TdPred,
@@ -3493,9 +3495,15 @@ static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core
 // left gaps a tone could fall into and read up to ~6x low (a 28 Hz, 8.7 A real tone read 4.1 A).
 // The FFT has uniform 0.5 Hz-class resolution with no gaps. Flat-top window = amplitude-accurate
 // (near-zero scalloping); single transform per window, NO run-to-run averaging. faToneBuf holds
-// this window's AC samples; faFftRe/Im are the zero-padded transform workspace. All PSRAM.
+// this window's raw current (window mean removed at finalize for an exact DC reference);
+// faFftRe/Im are the zero-padded transform workspace. All PSRAM.
 #define FA_FFT_N 1024                       // power-of-2 transform size (zero-padded from 625)
-static float *faToneBuf = NULL;             // PSRAM — FA_WIN_DECIM_N AC samples (this window)
+#define FA_MIN_TONE_HZ 4.0f                 // peak-search floor. Below ~one cycle per window
+                                            // (1/T = 2 Hz at 0.5 s) a tone isn't resolvable, and the
+                                            // flat-top window's wide flat main lobe smears any near-DC
+                                            // residual up into the lowest bins as a phantom 1-2 Hz tone.
+                                            // 4 Hz clears both; real tones of interest start ~10 Hz.
+static float *faToneBuf = NULL;             // PSRAM — FA_WIN_DECIM_N raw decimated current samples (window mean removed at finalize)
 static float *faFftRe = NULL, *faFftIm = NULL;  // PSRAM — FA_FFT_N transform workspace
 static float *faFtWin = NULL;               // PSRAM — FA_WIN_DECIM_N flat-top window table
 static float faFtWinSum = 1.0f;             // Σ window (single-sided amplitude normalization)
@@ -3509,7 +3517,7 @@ static uint16_t *faBitRev = NULL;           // PSRAM — FA_FFT_N bit-reversal p
 // EMA drift ≤ max(2 A, 5% of mean); no protection active; no attenuation switch; no
 // railed codes; no sample loss (wall-clock audit vs the crystal-timed sample count).
 #define FA_EMA_ALPHA (1.0f / 1250.0f)  // 1 s TC at the decimated rate
-#define FA_RPM_EDGE_MARGIN 10.0f
+#define FA_RPM_EDGE_MARGIN 2.0f    // guard band each side of a 50-RPM bin edge; m carves 2m RPM of map dead-zone per bin (2 -> 8%). The same-bin (no-straddle) test is the real correctness gate; this is just fringe-filing guard.
 #define FA_WIN_WALL_MAX_MS 580UL   // 0.5 s nominal (625 @ 1250 SPS) + ~80 ms loop-jitter margin; beyond this the window lost samples (DMA pool overflow)
 
 // ── User-tunable knobs (Pattern B settings — NVS-backed, echoed on CSV3) ──
@@ -3585,8 +3593,9 @@ static unsigned long faDetectMsgMs = 0, faAnomCapMs = 0, faDetTrendMsgMs = 0;
 // It does NOT read the scope ring or the decimated stream — crest picking needs the raw
 // 20 kSPS stream — so each measurement window's raw samples are also captured into
 // faDetWin (window-aligned to within one boxcar-16 group). A qualified window ARMS a job
-// on that buffer; faDetectorPoll() advances it from loop() in ≤1 ms slices and the verdict
-// lands ~1-2 s later (latency is irrelevant — a human response takes minutes). Division of
+// on that buffer; the Core-0 faDetTask runs the analysis and faDetectorPoll() consumes the
+// verdict on Core 1 ~tens of ms later (latency is irrelevant — a human response takes minutes,
+// and keeping the heavy math off Core 1 is the whole point). Division of
 // labor per the 2026-06-12 layering decision: first-line pk-pk-vs-cell-history detection
 // belongs to the disturbance matrix (consumer 1); this detector covers cold start (no cell
 // history yet), fault classification (winning k), and triggering the flipbook capture.
@@ -3809,7 +3818,7 @@ static void faWindowFinalize() {
         // sided amplitude spectrum, then local maxima with 3-bin parabolic interpolation. Uniform
         // resolution, no scalloping gaps — the bug the log Goertzel bank had (a 28 Hz tone read
         // ~2x low). Magnitudes are taken on the fly to avoid a full 512-bin spectrum buffer.
-        for (int i = 0; i < FA_WIN_DECIM_N; i++) faFftRe[i] = faToneBuf[i] * faFtWin[i];
+        for (int i = 0; i < FA_WIN_DECIM_N; i++) faFftRe[i] = (faToneBuf[i] - winMeanAmps) * faFtWin[i];
         for (int i = FA_WIN_DECIM_N; i < FA_FFT_N; i++) faFftRe[i] = 0.0f;
         for (int i = 0; i < FA_FFT_N; i++) faFftIm[i] = 0.0f;
         faFft();
@@ -3819,10 +3828,15 @@ static void faWindowFinalize() {
         float pf[FA_CELL_PEAKS * 4], pa[FA_CELL_PEAKS * 4];
         const int paCap = (int)(sizeof(pf) / sizeof(pf[0]));
         int np = 0;
+        // Peak search starts at FA_MIN_TONE_HZ, not bin 1: the lowest bins carry only DC-leakage
+        // residual and sub-one-cycle content, not resolvable tones. aPrev seeds from the bin just
+        // below so the first searched bin's local-max test is still valid.
+        int firstBin = (int)ceilf(FA_MIN_TONE_HZ / binHz);
+        if (firstBin < 1) firstBin = 1;
         float winTonePk = 0.0f;
-        float aPrev = 0.0f;  // DC excluded
-        float aCur = ampScale * sqrtf(faFftRe[1] * faFftRe[1] + faFftIm[1] * faFftIm[1]);
-        for (int i = 1; i < half - 1; i++) {
+        float aPrev = (firstBin > 1) ? ampScale * sqrtf(faFftRe[firstBin - 1] * faFftRe[firstBin - 1] + faFftIm[firstBin - 1] * faFftIm[firstBin - 1]) : 0.0f;
+        float aCur = ampScale * sqrtf(faFftRe[firstBin] * faFftRe[firstBin] + faFftIm[firstBin] * faFftIm[firstBin]);
+        for (int i = firstBin; i < half - 1; i++) {
           float aNext = ampScale * sqrtf(faFftRe[i + 1] * faFftRe[i + 1] + faFftIm[i + 1] * faFftIm[i + 1]);
           if (aCur > winTonePk) winTonePk = aCur;
           if (aCur >= faPeakMinA && aCur > aPrev && aCur >= aNext && np < paCap) {
@@ -3875,6 +3889,17 @@ static void faWindowFinalize() {
           faSesPeakWorstA = pa[0];
           faSesPeakWorstHz = pf[0];
         }
+        // Highest Tone in Map headline — peak-hold of the loudest tone (pk-pk) and the RPM
+        // bin center where it occurred. Tracked independently of the persistent map so it
+        // clears properly (see faDomReset): only Reset Worsts / Clear Map zero it.
+        if (np > 0) {
+          uint16_t domPkpkX100 = (uint16_t)fminf(pa[0] * 2.0f * 100.0f + 0.5f, 65535.0f);
+          if (domPkpkX100 > faDomAmpAX100) {
+            faDomAmpAX100 = domPkpkX100;
+            faDomFreqHzX10 = (uint16_t)fminf(pf[0] * 10.0f + 0.5f, 65535.0f);
+            faDomRpm = (uint16_t)(rpmBinLo * FA_RPM_BIN_W + FA_RPM_BIN_W / 2);
+          }
+        }
         // Flipbook capture + detector run hang here (qualified window, RPM/amps known)
         faQualifiedWindowHook(rpmBinLo * FA_RPM_BIN_W, winMeanAmps);
       }
@@ -3914,8 +3939,8 @@ static void faWindowFinalize() {
 static void faProcessDecimated(int16_t dmv) {
   if (faDecimWinN == 0) faWinStartMs = millis();
   // Gate EMAs (1 s TC). RPM comes from the existing tach value — binning is labeling,
-  // per-install consistency is all that matters. Amps EMA doubles as the DC reference
-  // the Goertzel input is measured against.
+  // per-install consistency is all that matters. The amps EMA feeds the steady-state drift
+  // gate; the FFT's DC reference is the exact window mean, subtracted at finalize.
   float ampsNow = faMvToAmps((float)dmv);
   if (!faEmaSeeded) {
     faAmpsEma = ampsNow;
@@ -3933,9 +3958,10 @@ static void faProcessDecimated(int16_t dmv) {
   if ((float)dmv > faWinDAmpMax) faWinDAmpMax = (float)dmv;
   faWinAmpsSum += ampsNow;
   if (g_loadDumpActive || alarmLatch) faWinProtection = true;  // "no protection active" gate leg
-  // Buffer the AC sample (DC reference = the 1 s amps EMA) for this window's flat-top FFT,
-  // computed in one shot at finalize. No per-sample transform work here anymore.
-  if (faToneBuf && faDecimWinN < FA_WIN_DECIM_N) faToneBuf[faDecimWinN] = ampsNow - faAmpsEma;
+  // Buffer the raw decimated current for this window's flat-top FFT; the window MEAN (not the
+  // lagging 1 s EMA) is subtracted in one shot at finalize. Subtracting the EMA here left a
+  // residual DC offset the flat-top's wide flat main lobe read as a phantom ~1-2 Hz tone.
+  if (faToneBuf && faDecimWinN < FA_WIN_DECIM_N) faToneBuf[faDecimWinN] = ampsNow;
   faDecimWinN++;
   if (faDecimWinN >= FA_WIN_DECIM_N) TIMED_CALL(ft_faWindowFinalize, faWindowFinalize());
 }
@@ -4103,9 +4129,8 @@ static void faCapturePage(int slot, uint16_t rpm, float amps, uint8_t isAnom, ui
 // ── Failure detector (consumer 2) — algorithm core ──
 // Faithful C++ port of the offline prototype (rect_fault_detector.py, 18/18 on the synthetic
 // gate). The algorithm bodies live in 8_functions.ino; the type definitions it shares with the
-// consumers below (FadJob / FadResult / FADV_* / FADS_*) are defined here because they are used
+// consumers below (FadJob / FadResult / FADV_*) are defined here because they are used
 // by value/sizeof in this file, which precedes 8_functions.ino in the Arduino build.
-// FAD_NOW_US() is defined in 8_functions.ino next to its only users.
 // Verdicts. QUIET doubles as "no-signal" (too little periodicity/crests to analyze) —
 // every consumer treats it as silence.
 #define FADV_QUIET 0
@@ -4128,50 +4153,19 @@ struct FadResult {
   int nCrests;
 };
 
-// Stages (one switch case each; J->pos / J->lag / J->seg / J->acc carry intra-stage progress)
-enum {
-  FADS_IDLE = 0,
-  FADS_CONVERT,        // int16 source → xf (skipped when the harness pre-fills xf)
-  FADS_S3,             // s = boxcar-3 of xf
-  FADS_PRE_S,          // pre = prefix(s)
-  FADS_R1,             // r1 = s − movavg(s, nRough)        (into buffer rr)
-  FADS_R1_MEAN,
-  FADS_R1_VAR,
-  FADS_REGIME_ACF,     // acf[] over lags 4..lagMaxCls of r1
-  FADS_REGIME_PEAK,    // cycle period → idle/cruise ladder
-  FADS_P1_PICK,        // bootstrap crest pick on r1, conservative rung (0.75, 0.65)
-  FADS_PITCH,          // P = median crest interval; 4..400 or bail
-  FADS_R2,             // r = s − movavg(s, nCyc)           (overwrites rr; pre still prefix(s))
-  FADS_R_RMS,
-  FADS_PRE_ABSR,       // pre = prefix(|r|)
-  FADS_ENV,            // env = max(movavg(|r|, envN), 0.2·rms)
-  FADS_RN,             // rn = r / env (into s — s is dead after R2) + mean accumulation
-  FADS_RN_VAR,
-  FADS_RUNG_PICK,      // per-rung crest pick on r
-  FADS_RUNG_WEAK,      // tall-height reference + weak-crest floor
-  FADS_RUNG_SUBTRAIN,
-  FADS_RUNG_FEATURES,  // parabolic (tt, hh) → hn, iv, dn
-  FADS_RUNG_BLOCKS,    // modulo-k ANOVA per 48-crest block, medians over blocks
-  FADS_RUNG_SYNC_PREP, // gaps; skip sync when < 12
-  FADS_RUNG_SYNC_ACF,  // acf[] over lags lagLo..lagHi of rn
-  FADS_RUNG_SYNC_MATCH,// period partners → modal segments → position-in-period ANOVA
-  FADS_RUNG_CONFIRM,   // ACF period-ratio spans (span_p then span_t)
-  FADS_RUNG_VERDICT,   // rung result; keep best (sane, headroom); next rung or done
-  FADS_DONE
-};
-
-// Crest-pick sub-stages (shared by FADS_P1_PICK and FADS_RUNG_PICK)
-enum { FADP_MAXIMA = 0, FADP_CONTRAST, FADP_CONTRAST_SEL, FADP_MERGE, FADP_FINISH };
-
+// Analysis state + workspace pointers. The detector runs straight-line on the Core-0 worker
+// (fadStep in 8_functions.ino) — there is no cooperative-slicing state machine anymore, so the
+// old FADS_*/FADP_* stage enums and the per-stage progress/carry scalars are gone; intra-stage
+// cursors are plain locals. Only cross-stage results live here.
 struct FadJob {
   // carved buffers (one external block; fadCarve lays them out)
   float *xf;     // input as float, n
-  float *s;      // boxcar-3 smoothed; becomes rn after FADS_RN
+  float *s;      // boxcar-3 smoothed; becomes rn (r/env) after the cycle-detrend
   float *rr;     // r1 (rough-detrended) then r (cycle-detrended)
   float *env;    // 2-cycle envelope
   double *pre;   // prefix sums, n+1
   float *acf;    // FAD_ACF_LAG_CAP entries, indexed lag − lagLo
-  int32_t *idx;  // raw local maxima
+  int32_t *idx;  // raw local maxima (also reused as the sync counting-sort histogram)
   int32_t *kept; // merged (then weak-filtered) crests
   int32_t *gpos, *instA, *instB, *cnts;
   float *tt, *hh, *hn, *iv, *dn, *scratch;
@@ -4181,25 +4175,18 @@ struct FadJob {
   const int16_t *src;  // NULL = xf pre-filled by caller
   float fs;
 
-  // generic intra-stage progress
-  uint8_t stage, pickStage;
-  int pos, lag, seg;
-  double acc;
-
   // regime
-  int nRough, lagMaxCls, lagLo, lagHi;
+  int lagLo, lagHi;
   float Tcycle;
   uint8_t cruise;
   float rungW[3], rungF[3];
-  int nRungs, rung;
+  int nRungs;
 
   // stats
   double r1Mean, r1Var, rnMean, rnVar;
 
-  // pick state
+  // pick output
   int nIdx, nKept;
-  float mergeDelta, vmin;
-  int scanFrom;
   uint8_t pickSane, idxOverflow;
 
   float P;
@@ -4208,17 +4195,14 @@ struct FadJob {
 
   // per-rung analysis
   uint8_t sane2;
-  float tallThr, medTall, scaleH, medIv, refIv;
+  float medTall, scaleH, medIv, refIv;
   int nGap;
   float subtrain;
   float Dh[9], Fh[9], Di[9], Fi[9];  // medians over blocks, indexed by k = 2..8
   int kH, kI;
   float dH, dI, runH, runI;
   uint8_t syncUsed;
-  float T0, Tsync;
-  int nInst, nRows;
-  float Twin, aP, aT;
-  uint8_t confirmPhase;
+  float Tsync;
 
   // best-rung selection (Python: lexicographic (sane, headroom) max, first wins ties)
   uint8_t haveBest, bestSane;
@@ -4229,13 +4213,38 @@ struct FadJob {
 static FadJob *faDetJob = NULL;   // PSRAM — analysis state machine (alloc'd once in faInit)
 static uint8_t *faDetMem = NULL;  // PSRAM — ~1.9 MB carved workspace (fadCarve)
 
-// Chunked job driver — called from loop() every pass via TIMED_CALL(ft_faDetector, ...).
-// Advances the armed analysis ≤1 ms per pass (idle cost: one flag check); consumers fire
-// here when the verdict lands. TREND verdicts are log-only (user decision 2026-06-12).
+// Cross-core handoff (Core 1 control loop <-> faDetTask on Core 0), using the FreeRTOS primitives
+// the rest of the firmware uses cross-core (proven on this silicon), not hand-placed fences: a
+// task notification arms the worker, a binary semaphore returns the verdict. faDetBusy still gates
+// faDetWin refill so Core 1 never writes the buffer while the worker reads it. faDetTaskHandle /
+// faResultSem are declared in Xregulator.ino. Detail: Working Markdown Docs/Fault_Detector_Dev_Summary.md.
+FadResult faSharedResult;
+
+// Whole-analysis compute time (us) on the Core-0 worker — last run + worst since ResetPerfCounters.
+uint32_t faDetLastComputeUs = 0;
+uint32_t faDetWorstComputeUs = 0;
+
+void faDetTask(void *pv) {
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // block until Core 1 arms a job (the notify is the barrier)
+    FadResult res;
+    int64_t t0 = esp_timer_get_time();
+    fadStep(faDetJob, 0, &res);  // straight-line: runs the whole analysis to completion
+    uint32_t computeUs = (uint32_t)(esp_timer_get_time() - t0);
+    faDetLastComputeUs = computeUs;
+    if (computeUs > faDetWorstComputeUs) faDetWorstComputeUs = computeUs;
+    faSharedResult = res;
+    xSemaphoreGive(faResultSem);  // hand the verdict back to Core 1 (give/take carry the memory barrier)
+  }
+}
+
+// Verdict consumer — called from loop() every pass via TIMED_CALL(ft_faDetector, ...). The heavy
+// fadStep work runs on faDetTask (Core 0); this only consumes a finished result (cheap, one
+// non-blocking semaphore poll). TREND verdicts are log-only (user decision 2026-06-12).
+// Side-effects stay on Core 1 to avoid faFlip cross-core races.
 void faDetectorPoll() {
-  if (!faDetBusy || !faDetJob) return;
-  FadResult res;
-  if (!fadStep(faDetJob, (int64_t)esp_timer_get_time() + (int64_t)FA_DRAIN_BUDGET_US, &res)) return;
+  if (!faResultSem || xSemaphoreTake(faResultSem, 0) != pdTRUE) return;  // no verdict ready
+  FadResult res = faSharedResult;
   faDetBusy = false;
   faDetWinN = 0;  // buffer consumed — refills window-aligned at the next faWinReset
   faDetectLastK = (res.verdict == FADV_FAULT) ? res.winningK : 0;
@@ -4269,42 +4278,31 @@ void faDetectorPoll() {
   }
 }
 
-// Highest Tone in Map — scan every learned cell's stored peaks for the single loudest tone,
-// recording its amplitude, frequency, and the RPM bin center where it lives. Cheap
-// (1200 cells × 6 peaks); run only when the map changes (from faQualifiedWindowHook).
-// faDomAmpAX100 is reported as PEAK-TO-PEAK (2 × the stored sine amplitude) so the headline
-// matches the max−min a user eyeballs on the live waveform.
-static void faScanDominant() {
-  if (!faMatrix) return;
-  uint16_t bestAmp = 0, bestFreq = 0;
-  int bestCell = -1;
-  for (int c = 0; c < FA_RPM_BINS * FA_AMP_BINS; c++) {
-    if (faMatrix[c].windows == 0) continue;
-    for (int p = 0; p < FA_CELL_PEAKS; p++) {
-      if (faMatrix[c].pk[p].nAcc == 0) continue;
-      if (faMatrix[c].pk[p].ampAX100 > bestAmp) {
-        bestAmp = faMatrix[c].pk[p].ampAX100;
-        bestFreq = faMatrix[c].pk[p].freqHzX10;
-        bestCell = c;
-      }
-    }
-  }
-  faDomAmpAX100 = (uint16_t)fminf((float)bestAmp * 2.0f, 65535.0f);  // amplitude → pk-pk
-  faDomFreqHzX10 = bestFreq;
-  // cellIdx = rpmBinLo * FA_AMP_BINS + ampBin → rpmBinLo = cellIdx / FA_AMP_BINS
-  faDomRpm = (bestCell >= 0) ? (uint16_t)((bestCell / FA_AMP_BINS) * FA_RPM_BIN_W + FA_RPM_BIN_W / 2) : 0;
+// Highest Tone in Map headline — peak-held at the matrix merge site (faWinFinalize) from each
+// qualified window's loudest tone, reported PEAK-TO-PEAK (2 × the stored sine amplitude) so it
+// matches the max−min a user eyeballs on the live waveform. It is NOT re-derived from the
+// persistent map (a full-map scan would always return the historical worst and immediately undo
+// a reset). Clear it ONLY here: Reset Worsts (ResetRipplePeaks) and Clear Map (FastAltClearMatrix).
+void faDomReset() {
+  faDomAmpAX100 = 0;
+  faDomFreqHzX10 = 0;
+  faDomRpm = 0;
 }
 
 // Qualified-window hook — called only when a window passed the steady-state gate and
 // landed in a matrix cell (the matrix merge has already happened by this point).
 static void faQualifiedWindowHook(int rpmBandLo, float meanAmps) {
-  faScanDominant();  // map just changed — refresh the Highest Tone in Map headline
-  // Reference flipbook: freeze-once page per 1000-RPM band, 20–100 A only
+  // Reference flipbook: freeze-once page per 1000-RPM band, 20–100 A only. The waveform is the
+  // point, so it's captured immediately regardless of clock — NEVER gated on time, or a headless
+  // AP session (no client connected) would lose its references entirely. If the first capture
+  // happened before any clock was available (epoch 0), allow ONE re-capture once time syncs, so
+  // the permanent page ends up with a real timestamp instead of "clock not set".
   if (faFlip && meanAmps >= 20.0f && meanAmps <= 100.0f) {
     int band = rpmBandLo / 1000;
-    // Defensive: band 0 must not freeze a near-zero-RPM page (engines don't idle below ~100 RPM)
-    if (band >= 0 && band < FA_FLIP_BANDS && !faFlip[band].used
-        && !(band == 0 && faRpmEma < 100.0f)) {
+    // Defensive: band 0 must not freeze a near-zero-RPM page (engines don't idle below ~100 RPM).
+    // Bounds-check band BEFORE indexing faFlip[band] for the capture-needed test.
+    if (band >= 0 && band < FA_FLIP_BANDS && !(band == 0 && faRpmEma < 100.0f)
+        && (!faFlip[band].used || (faFlip[band].epoch == 0 && timeIsSynced))) {
       faCapturePage(band, (uint16_t)fmaxf(faRpmEma, 0.0f), meanAmps, 0, 0, 0.0f);
       char m[96];
       int bandLo = (band == 0) ? 100 : band * 1000;          // band 0 labelled 100–1000 to match the dashboard
@@ -4323,21 +4321,22 @@ static void faQualifiedWindowHook(int rpmBandLo, float meanAmps) {
 // RPM-steadiness requirement. Several rectifier/stator faults corrupt the LM2907 RPM, and
 // re-coupling the trigger to RPM would blind the detector in exactly those cases. The caller
 // arms on a clean, current-steady window with real current flowing; the operating RPM bin is
-// irrelevant here. A qualified window ARMS the chunked analysis job (far too heavy for this
-// microseconds-budget context); faDetectorPoll() drains it from loop() in ≤1 ms slices and
-// fires the consumers (console alert, CSV2 faDetectK, anomaly flipbook capture) when the
-// verdict lands. faDetWin holds exactly this window's raw 20 kSPS stream, frozen while the job
-// runs. faDetCtxRpm is captured as page metadata only — if the tach is dead it records the
-// broken value, which is itself diagnostic.
+// irrelevant here. A qualified window ARMS the analysis job (far too heavy for the Core-1
+// control loop — it stalled it ~30 ms once a minute); the Core-0 faDetTask runs it and
+// faDetectorPoll() fires the consumers on Core 1 (console alert, CSV2 faDetectK, anomaly
+// flipbook capture) when the verdict lands. faDetWin holds exactly this window's raw 20 kSPS
+// stream, frozen while the job runs. faDetCtxRpm is captured as page metadata only — if the
+// tach is dead it records the broken value, which is itself diagnostic.
 static void faMaybeArmDetector(float meanAmps) {
-  if (faDetJob && !faDetBusy && faDetWinN == FA_DET_WIN_N
+  if (faDetJob && faDetTaskHandle && !faDetBusy && faDetWinN == FA_DET_WIN_N
       && millis() - faDetLastStartMs >= FA_DET_MIN_PERIOD_MS) {
     faDetLastStartMs = millis();
     faDetCtxRpm = (uint16_t)fmaxf(faRpmEma, 0.0f);
     faDetCtxAmps = meanAmps;
-    faDetBusy = true;
+    faDetBusy = true;       // owns faDetWin: Core-1 window refill stops (faDetFilling gate)
     faDetFilling = false;
     fadStart(faDetJob, faDetWin, FA_DET_WIN_N, (float)FA_SAMPLE_RATE_HZ);
+    xTaskNotifyGive(faDetTaskHandle);  // wake the Core-0 worker (the notify publishes fadStart()'s writes)
   }
 }
 
@@ -4373,7 +4372,7 @@ void faMatrixMaybeFlush() {
     fsTakeLock();
     LittleFS.remove(FA_MATRIX_PATH);
     fsReleaseLock();
-    faScanDominant();  // map wiped — clear the Highest Tone in Map headline too
+    faDomReset();  // map wiped — clear the Highest Tone in Map headline too (persists at the next save)
     queueConsoleMessage("Resonance & Ripple Map cleared");
     return;
   }
@@ -4400,20 +4399,25 @@ void faMatrixMaybeFlush() {
   }
 }
 
-// Snapshot the scope ring for the /fastscope.bin endpoint. Header (16 B, little-endian):
+// Snapshot the scope ring for the /fastscope.bin endpoint. Header (24 B, little-endian):
 // u32 magic 'FSC1', u16 sampleRate/10, u16 count, u16 zero-amps mV, u16 ampsPerVolt,
-// u8 attenIs12, u8 chanState, u16 reserved. Then count × int16 calibrated mV, oldest-first.
+// u8 attenIs12, u8 chanState, u16 RPM, i16 altTempF (whole °F), u32 epoch (0 = clock not synced),
+// u16 reserved. Then count × int16 calibrated mV, oldest-first. The capture is the trailing
+// ring ending NOW, so RPM/temp/epoch are stamped at request time = capture-end time.
 // Returns total bytes filled (0 = caller buffer too small).
 size_t faScopeSnapshot(uint8_t *buf, size_t cap) {
   uint16_t count = (faChanState == 1 && faRawRing)
                      ? ((faTotalSamples >= FA_RAW_RING_N) ? (uint16_t)FA_RAW_RING_N : (uint16_t)faTotalSamples)
                      : 0;
-  size_t need = 16 + (size_t)count * 2;
+  size_t need = 24 + (size_t)count * 2;
   if (!buf || cap < need) return 0;
   uint32_t magic = 0x46534331UL;  // 'FSC1'
   uint16_t rateDiv10 = FA_SAMPLE_RATE_HZ / 10;
   uint16_t zeroMv = (uint16_t)FA_ZERO_MV;
   uint16_t apv = (uint16_t)faAmpsPerVolt();
+  uint16_t rpm = (uint16_t)fmaxf(0.0f, fminf(RPM, 65535.0f));
+  int16_t altTempF = (int16_t)AlternatorTemperatureF;
+  uint32_t epoch = timeIsSynced ? (uint32_t)time(NULL) : 0;
   memcpy(buf + 0, &magic, 4);
   memcpy(buf + 4, &rateDiv10, 2);
   memcpy(buf + 6, &count, 2);
@@ -4421,10 +4425,13 @@ size_t faScopeSnapshot(uint8_t *buf, size_t cap) {
   memcpy(buf + 10, &apv, 2);
   buf[12] = faAttenIs12;
   buf[13] = faChanState;
-  buf[14] = 0;
-  buf[15] = 0;
+  memcpy(buf + 14, &rpm, 2);
+  memcpy(buf + 16, &altTempF, 2);
+  memcpy(buf + 18, &epoch, 4);
+  buf[22] = 0;
+  buf[23] = 0;
   if (count > 0) {
-    int16_t *out = (int16_t *)(buf + 16);
+    int16_t *out = (int16_t *)(buf + 24);
     portENTER_CRITICAL(&faRingMux);
     uint16_t head = faRingHead;
     if (count >= FA_RAW_RING_N) {  // full ring: oldest sample sits at head
@@ -4475,7 +4482,6 @@ void faInit() {
   if (faDetWin && faDetJob && detMem) {
     memset(faDetJob, 0, sizeof(FadJob));
     fadCarve(faDetJob, detMem, FA_DET_WIN_N);
-    faDetJob->stage = FADS_IDLE;
     faDetMem = detMem;
   } else {
     if (faDetWin) { free(faDetWin); faDetWin = NULL; }
