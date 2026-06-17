@@ -55,6 +55,9 @@ matching JS CSV*_FIELDS array — the runtime schema mismatch warning will fire 
         const GAP     = 10;
         const LABELPX = hasLabel ? 30 : 0;  // uPlot labelSize default
         return (u, values) => {
+            // uPlot calls size() with values=null on its first sizing pass (before ticks
+            // exist); guard so we don't deref null and throw, which would halt page init.
+            if (!values || !values.length) return Math.ceil((GAP + LABELPX + 4) / QUANTUM) * QUANTUM;
             if (_fontFamily === null) {
                 try { _fontFamily = getComputedStyle(u.root).fontFamily || 'sans-serif'; }
                 catch (e) { _fontFamily = 'sans-serif'; }
@@ -754,6 +757,13 @@ const CSV2_FIELDS = [
     "faDomFreqHz",             // Highest Tone in Map: frequency, Hz ×10
     "faDomAmp",                // ...pk-pk amplitude (2× sine amp), A ×100
     "faDomRpm",                // ...RPM where it occurs
+    "faDomAmps",               // ...window-mean output current there, A ×10
+    "faDomTempF",              // ...alternator temp there, °F ×10 (-1 = no probe)
+    "faDomEpoch",              // ...wall-clock epoch when set (0 = clock not synced)
+    "faSesPkpkRpm",            // Session Worst Pk-Pk: RPM where it occurred
+    "faSesPkpkAmps",           // ...window-mean output current there, A ×10
+    "faSesPkpkTempF",          // ...alternator temp there, °F ×10 (-1 = no probe)
+    "faSesPkpkEpoch",          // ...wall-clock epoch when set (0 = clock not synced)
     // gate-tuning 10s live readouts (ROLL_EMPTY sentinel = no sample in window; see attachLiveReadout)
     "faRpmEdge10sMin",         // RPM edge margin, 10s trough (RPM ×10)
     "faAmpsDrift10sMax",       // amps-drift EMA spread, 10s peak (A ×100)
@@ -1867,6 +1877,8 @@ const CSV3_FIELDS = [
     "tuningSweepStart",              // Hz ×10
     "tuningSweepEnd",                // Hz ×10
     "tuningSweepCycles",             // analysed cycles per sweep frequency
+    "SystemIDStabilizeAmps",         // A ×10 — plant-delay baseline/trough current
+    "tuningWaveFloor",               // A — Current Target Generator wave floor (trough), shared square + sine
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3729,6 +3741,31 @@ function getConfigCheckInterval(webgaugesIntervalMs) {
     return Math.max(1, Math.round((CONFIG_CHECK_INTERVAL_SECONDS * 1000) / webgaugesIntervalMs));
 }
 
+// Snap an axis range outward to "nice" round bounds (~5 ticks across the span).
+// Live autoscaling plots call setData every frame; if the range tracked the raw
+// data min/max it would shift by sub-pixel amounts each frame and uPlot would
+// regenerate the tick labels continuously (the "horrid axis redraw"). Snapping to
+// a grid means the bounds — and therefore the ticks — only move when the data
+// actually crosses a grid line, not on every frame.
+function niceAxisRange(lo, hi) {
+    if (!isFinite(lo) || !isFinite(hi)) return [0, 1];
+    if (hi <= lo) hi = lo + 1;
+    const rawStep = (hi - lo) / 5;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const norm = rawStep / mag;
+    const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+    return [Math.floor(lo / step) * step, Math.ceil(hi / step) * step];
+}
+
+// Stable replacement for uPlot.rangeNum(mn, mx, pad, true) on live autoscaling
+// axes: pads by `pad` fraction of the span, then snaps to the nice grid above so
+// the ticks stop jittering. Pass the same pad the old rangeNum call used.
+function stableAutoRange(mn, mx, pad) {
+    if (mn == null || mx == null || !isFinite(mn) || !isFinite(mx)) return [0, 1];
+    const m = (mx - mn) * (pad || 0);
+    return niceAxisRange(mn - m, mx + m);
+}
+
 // Computes a padded min/max range from selected series in a data array.
 // minSpan prevents zooming in too far; marginFrac adds padding; hardMin clamps the lower bound.
 function computeScaleRange(dataArray, seriesIndices, minSpan, marginFrac, hardMin) {
@@ -3751,6 +3788,9 @@ function computeScaleRange(dataArray, seriesIndices, minSpan, marginFrac, hardMi
     const margin = span * marginFrac;
     lo -= margin;
     hi += margin;
+    if (hardMin !== undefined) lo = Math.max(hardMin, lo);
+    // Snap to a stable grid so per-frame autoscale doesn't continuously re-tick the axis
+    [lo, hi] = niceAxisRange(lo, hi);
     if (hardMin !== undefined) lo = Math.max(hardMin, lo);
     return { min: lo, max: hi };
 }
@@ -4071,12 +4111,9 @@ function updatePlotConfiguration(data) {
         }
         cachedXTime = data.xTime;
 
-        // Reinitialize data structures and recreate both tuning plots
-        if (pidTuningPlot) {
-            pidTuningPlot.destroy();
-        }
-        initPidTuningDataStructures();
-        initPidTuningPlot();
+        // Re-window in place — no destroy/recreate (that flashed/jumped the plot on every echo)
+        rebuildPidTuningWindow();
+        updatePIDXButtons();
 
         // CV plot uses xTime as its fallback window when cvXTime is null
         if (cvTuningPlot && cvXTime === null) {
@@ -4288,6 +4325,7 @@ function updateAllEchosOptimized(data) {
         { key: 'NMEA0183Data', id: 'NMEA0183Data_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'NMEA2KData', id: 'NMEA2KData_echo', transform: v => v == 1 ? 'Enabled' : 'Disabled' },
         { key: 'waveAmplitude', id: 'waveAmplitude_echo', transform: v => v },
+        { key: 'tuningWaveFloor', id: 'tuningWaveFloor_echo', transform: v => v },
         { key: 'CurrentThreshold', id: 'CurrentThreshold_echo', transform: v => v / 100 },
         { key: 'PeukertExponent_scaled', id: 'PeukertExponent_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'ChargeEfficiency_scaled', id: 'ChargeEfficiency_echo', transform: v => (v / 10).toFixed(1) + '%' },
@@ -4357,7 +4395,7 @@ function updateAllEchosOptimized(data) {
         { key: 'DutySlowRampRate', id: 'DutySlowRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'ShutdownPhase2HoldMs', id: 'ShutdownPhase2HoldMs_echo', transform: v => Math.round(v) },
         { key: 'PidSampleDivisor', id: 'PidSampleDivisor_echo', transform: v => v },
-        { key: 'xTime', id: 'xTime_echo', transform: v => v },
+        // xTime echo removed — the X window is now the highlighted button (updatePIDXButtons), not a text field
         { key: 'MaxTableValue', id: 'MaxTableValue_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'yyMax', id: 'yyMax_echo', transform: v => v },
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
@@ -4443,6 +4481,7 @@ function updateAllEchosOptimized(data) {
         { key: 'tuningSweepStart',      id: 'tuningSweepStart_echo',      transform: v => (v / 10).toFixed(1) },
         { key: 'tuningSweepEnd',        id: 'tuningSweepEnd_echo',        transform: v => (v / 10).toFixed(1) },
         { key: 'tuningSweepCycles',     id: 'tuningSweepCycles_echo',     transform: v => v },
+        { key: 'SystemIDStabilizeAmps', id: 'SystemIDStabilizeAmps_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'WarmupRampRate', id: 'WarmupRampRate_echo', transform: v => (v / 10).toFixed(1) },
         { key: 'CVTuningMode',      id: 'CVTuningMode_echo',      transform: v => v == 1 ? 'On' : 'Off' },
         { key: 'cvWaveAmplitudeV',  id: 'cvWaveAmplitudeV_echo',  transform: v => (v / 100).toFixed(2) },
@@ -5738,8 +5777,8 @@ function initCVTuningPlot() {
             // manual Y edits take effect via plain setData — no destroy/recreate, no
             // layout jump. Null Y globals = default autoscale fit.
             x:     { time: false, auto: false, range: () => [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
-            volts: { range: (u, mn, mx) => (cvVoltsMin !== null && cvVoltsMax !== null) ? [cvVoltsMin, cvVoltsMax] : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
-            amps:  { range: (u, mn, mx) => (cvAmpsMin  !== null && cvAmpsMax  !== null) ? [cvAmpsMin,  cvAmpsMax]  : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
+            volts: { range: (u, mn, mx) => (cvVoltsMin !== null && cvVoltsMax !== null) ? [cvVoltsMin, cvVoltsMax] : stableAutoRange(mn, mx, 0.1) },
+            amps:  { range: (u, mn, mx) => (cvAmpsMin  !== null && cvAmpsMax  !== null) ? [cvAmpsMin,  cvAmpsMax]  : stableAutoRange(mn, mx, 0.1) },
         },
     };
 
@@ -8608,6 +8647,7 @@ window.addEventListener("load", function () {
     initTemperaturePlot();
     initPidTuningDataStructures();
     initPidTuningPlot();
+    updatePIDXButtons();
     initCVTuningDataStructures();
     initCVTuningPlot();
     startInterpLoop();
@@ -9389,6 +9429,17 @@ window.addEventListener("load", function () {
                     else if (key === "faDomAmp") {
                         newTextContent = (value / 100).toFixed(2);  // A ×100 (pk-pk)
                     }
+                    // Operating-point context mini-tables: window-mean output current (A ×10),
+                    // alternator temp (°F ×10; -1 = no probe at capture), capture date (epoch s; 0 = clock not synced)
+                    else if (key === "faDomAmps" || key === "faSesPkpkAmps") {
+                        newTextContent = (value / 10).toFixed(1);
+                    }
+                    else if (key === "faDomTempF" || key === "faSesPkpkTempF") {
+                        newTextContent = (value === -1) ? "—" : (value / 10).toFixed(0);  // -1 = SafeInt NaN sentinel (no probe at capture)
+                    }
+                    else if (key === "faDomEpoch" || key === "faSesPkpkEpoch") {
+                        newTextContent = (value > 1577836800) ? new Date(value * 1000).toLocaleDateString() : "—";
+                    }
                     // Time values that need conversion from minutes to days/hours/minutes
                     else if (["timeToFullChargeMin", "timeToFullDischargeMin"].includes(key)) {
                         newTextContent = formatMinutesToDHM(value);
@@ -9908,6 +9959,14 @@ window.addEventListener("load", function () {
                 ["faDomAmp_ID", "faDomAmp"],
                 ["faDomFreq_ID", "faDomFreqHz"],
                 ["faDomRpm_ID", "faDomRpm"],
+                ["faDomRpmCtx_ID", "faDomRpm"],
+                ["faDomAmps_ID", "faDomAmps"],
+                ["faDomTempF_ID", "faDomTempF"],
+                ["faDomEpoch_ID", "faDomEpoch"],
+                ["faSesPkpkRpm_ID", "faSesPkpkRpm"],
+                ["faSesPkpkAmps_ID", "faSesPkpkAmps"],
+                ["faSesPkpkTempF_ID", "faSesPkpkTempF"],
+                ["faSesPkpkEpoch_ID", "faSesPkpkEpoch"],
                 ["ft_uploadBufferedRecords_win_ID", "ft_uploadBufferedRecords_win"],
                 ["ft_uploadBufferedRecords_ses_ID", "ft_uploadBufferedRecords_ses"],
                 ["ft_buildConfigPayload_win_ID", "ft_buildConfigPayload_win"],
@@ -12143,14 +12202,16 @@ function initPidTuningPlot() {
             x: {
                 time: false,
                 auto: false,
-                range: [pidTuningData[0][0], pidTuningData[0][pidTuningData[0].length - 1]]
+                // fn (not static array) so setData(...) re-runs it after rebuildPidTuningWindow
+                // resizes the buffer — re-windows in place with no destroy/recreate
+                range: () => [pidTuningData[0][0], pidTuningData[0][pidTuningData[0].length - 1]]
             },
             amps: {
                 // Default auto (NOT auto:false): uPlot only refreshes the data min/max it
                 // passes here when the scale is auto, which the auto-fit branch needs.
                 // Manual (auto off) returns the firmware yyMin/yyMax; lock pins the frozen range.
                 range: (u, mn, mx) => pidAmpsLock ? pidAmpsLock
-                    : (pidAmpsAuto ? (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) : [yyMin, yyMax])
+                    : (pidAmpsAuto ? stableAutoRange(mn, mx, 0.1) : [yyMin, yyMax])
             },
             duty: {
                 auto: false,
@@ -12280,6 +12341,44 @@ function initPidTuningPlot() {
             }
         }
     ]);
+}
+
+// Resize the PID rolling window WITHOUT recreating the plot: rebuild the x axis at
+// the new length, right-align the newest overlapping samples (shrink keeps the newest
+// tail; grow pads the past with zeros), and let setData re-run the range fns. The plot
+// DOM, autoscale/lock controls, legend, and Y-edit boxes all survive untouched.
+// (Mirrors rebuildCVTuningWindow — destroy/recreate flashed and jumped the plot.)
+function rebuildPidTuningWindow() {
+    const old = pidTuningData;
+    initPidTuningDataStructures();
+    if (old && pidTuningData) {
+        const oldN = old[1].length, newN = pidTuningData[1].length;
+        const n = Math.min(oldN, newN);
+        for (let s = 1; s <= 7; s++)
+            for (let i = 0; i < n; i++)
+                pidTuningData[s][newN - 1 - i] = old[s][oldN - 1 - i];
+    }
+    if (pidTuningPlot) pidTuningPlot.setData(pidTuningData);
+}
+
+// X-window buttons under the PID plot. Re-windows in place and persists xTime to the
+// regulator (firmware-backed setting, unlike the CV plot's JS-only cvXTime).
+function setPIDXTime(val) {
+    const v = parseFloat(val);
+    if (!isFinite(v) || v <= 0) return;
+    xTime = v;
+    cachedXTime = v;        // pre-match the CSV3 echo so it doesn't double-rebuild
+    rebuildPidTuningWindow();
+    updatePIDXButtons();
+    sendYAxisSetting({ xTime: v });   // persist on the regulator (NVS) + echo to other clients
+}
+
+// Light the button matching the active xTime window.
+function updatePIDXButtons() {
+    const eff = (xTime && xTime > 0) ? xTime : 60;
+    document.querySelectorAll('#pidXTimeButtons button').forEach(b => {
+        b.classList.toggle('on', Number(b.value) === Number(eff));   // segmented-control active pill
+    });
 }
 
 // Custom legend with checkboxes for PID tuning plot
@@ -12419,12 +12518,9 @@ function updatePidTuningConfiguration(data) {
     }
 
     if (timeChanged) {
-        // Buffer length depends on xTime — full rebuild required
-        if (pidTuningPlot) {
-            pidTuningPlot.destroy();
-        }
-        initPidTuningDataStructures();
-        initPidTuningPlot();
+        // Re-window in place — no destroy/recreate (avoids the plot flash/jump on echo)
+        rebuildPidTuningWindow();
+        updatePIDXButtons();
     } else if (axisChanged && pidTuningPlot) {
         // Re-range in place — recreate caused a page jump on every Y edit echo
         pidTuningPlot.setScale('amps', { min: yyMin, max: yyMax });
@@ -13258,8 +13354,8 @@ function renderThermalPlot1(data, tMin) {
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
             // null manual range = auto-fit (default); a typed range pins the axis
-            temp: { range: (u, mn, mx) => thermalY.p0.temp || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) },
-            amps: { range: (u, mn, mx) => thermalY.p0.amps || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) }
+            temp: { range: (u, mn, mx) => thermalY.p0.temp || stableAutoRange(mn, mx, 0.1) },
+            amps: { range: (u, mn, mx) => thermalY.p0.amps || stableAutoRange(mn, mx, 0.1) }
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
@@ -13331,7 +13427,7 @@ function renderThermalPlot2(data, tMin) {
         scales: {
             x: { time: false, auto: false, range: [-thermalWindowMin, 0] },
             // null manual range = auto-fit (default); a typed range pins the axis
-            amps: { range: (u, mn, mx) => thermalY.p2.amps || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) }
+            amps: { range: (u, mn, mx) => thermalY.p2.amps || stableAutoRange(mn, mx, 0.1) }
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
@@ -13777,8 +13873,8 @@ function windTrendRender() {
         scales: {
             x: { time: false, auto: false, range: [-windWindowMin, 0] },
             // null manual range = auto-fit (default); a typed/locked range pins the axis
-            dir: { range: (u, mn, mx) => windY.dir || (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.18, true)) },
-            spd: { range: (u, mn, mx) => windY.spd || (mn == null ? [0, 5] : uPlot.rangeNum(Math.min(0, mn), mx, 0.15, true)) }
+            dir: { range: (u, mn, mx) => windY.dir || stableAutoRange(mn, mx, 0.18) },
+            spd: { range: (u, mn, mx) => windY.spd || (mn == null ? [0, 5] : stableAutoRange(Math.min(0, mn), mx, 0.15)) }
         },
         axes: [
             { label: 'Minutes Ago', grid: { show: true } },
@@ -14630,11 +14726,16 @@ let sysidPollInterval = null;
 let sysidPhaseStartWall = 0;   // wall-clock ms when current phase began
 let sysidLastPhase = -1;
 let sysidSuggestedTC = 0;
+// FOPDT plant fit from the last sine sweep (filled by showSysidBodeResults).
+// τ in ms; Kp/Ki are the IMC current-loop seed for the "Apply PID seed" button.
+let sysidFitTauMs = 0;
+let sysidFitKp = 0;
+let sysidFitKi = 0;
 let sysidPreflightInterval = null;
 
 // Phase numbers from firmware enum
 const SYSID_PHASE_NAMES = {
-    1: 'Stabilizing at 10A',
+    1: 'Stabilizing at baseline',
     2: 'Baseline measurement',
     3: 'Step up 1/3',
     4: 'Step down 1/3',
@@ -14724,8 +14825,10 @@ function tuningToggleWaveformUI(val) {
     const v = parseInt(val);
     const man = document.getElementById('tuning-sine-manual');
     const swp = document.getElementById('tuning-sine-sweep');
-    if (man) man.style.display = (v === 1) ? '' : 'none';
-    if (swp) swp.style.display = (v === 2) ? '' : 'none';
+    const per = document.getElementById('tuning-square-period');
+    if (man) man.style.display = (v === 1) ? '' : 'none';   // Sine Frequency: manual sine only
+    if (swp) swp.style.display = (v === 2) ? '' : 'none';   // Sweep range/run: auto-sweep only
+    if (per) per.style.display = (v === 0) ? '' : 'none';   // Wave Period: square only (sine uses freq/sweep)
 }
 
 let tuningBodePollTimer = null;
@@ -14954,10 +15057,38 @@ function sysidUpdatePreflight() {
     document.getElementById('sysid-check-mode').textContent  = modeMsg;
     document.getElementById('sysid-check-tests').textContent = testsMsg;
 
-    // Estimated duration: 20s stabilize overhead + 7 hold phases
-    const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
-    const holdMs = Math.max(15 * tcMs, 5000);
-    const estSec = Math.round(20 + 7 * holdMs / 1000);
+    // Swap the preflight copy + duration estimate to match the selected test type.
+    // (Progress and Results screens switch themselves elsewhere; this is the only
+    // screen whose text was step-only.)
+    const isSine = parseInt(getField("systemIDTestType_sel") ?? 0) === 1;
+    const setDisp = (id, show) => { const el = document.getElementById(id); if (el) el.style.display = show ? '' : 'none'; };
+    setDisp('sysid-intro-step',    !isSine);
+    setDisp('sysid-intro-sine',     isSine);
+    setDisp('sysid-warn-amp-step', !isSine);
+    setDisp('sysid-warn-amp-sine',  isSine);
+    const titleEl = document.getElementById('sysid-preflight-title');
+    if (titleEl) titleEl.textContent = isSine ? 'Plant Frequency Response' : 'Plant Delay Measurement';
+
+    // Estimated duration. Step: 20s stabilize overhead + 7 hold phases.
+    // Sine: 20s stabilize + sum over the log-spaced sweep of (1 settle + N analysed)
+    // cycles per point, floored at 1.5s each — mirrors the firmware and the progress poll.
+    let estSec;
+    if (isSine) {
+        const f0  = Math.max(0.1, parseFloat(getField("systemIDSineFreqStart_echo") ?? 0.5));
+        const f1  = Math.max(f0 + 0.1, parseFloat(getField("systemIDSineFreqEnd_echo") ?? 20));
+        const cyc = Math.max(2, parseInt(getField("systemIDSineCycles_echo") ?? 6));
+        const N   = 10;  // SYSID_SINE_NPOINTS
+        let ms = 20000;
+        for (let i = 0; i < N; i++) {
+            const f = f0 * Math.pow(f1 / f0, i / (N - 1));
+            ms += Math.max(1500, (1 + cyc) * 1000 / f);
+        }
+        estSec = Math.round(ms / 1000);
+    } else {
+        const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
+        const holdMs = Math.max(15 * tcMs, 5000);
+        estSec = Math.round(20 + 7 * holdMs / 1000);
+    }
     const estStr = estSec >= 90 ? (estSec / 60).toFixed(1) + ' min' : estSec + ' sec';
     document.getElementById('sysid-est-time').textContent = 'Estimated test duration: ~' + estStr;
 
@@ -15005,7 +15136,9 @@ function abortSystemIDTest() {
 function sysidStartProgressPoll() {
     const tcMs   = parseFloat(getField("InputFilterTC_echo") ?? 1000);
     const holdMs = Math.max(15 * tcMs, 5000);
-    const maxWaitMs = (SYSID_STABILIZE_TIMEOUT_HINT + 7 * holdMs + 10000);
+    // Step model; overridden below for sine, whose sweep can run minutes (low start
+    // frequency × many cycles per point) and would otherwise trip this step-sized timeout.
+    let maxWaitMs = (SYSID_STABILIZE_TIMEOUT_HINT + 7 * holdMs + 10000);
     let elapsed = 0;
     let sysidEverActive = false;
     const pollMs = 400;
@@ -15041,6 +15174,9 @@ function sysidStartProgressPoll() {
             sysidSineEstMs += Math.max(1500, (1 + cyc) * 1000 / f);
         }
         sysidSineEstMs += 20000;  // stabilize overhead
+        // Generous timeout: twice the estimated sweep + 60s, and never shorter than the
+        // step default. Scales automatically with the sweep range/cycles the user picked.
+        maxWaitMs = Math.max(maxWaitMs, sysidSineEstMs * 2 + 60000);
     }
 
     // Wall-clock phase advancement: once we know a phase started, we advance the bar
@@ -15317,16 +15453,139 @@ function showSysidBodeResults() {
                     '<td style="padding:6px 4px; color:' + col + ';">' + rel.toFixed(2) + ' (' + relDb.toFixed(1) + ' dB)</td>' +
                     '<td style="padding:6px 4px;">' + p.ph.toFixed(0) + '</td></tr>';
             }).join('');
-            // -3 dB bandwidth: first frequency where gain falls below 0.708× the low-freq value.
-            let f3 = null;
-            for (const p of pts) { if (p.g / g0 < 0.708) { f3 = p.f; break; } }
-            if (sum) sum.innerHTML = f3
+            // ── Fit a first-order-plus-dead-time (FOPDT) plant model from the sweep ──
+            // K = DC gain (low-freq), τ from the −3 dB corner, θ (dead time) from the
+            // phase lag the pole alone can't explain. All cheap closed-form math on ~10
+            // points — the heavy lock-in DFT already ran on the ESP32.
+            const fit = sysidFitFOPDT(pts, g0);
+
+            // −3 dB bandwidth: interpolated frequency where gain falls to 0.708× low-freq.
+            const f3 = fit.f3Hz;
+            let html = f3
                 ? 'Plant −3 dB bandwidth: <strong>~' + f3.toFixed(1) + ' Hz</strong> — the fastest the field can move the output open-loop. Phase lag growing well past 90° beyond here is dead-time, not just L/R lag.'
-                : 'Gain had not dropped to −3 dB by the top of the sweep — raise Sweep End to find the plant bandwidth.';
+                : 'Gain had not dropped to −3 dB within the sweep — start the sweep lower (to capture the flat DC region) or raise Sweep End, then re-run for a plant model.';
+
+            if (fit.ok) {
+                sysidFitTauMs = fit.tauMs;
+                sysidFitKp = fit.Kp;
+                sysidFitKi = fit.Ki;
+                const tcFast = Math.max(1, Math.round(fit.tauMs / 3));
+                const tcSlow = Math.max(1, Math.round(fit.tauMs));
+                html +=
+                    '<div style="margin-top:10px; padding-top:8px; border-top:1px solid #333; color:#ddd;">' +
+                    '<div style="color:#aaa; margin-bottom:4px;">Plant model (first-order + dead time)</div>' +
+                    'DC gain (K): <strong>' + fit.K.toFixed(3) + '</strong> A per % duty<br>' +
+                    'Time constant (τ): <strong style="color:#4a9eff;">' + fit.tauMs.toFixed(0) + ' ms</strong> — the field L/R lag<br>' +
+                    'Dead time (θ): <strong style="color:#4a9eff;">' + fit.thetaMs.toFixed(0) + ' ms</strong> — irreducible transport delay' +
+                    (fit.thetaMs > fit.tauMs * 0.5
+                        ? ' <span style="color:#f0a500;">(large vs τ — limits how hard the loop can be pushed)</span>' : '') +
+                    '</div>' +
+                    // Filter suggestion + apply (mirrors the step test: current filters get τ/3, voltage gets full τ)
+                    '<div style="margin-top:8px;">' +
+                    'Suggested filter TCs: <strong>' + tcFast + ' ms</strong> for PID feedback &amp; filtered-amps display (τ/3), ' +
+                    '<strong>' + tcSlow + ' ms</strong> for voltage smoothing (full τ).' +
+                    '<br><button onclick="applySysidBodeFilters()" class="btn-secondary btn-sm" style="margin-top:6px;">' +
+                    'Set filters from τ (' + tcFast + ' / ' + tcFast + ' / ' + tcSlow + ' ms)</button>' +
+                    '</div>' +
+                    // IMC PI seed for the current loop. λ (desired closed-loop speed) chosen conservatively
+                    // because overvoltage is costly here; tune from this with the square-wave tuner.
+                    '<div style="margin-top:8px;">' +
+                    'Current-loop start (IMC, λ=' + fit.lambdaMs.toFixed(0) + ' ms): ' +
+                    '<strong>Kp=' + fit.Kp.toFixed(3) + '</strong>, <strong>Ki=' + fit.Ki.toFixed(3) + '</strong> ' +
+                    '<span style="color:#aaa;">(starting point — verify with the square-wave tuner)</span>' +
+                    '<br><button onclick="applySysidPidSeed()" class="btn-secondary btn-sm" style="margin-top:6px;">' +
+                    'Apply PID seed (Kp/Ki)</button>' +
+                    '</div>';
+            } else if (f3) {
+                // Corner found but the model fit was rejected (e.g. too few points below the knee).
+                html += '<div style="margin-top:8px; color:#f0a500;">Not enough of the flat low-frequency region was captured to fit a clean plant model — start the sweep lower and re-run.</div>';
+            }
+            if (sum) sum.innerHTML = html;
         })
         .catch(() => {
             if (body) body.innerHTML = '<tr><td colspan="3" style="padding:6px 4px; color:#ef4444;">Failed to fetch /sysidbode.</td></tr>';
         });
+}
+
+// Fit a first-order-plus-dead-time model G(s) = K·e^(−θs)/(τs+1) to the swept-sine
+// Bode points. pts: [{f (Hz), g (A per %duty), ph (output lag, deg)}], g0 = low-freq gain.
+// Returns {ok, K, tauMs, thetaMs, f3Hz, lambdaMs, Kp, Ki}. All closed-form (sums + atan).
+function sysidFitFOPDT(pts, g0) {
+    const out = { ok: false, K: g0, tauMs: 0, thetaMs: 0, f3Hz: null, lambdaMs: 0, Kp: 0, Ki: 0 };
+    if (!pts || pts.length < 3 || g0 <= 1e-6) return out;
+
+    // τ from the interpolated −3 dB corner: find the first segment where relative gain
+    // crosses 0.708×, interpolate the crossing frequency in log-f space, τ = 1/(2π f_c).
+    let f3 = null;
+    for (let i = 1; i < pts.length; i++) {
+        const relPrev = pts[i - 1].g / g0, relCur = pts[i].g / g0;
+        if (relPrev >= 0.708 && relCur < 0.708) {
+            const lf0 = Math.log(pts[i - 1].f), lf1 = Math.log(pts[i].f);
+            const t = (0.708 - relPrev) / (relCur - relPrev);   // 0..1 within the segment
+            f3 = Math.exp(lf0 + t * (lf1 - lf0));
+            break;
+        }
+    }
+    out.f3Hz = f3;
+    if (!f3 || f3 <= 0) return out;                 // no corner in range → can't size τ
+    const tauSec = 1 / (2 * Math.PI * f3);
+    out.tauMs = tauSec * 1000;
+
+    // θ (dead time) from the phase lag the pole can't explain. A pole contributes
+    // atan(ωτ); dead time adds ωθ on top. Least-squares of (excess lag) = θ·ω through
+    // the origin — naturally weights the high-frequency points where dead time dominates.
+    let Sva = 0, Sww = 0;
+    for (const p of pts) {
+        const w = 2 * Math.PI * p.f;
+        const excess = (p.ph * Math.PI / 180) - Math.atan(w * tauSec);   // rad
+        Sva += excess * w;
+        Sww += w * w;
+    }
+    let thetaSec = Sww > 0 ? Sva / Sww : 0;
+    if (thetaSec < 0) thetaSec = 0;                 // negative = noise/phase lead; clamp
+    out.thetaMs = thetaSec * 1000;
+
+    // IMC PI seed for the current loop (error in A → duty %). Kp = τ/(K(λ+θ)), Ki = Kp/τ
+    // (per-second, matching the Arduino PID SetTunings convention). λ chosen conservatively
+    // — overvoltage is costly here — so this is a safe starting point, not a final tune.
+    const lambdaSec = Math.max(tauSec, 2 * thetaSec);
+    out.lambdaMs = lambdaSec * 1000;
+    const Kp = tauSec / (g0 * (lambdaSec + thetaSec));
+    if (isFinite(Kp) && Kp > 0) {
+        out.Kp = Kp;
+        out.Ki = Kp / tauSec;
+        out.ok = true;
+    }
+    return out;
+}
+
+// "Set filters from τ" — same three filters the step test writes, sized from the fitted
+// time constant: current filters get τ/3 (phase margin), voltage smoothing gets full τ.
+function applySysidBodeFilters() {
+    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    if (sysidFitTauMs <= 0) { alert("No plant fit available — re-run the sweep."); return; }
+    const tcFast = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs / 3)));
+    const tcSlow = encodeURIComponent(Math.max(1, Math.round(sysidFitTauMs)));
+    const pw = encodeURIComponent(currentAdminPassword);
+    fetch(buildURL("/get?InputFilterTC=" + tcFast + "&password=" + pw))
+        .then(() => fetch(buildURL("/get?OutputPIDFilterTC=" + tcFast + "&password=" + pw)))
+        .then(() => fetch(buildURL("/get?VoltageFilterTC=" + tcSlow + "&password=" + pw)))
+        .then(() => { console.log("Filters set from τ: PID/display=" + tcFast + "ms, voltage=" + tcSlow + "ms"); closeSystemIDModal(); })
+        .catch(err => console.error("Filter set from τ failed:", err));
+}
+
+// "Apply PID seed" — write the IMC starting Kp/Ki to the current loop. A starting point;
+// the user refines with the square-wave tuner. Kd left untouched (PI seed).
+function applySysidPidSeed() {
+    if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    if (!(sysidFitKp > 0)) { alert("No PID seed available — re-run the sweep."); return; }
+    const pw = encodeURIComponent(currentAdminPassword);
+    const kp = encodeURIComponent(sysidFitKp.toFixed(4));
+    const ki = encodeURIComponent(sysidFitKi.toFixed(4));
+    fetch(buildURL("/get?PidKp=" + kp + "&password=" + pw))
+        .then(() => fetch(buildURL("/get?PidKi=" + ki + "&password=" + pw)))
+        .then(() => { console.log("PID seed applied: Kp=" + kp + ", Ki=" + ki); closeSystemIDModal(); })
+        .catch(err => console.error("PID seed apply failed:", err));
 }
 
 function applySystemIDResults() {
@@ -16728,7 +16987,7 @@ window.addEventListener('load', function () {
       height: 300,
       scales: {
         x: { time: false },
-        mpg: { range: (u, mn, mx) => yManual ? yManual : (mn == null ? [0, 1] : uPlot.rangeNum(mn, mx, 0.1, true)) }
+        mpg: { range: (u, mn, mx) => yManual ? yManual : stableAutoRange(mn, mx, 0.1) }
       },
       series: [
         { label: "RPM" },
@@ -16924,7 +17183,7 @@ function initFastScopePlot() {
             amps: {
                 range: (u, mn, mx) => (fastScopeAmpsMin != null && fastScopeAmpsMax != null)
                     ? [fastScopeAmpsMin, fastScopeAmpsMax]
-                    : (mn == null ? [-1, 1] : uPlot.rangeNum(mn, mx, 0.1, true))
+                    : (mn == null ? [-1, 1] : stableAutoRange(mn, mx, 0.1))
             }
         },
         axes: [
@@ -17536,7 +17795,17 @@ function fetchFastFlip(auto) {
             const cur = (fastFlipSelected >= 0) ? fastFlipPages.find(p => p.slot === fastFlipSelected && p.used) : null;
             if (!(auto && cur)) {   // auto poll leaves an open page alone; otherwise show the selected-or-first used page
                 const first = cur || fastFlipPages.find(p => p.used);
-                if (first) fastFlipRender(first.slot);
+                if (first) {
+                    fastFlipRender(first.slot);
+                } else {
+                    // Nothing left to show (e.g. just re-baselined and no anomaly captures kept): wipe the
+                    // chart instead of leaving the now-deleted reference waveform painted on screen.
+                    fastFlipSelected = -1;
+                    document.querySelectorAll('.fastflip-band').forEach(b => b.classList.remove('active'));
+                    const meta = document.getElementById('fastflip-meta');
+                    if (meta) meta.textContent = '';
+                    if (fastFlipPlot) fastFlipPlot.setData([[], [], []]);
+                }
             } else {
                 // Buttons were just rebuilt (highlight cleared) but we skipped the re-render — re-mark the open page.
                 document.querySelectorAll('.fastflip-band').forEach(b => b.classList.toggle('active', +b.dataset.slot === fastFlipSelected));

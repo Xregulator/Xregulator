@@ -280,6 +280,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineFreqStart "SysIDSineFStrt"
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
 #define NK_systemIDSineCycles "SysIDSineCyc"
+#define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
 #define NK_TailCurrent_A "TailCurrent_A"
@@ -357,6 +358,7 @@ bool fsRemove(const char *path) {
 #define NK_timeAxisModeChanging "timeAxsMdChngng"
 #define NK_totalPowerCycles "totalPowerCycls"
 #define NK_waveAmplitude "waveAmplitude"
+#define NK_tuningWaveFloor "tuningWaveFloor"
 #define NK_wavePeriod "wavePeriod"
 #define NK_tuningWaveform "tuningWaveform"
 #define NK_tuningSineFreq "tuningSineFreq"
@@ -1243,7 +1245,7 @@ void httpsTask(void *param) {
   static unsigned long uploadsSuspendedUntil = 0;
   for (;;) {
     // Check if uploads are suspended due to consecutive failures
-    if (uploadsSuspendedUntil && millis() < uploadsSuspendedUntil) {
+    if (uploadsSuspendedUntil && (int32_t)(millis() - uploadsSuspendedUntil) < 0) {  // rollover-safe "now < deadline"
       vTaskDelay(pdMS_TO_TICKS(500));
       esp_task_wdt_reset();
       continue;
@@ -3516,7 +3518,10 @@ static uint16_t *faBitRev = NULL;           // PSRAM — FA_FFT_N bit-reversal p
 // measured. Over the 0.5 s window: RPM EMA inside one bin with ≥10 RPM edge margin; amps
 // EMA drift ≤ max(2 A, 5% of mean); no protection active; no attenuation switch; no
 // railed codes; no sample loss (wall-clock audit vs the crystal-timed sample count).
-#define FA_EMA_ALPHA (1.0f / 1250.0f)  // 1 s TC at the decimated rate
+#define FA_EMA_ALPHA (1.0f / 1250.0f)  // 1 s TC — RPM EMA (binning, page label, detector ctx)
+// Amps gate EMA: 300 ms TC, fast enough that an end-of-window current collapse shows as drift
+// (1 s was too slow — a ~38 A tail collapse moved it only ~2 A, under the floor, so it passed).
+#define FA_AMPS_EMA_ALPHA (1.0f / 375.0f)  // 300 ms TC at the 1250 SPS decimated rate
 #define FA_RPM_EDGE_MARGIN 2.0f    // guard band each side of a 50-RPM bin edge; m carves 2m RPM of map dead-zone per bin (2 -> 8%). The same-bin (no-straddle) test is the real correctness gate; this is just fringe-filing guard.
 #define FA_WIN_WALL_MAX_MS 580UL   // 0.5 s nominal (625 @ 1250 SPS) + ~80 ms loop-jitter margin; beyond this the window lost samples (DMA pool overflow)
 
@@ -3884,7 +3889,14 @@ static void faWindowFinalize() {
         if (c->windows < 65535) c->windows++;
         faMatrixDirtyWindows++;
         // Fleet scalars: per-session worsts
-        if (pkpkA > faSesPkpkWorstA) faSesPkpkWorstA = pkpkA;
+        if (pkpkA > faSesPkpkWorstA) {
+          faSesPkpkWorstA = pkpkA;
+          // Capture the operating point for the dashboard mini-table
+          faSesPkpkAmpsA = winMeanAmps;
+          faSesPkpkTempF = AlternatorTemperatureF;
+          faSesPkpkRpm   = (uint16_t)(rpmBinLo * FA_RPM_BIN_W + FA_RPM_BIN_W / 2);
+          faSesPkpkEpoch = timeIsSynced ? (uint32_t)time(NULL) : 0;
+        }
         if (np > 0 && pa[0] > faSesPeakWorstA) {
           faSesPeakWorstA = pa[0];
           faSesPeakWorstHz = pf[0];
@@ -3898,6 +3910,10 @@ static void faWindowFinalize() {
             faDomAmpAX100 = domPkpkX100;
             faDomFreqHzX10 = (uint16_t)fminf(pf[0] * 10.0f + 0.5f, 65535.0f);
             faDomRpm = (uint16_t)(rpmBinLo * FA_RPM_BIN_W + FA_RPM_BIN_W / 2);
+            // Capture the operating point for the dashboard mini-table
+            faDomAmpsA = winMeanAmps;
+            faDomTempF = AlternatorTemperatureF;
+            faDomEpoch = timeIsSynced ? (uint32_t)time(NULL) : 0;
           }
         }
         // Flipbook capture + detector run hang here (qualified window, RPM/amps known)
@@ -3938,16 +3954,15 @@ static void faWindowFinalize() {
 
 static void faProcessDecimated(int16_t dmv) {
   if (faDecimWinN == 0) faWinStartMs = millis();
-  // Gate EMAs (1 s TC). RPM comes from the existing tach value — binning is labeling,
-  // per-install consistency is all that matters. The amps EMA feeds the steady-state drift
-  // gate; the FFT's DC reference is the exact window mean, subtracted at finalize.
+  // RPM EMA slow (1 s, just labels/bins); amps EMA fast (300 ms) so the drift gate sees
+  // end-of-window collapses. FFT DC reference is the window mean, not either EMA.
   float ampsNow = faMvToAmps((float)dmv);
   if (!faEmaSeeded) {
     faAmpsEma = ampsNow;
     faRpmEma = RPM;
     faEmaSeeded = true;
   } else {
-    faAmpsEma += FA_EMA_ALPHA * (ampsNow - faAmpsEma);
+    faAmpsEma += FA_AMPS_EMA_ALPHA * (ampsNow - faAmpsEma);
     faRpmEma += FA_EMA_ALPHA * (RPM - faRpmEma);
   }
   if (faRpmEma < faWinRpmEmaMin) faWinRpmEmaMin = faRpmEma;
@@ -4287,6 +4302,9 @@ void faDomReset() {
   faDomAmpAX100 = 0;
   faDomFreqHzX10 = 0;
   faDomRpm = 0;
+  faDomAmpsA = 0.0f;
+  faDomTempF = NAN;
+  faDomEpoch = 0;
 }
 
 // Qualified-window hook — called only when a window passed the steady-state gate and

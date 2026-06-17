@@ -982,6 +982,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     } else {
       systemIDSineCycles = (uint8_t)settingRead(NK_systemIDSineCycles).toInt();
     }
+    if (!settingExists(NK_SystemIDStabilizeAmps)) {
+      settingWrite(NK_SystemIDStabilizeAmps, String(SystemIDStabilizeAmps).c_str());
+    } else {
+      SystemIDStabilizeAmps = settingRead(NK_SystemIDStabilizeAmps).toFloat();
+    }
 
   if (!settingExists(NK_SwitchingFrequency)) {
     settingWrite(NK_SwitchingFrequency, String(SwitchingFrequency).c_str());
@@ -1089,6 +1094,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_waveAmplitude, String(waveAmplitude).c_str());
   } else {
     waveAmplitude = settingRead(NK_waveAmplitude).toInt();
+  }
+  if (!settingExists(NK_tuningWaveFloor)) {
+    settingWrite(NK_tuningWaveFloor, String(tuningWaveFloor).c_str());
+  } else {
+    tuningWaveFloor = settingRead(NK_tuningWaveFloor).toInt();
   }
   if (!settingExists(NK_CurrentThreshold)) {
     settingWrite(NK_CurrentThreshold, String(CurrentThreshold).c_str());

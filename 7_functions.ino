@@ -21,7 +21,7 @@
 // auto-prototyped, so this block must stay ABOVE the alt/boat front code below that instantiates
 // it (this project keeps no .h files; the FRONT_* state #defines stay in Xregulator.ino because
 // globals there use them). Design contract: BEST_EVER_FRONT_SPEC.md §2/§5 + IMPLEMENTATION_PLAN.md §2.
-//   1. Episode<NAXIS>    — backward look-back / reseed steady-run detector (replaces fixed windows).
+//   1. Episode<NAXIS>    — sliding-window steady-state detector (per-axis monotonic-deque min/max).
 //   2. FrontStore<NAXIS> — sparse best-ever support points (never a grid) + IDW eval + device keep-gate.
 // ============================================================
 
@@ -41,193 +41,151 @@ struct RawSample { float x[NAXIS]; float ex[2]; float out; uint32_t tMs; };
 template <int NAXIS>
 struct FrontPoint { float x[NAXIS]; float ex[2]; float y; uint32_t nSamp; uint32_t tEmit; };
 
-// A run is a contiguous tail of recent samples all mutually within band on every axis (max-min
-// ≤ tol). It grows while each new sample stays in band; on a break it emits the run's average
-// (if every axis held for its steady time) and reseeds the next run from the longest in-band
-// tail ending at the breaking sample, so compatible points are reused, never discarded.
+// Steadiness detector — sliding-window form. An axis is "steady NOW" iff the max−min of that axis
+// over the trailing steadySec window is ≤ tol. That's the textbook sliding-window-min/max problem,
+// solved per axis with a pair of monotonic deques (O(1) amortized; no per-tick rescan, no O(N) spike
+// — the old reseed-scan stall is gone). A brief excursion only widens the window range while it sits
+// inside the window, then ages out — it never zeroes accumulated dwell, so a disqualifying sample
+// does NOT discard the prior in-band history. A point emits, at most once per EP_EMIT_PERIOD_MS,
+// while EVERY axis (and the optional output band) is steady AND data has spanned its dwell since the
+// last hard barrier (eligible=false). The emitted value is a short trailing boxcar (EP_AVG_WIN_MS) —
+// minimal smear, since the caller pre-filters the inputs. Steadiness + averaging are fed at a
+// decimated EP_FEED_DT_MS cadence (the fold may run far faster — 200 Hz on alt). Shared by alt-health
+// (4 axes + amps band) and vessel-performance (sail/motor, 3 axes, output band disabled).
+
+#define EP_FEED_DT_MS      100    // steadiness/average update cadence (10 Hz), decimated from the fold
+#define EP_AVG_WIN_MS     2000    // trailing boxcar width for the emitted average (minimal smear)
+#define EP_EMIT_PERIOD_MS 1000    // max emit rate while steady (≤ the ~2/s consumer drain; the front's
+                                  // max-per-cell dedup collapses repeats in a long hold, so over-emitting is harmless)
+
+// Sliding-window extremum over a trailing time window (monotonic / "ascending-minima" deque).
+// keepMax=true → front() is the window max; false → the window min. Ring storage is bound in init.
+struct MonoDeque {
+  uint32_t *ts; float *val; int cap, head, tail; bool keepMax;
+  void bind(uint32_t *t, float *v, int c, bool isMax) { ts = t; val = v; cap = c; head = tail = 0; keepMax = isMax; }
+  void clear() { head = tail = 0; }
+  bool empty() const { return head == tail; }
+  float front() const { return val[head]; }
+  void push(uint32_t t, float v, uint32_t windowMs) {
+    while (head != tail) {                                       // drop back entries this one dominates
+      int b = (tail - 1 + cap) % cap;
+      if (keepMax ? (val[b] <= v) : (val[b] >= v)) tail = b; else break;
+    }
+    ts[tail] = t; val[tail] = v; tail = (tail + 1) % cap;
+    if (tail == head) head = (head + 1) % cap;                  // ring guard (sized to window; shouldn't trigger)
+    while (head != tail && (uint32_t)(t - ts[head]) > windowMs) head = (head + 1) % cap;   // evict stale front
+  }
+};
+
 template <int NAXIS>
 struct Episode {
-  EpAxisCfg cfg[NAXIS];
-  // current run (running sums → cheap average, no per-sample storage):
-  double    sumX[NAXIS], sumEx[2], sumOut;
-  float     runMin[NAXIS], runMax[NAXIS];
-  uint32_t  count, runStartMs;
-  // reseed look-back ring (PSRAM, allocated by the caller):
-  RawSample<NAXIS> *ring; int ringCap, ringHead, ringCount;
-  // Per-axis INDEPENDENT steadiness trackers. Each axis keeps its own in-band window + dwell so a
-  // long steady-time on a slow axis (e.g. temperature, 30 s) does NOT force the fast axes
-  // (RPM/duty/Vbus, ~3 s) to also hold that long — the whole point of per-axis criteria. These
-  // PERSIST across reseeds (a fast-axis break must not wipe the slow axis's accumulated dwell);
-  // they re-center only on a full reset (ringCount==0 → next sample is "fresh").
-  float     axMin[NAXIS], axMax[NAXIS];
-  uint32_t  axSinceMs[NAXIS];   // when each axis last (re)entered its band
-  bool      runQualified;       // current run has met EVERY axis's own steady time
-  // OPTIONAL output-steadiness band (outCfg.tol <= 0 → disabled, the default): the emitted
-  // quantity itself must also hold steady. Directly guards what gets recorded, which is what
-  // allows the input bands to be sized purely for transient rejection. Same independent-dwell
-  // pattern as the input axes.
-  EpAxisCfg outCfg;
-  float     outAxMin, outAxMax;     // independent dwell tracker (persists across reseeds, like axMin/axMax)
-  uint32_t  outAxSinceMs;
-  float     runOutMin, runOutMax;   // current run's output band
-  uint32_t  minRunMs;               // minimum run duration to emit (0 = no floor); closes the
-                                    // short-tail-after-reseed emit edge case
+  EpAxisCfg cfg[NAXIS];             // per-axis {tol, steadySec}; synced by the caller each fold
+  EpAxisCfg outCfg;                 // optional output-steadiness band (outCfg.tol <= 0 → disabled)
+  uint32_t  minRunMs;               // retained for interface compatibility (unused by this detector)
 
-  void init(RawSample<NAXIS> *ringBuf, int cap) {
-    ring = ringBuf; ringCap = cap; ringHead = 0; ringCount = 0;
+  MonoDeque maxDQ[NAXIS + 1], minDQ[NAXIS + 1];   // per axis + [NAXIS] = output band: sliding window max/min
+  int       dqCap[NAXIS + 1];       // each deque ring's capacity (samples), sized from maxDwellSec in init
+  uint32_t  dataStartMs;            // time of the first eligible sample after the last hard barrier
+  bool      haveData, ready;
+
+  RawSample<NAXIS> *avgRing; int avgCap;          // trailing boxcar buffer (the caller's PSRAM ring)
+  int       ringHead, ringCount;    // boxcar head/count (named ringHead/ringCount for caller compatibility)
+  double    avgSumX[NAXIS], avgSumEx[2], avgSumOut;
+  uint32_t  count;                  // boxcar sample count while steady, else 0 (caller reads count>0 as "steady")
+  uint32_t  lastFeedMs, lastEmitMs;
+
+  // ringBuf/ringCap = the caller's PSRAM boxcar ring; maxDwellSec[NAXIS+1] sizes each axis's (and the
+  // output band's) deque to its longest expected steady time. Deque storage is ps_malloc'd here.
+  void init(RawSample<NAXIS> *ringBuf, int ringCap, const float *maxDwellSec) {
+    avgRing = ringBuf; avgCap = ringCap;
     outCfg = { 0, 0 }; minRunMs = 0;
-    outAxMin = outAxMax = 0; outAxSinceMs = 0;
+    ready = true;
+    for (int a = 0; a < NAXIS + 1; a++) {
+      int cap = (int)(maxDwellSec[a] * (1000.0f / EP_FEED_DT_MS)) + 4;
+      if (cap < 4) cap = 4;
+      dqCap[a] = cap;
+      uint32_t *tMax = (uint32_t *)ps_malloc((size_t)cap * sizeof(uint32_t));
+      float    *vMax = (float    *)ps_malloc((size_t)cap * sizeof(float));
+      uint32_t *tMin = (uint32_t *)ps_malloc((size_t)cap * sizeof(uint32_t));
+      float    *vMin = (float    *)ps_malloc((size_t)cap * sizeof(float));
+      if (!tMax || !vMax || !tMin || !vMin) { ready = false; return; }
+      maxDQ[a].bind(tMax, vMax, cap, true);
+      minDQ[a].bind(tMin, vMin, cap, false);
+    }
     clearRun();
   }
-  void clearRun() {
-    sumOut = 0; count = 0; runStartMs = 0; sumEx[0] = sumEx[1] = 0;
-    runQualified = false;   // NB: does NOT reset the per-axis trackers (reseed() calls clearRun);
-    for (int a = 0; a < NAXIS; a++) { sumX[a] = 0; runMin[a] = 0; runMax[a] = 0; }   // they re-center on a "fresh" sample
-    runOutMin = 0; runOutMax = 0;
-  }
-  // Per-axis independent steadiness. `fresh` (first sample after a full reset) re-centers every
-  // axis on the sample; otherwise each axis extends its own band, and restarts ONLY its own clock
-  // when IT leaves its band — independent of the other axes.
-  void axisTrack(const RawSample<NAXIS> &s, bool fresh) {
-    for (int a = 0; a < NAXIS; a++) {
-      if (fresh) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; continue; }
-      float lo = axMin[a] < s.x[a] ? axMin[a] : s.x[a];
-      float hi = axMax[a] > s.x[a] ? axMax[a] : s.x[a];
-      if (hi - lo > cfg[a].tol) { axMin[a] = axMax[a] = s.x[a]; axSinceMs[a] = s.tMs; }   // this axis left its band → restart its own clock
-      else { axMin[a] = lo; axMax[a] = hi; }
-    }
-    if (outCfg.tol > 0) {   // output band tracks the same way, with its own independent clock
-      if (fresh) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
-      else {
-        float lo = outAxMin < s.out ? outAxMin : s.out;
-        float hi = outAxMax > s.out ? outAxMax : s.out;
-        if (hi - lo > outCfg.tol) { outAxMin = outAxMax = s.out; outAxSinceMs = s.tMs; }
-        else { outAxMin = lo; outAxMax = hi; }
-      }
-    }
-  }
-  // True once EVERY axis (and the output band, if enabled) has independently held within its
-  // band for at least its OWN steady time.
-  bool axesQualified(uint32_t nowMs) const {
-    for (int a = 0; a < NAXIS; a++)
-      if ((uint32_t)(nowMs - axSinceMs[a]) < (uint32_t)(cfg[a].steadySec * 1000.0f)) return false;
-    if (outCfg.tol > 0 && (uint32_t)(nowMs - outAxSinceMs) < (uint32_t)(outCfg.steadySec * 1000.0f)) return false;
-    return true;
-  }
-  void ringPush(const RawSample<NAXIS> &s) {
-    ring[ringHead] = s;
-    ringHead = (ringHead + 1) % ringCap;
-    if (ringCount < ringCap) ringCount++;
-  }
-  // ring index of the k-th newest sample (k=0 = newest just pushed)
-  int ringIdx(int k) const { return ((ringHead - 1 - k) % ringCap + ringCap) % ringCap; }
 
-  void startRunWith(const RawSample<NAXIS> &s) {
-    sumOut = s.out; count = 1; runStartMs = s.tMs;
-    sumEx[0] = s.ex[0]; sumEx[1] = s.ex[1];
-    for (int a = 0; a < NAXIS; a++) { sumX[a] = s.x[a]; runMin[a] = runMax[a] = s.x[a]; }
-    runOutMin = runOutMax = s.out;
+  // Reset all detector state (sliding-window history, boxcar, dwell origin). Called on a hard barrier
+  // and by the caller's "Start Over". Safe even if init's alloc failed (clear() only zeroes indices).
+  void clearRun() {
+    for (int a = 0; a < NAXIS + 1; a++) { maxDQ[a].clear(); minDQ[a].clear(); }
+    ringHead = 0; ringCount = 0; count = 0;
+    for (int a = 0; a < NAXIS; a++) avgSumX[a] = 0;
+    avgSumEx[0] = avgSumEx[1] = 0; avgSumOut = 0;
+    dataStartMs = 0; haveData = false; lastFeedMs = 0; lastEmitMs = 0;
   }
-  bool inBandWith(const RawSample<NAXIS> &s) const {
+
+  // Feed one sample. eligible=false → hard barrier (drop all in-band history; a run can't span the
+  // gap). Returns true + fills `out` when a steady point should be recorded (rate-limited).
+  bool feed(bool eligible, const RawSample<NAXIS> &s, FrontPoint<NAXIS> *out) {
+    if (!ready) return false;
+    if (!eligible) { clearRun(); return false; }
+
+    // Decimate the steadiness/averaging update to EP_FEED_DT_MS (the fold may run much faster).
+    if (haveData && (uint32_t)(s.tMs - lastFeedMs) < EP_FEED_DT_MS) return false;
+    lastFeedMs = s.tMs;
+    if (!haveData) { dataStartMs = s.tMs; haveData = true; }
+
+    // Per-axis sliding-window min/max over each axis's own trailing dwell window (clamped to storage).
+    bool qualified = true;
     for (int a = 0; a < NAXIS; a++) {
-      float lo = runMin[a] < s.x[a] ? runMin[a] : s.x[a];
-      float hi = runMax[a] > s.x[a] ? runMax[a] : s.x[a];
-      if (hi - lo > cfg[a].tol) return false;
+      uint32_t win = (uint32_t)(cfg[a].steadySec * 1000.0f);
+      uint32_t winMax = (uint32_t)((dqCap[a] - 2) * EP_FEED_DT_MS);   // can't window more than the ring holds
+      if (win > winMax) win = winMax;
+      maxDQ[a].push(s.tMs, s.x[a], win);
+      minDQ[a].push(s.tMs, s.x[a], win);
+      if ((uint32_t)(s.tMs - dataStartMs) < win) qualified = false;                  // not enough dwell yet
+      else if (maxDQ[a].front() - minDQ[a].front() > cfg[a].tol) qualified = false;  // window range too wide
     }
     if (outCfg.tol > 0) {
-      float lo = runOutMin < s.out ? runOutMin : s.out;
-      float hi = runOutMax > s.out ? runOutMax : s.out;
-      if (hi - lo > outCfg.tol) return false;
+      uint32_t win = (uint32_t)(outCfg.steadySec * 1000.0f);
+      uint32_t winMax = (uint32_t)((dqCap[NAXIS] - 2) * EP_FEED_DT_MS);
+      if (win > winMax) win = winMax;
+      maxDQ[NAXIS].push(s.tMs, s.out, win);
+      minDQ[NAXIS].push(s.tMs, s.out, win);
+      if ((uint32_t)(s.tMs - dataStartMs) < win ||
+          maxDQ[NAXIS].front() - minDQ[NAXIS].front() > outCfg.tol) qualified = false;
     }
-    return true;
-  }
-  void commit(const RawSample<NAXIS> &s) {
-    for (int a = 0; a < NAXIS; a++) {
-      sumX[a] += s.x[a];
-      if (s.x[a] < runMin[a]) runMin[a] = s.x[a];
-      if (s.x[a] > runMax[a]) runMax[a] = s.x[a];
+
+    // Trailing boxcar average (the emitted value): push, then evict samples older than EP_AVG_WIN_MS.
+    avgRing[ringHead] = s;
+    ringHead = (ringHead + 1) % avgCap;
+    if (ringCount < avgCap) ringCount++;
+    for (int a = 0; a < NAXIS; a++) avgSumX[a] += s.x[a];
+    avgSumEx[0] += s.ex[0]; avgSumEx[1] += s.ex[1]; avgSumOut += s.out;
+    while (ringCount > 1) {
+      int tail = (ringHead - ringCount + avgCap) % avgCap;
+      if ((uint32_t)(s.tMs - avgRing[tail].tMs) <= EP_AVG_WIN_MS) break;
+      for (int a = 0; a < NAXIS; a++) avgSumX[a] -= avgRing[tail].x[a];
+      avgSumEx[0] -= avgRing[tail].ex[0]; avgSumEx[1] -= avgRing[tail].ex[1]; avgSumOut -= avgRing[tail].out;
+      ringCount--;
     }
-    if (s.out < runOutMin) runOutMin = s.out;
-    if (s.out > runOutMax) runOutMax = s.out;
-    sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
-    sumOut += s.out; count++;
-  }
-  // Complete the current run; emit its average to `out` if it qualified — i.e. every axis
-  // independently held within its band for its OWN steady time (runQualified, latched during
-  // feed) AND the run itself lasted at least minRunMs (a reseed can start a run with latched
-  // qualification, so without the floor a short tail could emit). `nowMs` is the breaking
-  // sample's time. Returns true if a point was emitted.
-  bool complete(uint32_t nowMs, FrontPoint<NAXIS> *out) {
-    bool emit = (count >= 1) && runQualified
-                && (minRunMs == 0 || (uint32_t)(nowMs - runStartMs) >= minRunMs);
-    if (emit && out) {
-      for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(sumX[a] / (double)count);
-      out->ex[0] = (float)(sumEx[0] / (double)count);
-      out->ex[1] = (float)(sumEx[1] / (double)count);
-      out->y = (float)(sumOut / (double)count);
-      out->nSamp = count;
-      out->tEmit = nowMs;
-    }
-    return emit;
-  }
-  // Reseed a fresh run from the longest in-band tail of the ring ending at the newest sample
-  // (in-band on every axis AND the output band, when enabled).
-  void reseed() {
-    clearRun();
-    if (ringCount <= 0) return;
-    float mn[NAXIS], mx[NAXIS], mnO, mxO;
-    { const RawSample<NAXIS> &s0 = ring[ringIdx(0)];
-      for (int a = 0; a < NAXIS; a++) mn[a] = mx[a] = s0.x[a];
-      mnO = mxO = s0.out; }
-    int oldestK = 0;
-    for (int k = 1; k < ringCount; k++) {
-      const RawSample<NAXIS> &s = ring[ringIdx(k)];
-      bool ok = true;
-      for (int a = 0; a < NAXIS; a++) {
-        float lo = mn[a] < s.x[a] ? mn[a] : s.x[a];
-        float hi = mx[a] > s.x[a] ? mx[a] : s.x[a];
-        if (hi - lo > cfg[a].tol) { ok = false; break; }
+    count = qualified ? (uint32_t)ringCount : 0;            // caller reads count>0 as "steady now"
+
+    // Emit a steady point, rate-limited. lastEmitMs=0 after a barrier → the first qualified tick emits.
+    if (qualified && (uint32_t)(s.tMs - lastEmitMs) >= EP_EMIT_PERIOD_MS && ringCount > 0) {
+      lastEmitMs = s.tMs;
+      if (out) {
+        for (int a = 0; a < NAXIS; a++) out->x[a] = (float)(avgSumX[a] / (double)ringCount);
+        out->ex[0] = (float)(avgSumEx[0] / (double)ringCount);
+        out->ex[1] = (float)(avgSumEx[1] / (double)ringCount);
+        out->y = (float)(avgSumOut / (double)ringCount);
+        out->nSamp = (uint32_t)ringCount;
+        out->tEmit = s.tMs;
+        return true;
       }
-      if (ok && outCfg.tol > 0) {
-        float lo = mnO < s.out ? mnO : s.out;
-        float hi = mxO > s.out ? mxO : s.out;
-        if (hi - lo > outCfg.tol) ok = false;
-      }
-      if (!ok) break;
-      for (int a = 0; a < NAXIS; a++) { if (s.x[a] < mn[a]) mn[a] = s.x[a]; if (s.x[a] > mx[a]) mx[a] = s.x[a]; }
-      if (s.out < mnO) mnO = s.out;
-      if (s.out > mxO) mxO = s.out;
-      oldestK = k;
     }
-    for (int a = 0; a < NAXIS; a++) { runMin[a] = mn[a]; runMax[a] = mx[a]; }
-    runOutMin = mnO; runOutMax = mxO;
-    for (int k = oldestK; k >= 0; k--) {           // oldest → newest
-      const RawSample<NAXIS> &s = ring[ringIdx(k)];
-      for (int a = 0; a < NAXIS; a++) sumX[a] += s.x[a];
-      sumEx[0] += s.ex[0]; sumEx[1] += s.ex[1];
-      sumOut += s.out; count++;
-    }
-    runStartMs = ring[ringIdx(oldestK)].tMs;        // preserves accumulated dwell
-  }
-  // Feed one sample. eligible=false → below an admission floor: hard break, no reseed across it
-  // (the ring is dropped so a later run can't look back over the gap). Returns true + fills `out`
-  // when a completed run emits a point.
-  bool feed(bool eligible, const RawSample<NAXIS> &s, FrontPoint<NAXIS> *out) {
-    if (!eligible) {
-      bool emitted = complete(s.tMs, out);
-      clearRun();
-      ringHead = 0; ringCount = 0;                  // barrier: no reseed across the ineligible gap
-      return emitted;
-    }
-    bool fresh = (ringCount == 0);                   // first eligible sample after init/barrier → re-center axis trackers
-    axisTrack(s, fresh);                             // per-axis INDEPENDENT steadiness (decoupled steady times)
-    if (!runQualified && axesQualified(s.tMs)) runQualified = true;   // latch once every axis has met its own time
-    ringPush(s);
-    if (count == 0) { startRunWith(s); return false; }   // empty run → s founds it
-    if (inBandWith(s)) { commit(s); return false; }      // grow
-    bool emitted = complete(s.tMs, out);                 // break: complete then reseed (includes s)
-    reseed();
-    return emitted;
+    return false;
   }
 };
 
@@ -512,7 +470,10 @@ static inline float altExcitation(float duty, float vbus, float tF) {
 // that references them) so the rest of the module can use the front. Generic engine: Xregulator.ino.
 #define ALT_NAXIS        4
 #define ALT_FRONT_CAP    4096     // sparse support points (PSRAM); sized to be unreachable even AP-mode/no-prune — cost scales with count, not cap (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
-#define ALT_EP_RING_CAP  8192     // reseed look-back (~40 s of 200 Hz folds); PSRAM
+#define ALT_EP_RING_CAP  1024     // Episode trailing-boxcar buffer (PSRAM). Only ~EP_AVG_WIN_MS of
+                                  // decimated samples are ever live in it (~20 at 10 Hz); generously
+                                  // sized. The steadiness windows live in the per-axis monotonic
+                                  // deques (allocated in Episode::init), NOT here.
 #define ALT_PENDING_CAP  4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<ALT_NAXIS>     altEpisode;
@@ -529,8 +490,8 @@ static int altFrontEmitCount = 0;        // episode points emitted (whether or n
 float altRpmSec       = 3.0f;    // RPM steady time (s)
 float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
-float altThermDegF    = 5.0f;    // temperature deviation bound (°F)
-float altThermSec     = 30.0f;   // temperature steady time (s)
+float altThermDegF    = 2.0f;    // temperature deviation bound (°F) — tightened from 5 °F (record only at thermal equilibrium)
+float altThermSec     = 120.0f;  // temperature steady time (s) — raised from 30 s (temp has a long thermal lag)
 // Output-steadiness band (5th criterion: the measured amps themselves must hold steady — directly
 // guards what gets recorded, letting the input bands stay tight) + detector signal conditioning:
 float altAmpsTolPct   = 5.0f;    // output-amps band, % of the filtered reading
@@ -599,9 +560,12 @@ static float altSimDeg = 1.0f;
 #define ALT_SIM_NRPM 8
 #define ALT_SIM_NEXC 5
 #define ALT_SIM_NPTS (ALT_SIM_NRPM * ALT_SIM_NEXC)
-#define ALT_SIM_HOLD_MS 40000u    // hold each point > max steady time (altThermSec=30 s) so a run forms + emits
+#define ALT_SIM_HOLD_MS 40000u    // floor on the per-point hold; altSimTick extends it to altThermSec+30 s
 static void altSimTick(uint32_t nowMs) {
-  uint32_t hold = ALT_SIM_HOLD_MS;
+  // Hold each point longer than the temperature dwell (+margin) so the sliding-window temp band
+  // clears the inter-point temp jump (tF varies per point below) and the run can qualify + emit.
+  uint32_t hold = (uint32_t)(altThermSec * 1000.0f) + 30000u;
+  if (hold < ALT_SIM_HOLD_MS) hold = ALT_SIM_HOLD_MS;
   if (altSimPtStartMs == 0) altSimPtStartMs = nowMs;
   if (nowMs - altSimPtStartMs >= hold) {
     altSimPtStartMs = nowMs;
@@ -825,28 +789,75 @@ void  altClearPending() { altPendingCount = 0; altPendingSeededFrom = ""; }   //
 
 // ---- front CSV (the artifact): BEFRONT1,<sys>,<naxis>,<source>,<units…> then x0..xN,y,nSamp,tEmit ----
 // Serves /altcurve.csv (dashboard), the cloud sync-back, and Save/Load to file (spec §2.2/§8).
-String altCurveCsv() {
-  String s = "BEFRONT1,ALT,"; s += String(ALT_NAXIS); s += ","; s += String(altFront2.source);
-  s += ",rpm,exc,V,F,amps\n";
-  for (int i = 0; i < altFront2.count; i++) {
-    FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
-    s += String(p.x[0], 0); s += ","; s += String(p.x[1], 3); s += ","; s += String(p.x[2], 2); s += ",";
-    s += String(p.x[3], 1); s += ","; s += String(p.y, 2); s += ","; s += String(p.nSamp); s += ",";
-    s += String(p.tEmit); s += "\n";
-  }
-  return s;
+// Streamed row-by-row (beginChunkedResponse, same idiom as /alttrend.csv) so a front grown to its
+// 4096-point cap can no longer build a single ~150 KB std::String on the internal heap — that
+// fragmented the heap TLS needs ~32–40 KB contiguous from, a genuine fill-driven failure mode.
+// Only one row (line[]) is ever materialized; CONSTANT internal RAM at any count. total/source are
+// snapshotted so a concurrent Core-1 front edit can't run past the snapshot — an in-place same-cell
+// improvement just shows a fresher value for one row (harmless for a diagnostic CSV).
+void altCurveCsvSend(AsyncWebServerRequest *request) {
+  struct St { int total, source, idx; bool done; char line[96]; int len, pos; };
+  St st; st.total = altFrontBuf ? altFront2.count : 0; st.source = altFront2.source;
+  st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/plain",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          if (st.idx == 0) {
+            st.len = snprintf(st.line, sizeof(st.line), "BEFRONT1,ALT,%d,%d,rpm,exc,V,F,amps\n", ALT_NAXIS, st.source);
+          } else {
+            int i = st.idx - 1;
+            if (i >= st.total) { st.done = true; return written; }
+            FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
+            st.len = snprintf(st.line, sizeof(st.line), "%.0f,%.3f,%.2f,%.1f,%.2f,%u,%u\n",
+                              p.x[0], p.x[1], p.x[2], p.x[3], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit);
+          }
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;  // clamp snprintf's intended-len to the buffer (defensive vs a future wider field)
+          st.idx++; st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
 }
 // Plain front-points table for the dashboard scatter view (/altrecords.csv). Distinct from the
-// BEFRONT1 artifact above; small (≤ ALT_FRONT_CAP), so returned whole.
-String altFrontRecordsCsv() {
-  String s = "rpm,exc,vbus,tF,amps,nSamp\n";
-  if (!altFrontBuf) return s;
-  for (int i = 0; i < altFront2.count; i++) {
-    FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
-    s += String(p.x[0], 0); s += ","; s += String(p.x[1], 3); s += ","; s += String(p.x[2], 2); s += ",";
-    s += String(p.x[3], 1); s += ","; s += String(p.y, 2); s += ","; s += String(p.nSamp); s += "\n";
-  }
-  return s;
+// BEFRONT1 artifact above; streamed row-by-row (constant RAM at any count ≤ ALT_FRONT_CAP).
+void altFrontRecordsCsvSend(AsyncWebServerRequest *request) {
+  struct St { int total, idx; bool done; char line[96]; int len, pos; };
+  St st; st.total = altFrontBuf ? altFront2.count : 0;
+  st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          if (st.idx == 0) {
+            st.len = snprintf(st.line, sizeof(st.line), "rpm,exc,vbus,tF,amps,nSamp\n");
+          } else {
+            int i = st.idx - 1;
+            if (i >= st.total) { st.done = true; return written; }
+            FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
+            st.len = snprintf(st.line, sizeof(st.line), "%.0f,%.3f,%.2f,%.1f,%.2f,%u\n",
+                              p.x[0], p.x[1], p.x[2], p.x[3], p.y, (unsigned)p.nSamp);
+          }
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;  // clamp snprintf's intended-len to the buffer (defensive vs a future wider field)
+          st.idx++; st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
 }
 // Parse a BEFRONT1 CSV (the cloud's pruned front, or a saved file) into altFront2, replacing it.
 bool altIngestFrontCsv(char *body) {
@@ -1053,7 +1064,10 @@ void altFrontInit() {
   memset(altFrontBuf, 0, (size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   memset(altPending,  0, (size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
   altPendingCount = 0;
-  altEpisode.init(altEpRing, ALT_EP_RING_CAP);
+  // Per-axis deque window caps (max steady time the axis can be set to): RPM/duty/Vbus/amps ~30 s
+  // headroom, temperature 240 s (covers the 120 s dwell + room). Index 4 = the output (amps) band.
+  static const float ALT_MAXDWELL[ALT_NAXIS + 1] = { 30.0f, 30.0f, 30.0f, 240.0f, 30.0f };
+  altEpisode.init(altEpRing, ALT_EP_RING_CAP, ALT_MAXDWELL);
   altEpisodeSyncCfg(0.0f);   // amps band starts at the floor; resized from filtered amps every fold
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
   // axisScale ≈ the span of each axis that moves output a comparable amount (rationale + rebalance
@@ -1208,7 +1222,7 @@ String altSchemaJson() {
 #define PERF_MOTF_MAGIC  0x504D4652u  // 'PMFR' motor front blob
 #define PERF_NAXIS       3
 #define PERF_FRONT_CAP   4096     // sparse support points (PSRAM); sized to be unreachable even for fast hulls AP-mode/no-prune (see ALT_HEALTH_LWLR_ENGINE_SPEC.md)
-#define PERF_EP_RING_CAP 2048    // reseed look-back (~200 s at 10 Hz); PSRAM
+#define PERF_EP_RING_CAP 2048    // Episode trailing-boxcar buffer (PSRAM); only ~EP_AVG_WIN_MS of decimated samples are live (steadiness windows are in the per-axis deques)
 #define PERF_PENDING_CAP 4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<PERF_NAXIS>    sailEpisode,  motorEpisode;
@@ -1276,6 +1290,20 @@ static float perfSeaState(uint32_t nowMs) {
   return (var > 0) ? (float)sqrt(var) : 0.0f;
 }
 
+// FIXME (sail/motor steady-state — dedicated rework needed, deferred 2026-06-17): the timescales
+// here are TOTALLY INADEQUATE for boat-speed/polar work and must be redone in a focused session.
+//  - Dwells (AWS/AWA/RPM/headwind 3 s, sea 5 s) are far too short: a displacement hull takes tens of
+//    seconds to minutes to settle to its polar speed after conditions change, so a 3 s "steady" window
+//    records the boat mid-acceleration, not an equilibrium point. These need to be MINUTES.
+//  - Averaging is wrong: this detector emits a short ~2 s boxcar (EP_AVG_WIN_MS, shared with alt where
+//    it's correct). Boat speed is surgy (waves), so a polar point needs a MINUTES-scale average over
+//    several wave cycles to capture sustained speed, not a single surf peak. Make avgWin per-instance.
+//  - Acceptance model is too brittle: a steady interval should be ACCEPTED on its average behaviour,
+//    not excluded outright because of a brief excursion. The sliding-window engine helps (an excursion
+//    ages out instead of zeroing the dwell), but the accept/emit policy still needs to be rethought
+//    around long-window averages rather than instantaneous in-band/out-of-band gating.
+//  - Cascade when fixed: minutes-scale dwells also need PERF_MAXDWELL (the deque caps) raised to match.
+// Alt-health is correct as-is (fast, well-filtered, short windows); this note is sail/motor ONLY.
 // Per-axis tol from the deviation-bound knobs, steady time from the *Sec knobs. Resynced each fold.
 static void perfEpisodeSyncCfg() {
   sailEpisode.cfg[0]  = { perfWsTol,  perfWsSec  };   // AWS
@@ -1561,24 +1589,83 @@ static void boatPerfLoad() {
 // ---- front CSV (the artifact). A boat "curve" = the PAIR of sail + motor BEFRONT1 blocks, mode-
 //      tagged. target: 0 = sail, 1 = motor. (int target, not a template-typed param — keeps
 //      Arduino's auto-prototype pass from referencing FrontStore<3> before PERF_NAXIS is defined.) ----
-static String perfFrontBlock(int target) {
-  FrontStore<PERF_NAXIS> &f = target ? motorFront : sailFront;
-  FrontPoint<PERF_NAXIS> *buf = target ? motorFrontBuf : sailFrontBuf;
-  String s = "BEFRONT1,"; s += target ? "MOTOR" : "SAIL"; s += ","; s += String(PERF_NAXIS); s += ",";
-  s += String(f.source); s += ","; s += target ? "rpm,hw,sea,spd" : "aws,awa,sea,spd"; s += "\n";
-  for (int i = 0; i < f.count; i++) {
-    FrontPoint<PERF_NAXIS> &p = buf[i];
-    s += String(p.x[0], target ? 0 : 2); s += ","; s += String(p.x[1], 1); s += ","; s += String(p.x[2], 3); s += ",";
-    s += String(p.y, 2); s += ","; s += String(p.nSamp); s += ","; s += String(p.tEmit); s += "\n";
-  }
-  return s;
+// /perfcurve.csv — held best-ever fronts as the BEFRONT1 artifact pair (SAIL block then MOTOR block).
+// Streamed row-by-row: logical lines are SAIL header, sail rows, MOTOR header, motor rows — so two
+// 4096-cap fronts never concatenate into one huge heap String. Same constant-RAM chunker as the alt
+// senders. Output matches the old perfFrontBlock(0)+perfFrontBlock(1) build (sail x0=2dp, motor x0=0dp).
+void perfCurveCsvSend(AsyncWebServerRequest *request) {
+  struct St { int sc, mc, ssrc, msrc, idx; bool done; char line[96]; int len, pos; };
+  St st; st.sc = sailFrontBuf ? sailFront.count : 0; st.mc = motorFrontBuf ? motorFront.count : 0;
+  st.ssrc = sailFront.source; st.msrc = motorFront.source;
+  st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/plain",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          if (st.idx == 0) {                                               // SAIL header
+            st.len = snprintf(st.line, sizeof(st.line), "BEFRONT1,SAIL,%d,%d,aws,awa,sea,spd\n", PERF_NAXIS, st.ssrc);
+          } else if (st.idx <= st.sc) {                                    // sail rows
+            FrontPoint<PERF_NAXIS> &p = sailFrontBuf[st.idx - 1];
+            st.len = snprintf(st.line, sizeof(st.line), "%.2f,%.1f,%.3f,%.2f,%u,%u\n",
+                              p.x[0], p.x[1], p.x[2], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit);
+          } else if (st.idx == st.sc + 1) {                                // MOTOR header
+            st.len = snprintf(st.line, sizeof(st.line), "BEFRONT1,MOTOR,%d,%d,rpm,hw,sea,spd\n", PERF_NAXIS, st.msrc);
+          } else {
+            int k = st.idx - st.sc - 2;                                    // motor rows
+            if (k >= st.mc) { st.done = true; return written; }
+            FrontPoint<PERF_NAXIS> &p = motorFrontBuf[k];
+            st.len = snprintf(st.line, sizeof(st.line), "%.0f,%.1f,%.3f,%.2f,%u,%u\n",
+                              p.x[0], p.x[1], p.x[2], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit);
+          }
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;  // clamp snprintf's intended-len to the buffer (defensive vs a future wider field)
+          st.idx++; st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
 }
-String perfCurveCsv()  { return perfFrontBlock(0) + perfFrontBlock(1); }   // /perfcurve.csv
-String perfRecordsCsv() {                                                  // /perfrecords.csv — scatter table
-  String s = "mode,a0,a1,sea,spd,nSamp\n";
-  if (sailFrontBuf)  for (int i = 0; i < sailFront.count;  i++) { FrontPoint<PERF_NAXIS> &p = sailFrontBuf[i];  s += "sail,"  + String(p.x[0],2)+","+String(p.x[1],1)+","+String(p.x[2],3)+","+String(p.y,2)+","+String(p.nSamp)+"\n"; }
-  if (motorFrontBuf) for (int i = 0; i < motorFront.count; i++) { FrontPoint<PERF_NAXIS> &p = motorFrontBuf[i]; s += "motor," + String(p.x[0],0)+","+String(p.x[1],1)+","+String(p.x[2],3)+","+String(p.y,2)+","+String(p.nSamp)+"\n"; }
-  return s;
+// /perfrecords.csv — scatter table, sail rows then motor rows, mode-tagged. Streamed row-by-row.
+void perfRecordsCsvSend(AsyncWebServerRequest *request) {
+  struct St { int sc, mc, idx; bool done; char line[96]; int len, pos; };
+  St st; st.sc = sailFrontBuf ? sailFront.count : 0; st.mc = motorFrontBuf ? motorFront.count : 0;
+  st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          if (st.idx == 0) {
+            st.len = snprintf(st.line, sizeof(st.line), "mode,a0,a1,sea,spd,nSamp\n");
+          } else if (st.idx <= st.sc) {                                    // sail rows
+            FrontPoint<PERF_NAXIS> &p = sailFrontBuf[st.idx - 1];
+            st.len = snprintf(st.line, sizeof(st.line), "sail,%.2f,%.1f,%.3f,%.2f,%u\n",
+                              p.x[0], p.x[1], p.x[2], p.y, (unsigned)p.nSamp);
+          } else {
+            int k = st.idx - st.sc - 1;                                    // motor rows
+            if (k >= st.mc) { st.done = true; return written; }
+            FrontPoint<PERF_NAXIS> &p = motorFrontBuf[k];
+            st.len = snprintf(st.line, sizeof(st.line), "motor,%.0f,%.1f,%.3f,%.2f,%u\n",
+                              p.x[0], p.x[1], p.x[2], p.y, (unsigned)p.nSamp);
+          }
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;  // clamp snprintf's intended-len to the buffer (defensive vs a future wider field)
+          st.idx++; st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
 }
 // Parse one BEFRONT1 block (starting at p) into the sail (target 0) or motor (target 1) front.
 static int perfIngestBlock(char *p, int target) {
@@ -1697,8 +1784,12 @@ void initBoatPerformance() {
   }
   memset(sailFrontBuf,  0, (size_t)PERF_FRONT_CAP * sizeof(FrontPoint<PERF_NAXIS>));
   memset(motorFrontBuf, 0, (size_t)PERF_FRONT_CAP * sizeof(FrontPoint<PERF_NAXIS>));
-  sailEpisode.init(sailRing, PERF_EP_RING_CAP);
-  motorEpisode.init(motorRing, PERF_EP_RING_CAP);
+  // Per-axis deque window caps. Sail axes {AWS, AWA, sea}, motor axes {RPM, headwind, sea};
+  // longest dwell is sea-state (~5 s default), 60 s headroom. Index 3 = output band (unused; perf
+  // leaves outCfg disabled), small.
+  static const float PERF_MAXDWELL[PERF_NAXIS + 1] = { 30.0f, 30.0f, 60.0f, 30.0f };
+  sailEpisode.init(sailRing, PERF_EP_RING_CAP, PERF_MAXDWELL);
+  motorEpisode.init(motorRing, PERF_EP_RING_CAP, PERF_MAXDWELL);
   perfEpisodeSyncCfg();
   sailFront.init(sailFrontBuf, PERF_FRONT_CAP);
   motorFront.init(motorFrontBuf, PERF_FRONT_CAP);
@@ -2509,6 +2600,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint32_t sineSweepEndMs = 0;
   static uint8_t  sineIdx = 0;
   static bool     sineSegStarted = false;
+  static uint32_t lastSineSampleMs = 0;   // decimation clock so a long/low-freq sweep can't overflow the buffer
 
   // One-shot debug on request arrival
   static bool lastReqState = false;
@@ -2587,23 +2679,24 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       sineIdx = 0;
       sineSegStarted = false;
       systemIDBodeCount = 0;
+      lastSineSampleMs = 0;
     }
 
     queueConsoleMessageF(
       "SystemID: stabilizing to %.0fA | step=+%.1f%% holdMs=%u TC=%.0fms",
-      SYSID_STABILIZE_AMPS, SystemIDStepAmplitude, holdMs, InputFilterTC);
+      SystemIDStabilizeAmps, SystemIDStepAmplitude, holdMs, InputFilterTC);
 
     phaseStartMs[0] = nowMs;  // STABILIZE start
     phase = SYSID_STABILIZE;
     systemIDActive = (uint8_t)SYSID_STABILIZE;
   }
 
-  // ── STABILIZE phase: P-control to SYSID_STABILIZE_AMPS before baseline ──
+  // ── STABILIZE phase: P-control to SystemIDStabilizeAmps before baseline ──
   // Adjust duty once per second. Once the 5-second rolling average is within
   // ±3A of the target, advance. Abort if timeout exceeded.
   if (phase == SYSID_STABILIZE) {
     if (nowMs - stabilizeLastAdjMs >= 1000) {
-      float err = SYSID_STABILIZE_AMPS - ampsRaw;
+      float err = SystemIDStabilizeAmps - ampsRaw;
       baseDuty = constrain(baseDuty + err * 0.5f, 5.0f, 80.0f);
       // Push ampsRaw into the ring buffer on each 1Hz duty update
       stabRing[stabRingIdx] = ampsRaw;
@@ -2616,7 +2709,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         float sum = 0;
         for (uint8_t i = 0; i < SYSID_STABILIZE_SAMPLES; i++) sum += stabRing[i];
         float avg = sum / SYSID_STABILIZE_SAMPLES;
-        if (fabsf(avg - SYSID_STABILIZE_AMPS) < SYSID_STABILIZE_BAND_A) {
+        if (fabsf(avg - SystemIDStabilizeAmps) < SYSID_STABILIZE_BAND_A) {
           stabRingIdx = 0;
           stabRingCount = 0;
           stabilizeLastAdjMs = 0;
@@ -2652,7 +2745,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       queueConsoleMessageF(
         "SystemID: ABORTED — could not stabilize at %.0fA within %us "
         "(last reading: %.1fA duty=%.1f%%)",
-        SYSID_STABILIZE_AMPS, SYSID_STABILIZE_TIMEOUT_MS / 1000,
+        SystemIDStabilizeAmps, SYSID_STABILIZE_TIMEOUT_MS / 1000,
         ampsRaw, baseDuty);
       systemIDAbortReason = 254;             // sentinel: stabilize-phase timeout (outside FieldEventReason enum)
       systemIDAbortPhase  = systemIDActive;  // current phase before we clear it
@@ -2667,9 +2760,10 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   }
 
   // ── SINE SWEEP phase (open-loop plant Bode): swept sine on duty, PID off ──
-  // dutyOut = baseDuty + amp·sin(2π f t); record (ts,duty,amps) each tick; advance to
-  // the next log-spaced frequency after (1 settle + N analysed) cycles. Lock-in DFT
-  // in PROCESSING extracts per-frequency gain and phase.
+  // dutyOut = baseDuty + amp·(1+sin(2π f t)) — baseDuty is the trough, so the swing is entirely
+  // upward and the current can't clip at the bottom. Record (ts,duty,amps) each tick; advance to
+  // the next log-spaced frequency after (1 settle + N analysed) cycles. Lock-in DFT in PROCESSING
+  // extracts per-frequency gain and phase (AC amplitude still SystemIDStepAmplitude).
   if (phase == SYSID_SINE) {
     if (!sineSegStarted) {
       sineSegStartMs[sineIdx] = nowMs;
@@ -2677,12 +2771,25 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
     float f = sineFreq[sineIdx];
     float tSec = (float)(nowMs - sineSegStartMs[sineIdx]) / 1000.0f;
-    float drive = SystemIDStepAmplitude * sinf(2.0f * (float)M_PI * f * tSec);
+    // Unipolar-up: baseDuty is the TROUGH of the wave (not the midpoint). The (1+sin) offset
+    // keeps the swing entirely above the stabilized baseline so the current can't clip toward
+    // zero at the bottom. AC amplitude is still SystemIDStepAmplitude → lock-in gain unchanged.
+    float drive = SystemIDStepAmplitude * (1.0f + sinf(2.0f * (float)M_PI * f * tSec));
     float d = constrain(baseDuty + drive, 0.0f, 100.0f);
     dutyOut = d;
 
-    if (sysIDSampleCount < SYSID_BUF_SIZE) {
-      sysIDBuffer[sysIDSampleCount++] = { nowMs, d, ampsRaw };
+    // Frequency-adaptive decimation: record ~24 samples per cycle of the current tone.
+    // At high frequencies this is essentially every CH1 sample (interval below the ~3ms
+    // sample period); at low frequencies it throttles hard so a multi-minute, low-start
+    // sweep can't exhaust the 15000-sample buffer and starve the later (high-freq) points.
+    // 24/cycle is far above Nyquist, so the per-frequency lock-in stays clean. The DFT uses
+    // each sample's real timestamp, so the non-uniform rate across segments is harmless.
+    uint32_t sineSampleIntervalMs = (uint32_t)(1000.0f / (f * 24.0f));  // period/24
+    if ((uint32_t)(nowMs - lastSineSampleMs) >= sineSampleIntervalMs) {
+      lastSineSampleMs = nowMs;
+      if (sysIDSampleCount < SYSID_BUF_SIZE) {
+        sysIDBuffer[sysIDSampleCount++] = { nowMs, d, ampsRaw };
+      }
     }
 
     // Hold = 1 settle cycle + N analysed cycles, floored at 1.5 s for the fastest tones.

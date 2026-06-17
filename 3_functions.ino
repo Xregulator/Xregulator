@@ -587,6 +587,13 @@ enum Csv2Index {
   CSV2_faDomFreqHz,         // Highest Tone in Map: frequency, Hz ×10
   CSV2_faDomAmp,            // ...amplitude, A ×100
   CSV2_faDomRpm,            // ...RPM (bin center) where it occurs
+  CSV2_faDomAmps,           // ...window-mean output current there, A ×10
+  CSV2_faDomTempF,          // ...alternator temperature there, °F ×10 (-1 = no probe)
+  CSV2_faDomEpoch,          // ...wall-clock epoch when set (0 = clock not synced)
+  CSV2_faSesPkpkRpm,        // Session Worst Pk-Pk: RPM (bin center) where it occurred
+  CSV2_faSesPkpkAmps,       // ...window-mean output current there, A ×10
+  CSV2_faSesPkpkTempF,      // ...alternator temperature there, °F ×10 (-1 = no probe)
+  CSV2_faSesPkpkEpoch,      // ...wall-clock epoch when set (0 = clock not synced)
 
   // gate-tuning 10s live readouts (firmware Roll10s extreme; ROLL_EMPTY sentinel when no sample in window)
   CSV2_faRpmEdge10sMin,     // RPM edge margin, 10s trough (RPM ×10)
@@ -621,7 +628,7 @@ enum Csv2Index {
   CSV2_cvPeakOver2,
   CSV2_cvPeakOver3,
 
-  CSV2_FIELD_COUNT  // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546
+  CSV2_FIELD_COUNT  // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553
 };
 
 enum Csv4Index {
@@ -957,8 +964,10 @@ enum Csv3Index {
   CSV3_tuningSweepStart,        // Hz ×10
   CSV3_tuningSweepEnd,          // Hz ×10
   CSV3_tuningSweepCycles,       // analysed cycles per sweep frequency
+  CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
+  CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
 
-  CSV3_FIELD_COUNT  // = 302 (297 prior + 5 tuning sine params)
+  CSV3_FIELD_COUNT  // = 304 (303 prior + tuningWaveFloor)
 };
 
 
@@ -2132,13 +2141,13 @@ void setupServer() {
   server.on("/altschema", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", altSchemaJson());
   });
-  // The held best-ever front (BEFRONT1 CSV artifact).
+  // The held best-ever front (BEFRONT1 CSV artifact) — streamed (constant RAM at any front size).
   server.on("/altcurve.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/plain", altCurveCsv());
+    altCurveCsvSend(request);
   });
-  // Front support points as a plain scatter table.
+  // Front support points as a plain scatter table — streamed.
   server.on("/altrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/csv", altFrontRecordsCsv());
+    altFrontRecordsCsvSend(request);
   });
   // Performance-vs-engine-hours trend (header + points, chunked). This is the headline. Decimated to
   // <= TR_MAXOUT output points for readability + payload (full hourly history stays on the device):
@@ -2194,14 +2203,14 @@ void setupServer() {
     request->send(200, "application/json", perfSchemaJson());
   });
 
-  // The held best-ever fronts (BEFRONT1 CSV pair: SAIL + MOTOR blocks) — dashboard polar/curve source.
+  // The held best-ever fronts (BEFRONT1 CSV pair: SAIL + MOTOR blocks) — dashboard polar/curve source. Streamed.
   server.on("/perfcurve.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/plain", perfCurveCsv());
+    perfCurveCsvSend(request);
   });
 
-  // Front support points as a plain scatter table (sail + motor, mode-tagged).
+  // Front support points as a plain scatter table (sail + motor, mode-tagged) — streamed.
   server.on("/perfrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/csv", perfRecordsCsv());
+    perfRecordsCsvSend(request);
   });
 
   // Load CSV (import a shared/saved polar): POST the BEFRONT1 sail+motor pair as the raw body to
@@ -2731,6 +2740,12 @@ void setupServer() {
       settingWrite(NK_systemIDSineCycles, inputMessage.c_str());
       systemIDSineCycles = (uint8_t)inputMessage.toInt();
     }
+    else if (request->hasParam("SystemIDStabilizeAmps")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SystemIDStabilizeAmps")->value();
+      settingWrite(NK_SystemIDStabilizeAmps, inputMessage.c_str());
+      SystemIDStabilizeAmps = inputMessage.toFloat();
+    }
 
     else if (request->hasParam("startSystemID")) {
       foundParameter = true;
@@ -2789,6 +2804,10 @@ void setupServer() {
       // cleared values actually write (prev != 0 → saveNVSDataFull writes).
       foundParameter = true;
       faSesPkpkWorstA = 0.0f;
+      faSesPkpkAmpsA = 0.0f;     // clear the pk-pk operating-point context too
+      faSesPkpkTempF = NAN;
+      faSesPkpkRpm = 0;
+      faSesPkpkEpoch = 0;
       faSesPeakWorstA = 0.0f;
       faSesPeakWorstHz = 0.0f;
       faDomReset();  // Highest Tone in Map headline clears with the other worsts
@@ -3124,6 +3143,13 @@ void setupServer() {
       inputMessage = request->getParam("waveAmplitude")->value();
       settingWrite(NK_waveAmplitude, inputMessage.c_str());
       waveAmplitude = inputMessage.toInt();
+      if (TuningMode) tuningParamChanged = true;
+    }
+    if (request->hasParam("tuningWaveFloor")) {
+      foundParameter = true;
+      inputMessage = request->getParam("tuningWaveFloor")->value();
+      settingWrite(NK_tuningWaveFloor, inputMessage.c_str());
+      tuningWaveFloor = inputMessage.toInt();
       if (TuningMode) tuningParamChanged = true;
     }
     if (request->hasParam("CurrentThreshold")) {
@@ -4846,6 +4872,8 @@ void setupServer() {
       // AdjustField section profiler — clear the worst-full-pass latch + breakdown (/debug)
       aflWorstTotalUs = 0;
       memset(aflWorstSecUs, 0, sizeof(aflWorstSecUs));
+      // Worst-loop attribution diagnostic — re-arm so the next worst pass prints to Console
+      loopDiagWorstUs = 0;
       // Fault-detector overall compute time — clear so /debug tracks worst since-reset.
       faDetWorstComputeUs = 0;
       faDetLastComputeUs = 0;
@@ -6331,6 +6359,8 @@ void SendWifiData() {
                                "%d,%d,"
                                // +18: fast alt-current channel (drain timer ×2, flush timer ×2, detector timer ×2, window-finalize timer ×2, state, cells, detectK, session worsts ×3, anomaly count, Highest Tone in Map ×3 [freq, amp, rpm])
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +7: operating-point context for the two headline worsts (Highest Tone amps/temp/epoch, Session Pk-Pk rpm/amps/temp/epoch)
+                               "%d,%d,%d,%d,%d,%d,%d,"
                                // +6: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope)
                                "%d,%d,%d,%d,%d,%d,"
                                // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
@@ -6851,6 +6881,13 @@ void SendWifiData() {
                                SafeInt(faDomFreqHzX10),                    // CSV2_faDomFreqHz (already Hz×10; JS divides by 10)
                                SafeInt(faDomAmpAX100),                     // CSV2_faDomAmp (already A×100; JS divides by 100)
                                SafeInt(faDomRpm),                          // CSV2_faDomRpm (raw RPM)
+                               SafeInt(faDomAmpsA, 10),                    // CSV2_faDomAmps (A ×10)
+                               SafeInt(faDomTempF, 10),                    // CSV2_faDomTempF (°F ×10; NAN -> -1)
+                               SafeInt((double)faDomEpoch),                // CSV2_faDomEpoch (epoch seconds; 0 = clock not synced)
+                               SafeInt(faSesPkpkRpm),                      // CSV2_faSesPkpkRpm (raw RPM)
+                               SafeInt(faSesPkpkAmpsA, 10),                // CSV2_faSesPkpkAmps (A ×10)
+                               SafeInt(faSesPkpkTempF, 10),                // CSV2_faSesPkpkTempF (°F ×10; NAN -> -1)
+                               SafeInt((double)faSesPkpkEpoch),            // CSV2_faSesPkpkEpoch (epoch seconds; 0 = clock not synced)
                                // +5: gate-tuning 10s live readouts (ROLL_EMPTY when no sample in window)
                                rollCsv(ROLL_RPMEDGE, 10),                  // CSV2_faRpmEdge10sMin  (RPM ×10, trough)
                                rollCsv(ROLL_AMPSDRIFT, 100),               // CSV2_faAmpsDrift10sMax (A ×100, peak)
@@ -6938,7 +6975,9 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,"  // 9 fast-alt diagnostic knobs
                                "%d,%d,%d,"  // wifiNapEnabled + 2 imu zero offsets (moved from CSV2)
                                "%d,%d,%d,%d,"  // 4 systemID sine-sweep params
-                               "%d,%d,%d,%d,%d",  // 5 tuning sine params
+                               "%d,%d,%d,%d,%d,"  // 5 tuning sine params
+                               "%d,"  // SystemIDStabilizeAmps
+                               "%d",  // tuningWaveFloor (Current Target Generator floor)
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -7245,7 +7284,9 @@ void SendWifiData() {
                                SafeInt(tuningSineFreq, 10),                     // Hz ×10
                                SafeInt(tuningSweepStart, 10),                   // Hz ×10
                                SafeInt(tuningSweepEnd, 10),                     // Hz ×10
-                               SafeInt(tuningSweepCycles)
+                               SafeInt(tuningSweepCycles),
+                               SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
+                               SafeInt(tuningWaveFloor)                         // A (raw)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

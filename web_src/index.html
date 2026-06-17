@@ -4672,6 +4672,22 @@
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>Baseline Current (A) (<span id="SystemIDStabilizeAmps_echo">?</span>):</span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+              <span class="tooltip-box">Alternator output the test stabilizes to before the sweep, and the trough the sine sits on (the sine swings upward from here). Raise it if the bottom of the current wave clips toward zero at low RPM; keep it well within what the alternator can produce at your test RPM.</span>
+            </span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="SystemIDStabilizeAmps" type="number" step="0.5" min="2" max="200" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Test Type (<span id="systemIDTestType_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
               <span class="tooltip-box">Step = the classic rise/fall delay test (PID off, duty steps up and down). Sine Sweep = drives a swept sine on duty with the PID off and measures the plant's gain and phase lag at each frequency — an open-loop Bode plot. Use Sine Sweep to see how much of the plant delay is true dead-time versus field L/R lag, and where the plant rolls off.</span>
@@ -5043,35 +5059,32 @@
               <!-- Live Plot View (open by default) -->
               <details open class="tuning-section">
                 <summary class="tuning-section-title">Live Plot View</summary>
+
+                <!-- PID plot axis controls — Y ranges are edited directly on the plot
+                     (attachYAxisEdit boxes); only the X window control lives here.
+                     Buttons re-window in place (no redraw) and persist xTime to the regulator. -->
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0 2px 0; font-size:0.83em; color:var(--text-muted);">
+                  <span style="font-weight:600; white-space:nowrap;">Plot axes:</span>
+
+                  <span class="time-window-input" id="pidXTimeButtons" style="white-space:nowrap; display:inline-flex; gap:6px; align-items:center;">
+                    X (s):
+                    <span class="seg">
+                      <button type="button" value="5"   onclick="setPIDXTime(5)">5S</button>
+                      <button type="button" value="10"  onclick="setPIDXTime(10)">10S</button>
+                      <button type="button" value="30"  onclick="setPIDXTime(30)">30S</button>
+                      <button type="button" value="60"  onclick="setPIDXTime(60)">60S</button>
+                      <button type="button" value="120" onclick="setPIDXTime(120)">2M</button>
+                      <button type="button" value="300" onclick="setPIDXTime(300)">5M</button>
+                    </span>
+                  </span>
+                </div>
+
                 <div class="plot-container" id="pid-tuning-plot"></div>
               </details>
 
               <!-- Current Target Generator (collapsed) -->
               <details class="tuning-section">
                 <summary class="tuning-section-title">Current Target Generator</summary>
-
-                <!-- Protection toggle (per-page; all three test pages share the same firmware flag) -->
-                <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
-                  <div class="form-row" style="margin-bottom:0;">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>⚠️ Protections:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <span class="toggle-label">Disabled</span>
-                        <label class="switch">
-                          <input id="testProtectionsEnabled_current_checkbox" type="checkbox" checked
-                            onchange="if(handleUserToggle('testProtectionsEnabled_current_checkbox', 'testProtectionsEnabled_current', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_current_checkbox'); this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">Enabled</span>
-                        <input id="testProtectionsEnabled_current" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
-                      </form>
-                    </div>
-                  </div>
-                </div>
 
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
@@ -5098,6 +5111,43 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Wave Amplitude (A) (<span id="waveAmplitude_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Size
+                        of the wave above the Wave Floor. Square toggles between the floor (low) and (floor + amplitude)
+                        (high); sine swings the same amplitude, centered on (floor + amplitude/2). E.g. floor 5A +
+                        amplitude 20A → square cycles 5A↔25A, sine centers on 15A.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="waveAmplitude" type="number" step="1" min="1" max="500" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Wave Floor (A) (<span id="tuningWaveFloor_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The
+                        bottom of the wave — both waveforms sit on this floor and swing upward from it. Square toggles
+                        between the floor and (floor + amplitude); sine is centered on (floor + amplitude/2) and never
+                        dips below the floor. Raise it to keep the trough clear of zero at low RPM. Separate from the
+                        Plant Delay tab's Baseline Current.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="tuningWaveFloor" type="number" step="1" min="0" max="200" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Waveform Type (<span id="tuningWaveform_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Square = the classic toggle test with the ISE tuning score below. Sine (manual) = drive one sine frequency you set and watch how well the current PID tracks it on the plot. Sine (auto-sweep) = step through a frequency range and measure closed-loop gain &amp; phase at each — a Bode plot of how fast your tuned loop can follow a moving setpoint. Tune with Square first, then sweep to see your tracking bandwidth.</span></span>
                   </div>
@@ -5113,37 +5163,24 @@
                   </div>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Wave Period (s) (<span id="wavePeriod_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Duration
-                        (s) of one complete test square wave cycle. The wave spends half the period at the low setpoint
-                        and half at the high setpoint.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="wavePeriod" type="number" step="1" min="1" max="300" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Wave Amplitude (A) (<span id="waveAmplitude_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Square
-                        wave oscillates between 5A (low) and (5 + amplitude) (high). E.g. amplitude 20A creates a wave
-                        cycling between 5A and 25A.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="waveAmplitude" type="number" step="1" min="1" max="500" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
+                <!-- Wave Period only applies to the Square waveform; hidden in both sine modes
+                     (sine drives off Sine Frequency / Sweep range instead). Toggled by tuningToggleWaveformUI. -->
+                <div id="tuning-square-period">
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Wave Period (s) (<span id="wavePeriod_echo">?</span>):</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Duration
+                          (s) of one complete test square wave cycle. The wave spends half the period at the low setpoint
+                          and half at the high setpoint.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <input name="wavePeriod" type="number" step="1" min="1" max="300" />
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </form>
+                    </div>
                   </div>
                 </div>
 
@@ -5244,25 +5281,32 @@
                   </div>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Time to Display — X Axis (s) (<span id="xTime_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Width of
-                        the live plot time window in seconds. Determines how much history is visible at
-                        once.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="xTime" type="number" step="1" min="1" max="3600" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
+                <!-- X-axis time window moved to the buttons above the plot (setPIDXTime);
+                     Y axis min/max are edited on the plot itself (attachYAxisEdit owns yyMin/yyMax). -->
+
+                <!-- Protection toggle (per-page; all three test pages share the same firmware flag).
+                     Kept last to mirror the Plant Delay tab's parameter order. -->
+                <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
+                  <div class="form-row" style="margin-bottom:0;">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>⚠️ Protections:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Disabled</span>
+                        <label class="switch">
+                          <input id="testProtectionsEnabled_current_checkbox" type="checkbox" checked
+                            onchange="if(handleUserToggle('testProtectionsEnabled_current_checkbox', 'testProtectionsEnabled_current', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_current_checkbox'); this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">Enabled</span>
+                        <input id="testProtectionsEnabled_current" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
+                      </form>
+                    </div>
                   </div>
                 </div>
-
-                <!-- Y axis min/max form rows removed — the plot's on-plot edit
-                     boxes (attachYAxisEdit) own yyMin/yyMax now -->
 
               </details> <!-- END Current Target Generator -->
 
@@ -9978,8 +10022,46 @@
           <div class="card"><p>Map Cells Learned</p><p class="reading" style="font-size:20px;"><span id="faCellsUsed_ID">?</span></p></div>
           <div class="card"><p>Last Fault Class <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to open the Live Oscilloscope panel and look at the waveform yourself. 0 or blank means no fault detected.</span></span></p><p class="reading" style="font-size:20px;"><span id="faDetectK_ID">?</span></p></div>
           <div class="card"><p>Lifetime Anomalies</p><p class="reading" style="font-size:20px;"><span id="faAnomalyCount_ID">?</span></p></div>
-          <div class="card"><p>Session Worst Ripple Pk-Pk (A)</p><p class="reading" style="font-size:20px;"><span id="faSesPkpkWorst_ID">?</span></p></div>
-          <div class="card"><p>Highest Tone in Map <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single strongest ripple tone in the learned map, and the engine speed/load where it occurs. A strong tone that stays at a fixed frequency across different RPM points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is normal rectifier ripple.</span></span></p><p class="reading" style="font-size:16px; white-space:normal;"><span id="faDomAmp_ID">?</span> A pk-pk @ <span id="faDomFreq_ID">?</span> Hz · <span id="faDomRpm_ID">?</span> RPM</p></div>
+        </div>
+        <!-- Operating-point context for the two headline worsts: where on the engine map each was recorded -->
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <span style="font-size:13px; font-weight:600;">Worst ripple &amp; tone — and where each occurred</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The worst ripple amplitude and strongest single tone seen, with the operating point captured at the instant each was last set. Pk-Pk (A) is the ripple amplitude; the Highest Tone row also lists the tone frequency (the Ripple Pk-Pk row spans ALL frequencies, so it has no single tone). Output Current is the 0.5-second window-mean alternator current at that moment (not a setpoint). Alt Temp is the alternator probe reading then ("—" if no probe). Date needs a synced clock — it shows "—" until the regulator has the time. These persist across reboot and clear with Reset Worsts.</span></span>
+        </div>
+        <div style="overflow-x:auto; margin-top:4px;">
+          <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead>
+              <tr style="text-align:left; color:var(--text-muted);">
+                <th style="padding:4px 8px; font-weight:600;">Worst</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">Pk-Pk (A)</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">Tone (Hz)</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">RPM</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">Output Current (A)</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">Alt Temp (°F)</th>
+                <th style="padding:4px 8px; font-weight:600; text-align:right;">Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="padding:4px 8px;">Ripple Pk-Pk</td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faSesPkpkWorst_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;">ALL</td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faSesPkpkRpm_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faSesPkpkAmps_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faSesPkpkTempF_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faSesPkpkEpoch_ID">?</span></td>
+              </tr>
+              <tr>
+                <td style="padding:4px 8px;">Highest Tone</td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faDomAmp_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faDomFreq_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faDomRpmCtx_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faDomAmps_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faDomTempF_ID">?</span></td>
+                <td style="padding:4px 8px; text-align:right;"><span id="faDomEpoch_ID">?</span></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <hr />
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
@@ -10003,13 +10085,14 @@
               or switched off in Settings below.</p>
             <p><b>Map Cells Learned</b> counts how many RPM/output-current operating points have a
               stored ripple signature yet — the Resonance &amp; Ripple Map fills in as the engine runs at
-              more speeds and loads. <b>Highest Tone in Map</b> is the strongest single tone across all
-              of those cells, and where it occurs.</p>
-            <p><b>Last Fault Class / Lifetime Anomalies / Session Worst Ripple Pk-Pk</b> summarize the
-              rectifier/stator monitor: the most recent fault category, the running count of fault
-              detections over the unit's life, and the largest broadband ripple seen since you last
-              pressed <b>Reset Worsts</b> on this panel. The worst value persists across reboots, so
-              it only clears when you press that button.</p>
+              more speeds and loads. The <b>Highest Tone</b> row below is the strongest single tone
+              across all of those cells, and where it occurs.</p>
+            <p><b>Last Fault Class / Lifetime Anomalies</b> summarize the rectifier/stator monitor: the
+              most recent fault category and the running count of fault detections over the unit's
+              life. The <b>Worst ripple &amp; tone</b> table lists the largest broadband ripple
+              (<b>Ripple Pk-Pk</b>) and strongest single tone (<b>Highest Tone</b>) seen since you last
+              pressed <b>Reset Worsts</b>, with the engine operating point where each occurred. These
+              worsts persist across reboots, so they only clear when you press that button.</p>
           </div>
         </details>
       </div>
@@ -10201,8 +10284,7 @@
 
         <div class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px;">
           <span style="font-size:13px; font-weight:600;">Anomaly Captures</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Not live. A new anomaly snapshot is saved at most once every 5 minutes, into 4 rotating slots (the oldest is overwritten). Detection, alerts, and the alarm keep running regardless; the Pause button on the chart below only stops new snapshots from overwriting the ones you're examining. Press Refresh to pull the latest.</span></span>
-          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="fetchFastFlip()">↺ Refresh</button>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Not live. A new anomaly snapshot is saved at most once every 5 minutes, into 4 rotating slots (the oldest is overwritten). Detection, alerts, and the alarm keep running regardless; the Pause button on the chart below only stops new snapshots from overwriting the ones you're examining. This panel refreshes itself every ~30 seconds while open.</span></span>
         </div>
         <div id="fastflip-anoms" class="form-row form-row-wide" style="align-items:center; gap:6px; flex-wrap:wrap; margin-top:4px;"></div>
 
@@ -10693,6 +10775,7 @@
     <span id="NMEA0183Data_echo" style="display:none;">0</span>
     <span id="NMEA2KData_echo" style="display:none;">0</span>
     <span id="waveAmplitude_echo" style="display:none;">0</span>
+    <span id="tuningWaveFloor_echo" style="display:none;">0</span>
     <span id="CurrentThreshold_echo" style="display:none;">0</span>
     <span id="PeukertExponent_echo" style="display:none;">0</span>
     <span id="ChargeEfficiency_echo" style="display:none;">0</span>
@@ -10836,6 +10919,7 @@
     <input id="NMEA0183Data" name="NMEA0183Data" type="number" value style="display:none;" />
     <input id="NMEA2KData" name="NMEA2KData" type="number" value style="display:none;" />
     <input id="waveAmplitude" style="display:none;" value="0" />
+    <input id="tuningWaveFloor" style="display:none;" value="0" />
     <input id="CurrentThreshold" style="display:none;" value="0" />
     <input id="PeukertExponent" style="display:none;" value="0" />
     <input id="ChargeEfficiency" style="display:none;" value="0" />
@@ -11018,19 +11102,33 @@
 
       <!-- SCREEN 1: Pre-flight -->
       <div id="sysid-screen-preflight">
-        <h3 style="margin-top:0; color:#fff;">Plant Delay Measurement</h3>
-        <p style="margin:0 0 12px; font-size:0.92em; line-height:1.5;">
+        <h3 id="sysid-preflight-title" style="margin-top:0; color:#fff;">Plant Delay Measurement</h3>
+        <!-- Step-test intro (Test Type = Step) -->
+        <p id="sysid-intro-step" style="margin:0 0 12px; font-size:0.92em; line-height:1.5;">
           This test measures how quickly the alternator's output responds to a change.
-          It first ramps the field to <strong>10A</strong> and holds there for 5 seconds to establish a stable baseline.
+          It first ramps the field to your <strong>Baseline Current</strong> and holds there for 5 seconds to establish a stable baseline.
           It then steps the field up by your <strong>Step Test Amplitude</strong> (in % duty) and back down,
           repeating that up-and-down step several times, timing how fast the output settles after each move.
+        </p>
+        <!-- Sine-sweep intro (Test Type = Sine Sweep) — shown by sysidUpdatePreflight -->
+        <p id="sysid-intro-sine" style="margin:0 0 12px; font-size:0.92em; line-height:1.5; display:none;">
+          This test measures the alternator's frequency response — an open-loop frequency-by-frequency map of the plant (a Bode plot).
+          It first ramps the field to your <strong>Baseline Current</strong> and holds there for 5 seconds to establish a stable baseline.
+          It then drives a swept sine on the field — from <strong>Sweep Start</strong> up to <strong>Sweep End</strong>, with the PID off —
+          and measures the output's gain and phase lag at each frequency. The result shows how fast the field can move the output and where the plant rolls off.
         </p>
         <p style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
           ⚠️ <strong>Bring the engine to your typical operating RPM</strong> before clicking Start. The test is most accurate at normal cruising speed.
         </p>
-        <p style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
-          ⚠️ <strong>Keep Step Test Amplitude small.</strong> Each upward step pushes output above the 10A baseline, which briefly raises battery voltage.
+        <!-- Step-test amplitude warning -->
+        <p id="sysid-warn-amp-step" style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
+          ⚠️ <strong>Keep Step Test Amplitude small.</strong> Each upward step pushes output above the baseline current, which briefly raises battery voltage.
           Choose a value small enough that the test won't over-volt your battery — start low (a few % duty) and only increase it if the measured response is too noisy.
+        </p>
+        <!-- Sine-sweep amplitude warning — shown by sysidUpdatePreflight -->
+        <p id="sysid-warn-amp-sine" style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px; display:none;">
+          ⚠️ <strong>Keep Step Test Amplitude small.</strong> The sine swings upward from the baseline by up to twice this amplitude, briefly raising battery voltage at each peak.
+          Choose a value small enough that the test won't over-volt your battery — start low (a few % duty) and only increase it if the response is too noisy.
         </p>
 
         <div style="margin-bottom:16px; font-size:0.9em;">
@@ -11054,7 +11152,7 @@
       <div id="sysid-screen-progress" style="display:none;">
         <h3 style="margin-top:0; color:#fff;">Test Running…</h3>
         <div id="sysid-phase-list" style="font-size:0.9em; margin-bottom:16px;">
-          <div id="sysid-p1" class="sysid-phase-row">⬜ Stabilizing at 10A</div>
+          <div id="sysid-p1" class="sysid-phase-row">⬜ Stabilizing at baseline current</div>
           <div id="sysid-p2" class="sysid-phase-row">⬜ Baseline measurement</div>
           <div id="sysid-p3" class="sysid-phase-row">⬜ Step up 1/3</div>
           <div id="sysid-p4" class="sysid-phase-row">⬜ Step down 1/3</div>

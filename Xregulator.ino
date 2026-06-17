@@ -246,7 +246,7 @@ static bool    altHiFieldAlert = false;    // high-field-low-output alert (indep
 // Bands apply to the EMA-FILTERED detector inputs (altEmaSec), so they're sized for real
 // operating-point drift, not raw loop dither / sensor jitter (which the filter strips):
 float altDutyTolPct    = 1.5f;   // field-duty stability band (% points, filtered; raw CV dither is ~3 p-p)
-float altRpmTol        = 60.0f;  // RPM deviation band (filtered; raw idle jitter is ~50 p-p)
+float altRpmTol        = 30.0f;  // RPM deviation band (filtered; tightened from 60; raw idle jitter is ~50 p-p)
 float altVbusTol       = 0.05f;  // bus-voltage deviation band (V, filtered)
 // Admission floors:
 float altMinAmps = 2.0f;
@@ -856,7 +856,7 @@ uint8_t systemIDAbortReason = 0;               // FieldEventReason code if prote
 uint8_t systemIDAbortPhase = 0;                // phase (1-9) at moment of protection abort; 0 = no abort
 
 // ── Stabilize-phase constants ────────────────────────────────────────────────
-#define SYSID_STABILIZE_AMPS 10.0f        // target alternator output before baseline begins
+float SystemIDStabilizeAmps = 10.0f;      // target alternator output before the sweep (= sweep trough); dashboard setting
 #define SYSID_STABILIZE_SAMPLES 5         // ring buffer size: 5 samples × 1Hz = 5-second window
 #define SYSID_STABILIZE_BAND_A 3.0f       // 5-s rolling average must be within ±3A of target
 #define SYSID_STABILIZE_TIMEOUT_MS 30000  // abort if can't stabilize within this window
@@ -2220,6 +2220,23 @@ int32_t prev_faSesPeakHz = 0;
 int32_t prev_faDomAmp = 0;
 int32_t prev_faDomFreq = 0;
 int32_t prev_faDomRpm = 0;
+// Operating-point context captured at the instant each headline worst was set — feeds the dashboard
+// mini-tables under "Session Worst Ripple Pk-Pk" and "Highest Tone in Map". Persisted alongside the
+// worsts so the context survives a reboot; cleared by the same Reset Worsts / Clear Map paths.
+float    faSesPkpkAmpsA = 0.0f;   // window-mean output current where the worst pk-pk occurred, amps
+float    faSesPkpkTempF = NAN;    // alternator temperature there, °F (NAN = no probe)
+uint16_t faSesPkpkRpm   = 0;      // RPM (bin center) there
+uint32_t faSesPkpkEpoch = 0;      // wall-clock epoch when set (0 = clock not synced)
+float    faDomAmpsA     = 0.0f;   // window-mean output current at the highest tone, amps
+float    faDomTempF     = NAN;    // alternator temperature there, °F
+uint32_t faDomEpoch     = 0;      // wall-clock epoch when set (0 = clock not synced)
+int32_t prev_faSPkAmp = 0;
+int32_t prev_faSPkTmp = 0;
+int32_t prev_faSPkRpm = 0;
+int32_t prev_faSPkEp = 0;
+int32_t prev_faDomAmps = 0;
+int32_t prev_faDomTmp = 0;
+int32_t prev_faDomEp = 0;
 
 // Aliases so existing telemetry plumbing (CSVData2, dashboard) needs no changes.
 // Time2 = last call duration; Time = worst-in-window. Both now backed by FuncTiming.
@@ -2245,6 +2262,14 @@ uint32_t loopTime5sWindow = 0;                     // worst loop time in last Ai
 constexpr unsigned long AinputTrackerTime = 5000;  // rolling window reset interval (ms)
 // Previous session max loop time — snapshot of MaxLoopTime taken at boot before reset
 uint32_t prevSessionMaxLoopTime = 0;  // worst loop time from the session before this one (µs)
+
+// ── Worst-loop attribution diagnostic (loop-stall hunt) ──────────────────────
+// On each new worst loop pass above this threshold, ONE Console line prints that
+// pass's per-function breakdown so the stall offender names itself during a soak.
+// Self-throttling (fires only when the record breaks). Pure diagnostic — no control
+// effect, no payload change. Re-armed by "Reset Peak Values". Remove once stall is closed.
+#define LOOP_DIAG_THRESH_US 10000  // only report passes over 10 ms
+uint32_t loopDiagWorstUs = 0;
 
 // ── 80MHz low-power-mode loop instrumentation ─────────────────────────────────
 // Engine-off drops the CPU to 80MHz; these track loop health in that state only
@@ -2336,6 +2361,7 @@ int LearningTempHysteresis = 10;
 // PID Tuning
 int wavePeriod = 10;     //For PID tuning
 int waveAmplitude = 10;  //For PID tuning
+int tuningWaveFloor = 5; // A — floor (trough) the Current Target Generator wave sits on; shared by square + sine. Separate from the Plant tab's SystemIDStabilizeAmps.
 int TuningMode = 0;      //
 
 // ── Tuning→Current closed-loop sine generator (Stage 2) ───────────────────────
@@ -3036,6 +3062,8 @@ double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damag
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
 bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the integrator cannot wind UP (P + projection alone handle the approach — prevents approach windup overshoot)
+float thermalHoldEstimate = 0.0f;    // learned equilibrium holding penalty (amps): EMA of the integral term sampled only when genuinely settled at setpoint. The integrator is clamped to this + margin so it reaches the holding level but cannot overbuild during a hot transient dwell (the relaxation-oscillation source).
+bool  thermalHoldValid = false;      // false until the first settled-at-setpoint sample seeds thermalHoldEstimate; while false the equilibrium clamp is disabled (ceiling = penaltyMax)
 
 float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted from target table
 double thermalPenaltyAmps_d = 0.0;  // double version for PID library
@@ -4568,7 +4596,7 @@ void loop() {
             }
             shutdownNVSFlushDone = true;
             shutdownCloudDeadlineMs = millis() + 1800000;  // TEMP BENCH POWER TEST  5000 Original: 30-min window: fieldOffSettled() gates fire at 60-75s after field off; 30 min gives full time for NTP, uploads, weather, and buffer drain
-          } else if (millis() < shutdownCloudDeadlineMs) {
+          } else if (shutdownCloudDeadlineMs && (int32_t)(millis() - shutdownCloudDeadlineMs) < 0) {  // rollover-safe "now < deadline"
             // Phase 3: hold 240MHz and WiFi for the full 30-min window unconditionally.
             // Lets the CloudFeatures block continue uploading, and keeps WiFi open to verify the drain.
             setCpuFrequencyMhz(240);
@@ -4950,6 +4978,24 @@ void loop() {
   }
   endtime = esp_timer_get_time();  //Record end of Loop
   LoopTime = (endtime - starttime);
+  // Worst-loop attribution: on each new worst pass over the threshold, print this pass's
+  // per-function breakdown to Console once. All ft_*.lastCall are THIS pass's durations (every
+  // suspect is TIMED_CALL'd earlier in this same loop()). ctrl(inclFold) already contains fold.
+  // A part larger than total = that function was throttled this pass, so its lastCall is stale —
+  // judge by total. Emitted here (after endtime) so it never counts against the measured pass.
+  if ((uint32_t)LoopTime > LOOP_DIAG_THRESH_US && (uint32_t)LoopTime > loopDiagWorstUs) {
+    loopDiagWorstUs = (uint32_t)LoopTime;
+    queueConsoleMessageF(
+      "LOOP WORST %.1fms | rai=%.1f ctrl(inclFold)=%.1f fold=%.1f health=%.1f boat=%.1f sysHealth=%.1f wifiSend=%.1f",
+      LoopTime / 1000.0,
+      ft_rai_total.lastCall / 1000.0,
+      ft_AdjustFieldLearnMode.lastCall / 1000.0,
+      ft_altFold.lastCall / 1000.0,
+      ft_altHealth.lastCall / 1000.0,
+      ft_boatPerf.lastCall / 1000.0,
+      ft_updateSystemHealthStats.lastCall / 1000.0,
+      ft_SendWifiData.lastCall / 1000.0);
+  }
   // 80MHz low-power loop health (engine-off only). One cheap freq read gates it;
   // tracks worst pass + counts passes over the accel FIFO drain limit. See LOOP80_* globals.
   if (getCpuFrequencyMhz() < 81) {

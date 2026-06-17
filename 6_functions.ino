@@ -1757,7 +1757,7 @@ void AdjustFieldLearnMode() {
         if (tuningWaveform != 0) {
           // SINE (closed-loop reference). Bypass slew so the PID sees the true sine; no ISE scoring.
           tuningScore.inScoringWindow = false;
-          float baseA = 5.0f + waveAmplitude * 0.5f;   // midpoint; swings 5 .. 5+waveAmplitude
+          float baseA = (float)tuningWaveFloor + waveAmplitude * 0.5f;   // midpoint; swings tuningWaveFloor .. tuningWaveFloor+waveAmplitude
           float ampA  = waveAmplitude * 0.5f;
           tuningSineStep(tick.nowMs, actualDtSec, tuningSinePhase, baseA, ampA, MeasuredAmps, setpointCommand);
           setpointLimited = setpointCommand;           // no slew limiting → clean sine reference
@@ -1783,7 +1783,7 @@ void AdjustFieldLearnMode() {
             tuningScore.inScoringWindow = false;
           }
 
-          uTargetAmps = tuningWaveHigh ? (5 + waveAmplitude) : 5;
+          uTargetAmps = tuningWaveHigh ? (tuningWaveFloor + waveAmplitude) : tuningWaveFloor;
           setpointCommand = (float)uTargetAmps;
 
           setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
@@ -2103,9 +2103,14 @@ void AdjustFieldLearnMode() {
               setpointLimited = 0.0f;
               fastOvClampActive = true;
               if (!ldWasActive) {
-                cv_I = 0.0f;            // snap integrator on rising edge
+                cv_I = 0.0f;            // snap voltage-loop integrator on rising edge
+                // Collapse inner PID integrator too (same as iExcess / hard-OV): without
+                // it a wound-up integrator resists the setpoint collapse and grinds duty
+                // down at ~40%/s instead of reaching MinDuty in 1-2 cycles. Load dump is
+                // the most catastrophic over-current, so it gets the fastest field collapse.
+                currentPID.ResetIntegratorTo(0.0);
                 g_loadDumpCount++;
-                queueConsoleMessageF("Load dump #%lu detected — output cut (dBcur/dt=%.0f A/s)",
+                queueConsoleMessageF("Load dump #%lu detected — output cut, inner PID integrator reset (dBcur/dt=%.0f A/s)",
                                      (unsigned long)g_loadDumpCount, g_dBcur_dt);
               }
             }
@@ -4060,6 +4065,8 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalSlopeFPerSec = 0.0f;
     projectedTempF = NAN;
     thermalIntegratorReleased = false;  // fresh approach — integrator frozen until present temp reaches setpoint again
+    thermalHoldEstimate = 0.0f;         // forget the learned equilibrium holding level — a hard reset means the operating point is unknown
+    thermalHoldValid = false;
     queueConsoleMessage("ThermalPID: manual reset requested - integrator and filter cleared");
     return;
   }
@@ -4259,17 +4266,25 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //   4. Rising transient (added 2026-06-15): above setpoint and slope > flat band.
   //      Freezes integrator overbuild on the projection-inflated rising overshoot;
   //      slow drift (<= band) still winds so heat-soak tracks. See dev summary.
-  //   5. Holding band (added 2026-06-16): present temp more than THERMAL_I_HOLD_BAND
-  //      above setpoint. Cases 3/4 gate on slope, so neither catches the quasi-flat
-  //      DWELL at the top of an overshoot — the integrator wound there to ~2x the
-  //      holding level, over-cut current, and sustained the cycle (longthermal +
-  //      moreThermal, 2026-06-16: peak grazed the limit at +5.1°F). Conditional
-  //      integration: integral corrects steady-state droop NEAR setpoint; larger
-  //      positive excursions are transients the P term already covers. Trades a
-  //      little steady-state droop tolerance (user accepts +/-5°F of the limit-5
-  //      setpoint) for killing the cycle and the limit graze.
+  //   5. Equilibrium clamp (revised 2026-06-16): the dwell at the top of an overshoot
+  //      reads slope≈0 so cases 3/4 miss it — the integrator wound there to ~2x the
+  //      holding level, over-cut current, and sustained a relaxation cycle (longthermal
+  //      + moreThermal: peak grazed the limit at +5.1°F). The first attempt (a hard
+  //      freeze whenever present temp was >1.5°F above setpoint) starved the integrator
+  //      and reintroduced proportional droop — THERMLA.csv parked +3.5°F, peaked 161.7
+  //      over a 160 limit, and tripped the over-temp shutdown. So instead of freezing on
+  //      a fixed band, LEARN the holding level and clamp to it: thermalHoldEstimate is an
+  //      EMA of the integral term sampled only when GENUINELY settled at setpoint (|err|
+  //      <= HOLD_BAND AND |slope| <= FLAT_BAND — the only regime where the applied derate
+  //      truly equals what holds setpoint). The integrator may wind up to that estimate +
+  //      HOLD_MARGIN and no further: it still carries the full steady-state holding level
+  //      (no droop) and tracks heat-soak as the estimate rises, but cannot overbuild past
+  //      equilibrium during a hot transient dwell. Disabled (ceiling = penaltyMax) until
+  //      the first settled sample exists, so the cold approach is unaffected.
   const float THERMAL_I_FLAT_BAND = 0.04f;  // °F/s — heat-soak drift (track) vs loop transient (freeze)
-  const float THERMAL_I_HOLD_BAND = 1.5f;   // °F — integrate only within this band of setpoint (case 5)
+  const float THERMAL_I_HOLD_BAND = 1.5f;   // °F — "settled at setpoint" window for sampling the equilibrium estimate (case 5)
+  const float THERMAL_I_HOLD_MARGIN = 10.0f; // A — how far above the learned holding level the integrator may still wind (heat-soak headroom; caps transient overbuild)
+  const float THERMAL_HOLD_EMA_ALPHA = 0.05f; // EMA weight per settled tick (~100s time constant at the 5s PID cadence)
   const bool aboveSetpoint = (tempPIDInput_d > (double)effectiveSetpoint);
   const bool satFreeze     = aboveSetpoint && thermalIntegratorReleased
                              && (prevThermalPenalty >= capCurrent - 0.5f);
@@ -4277,11 +4292,25 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
                              && (thermalSlopeFPerSec < 0.0f);
   const bool risingTransientFreeze = aboveSetpoint && thermalIntegratorReleased
                              && (thermalSlopeFPerSec > THERMAL_I_FLAT_BAND);
-  // Conditional integration on PRESENT temp — implies aboveSetpoint (band > 0).
-  const bool holdBandFreeze = thermalIntegratorReleased
-                             && (tempNowPid > (float)effectiveSetpoint + THERMAL_I_HOLD_BAND);
+
+  // Equilibrium clamp (case 5). Sample the integral term as the holding-level estimate
+  // ONLY when genuinely settled at setpoint (small error AND flat slope) — there the
+  // applied derate equals what holds setpoint. EMA-track it so heat-soak drift is followed.
+  const float iTermNow = (float)tempPID.GetIterm();
+  const bool settledAtSetpoint = thermalIntegratorReleased
+                             && (fabsf(tempNowPid - effectiveSetpoint) <= THERMAL_I_HOLD_BAND)
+                             && (fabsf(thermalSlopeFPerSec) <= THERMAL_I_FLAT_BAND);
+  if (settledAtSetpoint) {
+    if (!thermalHoldValid) { thermalHoldEstimate = iTermNow; thermalHoldValid = true; }
+    else { thermalHoldEstimate += THERMAL_HOLD_EMA_ALPHA * (iTermNow - thermalHoldEstimate); }
+  }
+  // Clamp upward winding to the learned holding level + margin. Until a settled sample
+  // exists the ceiling is penaltyMax (no clamp) so the cold approach is unaffected.
+  const float holdCeiling = thermalHoldValid ? (thermalHoldEstimate + THERMAL_I_HOLD_MARGIN) : penaltyMax;
+  const bool equilibriumFreeze = aboveSetpoint && thermalIntegratorReleased
+                             && (iTermNow >= holdCeiling);
   bool freezeIntegrator = aboveSetpoint
-                          && (!thermalIntegratorReleased || satFreeze || descentFreeze || risingTransientFreeze || holdBandFreeze);
+                          && (!thermalIntegratorReleased || satFreeze || descentFreeze || risingTransientFreeze || equilibriumFreeze);
   {
     // Log the saturation case only (descent fires every cycle — its signature is
     // outerI flat-while-falling in the thermal log, no console spam needed).
@@ -4293,6 +4322,17 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
       }
     } else {
       satFreezeLogged = false;  // re-log on next distinct saturation episode
+    }
+    // Equilibrium clamp visibility — report the learned holding level when the clamp
+    // first engages (outerI plateaus at the ceiling in the thermal log; this names it).
+    static bool eqFreezeLogged = false;
+    if (equilibriumFreeze && !satFreeze) {
+      if (!eqFreezeLogged) {
+        eqFreezeLogged = true;
+        queueConsoleMessageF("TempPID: integrator at equilibrium ceiling — holding est %.1fA + margin %.1fA (capped to stop overbuild)", thermalHoldEstimate, THERMAL_I_HOLD_MARGIN);
+      }
+    } else {
+      eqFreezeLogged = false;
     }
   }
 

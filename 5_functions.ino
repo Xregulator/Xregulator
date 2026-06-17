@@ -4057,6 +4057,14 @@ void saveNVSDataFull() {
   if (prev_faDomAmp    != (int32_t)faDomAmpAX100)                              { nvs_set_i32(h, "faDomAmp",      (int32_t)faDomAmpAX100);                              prev_faDomAmp    = (int32_t)faDomAmpAX100;                            chg = true; }
   if (prev_faDomFreq   != (int32_t)faDomFreqHzX10)                             { nvs_set_i32(h, "faDomFreq",     (int32_t)faDomFreqHzX10);                             prev_faDomFreq   = (int32_t)faDomFreqHzX10;                           chg = true; }
   if (prev_faDomRpm    != (int32_t)faDomRpm)                                   { nvs_set_i32(h, "faDomRpm",      (int32_t)faDomRpm);                                   prev_faDomRpm    = (int32_t)faDomRpm;                                 chg = true; }
+  // Operating-point context for the two headline worsts (amps ×10, temp ×10 [INT32_MIN if no probe], rpm raw, epoch raw)
+  if (prev_faDomAmps   != (int32_t)(faDomAmpsA * 10))                          { nvs_set_i32(h, "faDomAmps",     (int32_t)(faDomAmpsA * 10));                          prev_faDomAmps   = (int32_t)(faDomAmpsA * 10);                        chg = true; }
+  if (prev_faDomTmp    != (isnan(faDomTempF) ? INT32_MIN : (int32_t)(faDomTempF * 10)))      { nvs_set_i32(h, "faDomTmp",      (isnan(faDomTempF) ? INT32_MIN : (int32_t)(faDomTempF * 10)));      prev_faDomTmp    = (isnan(faDomTempF) ? INT32_MIN : (int32_t)(faDomTempF * 10));      chg = true; }
+  if (prev_faDomEp     != (int32_t)faDomEpoch)                                 { nvs_set_i32(h, "faDomEp",       (int32_t)faDomEpoch);                                 prev_faDomEp     = (int32_t)faDomEpoch;                               chg = true; }
+  if (prev_faSPkAmp    != (int32_t)(faSesPkpkAmpsA * 10))                       { nvs_set_i32(h, "faSPkAmp",      (int32_t)(faSesPkpkAmpsA * 10));                       prev_faSPkAmp    = (int32_t)(faSesPkpkAmpsA * 10);                     chg = true; }
+  if (prev_faSPkTmp    != (isnan(faSesPkpkTempF) ? INT32_MIN : (int32_t)(faSesPkpkTempF * 10))) { nvs_set_i32(h, "faSPkTmp",      (isnan(faSesPkpkTempF) ? INT32_MIN : (int32_t)(faSesPkpkTempF * 10))); prev_faSPkTmp    = (isnan(faSesPkpkTempF) ? INT32_MIN : (int32_t)(faSesPkpkTempF * 10)); chg = true; }
+  if (prev_faSPkRpm    != (int32_t)faSesPkpkRpm)                               { nvs_set_i32(h, "faSPkRpm",      (int32_t)faSesPkpkRpm);                               prev_faSPkRpm    = (int32_t)faSesPkpkRpm;                             chg = true; }
+  if (prev_faSPkEp     != (int32_t)faSesPkpkEpoch)                             { nvs_set_i32(h, "faSPkEp",       (int32_t)faSesPkpkEpoch);                             prev_faSPkEp     = (int32_t)faSesPkpkEpoch;                           chg = true; }
   if (prev_MeasAmpsMax != MeasuredAmpsMax)                                  { nvs_set_blob(h, "MAmpsMax",      &MeasuredAmpsMax,                   sizeof(float));    prev_MeasAmpsMax = MeasuredAmpsMax;                                  chg = true; }
   if (prev_MeasAmpsMax_AllTime != MeasuredAmpsMax_AllTime)                  { nvs_set_blob(h, "MAmpsMax_AT",   &MeasuredAmpsMax_AllTime,           sizeof(float));    prev_MeasAmpsMax_AllTime = MeasuredAmpsMax_AllTime;                  chg = true; }
   if (prev_RPMMax != RPMMax)                                                { nvs_set_blob(h, "RPMMax",        &RPMMax,                            sizeof(float));    prev_RPMMax = RPMMax;                                                chg = true; }
@@ -4190,6 +4198,14 @@ void loadNVSData() {
   if (nvs_get_i32(nvs_handle, "faDomAmp", &temp_int32) == ESP_OK) faDomAmpAX100 = (uint16_t)temp_int32;     // Highest Tone in Map: pre-scaled, store/restore raw
   if (nvs_get_i32(nvs_handle, "faDomFreq", &temp_int32) == ESP_OK) faDomFreqHzX10 = (uint16_t)temp_int32;
   if (nvs_get_i32(nvs_handle, "faDomRpm", &temp_int32) == ESP_OK) faDomRpm = (uint16_t)temp_int32;
+  // Operating-point context (temp sentinel INT32_MIN -> NAN, "no probe at capture")
+  if (nvs_get_i32(nvs_handle, "faDomAmps", &temp_int32) == ESP_OK) faDomAmpsA = temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "faDomTmp", &temp_int32) == ESP_OK) faDomTempF = (temp_int32 == INT32_MIN) ? NAN : temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "faDomEp", &temp_int32) == ESP_OK) faDomEpoch = (uint32_t)temp_int32;
+  if (nvs_get_i32(nvs_handle, "faSPkAmp", &temp_int32) == ESP_OK) faSesPkpkAmpsA = temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "faSPkTmp", &temp_int32) == ESP_OK) faSesPkpkTempF = (temp_int32 == INT32_MIN) ? NAN : temp_int32 / 10.0f;
+  if (nvs_get_i32(nvs_handle, "faSPkRpm", &temp_int32) == ESP_OK) faSesPkpkRpm = (uint16_t)temp_int32;
+  if (nvs_get_i32(nvs_handle, "faSPkEp", &temp_int32) == ESP_OK) faSesPkpkEpoch = (uint32_t)temp_int32;
 
   // Speed AllTime accumulators (restore so AvgSpeed_AllTime continues correctly after reboot)
   required_size = sizeof(double);
@@ -4468,6 +4484,13 @@ void initNVSCache() {
   prev_faDomAmp             = (int32_t)faDomAmpAX100;
   prev_faDomFreq            = (int32_t)faDomFreqHzX10;
   prev_faDomRpm             = (int32_t)faDomRpm;
+  prev_faDomAmps            = (int32_t)(faDomAmpsA * 10);
+  prev_faDomTmp             = (isnan(faDomTempF) ? INT32_MIN : (int32_t)(faDomTempF * 10));
+  prev_faDomEp              = (int32_t)faDomEpoch;
+  prev_faSPkAmp             = (int32_t)(faSesPkpkAmpsA * 10);
+  prev_faSPkTmp             = (isnan(faSesPkpkTempF) ? INT32_MIN : (int32_t)(faSesPkpkTempF * 10));
+  prev_faSPkRpm             = (int32_t)faSesPkpkRpm;
+  prev_faSPkEp              = (int32_t)faSesPkpkEpoch;
   prev_MeasAmpsMax          = MeasuredAmpsMax;
   prev_MeasAmpsMax_AllTime  = MeasuredAmpsMax_AllTime;
   prev_RPMMax               = RPMMax;
