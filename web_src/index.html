@@ -1962,7 +1962,7 @@
                   <p data-intro="cl">When measured current exceeds the safe system limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum across the whole system — including alternator continuous rating, battery acceptance, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. The trip threshold is automatically 10 A above Command Limit.</p>
                   <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> turns the whole layer off.</p>
                   <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> turns the whole layer off.</p>
-                  <p data-intro="g3">Two regimes, split at the <strong>Arming Margin</strong> below target. <strong>Near the target</strong> (within Arming Margin): engages when the <em>time-averaged</em> measured current rises above the commanded <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong> (a percentage of the setpoint). <strong>Below the Arming Margin (Bulk / current-control phase):</strong> the main detector is off and the bulk sub-mode takes over — it engages when the averaged current rises above the commanded <strong>ceiling</strong> (RPM cap minus thermal/warmup) by more than the <strong>Detection Threshold (Bulk)</strong>. Comparing to the ceiling rather than the slewed setpoint means normal RPM ramps don't false-fire. The <strong>Averaging Time Constant</strong> is what rejects the belt-resonance shiver — any oscillation faster than that window cancels out before the threshold is checked. The percentage threshold is bounded by the <strong>Threshold Floor</strong> and <strong>Threshold Ceiling</strong> (amps), and <strong>Release Hysteresis</strong> sets how far the average must fall before the detector re-arms.</p>
+                  <p data-intro="g3">Two regimes, split at the <strong>Strict Over-Current Band</strong> below target. <strong>Near the target</strong> (within the band): engages when the <em>time-averaged</em> measured current rises above the commanded <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong> (a percentage of the setpoint). <strong>Below the band</strong> (battery voltage well below the charge target, whatever the charge stage): the near-target detector switches off and the lower threshold — <strong>Detection Threshold (Bulk)</strong> — takes over, engaging when the averaged current rises above the commanded <strong>ceiling</strong> (the RPM table cap minus any thermal/warm-up limit) by more than that percentage. Comparing to the ceiling rather than the moving setpoint means normal speed-up ramps don't false-trip. The <strong>Averaging Time Constant</strong> smooths the current first, so brief fluctuations cancel out before the threshold is checked and only a sustained excess can trip it. The percentage threshold is bounded by the <strong>Threshold Floor</strong> and <strong>Threshold Ceiling</strong> (amps), and <strong>Release Hysteresis</strong> sets how far the average must fall before the detector re-arms.</p>
                   <p data-intro="g4">Three tiered thresholds on the rate-of-change of battery current. <strong>Tier 1</strong> fires when one sample exceeds its threshold. <strong>Tier 2</strong> fires when two consecutive samples exceed its threshold. <strong>Tier 3</strong> fires when three consecutive samples exceed its threshold.</p>
                 </div>
 
@@ -2055,7 +2055,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span>
                       dvdt EMA TC (ms) (<span id="DvdtTC_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time constant for the EMA smoothing applied to the raw voltage rate-of-rise signal before it enters the Group 1 prediction. Larger TC = smoother but laggier; smaller TC = faster response, noisier. The filter is dt-aware, so behavior stays consistent across INA228 sample-cadence jitter. <strong>Constraint: do not lower TC below ~25 ms without retesting false-fire rate at idle — the 16 mV noise margin is thin.</strong></span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Smoothing time applied to the voltage rate-of-rise signal before Group 1 uses it to predict overshoot. Larger = smoother but slower to react; smaller = faster but noisier. Setting it too low can let measurement noise cause false trips, so reduce it gradually if you adjust it.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2091,7 +2091,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g2">G2</span>
                       OvMeasMargin — Group 2 Trigger Margin (V) (<span id="OvMeasMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must exceed the active charge target before Group 2 engages. Lowering = more sensitive (fires sooner above target); raising = relaxed. <strong>Watch your steady-state ripple amplitude — set this meaningfully above your peak-to-peak ripple to avoid false fires.</strong> This does not affect Group 3 — see Group 3's own Arming Margin.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far measured battery voltage must rise above the active charge target before Group 2 engages. Lowering = more sensitive (engages sooner above target); raising = relaxed. Set it above the normal voltage variation you see above target, so ordinary fluctuation doesn't trip it. This does not affect Group 3 — see Group 3's own Strict Over-Current Band.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2104,10 +2104,25 @@
                   </article>
 
                   <article class="protections-param" data-groups="g3">
+                    <div class="protections-name" style="font-weight:normal; display:block;">
+                      <div style="display:flex; justify-content:flex-end; margin-bottom:2px;">
+                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:11px; color:#888; cursor:pointer;">
+                          <input type="checkbox" id="iExcessSparkAuto" onchange="localStorage.setItem('iExcessSparkAuto', this.checked?'1':'0')" style="margin:0;"> auto-scale
+                        </label>
+                      </div>
+                      <canvas id="iExcessSpark" style="display:block; width:100%; height:30px;"></canvas>
+                      <div style="font-size:0.92em; margin-top:5px;">
+                        peak excess <strong id="mExcessEmaLive">—</strong> A&nbsp;·&nbsp;threshold <strong id="iExcessELive">—</strong> A
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Live Group 3 detector. Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> fire threshold (amber). The threshold rides the live current command and clamps onto the Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross. On a clean high-current hold the teal stays well under the amber; a real over-current crosses it and draws a marker.</span></span>
+                      </div>
+                    </div>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      Arming Margin — V below target (<span id="IExcessArmMarginV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How close to the active charge target the measured battery voltage must be before Group 3 is allowed to fire. The gate opens when <em>measured voltage &gt; target − this margin</em>. Larger values arm earlier in the ramp (more aggressive); smaller values restrict Group 3 to near-target only. <strong>Big-bank installs</strong> where voltage barely deflects above target can set this large (e.g. 1.0–5.0 V) so Group 3 remains the primary current-overshoot detector. This moves independently of the Group 2 Trigger Margin.</span></span>
+                      Strict Over-Current Band — V below target (<span id="IExcessArmMarginV_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Within this band of the presently acting voltage target (usually, the bulk voltage), it's strict — it reacts whenever current exceeds the current setpoint. Below this band, current is allowed to momentarily run well above the moment-to-moment setpoint, all the way up toward the “ceiling” (the most current allowed right now — basically the RPM table cap minus any thermal/warm-up limit).</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2123,8 +2138,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Detection Threshold — % of command (<span id="IExcessFrac_echo">?</span>%)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the <strong>time-averaged</strong> alternator current must rise above the commanded current setpoint before Group 3 fires, as a percentage of that setpoint. Group 3 averages the current first (see Averaging Time Constant), so the belt-resonance shiver and other ripple cancel out before this threshold is checked — a brief spike won't trip it, only a sustained excess will. Expressing it as a percentage means the same setting works on a small or a large alternator. The averaged-vs-floor/ceiling result is what actually fires; this percentage is bounded by the Threshold Floor and Ceiling below.<br><br><strong>Arming gate:</strong> only active while the CV loop is running AND the Arming Margin above is satisfied. Works at float, bulk, Maintain Mode, and Target Voltage mode alike.</span></span>
-                      <span id="IExcessK_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak over setpoint: —</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the alternator's current may rise above the current the regulator is commanding before Group 3 steps in — set as a percentage of that commanded current. It acts on a short-time-averaged current (see Averaging Time Constant), so a brief momentary spike won't trip it; only a sustained excess will. The percentage is bounded by the Threshold Floor and Ceiling below.<br><br>This is the threshold in effect when battery voltage is near the charge target — within the Strict Over-Current Band — at any charge stage. When voltage sits well below the target, the Detection Threshold (Bulk) below takes over instead.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2140,8 +2154,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Detection Threshold (Bulk) — % of ceiling (<span id="IExcessFracBulk_echo">?</span>%)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Bulk sub-mode of Group 3, active in the current-control phase — battery voltage far below the charge target, where the main threshold above is gated off. How far the time-averaged current must rise above the commanded current <strong>ceiling</strong> (RPM cap minus thermal/warmup limits), as a percentage of that ceiling, before it fires. Looser than the main threshold on purpose: far from the voltage limit we tolerate more command-vs-actual error and only catch absurd RPM-blip overshoots before they trip a hard protection. The handoff between this and the main threshold is the Arming Margin above.</span></span>
-                      <span id="IExcessKBulk_live" style="display:block; width:100%; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak over ceiling: —</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The Group 3 threshold used when battery voltage is well below the charge target, where the threshold above is not in effect. It sets how far the current may rise above the maximum current allowed at the moment — the <strong>ceiling</strong> (the RPM table cap minus any thermal/warm-up limit) — as a percentage of that ceiling, before Group 3 steps in. It's intentionally looser than the threshold above: far from the voltage target, more difference between commanded and actual current is acceptable, so it only catches large overshoots. The handoff between this and the threshold above is the Strict Over-Current Band.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2157,7 +2170,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Threshold Floor — minimum amps (<span id="IExcessFloorA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small (e.g. a depressed setpoint mid-recovery), the percentage-of-command threshold above could shrink below the residual ripple and false-fire — this floor stops that. Whichever is larger, the percentage or this floor, is used.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2189,7 +2202,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Averaging Time Constant (<span id="IExcessTau_echo">?</span> ms)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the alternator current is time-averaged before Group 3 checks it against the threshold. This is the knob that rejects the belt-resonance shiver: any oscillation faster than this averaging window cancels out, so a larger value rejects more (lower frequencies) but reacts a little slower to a real overshoot. The default (75 ms) is sized for the worst case — the slow resonance at engine idle — and covers the whole RPM range automatically.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the alternator current is time-averaged before Group 3 checks it against the threshold. A larger value smooths out brief fluctuations more, so momentary spikes won't trip it, but it reacts a little slower to a real, sustained overshoot. The default suits most installations across the full speed range.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2205,7 +2218,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Release Hysteresis — % of threshold (<span id="IExcessRelFrac_echo">?</span>%)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After Group 3 fires it stays latched until the averaged excess falls back below this percentage of the threshold, then it re-arms. Prevents the detector from chattering on and off during the field's current tail-off. Lower = holds longer before releasing; higher = re-arms sooner. (This replaces the old fixed 2 A release deadband, now scaled to the threshold so it works on any alternator size.)</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After Group 3 fires it stays engaged until the averaged excess falls back below this percentage of the threshold, then it re-arms. Prevents the detector from rapidly switching on and off as the current settles. Lower = holds longer before releasing; higher = re-arms sooner.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2274,7 +2287,7 @@
 
                 <div class="protections-intro">
                   <p data-intro="cl">The field drive FET is powered off and the field collapses through the coil's natural time constant. Hardware-level cut — no adjustable parameter, and none of the integrator-bleed actions used by the other protections apply here.</p>
-                  <p data-intro="g1"><strong>KHard — Response Slope</strong> sets how aggressively the current cap is trimmed per volt of overshoot — applied every tick, cumulative across the overshoot duration. Shared with Measured OV. <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while any of the other protections is clamping, scaled to alternator size via Command Limit.</p>
+                  <p data-intro="g1"><strong>KHard — Response Slope</strong> sets how aggressively the current cap is trimmed per volt of overshoot — applied every tick, cumulative across the overshoot duration. Shared with Measured OV. <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while any of the other protections is clamping.</p>
                   <p data-intro="g2">Same <strong>KHard — Response Slope</strong> cap-trim mechanism as Predictive OV (shared parameter). <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while the clamp is active.</p>
                   <p data-intro="g3">Trims the current cap by the measured amount of excess each tick — the same cap-trim action the OV groups apply, but driven by current overshoot rather than voltage. <strong>K_bleed — Integrator Bleed Mode</strong> additionally drains the voltage integrator during the event — 0 means snap to zero every tick (maximum response); &gt; 0 walks the integrator down proportionally to the amount of excess. <strong>AW Bleed Rate</strong> also drains continuously while active.</p>
                   <p data-intro="g4">The voltage integrator is snapped to 0 instantly on the rising edge of the trip — hardcoded, no adjustable parameter for the snap itself. <strong>AW Bleed Rate</strong> also drains continuously while active.</p>
@@ -2301,7 +2314,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how the voltage loop integrator is driven down <em>during</em> a Group 3 event, on top of the Shared Action bleed:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response).<br>• <strong>&gt; 0</strong> = each tick, subtract (K_bleed × amps-of-excess × tick-duration). Walks the integrator down gradually instead of pinning it.<br><br>Proportional mode is gentler and lowers undershoot risk after the event clears. <strong>Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.</strong> Recovery is always handled by the Shared Recovery block regardless of mode.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Controls how the voltage loop integrator is driven down <em>during</em> a Group 3 event, on top of the Shared Action bleed:<br><br>• <strong>0</strong> = pin the integrator at zero every tick (maximum response).<br>• <strong>&gt; 0</strong> = each tick, reduce the integrator by an amount proportional to how far the current is over the limit (and to the tick duration). Walks it down gradually instead of pinning it.<br><br>Proportional mode is gentler and lowers undershoot risk after the event clears. <strong>Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.</strong> Recovery is always handled by the Shared Recovery block regardless of mode.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2317,7 +2330,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       AW Bleed Rate (×Table/s) (<span id="AwBleedRate_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at which the voltage loop integrator is bled toward zero while ANY protection group is asserted. Expressed as a fraction of the Alternator Current Limit per second, so the proportional aggression stays the same regardless of alternator size. <strong>Example: a value of 2.0 at a 150 A current limit gives 300 A/s, so a 100 ms protection event bleeds ~30 A of integrator value.</strong></span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Rate at which the voltage loop integrator is bled toward zero while any protection group is active. Expressed as a fraction of the Alternator Current Limit per second. <strong>Example: 2.0 at a 150 A current limit gives 300 A/s, so a 100 ms protection event bleeds about 30 A of integrator value.</strong></span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2413,7 +2426,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Fast Rise Headroom (V) (<span id="FastSetpointRiseHeadroomV_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts below the active charge target at which fast-rise is allowed to fire. The fast-rise gate stays open while <em>battV &lt; target − Headroom</em>; the moment battV climbs back into the target band, the gate closes and the slew falls back to the normal Setpoint Rise Rate. Keep it inside the Group 3 iExcess Arming Margin so iExcess can still arm during fast-rise. Range 0.05–2.0 V.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Volts below the active charge target at which fast-rise is allowed to fire. The fast-rise gate stays open while <em>battV &lt; target − Headroom</em>; the moment battV climbs back into the target band, the gate closes and the slew falls back to the normal Setpoint Rise Rate. Keep it inside the Group 3 Strict Over-Current Band so Group 3 can still arm during fast-rise. Range 0.05–2.0 V.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2788,14 +2801,14 @@
               <p style="font-size: 12px; color: var(--text-muted); margin: 8px 0 12px 0; line-height: 1.5;">
                 Battery-side protections that ramp the field down or cut it entirely when a battery-safety limit is exceeded.
                 These thresholds sit above the four control-loop throttling protections (Settings → Alternator → Protections)
-                and the INA228 hardware ALERT pin (a hardware backup that needs no configuration).
+                and a separate hardware overvoltage backup (needs no configuration).
               </p>
 
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                   <span>Alternator Hard Shutdown Voltage (V) (<span id="AlternatorHardShutdownV_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current; alongside it sits the INA228 hardware ALERT pin (a separate hardware backup at the same default threshold of BulkVoltage + 0.3 V, but using the chip's slow-averaged value — see console log on boot for the exact programmed threshold). Should be set just below your battery BMS shutdown voltage so the alternator stops before the BMS opens the contactor. <strong>First-boot default auto-scales to BulkVoltage + 0.3 V</strong> (so 14.8 V on a 12V system, 29.1 V on a 24V system, 57.9 V on a 48V system). Once you save your own value it stays absolute — re-set it manually if you later change BulkVoltage to a different system class.</span>
+                    <span class="tooltip-box">Absolute battery voltage at which the alternator is force-shutdown: field is ramped to 0, GPIO4 is cut, and a cooldown lockout begins before charging can resume. This is the only software-layer hard overvoltage shutdown — below it sit the Group 1/2/3 throttling protections (Voltage tab) which keep charging while trimming current; alongside it sits a separate hardware overvoltage backup at the same default threshold of BulkVoltage + 0.3 V, using a slow-averaged voltage (see the console log on boot for the exact programmed threshold). Should be set just below your battery BMS shutdown voltage so the alternator stops before the BMS opens the contactor. <strong>First-boot default auto-scales to BulkVoltage + 0.3 V</strong> (so 14.8 V on a 12V system, 29.1 V on a 24V system, 57.9 V on a 48V system). Once you save your own value it stays absolute — re-set it manually if you later change BulkVoltage to a different system class.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -2850,7 +2863,7 @@
                       the fault clears. <strong>Triggered by:</strong> alternator hard-shutdown (Alternator Hard Shutdown Voltage
                       exceeded), voltage sensor disagreement (warning or critical), both voltage sensors implausible,
                       temperature warning/sustained, temperature data stale, alternator current data stale.
-                      <strong>NOT triggered by</strong> immediate-cut faults (INA228 hardware overvoltage, hard
+                      <strong>NOT triggered by</strong> immediate-cut faults (hardware overvoltage, hard
                       overcurrent, temperature critical, RPM below minimum) — those just cut the field and re-enable
                       as soon as the condition clears, no cooldown.</span></span>
                 </div>
@@ -3011,7 +3024,7 @@
                   <span>Shunt Resitance uOhms (micro)(<span id="ShuntResistanceMicroOhm_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
-                    <span class="tooltip-box">Resistance of your current shunt in micro-ohms (µΩ). The INA228 uses this value to convert measured voltage drop to amps. Victron SmartShunt / BMV shunts = 100µΩ. Check your shunt's datasheet if unsure — an incorrect value will scale all current and SoC readings proportionally.</span></span>
+                    <span class="tooltip-box">Resistance of your current shunt in micro-ohms (µΩ). The current sensor uses this value to convert measured voltage drop to amps. Victron SmartShunt / BMV shunts = 100µΩ. Check your shunt's datasheet if unsure — an incorrect value will scale all current and SoC readings proportionally.</span></span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -4656,23 +4669,46 @@
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Step Test Amplitude (% duty) (<span id="SystemIDStepAmplitude_echo">?</span>):</span>
+            <span>Test Type (<span id="systemIDTestType_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Duty cycle step size used during the plant delay measurement test. Larger steps produce a cleaner current signal above noise but disturb the system more. Must be large enough that the current response is clearly visible above the baseline noise floor.</span>
+              <span class="tooltip-box">Step = the classic rise/fall delay test (PID off, duty steps up and down). Sine Sweep = drives a swept sine on duty with the PID off and measures the plant's gain and phase lag at each frequency — an open-loop Bode plot. Use Sine Sweep to see how much of the plant delay is true dead-time versus field L/R lag, and where the plant rolls off.</span>
             </span>
           </div>
           <div class="form-input">
-            <form action="/get" method="GET" target="hidden-form">
-              <input type="hidden" name="password" class="password_field">
-              <input name="SystemIDStepAmplitude" type="number" step="0.1" min="0.1" max="1000" />
-              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-            </form>
+            <span class="seg accent">
+              <button type="button" id="systemIDTestType_btn0" class="on" onclick="setSysidTestType(0)">Step</button>
+              <button type="button" id="systemIDTestType_btn1" onclick="setSysidTestType(1)">Sine Sweep</button>
+            </span>
+            <input id="systemIDTestType_sel" type="hidden" value="0">
+          </div>
+        </div>
+
+        <!-- Protection toggle (per-page; all three pages share the same firmware flag) -->
+        <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
+          <div class="form-row" style="margin-bottom:0;">
+            <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+              <span>⚠️ Protections:</span>
+              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+            </div>
+            <div class="form-input">
+              <form action="/get" method="GET" target="hidden-form">
+                <input type="hidden" name="password" class="password_field">
+                <span class="toggle-label">Disabled</span>
+                <label class="switch">
+                  <input id="testProtectionsEnabled_plant_checkbox" type="checkbox" checked
+                    onchange="if(handleUserToggle('testProtectionsEnabled_plant_checkbox', 'testProtectionsEnabled_plant', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_plant_checkbox'); this.form.submit(); submitMessage(); }" />
+                  <span class="slider round"></span>
+                </label>
+                <span class="toggle-label">Enabled</span>
+                <input id="testProtectionsEnabled_plant" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
+              </form>
+            </div>
           </div>
         </div>
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Baseline Current (A) (<span id="SystemIDStabilizeAmps_echo">?</span>):</span>
+            <span>Wave Floor (A) (<span id="SystemIDStabilizeAmps_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
               <span class="tooltip-box">Alternator output the test stabilizes to before the sweep, and the trough the sine sits on (the sine swings upward from here). Raise it if the bottom of the current wave clips toward zero at low RPM; keep it well within what the alternator can produce at your test RPM.</span>
             </span>
@@ -4688,18 +4724,16 @@
 
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-            <span>Test Type (<span id="systemIDTestType_echo">?</span>):</span>
+            <span>Wave Amplitude (% duty) (<span id="SystemIDStepAmplitude_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Step = the classic rise/fall delay test (PID off, duty steps up and down). Sine Sweep = drives a swept sine on duty with the PID off and measures the plant's gain and phase lag at each frequency — an open-loop Bode plot. Use Sine Sweep to see how much of the plant delay is true dead-time versus field L/R lag, and where the plant rolls off.</span>
+              <span class="tooltip-box">Duty cycle step size used during the plant delay measurement test. Larger steps produce a cleaner current signal above noise but disturb the system more. Must be large enough that the current response is clearly visible above the baseline noise floor.</span>
             </span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
               <input type="hidden" name="password" class="password_field">
-              <select id="systemIDTestType_sel" name="systemIDTestType" onchange="this.form.submit(); submitMessage(); sysidToggleSineParams(this.value);">
-                <option value="0">Step (rise/fall delay)</option>
-                <option value="1">Sine Sweep (Bode)</option>
-              </select>
+              <input name="SystemIDStepAmplitude" type="number" step="0.1" min="0.1" max="1000" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
             </form>
           </div>
         </div>
@@ -4755,35 +4789,23 @@
           </div>
         </div>
 
-        <!-- Protection toggle (per-page; all three pages share the same firmware flag) -->
-        <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
-          <div class="form-row" style="margin-bottom:0;">
-            <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-              <span>⚠️ Protections:</span>
-              <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
-            </div>
-            <div class="form-input">
-              <form action="/get" method="GET" target="hidden-form">
-                <input type="hidden" name="password" class="password_field">
-                <span class="toggle-label">Disabled</span>
-                <label class="switch">
-                  <input id="testProtectionsEnabled_plant_checkbox" type="checkbox" checked
-                    onchange="if(handleUserToggle('testProtectionsEnabled_plant_checkbox', 'testProtectionsEnabled_plant', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_plant_checkbox'); this.form.submit(); submitMessage(); }" />
-                  <span class="slider round"></span>
-                </label>
-                <span class="toggle-label">Enabled</span>
-                <input id="testProtectionsEnabled_plant" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
-              </form>
-            </div>
-          </div>
+        <hr />
+        <!-- Auto-commissioning: one-button current-loop setup. The badge warns until the
+             device has been commissioned; the button opens the guided flow either way. -->
+        <div style="margin:16px 0 4px 0;">
+          <div id="commission-badge" style="display:none; margin-bottom:8px; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;"></div>
+          <button onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:10px;">Commission Current Loop…</button>
+          <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Guided one-button setup of the current-control + over-current chain (plant fit → PI gains &amp; filters → disturbance map → over-current thresholds). You hold the throttle; the regulator drives the field.</p>
         </div>
 
-        <div style="margin:20px 0 4px 0;">
+        <hr />
+        <div style="margin:16px 0 4px 0;">
           <button onclick="openSystemIDModal()" class="btn-secondary" style="width:100%;padding:10px;">Run Plant Delay Test…</button>
         </div>
 
         <hr />
-        <p class="card-group-title" style="margin:12px 0 10px 0;">Last Test Results</p>
+        <p class="card-group-title" style="margin:12px 0 10px 0;">Last Step Test Results</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">Rise/fall delays from the most recent <strong>Step</strong> run. Sine Sweep (Bode) results appear in the test window while that test runs.</p>
 
         <div class="grid telemetry-groups">
           <div class="card-group telemetry-group">
@@ -4834,14 +4856,14 @@
 
         <hr />
         <details id="systemIDLogSection" class="tuning-section">
-          <summary class="tuning-section-title">Plant Delay History</summary>
+          <summary class="tuning-section-title">Plant Delay History (Step runs)</summary>
           <div>
             <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
               <button type="button" class="btn-secondary" onclick="fetchSystemIDLog()">↺ Refresh</button>
               <button type="button" class="btn-secondary" onclick="resetSystemIDLog()">Reset Log</button>
             </div>
             <div style="overflow-x:auto;">
-              <table style="width:100%;min-width:900px;border-collapse:collapse;font-size:12px;">
+              <table style="width:100%;min-width:1020px;border-collapse:collapse;font-size:12px;">
                 <thead>
                   <tr style="background:var(--bg-card);color:var(--text-muted);">
                     <th style="padding:4px 6px;text-align:left;">#</th>
@@ -4854,17 +4876,56 @@
                     <th style="padding:4px 6px;text-align:left;">Setup (%)</th>
                     <th style="padding:4px 6px;text-align:left;">RPM</th>
                     <th style="padding:4px 6px;text-align:left;">Alt Temp (°F)</th>
+                    <th style="padding:4px 6px;text-align:left;" title="Bus voltage at commit">Bus V</th>
+                    <th style="padding:4px 6px;text-align:left;" title="Charge stage at commit">Stage</th>
                     <th style="padding:4px 6px;text-align:left;">Abort</th>
                   </tr>
                 </thead>
                 <tbody id="systemIDLogBody">
-                  <tr><td colspan="11" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
+                  <tr><td colspan="13" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
                 </tbody>
               </table>
             </div>
             <p style="font-size:11px;color:var(--text-muted);margin-top:12px;">
               Sorted by Rise Average (lower = faster plant = better). Aborted runs sink to end and are dimmed.
               Abort column shows <code>R<i>reason</i>/P<i>phase</i></code> — reason 254 = stabilize-phase timeout; others map to the firmware's FieldEventReason enum.
+            </p>
+          </div>
+        </details>
+
+        <hr />
+        <details id="sysidSweepLogSection" class="tuning-section">
+          <summary class="tuning-section-title">Sine Sweep History</summary>
+          <div>
+            <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+              <button type="button" class="btn-secondary" onclick="fetchSysidSweepLog()">↺ Refresh</button>
+              <button type="button" class="btn-secondary" onclick="resetSysidSweepLog()">Reset Log</button>
+            </div>
+            <div style="overflow-x:auto;">
+              <table style="width:100%;min-width:980px;border-collapse:collapse;font-size:12px;">
+                <thead>
+                  <tr style="background:var(--bg-card);color:var(--text-muted);text-align:left;">
+                    <th style="padding:4px 6px;">#</th>
+                    <th style="padding:4px 6px;">Roll-off (Hz) ↑</th>
+                    <th style="padding:4px 6px;">DC gain (A/%)</th>
+                    <th style="padding:4px 6px;">Worst lag (°)</th>
+                    <th style="padding:4px 6px;">Wave Amp (%)</th>
+                    <th style="padding:4px 6px;">Wave Floor (A)</th>
+                    <th style="padding:4px 6px;">Sweep (Hz)</th>
+                    <th style="padding:4px 6px;">RPM</th>
+                    <th style="padding:4px 6px;">Alt Temp (°F)</th>
+                    <th style="padding:4px 6px;" title="Bus voltage during the sweep">Bus V</th>
+                    <th style="padding:4px 6px;" title="Charge stage at commit">Stage</th>
+                  </tr>
+                </thead>
+                <tbody id="sysidSweepLogBody">
+                  <tr><td colspan="11" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p style="font-size:11px;color:var(--text-muted);margin-top:10px;">
+              Open-loop plant frequency response, one row per completed Sine Sweep. Sorted by −3 dB roll-off
+              (higher = faster plant = better). Click a row to show that run's full gain/phase curve.
             </p>
           </div>
         </details>
@@ -5111,18 +5172,39 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Wave Amplitude (A) (<span id="waveAmplitude_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Size
-                        of the wave above the Wave Floor. Square toggles between the floor (low) and (floor + amplitude)
-                        (high); sine swings the same amplitude, centered on (floor + amplitude/2). E.g. floor 5A +
-                        amplitude 20A → square cycles 5A↔25A, sine centers on 15A.</span></span>
+                    <span>Waveform Type (<span id="tuningWaveform_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Square = the classic toggle test with the ISE tuning score below. Sine (manual) = drive one sine frequency you set and watch how well the current PID tracks it on the plot. Sine (auto-sweep) = step through a frequency range and measure closed-loop gain &amp; phase at each — a Bode plot of how fast your tuned loop can follow a moving setpoint. Tune with Square first, then sweep to see your tracking bandwidth.</span></span>
                   </div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="waveAmplitude" type="number" step="1" min="1" max="500" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
+                    <span class="seg accent">
+                      <button type="button" id="tuningWaveform_btn0" class="on" onclick="setTuningWaveform(0)">Square</button>
+                      <button type="button" id="tuningWaveform_btn1" onclick="setTuningWaveform(1)">Sine manual</button>
+                      <button type="button" id="tuningWaveform_btn2" onclick="setTuningWaveform(2)">Sine sweep</button>
+                    </span>
+                    <input id="tuningWaveform_sel" type="hidden" value="0">
+                  </div>
+                </div>
+
+                <!-- Protection toggle (per-page; all three test pages share the same firmware flag) -->
+                <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
+                  <div class="form-row" style="margin-bottom:0;">
+                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                      <span>⚠️ Protections:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <form action="/get" method="GET" target="hidden-form">
+                        <input type="hidden" name="password" class="password_field">
+                        <span class="toggle-label">Disabled</span>
+                        <label class="switch">
+                          <input id="testProtectionsEnabled_current_checkbox" type="checkbox" checked
+                            onchange="if(handleUserToggle('testProtectionsEnabled_current_checkbox', 'testProtectionsEnabled_current', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_current_checkbox'); this.form.submit(); submitMessage(); }" />
+                          <span class="slider round"></span>
+                        </label>
+                        <span class="toggle-label">Enabled</span>
+                        <input id="testProtectionsEnabled_current" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
+                      </form>
+                    </div>
                   </div>
                 </div>
 
@@ -5134,7 +5216,7 @@
                         bottom of the wave — both waveforms sit on this floor and swing upward from it. Square toggles
                         between the floor and (floor + amplitude); sine is centered on (floor + amplitude/2) and never
                         dips below the floor. Raise it to keep the trough clear of zero at low RPM. Separate from the
-                        Plant Delay tab's Baseline Current.</span></span>
+                        Plant Delay tab's Wave Floor.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5148,17 +5230,17 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Waveform Type (<span id="tuningWaveform_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Square = the classic toggle test with the ISE tuning score below. Sine (manual) = drive one sine frequency you set and watch how well the current PID tracks it on the plot. Sine (auto-sweep) = step through a frequency range and measure closed-loop gain &amp; phase at each — a Bode plot of how fast your tuned loop can follow a moving setpoint. Tune with Square first, then sweep to see your tracking bandwidth.</span></span>
+                    <span>Wave Amplitude (A) (<span id="waveAmplitude_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Size
+                        of the wave above the Wave Floor. Square toggles between the floor (low) and (floor + amplitude)
+                        (high); sine swings the same amplitude, centered on (floor + amplitude/2). E.g. floor 5A +
+                        amplitude 20A → square cycles 5A↔25A, sine centers on 15A.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <select id="tuningWaveform_sel" name="tuningWaveform" onchange="this.form.submit(); submitMessage(); tuningToggleWaveformUI(this.value);">
-                        <option value="0">Square (ISE score)</option>
-                        <option value="1">Sine — manual frequency</option>
-                        <option value="2">Sine — auto-sweep (Bode)</option>
-                      </select>
+                      <input name="waveAmplitude" type="number" step="1" min="1" max="500" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
                 </div>
@@ -5253,11 +5335,12 @@
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                       <span>Run closed-loop sweep:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Turn the Waveform On/Off toggle ON first — the generator only runs in tuning mode. The sweep takes ~30–60 s; keep engine RPM steady. Results appear below.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Starts the sweep, automatically arming the generator (turning the Waveform toggle On) if it's off — one button does both. The sweep takes ~30–60 s; keep engine RPM steady. Press Stop to abort. Results appear below.</span></span>
                     </div>
                     <div class="form-input">
-                      <button onclick="tuningRunSweep()" class="btn-primary" type="button">Run Sweep</button>
+                      <button id="tuningRunSweepBtn" onclick="tuningRunSweep()" class="btn-primary" type="button">▶ Run Sweep</button>
                       <span id="tuning-sweep-status" style="margin-left:8px; font-size:0.85em; color:#aaa;"></span>
+                      <div style="font-size:0.8em; color:#888; margin-top:4px;">Auto-arms the generator for you — no need to flip the Waveform toggle first.</div>
                     </div>
                   </div>
 
@@ -5283,30 +5366,6 @@
 
                 <!-- X-axis time window moved to the buttons above the plot (setPIDXTime);
                      Y axis min/max are edited on the plot itself (attachYAxisEdit owns yyMin/yyMax). -->
-
-                <!-- Protection toggle (per-page; all three test pages share the same firmware flag).
-                     Kept last to mirror the Plant Delay tab's parameter order. -->
-                <div style="border:2px solid #c62828; border-radius:6px; padding:10px 14px; margin:14px 0;">
-                  <div class="form-row" style="margin-bottom:0;">
-                    <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                      <span>⚠️ Protections:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Toggle right = Enabled (default). The regulator runs Group 1 (predictive OV), Group 2 (measured OV), Group 3 (iExcess), and the Alternator Hard Shutdown Voltage normally.<br><br>Toggle left = Disabled. Those four layers are bypassed so a step-test can characterise the plant without them fighting the test input. <strong>G4 (Load Dump), the INA228 hardware ALERT pin, and the hardware overcurrent trip (Alternator Current Limit + 10 A) stay active regardless.</strong><br><br><strong>Does not auto-revert — re-enable before normal use.</strong> A red banner at the top of every page is shown whenever protections are disabled. Resets to Enabled on every reboot.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <form action="/get" method="GET" target="hidden-form">
-                        <input type="hidden" name="password" class="password_field">
-                        <span class="toggle-label">Disabled</span>
-                        <label class="switch">
-                          <input id="testProtectionsEnabled_current_checkbox" type="checkbox" checked
-                            onchange="if(handleUserToggle('testProtectionsEnabled_current_checkbox', 'testProtectionsEnabled_current', 'testProtectionsEnabled')) { mirrorTestProtectionsToggle('testProtectionsEnabled_current_checkbox'); this.form.submit(); submitMessage(); }" />
-                          <span class="slider round"></span>
-                        </label>
-                        <span class="toggle-label">Enabled</span>
-                        <input id="testProtectionsEnabled_current" name="testProtectionsEnabled" type="number" value="1" style="display:none;" />
-                      </form>
-                    </div>
-                  </div>
-                </div>
 
               </details> <!-- END Current Target Generator -->
 
@@ -5336,11 +5395,9 @@
                 <div>
 
                 <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
-                  <span style="color:var(--text-muted);">Live score (1/10/100/1000 min):</span>
+                  <span style="color:var(--text-muted);">Live accuracy — RMS error / worst overshoot (A, since reset):</span>
                   <span id="liveScore0" style="font-weight:bold;">—</span>
                   <span id="liveScore1" style="font-weight:bold;">—</span>
-                  <span id="liveScore2" style="font-weight:bold;">—</span>
-                  <span id="liveScore3" style="font-weight:bold;">—</span>
                   <button onclick="resetTuningLog()" class="btn-secondary" style="margin-left:auto; padding:3px 10px; font-size:0.85em;">Reset All</button>
                 </div>
 
@@ -5362,10 +5419,13 @@
                         <th style="padding:3px 5px;">DRamp</th>
                         <th style="padding:3px 5px;">Amp</th>
                         <th style="padding:3px 5px;">Per</th>
+                        <th style="padding:3px 5px;" title="Wave Floor — operating-point trough the wave sat on (A)">Floor</th>
                         <th style="padding:3px 5px;">RPM</th>
                         <th style="padding:3px 5px;">Temp°F</th>
                         <th style="padding:3px 5px;">Worst</th>
                         <th style="padding:3px 5px;">t(s)</th>
+                        <th style="padding:3px 5px;" title="Bus voltage during the test">BusV</th>
+                        <th style="padding:3px 5px;" title="Charge stage at commit">Stage</th>
                       </tr>
                     </thead>
                     <tbody id="tuningLogBody"></tbody>
@@ -5379,6 +5439,49 @@
                   <span style="color:#ef4444;">&#9632;</span> &ge;10.
                   Highlighted rows match current PID + wave settings.
                 </p>
+                </div>
+              </details>
+
+              <!-- Sine Sweep Score Log (closed-loop auto-sweep history; collapsed) -->
+              <details id="tuningSweepLogSection" class="tuning-section">
+                <summary class="tuning-section-title">Sine Sweep Score Log</summary>
+                <div>
+                  <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
+                    <button type="button" class="btn-secondary" onclick="fetchTuningSweepLog()">↺ Refresh</button>
+                    <button type="button" class="btn-secondary" onclick="resetTuningSweepLog()">Reset Log</button>
+                  </div>
+                  <div style="overflow-x:auto;">
+                    <table style="width:100%;min-width:1180px;border-collapse:collapse;font-size:12px;">
+                      <thead>
+                        <tr style="background:var(--card-dark);color:var(--text-muted);text-align:left;">
+                          <th style="padding:4px 6px;">#</th>
+                          <th style="padding:4px 6px;">Bandwidth (Hz) ↑</th>
+                          <th style="padding:4px 6px;">Peak gain</th>
+                          <th style="padding:4px 6px;">Worst lag (°)</th>
+                          <th style="padding:4px 6px;">Kp</th>
+                          <th style="padding:4px 6px;">Ki</th>
+                          <th style="padding:4px 6px;">Kd</th>
+                          <th style="padding:4px 6px;">Sweep (Hz)</th>
+                          <th style="padding:4px 6px;" title="Sine perturbation amplitude (A) — gain/phase only comparable between rows at equal amplitude">Amp (A)</th>
+                          <th style="padding:4px 6px;" title="Operating-point center — the field current the sine swung around">Base (A)</th>
+                          <th style="padding:4px 6px;" title="Bus voltage during the sweep">Bus V</th>
+                          <th style="padding:4px 6px;">RPM</th>
+                          <th style="padding:4px 6px;" title="RPM range during the sweep — wide spread = operating point moved = smeared Bode">RPM min–max</th>
+                          <th style="padding:4px 6px;">Temp°F</th>
+                          <th style="padding:4px 6px;" title="Worst per-point fit coherence (0–1). Below ~0.7 = noisy/unreliable point in this run">Coh</th>
+                          <th style="padding:4px 6px;" title="Field duty hit 0%/100% during the sweep — the sine was clipped, gain understated">Clip</th>
+                          <th style="padding:4px 6px;" title="Charge stage at the moment the run was logged">Stage</th>
+                        </tr>
+                      </thead>
+                      <tbody id="tuningSweepLogBody">
+                        <tr><td colspan="17" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p style="font-size:11px;color:var(--text-muted);margin-top:10px;">
+                    Sorted by −3 dB closed-loop bandwidth (higher = the loop follows faster setpoint motion = better).
+                    Click a row to show that run's full gain/phase curve. Highlighted row matches current Kp/Ki/Kd.
+                  </p>
                 </div>
               </details>
 
@@ -5774,13 +5877,11 @@
                 <summary class="tuning-section-title">CV Tuning Score Log</summary>
                 <div>
 
-                <!-- Live score spans -->
+                <!-- Live accuracy: RMS error / worst over-voltage (mV, since reset) -->
                 <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
-                  <span style="color:var(--text-muted);">Live RMS error (1/10/100/1000 min):</span>
+                  <span style="color:var(--text-muted);">Live accuracy — RMS error / worst overshoot (mV, since reset):</span>
                   <span id="cvLiveScore0" style="font-weight:bold;">—</span>
                   <span id="cvLiveScore1" style="font-weight:bold;">—</span>
-                  <span id="cvLiveScore2" style="font-weight:bold;">—</span>
-                  <span id="cvLiveScore3" style="font-weight:bold;">—</span>
                 </div>
 
                 <!-- Log table -->
@@ -5828,10 +5929,11 @@
                         <th style="padding:3px 4px;">BattV</th>
                         <th style="padding:3px 4px;">SOC%</th>
                         <th style="padding:3px 4px;">CVT</th>
+                        <th style="padding:3px 4px;" title="Charge stage at commit">Stage</th>
                       </tr>
                     </thead>
                     <tbody id="cvTuningLogBody">
-                      <tr><td colspan="40" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
+                      <tr><td colspan="41" style="padding:6px;color:var(--text-muted);">No records yet — open section to fetch.</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -6251,12 +6353,10 @@
                 <summary class="tuning-section-title">Step Test Score Log</summary>
                 <div>
 
-                  <!-- Live score spans (10m, 1h, 10h, 100h) -->
+                  <!-- Live accuracy: RMS error / worst over-temp (°F, since reset) -->
                   <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;">
-                    <span id="thermalLiveScore0" style="color:var(--text-muted);">10m: —</span>
-                    <span id="thermalLiveScore1" style="color:var(--text-muted);">1h: —</span>
-                    <span id="thermalLiveScore2" style="color:var(--text-muted);">10h: —</span>
-                    <span id="thermalLiveScore3" style="color:var(--text-muted);">100h: —</span>
+                    <span id="thermalLiveScore0" style="color:var(--text-muted);">RMS: —</span>
+                    <span id="thermalLiveScore1" style="color:var(--text-muted);">Peak: —</span>
                   </div>
 
                   <!-- Active test status -->
@@ -6271,7 +6371,7 @@
                   </div>
 
                   <div style="overflow-x:auto;">
-                    <table style="width:100%;min-width:1100px;border-collapse:collapse;font-size:12px;">
+                    <table style="width:100%;min-width:1220px;border-collapse:collapse;font-size:12px;">
                       <thead>
                         <tr style="background:var(--bg-card);color:var(--text-muted);">
                           <th style="padding:4px 6px;text-align:left;">#</th>
@@ -6293,10 +6393,12 @@
                           <th style="padding:4px 6px;text-align:left;">Board (°F)</th>
                           <th style="padding:4px 6px;text-align:left;">Rise (A/s)</th>
                           <th style="padding:4px 6px;text-align:left;">Fall (A/s)</th>
+                          <th style="padding:4px 6px;text-align:left;" title="Bus voltage during the test">Bus V</th>
+                          <th style="padding:4px 6px;text-align:left;" title="Charge stage at commit">Stage</th>
                         </tr>
                       </thead>
                       <tbody id="thermalTuningLogBody">
-                        <tr><td colspan="19" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
+                        <tr><td colspan="21" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -10065,6 +10167,13 @@
         </div>
         <hr />
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:13px; font-weight:600;">Biggest actionable disturbance</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The worst disturbance the field can actually react to — the strongest tone inside the band from 4 Hz up to the actuator bandwidth (set by the fitted plant time constant from the Plant Delay sine sweep). Tones above that band are real but un-actionable: the field is too slow to chase them, so the over-current detector averages them out. Ranked by post-filter residual (amplitude ÷ frequency), not raw amplitude, because a low slow tone survives the averaging far better than a high one. Use the residual figure to set the over-current detector floor above it. Needs a Plant Delay sine sweep first.</span></span>
+          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="computeActionableDisturbance()">Compute</button>
+        </div>
+        <div id="faActionableResult" style="font-size:13px; color:#555; margin-top:4px;">Press Compute (needs a Plant Delay sine sweep first).</div>
+        <hr />
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:13px; font-weight:600;">Resonance &amp; Ripple Map</span>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
           <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadCsv('/famatrix.csv','Resonance and Ripple Map')">Download CSV</button>
@@ -10211,9 +10320,7 @@
       <div class="settings-card fa-paired-top">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Live Oscilloscope</span>
-          <button type="button" class="btn-secondary" onclick="fetchFastScope()">↺ Refresh Capture</button>
-          <button type="button" class="btn-secondary btn-sm" onclick="fastScopePauseToggle(this)">Pause</button>
-          <!-- Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. -->
+          <!-- Series selector mirrors the Reference Flipbook header below for UX consistency. Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. Refresh Capture removed (auto-refreshes every 5 s); Pause now lives on the chart top-right, matching the flipbook. -->
           <div class="cap-mode-toggle">
             <button type="button" id="faScopeRawBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('raw',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
             <button type="button" id="faScopeFiltBtn" class="cap-mode-btn" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
@@ -10225,7 +10332,7 @@
             at 1.25 kHz) and shrinks single-sample spikes about 16×. Filtered is what the Resonance &amp; Ripple Map and
             the fault detector's loudness measurement actually see. Download CSV always saves both columns.</span></span>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadFaScopeCsv()">Download CSV</button>
-          <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet — press Refresh Capture. Refreshes every 5 seconds; each capture is a 20,000-per-second snapshot.</span>
+          <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet. Refreshes every 5 seconds; each capture is a 20,000-per-second snapshot.</span>
         </div>
         <!-- Shared time window: these buttons re-window BOTH the scope and the Reference Flipbook
              below, so the two X axes always span the same milliseconds. Capped at 200 ms because
@@ -10246,7 +10353,7 @@
             <p><b>What you are seeing.</b> A half-second snapshot of alternator output current, sampled
               20,000 times per second — fast enough to show the individual ripple pulses the rectifier
               produces, belt and mounting vibration, and electrical noise that the normal once-per-tick
-              current reading averages away. Press Refresh to grab the most recent half second.</p>
+              current reading averages away. It refreshes automatically every few seconds with the most recent half second.</p>
             <p><b>Reading the trace.</b> A healthy alternator shows an even comb of small ripple pulses
               riding on the average current. The view buttons set how many milliseconds of the capture
               are shown; the hint above the plot reports roughly how many engine and alternator
@@ -10314,47 +10421,51 @@
         <summary class="diag-section-title">Control Accuracy Scores</summary>
         <div class="settings-card">
         <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">
-          Always-running scores over rolling clock-time windows. Lower is better. Dash = no qualifying data yet for that window.
+          How tightly each control loop tracks its target, and its worst single excursion in the
+          damaging direction — counted only while that loop actually held control (so a cold
+          alternator or a stage with no current headroom is never scored against it). Lower is
+          better. Accumulates since the last reset; auto-resets after each daily cloud snapshot, or
+          press Reset below. Dash = no qualifying data yet.
         </p>
 
-        <div class="metric-row" style="margin-bottom:8px;">
-          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">Inner Loop (current) — 1m / 10m / 100m / 1000m:</span>
-          <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
-            <span id="liveScoreAlt0" style="font-weight:bold;">—</span>
-            <span id="liveScoreAlt1" style="font-weight:bold;">—</span>
-            <span id="liveScoreAlt2" style="font-weight:bold;">—</span>
-            <span id="liveScoreAlt3" style="font-weight:bold;">—</span>
+        <div class="metric-row" style="font-size:0.8em;color:var(--text-muted);">
+          <span class="metric-label">Loop</span>
+          <span class="metric-value" style="display:flex;gap:18px;">
+            <span style="min-width:90px;text-align:right;">RMS error</span>
+            <span style="min-width:90px;text-align:right;">Worst overshoot</span>
           </span>
         </div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
 
         <div class="metric-row">
-          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">CV Loop — RMS error (mV) — 1m / 10m / 100m / 1000m:</span>
-          <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
-            <span id="cvRmsErrAlt0" style="font-weight:bold;">—</span>
-            <span id="cvRmsErrAlt1" style="font-weight:bold;">—</span>
-            <span id="cvRmsErrAlt2" style="font-weight:bold;">—</span>
-            <span id="cvRmsErrAlt3" style="font-weight:bold;">—</span>
+          <span class="metric-label" style="font-size:0.85em;">Current loop (A)</span>
+          <span class="metric-value" style="display:flex;gap:18px;">
+            <span id="accCurRms"  style="font-weight:bold;min-width:90px;text-align:right;">—</span>
+            <span id="accCurPeak" style="font-weight:bold;min-width:90px;text-align:right;">—</span>
           </span>
         </div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
 
         <div class="metric-row">
-          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">CV Loop — Peak overshoot (mV) — 1m / 10m / 100m / 1000m:</span>
-          <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
-            <span id="cvPeakOverAlt0" style="font-weight:bold;">—</span>
-            <span id="cvPeakOverAlt1" style="font-weight:bold;">—</span>
-            <span id="cvPeakOverAlt2" style="font-weight:bold;">—</span>
-            <span id="cvPeakOverAlt3" style="font-weight:bold;">—</span>
+          <span class="metric-label" style="font-size:0.85em;">Voltage loop (mV)</span>
+          <span class="metric-value" style="display:flex;gap:18px;">
+            <span id="accVoltRms"  style="font-weight:bold;min-width:90px;text-align:right;">—</span>
+            <span id="accVoltPeak" style="font-weight:bold;min-width:90px;text-align:right;">—</span>
           </span>
         </div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
 
-        <div class="metric-row" style="margin-top:8px;">
-          <span class="metric-label" style="font-size:0.85em;color:var(--text-muted);">Thermal Loop — 30m / 3h / 24h / 7d:</span>
-          <span class="metric-value" style="display:flex;gap:10px;flex-wrap:wrap;">
-            <span id="thermalLiveScoreAlt0" style="font-weight:bold;">—</span>
-            <span id="thermalLiveScoreAlt1" style="font-weight:bold;">—</span>
-            <span id="thermalLiveScoreAlt2" style="font-weight:bold;">—</span>
-            <span id="thermalLiveScoreAlt3" style="font-weight:bold;">—</span>
+        <div class="metric-row">
+          <span class="metric-label" style="font-size:0.85em;">Thermal loop (°F)</span>
+          <span class="metric-value" style="display:flex;gap:18px;">
+            <span id="accThermRms"  style="font-weight:bold;min-width:90px;text-align:right;">—</span>
+            <span id="accThermPeak" style="font-weight:bold;min-width:90px;text-align:right;">—</span>
           </span>
+        </div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:6px 0;">
+
+        <div style="text-align:right;margin-top:8px;">
+          <button onclick="resetAccuracyScores()" class="btn-secondary btn-sm">Reset</button>
         </div>
         </div>
       </details>
@@ -11106,14 +11217,14 @@
         <!-- Step-test intro (Test Type = Step) -->
         <p id="sysid-intro-step" style="margin:0 0 12px; font-size:0.92em; line-height:1.5;">
           This test measures how quickly the alternator's output responds to a change.
-          It first ramps the field to your <strong>Baseline Current</strong> and holds there for 5 seconds to establish a stable baseline.
-          It then steps the field up by your <strong>Step Test Amplitude</strong> (in % duty) and back down,
+          It first ramps the field to your <strong>Wave Floor</strong> and holds there for 5 seconds to establish a stable baseline.
+          It then steps the field up by your <strong>Wave Amplitude</strong> (in % duty) and back down,
           repeating that up-and-down step several times, timing how fast the output settles after each move.
         </p>
         <!-- Sine-sweep intro (Test Type = Sine Sweep) — shown by sysidUpdatePreflight -->
         <p id="sysid-intro-sine" style="margin:0 0 12px; font-size:0.92em; line-height:1.5; display:none;">
           This test measures the alternator's frequency response — an open-loop frequency-by-frequency map of the plant (a Bode plot).
-          It first ramps the field to your <strong>Baseline Current</strong> and holds there for 5 seconds to establish a stable baseline.
+          It first ramps the field to your <strong>Wave Floor</strong> and holds there for 5 seconds to establish a stable baseline.
           It then drives a swept sine on the field — from <strong>Sweep Start</strong> up to <strong>Sweep End</strong>, with the PID off —
           and measures the output's gain and phase lag at each frequency. The result shows how fast the field can move the output and where the plant rolls off.
         </p>
@@ -11122,12 +11233,12 @@
         </p>
         <!-- Step-test amplitude warning -->
         <p id="sysid-warn-amp-step" style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px;">
-          ⚠️ <strong>Keep Step Test Amplitude small.</strong> Each upward step pushes output above the baseline current, which briefly raises battery voltage.
+          ⚠️ <strong>Keep Wave Amplitude small.</strong> Each upward step pushes output above the wave floor, which briefly raises battery voltage.
           Choose a value small enough that the test won't over-volt your battery — start low (a few % duty) and only increase it if the measured response is too noisy.
         </p>
         <!-- Sine-sweep amplitude warning — shown by sysidUpdatePreflight -->
         <p id="sysid-warn-amp-sine" style="margin:0 0 16px; font-size:0.92em; background:#2a2a00; border:1px solid #666; border-radius:4px; padding:10px; display:none;">
-          ⚠️ <strong>Keep Step Test Amplitude small.</strong> The sine swings upward from the baseline by up to twice this amplitude, briefly raising battery voltage at each peak.
+          ⚠️ <strong>Keep Wave Amplitude small.</strong> The sine swings upward from the wave floor by up to twice this amplitude, briefly raising battery voltage at each peak.
           Choose a value small enough that the test won't over-volt your battery — start low (a few % duty) and only increase it if the response is too noisy.
         </p>
 
@@ -11283,6 +11394,24 @@
       <span class="sysid-pill-exp">⤢</span>
     </div>
   </div><!-- END sysid-modal-overlay -->
+
+  <!-- Auto-commissioning orchestrator modal — reuses the Plant Delay modal styling.
+       A single dynamic body (#commission-body) is re-rendered per phase by commissionRender(). -->
+  <div id="commission-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
+    <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commission Current Loop</span>
+        <button onclick="closeCommissionModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div style="padding:20px;">
+        <div id="commission-steps" style="display:flex; flex-wrap:wrap; gap:4px 8px; margin-bottom:14px; font-size:11px; color:#777;"></div>
+        <div id="commission-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
+        <div id="commission-abort-row" style="margin-top:16px; padding-top:10px; border-top:1px solid #333; display:none;">
+          <button onclick="commissionAbort()" class="btn-danger-ghost btn-sm" style="width:100%;">Abort &amp; revert to pre-commissioning settings</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- END commission-modal-overlay -->
 
   <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->
   <div id="restart-countdown-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9000;

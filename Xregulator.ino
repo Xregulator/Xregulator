@@ -847,6 +847,30 @@ struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // ga
 SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
 uint8_t systemIDBodeCount = 0;         // valid Bode points after a sine run (served by /sysidbode)
 
+// SystemID open-loop sine-sweep history (50-record ring, /sysidsweeplog.bin).
+struct SysIDSweepRecord {
+  uint16_t runNumber;
+  float    rolloffHz;      // -3dB plant roll-off; -1 if none in range
+  float    dcGainApPct;    // low-frequency plateau gain (A per %duty)
+  float    worstPhaseDeg;
+  float    worstPhaseFreqHz;
+  float    setupAmplitude; // % duty
+  float    stabilizeAmps;  // Wave Floor, A
+  float    sweepStartHz;
+  float    sweepEndHz;
+  uint8_t  cycles;
+  uint8_t  nPoints;
+  float    avgRPM;
+  float    avgAltTempF;
+  float    battV;          // bus voltage during the sweep
+  uint8_t  chargeStage;    // getChargeStageDisplayCode() at commit
+  SysIDBodePoint curve[SYSID_SINE_NPOINTS];
+};
+SysIDSweepRecord *sysidSweepLog = nullptr;
+uint8_t  sysidSweepLogCount = 0;
+uint8_t  sysidSweepLogHead  = 0;
+uint16_t sysidSweepRunCounter = 0;
+
 volatile bool systemIDRequested = false;       // set true by UI handler to trigger a test run
 volatile bool systemIDAbortRequested = false;  // set true by UI handler to abort in-progress test
 uint8_t systemIDActive = 0;                    // 0=idle, 1-9=current phase (sent to UI for progress)
@@ -886,6 +910,8 @@ struct SystemIDRecord {
   float    setupStepAmplitude; // SystemIDStepAmplitude at test time (% duty)
   float    avgRPM;             // RPM snapshot at commit
   float    avgAltTempF;        // AlternatorTemperatureF snapshot at commit
+  float    battV;              // bus voltage snapshot at commit
+  uint8_t  chargeStage;        // getChargeStageDisplayCode() at commit
 };
 
 SystemIDRecord *systemIDLog = nullptr;  // ps_malloc(50 × sizeof(SystemIDRecord))
@@ -915,6 +941,44 @@ struct SystemIDResumeState {
   bool voltageControlActive_snap = false;
 };
 static SystemIDResumeState g_sysIDResume;
+
+// ── Field-% curve (auto-commissioning Phase 1a) ───────────────────────────────
+// Quasi-static duty→amps ramp. Shares the SystemID duty-override path (mutually
+// exclusive with SystemID / tuning sweeps). At each step it parks duty for a
+// generous dwell (>5× any realistic field L/R) so the lag doesn't bias the curve,
+// then records the settled (duty, amps) pair. Post-ramp it finds the saturation
+// knee (where dAmps/dDuty flattens) and proposes the two open-loop sine settings:
+//   SystemIDStabilizeAmps  = trough current  = 50% of the table limit-at-speed
+//   SystemIDStepAmplitude  = AC duty amplitude = (duty@75% − duty@50%) / 2
+// placed in the linear region BELOW the knee (slid down if 75% is into saturation),
+// so K is never measured near saturation (would read low → over-aggressive Kp).
+#define FIELDCURVE_MAX_PTS    48        // ramp samples (duty 5%→max)
+#define FIELDCURVE_DUTY_START 5.0f      // first step (%)
+#define FIELDCURVE_DUTY_MAX   92.0f     // ramp ceiling (%) — stop here if amps never reach the limit
+#define FIELDCURVE_DUTY_STEP  2.0f      // duty increment per step (%)
+#define FIELDCURVE_DWELL_MS   1500UL    // settle dwell per step (ms) — >5τ for any realistic field
+struct FieldCurvePoint { float duty; float amps; };
+FieldCurvePoint *fieldCurveBuf = nullptr;     // ps_malloc'd on first run, never freed
+int   fieldCurveCount = 0;                     // points captured this run
+volatile bool fieldCurveRequested = false;     // set by /get?startFieldCurve
+volatile bool fieldCurveAbortRequested = false;// set by /get?cancelFieldCurve
+uint8_t fieldCurveActive = 0;                  // 0=idle, 1=ramping, 2=processing (sent to UI)
+bool  fieldCurveResultsReady = false;          // true when curve + proposals are ready to read
+uint32_t fieldCurveLastEndMs = 0;              // cooldown guard
+// Results (read via /fieldcurve.csv)
+float fieldCurveKneeDuty   = -1.0f;            // duty at the saturation knee (%), -1 = none found
+float fieldCurveKneeAmps   = -1.0f;            // amps at the knee (A)
+float fieldCurveTargetLimitA = 0.0f;           // table limit-at-speed used for the 50/75% targets (A)
+float fieldCurvePropStabA  = 0.0f;             // proposed SystemIDStabilizeAmps (A)
+float fieldCurvePropStepPct = 0.0f;            // proposed SystemIDStepAmplitude (% duty)
+bool  fieldCurveOk = false;                     // true if a usable linear region + proposals were found
+
+// ── Auto-commissioning state machine ──────────────────────────────────────────
+// Persistent across reboots (NVS). 0=NOT_COMMISSIONED, 1=IN_PROGRESS, 2=COMMISSIONED.
+// Phase 0 snapshots every setting the flow may write (positional CSV string in one
+// NVS key) so an explicit abort reverts to the pre-commissioning tune.
+uint8_t commissionState = 0;                    // mirrors NK_commissionState
+volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
 // Weather Mode Global Variables (add with your other globals)
 float UVToday = 0.0;
@@ -2381,6 +2445,46 @@ struct TuningBodePoint { float freqHz; float gain; float phaseDeg; };  // gain =
 TuningBodePoint tuningBode[TUNING_SWEEP_NPOINTS] = {};
 uint8_t tuningBodeCount = 0;           // valid points (served by /tuningbode)
 
+// Sine-sweep run-condition trackers — reset on sweep start, snapshotted into the record at commit.
+// baseA/ampA describe the injected waveform; rpmMin/Max + worst coherence + duty-rail flag describe
+// how trustworthy the run was (a sweep at a wandering RPM or a railed field isn't comparable).
+float tuningSweepBaseA      = 0.0f;    // operating-point center of the sine (A)
+float tuningSweepAmpA       = 0.0f;    // perturbation amplitude of the sine (A)
+float tuningSweepRpmMin     = 0.0f;
+float tuningSweepRpmMax     = 0.0f;
+float tuningSweepBattV      = 0.0f;    // bus voltage snapshot during the sweep
+bool  tuningSweepDutyRailed = false;   // field duty hit 0%/100% on any sine peak
+float tuningSweepWorstCoh   = 1.0f;    // min per-point fit coherence seen (0..1, 1 = clean)
+
+// Current closed-loop sine-sweep history (50-record ring, /tuningsweeplog.bin).
+struct TuningSweepRecord {
+  uint16_t runNumber;
+  float    bandwidthHz;     // -3dB closed-loop bandwidth; -1 if it never tracks
+  float    peakGain;        // resonance indicator
+  float    peakGainFreqHz;
+  float    worstPhaseDeg;
+  float    worstPhaseFreqHz;
+  float    kp, ki, kd;
+  float    sweepStartHz;
+  float    sweepEndHz;
+  uint8_t  cycles;
+  uint8_t  nPoints;
+  float    avgRPM;
+  float    avgAltTempF;
+  float    sineAmpA;        // perturbation amplitude (A) — results only comparable at equal amplitude
+  float    baseA;           // operating-point center (A) — the field current the sine swung around
+  float    battV;           // bus voltage during the sweep
+  float    rpmMin, rpmMax;  // RPM range across the sweep (wide spread = smeared Bode, distrust)
+  float    worstCoherence;  // min per-point fit coherence (0..1; low = noisy/unreliable point)
+  uint8_t  dutyRailed;      // 1 if field duty hit 0%/100% during the sweep (clipped sine)
+  uint8_t  chargeStage;     // getChargeStageDisplayCode() at commit
+  TuningBodePoint curve[TUNING_SWEEP_NPOINTS];
+};
+TuningSweepRecord *tuningSweepLog = nullptr;
+uint8_t  tuningSweepLogCount = 0;
+uint8_t  tuningSweepLogHead  = 0;
+uint16_t tuningSweepRunCounter = 0;
+
 // === PID Tuning Score System ===
 struct TuningRecord {
   uint16_t runNumber;
@@ -2392,14 +2496,12 @@ struct TuningRecord {
   float dutyRampRate;
   int16_t waveAmplitude;
   int16_t wavePeriod;
+  int16_t waveFloor;     // operating-point trough the wave sat on (A)
   float avgRPM;
   float avgAltTempF;
   float worstErrorA;
-};
-
-struct ScoreBucket {
-  float errorAccum;
-  float activeTimeSec;
+  float battV;           // bus voltage during the test
+  uint8_t chargeStage;   // getChargeStageDisplayCode() at commit
 };
 
 struct TuningScoreState {
@@ -2418,9 +2520,6 @@ struct TuningScoreState {
   float score;        // current normalized score = errorAccum / activeTimeSec
 };
 
-const uint32_t LIVE_BUCKET_MS[4] = { 1000UL, 10000UL, 100000UL, 1000000UL };  // bucket widths: 1s, 10s, 100s, 1000s
-const uint8_t LIVE_BUCKET_N = 60;                                             // buckets per window (60 × bucket_width = window size)
-const float CV_LIVE_GATE_APS = 15.0f;                                         // A/s battery current rate-of-change to open CV scoring window
 
 TuningRecord *tuningLog = nullptr;  // ps_malloc(50 × sizeof(TuningRecord))
 uint8_t tuningLogCount = 0;         // records currently in ring buffer (0–50)
@@ -2431,28 +2530,27 @@ bool tuningParamChanged = false;             // set by server handlers when a tu
 volatile bool manualCommitTuningRequested = false;   // set by UI commit button
 volatile bool manualCommitCVTuningRequested = false; // set by UI commit button
 
-ScoreBucket *liveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
-uint8_t liveScoreHead[4] = {};
-uint32_t liveBucketStartMs[4] = {};
-float liveScoreVal[4] = {};      // cached computed scores, updated each accumulation tick
-float liveScore_lastCmd = 0.0f;  // setpointCommand from previous tick (pre-slew)
-float liveScore_thisCmd = 0.0f;  // setpointCommand from current tick (pre-slew)
-uint32_t liveScore_lastStepMs = 0;
-bool liveScore_inWindow = false;
+// ===== Control Accuracy Scores (accumulate-since-reset). Auto-reset right after each successful
+// config-snapshot upload (≈daily in production), plus a manual Reset button on the dashboard.
+// Replaces the old 4-window ISE bucket rings (2026-06-18). Per loop we keep RMS tracking error +
+// worst damaging overshoot, in physical units, counted ONLY while the loop holds control authority
+// (its actuator is off both rails) and has held it past a settle time — so a loop is never blamed
+// for conditions it cannot act on (cold alternator, low RPM, another limiter in charge).
+// errAccum/timeAccum are DOUBLE on purpose: a float32 running sum silently STOPS growing once it
+// passes ~a day of accumulated time (the per-tick dt drops below the float ULP and rounds away).
+struct AccuracyScore {
+  double   errAccum;        // Σ(e²·dt) — squared tracking error integrated over authority time
+  double   timeAccum;       // Σ dt while the loop held authority
+  float    worstOver;       // worst single excursion in the damaging direction (physical units)
+  uint32_t bindingStartMs;  // millis() the authority condition last went true (0 = not binding)
+};
+AccuracyScore accCurrent = {};  // inner current loop — error/overshoot in amps
+AccuracyScore accVoltage = {};  // CV voltage loop — error/overshoot in volts (displayed mV)
+AccuracyScore accThermal = {};  // thermal loop — error/overshoot in °F
 
-// CV loop live score — two intuitive readouts (both volts) over the same disturbance-gated window:
-//   cvRmsErrVal  — RMS voltage error, symmetric (overall regulation tightness)
-//   cvPeakOverVal — peak excursion ABOVE target (the battery-damaging side); peak-only, no duration
-// cvLiveScoreBuckets holds the unweighted Σ(e²·dt)/Σdt for the RMS number; cvPeakBuckets holds the
-// per-bucket peak overshoot so the window peak = max over the 60 buckets (old peaks age out on rotation).
-ScoreBucket *cvLiveScoreBuckets[4] = {};  // ps_malloc'd — 4 windows × 60 buckets × 8 bytes = 1920 bytes
-float *cvPeakBuckets[4] = {};             // ps_malloc'd — per-bucket peak overshoot (V); window peak = max over buckets
-uint8_t cvLiveScoreHead[4] = {};
-uint32_t cvLiveBucketStartMs[4] = {};
-float cvRmsErrVal[4] = {};                // RMS voltage error (V) over the gated window
-float cvPeakOverVal[4] = {};              // peak overshoot above target (V) over the gated window
-uint32_t cvLiveScore_lastDtMs = 0;  // last time |g_dBcur_dt| crossed the gate threshold
-bool cvLiveScore_inWindow = false;
+const uint32_t ACC_SETTLE_CURRENT_MS = 500;     // current loop reacts in ms → short settle
+const uint32_t ACC_SETTLE_VOLTAGE_MS = 2000;    // CV loop settles in seconds
+const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal loop: minutes — require sustained binding
 
 // === CV Loop Tuning Score System ===
 float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
@@ -2505,6 +2603,7 @@ struct CVTuningRecord {
   float avgRPM, avgAltTempF;
   float battVAtStart, socAtStart;
   float chargingVoltageTarget;
+  uint8_t chargeStage;   // getChargeStageDisplayCode() at commit
   // Low phase results (step-down response)
   float lowScore;
   float avgLowSettlingTimeSec;
@@ -2585,6 +2684,8 @@ struct ThermalTuningRecord {
   // Operating conditions
   float avgRPM;
   float avgAmbientF;
+  float battV;           // bus voltage during the test
+  uint8_t chargeStage;   // getChargeStageDisplayCode() at commit
 };
 
 struct ThermalTuningScoreState {
@@ -2633,13 +2734,6 @@ uint8_t thermalTuningLogCount = 0;
 uint8_t thermalTuningLogHead = 0;
 uint16_t thermalTuningRunCounter = 0;
 ThermalTuningScoreState thermalTuningScore = {};
-
-// Thermal always-on live score buckets (30m, 3h, 24h, 7d — thermal system has long time constants)
-const uint32_t THERMAL_LIVE_BUCKET_MS[4] = { 1800000UL, 10800000UL, 86400000UL, 604800000UL };
-ScoreBucket *thermalLiveScoreBuckets[4] = {};  // ps_malloc'd
-uint8_t thermalLiveScoreHead[4] = {};
-uint32_t thermalLiveBucketStartMs[4] = {};
-float thermalLiveScoreVal[4] = {};
 
 float xTime = 60.0;     // seconds    PID Chart
 int yyMax = 105;        // PID Chart     Amps
@@ -2746,6 +2840,8 @@ volatile bool pendingSaveCVTuningLog = false;
 volatile bool pendingSaveTuningLog = false;
 volatile bool pendingSaveThermalTuningLog = false;
 volatile bool pendingSaveSystemIDLog = false;
+volatile bool pendingSaveTuningSweepLog = false;
+volatile bool pendingSaveSysidSweepLog = false;
 volatile bool pendingResetAlternatorHealth = false;
 volatile bool pendingResetBoatPerformance = false;
 volatile bool pendingClearOverheatHistory = false;
@@ -3221,14 +3317,17 @@ struct PidLogEntry {
   int16_t voltLoopIntervalMs;  // actual voltage loop interval when fired this tick (ms); 0 if not fired
   int16_t inaIntervalMs;       // ina_last_ms — INA228 read freshness (ms)
   int16_t pad2;                // alignment pad
-};                   // 132 bytes — naturally aligned, no implicit holes
+  // ── iExcess (Group 3) detector tuning traces ─────────────────────────────
+  float mExcessEma;            // g_mExcessEma — time-averaged signed current excess over command (A)
+  float iExcessThreshold;      // g_iExcessThreshold — computed fire threshold E (A)
+};                   // 140 bytes — naturally aligned, no implicit holes
 
 struct PidDLState {
   int count;
   int oldest;
   int row;
   bool done;
-  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header=449B (39 cols).
+  char line[1024];  // MUST hold the largest single row intact: comment block=715B, header≈477B (41 cols).
                     // snprintf truncation is NOT harmless here — it eats the row's trailing '\n', gluing
                     // that row onto the next one in the download (was 440 → header lost "ntervalMs\n" and
                     // merged with the first data row; comment lost 7 lines + its '\n' and merged with header).
@@ -3465,6 +3564,12 @@ bool g_iExcessBulkActive = false;  // Group 3 BULK sub-mode active this tick (cu
 float g_iExcessDutyCap = 100.0f;
 float g_mExcessEma = 0.0f;    // averaged signed current excess over command (A) — tuning trace; whichever detector gate is open writes it
 float g_iExcessThreshold = 0.0f;  // the computed fire threshold E (A) for the active detector — tuning trace
+// Per-CSV1-frame aggregates for the live sparkline. The control loop runs far faster than the
+// ~10 Hz CSV1 stream, so the detector accumulates the worst case each tick and the CSV1 sender
+// resets these after each send. Peak excess + min threshold = the closest-to-firing the frame got.
+float g_mExcessEmaPeak = 0.0f;      // peak of g_mExcessEma over the frame (A)
+float g_iExcessThreshWinMin = 0.0f; // min of E over armed ticks this frame (A)
+bool  g_iExcessArmedWin = false;    // detector armed at any tick this frame (peak/min validity)
 
 // Load dump detection via dBcur/dt — three-tier cascade
 float LoadDumpDtThresh1 = 4000.0f;  // A/s — tier 1: fires on a SINGLE sample above this (hard-switched FET disconnects)
@@ -3975,21 +4080,7 @@ void setup() {
   tuningLog = (TuningRecord *)ps_malloc(50 * sizeof(TuningRecord));
   if (!tuningLog) Serial.println("FATAL: tuningLog ps_malloc failed");
   else memset(tuningLog, 0, 50 * sizeof(TuningRecord));
-  // Live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
-  for (int i = 0; i < 4; i++) {
-    liveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
-    if (!liveScoreBuckets[i]) Serial.printf("FATAL: liveScoreBuckets[%d] ps_malloc failed\n", i);
-    else memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
-  }
-  // CV live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM (RMS), + 4 × 60 × 4 bytes = 960 bytes (peak)
-  for (int i = 0; i < 4; i++) {
-    cvLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
-    if (!cvLiveScoreBuckets[i]) Serial.printf("FATAL: cvLiveScoreBuckets[%d] ps_malloc failed\n", i);
-    else memset(cvLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
-    cvPeakBuckets[i] = (float *)ps_malloc(LIVE_BUCKET_N * sizeof(float));
-    if (!cvPeakBuckets[i]) Serial.printf("FATAL: cvPeakBuckets[%d] ps_malloc failed\n", i);
-    else memset(cvPeakBuckets[i], 0, LIVE_BUCKET_N * sizeof(float));
-  }
+  // Control Accuracy Scores need no PSRAM — accCurrent/accVoltage/accThermal are plain globals.
   // CV tuning score log — 50 records × ~120 bytes = ~6 KB PSRAM
   cvTuningLog = (CVTuningRecord *)ps_malloc(50 * sizeof(CVTuningRecord));
   if (!cvTuningLog) Serial.println("FATAL: cvTuningLog ps_malloc failed");
@@ -4002,18 +4093,20 @@ void setup() {
   systemIDLog = (SystemIDRecord *)ps_malloc(50 * sizeof(SystemIDRecord));
   if (!systemIDLog) Serial.println("FATAL: systemIDLog ps_malloc failed");
   else memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
+  // SystemID sine-sweep history — 50 records × ~176 bytes = ~8.8 KB PSRAM
+  sysidSweepLog = (SysIDSweepRecord *)ps_malloc(50 * sizeof(SysIDSweepRecord));
+  if (!sysidSweepLog) Serial.println("FATAL: sysidSweepLog ps_malloc failed");
+  else memset(sysidSweepLog, 0, 50 * sizeof(SysIDSweepRecord));
+  // Current closed-loop sine-sweep history — 50 records × ~176 bytes = ~8.8 KB PSRAM
+  tuningSweepLog = (TuningSweepRecord *)ps_malloc(50 * sizeof(TuningSweepRecord));
+  if (!tuningSweepLog) Serial.println("FATAL: tuningSweepLog ps_malloc failed");
+  else memset(tuningSweepLog, 0, 50 * sizeof(TuningSweepRecord));
   // Gate-tuning 10s live-readout trackers — ROLL_COUNT × ~84 bytes PSRAM
   gRoll = (Roll10s *)ps_malloc(sizeof(Roll10s) * ROLL_COUNT);
   if (!gRoll) Serial.println("FATAL: gRoll ps_malloc failed");
   else {
     memset(gRoll, 0, sizeof(Roll10s) * ROLL_COUNT);
     gRoll[ROLL_RPMEDGE].isMin = true;   // worst (smallest) RPM edge margin is the binding case
-  }
-  // Thermal live score buckets — 4 windows × 60 × 8 bytes = 1920 bytes PSRAM
-  for (int i = 0; i < 4; i++) {
-    thermalLiveScoreBuckets[i] = (ScoreBucket *)ps_malloc(LIVE_BUCKET_N * sizeof(ScoreBucket));
-    if (!thermalLiveScoreBuckets[i]) Serial.printf("FATAL: thermalLiveScoreBuckets[%d] ps_malloc failed\n", i);
-    else memset(thermalLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
   }
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3
@@ -4178,6 +4271,8 @@ void setup() {
   loadCVTuningLog();          // restore CV tuning records from LittleFS
   loadThermalTuningLog();     // restore thermal step test records from LittleFS
   loadSystemIDLog();          // restore plant-delay (SystemID) records from LittleFS
+  loadSysidSweepLog();        // restore Plant Delay sine-sweep history from LittleFS
+  loadTuningSweepLog();       // restore Current closed-loop sine-sweep history from LittleFS
   loadPasswordHash();
   // Check if we should wake WiFi for a pending OTA update
   nvs_handle_t wake_handle;
@@ -4483,6 +4578,14 @@ void loop() {
     pendingSaveSystemIDLog = false;
     saveSystemIDLog();
   }
+  if (pendingSaveSysidSweepLog) {
+    pendingSaveSysidSweepLog = false;
+    saveSysidSweepLog();
+  }
+  if (pendingSaveTuningSweepLog) {
+    pendingSaveTuningSweepLog = false;
+    saveTuningSweepLog();
+  }
   if (pendingResetAlternatorHealth) {
     pendingResetAlternatorHealth = false;
     resetAlternatorHealth();
@@ -4573,6 +4676,14 @@ void loop() {
             if (pendingSaveSystemIDLog) {
               pendingSaveSystemIDLog = false;
               saveSystemIDLog();
+            }
+            if (pendingSaveSysidSweepLog) {
+              pendingSaveSysidSweepLog = false;
+              saveSysidSweepLog();
+            }
+            if (pendingSaveTuningSweepLog) {
+              pendingSaveTuningSweepLog = false;
+              saveTuningSweepLog();
             }
             if (pendingResetAlternatorHealth) {
               pendingResetAlternatorHealth = false;
@@ -4978,23 +5089,72 @@ void loop() {
   }
   endtime = esp_timer_get_time();  //Record end of Loop
   LoopTime = (endtime - starttime);
-  // Worst-loop attribution: on each new worst pass over the threshold, print this pass's
-  // per-function breakdown to Console once. All ft_*.lastCall are THIS pass's durations (every
-  // suspect is TIMED_CALL'd earlier in this same loop()). ctrl(inclFold) already contains fold.
-  // A part larger than total = that function was throttled this pass, so its lastCall is stale —
-  // judge by total. Emitted here (after endtime) so it never counts against the measured pass.
-  if ((uint32_t)LoopTime > LOOP_DIAG_THRESH_US && (uint32_t)LoopTime > loopDiagWorstUs) {
-    loopDiagWorstUs = (uint32_t)LoopTime;
-    queueConsoleMessageF(
-      "LOOP WORST %.1fms | rai=%.1f ctrl(inclFold)=%.1f fold=%.1f health=%.1f boat=%.1f sysHealth=%.1f wifiSend=%.1f",
-      LoopTime / 1000.0,
-      ft_rai_total.lastCall / 1000.0,
-      ft_AdjustFieldLearnMode.lastCall / 1000.0,
-      ft_altFold.lastCall / 1000.0,
-      ft_altHealth.lastCall / 1000.0,
-      ft_boatPerf.lastCall / 1000.0,
-      ft_updateSystemHealthStats.lastCall / 1000.0,
-      ft_SendWifiData.lastCall / 1000.0);
+  // Worst-loop attribution. All ft_*.lastCall are THIS pass's durations (every suspect is TIMED_CALL'd
+  // earlier in this same loop()). ctrl(inclFold) already contains fold. A part larger than total = that
+  // function was throttled this pass, so its lastCall is stale — judge by total. Emitted here (after
+  // endtime) so it never counts against the measured pass.
+  //
+  // Two headless serial streams, both non-blocking (skip if the UART TX FIFO is full, so the print
+  // itself never adds loop latency). We do NOT auto-reset a worst-watermark on a guessed interval —
+  // we don't know the stall cadence yet, so instead:
+  //   (1) PER-EVENT line on EVERY pass over the threshold (not just a new worst): absolute timestamp
+  //       + gap since the previous over-threshold pass (reveals cadence/periodicity directly) + the
+  //       per-function breakdown (which function dominated THIS one) + context (clients, CPU MHz,
+  //       heap). Throttled to 1 print / 100 ms so a burst can't flood the UART; suppressed passes are
+  //       still counted in the window and reported as sup=.
+  //   (2) WINDOW summary every 30 s that SELF-RESETS — count in 10/15/20 ms buckets + window max +
+  //       context. This is the live "still happening / how often / how bad" signal with no client and
+  //       no watermark to clear. The SSE console still gets the classic line on a genuine new worst.
+  static uint32_t winStartMs = 0, winN10 = 0, winN15 = 0, winN20 = 0, winMaxUs = 0;
+  static uint32_t lastStallMs = 0, lastEvtPrintMs = 0, evtSuppressed = 0;
+  uint32_t ltUs = (uint32_t)LoopTime;
+  uint32_t nowMsLD = millis();
+  if (winStartMs == 0) winStartMs = nowMsLD;
+  if (ltUs > LOOP_DIAG_THRESH_US) {
+    uint32_t gap = lastStallMs ? (nowMsLD - lastStallMs) : 0;
+    lastStallMs = nowMsLD;
+    winN10++;
+    if (ltUs > 15000) winN15++;
+    if (ltUs > 20000) winN20++;
+    if (ltUs > winMaxUs) winMaxUs = ltUs;
+    if (ltUs > loopDiagWorstUs) {           // genuine new worst → classic SSE console line (dashboard)
+      loopDiagWorstUs = ltUs;
+      char lw[200];
+      snprintf(lw, sizeof(lw),
+        "LOOP WORST %.1fms | rai=%.1f ctrl(inclFold)=%.1f fold=%.1f health=%.1f boat=%.1f sysHealth=%.1f wifiSend=%.1f",
+        ltUs / 1000.0, ft_rai_total.lastCall / 1000.0, ft_AdjustFieldLearnMode.lastCall / 1000.0,
+        ft_altFold.lastCall / 1000.0, ft_altHealth.lastCall / 1000.0, ft_boatPerf.lastCall / 1000.0,
+        ft_updateSystemHealthStats.lastCall / 1000.0, ft_SendWifiData.lastCall / 1000.0);
+      queueConsoleMessage(lw);
+    }
+    if (nowMsLD - lastEvtPrintMs >= 100UL) {   // per-event serial line, throttled
+      lastEvtPrintMs = nowMsLD;
+      char lw[240];
+      int lwn = snprintf(lw, sizeof(lw),
+        "LW t=%lu gap=%lu loop=%.1f rai=%.1f ctrl=%.1f fold=%.1f health=%.1f boat=%.1f sysH=%.1f wifi=%.1f clients=%u mhz=%u heap=%lu sup=%lu\n",
+        (unsigned long)nowMsLD, (unsigned long)gap, ltUs / 1000.0,
+        ft_rai_total.lastCall / 1000.0, ft_AdjustFieldLearnMode.lastCall / 1000.0,
+        ft_altFold.lastCall / 1000.0, ft_altHealth.lastCall / 1000.0, ft_boatPerf.lastCall / 1000.0,
+        ft_updateSystemHealthStats.lastCall / 1000.0, ft_SendWifiData.lastCall / 1000.0,
+        (unsigned)events.count(), (unsigned)getCpuFrequencyMhz(),
+        (unsigned long)ESP.getFreeHeap(), (unsigned long)evtSuppressed);
+      if (lwn > 0 && Serial.availableForWrite() >= lwn) Serial.write((const uint8_t *)lw, lwn);
+      evtSuppressed = 0;
+    } else {
+      evtSuppressed++;
+    }
+  }
+  if (nowMsLD - winStartMs >= 30000UL) {       // 30 s self-resetting window summary (also a liveness pulse)
+    char ws[176];
+    int wsn = snprintf(ws, sizeof(ws),
+      "WIN %lus n>10=%lu n>15=%lu n>20=%lu max=%.1fms clients=%u mhz=%u heap=%lu\n",
+      (unsigned long)((nowMsLD - winStartMs) / 1000UL),
+      (unsigned long)winN10, (unsigned long)winN15, (unsigned long)winN20,
+      winMaxUs / 1000.0f, (unsigned)events.count(), (unsigned)getCpuFrequencyMhz(),
+      (unsigned long)ESP.getFreeHeap());
+    if (wsn > 0 && Serial.availableForWrite() >= wsn) Serial.write((const uint8_t *)ws, wsn);
+    winStartMs = nowMsLD;
+    winN10 = winN15 = winN20 = 0; winMaxUs = 0;
   }
   // 80MHz low-power loop health (engine-off only). One cheap freq read gates it;
   // tracks worst pass + counts passes over the accel FIFO drain limit. See LOOP80_* globals.

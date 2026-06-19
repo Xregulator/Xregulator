@@ -240,6 +240,8 @@ const CSV1_FIELDS = [
     "Ignition",   // moved from CSV2 so the banner IGN indicator tracks at ~10 Hz
     "mExcessEma",        // iExcess detector: averaged current excess over command (A ×10) — tuning trace
     "iExcessThreshold",  // iExcess detector: fire threshold E (A ×10) — tuning trace
+    "mExcessEmaPeak",    // iExcess: per-frame peak averaged excess (A ×10) — live sparkline
+    "iExcessThreshMin",  // iExcess: per-frame min fire threshold E (A ×10) — live sparkline
     "protEventMask",     // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
 ];
 
@@ -468,10 +470,6 @@ const CSV2_FIELDS = [
     "imu_heading_swing_120s",
     "dBcur_dt",
     "loadDumpActive",
-    "thermalLiveScore0",
-    "thermalLiveScore1",
-    "thermalLiveScore2",
-    "thermalLiveScore3",
     "thermalTuningTestPhase",
     "ft_updateAccelMetrics_win",
     "ft_updateAccelMetrics_ses",
@@ -777,19 +775,13 @@ const CSV2_FIELDS = [
     "DeepestAnchorAT",         // deepest anchorage, ft ×10
     "BestUpwindVmgAT",         // best upwind VMG, kts ×100
     "LongestGaleAT",           // longest gale duration, hours ×100
-    // Inner-current-loop live accuracy (amps²×10000) + CV RMS error (mV) + CV peak overshoot (mV); 1m/10m/100m/1000m windows each
-    "liveScore0",
-    "liveScore1",
-    "liveScore2",
-    "liveScore3",
-    "cvRmsErr0",
-    "cvRmsErr1",
-    "cvRmsErr2",
-    "cvRmsErr3",
-    "cvPeakOver0",
-    "cvPeakOver1",
-    "cvPeakOver2",
-    "cvPeakOver3",
+    // Control Accuracy Scores (since last reset): RMS error + worst overshoot per loop, physical units.
+    "accCurRms",    // inner current loop RMS error (A ×100)
+    "accCurPeak",   // inner current loop worst over-current (A ×100)
+    "accVoltRms",   // CV loop RMS error (mV)
+    "accVoltPeak",  // CV loop worst over-voltage (mV)
+    "accThermRms",  // thermal loop RMS error (°F ×100)
+    "accThermPeak", // thermal loop worst over-temp (°F ×100)
 ];
 
 // CSVData4 / NavStream — live nav/wind/solar/fuel at 2 Hz (500 ms). Sits between CSV1 (10 Hz)
@@ -864,44 +856,64 @@ function gateReadoutOnCsv2(data) {
     gateColor('faAmpsDriftFloorA_live', drPass);
     gateColor('faAmpsDriftPct_live', drPass);
 }
-// IExcessK_live: peak of (measured amps − active setpoint) over the last 10s, from CSV1 (both sent A×100).
-// IExcessKBulk_live: peak of (measured amps − commanded ceiling uTargetAmps) over 10s, same CSV1 source.
-let _iExcessRing10s = [];
-let _iExcessBulkRing10s = [];
-function gateReadoutOnCsv1(data) {
-    const now = (window.performance && performance.now) ? performance.now() : Date.now();
-    const cut = now - 10000;
-    const ma = Number(data.MeasuredAmps);
-
-    const el = document.getElementById('IExcessK_live');
-    if (el) {
-        const sp = Number(data.setpointLimited);
-        if (isFinite(ma) && isFinite(sp)) {
-            _iExcessRing10s.push([now, (ma - sp) / 100]);
-            while (_iExcessRing10s.length && _iExcessRing10s[0][0] < cut) _iExcessRing10s.shift();
-        }
-        if (!_iExcessRing10s.length) { el.textContent = '10s peak over setpoint: —'; }
-        else {
-            let pk = -Infinity;
-            for (const s of _iExcessRing10s) if (s[1] > pk) pk = s[1];
-            el.textContent = `10s peak over setpoint: ${pk.toFixed(2)} A`;
-        }
+// iExcessLive: live Group 3 (iExcess) detector sparkline. Per CSV1 frame the firmware ships the
+// PEAK averaged excess and the MIN threshold E over that frame (aggregated at control-loop rate),
+// plus protEventMask bit 2 = a TRUE fire that frame. The chart plots peak excess (teal) vs min E
+// (amber) with Floor/Ceiling context; a segment goes red only where the detector actually fired —
+// not where the plotted peak/min lines merely cross. Numbers underneath show the latest values.
+const _ieSpark = { peak: new Array(200).fill(0), minE: new Array(200).fill(0), fired: new Array(200).fill(0), N: 200 };
+function iExcessLiveOnCsv1(data) {
+    const canvas = document.getElementById('iExcessSpark');
+    if (!canvas) return;  // strip not present on this page
+    const peak = Number(data.mExcessEmaPeak) / 10;
+    const minE = Number(data.iExcessThreshMin) / 10;
+    const fired = (Number(data.protEventMask) & 2) ? 1 : 0;
+    const S = _ieSpark;
+    S.peak.push(isFinite(peak) ? peak : 0); S.peak.shift();
+    S.minE.push(isFinite(minE) ? minE : 0); S.minE.shift();
+    S.fired.push(fired); S.fired.shift();
+    const pe = document.getElementById('mExcessEmaLive'); if (pe) pe.textContent = (isFinite(peak) ? peak : 0).toFixed(2);
+    const ee = document.getElementById('iExcessELive'); if (ee) ee.textContent = (minE > 0 ? minE.toFixed(1) : '—');
+    drawIExcessSpark(canvas);
+}
+function drawIExcessSpark(c) {
+    const S = _ieSpark, N = S.N;
+    if (!S._init) { S._init = true; const cb = document.getElementById('iExcessSparkAuto'); if (cb) cb.checked = localStorage.getItem('iExcessSparkAuto') === '1'; }
+    const autoEl = document.getElementById('iExcessSparkAuto'), auto = !!(autoEl && autoEl.checked);
+    const floorEl = document.getElementById('IExcessFloorA_echo'), ceilEl = document.getElementById('IExcessCeilA_echo');
+    const floor = (floorEl && parseFloat(floorEl.textContent)) || 4;
+    const ceil = (ceilEl && parseFloat(ceilEl.textContent)) || 25;
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth || 220, h = c.clientHeight || 30;
+    if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+    const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const pad = 2;
+    let dmax = 0; for (let i = 0; i < N; i++) dmax = Math.max(dmax, S.peak[i], S.minE[i]);
+    // Fixed: 0→ceiling so both clamps are framed. Auto: anchor the top to the data (which includes E),
+    // so it can't zoom tighter than "E with headroom" — avoids the excessive-zoom-on-a-flat-signal trap.
+    const ymax = auto ? Math.max(dmax, 1) * 1.15 : Math.max(ceil, dmax) * 1.05;
+    const X = i => pad + i * (w - 2 * pad) / (N - 1), Y = v => h - pad - (Math.min(v, ymax) / ymax) * (h - 2 * pad);
+    // floor always; ceiling whenever it's within the visible range
+    g.strokeStyle = '#bbb'; g.lineWidth = 1; g.setLineDash([2, 3]);
+    g.beginPath(); g.moveTo(0, Y(floor)); g.lineTo(w, Y(floor)); g.stroke();
+    if (ceil <= ymax) {
+        g.strokeStyle = '#9b59b6'; g.setLineDash([5, 3]);
+        g.beginPath(); g.moveTo(0, Y(ceil)); g.lineTo(w, Y(ceil)); g.stroke();
     }
-
-    const elB = document.getElementById('IExcessKBulk_live');
-    if (elB) {
-        const ceil = Number(data.uTargetAmps);  // commanded ceiling, A×100
-        if (isFinite(ma) && isFinite(ceil)) {
-            _iExcessBulkRing10s.push([now, (ma - ceil) / 100]);
-            while (_iExcessBulkRing10s.length && _iExcessBulkRing10s[0][0] < cut) _iExcessBulkRing10s.shift();
-        }
-        if (!_iExcessBulkRing10s.length) { elB.textContent = '10s peak over ceiling: —'; }
-        else {
-            let pkB = -Infinity;
-            for (const s of _iExcessBulkRing10s) if (s[1] > pkB) pkB = s[1];
-            elB.textContent = `10s peak over ceiling: ${pkB.toFixed(2)} A`;
-        }
+    g.setLineDash([]);
+    // vertical fire markers — full-height red line at every frame that truly fired (drawn first,
+    // behind the traces). From the real fire flag (protEventMask), not the plotted crossing.
+    g.strokeStyle = 'rgba(192,57,43,0.85)'; g.lineWidth = 1.5;
+    for (let i = 0; i < N; i++) {
+        if (S.fired[i]) { const x = X(i); g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
     }
+    // min-E line (amber)
+    g.beginPath(); for (let i = 0; i < N; i++) { const x = X(i), y = Y(S.minE[i]); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.strokeStyle = '#d68910'; g.lineWidth = 1.4; g.stroke();
+    // peak-excess line (teal throughout — the fire is shown by the vertical marker)
+    g.beginPath(); for (let i = 0; i < N; i++) { const x = X(i), y = Y(S.peak[i]); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+    g.strokeStyle = '#00a19a'; g.lineWidth = 1.7; g.stroke();
+    g.fillStyle = '#00a19a';
+    g.beginPath(); g.arc(X(N - 1), Y(S.peak[N - 1]), 2.4, 0, 7); g.fill();
 }
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -1879,6 +1891,7 @@ const CSV3_FIELDS = [
     "tuningSweepCycles",             // analysed cycles per sweep frequency
     "SystemIDStabilizeAmps",         // A ×10 — plant-delay baseline/trough current
     "tuningWaveFloor",               // A — Current Target Generator wave floor (trough), shared square + sine
+    "commissionState",               // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5089,15 +5102,14 @@ function fetchTuningLog() {
 }
 
 function renderTuningLog(data) {
-    // Update live score displays (Settings panel + Live Data → Alternator mirror)
-    const liveLabels = ['1m', '10m', '100m', '1000m'];
-    (data.live || []).forEach((v, i) => {
-        const val = v > 0 ? v.toFixed(2) : '—';
+    // Live accuracy mirror (Settings panel): data.live = [RMS error (A), worst over-current (A), 0, 0].
+    // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
+    const liveLabels = ['RMS', 'Peak'];
+    const live = data.live || [];
+    for (let i = 0; i < 2; i++) {
         const el = document.getElementById('liveScore' + i);
-        if (el) el.textContent = liveLabels[i] + ': ' + val;
-        const elAlt = document.getElementById('liveScoreAlt' + i);
-        if (elAlt) elAlt.textContent = val;   // Diag row header already lists the windows — no per-value prefix
-    });
+        if (el) el.textContent = liveLabels[i] + ': ' + (live[i] > 0 ? live[i].toFixed(2) + ' A' : '—');
+    }
 
     // Active test score
     const testRow = document.getElementById('testScoreRow');
@@ -5170,10 +5182,13 @@ function renderTuningLog(data) {
             <td style="padding:2px 5px;">${r.dr.toFixed(1)}</td>
             <td style="padding:2px 5px;">${r.wa}</td>
             <td style="padding:2px 5px;">${r.wp}</td>
+            <td style="padding:2px 5px;">${r.wf != null ? r.wf : '—'}</td>
             <td style="padding:2px 5px;">${r.rpm.toFixed(0)}</td>
             <td style="padding:2px 5px;">${r.temp.toFixed(1)}</td>
             <td style="padding:2px 5px;">${r.worst.toFixed(1)}</td>
             <td style="padding:2px 5px;">${r.t.toFixed(0)}</td>
+            <td style="padding:2px 5px;">${(r.bv != null ? r.bv : 0).toFixed(2)}</td>
+            <td style="padding:2px 5px;">${stageLabel(r.cs)}</td>
         </tr>`;
     }).join('');
 }
@@ -5210,6 +5225,13 @@ function resetTuningLog() {
     fetch(buildURL('/resettuninglog'), { method: 'POST' })
         .then(() => fetchTuningLog())
         .catch(() => {});
+}
+
+// Manual reset for the Control Accuracy Scores panel. Clears all three loops' since-reset
+// accumulators on the device; the cells fall to dashes until fresh authority time accrues.
+function resetAccuracyScores() {
+    if (!confirm('Reset the Control Accuracy scores (RMS + worst overshoot for all three loops)?')) return;
+    fetch(buildURL('/resetAccuracyScores'), { method: 'POST' }).catch(() => {});
 }
 
 function commitCVTuningScore() {
@@ -5341,17 +5363,18 @@ function fetchCVTuningLog() {
         .catch(() => {});
 }
 
-// CV live-score cell: write a value in mV and color it green/orange/red by its thresholds.
-// mv <= 0 means "no disturbance scored in this window yet" → dash, muted. Greens are good.
-// Caches the last render on the element itself so it works regardless of dispatcher scope.
-function cvScoreCell(elId, _ck, mv, greenMax, orangeMax) {
+// Control Accuracy cell: divide the raw CSV value by `scale`, write it with `unit` and `decimals`,
+// and color green/orange/red by its thresholds (compared in display units). v <= 0 → dash, muted
+// ("no qualifying data scored yet"). Caches the last render on the element so it's scope-independent.
+function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax) {
     const el = document.getElementById(elId);
-    if (!el) return;
+    if (!el || raw === undefined) return;
+    const v = raw / scale;
     let txt, color;
-    if (!(mv > 0)) { txt = '—'; color = 'var(--text-muted)'; }
+    if (!(v > 0)) { txt = '—'; color = 'var(--text-muted)'; }
     else {
-        txt = Math.round(mv) + ' mV';
-        color = mv < greenMax ? '#21c25e' : (mv < orangeMax ? '#f08c1d' : '#ef4444');
+        txt = v.toFixed(decimals) + unit;
+        color = v < greenMax ? '#21c25e' : (v < orangeMax ? '#f08c1d' : '#ef4444');
     }
     const stamp = txt + '|' + color;
     if (el.dataset.stamp === stamp) return;
@@ -5361,14 +5384,14 @@ function cvScoreCell(elId, _ck, mv, greenMax, orangeMax) {
 }
 
 function renderCVTuningLog(data) {
-    // CV Tuning panel's own live readout = RMS error in mV (data.live is mV; the Diag mirror is
-    // fed separately off CSV2 with color, so we don't touch cvRmsErrAlt/cvPeakOverAlt here).
-    const cvLiveLabels = ['1m', '10m', '100m', '1000m'];
-    (data.live || []).forEach((v, i) => {
-        const val = v > 0 ? (Math.round(v) + ' mV') : '—';
+    // CV live accuracy mirror: data.live = [RMS error (mV), worst over-voltage (mV), 0, 0].
+    // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
+    const cvLiveLabels = ['RMS', 'Peak'];
+    const live = data.live || [];
+    for (let i = 0; i < 2; i++) {
         const el = document.getElementById('cvLiveScore' + i);
-        if (el) el.textContent = cvLiveLabels[i] + ': ' + val;
-    });
+        if (el) el.textContent = cvLiveLabels[i] + ': ' + (live[i] > 0 ? Math.round(live[i]) + ' mV' : '—');
+    }
 
     // Active test score banner
     const testRow = document.getElementById('cvTestScoreRow');
@@ -5463,6 +5486,7 @@ function renderCVTuningLog(data) {
             <td style="padding:2px 4px;">${r.bv.toFixed(2)}</td>
             <td style="padding:2px 4px;">${r.soc.toFixed(1)}</td>
             <td style="padding:2px 4px;">${r.cvt.toFixed(2)}</td>
+            <td style="padding:2px 4px;">${stageLabel(r.cs)}</td>
         </tr>`;
     }).join('');
 }
@@ -5500,16 +5524,14 @@ function fetchThermalTuningLog() {
 }
 
 function renderThermalTuningLog(data) {
-    // Update thermal live score displays (4 windows: 30m, 3h, 24h, 7d)
-    const labels = ['30m', '3h', '24h', '7d'];
-    (data.live || []).forEach((v, i) => {
-        const val = v > 0 ? v.toFixed(4) : '—';
+    // Thermal live accuracy mirror: data.live = [RMS error (°F), worst over-temp (°F), 0, 0].
+    // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
+    const labels = ['RMS', 'Peak'];
+    const live = data.live || [];
+    for (let i = 0; i < 2; i++) {
         const el = document.getElementById('thermalLiveScore' + i);
-        if (el) el.textContent = labels[i] + ': ' + val;
-        // Diag mirror: row header already lists the windows — show the bare value, no per-value prefix
-        const altEl = document.getElementById('thermalLiveScoreAlt' + i);
-        if (altEl) altEl.textContent = val;
-    });
+        if (el) el.textContent = labels[i] + ': ' + (live[i] > 0 ? live[i].toFixed(2) + ' °F' : '—');
+    }
 
     // Active test score banner
     const testRow = document.getElementById('thermalTestScoreRow');
@@ -5572,6 +5594,8 @@ function renderThermalTuningLog(data) {
             <td style="padding:2px 4px;">${(r.amb || 0).toFixed(1)}</td>
             <td style="padding:2px 4px;">${(r.rr || 0).toFixed(1)}</td>
             <td style="padding:2px 4px;">${(r.fr || 0).toFixed(1)}</td>
+            <td style="padding:2px 4px;">${(r.bv != null ? r.bv : 0).toFixed(2)}</td>
+            <td style="padding:2px 4px;">${stageLabel(r.cs)}</td>
         </tr>`;
     }).join('');
 }
@@ -5613,7 +5637,7 @@ function renderSystemIDLog(data) {
     if (!tbody) return;
 
     if (records.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" style="padding:12px;text-align:center;color:var(--text-muted);">No plant-delay runs logged yet.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="13" style="padding:12px;text-align:center;color:var(--text-muted);">No plant-delay runs logged yet.</td></tr>';
         return;
     }
 
@@ -5641,6 +5665,8 @@ function renderSystemIDLog(data) {
             <td style="padding:2px 4px;">${(r.amp || 0).toFixed(1)}</td>
             <td style="padding:2px 4px;">${(r.rpm || 0).toFixed(0)}</td>
             <td style="padding:2px 4px;">${(r.temp || 0).toFixed(0)}</td>
+            <td style="padding:2px 4px;">${fmtA(r.bv)}</td>
+            <td style="padding:2px 4px;">${stageLabel(r.cs)}</td>
             <td style="padding:2px 4px;color:${aborted ? '#ef4444' : 'inherit'};">${abortLabel}</td>
         </tr>`;
     }).join('');
@@ -5664,6 +5690,151 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(_systemIDLogPollTimer);
             _systemIDLogPollTimer = null;
         }
+    });
+});
+
+let _sysidSweepPollTimer = null;
+let _tuningSweepPollTimer = null;
+
+function fetchSysidSweepLog() {
+    fetch(buildURL('/sysidsweeplog'))
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) renderSysidSweepLog(d); })
+        .catch(() => {});
+}
+function fetchTuningSweepLog() {
+    fetch(buildURL('/tuningsweeplog'))
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d) renderTuningSweepLog(d); })
+        .catch(() => {});
+}
+
+function sweepCurveRowHTML(pts, cols, gainLabel) {
+    let t = '<table style="width:auto;border-collapse:collapse;font-size:11px;margin:4px 0 6px 18px;">' +
+        '<thead><tr style="color:var(--text-muted);text-align:left;">' +
+        '<th style="padding:2px 10px;">Freq (Hz)</th><th style="padding:2px 10px;">' + gainLabel + '</th>' +
+        '<th style="padding:2px 10px;">Phase lag (°)</th></tr></thead><tbody>';
+    (pts || []).forEach(p => {
+        t += '<tr><td style="padding:2px 10px;">' + p.f.toFixed(2) + '</td>' +
+             '<td style="padding:2px 10px;">' + p.g.toFixed(3) + '</td>' +
+             '<td style="padding:2px 10px;">' + p.ph.toFixed(0) + '</td></tr>';
+    });
+    t += '</tbody></table>';
+    return '<tr class="sweep-curve-row" style="display:none;"><td colspan="' + cols + '" style="padding:0;">' + t + '</td></tr>';
+}
+
+function toggleSweepCurve(rowEl) {
+    const next = rowEl.nextElementSibling;
+    if (next && next.classList.contains('sweep-curve-row')) {
+        next.style.display = (next.style.display === 'none' || !next.style.display) ? '' : 'none';
+    }
+}
+
+function renderSysidSweepLog(data) {
+    const tbody = document.getElementById('sysidSweepLogBody');
+    if (!tbody) return;
+    const recs = data.rec || [];
+    if (!recs.length) {
+        tbody.innerHTML = '<tr><td colspan="11" style="padding:12px;text-align:center;color:var(--text-muted);">No sweeps logged yet.</td></tr>';
+        return;
+    }
+    const fmt = (v, d) => (v == null || !isFinite(v) || v < 0) ? '—' : v.toFixed(d);
+    tbody.innerHTML = recs.map(r => {
+        const ro = (r.ro != null && r.ro >= 0) ? r.ro : -1;
+        const roColor = ro < 0 ? '#ef4444' : (ro >= 5 ? '#22c55e' : ro >= 2 ? '#eab308' : '#ef4444');
+        const summary = `<tr class="sweep-summary-row" style="cursor:pointer;" onclick="toggleSweepCurve(this)">
+            <td style="padding:2px 6px;">${r.n}</td>
+            <td style="padding:2px 6px;color:${roColor};font-weight:bold;">${fmt(ro, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.dc, 3)}</td>
+            <td style="padding:2px 6px;">${fmt(r.wp, 0)}</td>
+            <td style="padding:2px 6px;">${fmt(r.amp, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.floor, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.f0, 1)}–${fmt(r.f1, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.rpm, 0)}</td>
+            <td style="padding:2px 6px;">${fmt(r.temp, 0)}</td>
+            <td style="padding:2px 6px;">${fmt(r.bv, 2)}</td>
+            <td style="padding:2px 6px;">${stageLabel(r.cs)}</td>
+        </tr>`;
+        return summary + sweepCurveRowHTML(r.pts, 11, 'Gain (A/%)');
+    }).join('');
+}
+
+// Short charge-stage label from getChargeStageDisplayCode() (firmware enum 0..7).
+function stageLabel(code) {
+    switch (code) {
+        case 1: return 'Bulk';
+        case 2: return 'Abs';
+        case 3: return 'Float';
+        case 4: return 'Man';
+        case 5: return 'Maint';
+        case 6: return 'TgtV';
+        case 7: return 'Idle';
+        default: return '—';
+    }
+}
+
+function renderTuningSweepLog(data) {
+    const tbody = document.getElementById('tuningSweepLogBody');
+    if (!tbody) return;
+    const recs = data.rec || [];
+    if (!recs.length) {
+        tbody.innerHTML = '<tr><td colspan="17" style="padding:12px;text-align:center;color:var(--text-muted);">No sweeps logged yet.</td></tr>';
+        return;
+    }
+    const curKp = parseFloat(document.getElementById('PidKp_echo')?.textContent);
+    const curKi = parseFloat(document.getElementById('PidKi_echo')?.textContent);
+    const curKd = parseFloat(document.getElementById('PidKd_echo')?.textContent);
+    const fmt = (v, d) => (v == null || !isFinite(v) || v < 0) ? '—' : v.toFixed(d);
+    tbody.innerHTML = recs.map(r => {
+        const bw = (r.bw != null && r.bw >= 0) ? r.bw : -1;
+        const bwColor = bw < 0 ? '#ef4444' : (bw >= 5 ? '#22c55e' : bw >= 2 ? '#eab308' : '#ef4444');
+        const match = (Math.abs(r.kp - curKp) < 1e-4 && Math.abs(r.ki - curKi) < 1e-4 && Math.abs(r.kd - curKd) < 1e-5);
+        // Coherence + clip flag mark how much to trust the row's gain/phase numbers.
+        const coh = (r.coh != null) ? r.coh : 1;
+        const cohColor = coh >= 0.9 ? '#22c55e' : coh >= 0.7 ? '#eab308' : '#ef4444';
+        const clipColor = r.clip ? '#ef4444' : 'inherit';
+        const summary = `<tr class="sweep-summary-row" style="cursor:pointer;${match ? 'background:rgba(74,158,255,0.15);' : ''}" onclick="toggleSweepCurve(this)">
+            <td style="padding:2px 6px;">${r.n}</td>
+            <td style="padding:2px 6px;color:${bwColor};font-weight:bold;">${fmt(bw, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.pg, 2)}</td>
+            <td style="padding:2px 6px;">${fmt(r.wp, 0)}</td>
+            <td style="padding:2px 6px;">${fmt(r.kp, 3)}</td>
+            <td style="padding:2px 6px;">${fmt(r.ki, 3)}</td>
+            <td style="padding:2px 6px;">${fmt(r.kd, 4)}</td>
+            <td style="padding:2px 6px;">${fmt(r.f0, 1)}–${fmt(r.f1, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.amp, 2)}</td>
+            <td style="padding:2px 6px;">${fmt(r.base, 1)}</td>
+            <td style="padding:2px 6px;">${fmt(r.bv, 2)}</td>
+            <td style="padding:2px 6px;">${fmt(r.rpm, 0)}</td>
+            <td style="padding:2px 6px;">${fmt(r.rmin, 0)}–${fmt(r.rmax, 0)}</td>
+            <td style="padding:2px 6px;">${fmt(r.temp, 0)}</td>
+            <td style="padding:2px 6px;color:${cohColor};">${fmt(coh, 2)}</td>
+            <td style="padding:2px 6px;color:${clipColor};">${r.clip ? 'YES' : 'no'}</td>
+            <td style="padding:2px 6px;">${stageLabel(r.cs)}</td>
+        </tr>`;
+        return summary + sweepCurveRowHTML(r.pts, 17, 'Gain (rel)');
+    }).join('');
+}
+
+function resetSysidSweepLog() {
+    if (!confirm('Reset all Sine Sweep history records?')) return;
+    fetch(buildURL('/resetsysidsweeplog'), { method: 'POST' }).then(() => fetchSysidSweepLog()).catch(() => {});
+}
+function resetTuningSweepLog() {
+    if (!confirm('Reset all Sine Sweep score log records?')) return;
+    fetch(buildURL('/resettuningsweeplog'), { method: 'POST' }).then(() => fetchTuningSweepLog()).catch(() => {});
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const s1 = document.getElementById('sysidSweepLogSection');
+    if (s1) s1.addEventListener('toggle', e => {
+        if (e.target.open) { fetchSysidSweepLog(); _sysidSweepPollTimer = setInterval(fetchSysidSweepLog, 10000); }
+        else { clearInterval(_sysidSweepPollTimer); _sysidSweepPollTimer = null; }
+    });
+    const s2 = document.getElementById('tuningSweepLogSection');
+    if (s2) s2.addEventListener('toggle', e => {
+        if (e.target.open) { fetchTuningSweepLog(); _tuningSweepPollTimer = setInterval(fetchTuningSweepLog, 10000); }
+        else { clearInterval(_tuningSweepPollTimer); _tuningSweepPollTimer = null; }
     });
 });
 
@@ -5776,7 +5947,12 @@ function initCVTuningPlot() {
             // ALL ranges are fns, not arrays: re-read each redraw, so window changes and
             // manual Y edits take effect via plain setData — no destroy/recreate, no
             // layout jump. Null Y globals = default autoscale fit.
-            x:     { time: false, auto: false, range: () => [cvTuningData[0][0], cvTuningData[0][cvTuningData[0].length - 1]] },
+            // x: fixed [-width, 0] with the right edge pinned at 0 — NOT data-driven [x[0], x[last]].
+            // applyInterp() slides x[last] left by elapsedSec each frame and snaps it back at every
+            // packet arrival; feeding that sawtooth into the range makes the whole axis (ticks + data)
+            // shiver left/right 5x/sec. Width is read from the buffer so a window/interval change still
+            // re-ranges in place via plain setData.
+            x:     { time: false, auto: false, range: () => { const xa = cvTuningData[0]; return [xa[0] - xa[xa.length - 1], 0]; } },
             volts: { range: (u, mn, mx) => (cvVoltsMin !== null && cvVoltsMax !== null) ? [cvVoltsMin, cvVoltsMax] : stableAutoRange(mn, mx, 0.1) },
             amps:  { range: (u, mn, mx) => (cvAmpsMin  !== null && cvAmpsMax  !== null) ? [cvAmpsMin,  cvAmpsMax]  : stableAutoRange(mn, mx, 0.1) },
         },
@@ -7046,7 +7222,7 @@ function initCurrentTempPlot() {
                             if (plotEl && currentTempPlot) {
                                 currentTempPlot.setSize({ width: plotEl.clientWidth, height: 300 });
                             }
-                        }, 1000);
+                        }, 150);
 
                         if (currentTempResizeObserver) {
                             currentTempResizeObserver.disconnect();
@@ -7205,7 +7381,7 @@ function initVoltagePlot() {
                             if (plotEl && voltagePlot) {
                                 voltagePlot.setSize({ width: plotEl.clientWidth, height: 300 });
                             }
-                        }, 1000);
+                        }, 150);
 
                         if (voltageResizeObserver) {
                             voltageResizeObserver.disconnect();
@@ -7357,7 +7533,7 @@ function initRPMPlot() {
                             if (plotEl && rpmPlot) {
                                 rpmPlot.setSize({ width: plotEl.clientWidth, height: 300 });
                             }
-                        }, 1000);
+                        }, 150);
 
                         if (rpmResizeObserver) {
                             rpmResizeObserver.disconnect();
@@ -7508,7 +7684,7 @@ function initTemperaturePlot() {
                             if (plotEl && temperaturePlot) {
                                 temperaturePlot.setSize({ width: plotEl.clientWidth, height: 300 });
                             }
-                        }, 1000);
+                        }, 150);
 
                         if (temperatureResizeObserver) {
                             temperatureResizeObserver.disconnect();
@@ -8287,17 +8463,16 @@ function updateTogglesFromData(data) {
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
         updateUploadNowButtonState();  // re-gray "Upload Now" if cloud just turned off/on
         updateCheckbox("wifiNapEnabled_checkbox", data.wifiNapEnabled, "wifiNapEnabled");
-        // SystemID test-type selector: reflect saved value + show/hide sine params (skip while user is picking).
-        const sysidTypeSel = document.getElementById('systemIDTestType_sel');
-        if (sysidTypeSel && data.systemIDTestType !== undefined && document.activeElement !== sysidTypeSel) {
-            sysidTypeSel.value = String(data.systemIDTestType);
-            sysidToggleSineParams(data.systemIDTestType);
+        // SystemID test-type selector (segmented): reflect saved value + show/hide sine params
+        // (skip while the user is actively clicking one of its buttons).
+        if (data.systemIDTestType !== undefined) {
+            const af = document.activeElement;
+            if (!(af && /^systemIDTestType_btn/.test(af.id || ''))) syncSysidTestTypeUI(data.systemIDTestType);
         }
-        // Tuning waveform selector: reflect saved value + show/hide sine rows (skip while user is picking).
-        const tWaveSel = document.getElementById('tuningWaveform_sel');
-        if (tWaveSel && data.tuningWaveform !== undefined && document.activeElement !== tWaveSel) {
-            tWaveSel.value = String(data.tuningWaveform);
-            tuningToggleWaveformUI(data.tuningWaveform);
+        // Tuning waveform selector (segmented): reflect saved value + show/hide period/sine rows.
+        if (data.tuningWaveform !== undefined) {
+            const af = document.activeElement;
+            if (!(af && /^tuningWaveform_btn/.test(af.id || ''))) syncTuningWaveformUI(data.tuningWaveform);
         }
         // WiFi Napping only applies in Client mode (a SoftAP can't sleep) — hide the row in AP mode.
         const napRow = document.getElementById("wifiNapEnabled_row");
@@ -8949,8 +9124,8 @@ window.addEventListener("load", function () {
             // Wind dial + trend plot: cache the fast (CSV1) wind series, drive the dial.
             try { windLiveOnCsv1(data); } catch (e) { }
 
-            // Gate-tuning readout: iExcess peak-over-command rides CSV1 (amps − setpoint); compute its 10s peak here.
-            try { gateReadoutOnCsv1(data); } catch (e) { }
+            // Live Group 3 detector sparkline: peak excess vs min threshold E.
+            try { iExcessLiveOnCsv1(data); } catch (e) { }
 
             // Update all "session window" labels with the current elapsed time since
             // "Reset Peak Values" was pressed (or boot). One CSV1 field drives every
@@ -9958,7 +10133,6 @@ window.addEventListener("load", function () {
                 ["LongestGaleAT_ID", "LongestGaleAT"],
                 ["faDomAmp_ID", "faDomAmp"],
                 ["faDomFreq_ID", "faDomFreqHz"],
-                ["faDomRpm_ID", "faDomRpm"],
                 ["faDomRpmCtx_ID", "faDomRpm"],
                 ["faDomAmps_ID", "faDomAmps"],
                 ["faDomTempF_ID", "faDomTempF"],
@@ -10193,48 +10367,15 @@ window.addEventListener("load", function () {
                 }
             }
 
-            // Update thermal live score spans in the Diag Control Accuracy table (always-on).
-            // thermalLiveScore0-3 are ×10000 in CSV2; show the bare value — the row header lists the windows.
-            {
-                for (let i = 0; i < 4; i++) {
-                    const raw = data['thermalLiveScore' + i];
-                    if (raw === undefined) continue;
-                    const v = raw / 10000;
-                    const txt = v > 0 ? v.toFixed(4) : '—';
-                    const cacheKey = 'thermalLiveScoreAlt_' + i;
-                    if (lastValues.get(cacheKey) !== txt) {
-                        lastValues.set(cacheKey, txt);
-                        const el = document.getElementById('thermalLiveScoreAlt' + i);
-                        if (el) el.textContent = txt;
-                    }
-                }
-            }
-
-            // Update inner-current-loop & CV-voltage-loop live score spans in the Diag Control Accuracy
-            // table (always-on, fed off CSV2 — no panel-poll needed). Inner score is amps²×10000 (show 2dp).
-            // CV is split into two color-coded mV readouts: RMS error and peak overshoot.
-            {
-                for (let i = 0; i < 4; i++) {
-                    const ri = data['liveScore' + i];
-                    if (ri !== undefined) {
-                        const v = ri / 10000;
-                        const txt = v > 0 ? v.toFixed(2) : '—';
-                        const ck = 'liveScoreAlt_' + i;
-                        if (lastValues.get(ck) !== txt) {
-                            lastValues.set(ck, txt);
-                            const el = document.getElementById('liveScoreAlt' + i);
-                            if (el) el.textContent = txt;
-                        }
-                    }
-                    // CV loop: two intuitive readouts, both in mV. RMS error (both directions) and
-                    // peak overshoot above target (the battery-damaging side). Each cell is colored
-                    // green/orange/red by its own thresholds — see cvScoreCell().
-                    const rms = data['cvRmsErr' + i];
-                    if (rms !== undefined) cvScoreCell('cvRmsErrAlt' + i, 'cvRmsErrAlt_' + i, rms, 50, 150);
-                    const pk = data['cvPeakOver' + i];
-                    if (pk !== undefined) cvScoreCell('cvPeakOverAlt' + i, 'cvPeakOverAlt_' + i, pk, 100, 250);
-                }
-            }
+            // Control Accuracy Scores (always-on, fed off CSV2). Six color-coded cells: RMS error +
+            // worst overshoot per loop, in physical units. Current/thermal are ×100 in CSV2, voltage
+            // is already in mV. Thresholds are in display units (A, mV, °F) — tune on the bench.
+            accScoreCell('accCurRms',    data.accCurRms,    100, ' A',  2, 1,  3);
+            accScoreCell('accCurPeak',   data.accCurPeak,   100, ' A',  2, 2,  5);
+            accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 50, 150);
+            accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 50, 200);
+            accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 2,  5);
+            accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, 3,  8);
 
             // Update GPS display and manual entry form visibility
             if (data.LatitudeNMEA !== undefined && data.LongitudeNMEA !== undefined) {
@@ -10466,6 +10607,10 @@ window.addEventListener("load", function () {
             // Update all setting echo labels and toggles from CSV3 data
             updateAllEchosOptimized(data);
             updateTogglesFromData(data);
+            // Auto-commissioning: refresh the warning badge from the persisted state (0/1/2)
+            if (data.commissionState !== undefined) {
+                try { updateCommissionBadge(parseInt(data.commissionState, 10)); } catch (e) { }
+            }
             // capLimitMode pending toggle confirmation (moved from CSV2 handler — capLimitMode is now in CSV3)
             if (data.capLimitMode !== undefined) {
                 const pending = pendingToggles.get('capLimitMode');
@@ -11109,6 +11254,26 @@ function updatePidInitializedDisplay(data) {
     }
 }
 
+// uPlot sizes itself to clientWidth at construction. All six live charts are built once at load
+// (initCurrentTempPlot()... near startInterpLoop()) while their tab is display:none, i.e. at width 0.
+// Each has a ResizeObserver that fixes this when the element gains size, but that's debounced, so the
+// chart shows squished until the observer fires. Call this the moment a chart's tab/sub-tab becomes
+// visible to size it immediately. The clientWidth>0 guard makes it a no-op for any chart whose
+// sub-tab is still hidden, so it's safe to call for the whole Plots/Tuning family unconditionally.
+function resizeLivePlotsOnShow() {
+    const fix = (plot, elId, height) => {
+        if (!plot) return;
+        const el = document.getElementById(elId);
+        if (el && el.clientWidth > 0) plot.setSize({ width: el.clientWidth, height });
+    };
+    fix(currentTempPlot, 'current-temp-plot', 300);
+    fix(voltagePlot,     'voltage-plot',      300);
+    fix(rpmPlot,         'rpm-plot',          300);
+    fix(temperaturePlot, 'temperature-plot',  300);
+    fix(pidTuningPlot,   'pid-tuning-plot',   400);
+    fix(cvTuningPlot,    'cv-tuning-plot',    350);
+}
+
 function showMainTab(tabName) {
     // Check if trying to access Cloud Features without unlocking
     if (tabName === 'cloudfeatures' && !currentAdminPassword) {
@@ -11137,6 +11302,9 @@ function showMainTab(tabName) {
 
     // Show selected tab content
     document.getElementById(tabName).classList.add('active');
+
+    // Charts in this tab were built at width 0 while it was hidden — size them now (no debounce wait).
+    if (tabName === 'plots' || tabName === 'tuning') resizeLivePlotsOnShow();
 
     // Find and activate the correct button by looking for the one that calls this tab
     mainTabs.forEach(tab => {
@@ -11215,6 +11383,10 @@ function showSubTab(parentTab, subTabName, evt = null) {
     if (contentEl) {
         contentEl.classList.add('active');
     }
+
+    // A chart revealed by this sub-tab switch (e.g. Tuning > Current/Voltage) was built at width 0
+    // while hidden — size it immediately instead of waiting on its debounced ResizeObserver.
+    if (parentTab === 'plots' || parentTab === 'tuning') resizeLivePlotsOnShow();
 
     // Add active class to clicked sub-tab, or find matching button if called programmatically
     if (evt && evt.target) {
@@ -12203,8 +12375,11 @@ function initPidTuningPlot() {
                 time: false,
                 auto: false,
                 // fn (not static array) so setData(...) re-runs it after rebuildPidTuningWindow
-                // resizes the buffer — re-windows in place with no destroy/recreate
-                range: () => [pidTuningData[0][0], pidTuningData[0][pidTuningData[0].length - 1]]
+                // resizes the buffer — re-windows in place with no destroy/recreate.
+                // Fixed [-width, 0] with the right edge pinned at 0, NOT data-driven [x[0], x[last]]:
+                // applyInterp() slides x[last] left then snaps it back each packet, which a data-driven
+                // range renders as an x-axis tick shiver. Width derived from the buffer tracks the window.
+                range: () => { const xa = pidTuningData[0]; return [xa[0] - xa[xa.length - 1], 0]; }
             },
             amps: {
                 // Default auto (NOT auto:false): uPlot only refreshes the data min/max it
@@ -12254,7 +12429,7 @@ function initPidTuningPlot() {
                             if (plotEl && pidTuningPlot) {
                                 pidTuningPlot.setSize({ width: plotEl.clientWidth, height: 400 });
                             }
-                        }, 1000);
+                        }, 150);
 
                         if (pidTuningResizeObserver) {
                             pidTuningResizeObserver.disconnect();
@@ -12722,22 +12897,48 @@ function startLogs() {
         .catch(() => { });
 }
 
-// Reflect live logging state (CSV2 slot 439) in the single pause/resume toggle —
-// its dot carries the state (pulsing green = recording, amber = paused), the label names the action.
-function updateLoggingStatus(loggingActive) {
+// Paint the pause/resume toggle's visual state (dot color + label + the dataset
+// flag toggleLogs reads). Pure render — no reconciliation. Its dot carries the
+// state (pulsing green = recording, amber = paused), the label names the action.
+function renderLoggingToggle(on) {
+    g_loggingActive = on ? 1 : 0;  // remembered for the log-relay capture-state stamp
     const toggle = document.getElementById('logToggleBtn');
-    g_loggingActive = Number(loggingActive);  // remembered for the log-relay capture-state stamp
     if (!toggle) return;
-    const on = Number(loggingActive) === 1;
     toggle.className = 'btn-log-toggle ' + (on ? 'is-recording' : 'is-paused');
     toggle.innerHTML = '<span class="log-dot"></span>' + (on ? '⏸ Pause Logs' : '▶ Resume Logs');
-    toggle.dataset.recording = on ? '1' : '0';   // remembered so toggleLogs() knows which call to make
+    toggle.dataset.recording = on ? '1' : '0';   // so toggleLogs() knows which call to make
 }
 
-// Single button toggles pause/resume based on the last-known state from updateLoggingStatus().
+// Reflect live logging state (CSV2 slot 439). Honors a pending optimistic toggle
+// so a STALE echo (loggingActive only streams on CSV2's ~5s cadence) cannot snap
+// the button back to its pre-click state during the round-trip. Same pendingToggles
+// + deadline guard as faUpdatePauseBtn / updateSegToggle.
+function updateLoggingStatus(loggingActive) {
+    const on = Number(loggingActive) === 1;
+    const pending = pendingToggles.get('loggingActive');
+    if (pending) {
+        if (pending.deadlineMs === undefined) pending.deadlineMs = Date.now() + 8000;  // covers a 5s CSV2 cycle + jitter
+        if ((on ? 1 : 0) !== pending.desiredValue) {
+            if (Date.now() <= pending.deadlineMs) return;   // stale echo — ignore until the device catches up
+            pendingToggles.delete('loggingActive');         // gave up waiting — accept the device value
+        } else {
+            pendingToggles.delete('loggingActive');         // device confirmed the click
+        }
+    }
+    renderLoggingToggle(on);
+}
+
+// Single button toggles pause/resume. Flips the button IMMEDIATELY (optimistic)
+// instead of waiting for the ~5s CSV2 echo — the old behavior left the button
+// looking dead for seconds, so a second "did it work?" click flip-flopped the
+// state and could leave logging silently paused for a whole session.
 function toggleLogs() {
     const toggle = document.getElementById('logToggleBtn');
-    if (toggle && toggle.dataset.recording === '1') { stopLogs(); } else { startLogs(); }
+    if (!toggle) return;
+    const goRecording = toggle.dataset.recording !== '1';   // target = opposite of current
+    pendingToggles.set('loggingActive', { desiredValue: goRecording ? 1 : 0, baseRev: lastSeenRev });
+    renderLoggingToggle(goRecording);                       // instant feedback — no CSV2 wait
+    (goRecording ? startLogs : stopLogs)();                 // POST; CSV2 echo reaffirms via updateLoggingStatus
 }
 
 // ── Silent cloud log relay ────────────────────────────────────────────────
@@ -14819,6 +15020,41 @@ function sysidToggleSineParams(val) {
     if (el) el.style.display = (parseInt(val) === 1) ? '' : 'none';
 }
 
+// Hidden input systemIDTestType_sel mirrors the value so getField()/the modal can read it.
+function syncSysidTestTypeUI(v) {
+    v = parseInt(v);
+    const sel = document.getElementById('systemIDTestType_sel');
+    if (sel) sel.value = String(v);
+    const b0 = document.getElementById('systemIDTestType_btn0');
+    const b1 = document.getElementById('systemIDTestType_btn1');
+    if (b0) b0.classList.toggle('on', v === 0);
+    if (b1) b1.classList.toggle('on', v === 1);
+    sysidToggleSineParams(v);
+}
+function setSysidTestType(v) {
+    syncSysidTestTypeUI(v);
+    const pw = document.querySelector('.password_field');
+    const pwVal = pw ? pw.value : '';
+    fetch(buildURL(`/get?systemIDTestType=${v}&password=${encodeURIComponent(pwVal)}`)).catch(() => {});
+}
+
+function syncTuningWaveformUI(v) {
+    v = parseInt(v);
+    const sel = document.getElementById('tuningWaveform_sel');
+    if (sel) sel.value = String(v);
+    for (let i = 0; i < 3; i++) {
+        const b = document.getElementById('tuningWaveform_btn' + i);
+        if (b) b.classList.toggle('on', v === i);
+    }
+    tuningToggleWaveformUI(v);
+}
+function setTuningWaveform(v) {
+    syncTuningWaveformUI(v);
+    const pw = document.querySelector('.password_field');
+    const pwVal = pw ? pw.value : '';
+    fetch(buildURL(`/get?tuningWaveform=${v}&password=${encodeURIComponent(pwVal)}`)).catch(() => {});
+}
+
 // ── Tuning→Current closed-loop sine (Stage 2) ──
 // Show the manual-frequency row (waveform 1) or the auto-sweep block (waveform 2).
 function tuningToggleWaveformUI(val) {
@@ -14832,18 +15068,61 @@ function tuningToggleWaveformUI(val) {
 }
 
 let tuningBodePollTimer = null;
+// Swap the Run Sweep button between its idle (start) and running (stop) states.
+function _setSweepBtnRunning(running) {
+    const btn = document.getElementById('tuningRunSweepBtn');
+    if (!btn) return;
+    if (running) {
+        btn.textContent = '■ Stop';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-danger');
+        btn.onclick = tuningStopSweep;
+    } else {
+        btn.textContent = '▶ Run Sweep';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-primary');
+        btn.onclick = tuningRunSweep;
+    }
+}
+
+// Run Sweep — single action. Auto-arms the generator (turns Waveform On) if it isn't already,
+// then fires the sweep. No separate "turn the toggle on first" step.
 function tuningRunSweep() {
     if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
+    const pw = encodeURIComponent(currentAdminPassword);
+
     if (parseInt(getField("TuningMode") ?? 0) !== 1) {
-        alert("Turn the Waveform On/Off toggle ON first — the sweep only runs in tuning mode.");
+        // Another loop's test must not be running.
+        const conflict = getActiveTestKey();
+        if (conflict && conflict !== 'curr') {
+            alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting a sweep.');
+            return;
+        }
+        // Optimistically reflect the armed state, register the pending toggle so the stream echo
+        // doesn't bounce it back, send the arm command, then start the sweep once it lands.
+        const cb = document.getElementById('TuningMode_checkbox');
+        const hidden = document.getElementById('TuningMode');
+        if (cb) cb.checked = true;
+        if (hidden) hidden.value = '1';
+        handleUserToggle('TuningMode_checkbox', 'TuningMode', 'TuningMode');
+        const statusEl = document.getElementById('tuning-sweep-status');
+        if (statusEl) statusEl.textContent = 'Arming…';
+        fetch(buildURL("/get?TuningMode=1&password=" + pw))
+            .then(() => _startTuningSweepNow(pw))
+            .catch(err => { const s = document.getElementById('tuning-sweep-status'); if (s) s.textContent = 'Arm failed: ' + err; });
         return;
     }
+    _startTuningSweepNow(pw);
+}
+
+// Fire the sweep and poll /tuningbode until it completes. Assumes the generator is already armed.
+function _startTuningSweepNow(pw) {
     const statusEl = document.getElementById('tuning-sweep-status');
-    const pw = encodeURIComponent(currentAdminPassword);
     fetch(buildURL("/get?startTuningSweep=1&password=" + pw))
         .then(r => {
             if (!r.ok) { if (statusEl) statusEl.textContent = 'Start failed (HTTP ' + r.status + ')'; return; }
             if (statusEl) statusEl.textContent = 'Sweep running…';
+            _setSweepBtnRunning(true);
             const bsec = document.getElementById('tuning-bode-section'); if (bsec) bsec.style.display = 'none';
             if (tuningBodePollTimer) clearInterval(tuningBodePollTimer);
             let waited = 0;
@@ -14858,14 +15137,30 @@ function tuningRunSweep() {
                             : (data.done ? 'Sweep complete.' : 'Idle');
                         if (data.done && !data.active) {
                             clearInterval(tuningBodePollTimer); tuningBodePollTimer = null;
+                            _setSweepBtnRunning(false);
                             renderTuningBode(data);
                         }
                     })
                     .catch(() => {});
-                if (waited > 180000) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; if (statusEl) statusEl.textContent = 'Timed out.'; }
+                if (waited > 180000) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; _setSweepBtnRunning(false); if (statusEl) statusEl.textContent = 'Timed out.'; }
             }, 1500);
         })
         .catch(err => { if (statusEl) statusEl.textContent = 'Start failed: ' + err; });
+}
+
+// Stop a running sweep by disarming the generator (turns Waveform Off) — halts the sweep mid-run.
+function tuningStopSweep() {
+    const pw = encodeURIComponent(currentAdminPassword || '');
+    const cb = document.getElementById('TuningMode_checkbox');
+    const hidden = document.getElementById('TuningMode');
+    if (cb) cb.checked = false;
+    if (hidden) hidden.value = '0';
+    handleUserToggle('TuningMode_checkbox', 'TuningMode', 'TuningMode');
+    fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
+    if (tuningBodePollTimer) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; }
+    const statusEl = document.getElementById('tuning-sweep-status');
+    if (statusEl) statusEl.textContent = 'Stopped.';
+    _setSweepBtnRunning(false);
 }
 
 function renderTuningBode(data) {
@@ -14873,6 +15168,7 @@ function renderTuningBode(data) {
     const body = document.getElementById('tuning-bode-body');
     const sum  = document.getElementById('tuning-bode-summary');
     if (sec) sec.style.display = '';
+    if (document.getElementById('tuningSweepLogSection')?.open) fetchTuningSweepLog();
     if (!data || !data.pts || !data.pts.length) {
         if (body) body.innerHTML = '<tr><td colspan="3" style="padding:6px 4px; color:#f0a500;">No Bode data.</td></tr>';
         return;
@@ -14888,8 +15184,18 @@ function renderTuningBode(data) {
             '<td style="padding:6px 4px; color:' + col + ';">' + rel.toFixed(2) + ' (' + relDb.toFixed(1) + ' dB)</td>' +
             '<td style="padding:6px 4px;">' + p.ph.toFixed(0) + '</td></tr>';
     }).join('');
+    // Log-frequency interpolation of the −3 dB crossing (points are log-spaced) — matches the
+    // open-loop FOPDT fit and the firmware-logged value so all three readouts agree.
     let f3 = null;
-    for (const p of pts) { if (p.g / g0 < 0.708) { f3 = p.f; break; } }
+    for (let i = 1; i < pts.length; i++) {
+        const relPrev = pts[i - 1].g / g0, relCur = pts[i].g / g0;
+        if (relPrev >= 0.708 && relCur < 0.708) {
+            const lf0 = Math.log(pts[i - 1].f), lf1 = Math.log(pts[i].f);
+            const t = (0.708 - relPrev) / (relCur - relPrev);
+            f3 = Math.exp(lf0 + t * (lf1 - lf0));
+            break;
+        }
+    }
     if (sum) sum.innerHTML = f3
         ? 'Closed-loop −3 dB bandwidth: <strong>~' + f3.toFixed(1) + ' Hz</strong> — the fastest setpoint motion your tuned PID can follow. Compare with the Plant Delay sine Bode: the gap is how much the feedback extended the raw plant.'
         : 'Tracking held to the top of the sweep — raise Sweep End to find the closed-loop bandwidth.';
@@ -15559,8 +15865,407 @@ function sysidFitFOPDT(pts, g0) {
     return out;
 }
 
+// "Biggest actionable disturbance" — worst tone the FIELD can react to, read from the resonance
+// /ripple matrix (/famatrix.csv). Actionable band is [4 Hz, actuator BW], where actuator BW =
+// 1/(2π·τ_plant) from the Plant Delay sine fit (sysidFitTauMs). Tones above it are real but
+// un-actionable (field too slow → the iExcess EMA averages them out), so they're excluded.
+// Ranked by residual (amp/freq): a low slow tone survives the EMA far better than a high one.
+// On a slow-field install the band can fall below 4 Hz → nothing is actionable (the common case).
+// See iExcess_Redesign_Spec.md §11.
+function computeActionableDisturbance() {
+    const el = document.getElementById('faActionableResult');
+    if (!el) return;
+    const tauMs = sysidFitTauMs;   // fitted plant τ (ms); 0 until a Plant Delay sweep is fit
+    if (!(tauMs > 0)) {
+        el.textContent = 'Run a Plant Delay sine sweep first — the actionable band edge comes from the fitted plant time constant.';
+        return;
+    }
+    const actBwHz  = 1000 / (2 * Math.PI * tauMs);   // actuator bandwidth, Hz
+    const FLOOR_HZ = 4.0;                            // matrix FFT peak-search floor (FA_MIN_TONE_HZ)
+    if (actBwHz <= FLOOR_HZ) {
+        el.innerHTML = 'No actionable disturbance — actuator bandwidth (<strong>' + actBwHz.toFixed(1) +
+            ' Hz</strong>, from plant τ=' + Math.round(tauMs) + ' ms) is below the 4 Hz measurement floor. ' +
+            'Every measurable tone is faster than the field can chase, so all are averaged out. ' +
+            'iExcess τ is bounded by ripple-rejection, not reaction speed.';
+        return;
+    }
+    el.textContent = 'Computing…';
+    const tauIeMs = parseFloat(getField('IExcessTau_echo'));   // detector EMA τ, for the residual figure
+    const FA_RPM_BIN_W = 50;   // mirror of the firmware matrix RPM bin width
+    fetch(buildURL('/famatrix.csv')).then(r => r.text()).then(txt => {
+        const lines = txt.trim().split('\n');
+        let best = null;
+        for (let i = 1; i < lines.length; i++) {   // skip header row
+            const c = lines[i].split(',');
+            if (c.length < 22) continue;
+            const rpmCtr = parseFloat(c[0]) + FA_RPM_BIN_W / 2;
+            for (let s = 0; s < 6; s++) {           // columns: f1,a1,n1 at 4,5,6; stride 3
+                const f = parseFloat(c[4 + s * 3]);
+                const a = parseFloat(c[5 + s * 3]);
+                const n = parseFloat(c[6 + s * 3]);
+                if (!(n > 0) || !(a > 0) || !(f >= FLOOR_HZ) || f > actBwHz) continue;
+                const residIdx = a / f;             // ∝ post-EMA residual (τ constant across the comparison)
+                if (!best || residIdx > best.residIdx) best = { f, a, rpm: rpmCtr, residIdx };
+            }
+        }
+        if (!best) {
+            el.innerHTML = 'No actionable tone in 4–' + actBwHz.toFixed(1) +
+                ' Hz across the learned map (plant τ=' + Math.round(tauMs) + ' ms). All measurable disturbances ' +
+                'are above the actuator bandwidth, so the field can’t chase them and the EMA averages them out.';
+            return;
+        }
+        let resStr = '';
+        if (tauIeMs > 0) {
+            const resid = best.a / (2 * Math.PI * best.f * (tauIeMs / 1000));   // post-EMA residual, A (spec §11)
+            resStr = ' — post-EMA residual ≈ <strong>' + resid.toFixed(2) + ' A</strong> at the current iExcess τ (' +
+                Math.round(tauIeMs) + ' ms); set the detector floor above this.';
+        }
+        el.innerHTML = 'Biggest actionable disturbance: <strong>' + best.a.toFixed(1) + ' A pk-pk @ ' +
+            best.f.toFixed(1) + ' Hz</strong>, ' + Math.round(best.rpm) + ' RPM (band 4–' + actBwHz.toFixed(1) +
+            ' Hz, plant τ=' + Math.round(tauMs) + ' ms)' + resStr;
+    }).catch(e => { el.textContent = 'Matrix fetch failed: ' + e; });
+}
+
 // "Set filters from τ" — same three filters the step test writes, sized from the fitted
 // time constant: current filters get τ/3 (phase margin), voltage smoothing gets full τ.
+// ============================================================================
+// Auto-commissioning orchestrator (spec §12). One-button guided setup of the
+// current-control + over-current chain. Drives existing /get handlers and the
+// existing SystemID / tuning-sweep / matrix endpoints; the operator only holds or
+// slowly changes engine speed when prompted — the regulator drives the field.
+// ============================================================================
+const CX_PHASES = ['Prep', 'Field curve', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds', 'Done'];
+let cx = null;             // orchestrator state object; null when the modal is closed
+let cxPollTimer = null;
+
+function cxStopPoll() { if (cxPollTimer) { clearInterval(cxPollTimer); cxPollTimer = null; } }
+
+// Every commissioning write goes through here so the admin password is always attached.
+function cxGet(params) {
+    const pw = encodeURIComponent(currentAdminPassword || '');
+    return fetch(buildURL('/get?' + params + '&password=' + pw));
+}
+
+function openCommissionModal() {
+    if (!currentAdminPassword) { alert('Unlock settings first (enter the admin password).'); return; }
+    cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false };
+    document.getElementById('commission-modal-overlay').style.display = 'block';
+    commissionRender();
+}
+
+function closeCommissionModal() {
+    // Pause ≠ abort: closing leaves the firmware state IN_PROGRESS so the flow can resume.
+    // But never leave a test running or the device in closed-loop tuning / the relaxed matrix
+    // gate — clean up whatever this session left active (best-effort, ignores errors).
+    cxStopPoll();
+    if (cx) {
+        if (cx.fieldRunning) cxGet('cancelFieldCurve=1').catch(() => { });
+        if (cx.plantRunning) cxGet('cancelSystemID=1').catch(() => { });
+        if (cx.verifyRunning) cxGet('TuningMode=0').catch(() => { });
+        if (cx.matrixOn) cxGet('faCommissionGate=0').catch(() => { });
+    }
+    document.getElementById('commission-modal-overlay').style.display = 'none';
+    cx = null;
+}
+
+function cxGoto(phase) { cx.phase = phase; commissionRender(); }
+
+function commissionRender() {
+    if (!cx) return;
+    const steps = document.getElementById('commission-steps');
+    steps.innerHTML = CX_PHASES.map((nm, i) =>
+        '<span style="' + (i === cx.phase ? 'color:#4a9eff;font-weight:600;' : (i < cx.phase ? 'color:#5a5;' : '')) + '">' +
+        (i < cx.phase ? '✓ ' : (i + 1) + '. ') + nm + '</span>').join('<span style="color:#444;"> › </span>');
+    document.getElementById('commission-abort-row').style.display = (cx.phase > 0 && cx.phase < 6) ? 'block' : 'none';
+    const b = document.getElementById('commission-body');
+    const R = [cxRenderPrep, cxRenderField, cxRenderPlant, cxRenderVerify, cxRenderMatrix, cxRenderThresh, cxRenderDone];
+    R[cx.phase](b);
+}
+
+// ── Phase 0 — preconditions & snapshot ──────────────────────────────────────
+function cxRenderPrep(b) {
+    b.innerHTML =
+        '<p>This sets every tunable in the current-control and over-current chain from measurements (~3–5 min and a short engine run).</p>' +
+        '<p><strong>Before you start:</strong></p>' +
+        '<ul style="margin:0 0 12px 18px; padding:0;">' +
+        '<li>Engine running, alternator producing current.</li>' +
+        '<li>Battery has charging headroom (not near absorption/float).</li>' +
+        '<li>No other tuning test running.</li>' +
+        '<li>You can hold the throttle steady when asked, then sweep it once.</li></ul>' +
+        '<p style="font-size:12px;color:#999;">Your current tune is snapshotted first — Abort at any point reverts to it.</p>' +
+        '<button onclick="cxStart()" class="btn-primary" style="width:100%;padding:9px;margin-top:6px;">Start commissioning</button>';
+}
+function cxStart() {
+    cxGet('commissionStart=1').then(() => cxGoto(1)).catch(e => alert('Start failed: ' + e));
+}
+
+// ── Phase 1a-i — field-% curve ──────────────────────────────────────────────
+function cxRenderField(b) {
+    const r = cx.fieldResult;
+    let body =
+        '<p><strong>Phase 1 — bring the engine to your typical cruising speed</strong> (the highest you normally hold, e.g. ~2000 RPM) and keep it steady. You hold the throttle; the regulator drives the field. Hold it through the next two steps (~1 min).</p>' +
+        '<p>First the regulator ramps the field through its range to map duty→amps, find the saturation knee, and propose the sine-test settings.</p>';
+    if (cx.fieldRunning) {
+        body += '<p style="color:#4a9eff;">Running field-% ramp… hold RPM steady. <span id="cx-field-prog"></span></p>';
+    } else if (r) {
+        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
+            'Captured <strong>' + r.pts.length + '</strong> points. ' +
+            (r.kneeAmps > 0 ? 'Saturation knee ~<strong>' + r.kneeAmps.toFixed(0) + ' A</strong> (' + r.kneeDuty.toFixed(0) + '% duty).'
+                : 'No saturation knee within range.') +
+            '<br>Proposed <strong>Stabilize current</strong> ' + r.propStabA.toFixed(0) + ' A &nbsp;·&nbsp; <strong>Step amplitude</strong> ' + r.propStepPct.toFixed(1) + '% duty.' +
+            (r.ok ? '' : '<br><span style="color:#f0a500;">Curve looks marginal — review before applying.</span>') +
+            (cx.fieldApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>' +
+            (cx.fieldApplied ? '' : '<button onclick="cxFieldApply()" class="btn-primary btn-sm">Apply proposed settings</button>');
+    }
+    if (!cx.fieldRunning && !r) body += '<button onclick="cxFieldStart()" class="btn-primary" style="width:100%;padding:9px;">Run field-% ramp</button>';
+    else if (!cx.fieldRunning && r) body += '<div style="margin-top:12px;"><button onclick="cxGoto(2)" class="btn-secondary btn-sm"' + (cx.fieldApplied ? '' : ' disabled') + '>Next: plant fit →</button> <button onclick="cxFieldStart()" class="btn-secondary btn-sm">Re-run</button></div>';
+    b.innerHTML = body;
+}
+function cxFieldStart() {
+    cx.fieldResult = null; cx.fieldApplied = false; cx.fieldRunning = true; commissionRender();
+    cxGet('startFieldCurve=1').then(() => {
+        cxStopPoll();
+        let waited = 0;
+        cxPollTimer = setInterval(() => {
+            waited += 1.5;
+            fetch(buildURL('/fieldcurve.json')).then(r => r.json()).then(j => {
+                const p = document.getElementById('cx-field-prog'); if (p) p.textContent = '(' + j.pts.length + ' pts)';
+                if (j.ready && !j.active) { cxStopPoll(); cx.fieldRunning = false; cx.fieldResult = j; commissionRender(); }
+                else if (waited > 150 && !j.active) { cxStopPoll(); cx.fieldRunning = false; alert('Field ramp did not start — check RPM/charging state (see console).'); commissionRender(); }
+            }).catch(() => { });
+        }, 1500);
+    }).catch(e => { cx.fieldRunning = false; alert('Field ramp start failed: ' + e); commissionRender(); });
+}
+function cxFieldApply() {
+    const r = cx.fieldResult; if (!r) return;
+    cxGet('SystemIDStabilizeAmps=' + r.propStabA.toFixed(1))
+        .then(() => cxGet('SystemIDStepAmplitude=' + r.propStepPct.toFixed(2)))
+        .then(() => { cx.fieldApplied = true; commissionRender(); })
+        .catch(e => alert('Apply failed: ' + e));
+}
+
+// ── Phase 1a-ii — open-loop plant fit → PI gains + filters ───────────────────
+function cxRenderPlant(b) {
+    const fit = cx.fit;
+    let body = '<p><strong>Phase 1 (cont.) — keep holding the same cruise RPM.</strong> The regulator runs an open-loop sine sweep to identify the plant (τ, gain, dead time) and propose PI gains + filter time constants.</p>';
+    if (cx.plantRunning) body += '<p style="color:#4a9eff;">Sine sweep running… hold RPM steady. <span id="cx-plant-prog"></span></p>';
+    else if (fit) {
+        if (!fit.ok) body += '<div style="margin:10px 0;color:#f0a500;">No −3 dB corner found in the swept range. Widening the sweep and retrying…</div>';
+        else body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
+            'Plant τ <strong>' + fit.tauMs.toFixed(0) + ' ms</strong>, K ' + fit.K.toFixed(3) + ' A/%, dead time ' + fit.thetaMs.toFixed(0) + ' ms.<br>' +
+            'Proposed <strong>Kp ' + fit.Kp.toFixed(3) + '</strong>, <strong>Ki ' + fit.Ki.toFixed(3) + '</strong>; filters τ/3=' + Math.round(fit.tauMs / 3) + ' ms, voltage τ=' + Math.round(fit.tauMs) + ' ms.' +
+            (cx.plantApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>' +
+            (cx.plantApplied ? '' : '<button onclick="cxPlantApply()" class="btn-primary btn-sm">Apply results</button>');
+    }
+    if (!cx.plantRunning && !fit) body += '<button onclick="cxPlantStart(false)" class="btn-primary" style="width:100%;padding:9px;">Run plant sine sweep</button>';
+    else if (!cx.plantRunning && fit && fit.ok) body += '<div style="margin-top:12px;"><button onclick="cxGoto(3)" class="btn-secondary btn-sm"' + (cx.plantApplied ? '' : ' disabled') + '>Next: verify →</button> <button onclick="cxPlantStart(false)" class="btn-secondary btn-sm">Re-run</button></div>';
+    b.innerHTML = body;
+}
+function cxPlantStart(wide) {
+    cx.fit = null; cx.plantApplied = false; cx.plantRunning = true; commissionRender();
+    const fStart = wide ? 0.3 : 0.5, fEnd = wide ? 30 : 20;
+    cxGet('systemIDTestType=1&systemIDSineFreqStart=' + fStart + '&systemIDSineFreqEnd=' + fEnd)
+        .then(() => cxGet('startSystemID=1'))
+        .then(() => {
+            cxStopPoll();
+            let waited = 0;
+            cxPollTimer = setInterval(() => {
+                waited += 1.5;
+                fetch(buildURL('/sysidbode')).then(r => r.json()).then(j => {
+                    const p = document.getElementById('cx-plant-prog'); if (p) p.textContent = '(' + j.pts.length + ' pts)';
+                    if (waited > 240 && !j.active && !j.ready) { cxStopPoll(); cx.plantRunning = false; alert('Plant sweep did not start — check RPM/charging state (see console).'); commissionRender(); return; }
+                    if (j.ready && !j.active) {
+                        cxStopPoll();
+                        const pts = j.pts;
+                        if (pts.length >= 3) {
+                            const fit = sysidFitFOPDT(pts, Math.max(1e-9, pts[0].g));
+                            cx.fit = fit;
+                            if (fit.ok) { sysidFitTauMs = fit.tauMs; sysidFitKp = fit.Kp; sysidFitKi = fit.Ki; }
+                            cx.plantRunning = false; commissionRender();
+                            if (!fit.ok && !cx._widened) { cx._widened = true; setTimeout(() => cxPlantStart(true), 1500); }
+                        } else { cx.fit = { ok: false }; cx.plantRunning = false; commissionRender(); }
+                    }
+                }).catch(() => { });
+            }, 1500);
+        }).catch(e => { cx.plantRunning = false; alert('Sweep start failed: ' + e); commissionRender(); });
+}
+function cxPlantApply() {
+    const f = cx.fit; if (!f || !f.ok) return;
+    const tcFast = Math.max(1, Math.round(f.tauMs / 3)), tcSlow = Math.max(1, Math.round(f.tauMs));
+    cxGet('PidKp=' + f.Kp.toFixed(4))
+        .then(() => cxGet('PidKi=' + f.Ki.toFixed(4)))
+        .then(() => cxGet('InputFilterTC=' + tcFast))
+        .then(() => cxGet('OutputPIDFilterTC=' + tcFast))
+        .then(() => cxGet('VoltageFilterTC=' + tcSlow))
+        .then(() => { cx.plantApplied = true; commissionRender(); })
+        .catch(e => alert('Apply failed: ' + e));
+}
+
+// ── Phase 1b — closed-loop verify ───────────────────────────────────────────
+function cxRenderVerify(b) {
+    let body = '<p><strong>Phase 1b — closed-loop check, same cruise RPM.</strong> Runs a closed-loop sine sweep to confirm the new gains are stable (no resonant peak). Keep holding RPM.</p>';
+    if (cx.verifyRunning) body += '<p style="color:#4a9eff;">Closed-loop sweep running… <span id="cx-verify-prog"></span></p>';
+    else if (cx.verify) {
+        const v = cx.verify;
+        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
+            'Peak closed-loop gain <strong style="color:' + (v.pass ? '#5a5' : '#f0a500') + ';">' + v.peakGain.toFixed(2) + '</strong>' +
+            (v.bwHz > 0 ? ', bandwidth ~' + v.bwHz.toFixed(1) + ' Hz' : '') + '.<br>' +
+            (v.pass ? '<span style="color:#5a5;">Passed — loop is stable.</span>' : '<span style="color:#f0a500;">Peak gain above 1.15 — loop is too aggressive.</span>') + '</div>' +
+            (v.pass ? '' : '<button onclick="cxDetune()" class="btn-secondary btn-sm">Detune 20% &amp; re-verify</button>');
+    }
+    if (!cx.verifyRunning && !cx.verify) body += '<button onclick="cxVerifyStart()" class="btn-primary" style="width:100%;padding:9px;">Run closed-loop verify</button>';
+    else if (!cx.verifyRunning && cx.verify) body += '<div style="margin-top:12px;"><button onclick="cxVerifyDone()" class="btn-secondary btn-sm"' + (cx.verify.pass ? '' : ' disabled') + '>Next: disturbance map →</button> <button onclick="cxVerifyStart()" class="btn-secondary btn-sm">Re-run</button></div>';
+    b.innerHTML = body;
+}
+function cxVerifyStart() {
+    cx.verify = null; cx.verifyRunning = true; commissionRender();
+    cxGet('tuningWaveform=2&TuningMode=1')
+        .then(() => cxGet('startTuningSweep=1'))
+        .then(() => {
+            cxStopPoll();
+            let waited = 0;
+            cxPollTimer = setInterval(() => {
+                waited += 1.5;
+                fetch(buildURL('/tuningbode')).then(r => r.json()).then(j => {
+                    const p = document.getElementById('cx-verify-prog'); if (p) p.textContent = '(' + (j.pts ? j.pts.length : 0) + ' pts)';
+                    if ((j.done && !j.active) || waited > 200) {
+                        cxStopPoll();
+                        const pts = j.pts || [];
+                        let peak = 0; pts.forEach(p2 => { if (p2.g > peak) peak = p2.g; });
+                        let bw = -1; const g0 = pts.length ? pts[0].g : 0;
+                        for (let i = 1; i < pts.length; i++) { if (pts[i].g < 0.707 * g0) { bw = pts[i].f; break; } }
+                        cx.verify = { peakGain: peak, bwHz: bw, pass: (peak > 0 && peak <= 1.15) };
+                        cx.verifyRunning = false;
+                        cxGet('TuningMode=0').finally(() => commissionRender());  // leave closed-loop tuning
+                    }
+                }).catch(() => { });
+            }, 1500);
+        }).catch(e => { cx.verifyRunning = false; alert('Verify start failed: ' + e); commissionRender(); });
+}
+function cxDetune() {
+    const kp = sysidFitKp * 0.8, ki = sysidFitKi * 0.8;
+    sysidFitKp = kp; sysidFitKi = ki;
+    cxGet('PidKp=' + kp.toFixed(4)).then(() => cxGet('PidKi=' + ki.toFixed(4))).then(() => cxVerifyStart());
+}
+function cxVerifyDone() { cxGet('TuningMode=0').finally(() => cxGoto(4)); }
+
+// ── Phase 2 — guided slow sweep populates the disturbance matrix ─────────────
+function cxRenderMatrix(b) {
+    let body = '<p><strong>Phase 2 — disturbance map.</strong> From idle, <strong>creep the throttle up slowly and continuously to ~2000 RPM</strong> (or your max if lower) — don\'t hold, just raise it as slowly as you comfortably can. One pass is enough. This records the worst low-frequency disturbance at each speed.</p>';
+    if (cx.matrixOn) {
+        body += '<div id="cx-cov" style="margin:10px 0;">Coverage: checking…</div>' +
+            '<button onclick="cxMatrixStop()" class="btn-secondary btn-sm">I\'m done sweeping</button>';
+    } else {
+        body += '<button onclick="cxMatrixStart()" class="btn-primary" style="width:100%;padding:9px;">Start guided sweep</button>';
+        if (cx.matrixCov) body += '<div style="margin-top:12px;"><button onclick="cxGoto(5)" class="btn-secondary btn-sm">Next: thresholds →</button></div>';
+    }
+    b.innerHTML = body;
+}
+function cxMatrixStart() {
+    cx.matrixOn = true; commissionRender();
+    cxGet('faCommissionGate=1').then(() => { cxStopPoll(); cxPollTimer = setInterval(cxMatrixPoll, 2000); cxMatrixPoll(); });
+}
+function cxMatrixPoll() {
+    fetch(buildURL('/famatrix.csv')).then(r => r.text()).then(txt => {
+        const lines = txt.trim().split('\n');
+        const bins = new Set();
+        for (let i = 1; i < lines.length; i++) { const c = lines[i].split(','); if (c.length >= 3) bins.add(parseInt(c[0], 10)); }
+        // Coverage over the relevant idle→ceiling band (500–2000 RPM, 50-RPM bins). Gaps tolerated.
+        let covered = 0; const lo = 500, hi = 2000, total = (hi - lo) / 50;
+        for (let r = lo; r < hi; r += 50) { if (bins.has(r)) covered++; }
+        const pct = Math.round(100 * covered / total);
+        cx.matrixCov = pct >= 60;
+        const el = document.getElementById('cx-cov');
+        if (el) el.innerHTML = 'Coverage: <strong style="color:' + (cx.matrixCov ? '#5a5' : '#f0a500') + ';">' + covered + '/' + total + ' RPM bins</strong> (' + pct + '%). ' + (cx.matrixCov ? 'Enough — you can stop.' : 'Keep creeping the throttle up.');
+    }).catch(() => { });
+}
+function cxMatrixStop() {
+    cx.matrixOn = false; cxStopPoll();
+    cxGet('faCommissionGate=0').finally(() => commissionRender());
+}
+
+// ── Phase 3 — over-current thresholds from the matrix (REPORT-only on v1) ─────
+function cxRenderThresh(b) {
+    let body = '<p><strong>Phase 3 — over-current thresholds.</strong> From the disturbance map and the measured plant τ, this proposes the over-current detector\'s averaging time and floor. <strong>Review, then apply</strong> — confirm with logs before trusting it.</p>';
+    if (!cx.thresh) { body += '<p style="color:#4a9eff;">Computing…</p>'; cxComputeThresholds(); }
+    else if (cx.thresh.err) body += '<div style="color:#f0a500;margin:10px 0;">' + cx.thresh.err + '</div>';
+    else {
+        const t = cx.thresh;
+        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
+            'Binding tone: <strong>' + t.A.toFixed(1) + ' A @ ' + t.f.toFixed(1) + ' Hz</strong> (' + t.rpm + ' RPM).<br>' +
+            'Proposed <strong>averaging τ ' + t.tau.toFixed(0) + ' ms</strong> (= plant τ); post-EMA residual ' + t.R.toFixed(2) + ' A.<br>' +
+            'Proposed <strong>floor ' + t.floor.toFixed(1) + ' A</strong> = max(default, residual×' + t.margin + ').' +
+            (t.tradeoff ? '<br><span style="color:#f0a500;">' + t.tradeoff + '</span>' : '') +
+            (cx.threshApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>' +
+            (cx.threshApplied ? '' : '<button onclick="cxThreshApply()" class="btn-primary btn-sm">Apply proposed thresholds</button>');
+    }
+    body += '<div style="margin-top:12px;"><button onclick="cxGoto(6)" class="btn-secondary btn-sm">Next →</button></div>';
+    b.innerHTML = body;
+}
+function cxComputeThresholds() {
+    const tauMs = sysidFitTauMs;
+    if (!(tauMs > 0)) { cx.thresh = { err: 'No plant fit — re-run Phase 1.' }; commissionRender(); return; }
+    const margin = 4, DEFAULT_FLOOR = 4.0;
+    fetch(buildURL('/famatrix.csv')).then(r => r.text()).then(txt => {
+        const lines = txt.trim().split('\n'); let best = null;
+        for (let i = 1; i < lines.length; i++) {
+            const c = lines[i].split(','); if (c.length < 22) continue;
+            const rpmCtr = parseFloat(c[0]) + 25;
+            for (let s = 0; s < 6; s++) {
+                const f = parseFloat(c[4 + s * 3]), a = parseFloat(c[5 + s * 3]), n = parseFloat(c[6 + s * 3]);
+                if (!(n > 0) || !(a > 0) || !(f >= 4)) continue;
+                const idx = a / f;  // residual-weighted: a low slow tone survives the EMA better than a big fast one
+                if (!best || idx > best.idx) best = { f, a, rpm: Math.round(rpmCtr), idx };
+            }
+        }
+        if (!best) { cx.thresh = { err: 'No qualifying tone in the map — sweep more RPM range in Phase 2.' }; commissionRender(); return; }
+        const R = best.a / (2 * Math.PI * best.f * (tauMs / 1000));
+        const floor = Math.max(DEFAULT_FLOOR, R * margin);
+        cx.thresh = { f: best.f, A: best.a, rpm: best.rpm, R, tau: tauMs, floor, margin };
+        if (floor > 10) {
+            const tauForLowFloor = (best.a * margin) / (2 * Math.PI * best.f * DEFAULT_FLOOR) * 1000;
+            cx.thresh.tradeoff = 'Floor is high (' + floor.toFixed(1) + ' A) — lengthening τ to ~' + Math.round(tauForLowFloor) + ' ms would lower it toward ' + DEFAULT_FLOOR + ' A, at the cost of slower reaction. Default keeps τ=plant and the higher floor.';
+        }
+        commissionRender();
+    }).catch(e => { cx.thresh = { err: 'Matrix fetch failed: ' + e }; commissionRender(); });
+}
+function cxThreshApply() {
+    const t = cx.thresh; if (!t || t.err) return;
+    cxGet('IExcessTau=' + Math.round(Math.min(300, Math.max(20, t.tau))))
+        .then(() => cxGet('IExcessFloorA=' + Math.min(20, Math.max(1, t.floor)).toFixed(1)))
+        .then(() => { cx.threshApplied = true; commissionRender(); })
+        .catch(e => alert('Apply failed: ' + e));
+}
+
+// ── Phase 4 — validate, then commit ─────────────────────────────────────────
+function cxRenderDone(b) {
+    b.innerHTML = '<p><strong>Phase 4 — validate.</strong> Hold a steady high current at the roughest RPM the sweep found and confirm no false over-current fire; one real RPM blip should trigger one clean response (integrator reset, no double-fire).</p>' +
+        '<p style="font-size:12px;color:#999;">Marking the device commissioned discards the pre-commissioning snapshot and clears the warning badge.</p>' +
+        '<button onclick="cxFinish()" class="btn-primary" style="width:100%;padding:9px;">Finish — mark commissioned</button>';
+}
+function cxFinish() {
+    cxGet('commissionDone=1').then(() => { alert('Commissioning complete.'); closeCommissionModal(); }).catch(e => alert('Finish failed: ' + e));
+}
+function commissionAbort() {
+    if (!confirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
+    cxStopPoll();
+    cxGet('commissionAbort=1').then(() => { alert('Reverted to pre-commissioning settings.'); closeCommissionModal(); }).catch(e => alert('Abort failed: ' + e));
+}
+
+// Warning badge in System Settings, driven from the persisted commissionState (CSV3).
+function updateCommissionBadge(state) {
+    const el = document.getElementById('commission-badge'); if (!el) return;
+    if (state === 2) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    if (state === 1) {
+        el.style.background = '#2a2a00'; el.style.border = '1px solid #886'; el.style.color = '#e8e0a0';
+        el.innerHTML = '⚠️ Commissioning in progress — the current loop is partially set. Resume or abort below.';
+    } else {
+        el.style.background = '#2a1a00'; el.style.border = '1px solid #864'; el.style.color = '#e8c0a0';
+        el.innerHTML = '⚠️ Current loop not commissioned — over-current protection is on default thresholds. Run commissioning for this alternator.';
+    }
+}
+
 function applySysidBodeFilters() {
     if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
     if (sysidFitTauMs <= 0) { alert("No plant fit available — re-run the sweep."); return; }
@@ -17206,9 +17911,10 @@ function initFastScopePlot() {
     if (existingAs) existingAs.remove();
     const asDiv = document.createElement('div');
     asDiv.className = 'autoscale-ctrl';
-    asDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;align-items:center;gap:3px;font-size:11px;opacity:0.6;';
-    asDiv.innerHTML = '<input type="checkbox" id="autoscale-fastscope-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-fastscope-cb" style="cursor:pointer;user-select:none;">auto</label>';
+    asDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-size:11px;';
+    asDiv.innerHTML = '<button id="fastscope-pause-btn" title="Pause — freeze the displayed capture (stops the ~5 s auto-refresh)" style="font-size:10px;padding:0 6px;cursor:pointer;border:1px solid #999;border-radius:2px;background:transparent;line-height:16px;" onclick="fastScopePauseToggle(this)">Pause</button><div style="display:flex;align-items:center;gap:3px;opacity:0.6;"><input type="checkbox" id="autoscale-fastscope-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-fastscope-cb" style="cursor:pointer;user-select:none;">auto</label></div>';
     plotEl.appendChild(asDiv);
+    if (fastScopePaused) { const pb = document.getElementById('fastscope-pause-btn'); if (pb) pb.textContent = 'Resume'; }
     const faCb = document.getElementById('autoscale-fastscope-cb');
     faCb.checked = (fastScopeAmpsMin == null);  // null range vars = auto-fit
     faCb.addEventListener('change', e => {
@@ -17287,8 +17993,8 @@ function fastScopeOnOpen() {
     fetchFastFlip();   // always re-pull on open so freshly-frozen reference pages show without a manual Refresh
 }
 
-// Pause freezes the displayed capture by halting the ~5 s auto-refresh; the manual Refresh
-// Capture button still works while paused so you can step to a fresh frame on demand.
+// Pause freezes the displayed capture by halting the ~5 s auto-refresh. The on-chart Pause
+// button (top-right of the scope plot) is the only control; press Resume to re-arm the refresh.
 function fastScopePauseToggle(btn) {
     fastScopePaused = !fastScopePaused;
     if (btn) { btn.textContent = fastScopePaused ? 'Resume' : 'Pause'; btn.classList.toggle('active', fastScopePaused); }
@@ -17317,7 +18023,7 @@ function buildFaScopeCsv(d) {
 
 // Export the currently-shown scope capture as CSV (header + raw + boxcar-16 filtered).
 function downloadFaScopeCsv() {
-    if (!fastScopeData || !fastScopeData.count) { alert('No scope capture yet — press Refresh Capture first.'); return; }
+    if (!fastScopeData || !fastScopeData.count) { alert('No scope capture yet — wait a few seconds for the first capture.'); return; }
     const csv = buildFaScopeCsv(fastScopeData);
     const dt = new Date(), p = n => String(n).padStart(2, '0');
     const stamp = dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + ' ' + p(dt.getHours()) + '-' + p(dt.getMinutes()) + '-' + p(dt.getSeconds());
@@ -17348,7 +18054,7 @@ function fastDiagStartAuto() {
     fastDiagFlipTick = 0;
     fastDiagAutoTimer = setInterval(() => {
         if (!fastDiagIsVisible()) { fastDiagStopAuto(); return; }
-        if (!fastScopePaused) fetchFastScope(true);  // silent: no "Fetching…" flash on the 5 s tick. Pause freezes auto-refresh; manual Refresh still works
+        if (!fastScopePaused) fetchFastScope(true);  // silent: no "Fetching…" flash on the 5 s tick. Pause freezes auto-refresh.
         // Flipbook poll every 6th tick (~30 s): reference bands freeze themselves, so their
         // buttons light up here with no manual press. Silent + non-disruptive (see fetchFastFlip).
         if (++fastDiagFlipTick % 6 === 0) fetchFastFlip(true);
@@ -17540,8 +18246,8 @@ function faFlipViewToggle(which) {
         fastFlipPlot.setSeries(2, { show: faFlipShowFilt });
     }
 }
-const FASTFLIP_PAGE_BYTES = 2020;
-const FASTFLIP_NSAMP = 1000;
+const FASTFLIP_PAGE_BYTES = 8020;
+const FASTFLIP_NSAMP = 4000;
 
 function parseFastFlip(buf) {
     const dv = new DataView(buf);
@@ -17598,7 +18304,7 @@ function initFastFlipPlot() {
         height: 300,   // match the scope plot above it so the two stacked charts read as the same size
         // No fixed-ms title: the shared Time window buttons re-window this page, so any "200 ms"
         // label is wrong once zoomed (mirrors the scope, which titles via the Y axis instead).
-        title: "Reference Waveform — 5 kHz",
+        title: "Reference Waveform — 20 kHz",
         // Raw + Filtered, same two series and colors as the live scope above so the stacked plots
         // read alike. Toggled by faFlipViewToggle; data is always [t, raw, filtered] each render.
         series: [

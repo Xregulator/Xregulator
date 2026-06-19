@@ -215,7 +215,7 @@ EXPECTED_HEADER = [
     "rpm", "measAmps", "innerKp", "innerKi", "innerKd", "voltageKp",
     "voltageKi", "voltageKd", "battV_filt_V", "iMeas_filt_A", "flags",
     "ovFlags", "dBcur_dt", "battI", "ch1IntervalMs", "voltLoopIntervalMs",
-    "inaIntervalMs",
+    "inaIntervalMs", "mExcessEma", "iExcessThreshold",
 ]
 _N = len(EXPECTED_HEADER)
 if _sep == "," and len(_col_names) != _N:
@@ -282,6 +282,7 @@ numeric_cols = [
     "battV_filt", "iMeas_filt",
     "ovFlags", "dBcur_dt", "battI",
     "ch1IntervalMs", "voltLoopIntervalMs", "inaIntervalMs",
+    "mExcessEma", "iExcessThreshold",   # iExcess detector: averaged excess vs fire threshold E (A)
 ]
 
 for col in numeric_cols:
@@ -802,6 +803,44 @@ if _timing_cols:
     ax7.set_xlabel(time_label)
 
 # ---------------------------------------------------------------------------
+# PLOT 8 — iExcess (Group 3) detector: averaged excess vs fire threshold E
+# Only rendered when the detector trace columns are present (firmware post-Jun2026).
+# This is THE validation panel for IExcessTau / IExcessFloorA: confirm mExcessEma
+# stays well below E during a clean high-current hold (ripple averaged out) and
+# crosses E promptly on a real over-current. Shaded bands mark ticks where an
+# iExcess flag was latched (CV bit3 or Bulk bit1 in ovFlags).
+# ---------------------------------------------------------------------------
+_have_iex = ("mExcessEma" in df.columns and "iExcessThreshold" in df.columns)
+if _have_iex:
+    fig8, (ax8, ax8s) = plt.subplots(2, 1, figsize=(16, 6),
+                                     gridspec_kw={"height_ratios": [5, 1]},
+                                     sharex=True)
+    fig8.canvas.manager.set_window_title("Plot 8 — iExcess Detector")
+    fig8.suptitle("iExcess (Group 3) Detector — Averaged Excess vs Fire Threshold",
+                  fontsize=14, fontweight="bold")
+    plt.subplots_adjust(hspace=0.05)
+
+    ax8.plot(df["t_plot"], df["mExcessEma"], color="#1565c0", lw=1.6,
+             label="mExcessEma — averaged current excess (A)", zorder=3)
+    ax8.plot(df["t_plot"], df["iExcessThreshold"], color="#c62828", lw=1.4, ls="--",
+             label="E — fire threshold (A)", zorder=2)
+    ax8.axhline(0, color="#888", lw=0.6, ls=":", alpha=0.6)
+
+    _fire = ((df.get("f_iExcess", 0) == 1) | (df.get("f_iExcessBulk", 0) == 1))
+    if hasattr(_fire, "any") and _fire.any():
+        ax8.fill_between(df["t_plot"], 0, 1, where=_fire,
+                         transform=ax8.get_xaxis_transform(),
+                         color="#ff8a80", alpha=0.25, step="pre",
+                         label="iExcess fired/latched", zorder=1)
+
+    ax8.set_ylabel("Amps")
+    ax8.grid(True, linestyle=":", alpha=0.4)
+    _leg8 = ax8.legend(loc="upper right", fontsize=10)
+    _leg8.set_draggable(True)
+    draw_state_strip(ax8s, df, state_changes)
+    ax8.set_xlabel(time_label)
+
+# ---------------------------------------------------------------------------
 # Linked x-axis zoom — syncs all plot windows when any one is zoomed/panned.
 # Registers xlim_changed on the primary (top) axes of each figure; sub-axes
 # within a figure already share x via sharex so only one per figure is needed.
@@ -811,6 +850,9 @@ _all_figs         = [fig1, fig2, fig3, fig4, fig5, fig6]
 if _timing_cols:
     _all_primary_axes.append(ax7)
     _all_figs.append(fig7)
+if _have_iex:
+    _all_primary_axes.append(ax8)
+    _all_figs.append(fig8)
 _syncing = [False]   # mutable container so the closure can write to it
 
 def _on_xlim_changed(changed_ax):

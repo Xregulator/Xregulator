@@ -492,9 +492,6 @@ void tuningScore_init() {
   Serial.printf("TuningScore: %d record slots × %u bytes = %u bytes in PSRAM\n",
                 50, (unsigned)sizeof(TuningRecord),
                 (unsigned)(50 * sizeof(TuningRecord)));
-  Serial.printf("TuningScore: live buckets = 4 windows × %d × %u bytes = %u bytes in PSRAM\n",
-                (int)LIVE_BUCKET_N, (unsigned)sizeof(ScoreBucket),
-                (unsigned)(4 * LIVE_BUCKET_N * sizeof(ScoreBucket)));
 }
 
 void saveTuningLog() {
@@ -558,6 +555,7 @@ void commitTuningRecord() {
   rec.dutyRampRate = DutyRampRate;
   rec.waveAmplitude = (int16_t)waveAmplitude;
   rec.wavePeriod = (int16_t)wavePeriod;
+  rec.waveFloor = (int16_t)tuningWaveFloor;
   rec.avgRPM = (tuningScore.avgSampleCount > 0)
                  ? (tuningScore.rpmSum / tuningScore.avgSampleCount)
                  : 0.0f;
@@ -565,6 +563,8 @@ void commitTuningRecord() {
                       ? (tuningScore.tempSum / tuningScore.avgSampleCount)
                       : 0.0f;
   rec.worstErrorA = tuningScore.worstErrorA;
+  rec.battV = BatteryV;
+  rec.chargeStage = getChargeStageDisplayCode();
 
   tuningLog[tuningLogHead] = rec;
   tuningLogHead = (tuningLogHead + 1) % 50;
@@ -676,6 +676,7 @@ void commitCVTuningRecord() {
   rec.battVAtStart = cvTuningScore.battVAtStart;
   rec.socAtStart = cvTuningScore.socAtStart;
   rec.chargingVoltageTarget = cvBaseTarget;
+  rec.chargeStage = getChargeStageDisplayCode();
   float nl = (float)cvTuningScore.scoredLowCount;
   if (nl > 0.0f) {
     rec.avgLowSettlingTimeSec = cvTuningScore.totalLowSettlingTimeSec / nl;
@@ -701,75 +702,43 @@ void commitCVTuningRecord() {
   cvTuningScore = {};
 }
 
-static float computeLiveScore(int w) {
-  float e = 0.0f, t = 0.0f;
-  if (!liveScoreBuckets[w]) return 0.0f;
-  for (int i = 0; i < LIVE_BUCKET_N; i++) {
-    e += liveScoreBuckets[w][i].errorAccum;
-    t += liveScoreBuckets[w][i].activeTimeSec;
-  }
-  return (t > 0.1f) ? (e / t) : 0.0f;
+// ===== Control Accuracy Scores — accumulate-since-reset engine (2026-06-18) =====
+// One running RMS-error accumulator + one worst-overshoot high-water mark per loop. No bucket ring,
+// no window rotation. The accumulators are zeroed by resetAccuracyScores() — fired automatically
+// right after each successful config-snapshot upload (≈daily) and by the manual dashboard button.
+
+// RMS tracking error in physical units = sqrt(Σ(e²·dt) / Σdt). Guard avoids a divide before any
+// authority time has accrued. Takes the raw double accumulators (NOT the struct) so the auto-
+// generated cross-file prototype doesn't reference AccuracyScore before it's defined. Returns float.
+float accScoreRms(double errAccum, double timeAccum) {
+  return (timeAccum > 0.1) ? sqrtf((float)(errAccum / timeAccum)) : 0.0f;
 }
 
-static void accumulateLiveScore(float e, float dtSec, uint32_t nowMs) {
-  float contribution = e * e * dtSec;
-  for (int w = 0; w < 4; w++) {
-    if (!liveScoreBuckets[w]) continue;
-    // Rotate bucket if the current one has expired
-    if (liveBucketStartMs[w] == 0) liveBucketStartMs[w] = nowMs;
-    if ((nowMs - liveBucketStartMs[w]) >= LIVE_BUCKET_MS[w]) {
-      liveScoreHead[w] = (liveScoreHead[w] + 1) % LIVE_BUCKET_N;
-      liveBucketStartMs[w] = nowMs;
-      liveScoreBuckets[w][liveScoreHead[w]] = { 0.0f, 0.0f };
-    }
-    liveScoreBuckets[w][liveScoreHead[w]].errorAccum += contribution;
-    liveScoreBuckets[w][liveScoreHead[w]].activeTimeSec += dtSec;
-    liveScoreVal[w] = computeLiveScore(w);
-  }
+// Add one tick of error + overshoot. err/dtSec are this tick's tracking error and elapsed time;
+// overshoot is the excursion in the damaging direction (already floored at 0 by the caller).
+// Takes the accumulator members by primitive reference (not the AccuracyScore struct) so Arduino's
+// auto-generated prototype — inserted above the struct's definition — references only built-in types.
+static void accScoreAdd(double &errAccum, double &timeAccum, float &worstOver,
+                        float err, float overshoot, float dtSec) {
+  errAccum  += (double)err * (double)err * (double)dtSec;
+  timeAccum += (double)dtSec;
+  if (overshoot > worstOver) worstOver = overshoot;
 }
 
-// RMS voltage error (V) over the window — symmetric, both directions
-static float computeCVRmsErr(int w) {
-  float e = 0.0f, t = 0.0f;
-  if (!cvLiveScoreBuckets[w]) return 0.0f;
-  for (int i = 0; i < LIVE_BUCKET_N; i++) {
-    e += cvLiveScoreBuckets[w][i].errorAccum;     // Σ(e²·dt)
-    t += cvLiveScoreBuckets[w][i].activeTimeSec;
-  }
-  return (t > 0.1f) ? sqrtf(e / t) : 0.0f;
+// Settle/debounce gate: returns true only once the loop's authority condition has held continuously
+// for settleMs. The false→true edge stamps bindingStartMs; any false tick clears it (restart timer).
+static bool accBindingReady(uint32_t &bindingStartMs, bool binding, uint32_t nowMs, uint32_t settleMs) {
+  if (!binding) { bindingStartMs = 0; return false; }
+  if (bindingStartMs == 0) bindingStartMs = nowMs;
+  return (uint32_t)(nowMs - bindingStartMs) >= settleMs;
 }
 
-// Peak overshoot above target (V) over the window — max across the 60 buckets
-static float computeCVPeakOver(int w) {
-  if (!cvPeakBuckets[w]) return 0.0f;
-  float p = 0.0f;
-  for (int i = 0; i < LIVE_BUCKET_N; i++)
-    if (cvPeakBuckets[w][i] > p) p = cvPeakBuckets[w][i];
-  return p;
-}
-
-// Two intuitive readouts, both in volts, over the same disturbance-gated window:
-//   RMS error  — plain (unweighted) Σ(e²·dt)/Σdt, square-rooted → overall regulation tightness
-//   peak over  — worst single excursion ABOVE target (the battery-damaging side)
-// The asymmetric cvKOvershoot weight is deliberately NOT used here — overshoot now lives in its
-// own readout instead of being baked into the average. (cvKOvershoot still scores the CV step-test.)
-static void accumulateCVLiveScore(float vErr, float dtSec, uint32_t nowMs) {
-  float overshoot = (vErr > 0.0f) ? vErr : 0.0f;
-  for (int w = 0; w < 4; w++) {
-    if (!cvLiveScoreBuckets[w] || !cvPeakBuckets[w]) continue;
-    if (cvLiveBucketStartMs[w] == 0) cvLiveBucketStartMs[w] = nowMs;
-    if ((nowMs - cvLiveBucketStartMs[w]) >= LIVE_BUCKET_MS[w]) {
-      cvLiveScoreHead[w] = (cvLiveScoreHead[w] + 1) % LIVE_BUCKET_N;
-      cvLiveBucketStartMs[w] = nowMs;
-      cvLiveScoreBuckets[w][cvLiveScoreHead[w]] = { 0.0f, 0.0f };
-      cvPeakBuckets[w][cvLiveScoreHead[w]] = 0.0f;
-    }
-    cvLiveScoreBuckets[w][cvLiveScoreHead[w]].errorAccum += vErr * vErr * dtSec;
-    cvLiveScoreBuckets[w][cvLiveScoreHead[w]].activeTimeSec += dtSec;
-    if (overshoot > cvPeakBuckets[w][cvLiveScoreHead[w]]) cvPeakBuckets[w][cvLiveScoreHead[w]] = overshoot;
-    cvRmsErrVal[w]   = computeCVRmsErr(w);
-    cvPeakOverVal[w] = computeCVPeakOver(w);
-  }
+// Zero all three loops' accumulators (RMS sums, worst-overshoot, settle timers). Called by the
+// /resetAccuracyScores button handler and automatically after each config-snapshot upload.
+void resetAccuracyScores() {
+  accCurrent = {};
+  accVoltage = {};
+  accThermal = {};
 }
 
 // ===== THERMAL STEP TEST TUNING — save / load / commit / live score / wave tick =====
@@ -848,6 +817,8 @@ void commitThermalTuningRecord() {
   rec.avgAmbientF = (thermalTuningScore.avgSampleCount > 0) ? (thermalTuningScore.ambientSum / thermalTuningScore.avgSampleCount) : 0.0f;
   rec.riseRate = ThermalPenaltyRiseRate;
   rec.fallRate = ThermalPenaltyFallRate;
+  rec.battV = BatteryV;
+  rec.chargeStage = getChargeStageDisplayCode();
 
   thermalTuningLog[thermalTuningLogHead] = rec;
   thermalTuningLogHead = (thermalTuningLogHead + 1) % 50;
@@ -918,6 +889,8 @@ void commitSystemIDRecord(bool aborted) {
   // Conditions snapshot at commit (no per-test accumulator exists for SystemID)
   rec.avgRPM       = (float)RPM;
   rec.avgAltTempF  = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
+  rec.battV        = BatteryV;
+  rec.chargeStage  = getChargeStageDisplayCode();
 
   if (aborted) {
     rec.score = -1.0f;
@@ -956,31 +929,199 @@ void commitSystemIDRecord(bool aborted) {
                        rec.riseAvg_ms, rec.fallAvg_ms, rec.setupStepAmplitude);
 }
 
-static float computeThermalLiveScore(int w) {
-  float e = 0.0f, t = 0.0f;
-  if (!thermalLiveScoreBuckets[w]) return 0.0f;
-  for (int i = 0; i < LIVE_BUCKET_N; i++) {
-    e += thermalLiveScoreBuckets[w][i].errorAccum;
-    t += thermalLiveScoreBuckets[w][i].activeTimeSec;
-  }
-  return (t > 0.1f) ? (e / t) : 0.0f;
+void saveSysidSweepLog() {
+  if (!sysidSweepLog) return;
+  File f = LittleFS.open("/sysidsweeplog.bin", "w");
+  if (!f) return;
+  f.write((uint8_t *)&sysidSweepLogCount,   sizeof(sysidSweepLogCount));
+  f.write((uint8_t *)&sysidSweepLogHead,    sizeof(sysidSweepLogHead));
+  f.write((uint8_t *)&sysidSweepRunCounter, sizeof(sysidSweepRunCounter));
+  f.write((uint8_t *)sysidSweepLog,         50 * sizeof(SysIDSweepRecord));
+  f.close();
 }
 
-static void accumulateThermalLiveScore(float err, float dtSec, uint32_t nowMs) {
-  // Asymmetric ISE: K_high × e² when above setpoint, K_low × e² when below
-  float contribution = (err > 0.0f ? thermalKOvershoot : thermalKUndershoot) * err * err * dtSec;
-  for (int w = 0; w < 4; w++) {
-    if (!thermalLiveScoreBuckets[w]) continue;
-    if (thermalLiveBucketStartMs[w] == 0) thermalLiveBucketStartMs[w] = nowMs;
-    if ((nowMs - thermalLiveBucketStartMs[w]) >= THERMAL_LIVE_BUCKET_MS[w]) {
-      thermalLiveScoreHead[w] = (thermalLiveScoreHead[w] + 1) % LIVE_BUCKET_N;
-      thermalLiveBucketStartMs[w] = nowMs;
-      thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]] = { 0.0f, 0.0f };
-    }
-    thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]].errorAccum += contribution;
-    thermalLiveScoreBuckets[w][thermalLiveScoreHead[w]].activeTimeSec += dtSec;
-    thermalLiveScoreVal[w] = computeThermalLiveScore(w);
+void loadSysidSweepLog() {
+  if (!sysidSweepLog) return;
+  File f = LittleFS.open("/sysidsweeplog.bin", "r");
+  if (!f) return;
+  const size_t expected = sizeof(sysidSweepLogCount) + sizeof(sysidSweepLogHead)
+                          + sizeof(sysidSweepRunCounter) + 50 * sizeof(SysIDSweepRecord);
+  if (f.size() != expected) {
+    Serial.printf("SysidSweepLog: size mismatch (%u vs %u expected) — discarding old log\n",
+                  (unsigned)f.size(), (unsigned)expected);
+    f.close();
+    LittleFS.remove("/sysidsweeplog.bin");
+    return;
   }
+  f.read((uint8_t *)&sysidSweepLogCount,   sizeof(sysidSweepLogCount));
+  f.read((uint8_t *)&sysidSweepLogHead,    sizeof(sysidSweepLogHead));
+  f.read((uint8_t *)&sysidSweepRunCounter, sizeof(sysidSweepRunCounter));
+  f.read((uint8_t *)sysidSweepLog,         50 * sizeof(SysIDSweepRecord));
+  f.close();
+  if (sysidSweepLogCount > 50 || sysidSweepLogHead >= 50) {
+    Serial.println("SysidSweepLog: corrupt count/head — discarding old log");
+    sysidSweepLogCount = 0;
+    sysidSweepLogHead = 0;
+    LittleFS.remove("/sysidsweeplog.bin");
+    return;
+  }
+  Serial.printf("SysidSweepLog: loaded %d records, counter=%d\n",
+                sysidSweepLogCount, sysidSweepRunCounter);
+}
+
+void commitSysidSweepRecord() {
+  if (!sysidSweepLog) return;
+  if (systemIDBodeCount < 2) return;
+
+  SysIDSweepRecord rec = {};
+  rec.runNumber      = ++sysidSweepRunCounter;
+  rec.setupAmplitude = SystemIDStepAmplitude;
+  rec.stabilizeAmps  = SystemIDStabilizeAmps;
+  rec.sweepStartHz   = systemIDSineFreqStart;
+  rec.sweepEndHz     = systemIDSineFreqEnd;
+  rec.cycles         = systemIDSineCycles;
+  rec.nPoints        = systemIDBodeCount;
+  rec.avgRPM         = (float)RPM;
+  rec.avgAltTempF    = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
+  rec.battV          = BatteryV;
+  rec.chargeStage    = getChargeStageDisplayCode();
+
+  for (int i = 0; i < systemIDBodeCount && i < SYSID_SINE_NPOINTS; i++)
+    rec.curve[i] = systemIDBode[i];
+
+  float dcGain = systemIDBode[0].gainApPct;
+  rec.dcGainApPct = dcGain;
+  rec.rolloffHz = -1.0f;
+  if (dcGain > 0.0f) {
+    float thr = 0.707f * dcGain;
+    rec.rolloffHz = systemIDBode[systemIDBodeCount - 1].freqHz;  // no roll-off in range
+    for (int i = 1; i < systemIDBodeCount; i++) {
+      if (systemIDBode[i].gainApPct < thr) {
+        float f0 = systemIDBode[i - 1].freqHz, g0 = systemIDBode[i - 1].gainApPct;
+        float f1 = systemIDBode[i].freqHz,     g1 = systemIDBode[i].gainApPct;
+        // Log-frequency interpolation of the crossing (sweep points are log-spaced) — matches the
+        // dashboard FOPDT fit so the live readout and this logged value agree.
+        float t = (g0 - thr) / (g0 - g1);
+        rec.rolloffHz = (g0 != g1) ? expf(logf(f0) + (logf(f1) - logf(f0)) * t) : f0;
+        break;
+      }
+    }
+  }
+  float wp = 0.0f, wpf = 0.0f;
+  for (int i = 0; i < systemIDBodeCount; i++) {
+    float ap = fabsf(systemIDBode[i].phaseDeg);
+    if (ap > wp) { wp = ap; wpf = systemIDBode[i].freqHz; }
+  }
+  rec.worstPhaseDeg = wp;
+  rec.worstPhaseFreqHz = wpf;
+
+  sysidSweepLog[sysidSweepLogHead] = rec;
+  sysidSweepLogHead = (sysidSweepLogHead + 1) % 50;
+  if (sysidSweepLogCount < 50) sysidSweepLogCount++;
+  pendingSaveSysidSweepLog = true;  // deferred to Core 1
+
+  queueConsoleMessageF("SysID sweep: run#%d rolloff=%.1fHz dcGain=%.3f worstLag=%.0fdeg",
+                       rec.runNumber, rec.rolloffHz, rec.dcGainApPct, rec.worstPhaseDeg);
+}
+
+void saveTuningSweepLog() {
+  if (!tuningSweepLog) return;
+  File f = LittleFS.open("/tuningsweeplog.bin", "w");
+  if (!f) return;
+  f.write((uint8_t *)&tuningSweepLogCount,   sizeof(tuningSweepLogCount));
+  f.write((uint8_t *)&tuningSweepLogHead,    sizeof(tuningSweepLogHead));
+  f.write((uint8_t *)&tuningSweepRunCounter, sizeof(tuningSweepRunCounter));
+  f.write((uint8_t *)tuningSweepLog,         50 * sizeof(TuningSweepRecord));
+  f.close();
+}
+
+void loadTuningSweepLog() {
+  if (!tuningSweepLog) return;
+  File f = LittleFS.open("/tuningsweeplog.bin", "r");
+  if (!f) return;
+  const size_t expected = sizeof(tuningSweepLogCount) + sizeof(tuningSweepLogHead)
+                          + sizeof(tuningSweepRunCounter) + 50 * sizeof(TuningSweepRecord);
+  if (f.size() != expected) {
+    Serial.printf("TuningSweepLog: size mismatch (%u vs %u expected) — discarding old log\n",
+                  (unsigned)f.size(), (unsigned)expected);
+    f.close();
+    LittleFS.remove("/tuningsweeplog.bin");
+    return;
+  }
+  f.read((uint8_t *)&tuningSweepLogCount,   sizeof(tuningSweepLogCount));
+  f.read((uint8_t *)&tuningSweepLogHead,    sizeof(tuningSweepLogHead));
+  f.read((uint8_t *)&tuningSweepRunCounter, sizeof(tuningSweepRunCounter));
+  f.read((uint8_t *)tuningSweepLog,         50 * sizeof(TuningSweepRecord));
+  f.close();
+  if (tuningSweepLogCount > 50 || tuningSweepLogHead >= 50) {
+    Serial.println("TuningSweepLog: corrupt count/head — discarding old log");
+    tuningSweepLogCount = 0;
+    tuningSweepLogHead = 0;
+    LittleFS.remove("/tuningsweeplog.bin");
+    return;
+  }
+  Serial.printf("TuningSweepLog: loaded %d records, counter=%d\n",
+                tuningSweepLogCount, tuningSweepRunCounter);
+}
+
+void commitTuningSweepRecord() {
+  if (!tuningSweepLog) return;
+  if (tuningBodeCount < 2) return;
+
+  TuningSweepRecord rec = {};
+  rec.runNumber    = ++tuningSweepRunCounter;
+  rec.kp = PidKp; rec.ki = PidKi; rec.kd = PidKd;
+  rec.sweepStartHz = tuningSweepStart;
+  rec.sweepEndHz   = tuningSweepEnd;
+  rec.cycles       = tuningSweepCycles;
+  rec.nPoints      = tuningBodeCount;
+  rec.avgRPM       = (float)RPM;
+  rec.avgAltTempF  = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
+  // Run-condition snapshot — waveform params + how trustworthy the sweep was.
+  rec.sineAmpA       = tuningSweepAmpA;
+  rec.baseA          = tuningSweepBaseA;
+  rec.battV          = tuningSweepBattV;
+  rec.rpmMin         = tuningSweepRpmMin;
+  rec.rpmMax         = tuningSweepRpmMax;
+  rec.worstCoherence = tuningSweepWorstCoh;
+  rec.dutyRailed     = tuningSweepDutyRailed ? 1 : 0;
+  rec.chargeStage    = getChargeStageDisplayCode();
+
+  for (int i = 0; i < tuningBodeCount && i < TUNING_SWEEP_NPOINTS; i++)
+    rec.curve[i] = tuningBode[i];
+
+  // -3 dB bandwidth from the low end.
+  rec.bandwidthHz = -1.0f;
+  if (tuningBode[0].gain >= 0.707f) {
+    rec.bandwidthHz = tuningBode[tuningBodeCount - 1].freqHz;  // tracks full range
+    for (int i = 1; i < tuningBodeCount; i++) {
+      if (tuningBode[i].gain < 0.707f) {
+        float f0 = tuningBode[i - 1].freqHz, g0 = tuningBode[i - 1].gain;
+        float f1 = tuningBode[i].freqHz,     g1 = tuningBode[i].gain;
+        // Log-frequency interpolation of the crossing (sweep points are log-spaced) — matches the
+        // dashboard FOPDT fit so the live readout and this logged value agree.
+        float t = (g0 - 0.707f) / (g0 - g1);
+        rec.bandwidthHz = (g0 != g1) ? expf(logf(f0) + (logf(f1) - logf(f0)) * t) : f0;
+        break;
+      }
+    }
+  }
+  float pk = 0.0f, pkf = 0.0f, wp = 0.0f, wpf = 0.0f;
+  for (int i = 0; i < tuningBodeCount; i++) {
+    if (tuningBode[i].gain > pk) { pk = tuningBode[i].gain; pkf = tuningBode[i].freqHz; }
+    float ap = fabsf(tuningBode[i].phaseDeg);
+    if (ap > wp) { wp = ap; wpf = tuningBode[i].freqHz; }
+  }
+  rec.peakGain = pk; rec.peakGainFreqHz = pkf;
+  rec.worstPhaseDeg = wp; rec.worstPhaseFreqHz = wpf;
+
+  tuningSweepLog[tuningSweepLogHead] = rec;
+  tuningSweepLogHead = (tuningSweepLogHead + 1) % 50;
+  if (tuningSweepLogCount < 50) tuningSweepLogCount++;
+  pendingSaveTuningSweepLog = true;  // deferred to Core 1
+
+  queueConsoleMessageF("Tuning sweep: run#%d BW=%.1fHz peak=%.2f worstLag=%.0fdeg",
+                       rec.runNumber, rec.bandwidthHz, rec.peakGain, rec.worstPhaseDeg);
 }
 
 // Called from tempPID_tick() on every tick (16 Hz).
@@ -1105,28 +1246,30 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
     }
   }
 
-  // ===== Always-on thermal live score =====
-  // Fair gate: only score when thermal is the binding constraint with no other limiter active.
-  //   voltage-binding stage  — absorption/float/TargetVoltage: there the CV loop pulls current
-  //                           to hold voltage, so thermal error no longer reflects thermal
-  //                           control quality. 3-min blanking after it clears (sustained bias).
-  //                           BULK is deliberately NOT blanked: bulk is current-limited at the
-  //                           RPM/thermal ceiling, so thermal IS the binding constraint and we
-  //                           DO want to score it. (voltageControlActive alone is the wrong
-  //                           trigger — it is just !inIdleStage, so it is true in bulk too and
-  //                           was wrongly blanking every bulk tick → thermal score stuck at 0.)
+  // ===== Thermal Control Accuracy score (accumulate-since-reset) =====
+  // Authority gate: only score when the thermal loop is the binding constraint with no other
+  // limiter in charge. The actuator here is the penalty-amps derate; a SUSTAINED penalty IS the
+  // definition of "thermal is controlling" — the REVERSE PID floors penalty at 0 when cool, so a
+  // penalty held > 2A for 120 s (ACC_SETTLE_THERMAL_MS) can only happen while the loop is actively
+  // holding temperature at the limit. That sustained-penalty requirement is why g_I_cap > 10A is no
+  // longer needed: penalty can't stay up without sustained current, which needs adequate RPM.
+  //   voltage-binding stage  — absorption/float/TargetVoltage: there the CV loop pulls current to
+  //                           hold voltage, so thermal error no longer reflects thermal control
+  //                           quality. 3-min blanking after it clears (sustained bias). BULK is NOT
+  //                           blanked: bulk is current-limited at the RPM/thermal ceiling, so
+  //                           thermal IS the binding constraint and we DO want to score it.
   //   g_fastOvClampActive   — OV supervisor cutting current for voltage, not thermal
   //   MaintainMode          — output forced to zero; thermal loop does nothing
-  //   thermalPenaltyAmps    — must be > 2A; if near zero, RPM table or cool conditions are
-  //                           the real ceiling, not thermal management
-  //   g_I_cap               — RPM table ceiling must be > 10A; below that we're at near-idle
-  //                           RPM and thermal management is irrelevant
+  //   thermalPenaltyAmps    — must be > 2A (the binding-constraint signal; see above)
   bool voltageBindingStage = voltageControlActive && (getChargeStageDisplayCode() != CHARGE_STAGE_BULK);
   if (voltageBindingStage) thermalScoreLastExternalMs = nowMs;
-  bool liveScoreActive = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered) && !ThermalTuningMode && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f && g_I_cap > 10.0f && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
-  if (liveScoreActive) {
-    float liveErr = tempFiltered - TemperatureLimitF;
-    accumulateThermalLiveScore(liveErr, dtSec, nowMs);
+  bool thermalBinding = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered) && !ThermalTuningMode
+                        && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f
+                        && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
+  if (accBindingReady(accThermal.bindingStartMs, thermalBinding, nowMs, ACC_SETTLE_THERMAL_MS)) {
+    float err  = tempFiltered - TemperatureLimitF;              // °F; positive = over the limit
+    float over = err > 0.0f ? err : 0.0f;                       // over-temp side (alternator-damaging)
+    accScoreAdd(accThermal.errAccum, accThermal.timeAccum, accThermal.worstOver, err, over, dtSec);
   }
 }
 
@@ -1134,9 +1277,6 @@ void thermalScore_init() {
   Serial.printf("ThermalTuning: %d record slots × %u bytes = %u bytes in PSRAM\n",
                 50, (unsigned)sizeof(ThermalTuningRecord),
                 (unsigned)(50 * sizeof(ThermalTuningRecord)));
-  Serial.printf("ThermalTuning: live buckets = 4 windows × %d × %u bytes = %u bytes in PSRAM\n",
-                (int)LIVE_BUCKET_N, (unsigned)sizeof(ScoreBucket),
-                (unsigned)(4 * LIVE_BUCKET_N * sizeof(ScoreBucket)));
 }
 
 void AdjustFieldLearnMode() {
@@ -1159,7 +1299,7 @@ void AdjustFieldLearnMode() {
   if (actualDtMs == 0) actualDtMs = 1;  // floor prevents 0-div in slew calcs when tick runs twice in same ms
   float actualDtSec = (float)actualDtMs / 1000.0f;
 
-  static float uTargetRaw_cached = 50.0f;   // always MaxTableValue (assigned from uTargetRaw); used only for supervisorLimiting gate
+  static float uTargetRaw_cached = 50.0f;   // always MaxTableValue (assigned from uTargetRaw); seeds fastOvBaseCap (next line) and the supervisorLimiting gate
   float uTargetRaw = (float)MaxTableValue;  // always MaxTableValue; kept for uTargetRaw_cached lineage only
   float fastOvBaseCap = clamp_f(uTargetRaw_cached, 0.0f, (float)MaxTableValue);
   float fastOvCurrentCap = fastOvBaseCap;
@@ -1630,6 +1770,10 @@ void AdjustFieldLearnMode() {
 
   static bool prevSysIDRunning = false;
   bool sysIDRunning = systemID_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs);
+  // Commissioning field-% ramp shares the identical duty-override + bumpless-resume path
+  // (mutually exclusive with SystemID via the start-handler mutex). OR it in so the snapshot,
+  // override, and restore logic below cover it too.
+  sysIDRunning = fieldCurve_tick(sysIDDutyOut, MeasuredAmps, tick.nowMs) || sysIDRunning;
 
   bool sysIDJustStarted = !prevSysIDRunning && sysIDRunning;
   bool sysIDJustCompleted = prevSysIDRunning && !sysIDRunning;
@@ -1662,6 +1806,11 @@ void AdjustFieldLearnMode() {
     currentPID.SetMode(MANUAL);
     currentPID.ResetIntegratorTo((double)sysIDDutyOut);
     pidOutput = (double)sysIDDutyOut;
+    vlHasPrev = false;  // CV voltage loop is bypassed during the sweep (whole control path is under
+                        // !sysIDRunning), so voltLoop_record never fires. Re-baseline the CV-interval
+                        // tracker so the dead time across the test isn't logged as one giant gap (was
+                        // saturating vl_worst_at to 65535). Mirrors the CV-inactive re-baseline
+                        // (vlHasPrev = false) in the voltageControlActive else-branch further below.
   }
 
   // ── Restore on test completion ───────────────────────────────────────────────
@@ -1807,8 +1956,6 @@ void AdjustFieldLearnMode() {
             }
           }
         }
-        liveScore_thisCmd = setpointCommand;
-
         voltageControlActive = false;
 
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
@@ -2059,6 +2206,22 @@ void AdjustFieldLearnMode() {
             mExcessEmaBulk = 0.0f;
           }
           g_iExcessBulkActive = iExBulkActive;  // export for PID/CV log flag + dashboard
+        }
+
+        // ── iExcess live-sparkline aggregation (every control tick) ──────────────────
+        // Accumulate the per-CSV1-frame worst case: peak averaged excess and min threshold E
+        // over the ticks where a detector gate is open (g_iExcessThreshold > 0 = armed). The
+        // CSV1 sender ships and resets these. The "fired" colour comes from protEventMask
+        // (bit PROT_EVT_IX, latched above on a real cap), not from these aggregates.
+        if (g_iExcessThreshold > 0.0f) {
+          if (!g_iExcessArmedWin) {
+            g_mExcessEmaPeak = g_mExcessEma;
+            g_iExcessThreshWinMin = g_iExcessThreshold;
+            g_iExcessArmedWin = true;
+          } else {
+            if (g_mExcessEma > g_mExcessEmaPeak) g_mExcessEmaPeak = g_mExcessEma;
+            if (g_iExcessThreshold < g_iExcessThreshWinMin) g_iExcessThreshWinMin = g_iExcessThreshold;
+          }
         }
 
         // ── Load dump detection — dBcur/dt positive spike in CV mode ─────────────────
@@ -2375,7 +2538,7 @@ void AdjustFieldLearnMode() {
           // each overshoot. Recovers gradually after fastOV clears, giving the battery
           // time to settle before full current ramps back up.
           // cv_I_aw_cap is declared above the iExcess block so both blocks share it.
-          // AwBleedRate is a user-adjustable global (LittleFS-persisted). AwRecoverRate is hardcoded (0.1f).
+          // AwBleedRate is a user-adjustable global (NVS-persisted, settings namespace). AwRecoverRate is hardcoded (0.1f).
           // Scale bleed/recover rates by MaxTableValue so a fixed fraction-per-second
           // applies the same proportional aggression regardless of alternator size.
           // AwBleedRate=2.0 at 50A table → 100 A/s; at 150A table → 300 A/s.
@@ -2592,7 +2755,6 @@ void AdjustFieldLearnMode() {
         }
 
         setpointCommand = voltageControlActive ? Icv : (float)uTargetAmps;
-        liveScore_thisCmd = setpointCommand;
 
         float effectiveFallRate = fastOvClampActive ? 1.0e9f : SetpointFallRate;
         // Post-protection fast-rise: while the window is open AND battV still has
@@ -2677,44 +2839,35 @@ void AdjustFieldLearnMode() {
     innerTermI = (float)currentPID.GetIterm();
     innerTermD = (float)currentPID.GetDterm();
 
-    // Live score accumulation — gate on slewed setpoint rate of change.
-    // Using the slewed signal is fair regardless of SetpointRiseRate: slow slew = slow
-    // rate = window opens slowly but isn't falsely penalized for the slew itself.
-    // Window extends 3s beyond last tick where slewed rate >= 5 A/s.
+    // Inner current loop Control Accuracy score — authority gate: the field actuator must be
+    // actively modulating (duty off both rails — not pinned at 0% nor 100%), no protection owning
+    // the output, past the startup ramp, and genuinely commanding current. Held 0.5 s before
+    // scoring (ACC_SETTLE_CURRENT_MS). A duty pinned at 100% means we can't make more current
+    // (low RPM / out of headroom), so that gap is not a tuning fault and isn't counted.
     {
-      static float liveScore_prevSlewed = 0.0f;
-      static bool liveScore_slewInit = false;
-      float slewedRate = 0.0f;
-      if (liveScore_slewInit) {
-        slewedRate = fabsf(setpointLimited - liveScore_prevSlewed) / actualDtSec;
-      }
-      liveScore_prevSlewed = setpointLimited;
-      liveScore_slewInit = true;
-      if (slewedRate >= 5.0f) {
-        liveScore_lastStepMs = tick.nowMs;
-        liveScore_inWindow = true;
-      }
-      if (liveScore_inWindow && (tick.nowMs - liveScore_lastStepMs > 3000)) {
-        liveScore_inWindow = false;
-      }
-      if (liveScore_inWindow) {
-        accumulateLiveScore(pidError, actualDtSec, tick.nowMs);
+      bool binding = !g_fastOvClampActive && !inStartupRamp
+                     && dutyCycle > 1.0f && dutyCycle < 99.0f
+                     && setpointLimited > 2.0f;
+      if (accBindingReady(accCurrent.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_CURRENT_MS)) {
+        float err  = setpointLimited - MeasuredAmps;   // A; positive = under target
+        float over = MeasuredAmps - setpointLimited;   // over-current side (damaging)
+        accScoreAdd(accCurrent.errAccum, accCurrent.timeAccum, accCurrent.worstOver, err, over > 0.0f ? over : 0.0f, actualDtSec);
       }
     }
 
-    // CV live score — gate on battery current rate-of-change; 12s scoring window
+    // CV voltage loop Control Accuracy score — authority gate: voltage is genuinely the binding
+    // constraint, i.e. the CV PID output Icv is off both rails — above zero and strictly below the
+    // current ceiling uTargetAmps (if Icv is pinned at the ceiling we're current-limited, not
+    // voltage-regulating). No protection clamp. Held 2 s before scoring (ACC_SETTLE_VOLTAGE_MS).
     if (voltageControlActive) {
-      if (fabsf(g_dBcur_dt) >= CV_LIVE_GATE_APS) {
-        cvLiveScore_lastDtMs = tick.nowMs;
-        cvLiveScore_inWindow = true;
+      bool binding = !g_fastOvClampActive && Icv > 0.5f && Icv < (uTargetAmps - 0.5f);
+      if (accBindingReady(accVoltage.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_VOLTAGE_MS)) {
+        float vErr  = IBV - ChargingVoltageTarget;     // V (raw INA228); positive = overvoltage
+        float vOver = vErr > 0.0f ? vErr : 0.0f;       // over-voltage side (battery-damaging)
+        accScoreAdd(accVoltage.errAccum, accVoltage.timeAccum, accVoltage.worstOver, vErr, vOver, actualDtSec);
       }
-      if (cvLiveScore_inWindow && (tick.nowMs - cvLiveScore_lastDtMs > 12000)) {
-        cvLiveScore_inWindow = false;
-      }
-      if (cvLiveScore_inWindow) {
-        float vErr = IBV - ChargingVoltageTarget;  // raw INA228 — positive = overvoltage
-        accumulateCVLiveScore(vErr, actualDtSec, tick.nowMs);
-      }
+    } else {
+      accVoltage.bindingStartMs = 0;  // left CV → restart the settle timer next time it engages
     }
   } else {
     innerTermP = innerTermI = innerTermD = 0.0f;
@@ -4032,8 +4185,10 @@ bool isVoltageSensorPlausible() {  // may want to update this later to go off th
 // Call from setup() after NVS and sensors are initialized.
 // ===========================================================================
 void tempPID_init() {
-  // Output limits: 0 to MaxTableValue amps (penalty range)
-  tempPID.SetOutputLimits(-(double)MaxTableValue, (double)MaxTableValue);  //  set a reasonable static default for startup
+  // Output limits: 0 to MaxTableValue amps (derate-only penalty range).
+  // tempPID_tick() re-asserts (0, MaxTableValue) on every tick before any Compute(),
+  // so this is only the startup default. Floor is 0 — the penalty never goes negative.
+  tempPID.SetOutputLimits(0.0, (double)MaxTableValue);
   tempPID.SetSampleTime((int)TempPIDIntervalMs);
 
   // Start with zero penalty — PID will accumulate penalty only if temperature demands it
@@ -4080,7 +4235,12 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   const float penaltyMax = (float)MaxTableValue;
 
   const bool inPureBulk = (inBulkStage && !inAbsorptionStage);
-  const float penaltyMin = 0.0f;  //Cold boost is gone as a concept now.
+  // Thermal penalty is derate-only: PID output range is [0, MaxTableValue].
+  // It can only SUBTRACT from the RPM-table ceiling (I_cmd = I_cap - thermalPenaltyAmps,
+  // see command chain in AdjustFieldLearnMode), never add to it. So a cold alternator
+  // runs at penalty 0 = the full RPM-table current with no derate; the loop cannot push
+  // current above the table cap. There is no separate battery-temperature voltage comp.
+  const float penaltyMin = 0.0f;
 
   // ---------------------------------------------------------------------------
   //  Temperature sanity guard — only stops PID on invalid value (NaN / out of range).
@@ -4281,10 +4441,13 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //      (no droop) and tracks heat-soak as the estimate rises, but cannot overbuild past
   //      equilibrium during a hot transient dwell. Disabled (ceiling = penaltyMax) until
   //      the first settled sample exists, so the cold approach is unaffected.
+  //   5b. Ceiling-leak (not a freeze): creeps the estimate UP while stuck hot+flat above
+  //      the band, fixing case-5 self-locking droop. See dev summary.
   const float THERMAL_I_FLAT_BAND = 0.04f;  // °F/s — heat-soak drift (track) vs loop transient (freeze)
   const float THERMAL_I_HOLD_BAND = 1.5f;   // °F — "settled at setpoint" window for sampling the equilibrium estimate (case 5)
   const float THERMAL_I_HOLD_MARGIN = 10.0f; // A — how far above the learned holding level the integrator may still wind (heat-soak headroom; caps transient overbuild)
   const float THERMAL_HOLD_EMA_ALPHA = 0.05f; // EMA weight per settled tick (~100s time constant at the 5s PID cadence)
+  const float THERMAL_HOLD_LEAK_RATE = 0.3f;  // A per 5s compute — ceiling-leak (case 5b) upward creep rate
   const bool aboveSetpoint = (tempPIDInput_d > (double)effectiveSetpoint);
   const bool satFreeze     = aboveSetpoint && thermalIntegratorReleased
                              && (prevThermalPenalty >= capCurrent - 0.5f);
@@ -4309,6 +4472,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   const float holdCeiling = thermalHoldValid ? (thermalHoldEstimate + THERMAL_I_HOLD_MARGIN) : penaltyMax;
   const bool equilibriumFreeze = aboveSetpoint && thermalIntegratorReleased
                              && (iTermNow >= holdCeiling);
+  // Ceiling-leak (case 5b) trigger: stuck hot+flat above the band, integral pinned at ceiling.
+  const bool stuckHotAndFlat = thermalHoldValid && thermalIntegratorReleased
+                           && ((tempNowPid - effectiveSetpoint) > THERMAL_I_HOLD_BAND)
+                           && (fabsf(thermalSlopeFPerSec) <= THERMAL_I_FLAT_BAND)
+                           && (iTermNow >= holdCeiling);
   bool freezeIntegrator = aboveSetpoint
                           && (!thermalIntegratorReleased || satFreeze || descentFreeze || risingTransientFreeze || equilibriumFreeze);
   {
@@ -4340,6 +4508,22 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);
 
   bool pidComputed = tempPID.Compute();
+
+  // Leak on the compute edge only, so the rate is per-5s not per-loop-pass.
+  if (pidComputed && stuckHotAndFlat) {
+    thermalHoldEstimate += THERMAL_HOLD_LEAK_RATE;
+  }
+  {
+    static bool leakLogged = false;  // one-shot per droop episode
+    if (stuckHotAndFlat) {
+      if (!leakLogged) {
+        leakLogged = true;
+        queueConsoleMessageF("TempPID: holding-ceiling leak engaged — droop above band, raising est toward %.1fA", thermalHoldEstimate + THERMAL_I_HOLD_MARGIN);
+      }
+    } else {
+      leakLogged = false;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   //  Post-compute: slew limiter, final clamp.
@@ -4373,11 +4557,16 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // call so they remain inside the pidComputed block above.
   outerTermI = (float)tempPID.GetIterm();
 
-  // CV integrator bleed: in CV stages, if iterm < 0 (stale cold-boost bias
-  // from bulk), TrackAppliedOutput(0) bleeds it toward zero via back-calculation
-  // (slow by design). Asymmetric — positive thermal derate is never touched.
-  // Runs every tempPID_tick (~16 Hz), not just on Compute() ticks; dt-scaled.
-  // outerAntiWindupFired here means "CV bleed was active this tick."
+  // CV integrator bleed — now INERT, retained as a guard. Back when the thermal
+  // penalty was allowed to go negative (the removed boost-when-cold feature), the
+  // integrator could carry a negative bias out of bulk, and on CV entry this bled
+  // it toward zero via back-calculation. The penalty is now derate-only: penaltyMin
+  // is 0, and the PID library clamps its integrator (outputSum) to [0, penaltyMax]
+  // on every Compute() and setter, so GetIterm() can never return < 0 and the
+  // `iterm < 0.0` test below never fires. Asymmetric by design — positive thermal
+  // derate was never touched. outerAntiWindupFired = "CV bleed fired this tick"
+  // (which, with a 0 floor, no longer happens). Safe to delete with the block below
+  // if the loop is to stay derate-only.
   outerAntiWindupFired = false;
 
   if (!inPureBulk) {
@@ -4531,6 +4720,8 @@ void pidLog_tick(uint32_t nowMs) {
   e.voltLoopIntervalMs = pidLog_voltageLoopRanThisTick ? (int16_t)g_voltLoopActualIntervalMs : 0;
   e.inaIntervalMs = (int16_t)ina_last_ms;
   e.pad2 = 0;
+  e.mExcessEma = g_mExcessEma;             // iExcess detector traces — averaged excess vs its
+  e.iExcessThreshold = g_iExcessThreshold; // computed fire threshold E (both A), for offline tuning
 
   pidLogHead = (pidLogHead + 1) % PID_LOG_SIZE;
   if (pidLogCount < PID_LOG_SIZE) pidLogCount++;

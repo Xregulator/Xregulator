@@ -281,6 +281,8 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
+#define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
+#define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
 #define NK_TailCurrent_A "TailCurrent_A"
@@ -444,6 +446,53 @@ bool settingRemove(const char *key) {
   if (e == ESP_OK) e = nvs_commit(h);
   nvs_close(h);
   return e == ESP_OK || e == ESP_ERR_NVS_NOT_FOUND;  // already-absent counts as removed
+}
+
+// ── Auto-commissioning snapshot / restore ────────────────────────────────────
+// Phase 0 captures every setting the commissioning flow may overwrite as one
+// positional CSV in a single NVS key, so an explicit abort reverts to the
+// pre-commissioning tune. The field order is fixed and MUST match between save and
+// restore. (Positional CSV, not JSON — dependency-free, matches the codebase ethos.)
+void commissionSnapshot() {
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f",
+           PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
+           IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
+           SystemIDStabilizeAmps, SystemIDStepAmplitude);
+  settingWrite(NK_commissionSnap, buf);
+}
+
+// Restore from the Phase-0 snapshot (abort path). Returns false if none exists.
+bool commissionRestore() {
+  if (!settingExists(NK_commissionSnap)) return false;
+  String s = settingRead(NK_commissionSnap);
+  float v[12];
+  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+                 &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11]);
+  if (n != 12) return false;
+  PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
+  PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
+  InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
+  OutputPIDFilterTC = v[3];      settingWrite(NK_OutputPIDFilterTC, String(OutputPIDFilterTC, 2).c_str());
+  VoltageFilterTC = v[4];        settingWrite(NK_VoltageFilterTC, String(VoltageFilterTC, 2).c_str());
+  IExcessTau = v[5];             settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());
+  IExcessFloorA = v[6];          settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
+  IExcessCeilA = v[7];           settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
+  IExcessFrac = v[8];            settingWrite(NK_IExcessFrac, String(IExcessFrac, 3).c_str());
+  IExcessFracBulk = v[9];        settingWrite(NK_IExcessFracBulk, String(IExcessFracBulk, 3).c_str());
+  SystemIDStabilizeAmps = v[10]; settingWrite(NK_SystemIDStabilizeAmps, String(SystemIDStabilizeAmps, 2).c_str());
+  SystemIDStepAmplitude = v[11]; settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude, 3).c_str());
+  if (pidInitialized) currentPID.SetTunings(PidKp, PidKi, PidKd);  // re-apply gains live
+  settingRemove(NK_commissionSnap);
+  return true;
+}
+
+// Persist the commissioning state byte (0=not / 1=in-progress / 2=commissioned).
+void commissionSetState(uint8_t st) {
+  commissionState = st;
+  settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
 // One-time sweep at boot: move any pre-NVS settings file into NVS, then delete
@@ -2920,6 +2969,21 @@ bool buildConfigPayload() {
     ",\"fa_pkpk_worst_session\":%.2f,\"fa_peak_worst_a_session\":%.2f,\"fa_peak_worst_hz_session\":%.1f",
     faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
 
+  // Control Accuracy Scores since the last reset (≈one day — these auto-reset right after this
+  // upload succeeds, so each daily snapshot is one independent measurement of loop performance).
+  // RMS tracking error + worst damaging overshoot per loop, in physical units.
+  // CLOUD CONTRACT: like every state key, these are spread into the device_state_daily INSERT —
+  // the 6 columns (acc_cur_rms_a, acc_cur_peak_a, acc_volt_rms_mv, acc_volt_peak_mv,
+  // acc_therm_rms_f, acc_therm_peak_f) MUST exist in device_state_daily before this firmware ships,
+  // or the whole daily snapshot 500s.
+  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
+    ",\"acc_cur_rms_a\":%.2f,\"acc_cur_peak_a\":%.2f,"
+    "\"acc_volt_rms_mv\":%.0f,\"acc_volt_peak_mv\":%.0f,"
+    "\"acc_therm_rms_f\":%.2f,\"acc_therm_peak_f\":%.2f",
+    accScoreRms(accCurrent.errAccum, accCurrent.timeAccum), accCurrent.worstOver,
+    accScoreRms(accVoltage.errAccum, accVoltage.timeAccum) * 1000.0f, accVoltage.worstOver * 1000.0f,
+    accScoreRms(accThermal.errAccum, accThermal.timeAccum), accThermal.worstOver);
+
   // Close state, close root object
   offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "}}");
 
@@ -3056,6 +3120,9 @@ done_headers_cfg:
   bool success = (httpCode == 200);
   if (success) {
     queueConsoleMessage("Config snapshot uploaded");
+    // Tumbling window: start the next Control Accuracy measurement fresh so each daily snapshot is
+    // one independent sample. Reset only AFTER a confirmed upload — never lose unreported data.
+    resetAccuracyScores();
   } else if (httpCode > 0) {
     snprintf(messageBuffer, MESSAGE_BUFFER_SIZE, "Config upload failed HTTP %d", httpCode);
     queueConsoleMessage(messageBuffer);
@@ -3559,13 +3626,16 @@ static unsigned long faWinStartMs = 0;
 
 // ── Reference flipbook (consumer 4) ──
 // ONE axis: 1000-RPM bands. A page is captured when its band has no snapshot, amps are
-// 20–100 A, and the steady-state gate passed. ~5 kSPS (boxcar-4 of the raw ring), 200 ms,
-// ~2 KB/page. Pages FREEZE once captured; only the re-baseline button clears the book.
+// 20–100 A, and the steady-state gate passed. 20 kSPS (raw ring, no decimation), 200 ms,
+// ~8 KB/page. Full rate so the rectifier-ripple shape stays unaliased across the whole RPM
+// band — the 6-pulse ripple is 0.6·PulleyRatio·engineRPM Hz, which exceeds the old 5 kSPS
+// Nyquist (2.5 kHz) above idle; 20 kSPS holds clean to the top of the 5000-RPM bands.
+// Pages FREEZE once captured; only the re-baseline button clears the book.
 // Anomaly-triggered captures (detector fired) are stored alongside for before/after.
 #define FA_FLIP_BANDS 5  // 1000-RPM bands, 0–4999
 #define FA_FLIP_ANOM 4   // anomaly capture slots (round-robin)
 #define FA_FLIP_SLOTS (FA_FLIP_BANDS + FA_FLIP_ANOM)
-#define FA_FLIP_NSAMP 1000  // 200 ms @ 5 kSPS
+#define FA_FLIP_NSAMP 4000  // 200 ms @ 20 kSPS
 #define FA_FLIP_PATH "/faflip.bin"
 #define FA_FLIP_MAGIC 0x46414642u  // 'FAFB'
 #define FA_FLIP_VER 1
@@ -3582,7 +3652,7 @@ struct FaFlipPage {
   uint16_t apv;
   int16_t mv[FA_FLIP_NSAMP];
 };
-static_assert(sizeof(FaFlipPage) == 2020, "FaFlipPage layout is parsed byte-by-byte in script.js — keep in sync");
+static_assert(sizeof(FaFlipPage) == 8020, "FaFlipPage layout is parsed byte-by-byte in script.js — keep in sync");
 static FaFlipPage *faFlip = NULL;  // PSRAM: slots 0..4 = reference bands, 5..8 = anomaly ring
 static bool faFlipDirty = false;
 static uint8_t faAnomNext = 0;
@@ -3809,7 +3879,17 @@ static void faWindowFinalize() {
     // <=0 means the drift gate passed; the 10s peak of this is the dashboard's exact pass/fail signal —
     // no client-side recompute or raw-INA proxy for the mean current.
     rollUpdate(ROLL_AMPSDRIFTEXC, (faWinAmpsEmaMax - faWinAmpsEmaMin) - ampsDriftMax);
-    gated = rpmSteady && ampsSteady && rpmBinLo >= 0 && rpmBinLo < FA_RPM_BINS;
+    bool binValid = (rpmBinLo >= 0 && rpmBinLo < FA_RPM_BINS);
+    if (faCommissionGate) {
+      // Commissioning Phase-2 variant: the operator creeps the throttle up continuously, so the
+      // strict dead-steady gate (edge margin + amps-steady) would qualify nothing. Relax to
+      // "RPM stayed inside one 50-RPM bin during this 0.5 s window" — drift allowed, no edge
+      // margin, no amps-steadiness. The map is a bootstrap (floor + ongoing refinement), so
+      // one window/bin is coverage, not depth. Strict gate stays for normal-operation accumulation.
+      gated = (rpmBinLo == rpmBinHi) && binValid;
+    } else {
+      gated = rpmSteady && ampsSteady && binValid;
+    }
     // Detector arming is RPM-FREE (see faMaybeArmDetector): a clean, current-steady window with
     // real current flowing is enough — no RPM-steadiness or valid-bin requirement. This keeps
     // fault detection working when the tach is dead or erratic, the failure modes that motivated
@@ -4110,22 +4190,18 @@ void faDrain() {
   }
 }
 
-// Capture one flipbook page from the raw ring: most-recent 200 ms, boxcar-4 → 5 kSPS.
-// `used` is written last so a concurrent /faflip.bin read never serves a torn page.
+// Capture one flipbook page from the raw ring: most-recent 200 ms at full 20 kSPS (no
+// decimation). `used` is written last so a concurrent /faflip.bin read never serves a torn page.
 static void faCapturePage(int slot, uint16_t rpm, float amps, uint8_t isAnom, uint8_t patternK, float score) {
   if (!faFlip || !faRawRing || slot < 0 || slot >= FA_FLIP_SLOTS) return;
   FaFlipPage *pg = &faFlip[slot];
   pg->used = 0;
   portENTER_CRITICAL(&faRingMux);
-  int idx = (int)faRingHead - FA_FLIP_NSAMP * 4;
+  int idx = (int)faRingHead - FA_FLIP_NSAMP;
   while (idx < 0) idx += FA_RAW_RING_N;
   for (int i = 0; i < FA_FLIP_NSAMP; i++) {
-    int32_t acc = 0;
-    for (int j = 0; j < 4; j++) {
-      acc += faRawRing[idx];
-      if (++idx >= FA_RAW_RING_N) idx = 0;
-    }
-    pg->mv[i] = (int16_t)(acc / 4);
+    pg->mv[i] = faRawRing[idx];
+    if (++idx >= FA_RAW_RING_N) idx = 0;
   }
   portEXIT_CRITICAL(&faRingMux);
   pg->rpm = rpm;

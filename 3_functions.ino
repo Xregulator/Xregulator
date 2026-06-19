@@ -55,9 +55,11 @@ enum Csv1Index {
   CSV1_Ignition,       // effective ignition state (real GPIO1 wire OR force-on override) — on CSV1 so the banner tracks it at ~10 Hz, not the 5 s CSV2 cadence
   CSV1_mExcessEma,       // iExcess detector: averaged signed current excess over command (A ×10) — tuning trace
   CSV1_iExcessThreshold, // iExcess detector: computed fire threshold E (A ×10) — tuning trace
+  CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
+  CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
   CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
 
-  CSV1_FIELD_COUNT  // = 39
+  CSV1_FIELD_COUNT  // = 41
 };
 
 enum Csv2Index {
@@ -275,10 +277,6 @@ enum Csv2Index {
   CSV2_imu_heading_swing_120s,
   CSV2_dBcur_dt,
   CSV2_loadDumpActive,
-  CSV2_thermalLiveScore0,
-  CSV2_thermalLiveScore1,
-  CSV2_thermalLiveScore2,
-  CSV2_thermalLiveScore3,
   CSV2_thermalTuningTestPhase,
   CSV2_ft_updateAccelMetrics_win,
   CSV2_ft_updateAccelMetrics_ses,
@@ -611,24 +609,17 @@ enum Csv2Index {
   CSV2_BestUpwindVmgAT,     // best upwind VMG, kts ×100
   CSV2_LongestGaleAT,       // longest gale duration, hours ×100
 
-  // Inner-current-loop & CV-voltage-loop live accuracy scores (1m/10m/100m/1000m ISE windows each).
-  // Moved off the /tuninglog endpoint onto CSV2 (2026-06-15) so they update with the normal telemetry
-  // stream — no panel-open dependency. Mirrors the thermalLiveScore0-3 pattern; ×10000 in payload.
-  CSV2_liveScore0,
-  CSV2_liveScore1,
-  CSV2_liveScore2,
-  CSV2_liveScore3,
-  // CV live score split into two intuitive readouts (mV each): RMS error + peak overshoot, 4 windows each
-  CSV2_cvRmsErr0,
-  CSV2_cvRmsErr1,
-  CSV2_cvRmsErr2,
-  CSV2_cvRmsErr3,
-  CSV2_cvPeakOver0,
-  CSV2_cvPeakOver1,
-  CSV2_cvPeakOver2,
-  CSV2_cvPeakOver3,
+  // Control Accuracy Scores (accumulate-since-reset, 2026-06-18) — replaced the old 16 windowed
+  // live-score fields (4×inner ISE, 4×cvRms, 4×cvPeak, 4×thermal) with 6: RMS error + worst
+  // overshoot per loop, physical units. Current in A ×100, voltage in mV (V ×1000), thermal in °F ×100.
+  CSV2_accCurRms,    // inner current loop RMS error (A ×100)
+  CSV2_accCurPeak,   // inner current loop worst over-current (A ×100)
+  CSV2_accVoltRms,   // CV loop RMS error (mV)
+  CSV2_accVoltPeak,  // CV loop worst over-voltage (mV)
+  CSV2_accThermRms,  // thermal loop RMS error (°F ×100)
+  CSV2_accThermPeak, // thermal loop worst over-temp (°F ×100)
 
-  CSV2_FIELD_COUNT  // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553
+  CSV2_FIELD_COUNT  // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
 };
 
 enum Csv4Index {
@@ -966,8 +957,9 @@ enum Csv3Index {
   CSV3_tuningSweepCycles,       // analysed cycles per sweep frequency
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
+  CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
 
-  CSV3_FIELD_COUNT  // = 304 (303 prior + tuningWaveFloor)
+  CSV3_FIELD_COUNT  // = 305 (304 prior + commissionState)
 };
 
 
@@ -1678,12 +1670,6 @@ void setupServer() {
     performDeepFactoryReset();  // Unmounts+reformats LittleFS, erases all NVS, reinits, restarts
   });
 
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    AsyncWebServerResponse *response = request->beginResponse(webFS, "/index.html.gz", "text/html");
-    response->addHeader("Content-Encoding", "gzip");
-    request->send(response);
-  });
-
   server.on("/thermallog.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!thermalLogReady || !thermalLog || thermalLogCount == 0) {
       request->send(200, "text/plain", "No thermal log data yet.");
@@ -1927,7 +1913,9 @@ void setupServer() {
                 "battI,"
                 "ch1IntervalMs,"
                 "voltLoopIntervalMs,"
-                "inaIntervalMs\n");
+                "inaIntervalMs,"
+                "mExcessEma,"
+                "iExcessThreshold\n");
 
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
 
@@ -1962,7 +1950,8 @@ void setupServer() {
                 "%.3f,%.3f,"  // battV_filt, iMeas_filt
                 "%u,%u,"          // flags, ovFlags
                 "%.2f,%.3f,"      // dBcur_dt, battI
-                "%d,%d,%d\n",     // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
+                "%d,%d,%d,"       // ch1IntervalMs, voltLoopIntervalMs, inaIntervalMs
+                "%.3f,%.3f\n",    // mExcessEma, iExcessThreshold (A)
                 (unsigned long)e.ts,
                 (unsigned)e.chargeStageDisplay,
                 (unsigned)e.TargetVoltageMode,
@@ -2001,7 +1990,9 @@ void setupServer() {
                 e.battI,
                 (int)e.ch1IntervalMs,
                 (int)e.voltLoopIntervalMs,
-                (int)e.inaIntervalMs);
+                (int)e.inaIntervalMs,
+                e.mExcessEma,
+                e.iExcessThreshold);
               state.lineLen = min((int)state.lineLen, (int)sizeof(state.line) - 1);
             }
 
@@ -2070,7 +2061,7 @@ void setupServer() {
       return;
     }
     uint32_t magic = 0x46464C50UL;  // 'FFLP'
-    uint16_t rateDiv10 = 500;       // 5 kSPS
+    uint16_t rateDiv10 = FA_SAMPLE_RATE_HZ / 10;  // 20 kSPS (full rate, matches the live scope)
     memcpy(buf + 0, &magic, 4);
     buf[4] = FA_FLIP_BANDS;
     buf[5] = FA_FLIP_ANOM;
@@ -2753,7 +2744,8 @@ void setupServer() {
       // Mutex: refuse if any square-wave tuning test is already on. All four tests must run independently.
       const char *activeTuning = TuningMode ? "Current tuning"
                                             : (CVTuningMode ? "Voltage tuning"
-                                                            : (ThermalTuningMode ? "Thermal tuning" : nullptr));
+                                                            : (ThermalTuningMode ? "Thermal tuning"
+                                                                                 : (fieldCurveActive != 0 ? "Field curve" : nullptr)));
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
       } else if (!sysidModeOK) {
@@ -2776,6 +2768,66 @@ void setupServer() {
       foundParameter = true;
       systemIDAbortRequested = true;
       queueConsoleMessage("SystemID: abort requested via web UI");
+    }
+
+    // ── Auto-commissioning: field-% curve (Phase 1a) ────────────────────────
+    else if (request->hasParam("startFieldCurve")) {
+      foundParameter = true;
+      const char *busy = (systemIDActive != 0) ? "Plant Delay test"
+                         : TuningMode ? "Current tuning"
+                         : CVTuningMode ? "Voltage tuning"
+                         : ThermalTuningMode ? "Thermal tuning"
+                         : (fieldCurveActive != 0) ? "Field curve" : nullptr;
+      if (sysMode != SYS_MODE_AUTO) {
+        queueConsoleMessage("Field curve: start blocked — only allowed in AUTO mode");
+      } else if (busy != nullptr) {
+        queueConsoleMessageF("Field curve: start blocked — %s is active", busy);
+      } else if ((millis() - fieldCurveLastEndMs) > 2000UL) {
+        fieldCurveRequested = true;
+        fieldCurveResultsReady = false;
+        fieldCurveAbortRequested = false;
+        queueConsoleMessage("Field curve: requested via web UI");
+      } else {
+        queueConsoleMessage("Field curve: start ignored (cooldown)");
+      }
+    }
+    else if (request->hasParam("cancelFieldCurve")) {
+      foundParameter = true;
+      fieldCurveAbortRequested = true;
+      queueConsoleMessage("Field curve: abort requested via web UI");
+    }
+
+    // ── Auto-commissioning: Phase-2 relaxed matrix gate ─────────────────────
+    else if (request->hasParam("faCommissionGate")) {
+      foundParameter = true;
+      faCommissionGate = (request->getParam("faCommissionGate")->value().toInt() != 0);
+      queueConsoleMessageF("Commissioning matrix gate %s", faCommissionGate ? "RELAXED (Phase 2)" : "strict");
+    }
+
+    // ── Auto-commissioning: state machine ───────────────────────────────────
+    else if (request->hasParam("commissionStart")) {
+      foundParameter = true;
+      commissionSnapshot();         // capture pre-commissioning tune for the abort path
+      commissionSetState(1);        // IN_PROGRESS
+      settingsDirty = true;         // push the CSV3 state echo promptly
+      queueConsoleMessage("Commissioning: started — settings snapshotted");
+    }
+    else if (request->hasParam("commissionAbort")) {
+      foundParameter = true;
+      faCommissionGate = false;
+      bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
+      commissionSetState(0);                // NOT_COMMISSIONED
+      settingsDirty = true;
+      queueConsoleMessageF("Commissioning: aborted — %s",
+                           reverted ? "settings reverted to snapshot" : "no snapshot to revert");
+    }
+    else if (request->hasParam("commissionDone")) {
+      foundParameter = true;
+      faCommissionGate = false;
+      commissionSetState(2);                // COMMISSIONED
+      settingRemove(NK_commissionSnap);     // discard snapshot — commit the new tune
+      settingsDirty = true;
+      queueConsoleMessage("Commissioning: complete — device marked COMMISSIONED");
     }
 
     if (request->hasParam("TemperatureLimitF")) {
@@ -2990,7 +3042,11 @@ void setupServer() {
     }
     if (request->hasParam("startTuningSweep")) {
       foundParameter = true;
-      tuningSweepRequested = true;   // momentary — the TuningMode sine block consumes it
+      if (systemIDActive != 0 || fieldCurveActive != 0) {
+        queueConsoleMessage("Tuning sweep: start blocked — a SystemID/Field-curve test is active");
+      } else {
+        tuningSweepRequested = true;   // momentary — the TuningMode sine block consumes it
+      }
     }
     if (request->hasParam("SwitchingFrequency")) {
       foundParameter = true;
@@ -5059,8 +5115,8 @@ void setupServer() {
     int asyncTcpCore = hAsyncTcp ? (int)xTaskGetCoreID(hAsyncTcp) : -99;
     int lwipCore = hLwip ? (int)xTaskGetCoreID(hLwip) : -99;
     const char *faStateName = (faChanState == 1) ? "live" : (faChanState == 2) ? "RAILED-dormant (jumper open?)" : "off";
-    char out[1280];
-    snprintf(out, sizeof(out),
+    char out[2560];
+    int dpos = snprintf(out, sizeof(out),
              "Partition: %s\nVersion: %s\nFree heap: %lu\n"
              "Net task cores (0/1=pinned, 2147483647=floating, -99=not found): async_tcp=%d lwIP=%d\n"
              "AdjustField worst full pass (ms): total=%.1f | thermal=%.1f snapshot=%.1f fastov=%.1f modes=%.1f control=%.1f duty=%.1f tail=%.1f\n"
@@ -5086,6 +5142,24 @@ void setupServer() {
              faStateName, faAttenIs12 ? "12" : "6",
              (unsigned long)faWindowsAccepted, (unsigned long)faWindowsDiscarded,
              (unsigned)faCellsUsed, faSesPkpkWorstA, faSesPeakWorstA, faSesPeakWorstHz);
+    // Floating-task census for the Core-1 preemption hunt: any task with core=FLOAT
+    // (tskNO_AFFINITY) can land on Core 1 and stall the priority-1 loop task. The loop runs
+    // at priority 1 — read the core column, then suspect any FLOAT task above it.
+    if (dpos > 0 && dpos < (int)sizeof(out)) {
+      const UBaseType_t maxTasks = 32;   // uxTaskGetSystemState returns 0 if this is too small
+      TaskStatus_t st[maxTasks];
+      UBaseType_t nTasks = uxTaskGetSystemState(st, maxTasks, nullptr);
+      dpos += snprintf(out + dpos, sizeof(out) - dpos, "Tasks (name prio core stackHWM):");
+      for (UBaseType_t i = 0; i < nTasks && dpos < (int)sizeof(out) - 64; i++) {
+        int core = (int)xTaskGetCoreID(st[i].xHandle);
+        dpos += snprintf(out + dpos, sizeof(out) - dpos, " [%s p%u c%s hwm%u]",
+                         st[i].pcTaskName,
+                         (unsigned)st[i].uxCurrentPriority,
+                         core == 2147483647 ? "FLOAT" : (core == 0 ? "0" : "1"),
+                         (unsigned)st[i].usStackHighWaterMark);
+      }
+      snprintf(out + dpos, sizeof(out) - dpos, "\n");
+    }
     request->send(200, "text/plain", out);
   });
 
@@ -5478,22 +5552,25 @@ void setupServer() {
         "%s{\"n\":%d,\"s\":%.2f,\"t\":%.1f,"
         "\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.5f,"
         "\"sd\":%d,\"tg\":%.2f,\"dr\":%.1f,"
-        "\"wa\":%d,\"wp\":%d,"
-        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f}",
+        "\"wa\":%d,\"wp\":%d,\"wf\":%d,"
+        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f,\"bv\":%.2f,\"cs\":%d}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.activeTimeSec,
         r.kp, r.ki, r.kd,
         r.sampleDivisor, r.trackingGain, r.dutyRampRate,
-        (int)r.waveAmplitude, (int)r.wavePeriod,
-        r.avgRPM, r.avgAltTempF, r.worstErrorA);
+        (int)r.waveAmplitude, (int)r.wavePeriod, (int)r.waveFloor,
+        r.avgRPM, r.avgAltTempF, r.worstErrorA, r.battV, (int)r.chargeStage);
     }
     bool testActive = (TuningMode && tuningScore.toggleCount > 0);
     float ts = (tuningScore.activeTimeSec > 0.0f)
                  ? (tuningScore.errorAccum / tuningScore.activeTimeSec) : 0.0f;
+    // "live" now carries the since-reset Control Accuracy score for this loop: [RMS error (A),
+    // worst over-current (A), 0, 0]. (The old 4 ISE windows are gone — 4-slot shape kept for the
+    // tuning UI parser.)
     pos += snprintf(buf + pos, 10240 - pos,
       "],\"live\":[%.2f,%.2f,%.2f,%.2f],"
       "\"ts\":%.2f,\"tt\":%d,\"ta\":%d}",
-      liveScoreVal[0], liveScoreVal[1], liveScoreVal[2], liveScoreVal[3],
+      accScoreRms(accCurrent.errAccum, accCurrent.timeAccum), accCurrent.worstOver, 0.0f, 0.0f,
       ts, (int)tuningScore.toggleCount, testActive ? 1 : 0);
 
     // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
@@ -5546,6 +5623,133 @@ void setupServer() {
     request->send(200, "application/json", buf);
   });
 
+  // Auto-commissioning field-% curve: the duty→amps points + the saturation knee + the
+  // proposed open-loop-sine settings. Dashboard shows these and lets the user Apply.
+  server.on("/fieldcurve.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(2048), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+    int pos = 0;
+    pos += snprintf(buf + pos, 2048 - pos, "{\"pts\":[");
+    for (int i = 0; i < fieldCurveCount && pos < 1700; i++) {
+      pos += snprintf(buf + pos, 2048 - pos, "%s{\"d\":%.1f,\"a\":%.2f}",
+                      i > 0 ? "," : "", fieldCurveBuf[i].duty, fieldCurveBuf[i].amps);
+    }
+    pos += snprintf(buf + pos, 2048 - pos,
+                    "],\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"kneeAmps\":%.2f,"
+                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f}",
+                    fieldCurveActive != 0 ? 1 : 0, fieldCurveResultsReady ? 1 : 0, fieldCurveOk ? 1 : 0,
+                    fieldCurveKneeDuty, fieldCurveKneeAmps, fieldCurveTargetLimitA,
+                    fieldCurvePropStabA, fieldCurvePropStepPct);
+    request->send(200, "application/json", buf);
+  });
+
+  server.on("/tuningsweeplog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const int CAP = 32768;
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(CAP), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+    // Sort by bandwidth; never-tracks (<0) sinks to end.
+    uint8_t sortIdx[50];
+    for (int i = 0; i < tuningSweepLogCount; i++) sortIdx[i] = i;
+    for (int i = 1; i < tuningSweepLogCount; i++) {
+      uint8_t key = sortIdx[i];
+      float kb = tuningSweepLog[key].bandwidthHz; if (kb < 0.0f) kb = -1e9f;
+      int j = i - 1;
+      while (j >= 0) {
+        float pv = tuningSweepLog[sortIdx[j]].bandwidthHz; if (pv < 0.0f) pv = -1e9f;
+        if (pv >= kb) break;
+        sortIdx[j + 1] = sortIdx[j]; j--;
+      }
+      sortIdx[j + 1] = key;
+    }
+    int pos = 0;
+    pos += snprintf(buf + pos, CAP - pos, "{\"rec\":[");
+    for (int i = 0; i < tuningSweepLogCount && pos < CAP - 600; i++) {
+      TuningSweepRecord &r = tuningSweepLog[sortIdx[i]];
+      pos += snprintf(buf + pos, CAP - pos,
+        "%s{\"n\":%d,\"bw\":%.2f,\"pg\":%.3f,\"pgf\":%.2f,\"wp\":%.0f,\"wpf\":%.2f,"
+        "\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.5f,\"f0\":%.2f,\"f1\":%.2f,\"cy\":%d,"
+        "\"rpm\":%.0f,\"temp\":%.1f,"
+        "\"amp\":%.2f,\"base\":%.2f,\"bv\":%.2f,\"rmin\":%.0f,\"rmax\":%.0f,"
+        "\"coh\":%.3f,\"clip\":%d,\"cs\":%d,\"pts\":[",
+        i > 0 ? "," : "",
+        r.runNumber, r.bandwidthHz, r.peakGain, r.peakGainFreqHz, r.worstPhaseDeg, r.worstPhaseFreqHz,
+        r.kp, r.ki, r.kd, r.sweepStartHz, r.sweepEndHz, (int)r.cycles,
+        r.avgRPM, r.avgAltTempF,
+        r.sineAmpA, r.baseA, r.battV, r.rpmMin, r.rpmMax,
+        r.worstCoherence, (int)r.dutyRailed, (int)r.chargeStage);
+      for (int k = 0; k < r.nPoints && k < TUNING_SWEEP_NPOINTS && pos < CAP - 60; k++) {
+        pos += snprintf(buf + pos, CAP - pos, "%s{\"f\":%.2f,\"g\":%.4f,\"ph\":%.1f}",
+                        k > 0 ? "," : "", r.curve[k].freqHz, r.curve[k].gain, r.curve[k].phaseDeg);
+      }
+      pos += snprintf(buf + pos, CAP - pos, "]}");
+    }
+    pos += snprintf(buf + pos, CAP - pos, "],\"active\":%d,\"done\":%d}",
+                    tuningSweepActive ? 1 : 0, tuningSweepDone ? 1 : 0);
+    size_t total = (size_t)pos;
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/json",
+      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
+        memcpy(out, bufPtr.get() + index, toSend);
+        return toSend;
+      });
+    request->send(response);
+  });
+
+  server.on("/sysidsweeplog", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const int CAP = 32768;
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(CAP), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+    // Sort by roll-off; <0 sinks to end.
+    uint8_t sortIdx[50];
+    for (int i = 0; i < sysidSweepLogCount; i++) sortIdx[i] = i;
+    for (int i = 1; i < sysidSweepLogCount; i++) {
+      uint8_t key = sortIdx[i];
+      float kb = sysidSweepLog[key].rolloffHz; if (kb < 0.0f) kb = -1e9f;
+      int j = i - 1;
+      while (j >= 0) {
+        float pv = sysidSweepLog[sortIdx[j]].rolloffHz; if (pv < 0.0f) pv = -1e9f;
+        if (pv >= kb) break;
+        sortIdx[j + 1] = sortIdx[j]; j--;
+      }
+      sortIdx[j + 1] = key;
+    }
+    int pos = 0;
+    pos += snprintf(buf + pos, CAP - pos, "{\"rec\":[");
+    for (int i = 0; i < sysidSweepLogCount && pos < CAP - 600; i++) {
+      SysIDSweepRecord &r = sysidSweepLog[sortIdx[i]];
+      pos += snprintf(buf + pos, CAP - pos,
+        "%s{\"n\":%d,\"ro\":%.2f,\"dc\":%.4f,\"wp\":%.0f,\"wpf\":%.2f,"
+        "\"amp\":%.1f,\"floor\":%.1f,\"f0\":%.2f,\"f1\":%.2f,\"cy\":%d,"
+        "\"rpm\":%.0f,\"temp\":%.1f,\"bv\":%.2f,\"cs\":%d,\"pts\":[",
+        i > 0 ? "," : "",
+        r.runNumber, r.rolloffHz, r.dcGainApPct, r.worstPhaseDeg, r.worstPhaseFreqHz,
+        r.setupAmplitude, r.stabilizeAmps, r.sweepStartHz, r.sweepEndHz, (int)r.cycles,
+        r.avgRPM, r.avgAltTempF, r.battV, (int)r.chargeStage);
+      for (int k = 0; k < r.nPoints && k < SYSID_SINE_NPOINTS && pos < CAP - 60; k++) {
+        pos += snprintf(buf + pos, CAP - pos, "%s{\"f\":%.2f,\"g\":%.4f,\"ph\":%.1f}",
+                        k > 0 ? "," : "", r.curve[k].freqHz, r.curve[k].gainApPct, r.curve[k].phaseDeg);
+      }
+      pos += snprintf(buf + pos, CAP - pos, "]}");
+    }
+    bool active = (systemIDActive != 0 && systemIDTestType == 1);
+    pos += snprintf(buf + pos, CAP - pos, "],\"active\":%d}", active ? 1 : 0);
+    size_t total = (size_t)pos;
+    AsyncWebServerResponse *response = request->beginChunkedResponse(
+      "application/json",
+      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
+        if (index >= total) return 0;
+        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
+        memcpy(out, bufPtr.get() + index, toSend);
+        return toSend;
+      });
+    request->send(response);
+  });
+
   server.on("/systemidlog", HTTP_GET, [](AsyncWebServerRequest *request) {
     // PSRAM-backed buffer (50 records × ~200 bytes ≈ 10 KB).
     std::shared_ptr<char> bufPtr((char *)ps_malloc(10240), [](char *p) { if (p) free(p); });
@@ -5580,7 +5784,7 @@ void setupServer() {
         "\"ra\":%.1f,\"fa\":%.1f,"
         "\"sa\":[%.2f,%.2f,%.2f],\"qp\":[%.3f,%.3f,%.3f],"
         "\"ar\":%u,\"ap\":%u,\"amp\":%.2f,"
-        "\"rpm\":%.0f,\"temp\":%.1f}",
+        "\"rpm\":%.0f,\"temp\":%.1f,\"bv\":%.2f,\"cs\":%d}",
         i > 0 ? "," : "",
         (unsigned)r.runNumber, r.score,
         r.riseDelays[0], r.riseDelays[1], r.riseDelays[2],
@@ -5589,7 +5793,7 @@ void setupServer() {
         r.stepAmps[0], r.stepAmps[1], r.stepAmps[2],
         r.quietPP[0], r.quietPP[1], r.quietPP[2],
         (unsigned)r.abortReason, (unsigned)r.abortPhase, r.setupStepAmplitude,
-        r.avgRPM, r.avgAltTempF);
+        r.avgRPM, r.avgAltTempF, r.battV, (int)r.chargeStage);
     }
     pos += snprintf(buf + pos, 10240 - pos,
       "],\"active\":%d,\"ready\":%d}",
@@ -5644,7 +5848,7 @@ void setupServer() {
         "\"iefr\":%.3f,\"ietau\":%.0f,\"iekb\":%.2f,"
         "\"lddt\":%.0f,\"ldt1\":%.0f,\"ldt3\":%.0f,"
         "\"tc\":%.0f,\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
-        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f}",
+        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f,\"cs\":%d}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
         r.avgIntegratedOvershootVs, r.activeTimeSec,
@@ -5657,7 +5861,8 @@ void setupServer() {
         r.iExcessFrac, r.iExcessTau, r.iExcessKBleed,
         r.loadDumpDtThresh, r.loadDumpDtThresh1, r.loadDumpDtThresh3,
         r.inputFilterTC, r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
-        r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget);
+        r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget,
+        (int)r.chargeStage);
     }
     // Active test state
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
@@ -5668,10 +5873,12 @@ void setupServer() {
                         + cvTuningScore.totalLowUndershootVs)
              / cvTuningScore.activeTimeSec;
     }
+    // "live" now carries the since-reset Control Accuracy score for the CV loop: [RMS error (mV),
+    // worst over-voltage (mV), 0, 0]. (4-slot shape kept for the tuning UI parser.)
     pos += snprintf(buf + pos, (pos >= 32768 ? 0 : 32768 - pos),
       "],\"live\":[%.0f,%.0f,%.0f,%.0f],"
       "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
-      cvRmsErrVal[0] * 1000.0f, cvRmsErrVal[1] * 1000.0f, cvRmsErrVal[2] * 1000.0f, cvRmsErrVal[3] * 1000.0f,  // RMS error in mV
+      accScoreRms(accVoltage.errAccum, accVoltage.timeAccum) * 1000.0f, accVoltage.worstOver * 1000.0f, 0.0f, 0.0f,  // mV
       cvts, (int)cvTuningScore.scoredHighCount, cvTestActive ? 1 : 0);
 
     // Chunked send: only ~1.5 KB per chunk lands on the internal heap. bufPtr is
@@ -5696,16 +5903,7 @@ void setupServer() {
     cvTuningScore        = {};
     cvTuningParamChanged = false;
     if (cvTuningLog) memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
-    for (int i = 0; i < 4; i++) {
-      if (cvLiveScoreBuckets[i]) memset(cvLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
-      if (cvPeakBuckets[i]) memset(cvPeakBuckets[i], 0, LIVE_BUCKET_N * sizeof(float));
-      cvLiveScoreHead[i]      = 0;
-      cvLiveBucketStartMs[i]  = 0;
-      cvRmsErrVal[i]          = 0.0f;
-      cvPeakOverVal[i]        = 0.0f;
-    }
-    cvLiveScore_lastDtMs = 0;
-    cvLiveScore_inWindow = false;
+    accVoltage = {};  // clear the CV loop's Control Accuracy score too
     pendingSaveCVTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
@@ -5741,7 +5939,7 @@ void setupServer() {
         "\"kp\":%.4f,\"ki\":%.5f,\"la\":%.0f,\"fa\":%.3f,\"im\":%d,"
         "\"wl\":%.0f,\"wh\":%.0f,\"wp\":%.1f,"
         "\"rr\":%.1f,\"fr\":%.1f,"
-        "\"rpm\":%.0f,\"amb\":%.1f}",
+        "\"rpm\":%.0f,\"amb\":%.1f,\"bv\":%.2f,\"cs\":%d}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootF,
         r.avgIntOverFs, r.avgIntUnderFs,
@@ -5749,7 +5947,7 @@ void setupServer() {
         r.kp, r.ki, r.lookaheadSec, r.filterAlpha, (int)r.intervalMs,
         r.waveLowF, r.waveHighF, r.waveHalfPeriodMin,
         r.riseRate, r.fallRate,
-        r.avgRPM, r.avgAmbientF);
+        r.avgRPM, r.avgAmbientF, r.battV, (int)r.chargeStage);
     }
     // Active test state
     bool testActive = (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh);
@@ -5761,11 +5959,12 @@ void setupServer() {
       float avgUnder  = thermalTuningScore.totalIntUnderFs / n;
       ts = avgSettle + thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;
     }
+    // "live" now carries the since-reset Control Accuracy score for the thermal loop: [RMS error
+    // (°F), worst over-temp (°F), 0, 0]. (4-slot shape kept for the tuning UI parser.)
     pos += snprintf(buf + pos, (pos >= 8192 ? 0 : 8192 - pos),
       "],\"live\":[%.4f,%.4f,%.4f,%.4f],"
       "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
-      thermalLiveScoreVal[0], thermalLiveScoreVal[1],
-      thermalLiveScoreVal[2], thermalLiveScoreVal[3],
+      accScoreRms(accThermal.errAccum, accThermal.timeAccum), accThermal.worstOver, 0.0f, 0.0f,
       ts, (int)thermalTuningScore.scoredStepCount, testActive ? 1 : 0);
 
     // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
@@ -5789,12 +5988,7 @@ void setupServer() {
     thermalTuningParamChanged = false;
     thermalWaveCurrentSetpointF = 0.0f;
     if (thermalTuningLog) memset(thermalTuningLog, 0, 50 * sizeof(ThermalTuningRecord));
-    for (int i = 0; i < 4; i++) {
-      if (thermalLiveScoreBuckets[i]) memset(thermalLiveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
-      thermalLiveScoreHead[i]       = 0;
-      thermalLiveBucketStartMs[i]   = 0;
-      thermalLiveScoreVal[i]        = 0.0f;
-    }
+    accThermal = {};  // clear the thermal loop's Control Accuracy score too
     pendingSaveThermalTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
@@ -5806,17 +6000,15 @@ void setupServer() {
     tuningScore       = {};
     tuningParamChanged = false;
     if (tuningLog) memset(tuningLog, 0, 50 * sizeof(TuningRecord));
-    for (int i = 0; i < 4; i++) {
-      if (liveScoreBuckets[i]) memset(liveScoreBuckets[i], 0, LIVE_BUCKET_N * sizeof(ScoreBucket));
-      liveScoreHead[i]     = 0;
-      liveBucketStartMs[i] = 0;
-      liveScoreVal[i]      = 0.0f;
-    }
-    liveScore_lastCmd    = 0.0f;
-    liveScore_thisCmd    = 0.0f;
-    liveScore_lastStepMs = 0;
-    liveScore_inWindow   = false;
+    accCurrent = {};  // clear the inner current loop's Control Accuracy score too
     pendingSaveTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
+    request->send(200, "text/plain", "OK");
+  });
+
+  // Manual "Reset" button under the Control Accuracy Scores panel. Zeros all three loops'
+  // since-reset accumulators. (They also auto-reset after each config-snapshot upload.)
+  server.on("/resetAccuracyScores", HTTP_POST, [](AsyncWebServerRequest *request) {
+    resetAccuracyScores();
     request->send(200, "text/plain", "OK");
   });
 
@@ -5826,6 +6018,24 @@ void setupServer() {
     systemIDRunCounter  = 0;
     if (systemIDLog) memset(systemIDLog, 0, 50 * sizeof(SystemIDRecord));
     pendingSaveSystemIDLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resettuningsweeplog", HTTP_POST, [](AsyncWebServerRequest *request) {
+    tuningSweepLogCount   = 0;
+    tuningSweepLogHead    = 0;
+    tuningSweepRunCounter = 0;
+    if (tuningSweepLog) memset(tuningSweepLog, 0, 50 * sizeof(TuningSweepRecord));
+    pendingSaveTuningSweepLog = true;  // deferred to Core 1
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.on("/resetsysidsweeplog", HTTP_POST, [](AsyncWebServerRequest *request) {
+    sysidSweepLogCount   = 0;
+    sysidSweepLogHead    = 0;
+    sysidSweepRunCounter = 0;
+    if (sysidSweepLog) memset(sysidSweepLog, 0, 50 * sizeof(SysIDSweepRecord));
+    pendingSaveSysidSweepLog = true;  // deferred to Core 1
     request->send(200, "text/plain", "OK");
   });
 
@@ -6155,7 +6365,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -6197,8 +6407,14 @@ void SendWifiData() {
                                SafeInt(Ignition),  // effective ignition (override applied at top of loop)
                                SafeInt(g_mExcessEma, 10),       // CSV1_mExcessEma — averaged current excess (A ×10)
                                SafeInt(g_iExcessThreshold, 10), // CSV1_iExcessThreshold — fire threshold E (A ×10)
+                               SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
+                               SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
                                SafeInt(protMask)                // CSV1_protEventMask — protection-event bits this frame
     );
+    // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
+    g_mExcessEmaPeak = 0.0f;
+    g_iExcessThreshWinMin = 0.0f;
+    g_iExcessArmedWin = false;
     if (payload1Len < 0 || payload1Len >= PAYLOAD1_SIZE) {
       Serial.printf("payload1 truncated or format error: %d\n", payload1Len);
       return;
@@ -6288,7 +6504,8 @@ void SendWifiData() {
                                "%d,%d,%u,%u,%d,%d,%d,%d,%d,"
                                // -9 %d: COG/SOG/AWS/AWA/TWS/TWA/Leeway/VMGNMEA + HeadingNMEA moved to CSV4
                                "%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // -10 %d (2026-06-18): Control Accuracy Scores v2 removed 16 windowed
+                               // live-score fields and added 6 (net -10) — one 10-specifier row dropped here.
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -6588,10 +6805,6 @@ void SendWifiData() {
                                SafeInt(imu_heading_swing_120s, 10),              // ×10, 1dp degrees; -10 = no compass data
                                SafeInt(g_dBcur_dt, 10),                          // ×10, 1dp A/s battery current rate of change
                                (int)g_loadDumpActive,                            // 1 if load dump feedforward is active
-                               SafeInt(thermalLiveScoreVal[0], 10000),           // ×10000
-                               SafeInt(thermalLiveScoreVal[1], 10000),           // ×10000
-                               SafeInt(thermalLiveScoreVal[2], 10000),           // ×10000
-                               SafeInt(thermalLiveScoreVal[3], 10000),           // ×10000
                                (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0,
                                SafeInt(ft_updateAccelMetrics.worstWindow),
                                SafeInt(ft_updateAccelMetrics.worstSession),
@@ -6901,19 +7114,13 @@ void SendWifiData() {
                                SafeInt(DeepestAnchorage_Ft_AllTime, 10),   // CSV2_DeepestAnchorAT   (ft ×10)
                                SafeInt(best_upwind_vmg_alltime, 100),      // CSV2_BestUpwindVmgAT   (kts ×100)
                                SafeInt(longest_gale_duration_hours_alltime, 100), // CSV2_LongestGaleAT (hr ×100)
-                               // Inner & CV loop live accuracy scores (×10000, matches thermalLiveScore; JS divides by 10000)
-                               SafeInt(liveScoreVal[0], 10000),           // CSV2_liveScore0
-                               SafeInt(liveScoreVal[1], 10000),           // CSV2_liveScore1
-                               SafeInt(liveScoreVal[2], 10000),           // CSV2_liveScore2
-                               SafeInt(liveScoreVal[3], 10000),           // CSV2_liveScore3
-                               SafeInt(cvRmsErrVal[0], 1000),             // CSV2_cvRmsErr0 (V→mV)
-                               SafeInt(cvRmsErrVal[1], 1000),             // CSV2_cvRmsErr1 (V→mV)
-                               SafeInt(cvRmsErrVal[2], 1000),             // CSV2_cvRmsErr2 (V→mV)
-                               SafeInt(cvRmsErrVal[3], 1000),             // CSV2_cvRmsErr3 (V→mV)
-                               SafeInt(cvPeakOverVal[0], 1000),           // CSV2_cvPeakOver0 (V→mV)
-                               SafeInt(cvPeakOverVal[1], 1000),           // CSV2_cvPeakOver1 (V→mV)
-                               SafeInt(cvPeakOverVal[2], 1000),           // CSV2_cvPeakOver2 (V→mV)
-                               SafeInt(cvPeakOverVal[3], 1000)            // CSV2_cvPeakOver3 (V→mV)
+                               // Control Accuracy Scores (since last reset). RMS error + worst overshoot per loop.
+                               SafeInt(accScoreRms(accCurrent.errAccum, accCurrent.timeAccum), 100),     // CSV2_accCurRms   (A ×100)
+                               SafeInt(accCurrent.worstOver, 100),        // CSV2_accCurPeak  (A ×100)
+                               SafeInt(accScoreRms(accVoltage.errAccum, accVoltage.timeAccum), 1000),    // CSV2_accVoltRms  (V→mV)
+                               SafeInt(accVoltage.worstOver, 1000),       // CSV2_accVoltPeak (V→mV)
+                               SafeInt(accScoreRms(accThermal.errAccum, accThermal.timeAccum), 100),     // CSV2_accThermRms (°F ×100)
+                               SafeInt(accThermal.worstOver, 100)         // CSV2_accThermPeak (°F ×100)
     );
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
     thermalAntiWindupLatch = false;
@@ -6977,7 +7184,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,"  // 4 systemID sine-sweep params
                                "%d,%d,%d,%d,%d,"  // 5 tuning sine params
                                "%d,"  // SystemIDStabilizeAmps
-                               "%d",  // tuningWaveFloor (Current Target Generator floor)
+                               "%d,"  // tuningWaveFloor (Current Target Generator floor)
+                               "%d",  // commissionState
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -7286,7 +7494,8 @@ void SendWifiData() {
                                SafeInt(tuningSweepEnd, 10),                     // Hz ×10
                                SafeInt(tuningSweepCycles),
                                SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
-                               SafeInt(tuningWaveFloor)                         // A (raw)
+                               SafeInt(tuningWaveFloor),                        // A (raw)
+                               (int)commissionState                             // CSV3_commissionState (0/1/2)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

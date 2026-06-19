@@ -2642,8 +2642,10 @@ void _ReadAnalogInputs_inner() {
                              wmIgnUpdate(wmIgn_amps, MeasuredAmps);  // ignition-cycle watermark
                              ch1FreshFlag = true;  // Signal PID that fresh current data is available
                              // ── EMA filters ────────────────────────────────────────────────────────
-                             // iExcess EMA (InputFilterTC) and Output PID EMA (OutputPIDFilterTC) run
-                             // independently so each can be tuned for its role.
+                             // Display/log EMA (InputFilterTC → MeasuredAmps_filtered) and Output PID EMA
+                             // (OutputPIDFilterTC → g_pidI_filtered) run independently so each can be tuned
+                             // for its role. iExcess uses NEITHER — its own EMA reads raw MeasuredAmps into
+                             // mExcessEma (see the MA block below). InputFilterTC is display/logging only now.
                              {
                                static bool amps_filter_init = false;
                                static uint32_t lastAmpsFilterMs = 0;

@@ -1782,6 +1782,10 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     IExcessKBleed = settingRead(NK_IExcessKBleed).toFloat();
   }
+  // Auto-commissioning state (default 0 = NOT_COMMISSIONED on a virgin device).
+  if (settingExists(NK_commissionState)) {
+    commissionState = (uint8_t)settingRead(NK_commissionState).toInt();
+  }
   if (!settingExists(NK_IExcessArmMarginV)) {
     settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
   } else {

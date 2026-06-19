@@ -2957,6 +2957,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       systemIDBodeCount++;
       queueConsoleMessageF("Bode %d: %.2f Hz gain=%.3f A/%% lag=%.0f deg (n=%d)", p + 1, f, gain, phaseDeg, n);
     }
+    commitSysidSweepRecord();
     systemIDResultsReady = true;
     systemIDActive = 0;
     systemIDLastEndMs = millis();
@@ -3167,6 +3168,182 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 }
 
 
+// Invert the field-% curve: given a target current (A), linear-interpolate the duty (%).
+// Assumes fieldCurveBuf[] is ascending in amps (it is — a monotonic duty ramp).
+static float fieldCurveInvert(float targetA) {
+  if (fieldCurveCount <= 0) return FIELDCURVE_DUTY_START;
+  if (targetA <= fieldCurveBuf[0].amps) return fieldCurveBuf[0].duty;
+  for (int i = 1; i < fieldCurveCount; i++) {
+    if (targetA <= fieldCurveBuf[i].amps) {
+      float da = fieldCurveBuf[i].amps - fieldCurveBuf[i - 1].amps;
+      if (da <= 0.001f) return fieldCurveBuf[i].duty;
+      float t = (targetA - fieldCurveBuf[i - 1].amps) / da;
+      return fieldCurveBuf[i - 1].duty + t * (fieldCurveBuf[i].duty - fieldCurveBuf[i - 1].duty);
+    }
+  }
+  return fieldCurveBuf[fieldCurveCount - 1].duty;
+}
+
+// ============================================================
+// fieldCurve_tick() — auto-commissioning Phase 1a field-% sweep
+//
+// Quasi-static duty→amps ramp. Like systemID_tick it returns true while active and
+// the caller must force GOV_BYPASS_SLEW + MANUAL PID and use dutyOut as the command.
+// Ramps duty FIELDCURVE_DUTY_START → (table limit reached | FIELDCURVE_DUTY_MAX),
+// dwelling FIELDCURVE_DWELL_MS per step and averaging amps over the settled (2nd) half
+// of each dwell so the field L/R lag doesn't bias the curve. Post-ramp it locates the
+// saturation knee and proposes SystemIDStabilizeAmps / SystemIDStepAmplitude placed in
+// the linear region below the knee. Results are read by the dashboard via /fieldcurve.csv;
+// the user clicks Apply (show-before-write) — the firmware does NOT auto-write the settings.
+// ============================================================
+bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
+  static uint8_t  phase = 0;          // 0=idle, 1=ramp
+  static float    stepDuty = 0.0f;
+  static uint32_t stepStartMs = 0;
+  static double   ampSum = 0.0;
+  static uint32_t ampN = 0;
+
+  // ── Abort ────────────────────────────────────────────────────────────────
+  if (phase != 0 && fieldCurveAbortRequested) {
+    fieldCurveAbortRequested = false;
+    queueConsoleMessage("Field curve: aborted");
+    fieldCurveActive = 0;
+    fieldCurveLastEndMs = millis();
+    phase = 0;
+    return false;
+  }
+
+  // ── IDLE: wait for trigger (do NOT touch dutyOut — SystemID may own it) ───
+  if (phase == 0) {
+    if (!fieldCurveRequested) return false;
+    fieldCurveRequested = false;
+    fieldCurveAbortRequested = false;
+
+    if (fieldCurveBuf == nullptr) {
+      fieldCurveBuf = (FieldCurvePoint *)ps_malloc(FIELDCURVE_MAX_PTS * sizeof(FieldCurvePoint));
+      if (fieldCurveBuf == nullptr) {
+        queueConsoleMessage("Field curve: ABORTED — PSRAM alloc failed");
+        return false;
+      }
+    }
+
+    // Table limit-at-speed: the per-RPM current cap, clamped to the rated max.
+    fieldCurveTargetLimitA = fminf(interpolateRPMTable(RPM, rpmCapCurrentTable), (float)MaxTableValue);
+    if (fieldCurveTargetLimitA < 5.0f) {
+      queueConsoleMessageF("Field curve: ABORTED — table limit-at-speed only %.0fA (raise RPM)", fieldCurveTargetLimitA);
+      return false;
+    }
+
+    fieldCurveCount = 0;
+    fieldCurveResultsReady = false;
+    fieldCurveOk = false;
+    fieldCurveKneeDuty = -1.0f;
+    fieldCurveKneeAmps = -1.0f;
+    stepDuty = FIELDCURVE_DUTY_START;
+    stepStartMs = nowMs;
+    ampSum = 0.0;
+    ampN = 0;
+    phase = 1;
+    fieldCurveActive = 1;
+    queueConsoleMessageF("Field curve: ramping to %.0fA limit @ %.0f RPM (step %.1f%%, dwell %lums)",
+                         fieldCurveTargetLimitA, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
+  }
+
+  // ── RAMP ──────────────────────────────────────────────────────────────────
+  if (phase == 1) {
+    // Open-loop safety: the software OV control path is bypassed during the ramp (only the
+    // INA228 hardware OV/OC backstops remain). If the bus climbs over the active target the
+    // battery has less headroom than assumed — stop immediately rather than push more current.
+    if (ChargingVoltageTarget > 1.0f && IBV > ChargingVoltageTarget + 0.8f) {
+      queueConsoleMessageF("Field curve: ABORTED — bus %.2fV over target %.2fV (no charge headroom)",
+                           IBV, ChargingVoltageTarget);
+      fieldCurveActive = 0;
+      fieldCurveLastEndMs = millis();
+      phase = 0;
+      dutyOut = FIELDCURVE_DUTY_START;
+      return false;
+    }
+    dutyOut = stepDuty;
+
+    // Accumulate amps only over the settled second half of the dwell.
+    if ((nowMs - stepStartMs) >= (FIELDCURVE_DWELL_MS / 2)) {
+      ampSum += ampsRaw;
+      ampN++;
+    }
+
+    if ((nowMs - stepStartMs) >= FIELDCURVE_DWELL_MS) {
+      float avgAmps = (ampN > 0) ? (float)(ampSum / ampN) : ampsRaw;
+      if (fieldCurveCount < FIELDCURVE_MAX_PTS) {
+        fieldCurveBuf[fieldCurveCount++] = { stepDuty, avgAmps };
+      }
+      bool reachedLimit = (avgAmps >= fieldCurveTargetLimitA);
+      bool reachedCeil  = (stepDuty >= FIELDCURVE_DUTY_MAX);
+      bool bufFull      = (fieldCurveCount >= FIELDCURVE_MAX_PTS);
+
+      if (reachedLimit || reachedCeil || bufFull) {
+        // ── Post-process: knee + proposals ──────────────────────────────────
+        fieldCurveActive = 2;
+        // Max early slope over the lower third of the captured range.
+        float maxSlope = 0.0f;
+        int lowThird = (fieldCurveCount / 3 > 1) ? fieldCurveCount / 3 : (fieldCurveCount > 1 ? 2 : 1);
+        for (int i = 1; i < lowThird && i < fieldCurveCount; i++) {
+          float dd = fieldCurveBuf[i].duty - fieldCurveBuf[i - 1].duty;
+          if (dd > 0.001f) {
+            float s = (fieldCurveBuf[i].amps - fieldCurveBuf[i - 1].amps) / dd;
+            if (s > maxSlope) maxSlope = s;
+          }
+        }
+        // Knee = first point where slope falls below 40% of the early max.
+        for (int i = 1; i < fieldCurveCount; i++) {
+          float dd = fieldCurveBuf[i].duty - fieldCurveBuf[i - 1].duty;
+          if (dd <= 0.001f) continue;
+          float s = (fieldCurveBuf[i].amps - fieldCurveBuf[i - 1].amps) / dd;
+          if (maxSlope > 0.0f && s < 0.40f * maxSlope && fieldCurveBuf[i].amps > 0.3f * fieldCurveTargetLimitA) {
+            fieldCurveKneeDuty = fieldCurveBuf[i].duty;
+            fieldCurveKneeAmps = fieldCurveBuf[i].amps;
+            break;
+          }
+        }
+
+        // Targets: 50% / 75% of the table limit, slid below the knee if needed.
+        float amps75 = 0.75f * fieldCurveTargetLimitA;
+        if (fieldCurveKneeAmps > 0.0f && amps75 > fieldCurveKneeAmps) amps75 = fieldCurveKneeAmps;
+        float amps50 = amps75 * (0.50f / 0.75f);
+
+        // Invert the curve (amps→duty) by linear interpolation.
+        float duty50 = fieldCurveInvert(amps50);
+        float duty75 = fieldCurveInvert(amps75);
+
+        fieldCurvePropStabA   = amps50;
+        fieldCurvePropStepPct = constrain((duty75 - duty50) * 0.5f, 1.0f, 25.0f);
+        fieldCurveOk = (fieldCurveCount >= 4 && duty75 > duty50 && amps50 > 1.0f);
+
+        queueConsoleMessageF("Field curve: %d pts, knee %.1fA@%.1f%% — propose Stabilize=%.0fA Step=%.1f%% (%s)",
+                             fieldCurveCount, fieldCurveKneeAmps, fieldCurveKneeDuty,
+                             fieldCurvePropStabA, fieldCurvePropStepPct,
+                             fieldCurveOk ? "ok" : "review");
+
+        fieldCurveResultsReady = true;
+        fieldCurveActive = 0;
+        fieldCurveLastEndMs = millis();
+        phase = 0;
+        dutyOut = FIELDCURVE_DUTY_START;  // ease duty back down on exit tick
+        return false;
+      }
+
+      // Next step.
+      stepDuty += FIELDCURVE_DUTY_STEP;
+      stepStartMs = nowMs;
+      ampSum = 0.0;
+      ampN = 0;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+
 // ============================================================
 // tuningSineStep() — Tuning→Current closed-loop sine generator (Stage 2)
 //
@@ -3181,7 +3358,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
   static uint8_t  segIdx = 0;
   static uint32_t segStartMs = 0;
   static bool     segStarted = false;
-  static double   sAmpsSin, sAmpsCos, sAmps, sSin, sCos;
+  static double   sAmpsSin, sAmpsCos, sAmps, sSin, sCos, sAmpsSq;
   static uint32_t nAcc;
   static float    freqList[TUNING_SWEEP_NPOINTS];
 
@@ -3196,6 +3373,12 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
         freqList[i] = fLo * powf(fHi / fLo, (float)i / (float)(TUNING_SWEEP_NPOINTS - 1));
       segIdx = 0; segStarted = false; tuningBodeCount = 0;
       tuningSweepActive = true; tuningSweepDone = false;
+      // Reset whole-sweep run-condition trackers (captured into the record at commit).
+      tuningSweepBaseA = baseA; tuningSweepAmpA = ampA;
+      tuningSweepRpmMin = (float)RPM; tuningSweepRpmMax = (float)RPM;
+      tuningSweepBattV = BatteryV;
+      tuningSweepDutyRailed = false;
+      tuningSweepWorstCoh = 1.0f;
       queueConsoleMessageF("Tuning sine sweep: %d pts %.1f-%.1f Hz, %d cycles/pt, amp=%.1f A",
                            TUNING_SWEEP_NPOINTS, freqList[0], freqList[TUNING_SWEEP_NPOINTS - 1],
                            tuningSweepCycles, ampA);
@@ -3207,7 +3390,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
     f = freqList[segIdx];
     if (!segStarted) {
       segStartMs = nowMs; segStarted = true; phase = 0.0f;
-      sAmpsSin = sAmpsCos = sAmps = sSin = sCos = 0.0; nAcc = 0;
+      sAmpsSin = sAmpsCos = sAmps = sSin = sCos = sAmpsSq = 0.0; nAcc = 0;
     }
   } else {
     f = fmaxf(0.1f, tuningSineFreq);   // manual sine (waveform==1)
@@ -3221,11 +3404,17 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
 
   if (tuningWaveform == 2 && tuningSweepActive) {
     uint32_t tElapsed = nowMs - segStartMs;
+    // Whole-sweep run-condition tracking: RPM range and field-duty rail (clipped sine).
+    float rpmNow = (float)RPM;
+    if (rpmNow < tuningSweepRpmMin) tuningSweepRpmMin = rpmNow;
+    if (rpmNow > tuningSweepRpmMax) tuningSweepRpmMax = rpmNow;
+    if (dutyCycle <= MinDuty + 0.5f || dutyCycle >= 99.5f) tuningSweepDutyRailed = true;
     if (tElapsed >= (uint32_t)(1000.0f / f)) {   // accumulate after a 1-cycle settle
       float c = cosf(phase);
       sAmpsSin += (double)measAmps * s;
       sAmpsCos += (double)measAmps * c;
       sAmps += measAmps; sSin += s; sCos += c; nAcc++;
+      sAmpsSq += (double)measAmps * measAmps;   // for per-point coherence
     }
     float segMs = (1.0f + (float)tuningSweepCycles) * 1000.0f / f;
     if (segMs < 1500.0f) segMs = 1500.0f;
@@ -3238,6 +3427,16 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
         float B = 2.0f * (float)sqrt(Ic * Ic + Qc * Qc) / (float)nAcc;
         gain = B / ampA;                                              // measured / reference
         phaseDeg = atan2f(-(float)Qc, (float)Ic) * 180.0f / (float)M_PI;  // output lag (deg)
+        // Coherence: fraction of the measured AC power explained by the drive-frequency sinusoid.
+        // fitted power = B²/2; total AC power = variance of measAmps. Low = noisy/unreliable point.
+        double varA = sAmpsSq / (double)nAcc - meanA * meanA;
+        float coh = 1.0f;
+        if (varA > 1e-9) {
+          coh = (float)((0.5 * (double)B * (double)B) / varA);
+          if (coh > 1.0f) coh = 1.0f;
+          if (coh < 0.0f) coh = 0.0f;
+        }
+        if (coh < tuningSweepWorstCoh) tuningSweepWorstCoh = coh;
       }
       tuningBode[segIdx].freqHz   = f;
       tuningBode[segIdx].gain     = gain;
@@ -3249,6 +3448,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       if (segIdx >= TUNING_SWEEP_NPOINTS) {
         tuningSweepActive = false; tuningSweepDone = true;
         queueConsoleMessage("Tuning sine sweep complete.");
+        commitTuningSweepRecord();
       }
     }
   }
