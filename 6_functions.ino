@@ -37,6 +37,14 @@ float interpolateRPMTable(float rpm, const float *table);
 // RPM-dependent table lookups (all delegate to interpolateRPMTable)
 float getMinimumFieldForRPM(float rpm);
 float getCapCurrentForRPM(float rpm);
+// Auto Min% learning ("knee tracker") — observer + persistence (defined lower in this file)
+void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
+                      float dutyRequest, float rpmFloorDuty, bool modeOk);
+void kneeLearnInit();
+void kneeLearnService(bool fieldOff);
+void saveKneeLearnState();
+void kneeLearnResetDefaults();
+String kneeLearnStateJson();
 // RPM table index (for UI highlighting and bucket history)
 void updateCurrentRPMTableIndex(float rpm);
 // GPIO4 cut decision logic
@@ -223,6 +231,9 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   bool alreadyCut = gpio4IsLow;
   digitalWrite(4, LOW);
   gpio4IsLow = true;
+  // Fast OV: arm the cooldown lockout so the field can't re-engage for FIELD_COLLAPSE_DELAY (30s).
+  // applyImmediateCut returns before runShutdownPath's line-482 lockout-arm ever runs, so set it here.
+  if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) fieldCollapseTime = tick.nowMs;
   if (alreadyCut) return;  // hardware already cut — skip logging, don't spam
   apply_pwm_float(0.0f);
   lastAppliedDuty = 0.0f;
@@ -251,6 +262,9 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
     queueConsoleMessageF("SystemID: ABORTED — protection fired (%s) during phase %d — run the test again",
                          reasonToString(reason), (int)systemIDActive);
   }
+  // Commissioning field-curve ramp shares the same override path — flag it for a clean abort.
+  // fieldCurve_tick resets its static phase when it next runs (after the cooldown lockout clears).
+  if (fieldCurveActive != 0) fieldCurveAbortRequested = true;
 }
 
 /**
@@ -2834,6 +2848,16 @@ void AdjustFieldLearnMode() {
   lastAppliedDuty = dutyNewFloat;
   dutyCycle = dutyNewFloat;
 
+  // Auto Min% learning: observe the applied floor vs. output to walk rpmMinDutyTable toward
+  // (knee - margin). Observer only; gated to normal AUTO charging (no fault/shutdown/manual/sysID).
+  {
+    bool kneeModeOk = (sysMode == SYS_MODE_AUTO) && !sysIDRunning && tick.chargingEnabled
+                      && !tick.inLockout && !IgnoreTemperature && (hardwarePresent == 1)
+                      && !tick.currentDataStale;
+    kneeLearnObserve(RPM, dutyNewFloat, getBatteryVoltage(), TempToUse, MeasuredAmps,
+                     dutyRequest, tick.rpmMinDuty, kneeModeOk);
+  }
+
   if (sysMode == SYS_MODE_AUTO) {
     innerTermP = (float)currentPID.GetPterm();
     innerTermI = (float)currentPID.GetIterm();
@@ -3307,6 +3331,7 @@ const char *reasonToString(FieldEventReason r) {
     case REASON_CHARGING_DISABLED: return "DISABLED";
     case REASON_MANUAL_MODE: return "MANUAL";
     case REASON_INA_OVERVOLTAGE: return "INA228 hardware overvoltage";
+    case REASON_FAST_OVERVOLTAGE: return "FAST_OVERVOLTAGE";
     case REASON_HARD_OVERCURRENT: return "HARD_OVERCURRENT";
     case REASON_RPM_TOO_LOW: return "RPM_TOO_LOW";
     case REASON_CURRENT_STALE: return "CURRENT_STALE";
@@ -3325,6 +3350,15 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
   // PRIORITY 1: DISABLED (user On/Off switch - always respected)
   if (!tick.chargingEnabled) {
     return MODE_DISABLED_RAMP;
+  }
+
+  // PRIORITY 1.5: FAST OVER-VOLTAGE — absolute ceiling, fires in ALL modes incl. MANUAL.
+  // Live per-tick voltage vs AlternatorHardShutdownV. Reason REASON_FAST_OVERVOLTAGE is in
+  // shouldImmediatelyCutGPIO4 → instant field cut + 30s lockout. Deliberately ABOVE the manual
+  // branch (manual otherwise bypasses all safeties) and NOT gated by testProtectionsEnabled,
+  // because over-voltage is always disastrous. Must mirror selectFieldEventReason.
+  if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) {
+    return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
 
   // PRIORITY 2: MANUAL MODE (UNRESTRICTED - bypasses all safeties when user wants manual control)
@@ -3349,13 +3383,8 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
   }
 
   // PRIORITY 5: WARNING CONDITIONS (all start lockout)
-  // AlternatorHardShutdownV is an absolute voltage — should be set just below BMS shutdown.
-  // Suppressed when tick.testProtectionsEnabled is false (tuning toggle off): the INA228
-  // hardware ALERT pin is always armed and will trip first if voltage genuinely climbs to
-  // a dangerous level.
-  if (tick.testProtectionsEnabled && tick.currentBatteryVoltage > tick.alternatorHardShutdownV) {
-    return MODE_WARNING_RAMP_AND_LOCKOUT;
-  }
+  // (The AlternatorHardShutdownV over-voltage check moved up to PRIORITY 1.5 as the fast-OV
+  //  immediate cut — armed in every mode and ungated — so it is no longer repeated here.)
   if (tick.voltageDisagreementWarning) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
@@ -3397,6 +3426,10 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   // Priority 1a: Disabled (user control - always show this reason if off)
   if (!tick.chargingEnabled) return REASON_CHARGING_DISABLED;
 
+  // Priority 1.5: Fast over-voltage — absolute ceiling, above the manual bypass and ungated.
+  // Mirrors selectFieldControlMode PRIORITY 1.5. Live voltage → immediate cut + 30s lockout.
+  if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) return REASON_FAST_OVERVOLTAGE;
+
   // Priority 2: Manual mode
   if (tick.manualMode) return REASON_MANUAL_MODE;
 
@@ -3413,7 +3446,7 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
   }
 
   // Priority 5: Warning
-  if (tick.currentBatteryVoltage > tick.alternatorHardShutdownV) return REASON_VOLTAGE_SPIKE;
+  // (AlternatorHardShutdownV over-voltage moved up to Priority 1.5 as REASON_FAST_OVERVOLTAGE.)
   if (tick.voltageDisagreementWarning) return REASON_VOLTAGE_DISAGREE_WARNING;
   if (!tick.ignoreTemperature && tick.tempToUseF > (tick.tempLimitF + tick.tempWarnExcessF)) {
     if (tempWarningStartMs > 0 && (tick.nowMs - tempWarningStartMs > TempSustainedTimeout)) {
@@ -3439,6 +3472,7 @@ void updateProtectionCounters(FieldEventReason reason) {
     switch (reason) {
       case REASON_INA_OVERVOLTAGE: g_inaOVCount++; break;
       case REASON_HARD_OVERCURRENT: g_hardOCCount++; break;
+      case REASON_FAST_OVERVOLTAGE: g_voltSpikeCount++; break;  // reuses the OV-spike counter (REASON_VOLTAGE_SPIKE retired)
       case REASON_VOLTAGE_SPIKE: g_voltSpikeCount++; break;
       case REASON_VOLTAGE_DISAGREE_CRITICAL: g_voltDisagreeCritCount++; break;
       case REASON_VOLTAGE_DISAGREE_WARNING: g_voltDisagreeWarnCount++; break;
@@ -3530,6 +3564,7 @@ void updateFieldTelemetry(float duty, float voltage, float fieldResistance) {
  * irrelevant since GPIO4 will already be LOW.
  */
 bool shouldImmediatelyCutGPIO4(FieldEventReason reason) {
+  if (reason == REASON_FAST_OVERVOLTAGE) return true;   // absolute OV ceiling — instant cut in every mode
   if (reason == REASON_INA_OVERVOLTAGE) return true;
   if (reason == REASON_HARD_OVERCURRENT) return true;
   if (reason == REASON_RPM_TOO_LOW) return true;
@@ -3582,6 +3617,7 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
   // Settled at 0% for SettleTimeBeforeCut - check if cut is warranted
   switch (reason) {
     // Fast-responding faults: cut if fault persists after ramp-down
+    case REASON_FAST_OVERVOLTAGE:   // normally cut immediately; defensive if it ever reaches settle
     case REASON_VOLTAGE_SPIKE:
     case REASON_VOLTAGE_DISAGREE_WARNING:
     case REASON_VOLTAGE_IMPLAUSIBLE:
@@ -4140,6 +4176,235 @@ float getMinimumFieldForRPM(float rpm) {
 }
 float getCapCurrentForRPM(float rpm) {
   return interpolateRPMTable(rpm, rpmCapCurrentTable);
+}
+
+// ====================================================================================
+// AUTO MIN% LEARNING ("knee tracker")
+// ====================================================================================
+// Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and
+// parks rpmMinDutyTable a margin below it. Observer only: governor_apply / getMinimumFieldForRPM
+// are untouched — this rewrites rpmMinDutyTable like a user edit. Spec:
+// Working Markdown Docs/MinDuty_Knee_Learning.md.
+static bool kneeStateDirty = false;
+
+// Copper temp-coefficient correction used by the excitation proxy (matches alt-health's altExcitation).
+static inline float kneeTempCorr(float tF) {
+  float tc = (tF - 32.0f) / 1.8f;
+  float d = 1.0f + 0.00393f * (tc - 25.0f);
+  return (d < 0.5f) ? 0.5f : d;
+}
+// Convert an applied duty at live (Vbus,tF) to the duty that yields the same field excitation
+// at reference conditions (kneeVbusRef, kneeTempRefF). Keeps learning Vbus/temp-independent.
+static inline float kneeDutyToRef(float duty, float vbus, float tF) {
+  if (kneeVbusRef < 1.0f) return duty;
+  float exc = (duty / 100.0f) * vbus / kneeTempCorr(tF);
+  return exc * kneeTempCorr(kneeTempRefF) / kneeVbusRef * 100.0f;
+}
+
+// Called every control tick from the governor site (observer; cheap). On a steady, floor-active,
+// normal-AUTO sample it either confirms the knee (amps at the floor) and snaps the floor down to
+// knee-margin, or creeps the floor up to self-probe toward the knee.
+void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
+                      float dutyRequest, float rpmFloorDuty, bool modeOk) {
+  static uint32_t lastMs = 0, steadySince = 0, lastSampleMs = 0;
+  static float fRpm = 0, fVbus = 0, fTemp = 0, fDuty = 0;
+  static bool fInit = false;
+
+  uint32_t now = millis();
+  uint32_t dtMs = (lastMs == 0) ? 0 : (now - lastMs);
+  lastMs = now;
+
+  kneeActiveBin = -1; kneeFloorActive = false; kneeSteadyNow = false;
+
+  bool valid = modeOk && !isnan(rpm) && !isnan(vbus) && !isnan(tF) && !isnan(amps)
+               && !isnan(appliedDuty) && vbus >= 6.0f && rpm > 0;
+  if (!valid) { fInit = false; steadySince = 0; return; }
+
+  // Detector-input EMA (~0.5 s) so the steady bands reject jitter, not real operating-point moves.
+  if (!fInit || dtMs == 0 || dtMs > 3000) {
+    fRpm = rpm; fVbus = vbus; fTemp = tF; fDuty = appliedDuty; fInit = true;
+    steadySince = 0;
+  } else {
+    float a = (float)dtMs / (500.0f + (float)dtMs);
+    fRpm += a * (rpm - fRpm); fVbus += a * (vbus - fVbus);
+    fTemp += a * (tF - fTemp); fDuty += a * (appliedDuty - fDuty);
+  }
+
+  // Attribute to the nearest RPM breakpoint.
+  int b = 0; float best = 1e9f;
+  for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+    float d = fabsf(fRpm - (float)rpmTableRPMPoints[i]);
+    if (d < best) { best = d; b = i; }
+  }
+  kneeActiveBin = b;
+
+  // Floor active = governor is clamping the request up to the floor (low-output regime).
+  float floorEff = (rpmFloorDuty > MinDuty) ? rpmFloorDuty : MinDuty;
+  bool floorActive = (dutyRequest < floorEff - 0.05f);
+  kneeFloorActive = floorActive;
+
+  // Steady-band check vs. the EMA.
+  float rpmTolAbs = fmaxf(20.0f, fRpm * (kneeRpmTolPct / 100.0f));
+  bool steady = (fabsf(rpm - fRpm) <= rpmTolAbs)
+              && (fabsf(vbus - fVbus) <= kneeVbusTolV)
+              && (fabsf(tF - fTemp) <= kneeTempTolF)
+              && (fabsf(appliedDuty - fDuty) <= kneeDutyTolPct);
+  if (!steady) { steadySince = 0; return; }
+  if (steadySince == 0) { steadySince = now; lastSampleMs = now; }
+  kneeSteadyNow = true;
+
+  if (!kneeLearnEnable || !floorActive) return;
+  uint32_t dwellMs = (uint32_t)(kneeDwellSec * 1000.0f); if (dwellMs < 250) dwellMs = 250;
+  if ((now - steadySince) < dwellMs) return;     // initial settle
+  if ((now - lastSampleMs) < dwellMs) return;    // one sample per dwell
+  float dtMin = (float)(now - lastSampleMs) / 60000.0f;
+  lastSampleMs = now;
+
+  float dutyRef = kneeDutyToRef(appliedDuty, vbus, tF);
+  kneeSampN[b]++;
+
+  if (amps > kneeKickInA) {
+    // Knee confirmed at ~dutyRef: pull estimate, bump confidence, snap floor to knee-margin.
+    float g = kneeUpdateGain; if (g < 0.01f) g = 0.01f; if (g > 1.0f) g = 1.0f;
+    kneeDutyRef[b] += g * (dutyRef - kneeDutyRef[b]);
+    kneeConf[b]    += g * (1.0f - kneeConf[b]);
+    kneeLastMs[b]   = now;
+    float margin = (kneeMarginPct > 0) ? kneeMarginPct : 0;
+    kneeFloorRef[b] = kneeDutyRef[b] - margin;
+  } else {
+    // No output at the floor yet: creep up to self-probe toward the knee.
+    float step = kneeCreepPctMin * dtMin; if (step < 0.01f) step = 0.01f;
+    kneeFloorRef[b] += step;
+  }
+
+  // Clamp + publish the live floor.
+  if (kneeFloorRef[b] < 0) kneeFloorRef[b] = 0;
+  if (kneeFloorRef[b] > kneeMaxFloorPct) kneeFloorRef[b] = kneeMaxFloorPct;
+  if (kneeDutyRef[b] < 0) kneeDutyRef[b] = 0;
+  float kneeCap = kneeMaxFloorPct + kneeMarginPct + 2.0f;
+  if (kneeDutyRef[b] > kneeCap) kneeDutyRef[b] = kneeCap;
+  rpmMinDutyTable[b] = kneeFloorRef[b];
+  kneeStateDirty = true;
+  settingsDirty = true;   // push the CSV3 Min% echo promptly so the table cells track the learned floor (not the 60s heartbeat)
+}
+
+// Persist learned per-bin state (learning namespace blobs). Knobs persist separately via settingWrite.
+void saveKneeLearnState() {
+  nvs_handle_t h;
+  if (nvs_open("learning", NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_blob(h, "kneeDutyRef", kneeDutyRef, sizeof(kneeDutyRef));
+  nvs_set_blob(h, "kneeFloorRef", kneeFloorRef, sizeof(kneeFloorRef));
+  nvs_set_blob(h, "kneeConf", kneeConf, sizeof(kneeConf));
+  nvs_commit(h);
+  nvs_close(h);
+  kneeStateDirty = false;
+}
+
+// Throttled saver — called from loop() (NOT the control tick). Flash commit is gated on field-off
+// (like dumpLongTermRing) so the NVS write never stalls the control loop while the field is on.
+// Learned state accrues to RAM during field-on float/low-demand and is persisted once the field
+// drops; losing an in-progress session on a power cut is harmless (slow-learned, safe defaults).
+void kneeLearnService(bool fieldOff) {
+  static uint32_t lastSaveMs = 0;
+  if (!kneeStateDirty || !fieldOff) return;
+  uint32_t now = millis();
+  if (lastSaveMs != 0 && (now - lastSaveMs) < 300000UL) return;  // <= every 5 min
+  lastSaveMs = now;
+  saveKneeLearnState();
+}
+
+// Reset learned state to the factory min-duty defaults.
+void kneeLearnResetDefaults() {
+  for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+    kneeDutyRef[i]  = defaultMinDutyValues[i] + kneeMarginPct;
+    kneeFloorRef[i] = defaultMinDutyValues[i];
+    kneeConf[i] = 0.0f; kneeLastMs[i] = 0; kneeSampN[i] = 0;
+    if (kneeLearnEnable) rpmMinDutyTable[i] = defaultMinDutyValues[i];
+  }
+  saveKneeLearnState();
+}
+
+// Boot init: load knobs (settings namespace, create defaults if absent) + learned state blobs.
+// Call AFTER loadLearningTableFromNVS() so rpmMinDutyTable is already populated.
+void kneeLearnInit() {
+  if (!settingExists(NK_kneeLearnEnable)) settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
+  else kneeLearnEnable = (settingRead(NK_kneeLearnEnable).toInt() != 0);
+#define KNEE_LD_F(key, var) do { if (!settingExists(key)) settingWrite(key, String(var).c_str()); else var = settingRead(key).toFloat(); } while (0)
+  KNEE_LD_F(NK_kneeMarginPct,   kneeMarginPct);
+  KNEE_LD_F(NK_kneeKickInA,     kneeKickInA);
+  KNEE_LD_F(NK_kneeDwellSec,    kneeDwellSec);
+  KNEE_LD_F(NK_kneeCreepPctMin, kneeCreepPctMin);
+  KNEE_LD_F(NK_kneeUpdateGain,  kneeUpdateGain);
+  KNEE_LD_F(NK_kneeVbusRef,     kneeVbusRef);
+  KNEE_LD_F(NK_kneeTempRefF,    kneeTempRefF);
+  KNEE_LD_F(NK_kneeMaxFloorPct, kneeMaxFloorPct);
+  KNEE_LD_F(NK_kneeRpmTolPct,   kneeRpmTolPct);
+  KNEE_LD_F(NK_kneeVbusTolV,    kneeVbusTolV);
+  KNEE_LD_F(NK_kneeTempTolF,    kneeTempTolF);
+  KNEE_LD_F(NK_kneeDutyTolPct,  kneeDutyTolPct);
+#undef KNEE_LD_F
+
+  nvs_handle_t h;
+  bool haveFloor = false;
+  if (nvs_open("learning", NVS_READONLY, &h) == ESP_OK) {
+    size_t sz = sizeof(kneeDutyRef);
+    if (nvs_get_blob(h, "kneeDutyRef", kneeDutyRef, &sz) != ESP_OK || sz != sizeof(kneeDutyRef))
+      for (int i = 0; i < RPM_TABLE_SIZE; i++) kneeDutyRef[i] = defaultMinDutyValues[i] + kneeMarginPct;
+    sz = sizeof(kneeFloorRef);
+    if (nvs_get_blob(h, "kneeFloorRef", kneeFloorRef, &sz) == ESP_OK && sz == sizeof(kneeFloorRef)) haveFloor = true;
+    sz = sizeof(kneeConf);
+    if (nvs_get_blob(h, "kneeConf", kneeConf, &sz) != ESP_OK || sz != sizeof(kneeConf))
+      memset(kneeConf, 0, sizeof(kneeConf));
+    nvs_close(h);
+  } else {
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) kneeDutyRef[i] = defaultMinDutyValues[i] + kneeMarginPct;
+  }
+  if (!haveFloor)
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) kneeFloorRef[i] = rpmMinDutyTable[i];
+
+  // If learning is enabled, the floor owns the table from boot.
+  if (kneeLearnEnable)
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+      float f = kneeFloorRef[i];
+      if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
+      rpmMinDutyTable[i] = f;
+    }
+}
+
+// Build the /kneeLearnState JSON (knobs + live status + per-bin learned state).
+String kneeLearnStateJson() {
+  String j = "{";
+  j += "\"enable\":";        j += (kneeLearnEnable ? 1 : 0);
+  j += ",\"marginPct\":";    j += String(kneeMarginPct, 2);
+  j += ",\"kickInA\":";      j += String(kneeKickInA, 2);
+  j += ",\"dwellSec\":";     j += String(kneeDwellSec, 1);
+  j += ",\"creepPctMin\":";  j += String(kneeCreepPctMin, 2);
+  j += ",\"updateGain\":";   j += String(kneeUpdateGain, 2);
+  j += ",\"vbusRef\":";      j += String(kneeVbusRef, 2);
+  j += ",\"tempRefF\":";     j += String(kneeTempRefF, 1);
+  j += ",\"maxFloorPct\":";  j += String(kneeMaxFloorPct, 2);
+  j += ",\"rpmTolPct\":";    j += String(kneeRpmTolPct, 1);
+  j += ",\"vbusTolV\":";     j += String(kneeVbusTolV, 2);
+  j += ",\"tempTolF\":";     j += String(kneeTempTolF, 1);
+  j += ",\"dutyTolPct\":";   j += String(kneeDutyTolPct, 2);
+  j += ",\"activeBin\":";    j += String(kneeActiveBin);
+  j += ",\"floorActive\":";  j += String(kneeFloorActive ? 1 : 0);
+  j += ",\"steady\":";       j += String(kneeSteadyNow ? 1 : 0);
+  j += ",\"bins\":[";
+  uint32_t now = millis();
+  for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+    if (i) j += ",";
+    long ageS = (kneeLastMs[i] == 0) ? -1 : (long)((now - kneeLastMs[i]) / 1000UL);
+    j += "{\"rpm\":";   j += String(rpmTableRPMPoints[i]);
+    j += ",\"floor\":"; j += String(rpmMinDutyTable[i], 2);
+    j += ",\"knee\":";  j += String(kneeDutyRef[i], 2);
+    j += ",\"conf\":";  j += String(kneeConf[i], 2);
+    j += ",\"n\":";     j += String((unsigned)kneeSampN[i]);
+    j += ",\"ageS\":";  j += String(ageS);
+    j += "}";
+  }
+  j += "]}";
+  return j;
 }
 
 /**

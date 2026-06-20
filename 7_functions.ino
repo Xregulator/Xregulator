@@ -2575,7 +2575,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     SYSID_UP_3        = 7,
     SYSID_DOWN_3      = 8,
     SYSID_PROCESSING  = 9,
-    SYSID_SINE        = 10   // open-loop sine sweep (plant Bode) — replaces the UP/DOWN sequence
+    SYSID_SINE        = 10,  // open-loop sine sweep (plant Bode) — replaces the UP/DOWN sequence
+    SYSID_EASE        = 11   // ramp duty down gently on exit so protections don't trip on a fast collapse
   };
 
   static SysIDPhase phase = SYSID_IDLE;
@@ -2601,6 +2602,8 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint8_t  sineIdx = 0;
   static bool     sineSegStarted = false;
   static uint32_t lastSineSampleMs = 0;   // decimation clock so a long/low-freq sweep can't overflow the buffer
+  static uint32_t sysidEaseStartMs = 0;   // EASE phase: gentle field ramp-down on exit
+  static float    sysidEaseFromDuty = 0.0f;
 
   // One-shot debug on request arrival
   static bool lastReqState = false;
@@ -2609,6 +2612,21 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
                   phase, sysMode, lastAppliedDuty);
   }
   lastReqState = systemIDRequested;
+
+  // ── EASE-OUT: after a run completes, ramp the field down to baseDuty over ~1.5 s before handing
+  // back to normal control. The override (and thus the protection gate) stays held until the field
+  // has settled, so the fast current collapse doesn't trip a protection. ──
+  if (phase == SYSID_EASE) {
+    float frac = (float)(nowMs - sysidEaseStartMs) / 1500.0f;
+    if (frac >= 1.0f) {
+      systemIDLastEndMs = millis();
+      phase = SYSID_IDLE;
+      dutyOut = baseDuty;
+      return false;
+    }
+    dutyOut = sysidEaseFromDuty + (baseDuty - sysidEaseFromDuty) * frac;
+    return true;
+  }
 
   // ── Ignore re-triggers while a test is already running ──────────────────
   if (phase != SYSID_IDLE && systemIDRequested) {
@@ -3158,10 +3176,12 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     commitSystemIDRecord(false);  // log successful run to ring buffer
     systemIDResultsReady = true;
     systemIDActive = 0;
-    systemIDLastEndMs = millis();
-    phase = SYSID_IDLE;  // reset for next run
-    dutyOut = baseDuty;  // restore base duty on exit tick
-    return false;
+    // Don't snap back to normal control — ease the field down first (see SYSID_EASE above). The
+    // override stays held during the ramp so protections re-arm only once the current has settled.
+    sysidEaseFromDuty = dutyOut;   // dutyOut entered as lastAppliedDuty (the last sweep/step value)
+    sysidEaseStartMs = nowMs;
+    phase = SYSID_EASE;
+    return true;
   }
 
   return true;  // test still in progress
@@ -3197,11 +3217,13 @@ static float fieldCurveInvert(float targetA) {
 // the user clicks Apply (show-before-write) — the firmware does NOT auto-write the settings.
 // ============================================================
 bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
-  static uint8_t  phase = 0;          // 0=idle, 1=ramp
+  static uint8_t  phase = 0;          // 0=idle, 1=ramp, 2=ease-out
   static float    stepDuty = 0.0f;
   static uint32_t stepStartMs = 0;
   static double   ampSum = 0.0;
   static uint32_t ampN = 0;
+  static uint32_t fcEaseStartMs = 0;  // EASE phase: gentle field ramp-down on exit
+  static float    fcEaseFromDuty = 0.0f;
 
   // ── Abort ────────────────────────────────────────────────────────────────
   if (phase != 0 && fieldCurveAbortRequested) {
@@ -3251,18 +3273,10 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
 
   // ── RAMP ──────────────────────────────────────────────────────────────────
   if (phase == 1) {
-    // Open-loop safety: the software OV control path is bypassed during the ramp (only the
-    // INA228 hardware OV/OC backstops remain). If the bus climbs over the active target the
-    // battery has less headroom than assumed — stop immediately rather than push more current.
-    if (ChargingVoltageTarget > 1.0f && IBV > ChargingVoltageTarget + 0.8f) {
-      queueConsoleMessageF("Field curve: ABORTED — bus %.2fV over target %.2fV (no charge headroom)",
-                           IBV, ChargingVoltageTarget);
-      fieldCurveActive = 0;
-      fieldCurveLastEndMs = millis();
-      phase = 0;
-      dutyOut = FIELDCURVE_DUTY_START;
-      return false;
-    }
+    // Over-voltage during the ramp is handled by the canonical fast-OV layer on the main
+    // control path (REASON_FAST_OVERVOLTAGE: live bus > AlternatorHardShutdownV → immediate
+    // field cut, fires before this override runs). That cut also flags fieldCurveAbortRequested,
+    // so the ramp tears down cleanly. No bespoke per-target headroom abort is needed here.
     dutyOut = stepDuty;
 
     // Accumulate amps only over the settled second half of the dwell.
@@ -3324,11 +3338,14 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
                              fieldCurveOk ? "ok" : "review");
 
         fieldCurveResultsReady = true;
-        fieldCurveActive = 0;
-        fieldCurveLastEndMs = millis();
-        phase = 0;
-        dutyOut = FIELDCURVE_DUTY_START;  // ease duty back down on exit tick
-        return false;
+        // Ease the field down over ~1.5 s instead of snapping from the ramp peak to the start duty —
+        // a one-tick collapse trips a protection when the override releases. Keep fieldCurveActive
+        // non-zero so the dashboard poll waits for the ease to finish.
+        fcEaseFromDuty = stepDuty;
+        fcEaseStartMs = nowMs;
+        phase = 2;
+        fieldCurveActive = 2;
+        return true;
       }
 
       // Next step.
@@ -3337,6 +3354,20 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       ampSum = 0.0;
       ampN = 0;
     }
+    return true;
+  }
+
+  // ── EASE-OUT ──────────────────────────────────────────────────────────────
+  if (phase == 2) {
+    float frac = (float)(nowMs - fcEaseStartMs) / 1500.0f;
+    if (frac >= 1.0f) {
+      fieldCurveActive = 0;
+      fieldCurveLastEndMs = millis();
+      phase = 0;
+      dutyOut = FIELDCURVE_DUTY_START;
+      return false;
+    }
+    dutyOut = fcEaseFromDuty + (FIELDCURVE_DUTY_START - fcEaseFromDuty) * frac;
     return true;
   }
 
@@ -3361,6 +3392,9 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
   static double   sAmpsSin, sAmpsCos, sAmps, sSin, sCos, sAmpsSq;
   static uint32_t nAcc;
   static float    freqList[TUNING_SWEEP_NPOINTS];
+  static bool     tuningEaseActive = false;   // post-sweep setpoint ease-down
+  static uint32_t tuningEaseStartMs = 0;
+  static float    tuningEaseFromA = 0.0f;
 
   float f;
   if (tuningWaveform == 2) {
@@ -3372,7 +3406,7 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
       for (int i = 0; i < TUNING_SWEEP_NPOINTS; i++)
         freqList[i] = fLo * powf(fHi / fLo, (float)i / (float)(TUNING_SWEEP_NPOINTS - 1));
       segIdx = 0; segStarted = false; tuningBodeCount = 0;
-      tuningSweepActive = true; tuningSweepDone = false;
+      tuningSweepActive = true; tuningSweepDone = false; tuningEaseActive = false;
       // Reset whole-sweep run-condition trackers (captured into the record at commit).
       tuningSweepBaseA = baseA; tuningSweepAmpA = ampA;
       tuningSweepRpmMin = (float)RPM; tuningSweepRpmMax = (float)RPM;
@@ -3384,6 +3418,16 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
                            tuningSweepCycles, ampA);
     }
     if (!tuningSweepActive) {
+      if (tuningEaseActive) {
+        // Post-sweep: ease the current setpoint down to the wave floor over ~1.5 s so the field
+        // comes off gently. Otherwise it holds at the sweep center and the still-high current reads
+        // as an over-current the instant TuningMode releases and protections re-arm. Hold
+        // tuningSweepDone false until the ease finishes so the dashboard waits it out.
+        float frac = (float)(nowMs - tuningEaseStartMs) / 1500.0f;
+        if (frac >= 1.0f) { tuningEaseActive = false; tuningSweepDone = true; out = (float)tuningWaveFloor; }
+        else out = tuningEaseFromA + ((float)tuningWaveFloor - tuningEaseFromA) * frac;
+        return;
+      }
       out = baseA;   // idle hold at midpoint until a sweep is requested / after done
       return;
     }
@@ -3446,9 +3490,10 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
                            segIdx + 1, f, gain, phaseDeg, (unsigned long)nAcc);
       segIdx++; segStarted = false;
       if (segIdx >= TUNING_SWEEP_NPOINTS) {
-        tuningSweepActive = false; tuningSweepDone = true;
+        tuningSweepActive = false;   // tuningSweepDone set after the ease-down below completes
         queueConsoleMessage("Tuning sine sweep complete.");
         commitTuningSweepRecord();
+        tuningEaseActive = true; tuningEaseStartMs = nowMs; tuningEaseFromA = baseA;
       }
     }
   }

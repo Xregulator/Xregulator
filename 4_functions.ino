@@ -3945,6 +3945,118 @@ void executeClearForcedUpdate() {
 
   http.end();
 }
+
+// Extract a flat top-level "field":"value" string from a JSON body (returns "" for
+// missing or null). Used for the short id fields in the pending-config response; the
+// big config blob itself is handled by applyImportConfig's string scan, not ArduinoJson.
+static String jsonStringField(const String &body, const char *field) {
+  String needle = "\"";
+  needle += field;
+  needle += "\"";
+  int i = body.indexOf(needle);
+  if (i < 0) return "";
+  i += needle.length();
+  while (i < (int)body.length() && (body[i] == ' ' || body[i] == '\t' || body[i] == ':')) i++;
+  if (i >= (int)body.length() || body[i] != '"') return "";   // null or non-string -> none
+  i++;
+  int j = body.indexOf('"', i);
+  if (j < 0) return "";
+  return body.substring(i, j);
+}
+
+// Admin config push (boot-only): ask the cloud whether a config is queued for this device.
+// If a new one is present (id != the last applied id stored in NVS), apply tier-1 settings,
+// record the id, clear the server flag, and reboot so InitSystemSettings re-reads cleanly.
+// The NVS id guard makes this idempotent — a stale/un-cleared flag never re-applies or loops.
+void executeGetPendingConfig() {
+  if (!isRegistered || authToken.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (currentMode != MODE_CLIENT) return;
+  if (WiFi.RSSI() < -76) return;
+
+  String response;
+  int httpCode = -1;
+  {  // scope the TLS client so it frees before any clear-call TLS context opens
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(8);
+    HTTPClient http;
+    String url = String(SUPABASE_URL) + "/functions/v1/get-pending-config";
+    if (!http.begin(client, url)) {
+      Serial.println("PENDING_CONFIG: HTTP begin failed");
+      return;
+    }
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
+    http.setTimeout(8000);
+    String payload = "{\"token\":\"" + authToken + "\"}";
+    httpCode = http.POST(payload);
+    if (httpCode == 200) response = http.getString();
+    http.end();
+  }
+  if (httpCode != 200) {
+    Serial.printf("PENDING_CONFIG: HTTP %d\n", httpCode);
+    return;
+  }
+
+  String pid = jsonStringField(response, "pending_config_id");
+  if (pid.length() == 0) {
+    Serial.println("PENDING_CONFIG: none queued");
+    return;
+  }
+
+  String lastApplied = settingExists(NK_lastAppldCfgId) ? settingRead(NK_lastAppldCfgId) : "";
+  if (pid == lastApplied) {
+    // Already applied — self-heal a server flag the previous boot's clear may have missed.
+    Serial.println("PENDING_CONFIG: already applied; self-healing flag");
+    pendingConfigClearId = pid;
+    executeClearPendingConfig();
+    return;
+  }
+
+  // Apply tier-1 only (never push hardware/calibration to a device remotely). applyImportConfig
+  // scans the response for the embedded "config" object, so no big JSON parse is needed.
+  int n = applyImportConfig(response.c_str(), 0);
+  if (n < 0) {
+    Serial.println("PENDING_CONFIG: malformed blob, not applied");
+    return;
+  }
+  settingWrite(NK_lastAppldCfgId, pid.c_str());
+  Serial.printf("PENDING_CONFIG: applied %d settings from config %s; rebooting\n", n, pid.c_str());
+  queueConsoleMessage("Config push: applied " + String(n) + " settings, rebooting to load");
+
+  pendingConfigClearId = pid;
+  executeClearPendingConfig();   // synchronous (same task) so it completes before the reboot
+  rebootRequested = true;
+  rebootRequestedAt = millis();
+}
+
+// Clear the queued config server-side after applying it. Mirrors executeClearForcedUpdate;
+// config_id is matched so a newer push staged in the meantime is not wiped.
+void executeClearPendingConfig() {
+  if (!isRegistered || authToken.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (currentMode != MODE_CLIENT) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(8);
+
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/functions/v1/clear-pending-config";
+  if (!http.begin(client, url)) {
+    Serial.println("CLEAR_PENDING_CONFIG: HTTP begin failed");
+    return;
+  }
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
+  http.setTimeout(8000);
+
+  String payload = "{\"token\":\"" + authToken + "\",\"config_id\":\"" + pendingConfigClearId + "\"}";
+  int httpCode = http.POST(payload);
+  Serial.printf("CLEAR_PENDING_CONFIG: HTTP %d\n", httpCode);
+  http.end();
+}
 void printPartitionInfo() {
   Serial.println("=== PARTITION SUMMARY ===");
 

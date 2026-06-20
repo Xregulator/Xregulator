@@ -161,7 +161,9 @@ enum HttpsRequestType {
   HTTPS_FETCH_WEATHER,
   HTTPS_UPDATE_FW_VERSION,
   HTTPS_CHECK_FORCED_UPDATE,
-  HTTPS_CLEAR_FORCED_UPDATE
+  HTTPS_CLEAR_FORCED_UPDATE,
+  HTTPS_GET_PENDING_CONFIG,    // admin config push: fetch a queued config at boot
+  HTTPS_CLEAR_PENDING_CONFIG   // clear the queued config after applying it
 };
 
 struct HttpsRequest {
@@ -1638,6 +1640,36 @@ time_t     longTermLastEpoch      = 0;       // epoch of newest record (0 = unsy
 // while the ring is small and bounded (~501 KB) when full.
 const unsigned long LONGTERM_DUMP_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
 
+// ===== ZERO-DRIFT CHARACTERIZATION LOG (temporary diagnostic) =====
+// Records the alternator current sensor's reading WHILE THE FIELD IS OFF, to characterize how its
+// zero point drifts vs. time / temperature / RPM. Sampled only when field-off >= 5 s: every 1 s
+// while the engine spins (RPM>=200, for fast RPM sweeps), every 10 min while the engine is off.
+// MeasuredAmps IS the raw sensor zero as long as auto-zero + manual offset are off — so run the
+// characterization with Alternator Auto-Zero OFF. PSRAM ring, flushed to LittleFS field-off only;
+// /zerolog.csv reads the live ring (always complete). Master toggle ZeroLogEnable, default OFF.
+struct ZeroLogRecord {        // 18 bytes (compiler pads to 20)
+  uint32_t epoch;             // wall-clock seconds (0 = unsynced)
+  float    amps;              // MeasuredAmps at sample time (the zero-drift signal)
+  float    p2pAmps;           // peak-to-peak of MeasuredAmps over the prior 0.5 s
+  int16_t  rpm;               // engine RPM
+  int16_t  battVx100;         // battery volts ×100
+  int16_t  altTempFx10;       // alternator temperature °F ×10
+};
+const uint16_t ZEROLOG_RING_SIZE = 10000;   // ~195 KB PSRAM; ~2.8 hr @1s spinning, days @10min idle
+ZeroLogRecord *zeroLogRing = nullptr;       // ps_malloc'd in zeroLogInit()
+volatile uint16_t zeroLogHead = 0;          // next write slot (circular)
+volatile uint16_t zeroLogCount = 0;         // 0..ZEROLOG_RING_SIZE
+uint16_t  prev_zeroLogHead = 0xFFFF;        // shadow — flush only when head moved
+bool      ZeroLogEnable = false;            // master toggle (NVS NK_ZeroLogEnable), default OFF
+float     altAmpsP2P = 0.0f;                // latched 0.5 s peak-to-peak of MeasuredAmps (set in ReadAnalogInputs)
+#define ZEROLOG_PATH  "/zerolog.bin"
+#define ZEROLOG_MAGIC 0x5A45524Fu           // 'ZERO'
+#define ZEROLOG_VER   1u
+#define ZEROLOG_FIELDOFF_MIN_MS  5000UL     // field must be off this long before a sample (own short gate)
+#define ZEROLOG_RUN_INTERVAL_MS  1000UL     // sample period while engine spinning (RPM>=200)
+#define ZEROLOG_IDLE_INTERVAL_MS 600000UL   // sample period while engine off (RPM<200) = 10 min
+#define ZEROLOG_FLUSH_MS         1800000UL  // field-off flush cadence = 30 min
+
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
   int32_t accel_x_min, accel_x_max;
@@ -2892,7 +2924,8 @@ enum FieldEventReason : uint8_t {
   REASON_INA_OVERVOLTAGE,
   REASON_HARD_OVERCURRENT,
   REASON_RPM_TOO_LOW,
-  REASON_CURRENT_STALE
+  REASON_CURRENT_STALE,
+  REASON_FAST_OVERVOLTAGE          // absolute OV ceiling — fires in ALL modes incl. MANUAL (live per-tick, immediate cut)
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -3048,6 +3081,54 @@ uint8_t capLimitMode = 0;  // 0 = use amp cap (rpmCapCurrentTable), 1 = use kW c
 // excitation to produce useful output when spinning slowly.
 float rpmMinDutyTable[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
 float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
+
+// ===== AUTO MIN% LEARNING ("knee tracker") =====
+// Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and
+// parks rpmMinDutyTable a margin below it. Observer only — governor_apply/getMinimumFieldForRPM
+// are unchanged; this just rewrites rpmMinDutyTable like a user edit. Learning runs in
+// temp/voltage-normalized excitation space; kneeDutyRef/kneeFloorRef are duty% at reference
+// conditions (kneeVbusRef/kneeTempRefF). Full spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
+float kneeDutyRef[RPM_TABLE_SIZE]   = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };  // learned knee (duty% @ reference)
+float kneeFloorRef[RPM_TABLE_SIZE]  = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };  // commanded floor (creeps up, snaps down)
+float kneeConf[RPM_TABLE_SIZE]      = { 0 };  // 0..1 confidence (EMA fill per bin)
+uint32_t kneeLastMs[RPM_TABLE_SIZE] = { 0 };  // millis() of last knee confirmation (runtime only)
+uint32_t kneeSampN[RPM_TABLE_SIZE]  = { 0 };  // steady samples folded (runtime only)
+// User knobs (NVS settings namespace, NK_* keys)
+bool  kneeLearnEnable = false;   // master: when true, learner owns + auto-writes rpmMinDutyTable
+float kneeMarginPct   = 5.0f;    // park floor this many duty-% below the knee
+float kneeKickInA     = 2.0f;    // amps above this at the floor = "output building"
+float kneeDwellSec    = 4.0f;    // inputs must hold steady this long before a sample counts
+float kneeCreepPctMin = 0.5f;    // floor push-up rate (duty %/min) while probing
+float kneeUpdateGain  = 0.25f;   // EMA weight applied to each knee confirmation (0..1)
+float kneeVbusRef     = 13.6f;   // reference bus voltage for excitation<->duty conversion
+float kneeTempRefF    = 100.0f;  // reference temperature (degF) for excitation<->duty conversion
+float kneeMaxFloorPct = 12.0f;   // hard clamp on any learned floor (safety)
+float kneeRpmTolPct   = 6.0f;    // steady band: RPM, % of reading
+float kneeVbusTolV    = 0.20f;   // steady band: Vbus, volts
+float kneeTempTolF    = 4.0f;    // steady band: temperature, degF
+float kneeDutyTolPct  = 1.0f;    // steady band: applied duty, duty-% points
+// Live diagnostics (for /kneeLearnState)
+int   kneeActiveBin   = -1;      // bin currently being observed (-1 = none)
+bool  kneeFloorActive = false;   // governor is clamping up to the floor right now
+bool  kneeSteadyNow   = false;   // inputs currently within steady bands
+// Prototypes (defined in 6_functions.ino) — declared here so setup()/loop() and 3_functions.ino see them.
+void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
+                      float dutyRequest, float rpmFloorDuty, bool modeOk);
+void kneeLearnInit();
+void kneeLearnService(bool fieldOff);
+void saveKneeLearnState();
+void kneeLearnResetDefaults();
+String kneeLearnStateJson();
+
+// Config Sharing (8_functions.ino) — export/import the cloneable settings set
+String manifestConfigObject(bool includeHardware);
+String exportConfigJson(bool includeHardware);
+int applyImportConfig(const char *body, bool includeHardware);
+
+// Admin config push (4_functions.ino) — boot-time pull of a cloud-queued config
+void executeGetPendingConfig();
+void executeClearPendingConfig();
+String pendingConfigClearId = "";   // id passed from get → clear within one boot check
 
 unsigned long lastOverheatTime[RPM_TABLE_SIZE] = { 0 };          // Timestamp of last overheat per RPM
 int overheatCount[RPM_TABLE_SIZE] = { 0 };                       // Total overheat events per RPM
@@ -3866,7 +3947,7 @@ Stream *OutputStream = &Serial;
 
 //ADS1115 more pre-setup crap
 uint32_t adsI2CErrorCount = 0;
-uint32_t adsSlowReadCount = 0;      // times ADS_READ_RESULT took >5ms (I2C stall events)
+uint32_t adsSlowReadCount = 0;      // times the convert-register read took >5ms (I2C stall events)
 // I2C bus-health instrumentation — separates a true bus stall from loop preemption.
 // inaBusReadWorstUs / imuFifoFetchWorstUs time ONLY the Wire transactions; compare them
 // to the whole-block ft_rai_ina228 / IMU-drain timers: equal => the bus, much smaller =>
@@ -3900,6 +3981,7 @@ int adsTriggeredChannel = 0;
 unsigned long adsStateEntered = 0;
 const unsigned long ADS_CONVERSION_MS = 3;  // 1.16ms at 860SPS + millis() granularity margin
 const unsigned long ADS_TIMEOUT_MS = 10;    // hardware fault catcher
+const uint32_t ADS_SLOT_US = 4500;  // absolute per-slot grid; CH1 = 2 slots ≈ 9ms. Must exceed conversion time (1.16ms@860SPS).
 
 volatile bool ch1FreshFlag = false;  // Set when CH1 result is ready, consumed by AdjustFieldLearnMode()
 
@@ -4382,6 +4464,8 @@ void setup() {
     queueConsoleMessage("Watchdog: Failed to configure");
   }
   loadLearningTableFromNVS();  // Load all table data at boot
+  kneeLearnInit();             // Auto Min% learning: load knobs + learned per-bin state (after the table)
+  zeroLogInit();               // Zero-drift characterization log: load toggle, alloc PSRAM ring, restore persisted records
   Serial.println();
   // Force initial sensor readings before main loop starts
   delay(50);  // Brief settling time
@@ -4492,6 +4576,20 @@ void loop() {
     }
   }
   // // === END OTA UPDATE ===
+
+  // === ADMIN CONFIG PUSH: one-shot pending-config check after the OTA checks ===
+  // Boot-only, like the forced-update check. Fires once after otaCheckDone so it doesn't
+  // compete with the depth-2 httpsQueue; retries next loop if the queue is momentarily full.
+  static bool pendingConfigCheckDone = false;
+  if (!pendingConfigCheckDone && otaCheckDone && millis() > 6000) {
+    if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED && isRegistered && !core0Busy && WiFi.RSSI() >= -76) {
+      HttpsRequest req = { .type = HTTPS_GET_PENDING_CONFIG };
+      if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) pendingConfigCheckDone = true;
+    } else if (currentMode != MODE_CLIENT) {
+      pendingConfigCheckDone = true;   // not a cloud client — nothing to pull
+    }
+  }
+
   esp_task_wdt_reset();              // Feed the watchdog to prevent timeout
   starttime = esp_timer_get_time();  // Record start time for Loop
   // Latched at the top of the pass so a pass that drops the field mid-way still counts as
@@ -4511,6 +4609,7 @@ void loop() {
     TIMED_CALL(ft_UpdateBoardTempPressureMaximums, UpdateBoardTempPressureMaximums());  // NEW
     TIMED_CALL(ft_handleSocGainReset, handleSocGainReset());                            // do the dynamic updates
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
+    kneeLearnService(fieldOffSettled(2000));  // Auto Min% learning: NVS flush of learned floors, field-off-gated (never stalls control)
 
     // Barometric pressure history sampler — 5-min cadence into baroPressureHistory ring.
     // Skipped if BMP388 hasn't reported (NAN). Wall-clock epoch stamped only if timeIsSynced
@@ -4544,6 +4643,7 @@ void loop() {
     // above (banks during charging, flushes when safe). Timed: it's a flash writer.
     TIMED_CALL(ft_faMatrixFlush, faMatrixMaybeFlush());
   }
+  zeroLogService();  // Zero-drift diagnostic: sample (field-off >=5s; 1s spinning / 10min idle) + field-off-only flash flush. Cheap unless flushing.
   TIMED_CALL(ft_calculateChargeTimes, calculateChargeTimes());  // might want to put this in the above if statement and unthrottle at some point update later
   // Fast alt-current channel: bounded DMA drain (~1 ms hard cap). Unconditional and
   // out-of-band of all control — sampling is hardware-timed (DMA fills itself), this
@@ -5107,9 +5207,15 @@ void loop() {
   //       no watermark to clear. The SSE console still gets the classic line on a genuine new worst.
   static uint32_t winStartMs = 0, winN10 = 0, winN15 = 0, winN20 = 0, winMaxUs = 0;
   static uint32_t lastStallMs = 0, lastEvtPrintMs = 0, evtSuppressed = 0;
+  static uint32_t winB46 = 0, winB68 = 0, winB810 = 0;  // sub-10ms loop-pass bands — the band that stretches CH1 reads
   uint32_t ltUs = (uint32_t)LoopTime;
   uint32_t nowMsLD = millis();
   if (winStartMs == 0) winStartMs = nowMsLD;
+  if (ltUs >= 4000) {
+    if (ltUs < 6000) winB46++;
+    else if (ltUs < 8000) winB68++;
+    else if (ltUs < 10000) winB810++;
+  }
   if (ltUs > LOOP_DIAG_THRESH_US) {
     uint32_t gap = lastStallMs ? (nowMsLD - lastStallMs) : 0;
     lastStallMs = nowMsLD;
@@ -5145,16 +5251,18 @@ void loop() {
     }
   }
   if (nowMsLD - winStartMs >= 30000UL) {       // 30 s self-resetting window summary (also a liveness pulse)
-    char ws[176];
+    char ws[224];
     int wsn = snprintf(ws, sizeof(ws),
-      "WIN %lus n>10=%lu n>15=%lu n>20=%lu max=%.1fms clients=%u mhz=%u heap=%lu\n",
+      "WIN %lus b4-6=%lu b6-8=%lu b8-10=%lu n>10=%lu n>15=%lu n>20=%lu max=%.1fms clients=%u mhz=%u heap=%lu\n",
       (unsigned long)((nowMsLD - winStartMs) / 1000UL),
+      (unsigned long)winB46, (unsigned long)winB68, (unsigned long)winB810,
       (unsigned long)winN10, (unsigned long)winN15, (unsigned long)winN20,
       winMaxUs / 1000.0f, (unsigned)events.count(), (unsigned)getCpuFrequencyMhz(),
       (unsigned long)ESP.getFreeHeap());
     if (wsn > 0 && Serial.availableForWrite() >= wsn) Serial.write((const uint8_t *)ws, wsn);
     winStartMs = nowMsLD;
     winN10 = winN15 = winN20 = 0; winMaxUs = 0;
+    winB46 = winB68 = winB810 = 0;
   }
   // 80MHz low-power loop health (engine-off only). One cheap freq read gates it;
   // tracks worst pass + counts passes over the accel FIFO drain limit. See LOOP80_* globals.

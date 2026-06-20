@@ -394,6 +394,22 @@ bool fsRemove(const char *path) {
 #define NK_faAttenUpAmps "faAttenUpA"
 #define NK_faAttenDownAmps "faAttenDnA"
 #define NK_faPeakMinA "faPeakMinA"
+// Auto Min% learning ("knee tracker") knobs (keys <= 15 chars)
+#define NK_kneeLearnEnable "kneeLearnEn"
+#define NK_kneeMarginPct   "kneeMarginPct"
+#define NK_kneeKickInA     "kneeKickInA"
+#define NK_kneeDwellSec    "kneeDwellSec"
+#define NK_kneeCreepPctMin "kneeCreepPctMn"
+#define NK_kneeUpdateGain  "kneeUpdGain"
+#define NK_kneeVbusRef     "kneeVbusRef"
+#define NK_kneeTempRefF    "kneeTempRefF"
+#define NK_kneeMaxFloorPct "kneeMaxFloorPc"
+#define NK_kneeRpmTolPct   "kneeRpmTolPct"
+#define NK_kneeVbusTolV    "kneeVbusTolV"
+#define NK_kneeTempTolF    "kneeTempTolF"
+#define NK_kneeDutyTolPct  "kneeDutyTolPct"
+#define NK_ZeroLogEnable   "ZeroLogEnable"   // Zero-drift characterization log master toggle
+#define NK_lastAppldCfgId  "lastAppldCfgId"  // id of the last admin-pushed config applied (reboot-loop guard)
 
 #define SETTINGS_NVS_NAMESPACE "settings"
 
@@ -1087,6 +1103,7 @@ void TempTask(void *parameter) {
     }
 
     uint32_t pollInterval = lastReadWasSuccess ? 5000 : 1000;
+    if (RPM < 200) pollInterval = 600000;  // engine off: throttle to 10 min (reads fine at 80MHz; keeps temp fresh for the zero-drift log at low standby power)
     if (now - lastTempRead < pollInterval) {
       tempStaleSkipCount++;
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1351,6 +1368,14 @@ void httpsTask(void *param) {
           break;
         case HTTPS_CLEAR_FORCED_UPDATE:
           executeClearForcedUpdate();
+          opSuccess = true;
+          break;
+        case HTTPS_GET_PENDING_CONFIG:
+          executeGetPendingConfig();
+          opSuccess = true;
+          break;
+        case HTTPS_CLEAR_PENDING_CONFIG:
+          executeClearPendingConfig();
           opSuccess = true;
           break;
       }
@@ -2679,6 +2704,88 @@ void restoreLongTermRing() {
   Serial.printf("restoreLongTermRing: restored %u records\n", (unsigned)n);
 }
 
+// ===== Zero-drift characterization log (temporary diagnostic) =====
+// Flush the PSRAM ring to LittleFS so a reboot doesn't lose the session. Field-off only (the
+// caller gates it), mirrors dumpLongTermRing — writes just `count` records via the blob scaffold.
+void dumpZeroLog() {
+  if (!zeroLogRing || zeroLogCount == 0) return;
+  uint16_t startIdx = (zeroLogCount < ZEROLOG_RING_SIZE) ? 0 : zeroLogHead;  // oldest record
+  uint32_t n = writePsramBlob(ZEROLOG_PATH, ZEROLOG_MAGIC, ZEROLOG_VER, 0,
+                              zeroLogRing, sizeof(ZeroLogRecord),
+                              ZEROLOG_RING_SIZE, startIdx, zeroLogCount);
+  if (n > 0) prev_zeroLogHead = zeroLogHead;  // mark dumped so the edge won't re-write unchanged
+}
+
+// Boot init: load the enable toggle, alloc the PSRAM ring, restore any persisted records
+// (linearized tail=0, head=count). Called from setup() after kneeLearnInit().
+void zeroLogInit() {
+  if (!settingExists(NK_ZeroLogEnable)) settingWrite(NK_ZeroLogEnable, "0");
+  else ZeroLogEnable = (settingRead(NK_ZeroLogEnable).toInt() != 0);
+  if (!zeroLogRing) {
+    zeroLogRing = (ZeroLogRecord *)ps_malloc(ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
+    if (!zeroLogRing) { Serial.println("FATAL: zeroLogRing ps_malloc failed"); return; }
+    memset(zeroLogRing, 0, ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
+  }
+  uint32_t uw = 0;
+  uint32_t n = readPsramBlob(ZEROLOG_PATH, ZEROLOG_MAGIC, ZEROLOG_VER,
+                             zeroLogRing, sizeof(ZeroLogRecord), ZEROLOG_RING_SIZE, &uw, false);
+  zeroLogCount = (uint16_t)n;
+  zeroLogHead  = (n >= ZEROLOG_RING_SIZE) ? 0 : (uint16_t)n;
+  prev_zeroLogHead = zeroLogHead;
+  if (n > 0) Serial.printf("zeroLogInit: restored %u records\n", (unsigned)n);
+}
+
+// Dashboard "Reset Log" handler: empty the ring + delete the LittleFS backup (fresh session).
+void zeroLogResetAll() {
+  zeroLogHead = 0; zeroLogCount = 0; prev_zeroLogHead = 0xFFFF;
+  if (zeroLogRing) memset(zeroLogRing, 0, ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
+  fsTakeLock();
+  if (fsExists(ZEROLOG_PATH)) LittleFS.remove(ZEROLOG_PATH);
+  fsReleaseLock();
+  Serial.println("Cleared zero-drift log + backup");
+}
+
+// Called every loop pass. Samples while field-off >= 5 s (1 s spinning / 10 min idle) into the ring
+// (RAM only), and flushes to flash field-off only (60s-settled, every 30 min, new-data-gated — same
+// flash discipline as dumpLongTermRing). The flush is the only flash write; sampling is trivial.
+void zeroLogService() {
+  if (!zeroLogRing || !ZeroLogEnable) return;
+  uint32_t now = millis();
+
+  // SAMPLE — own short field-off timer. fieldOffSettled() has a 60 s floor (it gates flash writes,
+  // a different job), so we track field-off start here for the 5 s sampling threshold.
+  static uint32_t lastFieldOnMs = 0;
+  if (fieldActiveStatus > 0) lastFieldOnMs = now;
+  if ((now - lastFieldOnMs) >= ZEROLOG_FIELDOFF_MIN_MS) {
+    uint32_t interval = (RPM >= 200) ? ZEROLOG_RUN_INTERVAL_MS : ZEROLOG_IDLE_INTERVAL_MS;
+    static uint32_t lastSampleMs = 0;
+    if (lastSampleMs == 0 || (now - lastSampleMs) >= interval) {
+      lastSampleMs = now;
+      ZeroLogRecord &r = zeroLogRing[zeroLogHead];
+      r.epoch       = (uint32_t)getCurrentTimestamp();
+      r.amps        = MeasuredAmps;
+      r.p2pAmps     = altAmpsP2P;
+      r.rpm         = (int16_t)constrain((long)lroundf(RPM), -32768L, 32767L);
+      r.battVx100   = (int16_t)lroundf(getBatteryVoltage() * 100.0f);
+      r.altTempFx10 = (int16_t)lroundf(AlternatorTemperatureF * 10.0f);
+      zeroLogHead = (zeroLogHead + 1) % ZEROLOG_RING_SIZE;
+      if (zeroLogCount < ZEROLOG_RING_SIZE) zeroLogCount++;
+    }
+  }
+
+  // FLUSH — field-off only (60 s settled), every 30 min, only when the ring actually changed.
+  static bool prevFieldOff = false;
+  static uint32_t lastFlushMs = 0;
+  bool ffSettled = fieldOffSettled(0);
+  bool rising    = (ffSettled && !prevFieldOff);
+  bool periodic  = (ffSettled && (now - lastFlushMs >= ZEROLOG_FLUSH_MS));
+  if ((rising || periodic) && prev_zeroLogHead != zeroLogHead) {
+    dumpZeroLog();
+    lastFlushMs = now;
+  }
+  prevFieldOff = ffSettled;
+}
+
 // Dashboard "Clear" button handler. Empties the PSRAM ring and removes the
 // LittleFS shutdown-dump file so nothing comes back on next boot.
 void clearSensorBuffer() {
@@ -2720,201 +2827,22 @@ bool buildConfigPayload() {
     // payload_v = ingest payload schema version; bump when this body's shape changes.
     // Edge fn destructures named keys so it ignores this; present for version tracing.
     "\"payload_v\":1,"
-    "\"settings\":{",
+    "\"settings\":",
     device_id_hex, authToken.c_str(), timestampStr);
   if (offset < 0 || offset >= CONFIG_PAYLOAD_SIZE) return false;
 
   // ─── Settings ───────────────────────────────────────────────────────────────
-
-  // Electrical sizing & sensor topology
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    "\"BatteryCapacity_Ah\":%d,\"AlternatorNominalAmps\":%d,\"SolarWatts\":%d,"
-    "\"AmpSensorRange\":%d,\"ShuntResistanceMicroOhm\":%d,"
-    "\"BatteryCurrentSource\":%d,"
-    "\"InvertAltAmps\":%d,\"InvertBattAmps\":%d,\"hardwarePresent\":%d",
-    BatteryCapacity_Ah, AlternatorNominalAmps, SolarWatts,
-    AmpSensorRange, ShuntResistanceMicroOhm,
-    BatteryCurrentSource,
-    InvertAltAmps, InvertBattAmps, hardwarePresent);
-
-  // Thermistor / temperature config
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"TempSource\":%d,\"R_fixed\":%.2f,\"Beta\":%.2f,\"T0_C\":%.2f,"
-    "\"WindingTempOffset\":%.2f,\"displayTempUnit\":%d",
-    TempSource, R_fixed, Beta, T0_C, WindingTempOffset, displayTempUnit);
-
-  // Mechanical
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"FieldResistance\":%.2f,\"PulleyRatio\":%.3f,\"RPMScalingFactor\":%d,"
-    "\"SwitchingFrequency\":%.0f",
-    FieldResistance, PulleyRatio, RPMScalingFactor, SwitchingFrequency);
-
-  // Charge profile — voltage targets & stage timers
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"BulkVoltage\":%.2f,\"AbsorptionVoltage\":%.2f,\"FloatVoltage\":%.2f,"
-    "\"TargetVoltageMode\":%d,\"TargetVoltageSetpoint\":%.2f,"
-    "\"MaintainMode\":%d,\"UseFloat\":%d,"
-    "\"absorptionCompleteTime\":%lu,\"AbsorptionTimeoutMs\":%lu,"
-    "\"bulkVoltageHoldMs\":%lu,\"FLOAT_DURATION\":%lu,\"MinFloatTime\":%lu,"
-    "\"ChargedVoltage\":%.2f,\"ChargedDetectionTime\":%d,"
-    "\"TailCurrent\":%.2f,\"TailCurrent_A\":%.2f,\"CurrentThreshold\":%.3f,"
-    "\"MaximumAllowedBatteryAmps\":%d,\"MinRPMForField\":%d",
-    BulkVoltage, AbsorptionVoltage, FloatVoltage,
-    TargetVoltageMode, TargetVoltageSetpoint,
-    MaintainMode, UseFloat,
-    (unsigned long)absorptionCompleteTime, (unsigned long)AbsorptionTimeoutMs,
-    (unsigned long)bulkVoltageHoldMs, (unsigned long)FLOAT_DURATION, (unsigned long)MinFloatTime,
-    ChargedVoltage_Scaled / 100.0, ChargedDetectionTime,
-    TailCurrent, TailCurrent_A, CurrentThreshold,
-    MaximumAllowedBatteryAmps, MinRPMForField);
-
-  // Rebulk logic
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"RebulkVoltage\":%.2f,\"RebulkCurrent_A\":%.2f,\"rebulkDebounceTime\":%lu,"
-    "\"SOC_BlockRebulk_percent\":%d,\"SOC_AllowRebulk_percent\":%d",
-    RebulkVoltage, RebulkCurrent_A, (unsigned long)rebulkDebounceTime,
-    SOC_BlockRebulk_percent, SOC_AllowRebulk_percent);
-
-  // Safety / OV / OC / load dump / temp limits
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"AlternatorHardShutdownV\":%.2f,\"OvGroup1Enable\":%d,\"OvGroup2Enable\":%d,"
-    "\"OvMeasMarginV\":%.2f,\"OvPredMarginV\":%.2f,\"HardOCDebounceMs\":%lu,"
-    "\"LoadDumpDtThresh\":%.2f,\"LoadDumpDtThresh1\":%.2f,\"LoadDumpDtThresh3\":%.2f,"
-    "\"VoltageDisagreeThreshold\":%.2f,\"VoltageDisagreeTimeout\":%lu,"
-    "\"TemperatureLimitF\":%.2f,\"TempWarnExcess\":%.2f,\"TempCritExcess\":%.2f,"
-    "\"TempSustainedTimeout\":%lu,\"TempAlarm\":%d,\"TempAlarmLow\":%d,"
-    "\"VoltageAlarmHigh\":%.2f,\"VoltageAlarmLow\":%.2f,\"CurrentAlarmHigh\":%d,"
-    "\"AlarmActivate\":%d,\"AlarmLatchEnabled\":%d,"
-    "\"MaxDuty\":%.2f,\"MinDuty\":%.2f,\"MaxTableValue\":%.2f",
-    AlternatorHardShutdownV, OvGroup1Enable ? 1 : 0, OvGroup2Enable ? 1 : 0,
-    OvMeasMarginV, OvPredMarginV, (unsigned long)HardOCDebounceMs,
-    LoadDumpDtThresh, LoadDumpDtThresh1, LoadDumpDtThresh3,
-    VoltageDisagreeThreshold, (unsigned long)VoltageDisagreeTimeout,
-    TemperatureLimitF, TempWarnExcess, TempCritExcess,
-    (unsigned long)TempSustainedTimeout, TempAlarm, TempAlarmLow,
-    (float)VoltageAlarmHigh, (float)VoltageAlarmLow, CurrentAlarmHigh,
-    AlarmActivate, AlarmLatchEnabled,
-    MaxDuty, MinDuty, MaxTableValue);
-
-  // IMU motion thresholds
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"CAPSIZE_THRESHOLD_DEG\":%.2f,\"PITCHPOLE_THRESHOLD_DEG\":%.2f,"
-    "\"SLAM_THRESHOLD_G\":%.2f",
-    CAPSIZE_THRESHOLD_DEG, PITCHPOLE_THRESHOLD_DEG, SLAM_THRESHOLD_G);
-
-  // Current PID (inner loop)
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"PidKp\":%.4f,\"PidKi\":%.4f,\"PidKd\":%.4f,\"PidSampleDivisor\":%d,"
-    "\"PIDTrackingGain\":%.4f,\"InputFilterTC\":%.2f,\"OutputPIDFilterTC\":%.2f,"
-    "\"OutputPIDMA_N\":%d,\"OutputPIDSigSrc\":%d",
-    PidKp, PidKi, PidKd, PidSampleDivisor,
-    PIDTrackingGain, InputFilterTC, OutputPIDFilterTC,
-    OutputPIDMA_N, OutputPIDSigSrc);
-
-  // Voltage / CV protection loop
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"VoltageKp\":%.4f,\"VoltageKi\":%.4f,\"VoltageFilterTC\":%.2f,"
-    "\"VoltageLoopInterval\":%lu,"
-    "\"IExcessFrac\":%.4f,\"IExcessFracBulk\":%.4f,\"IExcessFloorA\":%.2f,"
-    "\"IExcessCeilA\":%.2f,\"IExcessTau\":%.1f,\"IExcessRelFrac\":%.3f,"
-    "\"IExcessKBleed\":%.4f,\"IExcessArmMarginV\":%.2f,"
-    "\"AwBleedRate\":%.4f,\"AwSeedProtectMs\":%lu,"
-    "\"FastSetpointRiseRate\":%.2f,\"FastSetpointRiseWindowMs\":%lu,"
-    "\"FastSetpointRiseHeadroomV\":%.2f,\"KHard\":%.4f,\"TdPred\":%.4f,"
-    "\"ReseedFrac\":%.4f,\"SlopeBleedThresh\":%.4f,\"SlopeBleedK\":%.4f,"
-    "\"SlopeBleedProxV\":%.2f,\"DvdtTC\":%.2f",
-    VoltageKp, VoltageKi, VoltageFilterTC,
-    (unsigned long)VoltageLoopInterval,
-    IExcessFrac, IExcessFracBulk, IExcessFloorA,
-    IExcessCeilA, IExcessTau, IExcessRelFrac,
-    IExcessKBleed, IExcessArmMarginV,
-    AwBleedRate, (unsigned long)AwSeedProtectMs,
-    FastSetpointRiseRate, (unsigned long)FastSetpointRiseWindowMs,
-    FastSetpointRiseHeadroomV, KHard, TdPred,
-    ReseedFrac, SlopeBleedThresh, SlopeBleedK,
-    SlopeBleedProxV, DvdtTC);
-
-  // Thermal PID
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"TempPIDKp\":%.4f,\"TempPIDKi\":%.4f,\"TempPIDIntervalMs\":%lu,"
-    "\"TempPIDFilterAlpha\":%.4f,\"ThermalLookaheadSec\":%.2f",
-    TempPIDKp, TempPIDKi, (unsigned long)TempPIDIntervalMs,
-    TempPIDFilterAlpha, ThermalLookaheadSec);
-
-  // Setpoint slew / ramp rates
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"SetpointRiseRate\":%.2f,\"SetpointFallRate\":%.2f,"
-    "\"StartupRiseRate\":%.2f,\"WarmupRampRate\":%.2f,"
-    "\"DutyRampRate\":%.2f,\"DutySlowRampRate\":%.2f,"
-    "\"SettleTimeBeforeCut\":%lu,\"ShutdownPhase2HoldMs\":%lu,"
-    "\"FIELD_COLLAPSE_DELAY\":%lu,\"FieldAdjustmentInterval\":%.2f",
-    SetpointRiseRate, SetpointFallRate,
-    StartupRiseRate, WarmupRampRate,
-    DutyRampRate, DutySlowRampRate,
-    (unsigned long)SettleTimeBeforeCut, (unsigned long)ShutdownPhase2HoldMs,
-    (unsigned long)FIELD_COLLAPSE_DELAY, FieldAdjustmentInterval);
-
-  // RPM / fuel / duty lookup tables (6 × 10-entry arrays expanded as JSON arrays)
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"rpmTableRPMPoints\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]",
-    rpmTableRPMPoints[0], rpmTableRPMPoints[1], rpmTableRPMPoints[2], rpmTableRPMPoints[3], rpmTableRPMPoints[4],
-    rpmTableRPMPoints[5], rpmTableRPMPoints[6], rpmTableRPMPoints[7], rpmTableRPMPoints[8], rpmTableRPMPoints[9]);
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"rpmCapCurrentTable\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
-    rpmCapCurrentTable[0], rpmCapCurrentTable[1], rpmCapCurrentTable[2], rpmCapCurrentTable[3], rpmCapCurrentTable[4],
-    rpmCapCurrentTable[5], rpmCapCurrentTable[6], rpmCapCurrentTable[7], rpmCapCurrentTable[8], rpmCapCurrentTable[9]);
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"rpmCapKW\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
-    rpmCapPowerTable[0], rpmCapPowerTable[1], rpmCapPowerTable[2], rpmCapPowerTable[3], rpmCapPowerTable[4],
-    rpmCapPowerTable[5], rpmCapPowerTable[6], rpmCapPowerTable[7], rpmCapPowerTable[8], rpmCapPowerTable[9]);
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"rpmMinDutyTable\":[%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f]",
-    rpmMinDutyTable[0], rpmMinDutyTable[1], rpmMinDutyTable[2], rpmMinDutyTable[3], rpmMinDutyTable[4],
-    rpmMinDutyTable[5], rpmMinDutyTable[6], rpmMinDutyTable[7], rpmMinDutyTable[8], rpmMinDutyTable[9]);
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"fuelTableRPM\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]",
-    fuelTableRPM[0], fuelTableRPM[1], fuelTableRPM[2], fuelTableRPM[3], fuelTableRPM[4],
-    fuelTableRPM[5], fuelTableRPM[6], fuelTableRPM[7], fuelTableRPM[8], fuelTableRPM[9]);
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"fuelTableGPH\":[%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]",
-    fuelTableGPH[0], fuelTableGPH[1], fuelTableGPH[2], fuelTableGPH[3], fuelTableGPH[4],
-    fuelTableGPH[5], fuelTableGPH[6], fuelTableGPH[7], fuelTableGPH[8], fuelTableGPH[9]);
-
-  // Calibration / auto-zero
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"AlternatorCOffset\":%.2f,\"BatteryCOffset\":%.2f,"
-    "\"AutoAltCurrentZero\":%d,\"AutoShuntGainCorrection\":%d",
-    AlternatorCOffset, BatteryCOffset, AutoAltCurrentZero, AutoShuntGainCorrection);
-
-  // Battery model — firmware stores scaled ints; descale to real values for the snapshot.
-  // PeukertExponent_scaled × 100 (e.g. 105 = 1.05).  ChargeEfficiency_scaled × 10 (e.g. 990 = 99.0%).
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"PeukertExponent\":%.3f,\"ChargeEfficiency\":%.3f",
-    PeukertExponent_scaled / 100.0, ChargeEfficiency_scaled / 10.0);
-
-  // Integrations & feature flags
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"VeData\":%d,\"NMEA0183Data\":%d,\"NMEA2KData\":%d,"
-    "\"gpsTimeSourceMode\":%d,\"socInfoAvailable\":%d,"
-    "\"bmsLogic\":%d,\"bmsLogicLevelOff\":%d,"
-    "\"CloudFeatures\":%d,"
-    "\"weatherModeEnabled\":%d,\"capLimitMode\":%d",
-    VeData, NMEA0183Data, NMEA2KData,
-    (int)gpsTimeSourceMode, socInfoAvailable ? 1 : 0,
-    bmsLogic, bmsLogicLevelOff,
-    CloudFeatures,
-    weatherModeEnabled, (int)capLimitMode);
-
-  // (Anomaly-detection config-snapshot fields removed with the old eff matrix.)
-
-  // Weather / location
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset,
-    ",\"LatitudeNMEA\":%.6f,\"LongitudeNMEA\":%.6f,"
-    "\"performanceRatio\":%.3f,\"UVThresholdHigh\":%.2f",
-    LatitudeNMEA, LongitudeNMEA, performanceRatio, UVThresholdHigh);
+  // Manifest-driven: the complete tier-1 + tier-2 settings set as raw NVS strings,
+  // sharing CONFIG_MANIFEST (8_functions.ino) with /exportConfig — one source of truth,
+  // so the fleet config snapshot can never drift behind the dashboard as settings are
+  // added. update-config-snapshot stores it verbatim as one jsonb column (no per-key DB).
+  {
+    String cfgObj = manifestConfigObject(true);   // true = include tier-2 install/topology keys
+    offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "%s", cfgObj.c_str());
+  }
 
   // ─── State ─────────────────────────────────────────────────────────────────
-  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, "},\"state\":{");
+  offset += snprintf(configPayloadBuffer + offset, CONFIG_PAYLOAD_SIZE - offset, ",\"state\":{");
 
   // Lifetime accumulators — every field also UPSERTs into device_statistics.
   // eng_hrs / alt_hrs sent as RAW SECONDS (firmware-canonical).
@@ -4319,9 +4247,13 @@ void faDetTask(void *pv) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // block until Core 1 arms a job (the notify is the barrier)
     FadResult res;
-    int64_t t0 = esp_timer_get_time();
+    // CPU time, not wall clock — esp_timer would count Core-0 preemption by WiFi (seconds).
+    TaskStatus_t ts;
+    vTaskGetInfo(NULL, &ts, pdFALSE, eInvalid);
+    uint32_t r0 = (uint32_t)ts.ulRunTimeCounter;
     fadStep(faDetJob, 0, &res);  // straight-line: runs the whole analysis to completion
-    uint32_t computeUs = (uint32_t)(esp_timer_get_time() - t0);
+    vTaskGetInfo(NULL, &ts, pdFALSE, eInvalid);
+    uint32_t computeUs = (uint32_t)ts.ulRunTimeCounter - r0;
     faDetLastComputeUs = computeUs;
     if (computeUs > faDetWorstComputeUs) faDetWorstComputeUs = computeUs;
     faSharedResult = res;

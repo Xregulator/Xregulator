@@ -929,6 +929,118 @@ let _altTrendPending = false, _altTrendLastFetch = 0;
 
 function fetchAltSchema(){ return fetch('/altschema').then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
 
+// ===== Automatic Min% Learning ("knee tracker") =====
+// Polls /kneeLearnState and fills the echo labels, knob input placeholders, and the per-RPM
+// status table. State flows through this endpoint, not CSV, so there is no CSV plumbing.
+function _kneeSetEcho(id, txt){ const e = document.getElementById(id); if (e) e.textContent = txt; }
+function _kneeSetInput(id, val){
+    const el = document.getElementById(id);
+    if (!el || el === document.activeElement) return;   // don't fight the user while editing
+    if (el.tagName === 'SELECT') { el.value = String(val); return; }
+    if (!el.value) el.placeholder = String(val);          // show current value as placeholder
+}
+function fetchKneeLearnState(){
+    return fetch(buildURL('/kneeLearnState')).then(r=>r.json()).then(j=>{
+        if (!j) return;
+        const on = (Number(j.enable) === 1);
+        _kneeSetEcho('kneeLearnEnable_echo', on ? 'On' : 'Off');
+        const sel = document.getElementById('kneeLearnEnable_input');
+        if (sel && sel !== document.activeElement) sel.value = on ? '1' : '0';
+        // When learning owns the Min% column, lock the 10 cells so manual edits can't be silently
+        // stomped by the learner; release them (and clear the hint) when learning is off.
+        for (let i = 0; i < 10; i++) {
+            const mi = document.getElementById('rpmMinDutyTable' + i + '_input');
+            if (!mi) continue;
+            mi.disabled = on;
+            mi.title = on ? 'Managed by Automatic Min% Learning — turn it off below to edit by hand' : '';
+        }
+        const mhint = document.getElementById('minduty-managed-hint');
+        if (mhint) mhint.style.display = on ? '' : 'none';
+        const f1 = (x)=>Number(x).toFixed(1), f2=(x)=>Number(x).toFixed(2);
+        _kneeSetEcho('kneeMarginPct_echo',   f1(j.marginPct));   _kneeSetInput('kneeMarginPct_input',   f1(j.marginPct));
+        _kneeSetEcho('kneeKickInA_echo',     f1(j.kickInA));     _kneeSetInput('kneeKickInA_input',     f1(j.kickInA));
+        _kneeSetEcho('kneeDwellSec_echo',    f1(j.dwellSec));    _kneeSetInput('kneeDwellSec_input',    f1(j.dwellSec));
+        _kneeSetEcho('kneeCreepPctMin_echo', f2(j.creepPctMin)); _kneeSetInput('kneeCreepPctMin_input', f2(j.creepPctMin));
+        _kneeSetEcho('kneeUpdateGain_echo',  f2(j.updateGain));  _kneeSetInput('kneeUpdateGain_input',  f2(j.updateGain));
+        _kneeSetEcho('kneeVbusRef_echo',     f1(j.vbusRef));     _kneeSetInput('kneeVbusRef_input',     f1(j.vbusRef));
+        _kneeSetEcho('kneeTempRefF_echo',    f1(j.tempRefF));    _kneeSetInput('kneeTempRefF_input',    f1(j.tempRefF));
+        _kneeSetEcho('kneeMaxFloorPct_echo', f1(j.maxFloorPct)); _kneeSetInput('kneeMaxFloorPct_input', f1(j.maxFloorPct));
+        _kneeSetEcho('kneeRpmTolPct_echo',   f1(j.rpmTolPct));   _kneeSetInput('kneeRpmTolPct_input',   f1(j.rpmTolPct));
+        _kneeSetEcho('kneeVbusTolV_echo',    f2(j.vbusTolV));    _kneeSetInput('kneeVbusTolV_input',    f2(j.vbusTolV));
+        _kneeSetEcho('kneeTempTolF_echo',    f1(j.tempTolF));    _kneeSetInput('kneeTempTolF_input',    f1(j.tempTolF));
+        _kneeSetEcho('kneeDutyTolPct_echo',  f1(j.dutyTolPct));  _kneeSetInput('kneeDutyTolPct_input',  f1(j.dutyTolPct));
+
+        const body = document.getElementById('knee-status-body');
+        if (body && Array.isArray(j.bins)) {
+            let html = '';
+            j.bins.forEach((b, i) => {
+                const active = (Number(j.activeBin) === i);
+                const confPct = Math.round(Number(b.conf) * 100);
+                let age;
+                if (Number(b.ageS) < 0) age = 'never';
+                else { const s = Number(b.ageS); age = s < 90 ? (s + 's') : s < 5400 ? (Math.round(s/60) + 'm') : (Math.round(s/3600) + 'h'); }
+                html += '<tr' + (active ? ' style="font-weight:700;"' : '') + '>'
+                      + '<td>' + (i === 0 ? '&lt;' : i === (j.bins.length-1) ? '' : '') + b.rpm + (i === (j.bins.length-1) ? '+' : '') + '</td>'
+                      + '<td>' + Number(b.floor).toFixed(1) + '</td>'
+                      + '<td>' + Number(b.knee).toFixed(1) + '</td>'
+                      + '<td>' + confPct + '%</td>'
+                      + '<td>' + age + '</td>'
+                      + '</tr>';
+            });
+            body.innerHTML = html;
+        }
+        const live = document.getElementById('knee-status-live');
+        if (live) {
+            const bin = Number(j.activeBin);
+            const where = (bin >= 0 && Array.isArray(j.bins) && j.bins[bin]) ? (' near ' + j.bins[bin].rpm + ' RPM') : '';
+            live.textContent = on
+                ? ('Status: ' + (Number(j.floorActive) === 1 ? 'probing floor' : 'watching') + (Number(j.steady) === 1 ? ', steady' : ', settling') + where)
+                : 'Status: learning off';
+        }
+    }).catch(()=>{});
+}
+function resetKneeLearn(){
+    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
+    if (!confirm("Reset all learned Min% floors to factory defaults?")) return;
+    const params = new URLSearchParams({ password: currentAdminPassword, ResetKneeLearn: '1' });
+    fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
+        .then(()=>{ setTimeout(fetchKneeLearnState, 400); })
+        .catch(()=>{});
+}
+
+// ===== Zero-drift characterization log (diagnostic) =====
+// Polls /zerologstate for the enable echo + fill/span status. CSV-free (own endpoint).
+let zeroLogToggledAt = 0; // ms timestamp of last user flip — guards the switch from poll snap-back
+function fetchZeroLogState(){
+    return fetch(buildURL('/zerologstate')).then(r=>r.json()).then(j=>{
+        if (!j) return;
+        const on = (Number(j.enable) === 1);
+        const e = document.getElementById('ZeroLogEnable_echo'); if (e) e.textContent = on ? 'On' : 'Off';
+        const cb = document.getElementById('ZeroLogEnable_checkbox');
+        // Don't fight a just-flipped switch during the GET round-trip (poll is ~1s).
+        if (cb && (Date.now() - zeroLogToggledAt) > 3000) cb.checked = on;
+        const st = document.getElementById('zerolog-status');
+        if (st) {
+            const cap = Number(j.cap) || 0, cnt = Number(j.count) || 0;
+            let span = '';
+            if (cnt > 1 && Number(j.oldest) > 0 && Number(j.newest) > 0) {
+                const dur = Number(j.newest) - Number(j.oldest);
+                const h = Math.floor(dur / 3600), m = Math.round((dur % 3600) / 60);
+                span = ', span ' + (h > 0 ? (h + 'h ' + m + 'm') : (m + 'm'));
+            }
+            st.textContent = 'Records: ' + cnt + ' / ' + cap + span;
+        }
+    }).catch(()=>{});
+}
+function resetZeroLog(){
+    if (!currentAdminPassword) { alert("Please unlock settings first"); return; }
+    if (!confirm("Erase the zero-drift log and start a fresh session?")) return;
+    const params = new URLSearchParams({ password: currentAdminPassword, ResetZeroLog: '1' });
+    fetchWithTimeout(buildURL('/get?' + params.toString()), {}, 8000)
+        .then(()=>{ setTimeout(fetchZeroLogState, 400); })
+        .catch(()=>{});
+}
+
 // Confidence-state labels + colors (firmware FrontStore::classify; OUTPUT-BLIND \u2014 position +
 // record-book geometry only). 0/1 show the live %; 2/3 deliberately show no number.
 const ALT_STATE_LABEL = ['MEASURED','ESTIMATED','Learning this operating region','No reference here yet'];
@@ -1003,6 +1115,68 @@ function downloadCsv(url, baseName){
     setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }).catch(e=>alert('Download failed: '+(e&&e.message?e.message:e)));
 }
+
+// ── Configuration Backup & Sharing ──────────────────────────────────────────
+// Export the whole config (/exportConfig), load one back (/importConfig, reboots),
+// and submit the current config to the cloud library for review (submit-config).
+// "Include hardware settings" (tier-2: sensor/shunt/polarity) applies to download/load
+// only — sharing never includes hardware (it's per-install).
+function configHwFlag(){
+  const cb=document.getElementById('configIncludeHardware');
+  return (cb && cb.checked) ? 1 : 0;
+}
+function exportConfigDownload(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  const hw=configHwFlag();
+  fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),{},10000)
+    .then(r=>{ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+    .then(txt=>{
+      const d=new Date(), p=n=>String(n).padStart(2,'0');
+      const stamp=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds());
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));
+      a.download='regulator-config '+stamp+'.json';
+      document.body.appendChild(a); a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }).catch(e=>alert('Export failed: '+(e&&e.message?e.message:e)));
+}
+function importConfigFromFile(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  const inp=document.getElementById('importConfigFile');
+  if(!inp || !inp.files || !inp.files.length){ alert('Choose a configuration file first.'); return; }
+  const hw=configHwFlag();
+  const warn='Apply this configuration to the regulator?\n\nThe regulator will REBOOT to apply it.'+
+    (hw?'\n\nHardware-specific settings (sensor/shunt/polarity) WILL be applied — only do this on identical hardware.':'');
+  if(!confirm(warn)) return;
+  const reader=new FileReader();
+  reader.onload=function(){
+    fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),
+      {method:'POST',body:reader.result},12000)
+      .then(r=>{ if(!r.ok){ return r.text().then(t=>{ throw new Error(t||('HTTP '+r.status)); }); } return r.json(); })
+      .then(res=>alert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
+      .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+  };
+  reader.readAsText(inp.files[0]);
+}
+async function shareConfigToLibrary(){
+  if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
+  const nameEl=document.getElementById('shareConfigName');
+  const name=nameEl?nameEl.value.trim():'';
+  try{
+    const token=await ensureCloudToken();
+    if(!token){ alert('This regulator is not registered for cloud features. Complete registration first.'); return; }
+    const r=await fetchWithTimeout(buildURL('/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=0'),{},10000);
+    if(!r.ok) throw new Error('export HTTP '+r.status);
+    const config=await r.json();
+    const resp=await fetch(`${SUPABASE_URL}/functions/v1/submit-config`,{
+      method:'POST', headers:cloudHeaders(), body:JSON.stringify({token, display_name:name, config})
+    });
+    const data=await resp.json();
+    if(resp.ok) alert('Submitted to the library for review (id '+data.id+'). It appears once approved.');
+    else alert('Submit failed: '+(data.error||('HTTP '+resp.status)));
+  }catch(e){ alert('Submit failed: '+(e&&e.message?e.message:e)); }
+}
+
 // Import a health curve from a file in Downloads (BEFRONT1). Opens the native picker;
 // altUploadCsvFile() reads it and POSTs the raw text to /altUploadFront. Mirrors perfLoadCsv.
 function altLoadCsv(){
@@ -2499,6 +2673,8 @@ function initializeEventSource() {
         }, false);
         fetchPerfSchema();
         fetchAltSchema();
+        if (!window._kneeTimer) { fetchKneeLearnState(); window._kneeTimer = setInterval(fetchKneeLearnState, 4000); }
+        if (!window._zeroLogTimer) { fetchZeroLogState(); window._zeroLogTimer = setInterval(fetchZeroLogState, 5000); }
 
         source.addEventListener('error', function (e) {
             const state = this.readyState;
@@ -6503,7 +6679,7 @@ function cloudDarkParam() {
 }
 function broadcastThemeToCloudIframes() {
     const dark = document.body.classList.contains('dark-mode');
-    ['leaderboards-iframe', 'fleetstats-iframe'].forEach(id => {
+    ['leaderboards-iframe', 'fleetstats-iframe', 'configsharing-iframe'].forEach(id => {
         const f = document.getElementById(id);
         if (f && f.contentWindow) {
             f.contentWindow.postMessage({ type: 'SET_THEME', dark }, 'https://supabase-nine-ashy.vercel.app');
@@ -6573,6 +6749,49 @@ async function loadFleetStatsInIframe() {
         }
     }
 }
+
+// ============================================
+// CLOUD FEATURES - Config Sharing
+// Browse the shared config library (Vercel page). Passes the device token so the page
+// can offer "load onto my regulator", which it relays back via a LOAD_CONFIG_TO_DEVICE
+// postMessage (handled below) — the cloud page can't reach the LAN device directly.
+// ============================================
+async function loadConfigSharingInIframe() {
+    const statusEl = document.getElementById('configsharing-status');
+    const iframe = document.getElementById('configsharing-iframe');
+    if (statusEl) statusEl.textContent = 'Loading shared configurations...';
+    try {
+        let tokenParam = '';
+        try {
+            const t = await ensureCloudToken();
+            if (t) tokenParam = '&token=' + encodeURIComponent(t);
+        } catch (e) { /* browsing works without a token; only loading-to-device needs it */ }
+        iframe.src = `https://supabase-nine-ashy.vercel.app/config-sharing.html?dark=${cloudDarkParam()}${tokenParam}`;
+        iframe.style.display = 'block';
+        iframe.onload = function () { if (statusEl) statusEl.style.display = 'none'; };
+    } catch (error) {
+        if (statusEl) {
+            statusEl.textContent = 'Error: Could not load shared configurations';
+            statusEl.style.color = '#ff6b6b';
+        }
+    }
+}
+
+// Relay a chosen library config from the Config Sharing iframe onto this regulator.
+// The iframe (cloud origin) can't POST to the LAN device, so it asks the parent to.
+function _configShareHandleMessage(e) {
+    if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
+    if (!e.data || e.data.type !== 'LOAD_CONFIG_TO_DEVICE' || !e.data.config) return;
+    if (!currentAdminPassword) { alert('Please unlock settings first'); return; }
+    const label = e.data.name ? ('"' + e.data.name + '"') : 'this configuration';
+    if (!confirm('Load ' + label + ' onto your regulator?\n\nThe regulator will REBOOT to apply it. Hardware-specific settings are not included.')) return;
+    fetchWithTimeout(buildURL('/importConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=0'),
+        { method: 'POST', body: JSON.stringify(e.data.config) }, 12000)
+        .then(r => { if (!r.ok) { return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); } return r.json(); })
+        .then(res => alert('Applied ' + res.applied + ' settings. ' + (res.reboot ? 'The regulator is rebooting — reconnect in ~30 s.' : '')))
+        .catch(err => alert('Load failed: ' + (err && err.message ? err.message : err)));
+}
+window.addEventListener('message', _configShareHandleMessage);
 
 
 //Alarm Momentery Button Logic
@@ -8458,7 +8677,7 @@ function updateTogglesFromData(data) {
         updateCheckbox("UseFloat_checkbox", data.UseFloat, "UseFloat");
 
 
-        updateCheckbox("TuningMode_checkbox", data.TuningMode, "TuningMode");
+        updateTuningModeUI(data.TuningMode);  // unified Begin/Stop Test button (no checkbox anymore)
         updateCheckbox("socInfoAvailable_checkbox", data.socInfoAvailable, "socInfoAvailable");
         updateCheckbox("CloudFeatures_checkbox", data.CloudFeatures, "CloudFeatures");
         updateUploadNowButtonState();  // re-gray "Upload Now" if cloud just turned off/on
@@ -11070,7 +11289,7 @@ max-width: 100%;     /* allow full width on mobile */
     document.getElementById("admin_password").addEventListener("change", updatePasswordFields);
     document.getElementById("timeAxisModeChanging_checkbox").checked = (document.getElementById("timeAxisModeChanging").value === "1");
     document.getElementById("weatherModeEnabled_checkbox").checked = (document.getElementById("weatherModeEnabled").value === "1");
-    document.getElementById("TuningMode_checkbox").checked = (document.getElementById("TuningMode").value === "1");
+    // TuningMode has no checkbox anymore — the unified Begin/Stop Test button reflects it via updateTuningModeUI().
     document.getElementById("socInfoAvailable_checkbox").checked = (document.getElementById("socInfoAvailable").value === "1");
     document.getElementById("CloudFeatures_checkbox").checked = (document.getElementById("CloudFeatures").value === "1");
     document.getElementById("AutoAltCurrentZero_checkbox").checked = (document.getElementById("AutoAltCurrentZero").value === "1");
@@ -11364,6 +11583,7 @@ function showSubTab(parentTab, subTabName, evt = null) {
         const featureNames = {
             'leaderboards': 'Leaderboards',
             'fleetstats': 'Fleet Stats',
+            'configsharing': 'Config Sharing',
             'softwareupdate': 'Software Update'
         };
         showRegistrationRequiredModal(featureNames[subTabName] || 'this feature');
@@ -11435,6 +11655,11 @@ function showSubTab(parentTab, subTabName, evt = null) {
     // Redirect to Vercel for Leaderboards
     if (parentTab === 'cloudfeatures' && subTabName === 'leaderboards') {
         loadLeaderboardsInIframe();
+    }
+
+    // Redirect to Vercel for Config Sharing
+    if (parentTab === 'cloudfeatures' && subTabName === 'configsharing') {
+        loadConfigSharingInIframe();
     }
 
     // Control sticky header for Cloud Features subtabs
@@ -14850,17 +15075,8 @@ function turnOffActiveTest() {
         .catch(e => console.warn('turnOffActiveTest failed:', e));
 }
 
-// Returns false (and shows alert) when test-ON gate fails; always passes for test-OFF.
-function checkCurrTestGate(checkbox) {
-    if (!checkbox.checked) return true; // turning OFF: always allow
-    const conflict = getActiveTestKey();
-    if (conflict && conflict !== 'curr') {
-        checkbox.checked = false;
-        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
-        return false;
-    }
-    return true;
-}
+// checkCurrTestGate removed — the current-loop test no longer uses a checkbox; tuningToggleTest()
+// does the conflict gate inline. CV and Thermal still use their own gates below.
 
 function checkCVTestGate(checkbox) {
     if (!checkbox.checked) return true;
@@ -15068,51 +15284,68 @@ function tuningToggleWaveformUI(val) {
 }
 
 let tuningBodePollTimer = null;
-// Swap the Run Sweep button between its idle (start) and running (stop) states.
-function _setSweepBtnRunning(running) {
-    const btn = document.getElementById('tuningRunSweepBtn');
+
+// Register a pending toggle + set a hidden input without a checkbox (button-driven toggles). Mirrors
+// what handleUserToggle does, but the unified Begin/Stop Test button has no checkbox to read from.
+function setPendingToggleValue(hiddenInputId, dataKey, value) {
+    const hiddenInput = document.getElementById(hiddenInputId);
+    if (hiddenInput) hiddenInput.value = String(value);
+    pendingToggles.set(dataKey, { desiredValue: parseInt(value), baseRev: lastSeenRev });
+}
+
+// Swap the unified Begin Test button between its idle and running states. Used for ALL three waveform
+// types — Square / Sine manual run until Stop Test; Sine sweep also flips back when it self-completes.
+function _setTestBtnRunning(running) {
+    const btn = document.getElementById('tuningBeginTestBtn');
     if (!btn) return;
     if (running) {
-        btn.textContent = '■ Stop';
+        btn.textContent = '■ Stop Test';
         btn.classList.remove('btn-primary');
         btn.classList.add('btn-danger');
-        btn.onclick = tuningStopSweep;
+        btn.onclick = tuningStopTest;
     } else {
-        btn.textContent = '▶ Run Sweep';
+        btn.textContent = '▶ Begin Test';
         btn.classList.remove('btn-danger');
         btn.classList.add('btn-primary');
-        btn.onclick = tuningRunSweep;
+        btn.onclick = tuningToggleTest;
     }
 }
 
-// Run Sweep — single action. Auto-arms the generator (turns Waveform On) if it isn't already,
-// then fires the sweep. No separate "turn the toggle on first" step.
-function tuningRunSweep() {
+// Single entry point for the Current Target Generator (replaces the old Waveform On/Off toggle +
+// separate Run Sweep button). The Waveform Type selector decides what runs: 0 square / 1 sine manual
+// arm the generator and run continuously until Stop; 2 sine sweep arms then fires the closed-loop
+// frequency sweep. Pressing again while running (Stop Test) disarms.
+function tuningToggleTest() {
     if (!currentAdminPassword) { alert("Please unlock settings first."); return; }
-    const pw = encodeURIComponent(currentAdminPassword);
+    // Already running → this press is a Stop.
+    if (parseInt(getField("TuningMode") ?? 0) === 1) { tuningStopTest(); return; }
 
-    if (parseInt(getField("TuningMode") ?? 0) !== 1) {
-        // Another loop's test must not be running.
-        const conflict = getActiveTestKey();
-        if (conflict && conflict !== 'curr') {
-            alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting a sweep.');
-            return;
-        }
-        // Optimistically reflect the armed state, register the pending toggle so the stream echo
-        // doesn't bounce it back, send the arm command, then start the sweep once it lands.
-        const cb = document.getElementById('TuningMode_checkbox');
-        const hidden = document.getElementById('TuningMode');
-        if (cb) cb.checked = true;
-        if (hidden) hidden.value = '1';
-        handleUserToggle('TuningMode_checkbox', 'TuningMode', 'TuningMode');
-        const statusEl = document.getElementById('tuning-sweep-status');
+    // Another loop's test must not be running.
+    const conflict = getActiveTestKey();
+    if (conflict && conflict !== 'curr') {
+        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
+        return;
+    }
+
+    const pw = encodeURIComponent(currentAdminPassword);
+    const waveform = parseInt(getField("tuningWaveform_sel") ?? 0);  // 0 square / 1 sine manual / 2 sine sweep
+    const statusEl = document.getElementById('tuning-sweep-status');
+
+    // Optimistically reflect the armed state, register the pending toggle so the stream echo doesn't
+    // bounce it back, then send the arm command (TuningMode=1 is all square/sine-manual need to run).
+    setPendingToggleValue('TuningMode', 'TuningMode', 1);
+    _setTestBtnRunning(true);
+
+    if (waveform === 2) {
         if (statusEl) statusEl.textContent = 'Arming…';
         fetch(buildURL("/get?TuningMode=1&password=" + pw))
             .then(() => _startTuningSweepNow(pw))
-            .catch(err => { const s = document.getElementById('tuning-sweep-status'); if (s) s.textContent = 'Arm failed: ' + err; });
-        return;
+            .catch(err => { if (statusEl) statusEl.textContent = 'Arm failed: ' + err; _setTestBtnRunning(false); });
+    } else {
+        if (statusEl) statusEl.textContent = 'Running…';
+        fetch(buildURL("/get?TuningMode=1&password=" + pw))
+            .catch(err => { if (statusEl) statusEl.textContent = 'Start failed: ' + err; _setTestBtnRunning(false); });
     }
-    _startTuningSweepNow(pw);
 }
 
 // Fire the sweep and poll /tuningbode until it completes. Assumes the generator is already armed.
@@ -15122,7 +15355,7 @@ function _startTuningSweepNow(pw) {
         .then(r => {
             if (!r.ok) { if (statusEl) statusEl.textContent = 'Start failed (HTTP ' + r.status + ')'; return; }
             if (statusEl) statusEl.textContent = 'Sweep running…';
-            _setSweepBtnRunning(true);
+            _setTestBtnRunning(true);
             const bsec = document.getElementById('tuning-bode-section'); if (bsec) bsec.style.display = 'none';
             if (tuningBodePollTimer) clearInterval(tuningBodePollTimer);
             let waited = 0;
@@ -15137,30 +15370,67 @@ function _startTuningSweepNow(pw) {
                             : (data.done ? 'Sweep complete.' : 'Idle');
                         if (data.done && !data.active) {
                             clearInterval(tuningBodePollTimer); tuningBodePollTimer = null;
-                            _setSweepBtnRunning(false);
+                            // Sweep finished — disarm the generator so the button returns to "Begin Test".
+                            // A completed sweep is a finished test (unlike square/sine-manual, which stay
+                            // armed until the user presses Stop).
+                            setPendingToggleValue('TuningMode', 'TuningMode', 0);
+                            fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
+                            _setTestBtnRunning(false);
                             renderTuningBode(data);
                         }
                     })
                     .catch(() => {});
-                if (waited > 180000) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; _setSweepBtnRunning(false); if (statusEl) statusEl.textContent = 'Timed out.'; }
+                if (waited > 180000) {
+                    clearInterval(tuningBodePollTimer); tuningBodePollTimer = null;
+                    setPendingToggleValue('TuningMode', 'TuningMode', 0);
+                    fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
+                    _setTestBtnRunning(false);
+                    if (statusEl) statusEl.textContent = 'Timed out.';
+                }
             }, 1500);
         })
         .catch(err => { if (statusEl) statusEl.textContent = 'Start failed: ' + err; });
 }
 
-// Stop a running sweep by disarming the generator (turns Waveform Off) — halts the sweep mid-run.
-function tuningStopSweep() {
+// Stop the current test by disarming the generator — works for square, sine-manual, and a running sweep.
+function tuningStopTest() {
     const pw = encodeURIComponent(currentAdminPassword || '');
-    const cb = document.getElementById('TuningMode_checkbox');
-    const hidden = document.getElementById('TuningMode');
-    if (cb) cb.checked = false;
-    if (hidden) hidden.value = '0';
-    handleUserToggle('TuningMode_checkbox', 'TuningMode', 'TuningMode');
+    setPendingToggleValue('TuningMode', 'TuningMode', 0);
     fetch(buildURL("/get?TuningMode=0&password=" + pw)).catch(() => {});
     if (tuningBodePollTimer) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; }
     const statusEl = document.getElementById('tuning-sweep-status');
     if (statusEl) statusEl.textContent = 'Stopped.';
-    _setSweepBtnRunning(false);
+    _setTestBtnRunning(false);
+}
+
+// Reflect firmware TuningMode state onto the unified Begin/Stop button + hidden input, honoring any
+// in-flight optimistic toggle so the stream echo doesn't bounce it (same pattern as updateCheckbox).
+// Catches reboot-with-generator-on and disarms triggered by another client.
+function updateTuningModeUI(value) {
+    if (value === undefined) return;
+    const pending = pendingToggles.get("TuningMode");
+    if (pending) {
+        if (pending.deadlineMs === undefined) pending.deadlineMs = Date.now() + 2500;
+        if (value !== pending.desiredValue) {
+            if (Date.now() <= pending.deadlineMs) return;   // keep optimistic UI
+            pendingToggles.delete("TuningMode");            // timed out → accept firmware state
+        } else {
+            pendingToggles.delete("TuningMode");            // confirmed
+        }
+    }
+    const hidden = document.getElementById("TuningMode");
+    if (hidden) hidden.value = String(value);
+    toggleStates["TuningMode"] = value;
+    const btn = document.getElementById('tuningBeginTestBtn');
+    if (!btn) return;
+    const btnRunning = btn.classList.contains('btn-danger');
+    if (value === 1 && !btnRunning) _setTestBtnRunning(true);
+    if (value !== 1 && btnRunning) {
+        _setTestBtnRunning(false);
+        if (tuningBodePollTimer) { clearInterval(tuningBodePollTimer); tuningBodePollTimer = null; }
+        const statusEl = document.getElementById('tuning-sweep-status');
+        if (statusEl && statusEl.textContent === 'Running…') statusEl.textContent = '';
+    }
 }
 
 function renderTuningBode(data) {
@@ -15934,11 +16204,51 @@ function computeActionableDisturbance() {
 // existing SystemID / tuning-sweep / matrix endpoints; the operator only holds or
 // slowly changes engine speed when prompted — the regulator drives the field.
 // ============================================================================
-const CX_PHASES = ['Prep', 'Field curve', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds', 'Done'];
-let cx = null;             // orchestrator state object; null when the modal is closed
+const CX_PHASES = ['Prep', 'Field curve', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds', 'Validate'];
+let cx = null;             // orchestrator state object; persists across panel close (in-session resume)
 let cxPollTimer = null;
 
 function cxStopPoll() { if (cxPollTimer) { clearInterval(cxPollTimer); cxPollTimer = null; } }
+
+// ── Live telemetry the panel reads straight from the SSE caches ───────────────
+// g_lastCsv1 holds the latest CSV1 frame (raw, name-keyed); echoes carry CSV3 settings.
+function cxLive() {
+  const c = (typeof g_lastCsv1 === 'object' && g_lastCsv1) ? g_lastCsv1 : {};
+  const num = (k, s) => (k in c && c[k] !== '' && c[k] != null) ? parseFloat(c[k]) / s : NaN;
+  return {
+    rpm: num('RPM', 1),
+    busV: num('IBV', 100),          // INA bus voltage (volts)
+    amps: num('MeasuredAmps', 100), // alternator current (amps)
+    duty: num('dutyCycle', 100),    // field duty (%)
+    prot: ('protEventMask' in c) ? (parseInt(c.protEventMask) || 0) : 0,  // bit1=OV bit2=iExcess bit4=LoadDump
+  };
+}
+function cxBulkV() { const v = getEchoNumber('BulkVoltage_echo'); return (v > 0) ? v : NaN; }
+function cxHardV() { const v = getEchoNumber('AlternatorHardShutdownV_echo'); return (v > 0) ? v : NaN; }
+
+// The one true protection statement, per phase. Open-loop phases (1,2) and the
+// closed-loop verify (3) are guarded only by the fast OV cut + INA228 backstop;
+// the disturbance map (4) and validation (6) run under full normal protection.
+function cxSafetyLine(phase) {
+  const hv = cxHardV();
+  const ov = isNaN(hv) ? 'AlternatorHardShutdownV' : ('Bulk+0.3 ≈ ' + hv.toFixed(2) + ' V');
+  const openLoop = (phase === 1 || phase === 2 || phase === 3);
+  const txt = openLoop
+    ? 'Protection this phase: fast over-voltage cut at ' + ov + ' (live, all modes) + INA228 hardware backstop. Current-limit / load-dump layers do not apply with no closed-loop setpoint.'
+    : 'Protection this phase: all normal layers active (over-voltage, current-limit, load-dump, INA228).';
+  return '<div style="margin-top:12px; padding-top:9px; border-top:1px solid #2c2c2c; font-size:11px; color:#888; line-height:1.45;">' + txt + '</div>';
+}
+
+// Keep the panel open and bring the relevant dashboard plot into view per phase.
+// Called only on phase change (never on poll re-render) so it can't yank the user's tab.
+function cxSwitchTab(phase) {
+  try {
+    if (phase === 1 || phase === 2) { showMainTab('tuning'); showSubTab('tuning', 'plant-delay'); }
+    else if (phase === 3) { showMainTab('tuning'); showSubTab('tuning', 'current'); }
+    else if (phase === 4) { showMainTab('livedata'); showSubTab('livedata', 'diag'); }
+    else if (phase === 6) { showMainTab('livedata'); showSubTab('livedata', 'alternator'); }
+  } catch (e) { /* tab not present — non-fatal */ }
+}
 
 // Every commissioning write goes through here so the admin password is always attached.
 function cxGet(params) {
@@ -15948,27 +16258,47 @@ function cxGet(params) {
 
 function openCommissionModal() {
     if (!currentAdminPassword) { alert('Unlock settings first (enter the admin password).'); return; }
-    cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false };
+    // In-session resume: if a flow is already underway, reopen exactly where it was.
+    if (!cx) cx = { phase: 0, fieldApplied: false, plantApplied: false, threshApplied: false };
     document.getElementById('commission-modal-overlay').style.display = 'block';
-    commissionRender();
+    cxGoto(cx.phase);   // re-applies the per-phase tab + restarts the right timer
 }
 
 function closeCommissionModal() {
-    // Pause ≠ abort: closing leaves the firmware state IN_PROGRESS so the flow can resume.
-    // But never leave a test running or the device in closed-loop tuning / the relaxed matrix
-    // gate — clean up whatever this session left active (best-effort, ignores errors).
+    // Pause ≠ abort: closing leaves the firmware state IN_PROGRESS and KEEPS cx so the flow
+    // resumes on reopen. But never leave a test running, the device in closed-loop tuning, the
+    // relaxed matrix gate, or a validation ramp live — clean up whatever this session left active.
     cxStopPoll();
     if (cx) {
         if (cx.fieldRunning) cxGet('cancelFieldCurve=1').catch(() => { });
         if (cx.plantRunning) cxGet('cancelSystemID=1').catch(() => { });
         if (cx.verifyRunning) cxGet('TuningMode=0').catch(() => { });
         if (cx.matrixOn) cxGet('faCommissionGate=0').catch(() => { });
+        cx.fieldRunning = cx.plantRunning = cx.verifyRunning = cx.matrixOn = false;
     }
     document.getElementById('commission-modal-overlay').style.display = 'none';
-    cx = null;
 }
 
-function cxGoto(phase) { cx.phase = phase; commissionRender(); }
+function cxGoto(phase) {
+    cxStopPoll();                 // drop any timer from the phase we're leaving
+    cx.phase = phase;
+    cxSwitchTab(phase);
+    commissionRender();
+    if (phase === 0) { cxPollTimer = setInterval(cxPrepRefresh, 1000); cxPrepRefresh(); }      // live Prep precheck
+    else if (phase === 6) { cxPollTimer = setInterval(cxValGateRefresh, 1000); cxValGateRefresh(); }  // live RPM gate
+}
+// Phase-6 RPM gate: enable "Start validation" only once engine speed is near the rough target.
+function cxValGateRefresh() {
+    if (!cx || cx.phase !== 6) return;
+    if (cx.val && (cx.val.running || cx.val.result)) return;  // gate not shown in those views
+    const tgtRpm = (cx.thresh && cx.thresh.rpm) ? cx.thresh.rpm : null;
+    const live = cxLive();
+    const rpmOk = !tgtRpm || (!isNaN(live.rpm) && Math.abs(live.rpm - tgtRpm) <= 200);
+    const g = document.getElementById('cx-val-gate');
+    if (g) g.textContent = tgtRpm ? ('Target ' + tgtRpm + ' RPM · now ' + (isNaN(live.rpm) ? '—' : Math.round(live.rpm)) + ' RPM') : 'Bring engine to the roughest RPM, then start.';
+    const btn = document.getElementById('cx-val-start');
+    if (btn) btn.disabled = !rpmOk;
+}
 
 function commissionRender() {
     if (!cx) return;
@@ -15976,24 +16306,49 @@ function commissionRender() {
     steps.innerHTML = CX_PHASES.map((nm, i) =>
         '<span style="' + (i === cx.phase ? 'color:#4a9eff;font-weight:600;' : (i < cx.phase ? 'color:#5a5;' : '')) + '">' +
         (i < cx.phase ? '✓ ' : (i + 1) + '. ') + nm + '</span>').join('<span style="color:#444;"> › </span>');
-    document.getElementById('commission-abort-row').style.display = (cx.phase > 0 && cx.phase < 6) ? 'block' : 'none';
+    document.getElementById('commission-abort-row').style.display = (cx.phase > 0) ? 'block' : 'none';
     const b = document.getElementById('commission-body');
     const R = [cxRenderPrep, cxRenderField, cxRenderPlant, cxRenderVerify, cxRenderMatrix, cxRenderThresh, cxRenderDone];
-    R[cx.phase](b);
+    // Wrap render so a transient error can never blank/close the panel mid-flow.
+    try { R[cx.phase](b); } catch (e) { console.warn('commissionRender', e); return; }
+    b.insertAdjacentHTML('beforeend', cxSafetyLine(cx.phase));
 }
 
 // ── Phase 0 — preconditions & snapshot ──────────────────────────────────────
 function cxRenderPrep(b) {
     b.innerHTML =
         '<p>This sets every tunable in the current-control and over-current chain from measurements (~3–5 min and a short engine run).</p>' +
-        '<p><strong>Before you start:</strong></p>' +
-        '<ul style="margin:0 0 12px 18px; padding:0;">' +
-        '<li>Engine running, alternator producing current.</li>' +
-        '<li>Battery has charging headroom (not near absorption/float).</li>' +
-        '<li>No other tuning test running.</li>' +
-        '<li>You can hold the throttle steady when asked, then sweep it once.</li></ul>' +
-        '<p style="font-size:12px;color:#999;">Your current tune is snapshotted first — Abort at any point reverts to it.</p>' +
-        '<button onclick="cxStart()" class="btn-primary" style="width:100%;padding:9px;margin-top:6px;">Start commissioning</button>';
+        '<p><strong>Live checks:</strong></p>' +
+        '<div style="margin:0 0 10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
+        '<div>Engine: <span id="cx-prep-rpm">…</span></div>' +
+        '<div>Charging headroom: <span id="cx-prep-headroom">…</span></div>' +
+        '</div>' +
+        '<p style="font-size:12px;color:#999;margin:0 0 4px;">Headroom is how far the bus sits below your Bulk target — you need room to push test current before hitting it. Near absorption/float there is little room; run earlier in a charge cycle.</p>' +
+        '<p style="font-size:12px;color:#c9a24b;line-height:1.5;">Commissioning runs from your current mode — <strong>Manual is fine</strong> (you may not have a tuned PID yet). Normal current-limit and load-dump layers are suspended during the measurement phases; <strong>over-voltage stays protected</strong> — fast field cut at AlternatorHardShutdownV (Bulk+0.3) plus the INA228 hardware backstop.</p>' +
+        '<p style="font-size:12px;color:#999;">Your current tune is snapshotted first — Abort at any point reverts to it. You can also hold the throttle steady when asked, then sweep it once.</p>' +
+        '<button id="cx-start-btn" onclick="cxStart()" class="btn-primary" style="width:100%;padding:9px;margin-top:6px;" disabled>Start commissioning</button>';
+    cxPrepRefresh();
+}
+// Live Prep precheck — refreshed on a 1 s timer while on the Prep phase.
+function cxPrepRefresh() {
+    if (!cx || cx.phase !== 0) return;
+    const L = cxLive(), bulk = cxBulkV();
+    const rpmEl = document.getElementById('cx-prep-rpm');
+    const hrEl = document.getElementById('cx-prep-headroom');
+    const btn = document.getElementById('cx-start-btn');
+    if (!rpmEl || !hrEl || !btn) return;
+    const engineOk = !isNaN(L.rpm) && L.rpm > 400;
+    rpmEl.innerHTML = isNaN(L.rpm) ? '<span style="color:#f0a500;">no RPM</span>'
+        : '<strong style="color:' + (engineOk ? '#5a5' : '#f0a500') + ';">' + Math.round(L.rpm) + ' RPM</strong>' + (engineOk ? '' : ' (start the engine)');
+    let headOk = false;
+    if (isNaN(L.busV) || isNaN(bulk)) { hrEl.innerHTML = '<span style="color:#f0a500;">unknown (no live voltage)</span>'; }
+    else {
+        const head = bulk - L.busV;
+        headOk = head > 1.0;
+        hrEl.innerHTML = '<strong style="color:' + (headOk ? '#5a5' : '#f0a500') + ';">' + head.toFixed(2) + ' V below Bulk</strong>'
+            + ' (' + L.busV.toFixed(2) + ' / ' + bulk.toFixed(2) + ' V)' + (headOk ? '' : ' — too little room');
+    }
+    btn.disabled = !(engineOk && headOk);
 }
 function cxStart() {
     cxGet('commissionStart=1').then(() => cxGoto(1)).catch(e => alert('Start failed: ' + e));
@@ -16239,20 +16594,85 @@ function cxThreshApply() {
 
 // ── Phase 4 — validate, then commit ─────────────────────────────────────────
 function cxRenderDone(b) {
-    b.innerHTML = '<p><strong>Phase 4 — validate.</strong> Hold a steady high current at the roughest RPM the sweep found and confirm no false over-current fire; one real RPM blip should trigger one clean response (integrator reset, no double-fire).</p>' +
-        '<p style="font-size:12px;color:#999;">Marking the device commissioned discards the pre-commissioning snapshot and clears the warning badge.</p>' +
+    const tgtRpm = (cx.thresh && cx.thresh.rpm) ? cx.thresh.rpm : null;
+    // Validation current target: half the field-curve saturation knee if we have it, floor 15 A.
+    const knee = (cx.fieldResult && cx.fieldResult.kneeAmps > 0) ? cx.fieldResult.kneeAmps : 0;
+    cx.valTarget = Math.max(15, Math.round(knee * 0.5));
+    const v = cx.val;
+    let body = '<p><strong>Phase 6 — validate.</strong> Confirm the new over-current settings don\'t false-fire at the roughest operating point the sweep found' + (tgtRpm ? ' (~<strong>' + tgtRpm + ' RPM</strong>)' : '') + '.</p>' +
+        '<p>Bring the engine to that speed, then <strong>slowly</strong> raise output current toward the limit — raise it gradually so you don\'t load the engine fast. The panel watches for a false current-limit or load-dump trip while you hold ~<strong>' + cx.valTarget + ' A</strong>.</p>';
+
+    if (v && v.running) {
+        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
+            '<div>RPM <strong id="cx-val-rpm">…</strong> · current <strong id="cx-val-amps">…</strong> (max <span id="cx-val-max">…</span>)</div>' +
+            '<div id="cx-val-prog" style="color:#4a9eff;">hold steady at target…</div></div>' +
+            '<button onclick="cxValStop()" class="btn-secondary btn-sm">Stop validation</button>';
+    } else if (v && v.result) {
+        const pass = v.result === 'pass';
+        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
+            (pass ? '<span style="color:#5a5;">PASS — held ~' + cx.valTarget + ' A with no false current-limit / load-dump trip.</span>'
+                  : '<span style="color:#f0a500;">REVIEW — ' + v.firedName + ' fired during the hold. Re-check thresholds (Phase 5) before trusting it.</span>') +
+            '</div><button onclick="cxValStart()" class="btn-secondary btn-sm">Re-run validation</button>';
+    } else {
+        const live = cxLive();
+        const rpmOk = !tgtRpm || (!isNaN(live.rpm) && Math.abs(live.rpm - tgtRpm) <= 200);
+        body += '<div id="cx-val-gate" style="font-size:12px;color:#999;margin:6px 0;">' +
+            (tgtRpm ? ('Target ' + tgtRpm + ' RPM · now ' + (isNaN(live.rpm) ? '—' : Math.round(live.rpm)) + ' RPM') : 'Bring engine to the roughest RPM, then start.') + '</div>' +
+            '<button id="cx-val-start" onclick="cxValStart()" class="btn-primary" style="width:100%;padding:9px;"' + (rpmOk ? '' : ' disabled') + '>Start validation</button>';
+    }
+
+    // Summary of everything applied this run.
+    body += '<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">Applied settings</summary>' +
+        '<div style="font-size:12px;color:#bbb;line-height:1.6;margin-top:6px;">' + cxAppliedSummary() + '</div></details>';
+
+    body += '<p style="font-size:12px;color:#999;margin-top:12px;">Finishing discards the pre-commissioning snapshot and clears the warning badge.</p>' +
         '<button onclick="cxFinish()" class="btn-primary" style="width:100%;padding:9px;">Finish — mark commissioned</button>';
+    b.innerHTML = body;
 }
+function cxAppliedSummary() {
+    const r = cx.fieldResult, f = cx.fit, t = cx.thresh;
+    const rows = [];
+    if (r) rows.push('Field: stabilize ' + r.propStabA.toFixed(0) + ' A, step ' + r.propStepPct.toFixed(1) + '%');
+    if (f && f.ok) rows.push('Gains: Kp ' + f.Kp.toFixed(3) + ', Ki ' + f.Ki.toFixed(3) + '; filters ' + Math.round(f.tauMs / 3) + '/' + Math.round(f.tauMs) + ' ms');
+    if (t && !t.err) rows.push('Over-current: averaging τ ' + t.tau.toFixed(0) + ' ms, floor ' + t.floor.toFixed(1) + ' A');
+    return rows.length ? rows.join('<br>') : 'No settings applied yet — earlier phases were skipped.';
+}
+// Guided + monitored validation: the operator raises current; the panel watches for a
+// false current-limit (iExcess, bit2) or load-dump (bit4) trip while ~valTarget A is held.
+function cxValStart() {
+    cx.val = { running: true, max: 0, holdMs: 0, lastMs: Date.now(), result: null, firedName: '' };
+    commissionRender();
+    cxStopPoll();
+    cxPollTimer = setInterval(() => {
+        const v = cx.val; if (!v || !v.running) return;
+        const L = cxLive(), now = Date.now(), dt = now - v.lastMs; v.lastMs = now;
+        if (!isNaN(L.amps) && L.amps > v.max) v.max = L.amps;
+        const rEl = document.getElementById('cx-val-rpm'); if (rEl) rEl.textContent = isNaN(L.rpm) ? '—' : Math.round(L.rpm) + ' RPM';
+        const aEl = document.getElementById('cx-val-amps'); if (aEl) aEl.textContent = isNaN(L.amps) ? '—' : L.amps.toFixed(1) + ' A';
+        const mEl = document.getElementById('cx-val-max'); if (mEl) mEl.textContent = v.max.toFixed(1) + ' A';
+        // False-fire detection: current-limit or load-dump while merely holding current.
+        if (L.prot & 2) { v.firedName = 'Current-limit (iExcess)'; v.result = 'fail'; v.running = false; }
+        else if (L.prot & 4) { v.firedName = 'Load-dump'; v.result = 'fail'; v.running = false; }
+        else if (!isNaN(L.amps) && L.amps >= cx.valTarget) {
+            v.holdMs += dt;
+            const pEl = document.getElementById('cx-val-prog');
+            if (pEl) pEl.textContent = 'holding ' + (v.holdMs / 1000).toFixed(0) + ' / 8 s at target…';
+            if (v.holdMs >= 8000) { v.result = 'pass'; v.running = false; }
+        } else { v.holdMs = 0; const pEl = document.getElementById('cx-val-prog'); if (pEl) pEl.textContent = 'raise current toward ' + cx.valTarget + ' A…'; }
+        if (!v.running) { cxStopPoll(); commissionRender(); }
+    }, 700);
+}
+function cxValStop() { if (cx.val) { cx.val.running = false; cx.val.result = null; } cxStopPoll(); commissionRender(); }
 function cxFinish() {
-    cxGet('commissionDone=1').then(() => { alert('Commissioning complete.'); closeCommissionModal(); }).catch(e => alert('Finish failed: ' + e));
+    cxGet('commissionDone=1').then(() => { alert('Commissioning complete.'); closeCommissionModal(); cx = null; }).catch(e => alert('Finish failed: ' + e));
 }
 function commissionAbort() {
     if (!confirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
     cxStopPoll();
-    cxGet('commissionAbort=1').then(() => { alert('Reverted to pre-commissioning settings.'); closeCommissionModal(); }).catch(e => alert('Abort failed: ' + e));
+    cxGet('commissionAbort=1').then(() => { alert('Reverted to pre-commissioning settings.'); closeCommissionModal(); cx = null; }).catch(e => alert('Abort failed: ' + e));
 }
 
-// Warning badge in System Settings, driven from the persisted commissionState (CSV3).
+// Warning badge on the Tuning > Commissioning tab, driven from the persisted commissionState (CSV3).
 function updateCommissionBadge(state) {
     const el = document.getElementById('commission-badge'); if (!el) return;
     if (state === 2) { el.style.display = 'none'; return; }

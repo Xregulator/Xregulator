@@ -625,3 +625,319 @@ done:
   if (out) { if (J->haveBest) *out = J->best; else memset(out, 0, sizeof(*out)); }
   return 1;
 }
+
+// ============================================================================
+// Config Sharing — export/import of the cloneable settings set (Phase 1)
+// ----------------------------------------------------------------------------
+// One ALLOWLIST (CONFIG_MANIFEST) is the single source of truth for which NVS
+// "settings" keys are shareable. tier 1 = free clone; tier 2 = install/hardware
+// topology (sensor/shunt/polarity) — exported but applied only with includeHardware.
+// Per-device calibration, identity/secrets, UI prefs, and momentary actions are
+// NEVER in the manifest (see config_drift_check.py — it fails the build if any
+// settingWrite key is in neither the manifest nor its EXCLUDE list).
+//
+// Values are carried as the RAW NVS strings (settingRead output), so import is a
+// straight settingWrite of byte-identical internal state followed by a reboot —
+// InitSystemSettings then re-reads the whole set consistently. No per-key unit
+// conversion, no /get replay. Cross-rev safe: a key absent on the destination is
+// skipped and that firmware's own default applies (see CLAUDE.md "NVS Cross-Rev Risk").
+// ============================================================================
+// AUTO-CLASSIFIED config manifest (allowlist). tier 1 = free clone, 2 = install/hardware.
+// Generated from NK_ macros + tier classification; see config_drift_check.py guard.
+struct ConfigManifestEntry { const char *param; const char *nvsKey; uint8_t tier; };
+static const ConfigManifestEntry CONFIG_MANIFEST[] = {
+  { "BulkVoltage", NK_BulkVoltage, 1 },
+  { "AbsorptionVoltage", NK_AbsorptionVoltage, 1 },
+  { "FloatVoltage", NK_FloatVoltage, 1 },
+  { "ChargedVoltage", NK_ChargedVoltage, 1 },
+  { "AbsorptionTimeoutMs", NK_AbsorptionTimeoutMs, 1 },
+  { "absorptionCompleteTime", NK_absorptionCompleteTime, 1 },
+  { "FLOAT_DURATION", NK_FLOAT_DURATION, 1 },
+  { "MinFloatTime", NK_MinFloatTime, 1 },
+  { "ChargedDetectionTime", NK_ChargedDetectionTime, 1 },
+  { "bulkVoltageHoldMs", NK_bulkVoltageHoldMs, 1 },
+  { "TailCurrent", NK_TailCurrent, 1 },
+  { "TailCurrent_A", NK_TailCurrent_A, 1 },
+  { "CurrentThreshold", NK_CurrentThreshold, 1 },
+  { "RebulkCurrent_A", NK_RebulkCurrent_A, 1 },
+  { "RebulkVoltage", NK_RebulkVoltage, 1 },
+  { "rebulkDebounceTime", NK_rebulkDebounceTime, 1 },
+  { "SOC_AllowRebulk_percent", NK_SOC_AllowRebulk_percent, 1 },
+  { "SOC_BlockRebulk_percent", NK_SOC_BlockRebulk_percent, 1 },
+  { "MaintainMode", NK_MaintainMode, 1 },
+  { "UseFloat", NK_UseFloat, 1 },
+  { "TargetVoltageMode", NK_TargetVoltageMode, 1 },
+  { "TargetVoltageSetpoint", NK_TargetVoltageSetpoint, 1 },
+  { "ChargeEfficiency", NK_ChargeEfficiency, 1 },
+  { "PeukertExponent", NK_PeukertExponent, 1 },
+  { "BatteryCapacity_Ah", NK_BatteryCapacity_Ah, 1 },
+  { "AlternatorNominalAmps", NK_AlternatorNominalAmps, 1 },
+  { "SolarWatts", NK_SolarWatts, 1 },
+  { "MaximumAllowedBatteryAmps", NK_MaximumAllowedBatteryAmps, 1 },
+  { "MaxTableValue", NK_MaxTableValue, 1 },
+  { "MaxDuty", NK_MaxDuty, 1 },
+  { "MinDuty", NK_MinDuty, 1 },
+  { "AlternatorHardShutdownV", NK_AlternatorHardShutdownV, 1 },
+  { "MinRPMForField", NK_MinRPMForField, 1 },
+  { "FIELD_COLLAPSE_DELAY", NK_FIELD_COLLAPSE_DELAY, 1 },
+  { "FieldAdjustmentInterval", NK_FieldAdjustmentInterval, 1 },
+  { "DutyRampRate", NK_DutyRampRate, 1 },
+  { "DutySlowRampRate", NK_DutySlowRampRate, 1 },
+  { "WarmupRampRate", NK_WarmupRampRate, 1 },
+  { "StartupRiseRate", NK_StartupRiseRate, 1 },
+  { "FieldResistance", NK_FieldResistance, 1 },
+  { "PulleyRatio", NK_PulleyRatio, 1 },
+  { "RPMScalingFactor", NK_RPMScalingFactor, 1 },
+  { "SwitchingFrequency", NK_SwitchingFrequency, 1 },
+  { "PidKp", NK_PidKp, 1 },
+  { "PidKi", NK_PidKi, 1 },
+  { "PidKd", NK_PidKd, 1 },
+  { "PidSampleDivisor", NK_PidSampleDivisor, 1 },
+  { "PIDTrackingGain", NK_PIDTrackingGain, 1 },
+  { "OutputPIDFilterTC", NK_OutputPIDFilterTC, 1 },
+  { "OutputPIDMA_N", NK_OutputPIDMA_N, 1 },
+  { "OutputPIDSigSrc", NK_OutputPIDSigSrc, 1 },
+  { "InputFilterTC", NK_InputFilterTC, 1 },
+  { "VoltageFilterTC", NK_VoltageFilterTC, 1 },
+  { "DvdtTC", NK_DvdtTC, 1 },
+  { "VoltageKp", NK_VoltageKp, 1 },
+  { "VoltageKi", NK_VoltageKi, 1 },
+  { "VoltageLoopInterval", NK_VoltageLoopInterval, 1 },
+  { "AwBleedRate", NK_AwBleedRate, 1 },
+  { "AwSeedProtectMs", NK_AwSeedProtectMs, 1 },
+  { "SetpointRiseRate", NK_SetpointRiseRate, 1 },
+  { "SetpointFallRate", NK_SetpointFallRate, 1 },
+  { "FastSetpointRiseRate", NK_FastSetpointRiseRate, 1 },
+  { "FastSetpointRiseHeadroomV", NK_FastSetpointRiseHeadroomV, 1 },
+  { "FastSetpointRiseWindowMs", NK_FastSetpointRiseWindowMs, 1 },
+  { "SlopeBleedK", NK_SlopeBleedK, 1 },
+  { "SlopeBleedProxV", NK_SlopeBleedProxV, 1 },
+  { "SlopeBleedThresh", NK_SlopeBleedThresh, 1 },
+  { "TdPred", NK_TdPred, 1 },
+  { "KHard", NK_KHard, 1 },
+  { "OvGroup1Enable", NK_OvGroup1Enable, 1 },
+  { "OvGroup2Enable", NK_OvGroup2Enable, 1 },
+  { "OvMeasMarginV", NK_OvMeasMarginV, 1 },
+  { "OvPredMarginV", NK_OvPredMarginV, 1 },
+  { "HardOCDebounceMs", NK_HardOCDebounceMs, 1 },
+  { "SettleTimeBeforeCut", NK_SettleTimeBeforeCut, 1 },
+  { "ShutdownPhase2HoldMs", NK_ShutdownPhase2HoldMs, 1 },
+  { "ReseedFrac", NK_ReseedFrac, 1 },
+  { "IExcessArmMarginV", NK_IExcessArmMarginV, 1 },
+  { "IExcessCeilA", NK_IExcessCeilA, 1 },
+  { "IExcessFloorA", NK_IExcessFloorA, 1 },
+  { "IExcessFrac", NK_IExcessFrac, 1 },
+  { "IExcessFracBulk", NK_IExcessFracBulk, 1 },
+  { "IExcessKBleed", NK_IExcessKBleed, 1 },
+  { "IExcessRelFrac", NK_IExcessRelFrac, 1 },
+  { "IExcessTau", NK_IExcessTau, 1 },
+  { "TemperatureLimitF", NK_TemperatureLimitF, 1 },
+  { "TempAlarm", NK_TempAlarm, 1 },
+  { "TempAlarmLow", NK_TempAlarmLow, 1 },
+  { "TempWarnExcess", NK_TempWarnExcess, 1 },
+  { "TempCritExcess", NK_TempCritExcess, 1 },
+  { "TempSustainedTimeout", NK_TempSustainedTimeout, 1 },
+  { "TempPIDKp", NK_TempPIDKp, 1 },
+  { "TempPIDKi", NK_TempPIDKi, 1 },
+  { "TempPIDIntervalMs", NK_TempPIDIntervalMs, 1 },
+  { "TempPIDFilterAlpha", NK_TempPIDFilterAlpha, 1 },
+  { "ThermalLookaheadSec", NK_ThermalLookaheadSec, 1 },
+  { "thermalKOvershoot", NK_thermalKOvershoot, 1 },
+  { "thermalKUndershoot", NK_thermalKUndershoot, 1 },
+  { "thermalSettleThreshF", NK_thermalSettleThreshF, 1 },
+  { "thermalConsecutiveReads", NK_thermalConsecutiveReads, 1 },
+  { "thermalWaveHighF", NK_thermalWaveHighF, 1 },
+  { "thermalWaveLowF", NK_thermalWaveLowF, 1 },
+  { "thermalWaveHalfPeriodMin", NK_thermalWaveHalfPeriodMin, 1 },
+  { "TempSource", NK_TempSource, 1 },
+  { "R_fixed", NK_R_fixed, 1 },
+  { "Beta", NK_Beta, 1 },
+  { "T0_C", NK_T0_C, 1 },
+  { "WindingTempOffset", NK_WindingTempOffset, 1 },
+  { "displayTempUnit", NK_displayTempUnit, 1 },
+  { "AmbientTempCorrectionFactor", NK_AmbientTempCorrectionFactor, 1 },
+  { "EnableAmbientCorrection", NK_EnableAmbientCorrection, 1 },
+  { "LearningUpStep", NK_LearningUpStep, 1 },
+  { "LearningDownStep", NK_LearningDownStep, 1 },
+  { "LearningSettlingPeriod", NK_LearningSettlingPeriod, 1 },
+  { "LearningMemoryDuration", NK_LearningMemoryDuration, 1 },
+  { "LearningRPMChangeThreshold", NK_LearningRPMChangeThreshold, 1 },
+  { "LearningTempHysteresis", NK_LearningTempHysteresis, 1 },
+  { "MinLearningInterval", NK_MinLearningInterval, 1 },
+  { "NeighborLearningFactor", NK_NeighborLearningFactor, 1 },
+  { "LogAllLearningEvents", NK_LogAllLearningEvents, 1 },
+  { "IgnoreLearningDuringPenalty", NK_IgnoreLearningDuringPenalty, 1 },
+  { "IgnoreRPM", NK_IgnoreRPM, 1 },
+  { "IgnoreTemperature", NK_IgnoreTemperature, 1 },
+  { "MaxPenaltyDuration", NK_MaxPenaltyDuration, 1 },
+  { "MaxPenaltyPercent", NK_MaxPenaltyPercent, 1 },
+  { "SafeOperationThreshold", NK_SafeOperationThreshold, 1 },
+  { "kneeLearnEnable", NK_kneeLearnEnable, 1 },
+  { "kneeMarginPct", NK_kneeMarginPct, 1 },
+  { "kneeMaxFloorPct", NK_kneeMaxFloorPct, 1 },
+  { "kneeKickInA", NK_kneeKickInA, 1 },
+  { "kneeUpdateGain", NK_kneeUpdateGain, 1 },
+  { "kneeDwellSec", NK_kneeDwellSec, 1 },
+  { "kneeCreepPctMin", NK_kneeCreepPctMin, 1 },
+  { "kneeTempRefF", NK_kneeTempRefF, 1 },
+  { "kneeVbusRef", NK_kneeVbusRef, 1 },
+  { "kneeRpmTolPct", NK_kneeRpmTolPct, 1 },
+  { "kneeVbusTolV", NK_kneeVbusTolV, 1 },
+  { "kneeTempTolF", NK_kneeTempTolF, 1 },
+  { "kneeDutyTolPct", NK_kneeDutyTolPct, 1 },
+  { "faEnabled", NK_faEnabled, 1 },
+  { "faAlarmEnable", NK_faAlarmEnable, 1 },
+  { "faPeakMinA", NK_faPeakMinA, 1 },
+  { "faAmpsDriftPct", NK_faAmpsDriftPct, 1 },
+  { "faAmpsDriftFloorA", NK_faAmpsDriftFloorA, 1 },
+  { "faAttenUpAmps", NK_faAttenUpAmps, 1 },
+  { "faAttenDownAmps", NK_faAttenDownAmps, 1 },
+  { "faRpmEdgeMargin", NK_faRpmEdgeMargin, 1 },
+  { "faAnomPause", NK_faAnomPause, 1 },
+  { "SystemIDStabilizeAmps", NK_SystemIDStabilizeAmps, 1 },
+  { "SystemIDStepAmplitude", NK_SystemIDStepAmplitude, 1 },
+  { "systemIDTestType", NK_systemIDTestType, 1 },
+  { "systemIDSineCycles", NK_systemIDSineCycles, 1 },
+  { "systemIDSineFreqStart", NK_systemIDSineFreqStart, 1 },
+  { "systemIDSineFreqEnd", NK_systemIDSineFreqEnd, 1 },
+  { "tuningWaveform", NK_tuningWaveform, 1 },
+  { "tuningSineFreq", NK_tuningSineFreq, 1 },
+  { "tuningSweepStart", NK_tuningSweepStart, 1 },
+  { "tuningSweepEnd", NK_tuningSweepEnd, 1 },
+  { "tuningSweepCycles", NK_tuningSweepCycles, 1 },
+  { "tuningWaveFloor", NK_tuningWaveFloor, 1 },
+  { "waveAmplitude", NK_waveAmplitude, 1 },
+  { "wavePeriod", NK_wavePeriod, 1 },
+  { "cvWaveAmplitudeV", NK_cvWaveAmplitudeV, 1 },
+  { "cvWavePeriodSec", NK_cvWavePeriodSec, 1 },
+  { "cvKOvershoot", NK_cvKOvershoot, 1 },
+  { "cvConsecutiveReads", NK_cvConsecutiveReads, 1 },
+  { "LoadDumpDtThresh", NK_LoadDumpDtThresh, 1 },
+  { "LoadDumpDtThresh1", NK_LoadDumpDtThresh1, 1 },
+  { "LoadDumpDtThresh3", NK_LoadDumpDtThresh3, 1 },
+  { "VoltageDisagreeThreshold", NK_VoltageDisagreeThreshold, 1 },
+  { "VoltageDisagreeTimeout", NK_VoltageDisagreeTimeout, 1 },
+  { "AlarmActivate", NK_AlarmActivate, 1 },
+  { "AlarmLatchEnabled", NK_AlarmLatchEnabled, 1 },
+  { "CurrentAlarmHigh", NK_CurrentAlarmHigh, 1 },
+  { "VoltageAlarmHigh", NK_VoltageAlarmHigh, 1 },
+  { "VoltageAlarmLow", NK_VoltageAlarmLow, 1 },
+  { "UVThresholdHigh", NK_UVThresholdHigh, 1 },
+  { "CAPSIZE_THRESHOLD_DEG", NK_CAPSIZE_THRESHOLD_DEG, 1 },
+  { "PITCHPOLE_THRESHOLD_DEG", NK_PITCHPOLE_THRESHOLD_DEG, 1 },
+  { "SLAM_THRESHOLD_G", NK_SLAM_THRESHOLD_G, 1 },
+  { "bmsLogic", NK_bmsLogic, 1 },
+  { "bmsLogicLevelOff", NK_bmsLogicLevelOff, 1 },
+  { "capLimitMode", NK_capLimitMode, 1 },
+  { "NMEA0183Data", NK_NMEA0183Data, 1 },
+  { "NMEA2KData", NK_NMEA2KData, 1 },
+  { "VeData", NK_VeData, 1 },
+  { "weatherModeEnabled", NK_weatherModeEnabled, 1 },
+  { "gpsTimeSourceMode", NK_gpsTimeSourceMode, 1 },
+  { "wifiNapEnabled", NK_wifiNapEnabled, 1 },
+  { "ZeroLogEnable", NK_ZeroLogEnable, 1 },
+  { "performanceRatio", NK_performanceRatio, 1 },
+  { "BatteryCurrentSource", NK_BatteryCurrentSource, 2 },
+  { "ShuntResistanceMicroOhm", NK_ShuntResistanceMicroOhm, 2 },
+  { "AmpSensorRange", NK_AmpSensorRange, 2 },
+  { "InvertAltAmps", NK_InvertAltAmps, 2 },
+  { "InvertBattAmps", NK_InvertBattAmps, 2 },
+};
+static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
+
+// Append val as a JSON string literal (quotes + backslash escaped).
+static void cfgAppendJsonStr(String &out, const String &val) {
+  out += '"';
+  for (size_t i = 0; i < val.length(); i++) {
+    char c = val[i];
+    if (c == '"' || c == '\\') out += '\\';
+    out += c;
+  }
+  out += '"';
+}
+
+// Emit the manifest settings as a complete JSON object {"param":"rawNvsStr",...}.
+// Single source of truth for BOTH /exportConfig (sharing) and the daily fleet config
+// snapshot (buildConfigPayload's "settings") — so neither can drift as settings are added.
+// includeHardware adds the tier-2 install/topology keys. Keys never set are omitted.
+String manifestConfigObject(bool includeHardware) {
+  String j;
+  j.reserve(6144);
+  j = "{";
+  bool first = true;
+  for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
+    if (CONFIG_MANIFEST[i].tier == 2 && !includeHardware) continue;
+    if (!settingExists(CONFIG_MANIFEST[i].nvsKey)) continue;   // key never set -> omit, destination keeps its default
+    String v = settingRead(CONFIG_MANIFEST[i].nvsKey);
+    if (!first) j += ',';
+    first = false;
+    j += '"'; j += CONFIG_MANIFEST[i].param; j += "\":";
+    cfgAppendJsonStr(j, v);
+  }
+  j += "}";
+  return j;
+}
+
+// Build the shareable config blob: fw_version + vessel metadata (for the cloud
+// table-of-contents) + the manifest "config" object. includeHardware adds tier-2 keys.
+String exportConfigJson(bool includeHardware) {
+  String j;
+  j.reserve(8192);
+  j = "{\"fw_version\":\"";
+  j += FIRMWARE_VERSION;
+  j += "\",\"payload_v\":1,\"vessel\":{";
+  j += "\"boat_make_model\":";        cfgAppendJsonStr(j, BOAT_MAKE_MODEL);
+  j += ",\"engine_make\":";           cfgAppendJsonStr(j, ENGINE_MAKE);
+  j += ",\"engine_hp\":";             j += String((unsigned)ENGINE_HP);
+  j += ",\"battery_voltage\":";       j += String((unsigned)BATTERY_VOLTAGE);
+  j += ",\"battery_capacity_ah\":";   j += String(BatteryCapacity_Ah);
+  j += ",\"battery_type\":";          cfgAppendJsonStr(j, BATTERY_TYPE);
+  j += ",\"alternator_brand_model\":";cfgAppendJsonStr(j, ALTERNATOR_BRAND_MODEL);
+  j += "},\"config\":";
+  j += manifestConfigObject(includeHardware);
+  j += "}";
+  return j;
+}
+
+// Extract a flat top-level value for "key" from a JSON object starting at 'from'.
+// Quote-delimited needle prevents prefix collisions (e.g. TailCurrent vs TailCurrent_A).
+// Values are simple numbers / short identifiers (raw NVS strings) — no nested escaping.
+static bool cfgJsonExtract(const char *from, const char *key, String &val) {
+  String needle = "\"";
+  needle += key;
+  needle += "\"";
+  const char *p = strstr(from, needle.c_str());
+  if (!p) return false;
+  p += needle.length();
+  while (*p == ' ' || *p == '\t' || *p == ':' ) p++;
+  if (*p == '"') {
+    p++;
+    const char *e = p;
+    while (*e && *e != '"') e++;
+    val = ""; val.concat(p, e - p);
+    return true;
+  }
+  const char *e = p;
+  while (*e && *e != ',' && *e != '}' && *e != ' ' && *e != '\n' && *e != '\r' && *e != '\t') e++;
+  val = ""; val.concat(p, e - p);
+  return true;
+}
+
+// Apply an imported config blob. Only manifest (allowlisted) keys are written —
+// anything else in the body is ignored by construction. Returns count applied,
+// or -1 if the body has no "config" object. settingWrite is compare-first so
+// unchanged values cost no flash. Caller reboots so the new set loads cleanly.
+int applyImportConfig(const char *body, bool includeHardware) {
+  if (!body) return -1;
+  const char *cfg = strstr(body, "\"config\"");
+  if (!cfg) return -1;   // malformed / wrong shape — reject, don't half-apply
+  int applied = 0;
+  for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
+    if (CONFIG_MANIFEST[i].tier == 2 && !includeHardware) continue;
+    String val;
+    if (cfgJsonExtract(cfg, CONFIG_MANIFEST[i].param, val)) {
+      if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) applied++;
+    }
+  }
+  return applied;
+}

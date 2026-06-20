@@ -681,7 +681,9 @@
                             <th>Min<br>(%) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                                   class="tooltip-box">Minimum field duty cycle (%) for this RPM range. Protects the
                                   tachometer signal coupling capacitor from dropout at low duty. Set to 0 if unsure —
-                                  the only penalty is occasional tach signal dropout.</span></span></th>
+                                  the only penalty is occasional tach signal dropout.</span></span>
+                              <span id="minduty-managed-hint" class="learning-info-label"
+                                    style="display:none; font-weight:400;">auto</span></th>
                           </tr>
                         </thead>
                         <tbody id="learning-table-body">
@@ -917,6 +919,286 @@
                           id="learning-table-save-button" class="btn-primary btn-save-table" style="display: none;">
                       </div>
                     </form>
+
+                    <!-- ===== Automatic Min% Learning ("knee tracker") ===== -->
+                    <hr style="margin-top:18px; border-color:var(--border);" />
+                    <div class="knee-learn-panel" style="margin-top:8px;">
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span><b>Automatic Min% Learning</b>
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When
+                                  on, the regulator learns — for each RPM range — the field level where the alternator
+                                  just begins to make current, and automatically keeps the Min (%) column a set margin
+                                  below it. It learns only during light-load moments (full battery), never while charging
+                                  hard. The Min (%) cells above update on their own; you can still turn this off and edit
+                                  them by hand.</span></span>
+                          </span>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Learning (<span id="kneeLearnEnable_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master
+                                  switch. On = the regulator owns and auto-fills the Min (%) column. Off = the column is
+                                  yours to edit and is left alone.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <select name="kneeLearnEnable" id="kneeLearnEnable_input">
+                              <option value="0">Off</option>
+                              <option value="1">On</option>
+                            </select>
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Margin Below Knee (%) (<span id="kneeMarginPct_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  far below the current-onset point to park the floor. Larger = safer (never forces
+                                  unwanted current), smaller = field stays more primed. 5 is a good start.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeMarginPct" id="kneeMarginPct_input" type="number" step="0.1" min="0" max="50" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Current Onset Threshold (A) (<span id="kneeKickInA_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  much output current counts as "current is building" when probing the floor. A couple of
+                                  amps is typical.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeKickInA" id="kneeKickInA_input" type="number" step="0.1" min="0" max="100" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Steady Dwell (s) (<span id="kneeDwellSec_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  long RPM, voltage, temperature and field must hold steady before a reading is trusted.
+                                  Rejects transients. Longer = stricter.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeDwellSec" id="kneeDwellSec_input" type="number" step="0.5" min="0.5" max="60" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Probe Rate (%/min) (<span id="kneeCreepPctMin_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  fast the floor is nudged upward to find the onset point. Slower = gentler, spends less
+                                  time near the onset; faster = learns each RPM range quicker.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeCreepPctMin" id="kneeCreepPctMin_input" type="number" step="0.05" min="0" max="20" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Learning Gain (<span id="kneeUpdateGain_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  strongly each new reading moves the learned onset point (0–1). Lower = smoother and more
+                                  stable, higher = adapts faster to change.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeUpdateGain" id="kneeUpdateGain_input" type="number" step="0.01" min="0.01" max="1" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Reference Voltage (V) (<span id="kneeVbusRef_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Readings
+                                  taken at different battery voltages and temperatures are normalized to this reference
+                                  before being combined, so the learned floor stays consistent. Set near your typical
+                                  float voltage.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeVbusRef" id="kneeVbusRef_input" type="number" step="0.1" min="6" max="65" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Reference Temperature (°F) (<span id="kneeTempRefF_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The
+                                  reference rotor temperature used alongside Reference Voltage to normalize readings. A
+                                  typical warm operating temperature is fine.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeTempRefF" id="kneeTempRefF_input" type="number" step="1" min="-40" max="300" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Maximum Floor (%) (<span id="kneeMaxFloorPct_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Safety
+                                  cap — no learned floor will ever exceed this, even while probing. Bounds how much field
+                                  can be held during light load.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeMaxFloorPct" id="kneeMaxFloorPct_input" type="number" step="0.5" min="0" max="50" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Steady Band — RPM (%) (<span id="kneeRpmTolPct_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  much RPM may wander and still count as steady. Tighter = stricter.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeRpmTolPct" id="kneeRpmTolPct_input" type="number" step="0.5" min="0.5" max="50" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Steady Band — Voltage (V) (<span id="kneeVbusTolV_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  much battery voltage may wander and still count as steady.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeVbusTolV" id="kneeVbusTolV_input" type="number" step="0.05" min="0.02" max="5" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Steady Band — Temperature (°F) (<span id="kneeTempTolF_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  much temperature may wander and still count as steady.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeTempTolF" id="kneeTempTolF_input" type="number" step="0.5" min="0.5" max="50" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Steady Band — Field (%) (<span id="kneeDutyTolPct_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
+                                  much the applied field may wander and still count as steady.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeDutyTolPct" id="kneeDutyTolPct_input" type="number" step="0.1" min="0.1" max="20" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div style="margin-top:10px;">
+                        <div class="learning-info-label" style="margin-bottom:6px;">Per-RPM Learning Status
+                          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Live
+                                view per RPM range: the floor in use, the learned current-onset point, how confident the
+                                learning is (0–100%), and how long since that range was last confirmed. "Active" marks the
+                                range being observed right now.</span></span>
+                        </div>
+                        <table class="learning-table" id="knee-status-table">
+                          <thead>
+                            <tr>
+                              <th>RPM</th>
+                              <th>Floor (%)</th>
+                              <th>Onset (%)</th>
+                              <th>Conf</th>
+                              <th>Last seen</th>
+                            </tr>
+                          </thead>
+                          <tbody id="knee-status-body">
+                          </tbody>
+                        </table>
+                        <div id="knee-status-live" class="learning-info-label" style="margin-top:6px;">Status: —</div>
+                      </div>
+
+                      <div class="btn-row" style="margin-top:10px;">
+                        <button type="button" class="btn-danger-ghost btn-sm" onclick="resetKneeLearn()">Reset Learned Floors</button>
+                      </div>
+                    </div>
+                    <!-- ===== end Automatic Min% Learning ===== -->
                   </div>
                 </div>
               </div>
@@ -1496,6 +1778,41 @@
                       <button type="button" class="btn-secondary" onclick="resetParameter('ResetDynamicAltZero')"
                         id="ResetDynamicAltZero_button">Reset Zero</button>
                     </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Zero-Drift Log (<span id="ZeroLogEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
+                        class="tooltip-box">Diagnostic. Records the alternator current reading while the field is
+                        off — every 1 s while the engine spins (for a quick RPM sweep), every 10 min while it's
+                        off — so the sensor's zero drift vs. time, temperature and RPM can be measured. Run this
+                        with Alternator Auto-Zero OFF so the reading is the true raw zero. Download the CSV to
+                        analyze, then Reset to start a fresh session.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="ZeroLogEnable_checkbox" type="checkbox"
+                          onchange="document.getElementById('ZeroLogEnable').value = this.checked ? '1' : '0'; zeroLogToggledAt = Date.now(); this.form.submit(); submitMessage();" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="ZeroLogEnable" name="ZeroLogEnable" type="number" value=""
+                        style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="form-label"><span id="zerolog-status" class="learning-info-label">Records: —</span></div>
+                  <div class="form-input">
+                    <button type="button" class="btn-secondary btn-sm"
+                      onclick="window.open(buildURL('/zerolog.csv'),'_blank')">Download CSV</button>
+                    <button type="button" class="btn-danger-ghost btn-sm" onclick="resetZeroLog()">Reset Log</button>
                   </div>
                 </div>
 
@@ -2110,7 +2427,7 @@
                           <input type="checkbox" id="iExcessSparkAuto" onchange="localStorage.setItem('iExcessSparkAuto', this.checked?'1':'0')" style="margin:0;"> auto-scale
                         </label>
                       </div>
-                      <canvas id="iExcessSpark" style="display:block; width:100%; height:30px;"></canvas>
+                      <canvas id="iExcessSpark" style="display:block; width:100%; height:60px;"></canvas>
                       <div style="font-size:0.92em; margin-top:5px;">
                         peak excess <strong id="mExcessEmaLive">—</strong> A&nbsp;·&nbsp;threshold <strong id="iExcessELive">—</strong> A
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Live Group 3 detector. Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> fire threshold (amber). The threshold rides the live current command and clamps onto the Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross. On a clean high-current hold the teal stays well under the amber; a real over-current crosses it and draws a marker.</span></span>
@@ -4253,6 +4570,76 @@
               </div>
             </details>
 
+            <!-- Configuration Backup & Sharing Section -->
+            <details>
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Configuration Backup &amp; Sharing</summary>
+
+              <div class="form-row">
+                <div class="form-label">Include hardware-specific settings (current sensor, shunt resistance,
+                  amp polarity) in download / load:
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When
+                    on, the download or load also includes settings tied to this specific installation: the current
+                    sensor type, shunt resistance, and amperage polarity. Leave it off when copying a configuration
+                    between different boats. Turn it on only when cloning onto identical hardware. Per-device
+                    calibration (sensor zero offsets) is never included either way.</span></span></div>
+                <div class="form-input">
+                  <label><input type="checkbox" id="configIncludeHardware" /> Include hardware settings</label>
+                </div>
+              </div>
+
+              <hr />
+
+              <div class="form-row">
+                <div class="form-label">Download this regulator's complete configuration to a file (backup, or
+                  to copy onto another regulator):
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Saves
+                    every charge-profile, tuning, and preference setting to a plain-text file in your Downloads. Use
+                    it to back this regulator up, or to copy its setup onto another regulator with Load Configuration.
+                    Hardware-specific settings are included only when the box above is checked.</span></span></div>
+                <div class="form-input">
+                  <input type="button" value="Download Configuration" class="btn-primary"
+                    onclick="exportConfigDownload()" />
+                </div>
+              </div>
+
+              <hr />
+
+              <div class="form-row">
+                <div class="form-label">Load a saved configuration file onto this regulator. The regulator
+                  reboots to apply it:
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies
+                    a configuration file to this regulator, then reboots it to load the new values — reconnect after
+                    about 30 seconds. Any setting the file does not contain keeps its current value. Only load files
+                    you trust. Hardware-specific settings are applied only when the box above is checked, so leave it
+                    off unless the file came from identical hardware.</span></span></div>
+                <div class="form-input">
+                  <input type="file" id="importConfigFile" accept="application/json,.json" />
+                  <input type="button" value="Load Configuration" class="btn-secondary"
+                    onclick="importConfigFromFile()" />
+                </div>
+              </div>
+
+              <hr />
+
+              <div class="form-row">
+                <div class="form-label">Share this configuration to the community library for review (hardware
+                  settings are never shared):
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Submits
+                    this regulator's configuration to the shared community library, where it is reviewed before
+                    others can see it. Installation-specific hardware settings are never shared. Give it a clear name
+                    (battery voltage, bank size, alternator) so others can find it. Requires cloud registration.</span></span></div>
+                <div class="form-input">
+                  <input type="text" id="shareConfigName" placeholder="Name (e.g. 48V LiFePO4 + Balmar 6-series)"
+                    style="margin-right: 6px;" />
+                  <input type="button" value="Share to Library" class="btn-secondary"
+                    onclick="shareConfigToLibrary()" />
+                </div>
+              </div>
+
+            </details>
+
           </div>
         </div>
 
@@ -4654,15 +5041,54 @@
   <div id="tuning" class="tab-content">
     <!-- Tuning Sub-tabs -->
     <div class="sub-tabs">
-      <button class="sub-tab active" onclick="showSubTab('tuning', 'plant-delay', event)">Plant Delay</button>
+      <button class="sub-tab active" onclick="showSubTab('tuning', 'commissioning', event)">Commissioning</button>
+      <button class="sub-tab" onclick="showSubTab('tuning', 'plant-delay', event)">Plant Delay</button>
       <button class="sub-tab" onclick="showSubTab('tuning', 'current', event)">Current</button>
       <button class="sub-tab" onclick="showSubTab('tuning', 'voltage', event)">Voltage</button>
       <button class="sub-tab" onclick="showSubTab('tuning', 'temperature', event)">Temperature</button>
       <button class="sub-tab" onclick="showSubTab('tuning', 'about', event)">About</button>
     </div>
 
+    <!-- Commissioning -->
+    <div id="tuning-commissioning" class="sub-tab-content active">
+      <div class="settings-card">
+
+        <p class="card-group-title" style="margin:0 0 10px 0;">Commissioning</p>
+        <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px 0;line-height:1.55;">
+          A single guided walkthrough that sets up the current-control loop and its over-current
+          protection for <strong>this</strong> alternator. You hold the engine at a steady speed; the
+          regulator drives the field and measures everything it needs. The dashboard switches pages
+          automatically as each step runs.
+        </p>
+
+        <!-- Commissioning status badge (promoted here from the Plant Delay page). Populated by
+             updateCommissionBadge() in script.js — keep this the only #commission-badge in the DOM. -->
+        <div id="commission-badge" style="display:none; margin-bottom:14px; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;"></div>
+
+        <button onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:12px;">Start / Resume Commissioning…</button>
+        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Opens the guided panel. If a session is already underway it resumes exactly where you left off.</p>
+
+        <hr />
+        <p class="card-group-title" style="margin:12px 0 10px 0;">What this sets up</p>
+        <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);font-size:13px;line-height:1.6;">
+          <ol style="margin:0;padding-left:20px;">
+            <li><strong>Plant fit</strong> — measures the field coil's electrical lag (Plant Delay page).</li>
+            <li><strong>Current gains &amp; filters</strong> — seeds the output-current controller from the fit (Current page).</li>
+            <li><strong>Disturbance map</strong> — finds the worst over-current the field can actually react to (Diagnostics page).</li>
+            <li><strong>Over-current thresholds</strong> — sets the protection trip points above that disturbance floor.</li>
+            <li><strong>Validation</strong> — a guided current hold that confirms protections don't false-trip (Alternator page).</li>
+          </ol>
+          <p style="margin:10px 0 0 0;color:var(--text-muted);">
+            While a step runs, the relevant over-current layers may be relaxed so the test input isn't fought —
+            a red banner shows at the top of every page whenever that's the case. Everything re-enables when the flow finishes.
+          </p>
+        </div>
+
+      </div>
+    </div>
+
     <!-- Plant Delay -->
-    <div id="tuning-plant-delay" class="sub-tab-content active">
+    <div id="tuning-plant-delay" class="sub-tab-content">
       <div class="settings-card">
 
         <p class="card-group-title" style="margin:0 0 10px 0;">Test Parameters</p>
@@ -4790,21 +5216,12 @@
         </div>
 
         <hr />
-        <!-- Auto-commissioning: one-button current-loop setup. The badge warns until the
-             device has been commissioned; the button opens the guided flow either way. -->
-        <div style="margin:16px 0 4px 0;">
-          <div id="commission-badge" style="display:none; margin-bottom:8px; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;"></div>
-          <button onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:10px;">Commission Current Loop…</button>
-          <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Guided one-button setup of the current-control + over-current chain (plant fit → PI gains &amp; filters → disturbance map → over-current thresholds). You hold the throttle; the regulator drives the field.</p>
-        </div>
-
-        <hr />
         <div style="margin:16px 0 4px 0;">
           <button onclick="openSystemIDModal()" class="btn-secondary" style="width:100%;padding:10px;">Run Plant Delay Test…</button>
         </div>
 
         <hr />
-        <p class="card-group-title" style="margin:12px 0 10px 0;">Last Step Test Results</p>
+        <p class="card-group-title" style="margin:12px 0 10px 0;">Test Results</p>
         <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;">Rise/fall delays from the most recent <strong>Step</strong> run. Sine Sweep (Bode) results appear in the test window while that test runs.</p>
 
         <div class="grid telemetry-groups">
@@ -4856,7 +5273,7 @@
 
         <hr />
         <details id="systemIDLogSection" class="tuning-section">
-          <summary class="tuning-section-title">Plant Delay History (Step runs)</summary>
+          <summary class="tuning-section-title">Step History</summary>
           <div>
             <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
               <button type="button" class="btn-secondary" onclick="fetchSystemIDLog()">↺ Refresh</button>
@@ -4895,7 +5312,7 @@
 
         <hr />
         <details id="sysidSweepLogSection" class="tuning-section">
-          <summary class="tuning-section-title">Sine Sweep History</summary>
+          <summary class="tuning-section-title">Sweep History</summary>
           <div>
             <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
               <button type="button" class="btn-secondary" onclick="fetchSysidSweepLog()">↺ Refresh</button>
@@ -5147,29 +5564,9 @@
               <details class="tuning-section">
                 <summary class="tuning-section-title">Current Target Generator</summary>
 
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Waveform (<span id="TuningMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enables
-                        test waveform generation for evaluating PID performance. Use with plots to optimize PID
-                        parameters. Disable for normal operation.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="TuningMode_checkbox" type="checkbox"
-                          onchange="if(checkCurrTestGate(this) && handleUserToggle('TuningMode_checkbox', 'TuningMode', 'TuningMode')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="TuningMode" name="TuningMode" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
+                <!-- The Waveform On/Off toggle and the separate Run Sweep button were merged into the single
+                     "Begin Test" / "Stop Test" button at the bottom of this panel, driven by Waveform Type.
+                     The hidden TuningMode input (state source for gating/echo) now lives in that bottom row. -->
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Waveform Type (<span id="tuningWaveform_echo">?</span>):</span>
@@ -5331,18 +5728,8 @@
                     </div>
                   </div>
 
-                  <hr />
-                  <div class="form-row">
-                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                      <span>Run closed-loop sweep:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Starts the sweep, automatically arming the generator (turning the Waveform toggle On) if it's off — one button does both. The sweep takes ~30–60 s; keep engine RPM steady. Press Stop to abort. Results appear below.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <button id="tuningRunSweepBtn" onclick="tuningRunSweep()" class="btn-primary" type="button">▶ Run Sweep</button>
-                      <span id="tuning-sweep-status" style="margin-left:8px; font-size:0.85em; color:#aaa;"></span>
-                      <div style="font-size:0.8em; color:#888; margin-top:4px;">Auto-arms the generator for you — no need to flip the Waveform toggle first.</div>
-                    </div>
-                  </div>
+                  <!-- Run Sweep button removed — sweeps now start from the unified "Begin Test" button at the
+                       bottom of this panel (when Waveform Type = Sine sweep). The results table stays here. -->
 
                   <!-- Closed-loop Bode results -->
                   <div id="tuning-bode-section" style="display:none; margin-top:10px;">
@@ -5361,6 +5748,19 @@
                       <tbody id="tuning-bode-body"></tbody>
                     </table>
                     <div id="tuning-bode-summary" style="font-size:0.88em; color:#4a9eff; line-height:1.45;"></div>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Test (<span id="TuningMode_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Begins the waveform selected in Waveform Type. Square and Sine manual run continuously for live PID tuning on the plot — press Stop Test to end. Sine sweep runs ~30–60 s then stops itself (keep engine RPM steady); its gain &amp; phase results appear above.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <button id="tuningBeginTestBtn" onclick="tuningToggleTest()" class="btn-primary" type="button">▶ Begin Test</button>
+                    <span id="tuning-sweep-status" style="margin-left:8px; font-size:0.85em; color:#aaa;"></span>
+                    <input id="TuningMode" name="TuningMode" type="number" value="0" style="display:none;" />
                   </div>
                 </div>
 
@@ -10704,6 +11104,7 @@
       <button class="sub-tab active" onclick="showSubTab('cloudfeatures', 'myprofile', event)">Registration</button>
       <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'leaderboards', event)">Leaderboards</button>
       <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'fleetstats', event)">Fleet Stats</button>
+      <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'configsharing', event)">Config Sharing</button>
       <button class="sub-tab" onclick="showSubTab('cloudfeatures', 'softwareupdate', event)">Software Update</button>
     </div>
     <!-- My Profile Sub-tab -->
@@ -10799,6 +11200,15 @@
         <iframe id="fleetstats-iframe"
           style="width: 100%; border: none; display: none; height: 600px; overflow: hidden;"></iframe>
         <p id="fleetstats-status" style="margin: 15px; color: #666;">Loading fleet statistics...</p>
+      </div>
+    </div>
+
+    <!-- Config Sharing Sub-tab -->
+    <div id="cloudfeatures-configsharing" class="sub-tab-content">
+      <div class="history-container">
+        <iframe id="configsharing-iframe"
+          style="width: 100%; border: none; display: none; height: 600px; overflow: hidden;"></iframe>
+        <p id="configsharing-status" style="margin: 15px; color: #666;">Loading shared configurations...</p>
       </div>
     </div>
 
@@ -11400,7 +11810,7 @@
   <div id="commission-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
     <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
       <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
-        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commission Current Loop</span>
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commissioning</span>
         <button onclick="closeCommissionModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
       </div>
       <div style="padding:20px;">

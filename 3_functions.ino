@@ -1635,6 +1635,7 @@ int doCloudPOST(const char *endpointPath, const char *payload,
 // ingested once the request completes. LAN-only single-client dashboard, so one global is fine.
 static String perfUploadBuf;
 static String altUploadBuf;   // same, for /altUploadFront (alternator-health Load CSV)
+static String importConfigBuf;   // body accumulator for POST /importConfig (config sharing)
 
 void setupServer() {
 
@@ -2132,6 +2133,68 @@ void setupServer() {
   server.on("/altschema", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", altSchemaJson());
   });
+  // Auto Min% learning ("knee tracker") state: knobs + live status + per-bin learned floors.
+  server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", kneeLearnStateJson());
+  });
+  // Zero-drift characterization log: small status JSON for the dashboard panel (enable, fill, span).
+  server.on("/zerologstate", HTTP_GET, [](AsyncWebServerRequest *request) {
+    uint32_t oldest = 0, newest = 0;
+    if (zeroLogRing && zeroLogCount > 0) {
+      uint16_t oi = (zeroLogCount < ZEROLOG_RING_SIZE) ? 0 : zeroLogHead;
+      uint16_t ni = (uint16_t)((zeroLogHead + ZEROLOG_RING_SIZE - 1) % ZEROLOG_RING_SIZE);
+      oldest = zeroLogRing[oi].epoch;
+      newest = zeroLogRing[ni].epoch;
+    }
+    String j = "{\"enable\":";  j += (ZeroLogEnable ? 1 : 0);
+    j += ",\"count\":";  j += String((unsigned)zeroLogCount);
+    j += ",\"cap\":";    j += String((unsigned)ZEROLOG_RING_SIZE);
+    j += ",\"oldest\":"; j += String(oldest);
+    j += ",\"newest\":"; j += String(newest);
+    j += "}";
+    request->send(200, "application/json", j);
+  });
+  // Zero-drift log → CSV, streamed oldest-first (constant RAM). Reads the live PSRAM ring, so the
+  // download is always complete regardless of the last flash flush.
+  server.on("/zerolog.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!zeroLogRing || zeroLogCount == 0) {
+      request->send(200, "text/csv", "epoch,rpm,battV,altTempF,amps,p2pAmps\n");
+      return;
+    }
+    struct ZExp { uint16_t head, count, idx; bool header, done; char line[96]; int len, pos; };
+    ZExp st;
+    st.head = zeroLogHead; st.count = zeroLogCount; st.idx = 0;
+    st.header = true; st.done = false; st.len = 0; st.pos = 0;
+    AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+      [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+        if (st.done) return 0;
+        size_t written = 0;
+        while (written < maxLen) {
+          if (st.pos >= st.len) {
+            if (st.header) {
+              st.len = snprintf(st.line, sizeof(st.line), "epoch,rpm,battV,altTempF,amps,p2pAmps\n");
+              st.header = false;
+            } else {
+              if (st.idx >= st.count) { st.done = true; return written; }
+              uint16_t ai = (st.count < ZEROLOG_RING_SIZE) ? st.idx
+                            : (uint16_t)((st.head + st.idx) % ZEROLOG_RING_SIZE);
+              ZeroLogRecord &r = zeroLogRing[ai];
+              st.len = snprintf(st.line, sizeof(st.line), "%u,%d,%.2f,%.1f,%.3f,%.3f\n",
+                                (unsigned)r.epoch, (int)r.rpm, r.battVx100 / 100.0f,
+                                r.altTempFx10 / 10.0f, r.amps, r.p2pAmps);
+              st.idx++;
+            }
+            st.pos = 0;
+          }
+          size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+          memcpy(buf + written, st.line + st.pos, tw);
+          written += tw; st.pos += (int)tw;
+        }
+        return written;
+      });
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
   // The held best-ever front (BEFRONT1 CSV artifact) — streamed (constant RAM at any front size).
   server.on("/altcurve.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altCurveCsvSend(request);
@@ -2256,6 +2319,50 @@ void setupServer() {
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       if (index == 0) { altUploadBuf = ""; altUploadBuf.reserve(total + 1); }
       altUploadBuf.concat((const char *)data, len);
+    });
+
+  // Config Sharing — export the cloneable settings set as one JSON blob (for download
+  // or cloud submission). ?includeHardware=1 adds the tier-2 install/topology keys.
+  // Password-gated like the upload endpoints.
+  server.on("/exportConfig", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
+      request->send(403, "text/plain", "Forbidden"); return;
+    }
+    bool hw = request->hasParam("includeHardware") && request->getParam("includeHardware")->value().toInt() != 0;
+    request->send(200, "application/json", exportConfigJson(hw));
+  });
+
+  // Config Sharing — apply an imported config blob (POST the /exportConfig JSON as the body).
+  // Only allowlisted manifest keys are written; everything else in the body is ignored.
+  // ?includeHardware=1 also applies the tier-2 install/topology keys (default OFF — different
+  // hardware). Reboots after applying so InitSystemSettings re-reads the whole set consistently
+  // (suppress with ?noReboot=1). Mirrors /perfUploadFront's body-accumulator pattern.
+  server.on("/importConfig", HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      if (!request->hasParam("password") || strcmp(request->getParam("password")->value().c_str(), requiredPassword) != 0) {
+        importConfigBuf = ""; request->send(403, "text/plain", "Forbidden"); return;
+      }
+      if (importConfigBuf.length() < 2) {
+        importConfigBuf = ""; request->send(400, "text/plain", "Empty body"); return;
+      }
+      char *bodyc = strdup(importConfigBuf.c_str());
+      importConfigBuf = "";
+      if (!bodyc) { request->send(500, "text/plain", "Out of memory"); return; }
+      bool hw = request->hasParam("includeHardware") && request->getParam("includeHardware")->value().toInt() != 0;
+      int n = applyImportConfig(bodyc, hw);
+      free(bodyc);
+      if (n < 0) { request->send(400, "text/plain", "No config object in body"); return; }
+      bool reboot = !request->hasParam("noReboot") || request->getParam("noReboot")->value().toInt() == 0;
+      if (reboot) { rebootRequested = true; rebootRequestedAt = millis(); }
+      String resp = "{\"applied\":";
+      resp += n; resp += ",\"reboot\":"; resp += (reboot ? 1 : 0); resp += "}";
+      request->send(200, "application/json", resp);
+    },
+    NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (total > 65536) return;   // bound: a real config blob is ~6 KB; reject anything absurd
+      if (index == 0) { importConfigBuf = ""; importConfigBuf.reserve(total + 1); }
+      importConfigBuf.concat((const char *)data, len);
     });
 
   server.on("/cvlog.bin", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2916,6 +3023,94 @@ void setupServer() {
       foundParameter = true;
       faPeakMinA = request->getParam("faPeakMinA")->value().toFloat();
       settingWrite(NK_faPeakMinA, String(faPeakMinA, 2).c_str());
+    }
+    // ---- Auto Min% learning ("knee tracker") knobs ----
+    else if (request->hasParam("kneeLearnEnable")) {
+      foundParameter = true;
+      kneeLearnEnable = (request->getParam("kneeLearnEnable")->value().toInt() != 0);
+      settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
+      if (kneeLearnEnable) {
+        // Take ownership of the Min% column immediately from the learned floors.
+        for (int i = 0; i < RPM_TABLE_SIZE; i++) {
+          float f = kneeFloorRef[i];
+          if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
+          rpmMinDutyTable[i] = f;
+        }
+      }
+    }
+    else if (request->hasParam("kneeMarginPct")) {
+      foundParameter = true;
+      kneeMarginPct = request->getParam("kneeMarginPct")->value().toFloat();
+      settingWrite(NK_kneeMarginPct, String(kneeMarginPct, 2).c_str());
+    }
+    else if (request->hasParam("kneeKickInA")) {
+      foundParameter = true;
+      kneeKickInA = request->getParam("kneeKickInA")->value().toFloat();
+      settingWrite(NK_kneeKickInA, String(kneeKickInA, 2).c_str());
+    }
+    else if (request->hasParam("kneeDwellSec")) {
+      foundParameter = true;
+      kneeDwellSec = request->getParam("kneeDwellSec")->value().toFloat();
+      settingWrite(NK_kneeDwellSec, String(kneeDwellSec, 1).c_str());
+    }
+    else if (request->hasParam("kneeCreepPctMin")) {
+      foundParameter = true;
+      kneeCreepPctMin = request->getParam("kneeCreepPctMin")->value().toFloat();
+      settingWrite(NK_kneeCreepPctMin, String(kneeCreepPctMin, 2).c_str());
+    }
+    else if (request->hasParam("kneeUpdateGain")) {
+      foundParameter = true;
+      kneeUpdateGain = request->getParam("kneeUpdateGain")->value().toFloat();
+      settingWrite(NK_kneeUpdateGain, String(kneeUpdateGain, 2).c_str());
+    }
+    else if (request->hasParam("kneeVbusRef")) {
+      foundParameter = true;
+      kneeVbusRef = request->getParam("kneeVbusRef")->value().toFloat();
+      settingWrite(NK_kneeVbusRef, String(kneeVbusRef, 2).c_str());
+    }
+    else if (request->hasParam("kneeTempRefF")) {
+      foundParameter = true;
+      kneeTempRefF = request->getParam("kneeTempRefF")->value().toFloat();
+      settingWrite(NK_kneeTempRefF, String(kneeTempRefF, 1).c_str());
+    }
+    else if (request->hasParam("kneeMaxFloorPct")) {
+      foundParameter = true;
+      kneeMaxFloorPct = request->getParam("kneeMaxFloorPct")->value().toFloat();
+      settingWrite(NK_kneeMaxFloorPct, String(kneeMaxFloorPct, 2).c_str());
+    }
+    else if (request->hasParam("kneeRpmTolPct")) {
+      foundParameter = true;
+      kneeRpmTolPct = request->getParam("kneeRpmTolPct")->value().toFloat();
+      settingWrite(NK_kneeRpmTolPct, String(kneeRpmTolPct, 1).c_str());
+    }
+    else if (request->hasParam("kneeVbusTolV")) {
+      foundParameter = true;
+      kneeVbusTolV = request->getParam("kneeVbusTolV")->value().toFloat();
+      settingWrite(NK_kneeVbusTolV, String(kneeVbusTolV, 2).c_str());
+    }
+    else if (request->hasParam("kneeTempTolF")) {
+      foundParameter = true;
+      kneeTempTolF = request->getParam("kneeTempTolF")->value().toFloat();
+      settingWrite(NK_kneeTempTolF, String(kneeTempTolF, 1).c_str());
+    }
+    else if (request->hasParam("kneeDutyTolPct")) {
+      foundParameter = true;
+      kneeDutyTolPct = request->getParam("kneeDutyTolPct")->value().toFloat();
+      settingWrite(NK_kneeDutyTolPct, String(kneeDutyTolPct, 2).c_str());
+    }
+    else if (request->hasParam("ResetKneeLearn")) {
+      foundParameter = true;
+      kneeLearnResetDefaults();
+    }
+    // ---- Zero-drift characterization log (diagnostic) ----
+    else if (request->hasParam("ZeroLogEnable")) {
+      foundParameter = true;
+      ZeroLogEnable = (request->getParam("ZeroLogEnable")->value().toInt() != 0);
+      settingWrite(NK_ZeroLogEnable, ZeroLogEnable ? "1" : "0");
+    }
+    else if (request->hasParam("ResetZeroLog")) {
+      foundParameter = true;
+      zeroLogResetAll();
     }
     else if (request->hasParam("wifiNapEnabled")) {
       foundParameter = true;
@@ -3945,7 +4140,7 @@ void setupServer() {
       if (testProtectionsEnabled) {
         queueConsoleMessage("PROTECTIONS ENABLED — all protection layers restored");
       } else {
-        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2/G3 + AlternatorHardShutdownV bypassed; G4, INA228, and hardware OC remain active");
+        queueConsoleMessage("PROTECTIONS DISABLED for tuning — G1/G2/G3 bypassed; fast OV (AlternatorHardShutdownV), G4, INA228, and hardware OC remain active");
       }
     }
     if (request->hasParam("TuningMode")) {
@@ -6147,15 +6342,17 @@ void dnsHandleRequest() {  // process dns request for captive portals
     }
   }
 }
-// Engine-off standby power drop. Normally powers WiFi fully off, suspends the temp task, and
-// slows the CPU to 80MHz. With WiFi Napping enabled in Client mode it instead keeps WiFi
-// associated in modem-sleep so the dashboard stays reachable with no button press — indefinitely
-// while the regulator stays on the router. Nap costs only ~1mA over full-off (measured), so there
-// is no idle timeout. While napping the CPU bumps to 240MHz whenever a dashboard is connected
-// (snappy UI) and drops to 80MHz when idle; the temp task stays suspended either way, so alt
-// temperature goes stale while napping (intentional — engine is off). Modem-sleep stays on, so
-// there's still ~100-300ms beacon latency on the first packet, which is fine. Ordering matters:
-// do the WiFi op, then suspend tasks, then set the clock.
+// Engine-off standby power drop. Normally powers WiFi fully off and slows the CPU to 80MHz. With
+// WiFi Napping enabled in Client mode it instead keeps WiFi associated in modem-sleep so the
+// dashboard stays reachable with no button press — indefinitely while the regulator stays on the
+// router. Nap costs only ~1mA over full-off (measured), so there is no idle timeout. While napping
+// the CPU bumps to 240MHz whenever a dashboard is connected (snappy UI) and drops to 80MHz when
+// idle. The temp task is NO LONGER suspended here — the DS18B20/OneWire path reads fine at 80MHz
+// (all its timing is wall-clock, not CPU-cycle, based), and the task self-throttles to a 10-min
+// cadence while the engine is off (see TempTask), which keeps alt temperature fresh for the
+// zero-drift log at negligible standby power. Modem-sleep stays on, so there's still ~100-300ms
+// beacon latency on the first packet, which is fine. Ordering matters: do the WiFi op, then set the
+// clock.
 void enterLowPowerStandby() {
   if (wifiNapEnabled && currentMode == MODE_CLIENT) {
     if (!wifiNapActive) {
@@ -6167,10 +6364,7 @@ void enterLowPowerStandby() {
     WiFi.mode(WIFI_OFF);             // THIS MUST BE DONE FIRST
     wifiNapActive = false;           // napping disabled (or AP mode) — clear stale nap state
   }
-  if (tempTaskHandle != NULL) {
-    vTaskSuspend(tempTaskHandle);    // SUSPEND BACKGROUND TASKS BEFORE SLOWING CPU
-    tempTaskSuspended = true;        // intentional suspend — health monitor must not read this as a hang
-  }
+  // Temp task intentionally NOT suspended (reads fine at 80MHz; self-throttles to 10 min engine-off).
   // While napping, run 240MHz when a dashboard is actually connected (snappy UI), else 80MHz.
   // WiFi-off standby always stays 80MHz. Guarded so the PLL isn't reconfigured every loop pass.
   uint32_t targetMhz = (wifiNapActive && events.count() > 0) ? 240 : 80;

@@ -2489,15 +2489,15 @@ void _ReadAnalogInputs_inner() {
     }
   }
 
-  // ── ADS1115 non-blocking state machine ───────────────────────────────────
-  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples (~213 Hz / ~4.7ms interval)
-  // ADS_WAIT uses time-based 3ms delay — no isConversionDone() I²C poll.
-  // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
-  // saving one loop() call per step. Falls back to ADS_IDLE if <2ms elapsed.
-  // Full 6-step cycle ≈ 14ms; CH0/CH2/CH3 each update every ~14ms.
+  // ── ADS1115 non-blocking sampler (absolute-grid paced) ───────────────────
+  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 slots. Each slot fires on a fixed micros()
+  // grid (ADS_SLOT_US), so CH1 lands every 2 slots ≈ 9ms with low jitter; a heavy
+  // loop pass stretches only the one interval it lands in, then the grid recovers.
+  // Read happens at the slot deadline (no isConversionDone poll — ADS_SLOT_US >>
+  // conversion time guarantees readiness). Full 6-slot cycle = 6*ADS_SLOT_US ≈ 27ms;
+  // CH0/CH2/CH3 each update once per cycle.
   //
-  // ft_rai_ads_state measures cost per state step (not a full logical read cycle),
-  // which is the correct unit for a non-blocking state machine.
+  // ft_rai_ads_state measures cost per pass (read+retrigger only on a due slot).
   if (ADS1115Disconnected != 0) {
     // Throttled error message to prevent console spam
     static unsigned long lastADSWarning = 0;
@@ -2511,32 +2511,25 @@ void _ReadAnalogInputs_inner() {
   unsigned long now = millis();
 
   TIMED_CALL(ft_rai_ads_state, ([&]() {
-               switch (adsState) {
+               // Absolute-grid pacer: each slot fires on a fixed micros() grid (ADS_SLOT_US),
+               // NOT relative to the prior read, so a heavy loop pass stretches at most one
+               // interval — the next slot snaps back to the grid instead of compounding.
+               // No isConversionDone() poll: ADS_SLOT_US >> conversion time, so the in-flight
+               // conversion is always done by its deadline (see ADS_SLOT_US guard note).
+               static uint32_t slotDueUs = 0;
+               static bool adsPrimed = false;
+               uint32_t nowUs = micros();
 
-                 case ADS_IDLE:
-                   // Trigger single-shot conversion on current channel
-                   adsTriggeredChannel = adsCurrentChannel;
-                   adc.setMux(adsMuxCodes[adsTriggeredChannel]);
-                   adc.triggerConversion();
-                   adsStateEntered = millis();  // capture AFTER triggerConversion() write completes
-                   adsState = ADS_WAIT;
-                   break;
-
-                 case ADS_WAIT:
-                   // Time-based ready check — eliminates isConversionDone() I²C poll (requestFrom blindspot)
-                   // 860 SPS = 1.16ms/conversion; 3ms gives millis() granularity margin
-                   if (now - adsStateEntered >= ADS_CONVERSION_MS) {
-                     adsState = ADS_READ_RESULT;
-                   } else if (now - adsStateEntered > ADS_TIMEOUT_MS) {
-                     queueConsoleMessage("ADS1115 timeout ch" + String(adsTriggeredChannel));
-                     adsState = ADS_IDLE;  // retry same channel
-                   }
-                   break;
-
-                 case ADS_READ_RESULT:
+               if (!adsPrimed) {
+                 adsTriggeredChannel = adsCurrentChannel;
+                 adc.setMux(adsMuxCodes[adsTriggeredChannel]);
+                 adc.triggerConversion();
+                 slotDueUs = nowUs + ADS_SLOT_US;
+                 adsPrimed = true;
+               } else if ((int32_t)(nowUs - slotDueUs) >= 0) {
                    {
-                     // Read conversion register directly - we have already confirmed OS bit is set,
-                     // so we bypass adc.getConversion() which would busy-wait/block the loop unnecessarily
+                     // Slot deadline reached — read the in-flight conversion (adsTriggeredChannel).
+                     // Direct convert-register read; ADS_SLOT_US guarantees it's done (no OS-bit poll).
                      Wire.beginTransmission(0x48);
                      Wire.write(ADS1115_REG_POINTER_CONVERT);
                      uint32_t _ads_t0 = (uint32_t)esp_timer_get_time();
@@ -2662,6 +2655,20 @@ void _ReadAnalogInputs_inner() {
                                }
                                lastAmpsFilterMs = now;
                              }
+
+                             // Zero-drift diagnostic: rolling 0.5 s peak-to-peak of alternator current.
+                             // Latched into altAmpsP2P every 0.5 s for zeroLogService() to record.
+                             {
+                               static float p2pMin = 1e9f, p2pMax = -1e9f;
+                               static uint32_t p2pWinStart = 0;
+                               if (p2pWinStart == 0) p2pWinStart = now;
+                               if (MeasuredAmps < p2pMin) p2pMin = MeasuredAmps;
+                               if (MeasuredAmps > p2pMax) p2pMax = MeasuredAmps;
+                               if (now - p2pWinStart >= 500) {
+                                 altAmpsP2P = (p2pMax >= p2pMin) ? (p2pMax - p2pMin) : 0.0f;
+                                 p2pMin = 1e9f; p2pMax = -1e9f; p2pWinStart = now;
+                               }
+                             }
                            }
 
                            // ── Current amplitude ring + moving averages ──────────────────────────────
@@ -2748,29 +2755,22 @@ void _ReadAnalogInputs_inner() {
                        }
                      }
 
-                     // Advance to next channel and return to IDLE
-                     // Change 1: sequence — CH1 gets 3 of 6 slots, worst-case gap = 2 conversion cycles
-                     static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };  // was {0, 1, 0, 1, 2, 3}
+                     // Advance the channel sequence — CH1 gets 3 of 6 slots, evenly spaced.
+                     static const uint8_t adsSeq[] = { 1, 0, 1, 2, 1, 3 };
                      static const uint8_t adsSeqLen = 6;
-
                      static uint8_t adsSeqIdx = 0;
                      adsSeqIdx = (adsSeqIdx + 1) % adsSeqLen;
                      adsCurrentChannel = adsSeq[adsSeqIdx];
 
-                     // Back-to-back trigger: fire next conversion immediately if ≥2ms has
-                     // elapsed since this conversion was triggered. At 860SPS (1.16ms) and
-                     // ~3ms loop cadence this is always true, saving one loop() call per
-                     // channel. Falls back to ADS_IDLE if called too soon (protects WiFi).
-                     if (millis() - adsStateEntered >= 2) {
-                       adsTriggeredChannel = adsCurrentChannel;
-                       adc.setMux(adsMuxCodes[adsTriggeredChannel]);
-                       adc.triggerConversion();
-                       adsStateEntered = millis();
-                       adsState = ADS_WAIT;
-                     } else {
-                       adsState = ADS_IDLE;
-                     }
-                     break;
+                     // Trigger the next conversion now; it ripens during the slot before its deadline.
+                     adsTriggeredChannel = adsCurrentChannel;
+                     adc.setMux(adsMuxCodes[adsTriggeredChannel]);
+                     adc.triggerConversion();
+
+                     // Advance the grid one slot (absolute). If a heavy pass put us a full slot
+                     // behind, resync so the just-triggered conversion still gets full ripen time.
+                     slotDueUs += ADS_SLOT_US;
+                     if ((int32_t)(nowUs - slotDueUs) >= 0) slotDueUs = nowUs + ADS_SLOT_US;
                    }
                }
              }()));
