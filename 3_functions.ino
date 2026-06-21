@@ -621,7 +621,26 @@ enum Csv2Index {
 
   CSV2_cpuFreqMhz,   // live CPU clock (80 or 240 MHz) — 80 = engine-off low-power throttle, 240 = full speed
 
-  CSV2_FIELD_COUNT  // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
+  // ADS slow-channel inter-sample gap meters (ms). last = most recent gap between valid
+  // readings, worst = max since Reset Peak Values. Validate the continuous-mode excursion
+  // scheme keeps CH0/CH2 under their <30ms targets. Dashboard: Live Data → ESP32.
+  CSV2_ch0GapLast,   // CH0 battery-voltage read gap, most recent (ms)
+  CSV2_ch0GapWorst,  // CH0 battery-voltage read gap, worst since reset (ms)
+  CSV2_ch2GapLast,   // CH2 RPM read gap, most recent (ms)
+  CSV2_ch2GapWorst,  // CH2 RPM read gap, worst since reset (ms)
+
+  // CSV2 send-cost breakdown (µs): build (snprintf) vs send (events.send). For deciding
+  // whether to chunk the build or the send to shrink the WiFi-send spike.
+  CSV2_csv2BuildLast,   // CSV2 build (snprintf) time, previous cycle (µs)
+  CSV2_csv2BuildWorst,  // CSV2 build time, worst since reset (µs)
+  CSV2_csv2SendLast,    // CSV2 send (events.send) time, previous cycle (µs)
+  CSV2_csv2SendWorst,   // CSV2 send time, worst since reset (µs)
+
+  // Core-0 HTTPS task — cloud op wall-clock time (ms). LAST op + WORST since Reset Peak Values.
+  CSV2_httpsUpload_win, // Core-0 cloud op time, LAST (ms)  [_win = LAST, matching the faDetector row]
+  CSV2_httpsUpload_ses, // Core-0 cloud op time, WORST since last Reset Peak Values (ms)
+
+  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
 };
 
 enum Csv4Index {
@@ -891,7 +910,7 @@ enum Csv3Index {
   CSV3_UseFloat,
   CSV3_IExcessFracBulk,  // was CSV3_IExcessKBulk — BULK threshold fraction (×1000)
   CSV3_IExcessRelFrac,   // was CSV3_IExcessNBulk — release hysteresis fraction (×1000)
-  CSV3_altSpare2,   // reserved (was anomalyAlarmEnable)
+  CSV3_systemIDPlantTauMs,   // fitted plant time constant (ms), persisted (was reserved altSpare2)
   CSV3_altSpare3,   // reserved (was degradationThreshold)
   CSV3_TempAlarmLow,
   CSV3_LoadDumpDtThresh,
@@ -960,7 +979,7 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Validate, 7=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…7=Validate, 8=finished
 
   CSV3_FIELD_COUNT  // = 306 (305 prior + commissionPhase)
 };
@@ -2838,6 +2857,14 @@ void setupServer() {
       settingWrite(NK_systemIDSineFreqEnd, inputMessage.c_str());
       systemIDSineFreqEnd = inputMessage.toFloat();
     }
+    else if (request->hasParam("systemIDPlantTauMs")) {
+      // Fitted plant tau from the dashboard Plant Delay sweep. Persisted with no field-off gate
+      // (cheap compare-first scalar) so the actionable-disturbance readout survives reboots.
+      foundParameter = true;
+      inputMessage = request->getParam("systemIDPlantTauMs")->value();
+      systemIDPlantTauMs = (uint16_t)inputMessage.toInt();
+      settingWrite(NK_sysidPlantTau, String(systemIDPlantTauMs).c_str());
+    }
     else if (request->hasParam("systemIDSineCycles")) {
       foundParameter = true;
       inputMessage = request->getParam("systemIDSineCycles")->value();
@@ -2896,9 +2923,11 @@ void setupServer() {
       } else if (busy != nullptr) {
         queueConsoleMessageF("Field curve: start blocked — %s is active", busy);
       } else if ((millis() - fieldCurveLastEndMs) > 2000UL) {
+        fieldCurveOnsetMode = false;  // saturation sweep (SystemID amplitudes)
         fieldCurveRequested = true;
         fieldCurveResultsReady = false;
         fieldCurveAbortRequested = false;
+        fieldCurveAbortReason = 0; fieldCurveAbortMsg[0] = '\0';  // clear prior abort latch
         queueConsoleMessage("Field curve: requested via web UI");
       } else {
         queueConsoleMessage("Field curve: start ignored (cooldown)");
@@ -2908,6 +2937,62 @@ void setupServer() {
       foundParameter = true;
       fieldCurveAbortRequested = true;
       queueConsoleMessage("Field curve: abort requested via web UI");
+    }
+
+    // ── Min% onset-knee sweep (commissioning) ───────────────────────────────
+    // Reuses the field-curve ramp in onset-stop mode (stops at first current). Each completed
+    // sweep is committed as an anchor; applyKneeCurve fits the Min% column across the anchors.
+    else if (request->hasParam("startKneeSweep")) {
+      foundParameter = true;
+      const char *busy = (systemIDActive != 0) ? "Plant Delay test"
+                         : TuningMode ? "Current tuning"
+                         : CVTuningMode ? "Voltage tuning"
+                         : ThermalTuningMode ? "Thermal tuning"
+                         : (fieldCurveActive != 0) ? "Field curve" : nullptr;
+      if (sysMode != SYS_MODE_AUTO) {
+        queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
+      } else if (busy != nullptr) {
+        queueConsoleMessageF("Min%% knee: start blocked — %s is active", busy);
+      } else if ((millis() - fieldCurveLastEndMs) > 2000UL) {
+        fieldCurveOnsetMode = true;  // onset-stop sweep (Min% floor)
+        fieldCurveRequested = true;
+        fieldCurveResultsReady = false;
+        fieldCurveAbortRequested = false;
+        fieldCurveAbortReason = 0; fieldCurveAbortMsg[0] = '\0';  // clear prior abort latch
+        queueConsoleMessage("Min% knee: sweep requested via web UI");
+      } else {
+        queueConsoleMessage("Min% knee: start ignored (cooldown)");
+      }
+    }
+    else if (request->hasParam("cancelKneeSweep")) {
+      foundParameter = true;
+      fieldCurveAbortRequested = true;
+      queueConsoleMessage("Min% knee: abort requested via web UI");
+    }
+    else if (request->hasParam("addKneeAnchor")) {
+      foundParameter = true;
+      if (kneeSweepKneeDuty <= 0.0f) {
+        queueConsoleMessage("Min% knee: no sweep result to commit");
+      } else if (kneeAnchorN >= KNEE_ANCHOR_MAX) {
+        queueConsoleMessage("Min% knee: anchor list full");
+      } else {
+        kneeAnchorRPM[kneeAnchorN] = kneeSweepRPM;
+        kneeAnchorDuty[kneeAnchorN] = kneeSweepKneeDuty;
+        kneeAnchorTempF[kneeAnchorN] = kneeSweepTempF;
+        kneeAnchorN++;
+        queueConsoleMessageF("Min%% knee: anchor %d committed (%.1f%% @ %.0f RPM, %.0fF)",
+                             kneeAnchorN, kneeSweepKneeDuty, kneeSweepRPM, kneeSweepTempF);
+      }
+    }
+    else if (request->hasParam("clearKneeAnchors")) {
+      foundParameter = true;
+      kneeAnchorN = 0;
+      queueConsoleMessage("Min% knee: anchors cleared");
+    }
+    else if (request->hasParam("applyKneeCurve")) {
+      foundParameter = true;
+      if (!kneeCurveApply())
+        queueConsoleMessage("Min% knee: need at least 4 anchors to fit a curve");
     }
 
     // ── Auto-commissioning: Phase-2 relaxed matrix gate ─────────────────────
@@ -2940,17 +3025,17 @@ void setupServer() {
       foundParameter = true;
       faCommissionGate = false;
       commissionSetState(2);                // COMMISSIONED
-      commissionSetPhase(7);                // all phases complete
+      commissionSetPhase(8);                // all phases complete (8 steps: 0=Prep..7=Validate, 8=finished)
       settingRemove(NK_commissionSnap);     // discard snapshot — commit the new tune
       settingsDirty = true;
       queueConsoleMessage("Commissioning: complete — device marked COMMISSIONED");
     }
     // Wizard heartbeat: persist the furthest phase reached so the tab checklist survives
-    // a page reload / a different client. Clamped 0..7. Does not change commissionState.
+    // a page reload / a different client. Clamped 0..8. Does not change commissionState.
     else if (request->hasParam("commissionPhase")) {
       foundParameter = true;
       int p = request->getParam("commissionPhase")->value().toInt();
-      if (p < 0) p = 0; if (p > 7) p = 7;
+      if (p < 0) p = 0; if (p > 8) p = 8;
       commissionSetPhase((uint8_t)p);
       settingsDirty = true;
     }
@@ -3343,6 +3428,13 @@ void setupServer() {
         loadCapTablesForMode(HiLow);  // swap active cap tables to match new mode
         tempPIDActive = false;        // re-seeds thermal integrator for new cap on next tick
         stateRevision++;              // force immediate CSVData echo of new table values
+        if (HiLow == 0) {
+          // Switching to Low drops the ceiling. Capture the present ceiling and arm the glide so the
+          // control loop ramps it down to the new Low cap instead of stepping (prevents the iExcess
+          // false-trip on the deliberate command drop). Up-switches don't glide — the loop lets them rise.
+          modeCapSlew = uTargetAmps;
+          modeCapSlewActive = true;
+        }
         queueConsoleMessageF("Charge rate mode: switched to %s", HiLow == 1 ? "Normal" : "Low");
       }
     }
@@ -5133,6 +5225,12 @@ void setupServer() {
       adsI2CErrorCount = 0;
       imuFifoFetchWorstUs = 0;
       imuFifoWorstSamples = 0;
+      // ADS slow-channel gap meters — clear worst (keep last; prev re-seeds on next read)
+      ch0GapWorstMs = 0;
+      ch2GapWorstMs = 0;
+      // CSV2 build/send cost — clear worsts
+      csv2BuildWorstUs = 0;
+      csv2SendWorstUs = 0;
       // AdjustField section profiler — clear the worst-full-pass latch + breakdown (/debug)
       aflWorstTotalUs = 0;
       memset(aflWorstSecUs, 0, sizeof(aflWorstSecUs));
@@ -5141,6 +5239,9 @@ void setupServer() {
       // Fault-detector overall compute time — clear so /debug tracks worst since-reset.
       faDetWorstComputeUs = 0;
       faDetLastComputeUs = 0;
+      // Core-0 HTTPS task cloud-op time — clear last + worst-since-reset
+      httpsUploadWorstMs = 0;
+      httpsUploadLastMs = 0;
       // NVS full-save diagnostics — clear the worst-duration watermark and the call
       // counter so "Worst Save Duration" and "Save Count" track since-reset, not since-boot.
       // "Last Save Duration" is zeroed too (it just shows 0 until the next field-off save).
@@ -5845,10 +5946,29 @@ void setupServer() {
     }
     pos += snprintf(buf + pos, 2048 - pos,
                     "],\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"kneeAmps\":%.2f,"
-                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f}",
+                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f,\"abort\":\"%s\"}",
                     fieldCurveActive != 0 ? 1 : 0, fieldCurveResultsReady ? 1 : 0, fieldCurveOk ? 1 : 0,
                     fieldCurveKneeDuty, fieldCurveKneeAmps, fieldCurveTargetLimitA,
-                    fieldCurvePropStabA, fieldCurvePropStepPct);
+                    fieldCurvePropStabA, fieldCurvePropStepPct, fieldCurveAbortMsg);
+    request->send(200, "application/json", buf);
+  });
+
+  // Min% onset-knee sweep status + committed anchors (commissioning step polls this).
+  server.on("/kneesweep.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    std::shared_ptr<char> bufPtr((char *)ps_malloc(1024), [](char *p) { if (p) free(p); });
+    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
+    char *buf = bufPtr.get();
+    int pos = 0;
+    pos += snprintf(buf + pos, 1024 - pos,
+                    "{\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"rpm\":%.0f,\"tempF\":%.0f,\"anchors\":[",
+                    (fieldCurveActive != 0 && fieldCurveOnsetMode) ? 1 : 0,
+                    (fieldCurveResultsReady && fieldCurveOnsetMode) ? 1 : 0, kneeSweepOk ? 1 : 0,
+                    kneeSweepKneeDuty, kneeSweepRPM, kneeSweepTempF);
+    for (int i = 0; i < kneeAnchorN && pos < 900; i++) {
+      pos += snprintf(buf + pos, 1024 - pos, "%s{\"rpm\":%.0f,\"duty\":%.1f,\"tempF\":%.0f}",
+                      i > 0 ? "," : "", kneeAnchorRPM[i], kneeAnchorDuty[i], kneeAnchorTempF[i]);
+    }
+    pos += snprintf(buf + pos, 1024 - pos, "],\"abort\":\"%s\"}", fieldCurveAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -6537,6 +6657,8 @@ void SendWifiData() {
 
   bool canSendNow = (now - lastEventSourceSend >= EVENTSOURCE_COOLDOWN);
   if (!canSendNow) return;
+  if (gHeavyRanThisPass) return;   // one-heavy-per-pass gate; defer the send (cooldown unchanged → retries next pass)
+  gHeavyRanThisPass = true;
 
   bool sentSomething = false;
 
@@ -6687,20 +6809,27 @@ void SendWifiData() {
   // Normal operation: every 5 s, gated behind CSV1 to avoid double-sending per tick.
   const bool sysIDRunning = (systemIDActive != 0);
   if ((sysIDRunning || !sentSomething) && now - lastpayload2send >= (sysIDRunning ? 500UL : 5000UL) && events.count() > 0) {
-    WifiStrength = cachedWiFiRSSI;
-    ch1_compute_stats();
-    pidFire_compute_stats();
-    voltLoop_compute_stats();
     static char *payload2 = nullptr;
     static const size_t PAYLOAD2_SIZE = 3800;  // (505 fields + 1) × 7 = 3542, rounded up to 3800
+    static int payload2Len = 0;       // persists between the build pass and the send pass
+    static uint8_t csv2Phase = 0;     // 0 = build this due pass, 1 = send the built payload next pass
     if (!payload2) {
       payload2 = (char *)ps_malloc(PAYLOAD2_SIZE);  // allocated to PSRAM
       if (!payload2) {
         Serial.println("FATAL: payload2 ps_malloc failed");
         return;
       }
-    }  // Format string:
-    int payload2Len = snprintf(payload2, PAYLOAD2_SIZE,
+    }
+    if (csv2Phase == 0) {
+    // PASS 1 — build only. The snprintf is the ~4.3 ms cost; the events.send is deferred to PASS 2
+    // (next pass) so build + send never stack in one loop tick (CH1/Vbus loop-stall work).
+    WifiStrength = cachedWiFiRSSI;
+    ch1_compute_stats();
+    pidFire_compute_stats();
+    voltLoop_compute_stats();
+    // Format string:
+    uint32_t _csv2b0 = micros();   // CSV2 build-cost timer (snprintf)
+    payload2Len = snprintf(payload2, PAYLOAD2_SIZE,
                                "%d,"  // CSV2_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -6792,7 +6921,13 @@ void SendWifiData() {
                                // +12: inner-current-loop live accuracy (×4, amps²×10000) + CV-voltage-loop RMS error (×4, mV) + CV peak overshoot (×4, mV), 1m/10m/100m/1000m windows each
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // +1: live CPU clock (80 or 240 MHz)
-                               "%d",
+                               "%d,"
+                               // +4: ADS slow-channel gap meters (ch0/ch2 last+worst, ms)
+                               "%d,%d,%d,%d,"
+                               // +4: CSV2 send-cost (build last/worst, send last/worst, µs)
+                               "%d,%d,%d,%d,"
+                               // +2: Core-0 HTTPS task cloud op time (last/worst, ms)
+                               "%d,%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -7330,19 +7465,40 @@ void SendWifiData() {
                                SafeInt(accVoltage.worstOver, 1000),       // CSV2_accVoltPeak (V→mV)
                                SafeInt(accScoreRms(accThermal.errAccum, accThermal.timeAccum), 100),     // CSV2_accThermRms (°F ×100)
                                SafeInt(accThermal.worstOver, 100),        // CSV2_accThermPeak (°F ×100)
-                               SafeInt(getCpuFrequencyMhz())              // CSV2_cpuFreqMhz   (MHz ×1)
+                               SafeInt(getCpuFrequencyMhz()),             // CSV2_cpuFreqMhz   (MHz ×1)
+                               SafeInt(ch0GapLastMs),                     // CSV2_ch0GapLast   (ms)
+                               SafeInt(ch0GapWorstMs),                    // CSV2_ch0GapWorst  (ms)
+                               SafeInt(ch2GapLastMs),                     // CSV2_ch2GapLast   (ms)
+                               SafeInt(ch2GapWorstMs),                    // CSV2_ch2GapWorst  (ms)
+                               SafeInt(csv2BuildLastUs),                  // CSV2_csv2BuildLast  (µs)
+                               SafeInt(csv2BuildWorstUs),                 // CSV2_csv2BuildWorst (µs)
+                               SafeInt(csv2SendLastUs),                   // CSV2_csv2SendLast   (µs)
+                               SafeInt(csv2SendWorstUs),                  // CSV2_csv2SendWorst  (µs)
+                               SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
+                               SafeInt(httpsUploadWorstMs)                // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
     );
+    csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
+    if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
     thermalAntiWindupLatch = false;
-    if (payload2Len < 0 || payload2Len >= PAYLOAD2_SIZE) {
+    if (payload2Len < 0 || payload2Len >= (int)PAYLOAD2_SIZE) {
       Serial.printf("payload2 truncated or format error: %d\n", payload2Len);
+      csv2Phase = 0;
       return;
     }
-
-    events.send(payload2, "CSVData2");
-    lastpayload2send = now;
-    lastEventSourceSend = now;
-    sentSomething = true;
+    csv2Phase = 1;          // built OK — send it on the next pass
+    sentSomething = true;   // claim this pass (the heavy build ran)
+    } else {
+      // PASS 2 — send the payload built last pass (cheap ~1.3 ms; kept off the build pass).
+      uint32_t _csv2s0 = micros();   // CSV2 send-cost timer (events.send → AsyncTCP)
+      events.send(payload2, "CSVData2");
+      csv2SendLastUs = micros() - _csv2s0;
+      if (csv2SendLastUs > csv2SendWorstUs) csv2SendWorstUs = csv2SendLastUs;
+      lastpayload2send = now;
+      lastEventSourceSend = now;
+      csv2Phase = 0;
+      sentSomething = true;
+    }
   }
 
   // PRIORITY 5: CSVData3 — sent immediately when settingsDirty (event-driven), or every 60s fallback
@@ -7638,7 +7794,7 @@ void SendWifiData() {
                                SafeInt(UseFloat),
                                SafeInt(IExcessFracBulk, 1000),  // CSV3_IExcessFracBulk (×1000, 3 decimals)
                                SafeInt(IExcessRelFrac, 1000),   // CSV3_IExcessRelFrac (×1000, 3 decimals)
-                               SafeInt(0),   // CSV3_altSpare2 (reserved)
+                               SafeInt(systemIDPlantTauMs),   // CSV3_systemIDPlantTauMs — fitted plant tau (ms), persisted
                                SafeInt(0),   // CSV3_altSpare3 (reserved)
                                SafeInt(TempAlarmLow),
                                SafeInt(LoadDumpDtThresh),                        // A/s tier-2 threshold (2 consecutive)
@@ -7707,7 +7863,7 @@ void SendWifiData() {
                                SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
                                SafeInt(tuningWaveFloor),                        // A (raw)
                                (int)commissionState,                            // CSV3_commissionState (0/1/2)
-                               (int)commissionPhase                             // CSV3_commissionPhase (0..7)
+                               (int)commissionPhase                             // CSV3_commissionPhase (0..8)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

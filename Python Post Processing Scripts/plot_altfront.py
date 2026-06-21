@@ -1,12 +1,13 @@
 """
 plot_altfront.py
-Alternator Best-Ever Front viewer for Xregulator.
+Alternator steady-state operating-point viewer for Xregulator.
 
 Replaces plot_altmatrix.py. The old dense bucket-matrix export
-(AltHealthMatrix_*.csv) is gone — the firmware now keeps a SPARSE best-ever
-front instead of a fixed RPM x temp x field grid. This viewer reads that new
-artifact: the "Alternator Health Data *.csv" file the dashboard's Download CSV
-button drops in ~/Downloads.
+(AltHealthMatrix_*.csv) is gone — the firmware now keeps a SPARSE set of
+operating points instead of a fixed RPM x temp x field grid. Each point is
+admitted only after the system reaches steady state, so every dot is a real
+equilibrium measurement. This viewer reads that artifact: the "Alternator
+Health Data *.csv" file the dashboard's Download CSV button drops in ~/Downloads.
 
 File format (BEFRONT1, alternator, 4-axis):
   line 1:  BEFRONT1,ALT,4,<source>,rpm,exc,V,F,amps     source 0=LEARNED, 1=FIXED
@@ -15,12 +16,12 @@ File format (BEFRONT1, alternator, 4-axis):
            excitation excitation proxy = (duty*Vbus)/(1+a(T_C-25)), a=0.00393
            vbus       bus voltage (V)
            tempF      alternator temperature (deg F)
-           amps       best-ever output current at this condition
+           amps       steady-state output current at this condition
            nSamp      samples averaged into this point (confidence)
            tEmit      device-uptime millis when emitted (wraps ~49 days; NOT wall clock)
 
-Two tabs (scatter + curves only — every dot is a real measured front point,
-nothing interpolated):
+Two tabs (scatter + curves only — every dot is a real steady-state
+measurement, nothing interpolated):
 
   Tab 1 - Overview
     Summary stats, coverage scatter (RPM vs temp, colour = amps, size = nSamp),
@@ -63,8 +64,8 @@ DOWNLOADS    = os.path.expanduser("~/Downloads")
 FILE_KEYWORD = "Alternator Health Data"
 
 AMP_CMAP  = matplotlib.cm.plasma
-RPM_CMAP  = matplotlib.cm.get_cmap("RdYlBu_r")
-BAND_CMAP = matplotlib.cm.get_cmap("RdYlBu_r")   # temperature bands: cool blue -> hot red
+RPM_CMAP  = matplotlib.colormaps["RdYlBu_r"]
+BAND_CMAP = matplotlib.colormaps["RdYlBu_r"]   # temperature bands: cool blue -> hot red
 BAND_MARKERS = ['o', 's', '^', 'D', 'v', 'P', '*']
 
 # X-axis choices for the curve tab: (column, label).
@@ -173,7 +174,7 @@ def source_label(source):
 # -----------------------------------------------------------------------------
 def build_overview_figure(df, source, fname):
     fig = plt.figure(figsize=(13, 8))
-    fig.suptitle(f"Alternator Best-Ever Front - {os.path.basename(fname)}",
+    fig.suptitle(f"Alternator Steady-State Operating Points - {os.path.basename(fname)}",
                  fontsize=11, y=0.995)
 
     gs = fig.add_gridspec(1, 3, width_ratios=[1.05, 1.5, 1.5], wspace=0.30)
@@ -186,7 +187,7 @@ def build_overview_figure(df, source, fname):
     lines = [
         f"File:        {os.path.basename(fname)}",
         f"Source:      {source_label(source)}",
-        f"Front points: {len(df)}",
+        f"Operating points: {len(df)}",
         f"Total samples: {int(df['nSamp'].sum())}",
         "",
         f"RPM:         {rng('rpm', ' rpm')}",
@@ -195,8 +196,8 @@ def build_overview_figure(df, source, fname):
         f"Excitation:  {rng('exc', '', '{:.2f}')}",
         f"Output:      {rng('amps', ' A', '{:.1f}')}",
         "",
-        "Each dot is a measured best-ever",
-        "front point (nothing interpolated).",
+        "Each dot is a measured steady-state",
+        "operating point (nothing interpolated).",
         "Larger dot = more samples (higher",
         "confidence) in that point.",
     ]
@@ -212,7 +213,7 @@ def build_overview_figure(df, source, fname):
     sc1 = ax1.scatter(df["rpm"], df["tempF"], c=df["amps"], s=sizes,
                       cmap=AMP_CMAP, edgecolor="#333", linewidth=0.4, alpha=0.9)
     ax1.set_xlabel("Engine RPM"); ax1.set_ylabel("Alternator Temp (F)")
-    ax1.set_title("Coverage - where the front is characterized")
+    ax1.set_title("Coverage - where the alternator is characterized")
     ax1.grid(True, linestyle="--", alpha=0.4)
     fig.colorbar(sc1, ax=ax1, label="Output (A)", fraction=0.046, pad=0.04)
 
@@ -248,7 +249,7 @@ class FrontViewer:
                               self.root._w, "NSAppearanceNameAqua")
         except Exception:
             pass
-        self.root.title(f"Alternator Best-Ever Front - {os.path.basename(fname)}")
+        self.root.title(f"Alternator Steady-State Operating Points - {os.path.basename(fname)}")
         self.root.geometry("1400x900")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -391,11 +392,11 @@ class FrontViewer:
                 n_lines += 1
 
         ax.set_xlabel(xlabel, fontsize=11)
-        ax.set_ylabel("Best-Ever Output (A)", fontsize=11)
+        ax.set_ylabel("Output (A)", fontsize=11)
         ax.set_title(f"Output Amps vs {self.x_choice.get()}  -  "
                      f"{source_label(self.source)}", fontsize=10, pad=18)
         ax.text(0.5, 1.005,
-                "Each marker is a real front point  -  colour = temperature band  -  "
+                "Each marker is a real steady-state point  -  colour = temperature band  -  "
                 "dot size = sample count (confidence)",
                 transform=ax.transAxes, ha="center", va="bottom",
                 fontsize=7.5, color="#555555", style="italic")
@@ -428,7 +429,7 @@ if __name__ == "__main__":
 
     df, source = load_front(path)
     if df.empty:
-        print("File loaded but contains no front points.")
+        print("File loaded but contains no operating points.")
         raise SystemExit
 
     FrontViewer(df, source, path)

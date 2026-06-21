@@ -33,7 +33,7 @@
 //major: 0-999   (4 digits max)
 //minor: 0-99    (2 digits max)
 //patch: 0-99    (2 digits max)
-const char *FIRMWARE_VERSION = "0.0.43";
+const char *FIRMWARE_VERSION = "0.0.44";
 
 // OTA artifacts are served from a stable URL we control: ota.xengineering.net, a thin
 // proxy on our own web host that forwards to the Supabase Storage "ota" bucket. The
@@ -149,6 +149,7 @@ TaskHandle_t httpsTaskHandle;
 // Fault-detector Core-0 worker handoff (defined here so setup() in this file and the worker/arm
 // in 2_functions.ino all see them). faResultSem returns the verdict; faDetTaskHandle is notified to arm.
 TaskHandle_t faDetTaskHandle = NULL;
+TaskHandle_t cpuLoadTaskHandle = NULL;   // low-prio Core-0 task: uxTaskGetSystemState CPU-load scan (moved off Core-1 loop)
 SemaphoreHandle_t faResultSem = NULL;
 
 SemaphoreHandle_t fsMutex = NULL;  // mutex protection for littlefs
@@ -846,6 +847,10 @@ uint8_t systemIDTestType   = 0;        // 0 = step delay, 1 = sine sweep
 float   systemIDSineFreqStart = 0.5f;  // Hz, sweep low end
 float   systemIDSineFreqEnd   = 20.0f; // Hz, sweep high end
 uint8_t systemIDSineCycles    = 6;     // analysed cycles per frequency (1 settle cycle skipped)
+// Fitted plant time constant (ms) from the dashboard's Plant Delay sweep fit. 0 = not yet fitted.
+// Persisted (NVS) so the Biggest Actionable Disturbance readout survives reboots/reloads; only
+// re-fit when the plant changes (alternator, belt, field wiring).
+uint16_t systemIDPlantTauMs   = 0;
 #define SYSID_SINE_NPOINTS 10          // log-spaced sweep points
 struct SysIDBodePoint { float freqHz; float gainApPct; float phaseDeg; };  // gain = A output per %duty
 SysIDBodePoint systemIDBode[SYSID_SINE_NPOINTS] = {};
@@ -960,6 +965,7 @@ static SystemIDResumeState g_sysIDResume;
 #define FIELDCURVE_DUTY_START 5.0f      // first step (%)
 #define FIELDCURVE_DUTY_MAX   92.0f     // ramp ceiling (%) — stop here if amps never reach the limit
 #define FIELDCURVE_DUTY_STEP  2.0f      // duty increment per step (%)
+#define FIELDCURVE_ONSET_FINE_STEP 0.25f // onset sweep: fine step backing DOWN to refine the coarse knee (%)
 #define FIELDCURVE_DWELL_MS   1500UL    // settle dwell per step (ms) — >5τ for any realistic field
 struct FieldCurvePoint { float duty; float amps; };
 FieldCurvePoint *fieldCurveBuf = nullptr;     // ps_malloc'd on first run, never freed
@@ -976,6 +982,28 @@ float fieldCurveTargetLimitA = 0.0f;           // table limit-at-speed used for 
 float fieldCurvePropStabA  = 0.0f;             // proposed SystemIDStabilizeAmps (A)
 float fieldCurvePropStepPct = 0.0f;            // proposed SystemIDStepAmplitude (% duty)
 bool  fieldCurveOk = false;                     // true if a usable linear region + proposals were found
+// Abort reason for the field-curve / knee sweeps (latched at the protection cut, cleared at each start).
+// fieldCurveAbortMsg is built from reasonToString() in 6_functions.ino and read back by the dashboard
+// via /fieldcurve.json & /kneesweep.json so the commissioning dialog can say WHY a test stopped.
+volatile uint8_t fieldCurveAbortReason = 0;     // 0 = none / user-cancel; else FieldEventReason code
+char  fieldCurveAbortMsg[48] = {0};             // human reason text at the cut ("" = none)
+
+// ── Min% onset-knee sweep (commissioning) ────────────────────────────────────
+// Reuses the field-curve ramp but STOPS the instant settled amps lift off the baseline
+// (the onset knee = where output current begins to build), so it forces almost no current.
+// Run at 3-4 held RPMs; each result is committed as an anchor; applyKneeCurve() fits a curve
+// across them and writes rpmMinDutyTable (Min% column). No physics model — empirical points only.
+#define KNEE_ANCHOR_MAX 8
+volatile bool kneeSweepRequested = false;       // set by /get?startKneeSweep
+bool  fieldCurveOnsetMode = false;              // true = onset-stop sweep (Min%), false = saturation sweep (SystemID)
+float kneeSweepKneeDuty = -1.0f;                // onset duty found this sweep (%), -1 = none/aborted
+float kneeSweepRPM      = 0.0f;                 // RPM the sweep was held at
+float kneeSweepTempF    = 0.0f;                 // alternator case temp at sweep (°F), for the kneeTempRefF normalization
+bool  kneeSweepOk       = false;                // true = a clean onset was captured this sweep
+float kneeAnchorRPM[KNEE_ANCHOR_MAX]  = {0};    // committed anchors (RPM, onset duty %, case temp °F)
+float kneeAnchorDuty[KNEE_ANCHOR_MAX] = {0};
+float kneeAnchorTempF[KNEE_ANCHOR_MAX] = {0};
+int   kneeAnchorN = 0;                          // anchors committed so far
 
 // ── Auto-commissioning state machine ──────────────────────────────────────────
 // Persistent across reboots (NVS). 0=NOT_COMMISSIONED, 1=IN_PROGRESS, 2=COMMISSIONED.
@@ -1015,6 +1043,14 @@ unsigned long nextWeatherUpdate = 0;  // When next update is due
 
 //Input Settings
 float uTargetAmps = 3;                           // the one that gets used as the real target
+
+// Charge-rate Hi->Lo ceiling slew (see AdjustField in 6_functions.ino). When the user drops the
+// charge-rate mode to Low, the ceiling is glided down from its present value instead of stepping,
+// so the field follows it and the iExcess supervisor never sees a false measured-vs-command excess.
+// Armed by the /get?HiLow=0 handler; self-clears in the control loop once the new (lower) cap is reached.
+float modeCapSlew = 0.0f;          // imposed ceiling during the down-glide (A)
+bool modeCapSlewActive = false;    // true while a Hi->Lo glide is in progress
+
 float FloatVoltage = 13.4;                       // self-explanatory
 float BulkVoltage = 14.5;                        // this could have been called Target Bulk Voltage to be more clear
 float ChargingVoltageTarget = 0;                 // This becomes active target
@@ -2987,7 +3023,7 @@ float DutyRampRate = 50.0f;  // %/sec - max rate of duty cycle change (protects 
 // Asymmetric setpoint slew
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
-float StartupRiseRate  = 3.0f;   // A/sec — setpoint slew rate applied only on field turn-on (OFF/FAULT→AUTO); user-adjustable
+float StartupRiseRate  = 10.0f;  // A/sec — setpoint slew rate applied only on field turn-on (OFF/FAULT→AUTO); user-adjustable
 bool  inStartupRamp    = false;  // true from field turn-on until setpointLimited catches up to command
 
 // --- Settle Time Before GPIO4 Cut ---
@@ -3108,16 +3144,16 @@ bool  kneeFrozen[RPM_TABLE_SIZE]     = { false };  // true once the knee is foun
 float kneeLearnTempF[RPM_TABLE_SIZE] = { 0 };      // alternator case temp (degF) at freeze (diagnostic, not persisted)
 uint32_t kneeLastMs[RPM_TABLE_SIZE]  = { 0 };      // millis() of last freeze / re-arm (runtime only)
 // User knobs (NVS settings namespace, NK_* keys)
-bool  kneeLearnEnable = false;   // master: when true, learner owns + auto-writes rpmMinDutyTable
+bool  kneeLearnEnable = true;    // master: when true, learner owns + auto-writes rpmMinDutyTable
 float kneeMarginPct   = 5.0f;    // park floor this many duty-% below the knee
 float kneeOnsetA      = 0.8f;    // amps above the freshly-captured zero = "output building" (knee found)
 float kneeReArmA      = 2.0f;    // amps at a locked floor = knee dropped -> lower floor one margin step (deadband guard)
 float kneeStepPct     = 0.5f;    // probe staircase increment (duty-% per dwell) while hunting the knee
-float kneeDwellSec    = 3.0f;    // settle + hold time per probe step (s)
-float kneeTempRefF    = 180.0f;  // reference temp (degF) the stored floors are normalized to (learning runs hot)
+float kneeDwellSec    = 1.0f;    // settle + hold time per probe step (s)
+float kneeTempRefF    = 150.0f;  // reference temp (degF) the stored floors are normalized to (anchored near steady-cruise temp)
 bool  kneeTempComp    = true;    // apply the copper temp correction to the floor at apply time
 float kneeMaxFloorPct = 30.0f;   // hard clamp on any learned floor; also the "no knee found" terminal value
-float kneeRpmTolPct   = 6.0f;    // steady band: RPM, % of reading
+float kneeRpmTolPct   = 10.0f;   // steady band: RPM, % of reading
 float kneeTempTolF    = 4.0f;    // steady band: temperature, degF
 float kneeDutyTolPct  = 1.0f;    // steady band: applied duty, duty-% points
 // Live diagnostics (for /kneeLearnState)
@@ -3227,8 +3263,8 @@ ShutdownPhase shutdownPhase = SHUTDOWN_PHASE_NONE;
 uint32_t shutdownPhaseEntryMs = 0;
 uint32_t shutdownPhase2EntryMs = 0;  // add with other shutdown globals
 // Tunable parameters (expose in web UI)
-float DutySlowRampRate = 1.0f;      // %/sec - Phase 3 slow ramp to 0
-uint32_t ShutdownPhase2HoldMs = 0;  // ms - hold at rpmMinDuty before slow ramp (0 = skip)
+float DutySlowRampRate = 0.5f;      // %/sec - Phase 3 slow ramp to 0
+uint32_t ShutdownPhase2HoldMs = 500;  // ms - hold at rpmMinDuty before slow ramp (0 = skip)
 
 // ===== TEMPERATURE LOOP PID (replaces thermal model) =====
 // Tuning — all web UI configurable
@@ -4009,6 +4045,29 @@ const uint16_t adsMuxCodes[4] = {
   ADS1115_REG_CONFIG_MUX_SINGLE_3
 };
 
+// Inter-sample gap meters for the two slow ADS channels (CH0 battV cross-check, CH2 RPM)
+// — diagnostic for the round-robin sampler's CH0/CH2 cadence. "last" = most recent gap
+// between VALID readings; "worst" = max since the last Reset Peak Values press. Updated
+// by adsGapUpdate() in the ADS read path. Dashboard: Live Data → ESP32. CSV2 (Pattern A2).
+uint16_t ch0GapLastMs = 0, ch0GapWorstMs = 0;   // CH0 battery-voltage read gap (ms)
+uint16_t ch2GapLastMs = 0, ch2GapWorstMs = 0;   // CH2 RPM read gap (ms)
+uint32_t ch0GapPrevMs = 0, ch2GapPrevMs = 0;    // timestamp of last valid read (internal)
+
+// One-heavy-per-pass scheduler gate. Reset false at the top of loop(); the staggerable
+// periodics (alt-health fold, boat-perf fold, system-health heap walk, WiFi send) each
+// claim it before doing work and defer one loop if another already claimed it this pass —
+// so at most ONE multi-ms periodic runs per loop pass, capping worst-case loop time at
+// floor + one heavy item instead of their sum. Control loop / RAI / IMU drain are NOT
+// gated (they must run every pass). Set true by whichever periodic claims the pass.
+bool gHeavyRanThisPass = false;
+
+// CSV2 (heavy ~548-field diagnostic blob, sent every 5s) send-cost breakdown: build (the
+// snprintf) vs send (events.send → AsyncTCP). Microseconds. "last" = previous CSV2 cycle,
+// "worst" = max since Reset Peak Values. Diagnostic to decide whether chunking the BUILD or
+// the SEND shrinks the ~5.8ms WiFi-send spike. Dashboard: Live Data → ESP32.
+uint32_t csv2BuildLastUs = 0, csv2BuildWorstUs = 0;   // CSV2 snprintf build time (µs)
+uint32_t csv2SendLastUs  = 0, csv2SendWorstUs  = 0;   // CSV2 events.send time (µs)
+
 // Forward declarations (for WiFi functions)
 String readFile(fs::FS &fs, const char *path);
 bool writeFile(fs::FS &fs, const char *path, const char *message);
@@ -4412,6 +4471,13 @@ void setup() {
   xTaskCreatePinnedToCore(faDetTask, "faDet", 8192, NULL, 1, &faDetTaskHandle, 0);
   Serial.println("Fault-detector task created on Core 0");
 
+  // CPU-load sampler — Core 0, priority 0 (BELOW every network/upload task). uxTaskGetSystemState
+  // is a ~4ms scan that used to run on the Core-1 control loop; here it runs every 2s only when
+  // Core 0 is otherwise idle, so it yields to WiFi/uploads and can't worsen Core-0 spikes. It
+  // sleeps 2s between runs, so it never starves the Core-0 idle task / watchdog.
+  xTaskCreatePinnedToCore(cpuLoadTask, "cpuLoad", 4096, NULL, 0, &cpuLoadTaskHandle, 0);
+  Serial.println("CPU-load task created on Core 0 (prio 0)");
+
   if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
     Serial.println("Starting NTP sync...");
     syncTimeFromNTP();
@@ -4509,6 +4575,8 @@ void setup() {
 void loop() {
 
   esp_task_wdt_reset();
+
+  gHeavyRanThisPass = false;  // reset the one-heavy-per-pass scheduler gate for this loop pass
 
   // Deferred reboot from /get?RebootRegulator — wait 2s so the HTTP 200 reaches the caller
   if (rebootRequested && millis() - rebootRequestedAt > 2000) {

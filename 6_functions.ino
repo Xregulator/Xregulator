@@ -262,9 +262,15 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
     queueConsoleMessageF("SystemID: ABORTED — protection fired (%s) during phase %d — run the test again",
                          reasonToString(reason), (int)systemIDActive);
   }
-  // Commissioning field-curve ramp shares the same override path — flag it for a clean abort.
+  // Commissioning field-curve / knee ramp shares the same override path — flag it for a clean abort
+  // AND latch why, so the dashboard can report it instead of the dialog sitting there silently.
   // fieldCurve_tick resets its static phase when it next runs (after the cooldown lockout clears).
-  if (fieldCurveActive != 0) fieldCurveAbortRequested = true;
+  if (fieldCurveActive != 0) {
+    fieldCurveAbortRequested = true;
+    fieldCurveAbortReason = (uint8_t)reason;
+    strncpy(fieldCurveAbortMsg, reasonToString(reason), sizeof(fieldCurveAbortMsg) - 1);
+    fieldCurveAbortMsg[sizeof(fieldCurveAbortMsg) - 1] = '\0';
+  }
 }
 
 /**
@@ -2055,6 +2061,21 @@ void AdjustFieldLearnMode() {
         if (WarmupRampRate > 0.0f) {
           warmupCeiling = fminf(warmupCeiling + WarmupRampRate * actualDtSec, (float)MaxTableValue);
           uTargetAmps = fminf(uTargetAmps, warmupCeiling);
+        }
+
+        // Charge-rate Hi->Lo ceiling glide. Armed by the HiLow handler when the user picks Low: the
+        // table has already dropped to the Low cap, but the alternator is still at the old output. Hold
+        // the ceiling up and ramp it down to the new (lower) uTargetAmps at MaxTableValue A/s (~1s full
+        // scale) so the field tracks it and iExcess never reads the deliberate command drop as a fault.
+        // No protection is suspended — hardware OV, fast OV, and the HardOCTripAmps trip stay live. The
+        // glide self-clears once the held ceiling reaches the new cap (or an up-switch raises it past).
+        if (modeCapSlewActive) {
+          if (modeCapSlew > (float)uTargetAmps) {
+            modeCapSlew = fmaxf((float)uTargetAmps, modeCapSlew - MaxTableValue * actualDtSec);
+            uTargetAmps = modeCapSlew;
+          } else {
+            modeCapSlewActive = false;
+          }
         }
 
         // User overrides
@@ -4246,9 +4267,14 @@ void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
     return;
   }
 
-  // Floor active = governor is clamping the request up to the floor (low-output regime).
+  // Floor active = the controller wants no more field than the floor — the low-output / topped /
+  // thermally-limited regime where the floor (not the PID) is setting the field. dutyRequest is the
+  // inner PID output, which is clamped to >= MinDuty and (via bumpless tracking) sits AT the applied
+  // floor while the floor is binding. So "floor binding" reads as dutyRequest <= floorEff, NOT
+  // < floorEff: the old "< floorEff - 0.05f" could never be true once floorEff == MinDuty (the PID
+  // output can't go below MinDuty), so every bin sat at 0% forever and the learner never left "watching".
   float floorEff = (rpmFloorDuty > MinDuty) ? rpmFloorDuty : MinDuty;
-  bool floorActive = (dutyRequest < floorEff - 0.05f);
+  bool floorActive = (dutyRequest <= floorEff + 0.05f);
   kneeFloorActive = floorActive;
 
   // Steady-band check vs. the EMA (RPM, temp, applied duty — voltage intentionally not gated).
@@ -4313,6 +4339,76 @@ void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
   }
   kneeStateDirty = true;
   settingsDirty = true;   // push the CSV3 Min% echo promptly so the table cells track the learned floor (not the 60s heartbeat)
+}
+
+// Fit the Min% column from the committed onset-knee anchors (commissioning). Empirical only — no
+// physics model: linear interpolation across the anchors by RPM (hold the ends), enforced monotone
+// non-increasing (the knee falls as RPM rises). Each anchor's measured knee is first normalized to
+// kneeTempRefF (the same copper-temp curve getMinimumFieldForRPM applies live, so the two cancel),
+// then parked kneeMarginPct below. Writes the learner's FROZEN baseline, so the background re-arm
+// just maintains drift from here. Bin 0 stays locked at 0%. Returns false if < 4 anchors (the UI
+// requires 4 before Apply; this is the matching firmware guard).
+bool kneeCurveApply() {
+  if (kneeAnchorN < 4) return false;
+
+  // Sort anchors ascending by RPM (tiny n — insertion sort).
+  for (int i = 1; i < kneeAnchorN; i++) {
+    float r = kneeAnchorRPM[i], d = kneeAnchorDuty[i], t = kneeAnchorTempF[i];
+    int j = i - 1;
+    while (j >= 0 && kneeAnchorRPM[j] > r) {
+      kneeAnchorRPM[j + 1] = kneeAnchorRPM[j];
+      kneeAnchorDuty[j + 1] = kneeAnchorDuty[j];
+      kneeAnchorTempF[j + 1] = kneeAnchorTempF[j];
+      j--;
+    }
+    kneeAnchorRPM[j + 1] = r; kneeAnchorDuty[j + 1] = d; kneeAnchorTempF[j + 1] = t;
+  }
+
+  // Normalize each anchor knee to kneeTempRefF (knee scales with copper R, ~0.218 %/°F of itself).
+  float kneeRef[KNEE_ANCHOR_MAX];
+  for (int i = 0; i < kneeAnchorN; i++)
+    kneeRef[i] = kneeAnchorDuty[i] * (1.0f + 0.00218f * (kneeTempRefF - kneeAnchorTempF[i]));
+
+  const float maxKnee = kneeMaxFloorPct + kneeMarginPct;
+  float prev = 1e9f;  // running cap for monotone non-increasing knee-vs-RPM
+  for (int b = 0; b < RPM_TABLE_SIZE; b++) {
+    float rpmB = (float)rpmTableRPMPoints[b];
+    float kneeB, tempB;  // tempB = actual measured case temp at this bin's anchors (interpolated)
+    if (rpmB <= kneeAnchorRPM[0]) { kneeB = kneeRef[0]; tempB = kneeAnchorTempF[0]; }
+    else if (rpmB >= kneeAnchorRPM[kneeAnchorN - 1]) { kneeB = kneeRef[kneeAnchorN - 1]; tempB = kneeAnchorTempF[kneeAnchorN - 1]; }
+    else {
+      kneeB = kneeRef[kneeAnchorN - 1]; tempB = kneeAnchorTempF[kneeAnchorN - 1];
+      for (int i = 1; i < kneeAnchorN; i++) {
+        if (rpmB <= kneeAnchorRPM[i]) {
+          float dr = kneeAnchorRPM[i] - kneeAnchorRPM[i - 1];
+          float f = (dr > 0.001f) ? (rpmB - kneeAnchorRPM[i - 1]) / dr : 0.0f;
+          kneeB = kneeRef[i - 1] + f * (kneeRef[i] - kneeRef[i - 1]);
+          tempB = kneeAnchorTempF[i - 1] + f * (kneeAnchorTempF[i] - kneeAnchorTempF[i - 1]);
+          break;
+        }
+      }
+    }
+    if (kneeB > prev) kneeB = prev;  // enforce non-increasing with RPM
+    prev = kneeB;
+    if (kneeB < 0) kneeB = 0;
+    if (kneeB > maxKnee) kneeB = maxKnee;
+
+    float floorB = (b == 0) ? 0.0f : fmaxf(0.0f, fminf(kneeB - kneeMarginPct, kneeMaxFloorPct));
+    kneeKnee[b] = kneeB;
+    kneeFloor[b] = floorB;
+    kneeFrozen[b] = true;
+    // Diagnostic only — the live correction uses the global kneeTempRefF, not this. Store the ACTUAL
+    // measured temp (like the background learner stores caseF) so the "Learn °F" column reflects the
+    // commissioning measurement, not the reference. The stored floor IS normalized to kneeTempRefF.
+    kneeLearnTempF[b] = tempB;
+    rpmMinDutyTable[b] = floorB;
+  }
+
+  kneeStateDirty = true;            // persist knee blobs on the next field-off flush
+  settingsDirty = true;             // push the CSV3 Min% echo so the table cells update now
+  pendingSaveUserTableEdits = true; // persist rpmMinDutyTable via the same path as a manual edit
+  queueConsoleMessageF("Min%% curve applied from %d anchors", kneeAnchorN);
+  return true;
 }
 
 // Persist learned per-bin state (learning namespace blobs). Knobs persist separately via settingWrite.

@@ -2366,6 +2366,22 @@ void checkWebFilesExist() {
     queueConsoleMessage("Web interface files verified OK");
   }
 }
+
+// Inter-sample gap meter for a slow ADS channel (CH0 battV, CH2 RPM). Called on each
+// VALID reading; records the gap since the previous valid reading. "worst" resets on
+// Reset Peak Values. ch=0 → battV, ch=2 → RPM. Dashboard: Live Data → ESP32.
+static inline void adsGapUpdate(uint8_t ch, uint32_t now) {
+  uint32_t *prev  = (ch == 0) ? &ch0GapPrevMs  : &ch2GapPrevMs;
+  uint16_t *last  = (ch == 0) ? &ch0GapLastMs  : &ch2GapLastMs;
+  uint16_t *worst = (ch == 0) ? &ch0GapWorstMs : &ch2GapWorstMs;
+  uint32_t g = (*prev == 0) ? 0 : (now - *prev);
+  if (g > 65535u) g = 65535u;                  // clamp (a >65s gap means the channel is dead)
+  *last = (uint16_t)g;
+  if ((uint16_t)g > *worst) *worst = (uint16_t)g;
+  *prev = now;
+}
+
+
 void ReadAnalogInputs() {
   // Outer wrapper — ft_rai_total captures the true worst-case duration including
   // I2C timeouts that the old INA228-only timer missed entirely. Individual
@@ -2597,6 +2613,7 @@ void _ReadAnalogInputs_inner() {
                            if (BatteryV > 5.0 && BatteryV < 70.0) {  // Sanity check
                              MARK_FRESH(IDX_BATTERY_V);              // Only mark fresh on valid reading
                              battVFreshFlag = true;
+                             adsGapUpdate(0, now);  // CH0 battV inter-sample gap meter
                            }
                            break;
 
@@ -2731,6 +2748,7 @@ void _ReadAnalogInputs_inner() {
                            if (RPM >= 0 && RPM < 10000) {  // Sanity check
                              MARK_FRESH(IDX_RPM);          // Only mark fresh on valid reading
                              wmIgnUpdate(wmIgn_RPM, RPM);  // ignition-cycle watermark
+                             adsGapUpdate(2, now);  // CH2 RPM inter-sample gap meter
                            }
                            break;
 

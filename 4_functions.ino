@@ -83,22 +83,31 @@ void updateCpuLoad() {
   lastTotal = total;
 }
 
+// Core-0 sampler for updateCpuLoad() — moved off the Core-1 control loop (the uxTaskGetSystemState
+// scan was ~4ms once every 2s on Core 1). Runs at priority 0, so it only takes Core 0 when no
+// network/upload task needs it. Writes cpuLoadCore0/1(+Max), read by the CSV2 sender on Core 1.
+void cpuLoadTask(void *param) {
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    updateCpuLoad();
+  }
+}
+
 void updateSystemHealthStats() {
   if (otaInProgress) return;
 
-  static unsigned long lastCpuSample = 0;
+  // CPU-load scan (updateCpuLoad) moved to cpuLoadTask on Core 0. This now does only the
+  // 4s heap walk, behind the one-heavy-per-pass gate.
   static unsigned long lastHeapSample = 0;
 
   unsigned long now = millis();
 
-  if (now - lastCpuSample >= 2000) {
-    lastCpuSample = now;
-    updateCpuLoad();
-  }
+  if (now - lastHeapSample < 4000) return;   // not due
+  if (gHeavyRanThisPass) return;             // gate: another heavy ran this pass — defer (timer unchanged → still due)
+  gHeavyRanThisPass = true;
+  lastHeapSample = now;
 
-  if (now - lastHeapSample >= 4000) {
-    lastHeapSample = now;
-
+  {
     FreeHeap = esp_get_free_heap_size() / 1024;
     MinFreeHeap = esp_get_minimum_free_heap_size() / 1024;
     FreeInternalRam = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024;
@@ -976,6 +985,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
       settingWrite(NK_systemIDSineFreqEnd, String(systemIDSineFreqEnd).c_str());
     } else {
       systemIDSineFreqEnd = settingRead(NK_systemIDSineFreqEnd).toFloat();
+    }
+    if (!settingExists(NK_sysidPlantTau)) {
+      settingWrite(NK_sysidPlantTau, String(systemIDPlantTauMs).c_str());
+    } else {
+      systemIDPlantTauMs = (uint16_t)settingRead(NK_sysidPlantTau).toInt();
     }
     if (!settingExists(NK_systemIDSineCycles)) {
       settingWrite(NK_systemIDSineCycles, String(systemIDSineCycles).c_str());

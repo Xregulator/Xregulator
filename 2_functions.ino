@@ -279,6 +279,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDTestType "SysIDTestType"
 #define NK_systemIDSineFreqStart "SysIDSineFStrt"
 #define NK_systemIDSineFreqEnd "SysIDSineFEnd"
+#define NK_sysidPlantTau "sysidPlantTau"
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
@@ -1308,6 +1309,11 @@ cleanup:
   }
 }
 
+// Core-0 HTTPS task per-operation wall-clock time (ms): last cloud op + worst since Reset Peak Values.
+// Wall-clock is correct here — a network transfer's real cost includes the time on the wire.
+uint32_t httpsUploadLastMs = 0;
+uint32_t httpsUploadWorstMs = 0;
+
 void httpsTask(void *param) {
   if (otaInProgress) {
     return;  // Skip during OTA
@@ -1392,6 +1398,8 @@ void httpsTask(void *param) {
       }
 
       unsigned long opDuration = millis() - opStart;
+      httpsUploadLastMs = (uint32_t)opDuration;                                 // Core-0 cloud op time, dashboard Core-0 section
+      if ((uint32_t)opDuration > httpsUploadWorstMs) httpsUploadWorstMs = (uint32_t)opDuration;
 
       if (opDuration > 9000) {
         Serial.printf("WARNING: Operation took %lums (>9s limit)\n", opDuration);
@@ -4307,13 +4315,20 @@ void faDetTask(void *pv) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // block until Core 1 arms a job (the notify is the barrier)
     FadResult res;
-    // CPU time, not wall clock — esp_timer would count Core-0 preemption by WiFi (seconds).
+    // CPU compute time, immune to Core-0 network/WiFi preemption: ulRunTimeCounter accumulates ONLY
+    // the cycles this task actually executes — time the analysis is paused while WiFi/lwIP borrows
+    // the core is NOT counted. The catch is units: the run-time-stats counter on this silicon ticks
+    // in CPU CLOCK CYCLES, not microseconds. The original bug stored that raw cycle delta straight
+    // into a "...Us" variable, so the dashboard's /1000 produced the bogus, near-constant "3268.8 ms".
+    // Divide by the live CPU MHz to get true microseconds. getCpuFrequencyMhz() keeps it correct even
+    // in the 80 MHz engine-off idle (CPU is 240 MHz whenever the dashboard is actually open).
     TaskStatus_t ts;
     vTaskGetInfo(NULL, &ts, pdFALSE, eInvalid);
-    uint32_t r0 = (uint32_t)ts.ulRunTimeCounter;
+    uint32_t c0 = (uint32_t)ts.ulRunTimeCounter;
     fadStep(faDetJob, 0, &res);  // straight-line: runs the whole analysis to completion
     vTaskGetInfo(NULL, &ts, pdFALSE, eInvalid);
-    uint32_t computeUs = (uint32_t)ts.ulRunTimeCounter - r0;
+    uint32_t cpuMHz = getCpuFrequencyMhz();
+    uint32_t computeUs = ((uint32_t)ts.ulRunTimeCounter - c0) / (cpuMHz ? cpuMHz : 240);
     faDetLastComputeUs = computeUs;
     if (computeUs > faDetWorstComputeUs) faDetWorstComputeUs = computeUs;
     faSharedResult = res;

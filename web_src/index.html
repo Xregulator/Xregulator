@@ -920,6 +920,22 @@
                       </div>
                     </form>
 
+                    <div class="btn-row" style="margin-top:8px;">
+                      <form action="/get" method="GET" target="hidden-form" style="display: inline;">
+                        <input type="hidden" name="password" class="password_field">
+                        <input type="hidden" name="ClearOverheatHistory" value="1">
+                        <input onclick="return handleClearOverheatHistory();" type="submit"
+                          value="Clear Overheats / Safe Hours" class="btn-secondary" />
+                      </form>
+
+                      <form action="/get" method="GET" target="hidden-form" style="display: inline;">
+                        <input type="hidden" name="password" class="password_field">
+                        <input type="hidden" name="ResetLearningTable" value="1">
+                        <input onclick="return handleResetLearningTable();" type="submit" value="Reset Table"
+                          class="btn-secondary" />
+                      </form>
+                    </div>
+
                     <!-- ===== Automatic Min% Learning ("knee tracker") ===== -->
                     <hr style="margin-top:18px; border-color:var(--border);" />
                     <div class="knee-learn-panel" style="margin-top:8px;">
@@ -948,11 +964,14 @@
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form">
                             <input type="hidden" name="password" class="password_field">
-                            <select name="kneeLearnEnable" id="kneeLearnEnable_input">
-                              <option value="0">Off</option>
-                              <option value="1">On</option>
-                            </select>
-                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                            <span class="toggle-label">Off</span>
+                            <label class="switch">
+                              <input id="kneeLearnEnable_checkbox" type="checkbox"
+                                onchange="document.getElementById('kneeLearnEnable').value = this.checked ? '1' : '0'; this.form.submit(); submitMessage();" />
+                              <span class="slider round"></span>
+                            </label>
+                            <span class="toggle-label">On</span>
+                            <input id="kneeLearnEnable" name="kneeLearnEnable" type="number" value="" style="display:none;" />
                           </form>
                         </div>
                       </div>
@@ -1063,11 +1082,14 @@
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form">
                             <input type="hidden" name="password" class="password_field">
-                            <select name="kneeTempComp" id="kneeTempComp_input">
-                              <option value="1">On</option>
-                              <option value="0">Off</option>
-                            </select>
-                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                            <span class="toggle-label">Off</span>
+                            <label class="switch">
+                              <input id="kneeTempComp_checkbox" type="checkbox"
+                                onchange="document.getElementById('kneeTempComp').value = this.checked ? '1' : '0'; this.form.submit(); submitMessage();" />
+                              <span class="slider round"></span>
+                            </label>
+                            <span class="toggle-label">On</span>
+                            <input id="kneeTempComp" name="kneeTempComp" type="number" value="" style="display:none;" />
                           </form>
                         </div>
                       </div>
@@ -1215,23 +1237,6 @@
                     </span>
                     <span class="learning-info-value"><span id="pidInitialized_display">No</span></span>
                   </div>
-                </div>
-
-                <hr />
-                <div class="btn-row">
-                  <form action="/get" method="GET" target="hidden-form" style="display: inline;">
-                    <input type="hidden" name="password" class="password_field">
-                    <input type="hidden" name="ClearOverheatHistory" value="1">
-                    <input onclick="return handleClearOverheatHistory();" type="submit"
-                      value="Clear Overheats / Safe Hours" class="btn-secondary" />
-                  </form>
-
-                  <form action="/get" method="GET" target="hidden-form" style="display: inline;">
-                    <input type="hidden" name="password" class="password_field">
-                    <input type="hidden" name="ResetLearningTable" value="1">
-                    <input onclick="return handleResetLearningTable();" type="submit" value="Reset Table"
-                      class="btn-secondary" />
-                  </form>
                 </div>
 
               <!-- Sticky Header -->
@@ -5063,10 +5068,12 @@
           <div class="form-input"><strong id="commission-overall" style="color:var(--text-muted);">…</strong></div>
         </div>
 
-        <button onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:12px;">Start / Resume Commissioning…</button>
-        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Opens the guided panel. If a session is already underway it resumes where you left off (in-session). The steps below show the persisted progress for this alternator.</p>
+        <!-- Label/class/help adapt to commissionState in renderCommissionStatus(): start (0) / resume (1) / re-commission (2). -->
+        <button id="commission-start-btn" onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:12px;">Start commissioning…</button>
+        <p id="commission-start-help" style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Opens the guided walkthrough for this alternator. The steps below show the persisted progress.</p>
 
-        <!-- Clear & start over — shown by renderCommissionStatus() only when there is progress (state != 0). -->
+        <!-- Clear & start over — shown by renderCommissionStatus() only while a run is in progress (state == 1),
+             where resume-vs-restart is a real choice. When already commissioned, re-commissioning IS starting over. -->
         <div id="commission-clear-row" style="display:none; margin-top:12px;">
           <button onclick="commissionClearAndRestart()" class="btn-danger-ghost" style="width:100%;padding:10px;">Clear progress &amp; start over</button>
           <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0 0;">Reverts to your pre-commissioning settings and restarts the walkthrough from the first step.</p>
@@ -8894,6 +8901,78 @@
               <span class="metric-value"><span id="imuFifoWorstSamples_ID">0</span></span>
             </div>
 
+            <div class="metric-row">
+              <span class="metric-label">RPM Read Gap — Last (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Milliseconds since the previous valid RPM (ADS channel 2) reading. RPM is a time-shared channel: with the continuous-mode sampler it is read on a brief mux excursion off the parked current channel. Target is under 30 ms so RPM stays smooth for the control logic that uses it. Glitch/out-of-range reads do not count.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch2GapLast_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">RPM Read Gap — Worst (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Largest gap between valid RPM readings since the last Reset Peak Values. Confirms the excursion scheduler is not starving RPM. Should stay under ~30 ms; a spike means a heavy loop pass stretched the excursion. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch2GapWorst_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">Voltage Read Gap — Last (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Milliseconds since the previous valid ADS battery-voltage (channel 0) reading. This is the secondary voltage used only as a sanity cross-check against the INA228; like RPM it is read on a brief mux excursion. Target is under 30 ms. Out-of-range reads do not count.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch0GapLast_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">Voltage Read Gap — Worst (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Largest gap between valid ADS battery-voltage readings since the last Reset Peak Values. Confirms the cross-check voltage channel is not starved by the excursion scheduler. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="ch0GapWorst_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Build — Last (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Time to BUILD the ~548-field CSV2 diagnostic payload (the snprintf) on the most recent send, ~every 5 s. This is the CPU half of the WiFi-send cost. If this dominates the WiFi Send timer, the win is chunking/offloading the build; if it's small, the cost is in the send instead.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2BuildLast_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Build — Worst (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Worst CSV2 build (snprintf) time since the last Reset Peak Values. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2BuildWorst_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Send — Last (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Time to SEND the CSV2 payload (events.send → AsyncTCP) on the most recent send. This is the transport half of the WiFi-send cost. If this dominates, the win is splitting CSV2 into smaller events; if the build dominates instead, chunk/offload the build.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2SendLast_ID">0</span></span>
+            </div>
+
+            <div class="metric-row">
+              <span class="metric-label">CSV2 Send — Worst (ms)
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ
+                  <span class="tooltip-box">Worst CSV2 send (events.send) time since the last Reset Peak Values. Resets with Reset Peak Values.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="csv2SendWorst_ID">0</span></span>
+            </div>
+
           </div>
           <!-- MEMORY -->
           <div class="card-group">
@@ -9499,25 +9578,6 @@
                 </div>
               </div>
 
-              <!-- Rectifier Fault Detector -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Rectifier Fault Detector
-                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                    <span class="tooltip-box">Time to run the whole rectifier/stator fault analysis on a 2-second current
-                      recording, at most once a minute. This runs on the second processor core (Core 0), off the control
-                      loop, so it no longer affects charging — for this row the left value is the LAST run and the right
-                      value is the WORST since Reset Peak Values (not a 5-second window). 0ms means it has not run yet.</span>
-                  </span>
-                </div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_faDetector_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_faDetector_ses_ID">0</span>
-                </div>
-              </div>
-
               <!-- Fast Alt-Current Window Finalize -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
@@ -9809,6 +9869,54 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_checkTimeSync_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Core 0 — Background Tasks sub-header -->
+              <div
+                style="grid-column: 1 / -1; background: rgba(0,0,0,0.03); padding: 4px 8px; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); border-top: 2px solid var(--border);">
+                Core 0 — Background Tasks (off the control loop)
+              </div>
+
+              <!-- Rectifier Fault Detector (Core 0) -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Rectifier Fault Detector
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Time to run the whole rectifier/stator fault analysis on a 2-second current
+                      recording, at most once a minute. This runs on the second processor core (Core 0), off the control
+                      loop, so it no longer affects charging — for this row the left value is the LAST run and the right
+                      value is the WORST since Reset Peak Values (not a 5-second window). 0ms means it has not run yet.
+                      This is processor compute time (CPU time): only the time the math actually held the core, NOT any
+                      pauses while Wi-Fi or other background work borrowed it — so the reading stays clean and is never
+                      inflated by network traffic. It assumes the chip's normal full speed (240 MHz).</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_faDetector_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_faDetector_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Cloud Upload (HTTPS, Core 0) -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Cloud Upload (HTTPS)
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">How long the last cloud upload took end to end on the second processor core
+                      (Core 0) — opening the secure connection, sending the data, and reading the reply. Left is the LAST
+                      upload, right is the WORST since Reset Peak Values. This is real elapsed (wall-clock) time, so it
+                      includes time spent waiting on the network — a slow Wi-Fi link or a busy server shows up here. It runs
+                      off the control loop, so a slow upload never affects charging. 0 means nothing has uploaded yet.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="httpsUpload_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="httpsUpload_ses_ID">0</span>
                 </div>
               </div>
 
@@ -10538,7 +10646,13 @@
         <!-- Operating-point context for the two headline worsts: where on the engine map each was recorded -->
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
           <span style="font-size:13px; font-weight:600;">Worst ripple &amp; tone — and where each occurred</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The worst ripple amplitude and strongest single tone seen, with the operating point captured at the instant each was last set. Pk-Pk (A) is the ripple amplitude; the Highest Tone row also lists the tone frequency (the Ripple Pk-Pk row spans ALL frequencies, so it has no single tone). Output Current is the 0.5-second window-mean alternator current at that moment (not a setpoint). Alt Temp is the alternator probe reading then ("—" if no probe). Date needs a synced clock — it shows "—" until the regulator has the time. These persist across reboot and clear with Reset Worsts.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The worst ripple amplitude and strongest single tone seen, with the operating point captured at the instant each was last set. Pk-Pk (A) is the ripple amplitude; the Highest Tone row also lists the tone frequency (the Ripple Pk-Pk row spans ALL frequencies, so it has no single tone). Output Current is the 0.5-second window-mean alternator current at that moment (not a setpoint). Alt Temp is the alternator probe reading then ("—" if no probe). Date needs a synced clock — it shows "—" until the regulator has the time. These persist across reboot and clear with Reset Worsts. Reset Worsts affects ONLY this table — it does not touch the Resonance &amp; Ripple Map below.</span></span>
+          <form action="/get" method="GET" target="hidden-form" style="display:inline;margin:0 0 0 auto;">
+            <input type="hidden" name="ResetRipplePeaks" id="ResetRipplePeaks" value="0" />
+            <input type="hidden" name="password" class="password_field" />
+            <button type="button" class="btn-secondary btn-sm" onclick="resetParameter('ResetRipplePeaks')"
+              id="ResetRipplePeaks_button">Reset Worsts</button>
+          </form>
         </div>
         <div style="overflow-x:auto; margin-top:4px;">
           <table style="width:100%; border-collapse:collapse; font-size:13px;">
@@ -10577,27 +10691,23 @@
         </div>
         <hr />
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:13px; font-weight:600;">Biggest actionable disturbance</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The worst disturbance the field can actually react to — the strongest tone inside the band from 4 Hz up to the actuator bandwidth (set by the fitted plant time constant from the Plant Delay sine sweep). Tones above that band are real but un-actionable: the field is too slow to chase them, so the over-current detector averages them out. Ranked by post-filter residual (amplitude ÷ frequency), not raw amplitude, because a low slow tone survives the averaging far better than a high one. Use the residual figure to set the over-current detector floor above it. Needs a Plant Delay sine sweep first.</span></span>
-          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="computeActionableDisturbance()">Compute</button>
-        </div>
-        <div id="faActionableResult" style="font-size:13px; color:#555; margin-top:4px;">Press Compute (needs a Plant Delay sine sweep first).</div>
-        <hr />
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:13px; font-weight:600;">Resonance &amp; Ripple Map</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load — a separate, long-running dataset from the worst-value table above. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. Clear Map affects ONLY this map; it does not reset the worst-value table above (use Reset Worsts there for that). A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
+          <span style="font-size:12px; color:var(--text-muted);">Separate long-term dataset — not affected by Reset Worsts</span>
           <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadCsv('/famatrix.csv','Resonance and Ripple Map')">Download CSV</button>
-          <form action="/get" method="GET" target="hidden-form" style="display:inline;margin:0;">
-            <input type="hidden" name="ResetRipplePeaks" id="ResetRipplePeaks" value="0" />
-            <input type="hidden" name="password" class="password_field" />
-            <button type="button" class="btn-secondary btn-sm" onclick="resetParameter('ResetRipplePeaks')"
-              id="ResetRipplePeaks_button">Reset Worsts</button>
-          </form>
           <button type="button" class="btn-danger-ghost btn-sm"
             onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
         </div>
+        <hr />
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:13px; font-weight:600;">Biggest Actionable Disturbance in the Ripple Map</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The strongest ripple tone in the Resonance &amp; Ripple Map above that is slow enough for the field to actually chase — the band from 4 Hz up to the actuator bandwidth set by the plant time constant (τ) from the Commissioning Plant Delay sweep. On a normal alternator the field is slower than 4 Hz, so no tone is chaseable: there is nothing to tune and this line just says so, updating automatically from the fitted τ. Only if a sweep ever fits a fast plant (τ below ~40 ms) does a Compute button appear, to scan the map for the actual tone and the residual current that leaks past the over-current detector.</span></span>
+          <span id="faPlantTau_readout" style="font-size:12px; color:var(--text-muted);">Plant τ: not fitted yet — run a Plant Delay sine sweep in Commissioning</span>
+          <button type="button" id="faComputeBtn" class="btn-secondary btn-sm" style="margin-left:auto; display:none;" onclick="computeActionableDisturbance()">Compute</button>
+        </div>
+        <div id="faActionableResult" style="font-size:13px; color:#555; margin-top:4px;">Run a Plant Delay sine sweep in Commissioning to evaluate this.</div>
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
-          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
+          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How this diagnostic panel works</summary>
           <div style="margin-top:8px;line-height:1.5;">
             <p><b>Channel State</b> is whether the fast current sensor is actively sampling, dormant
               (its sense wire reads open, so the regulator stopped and re-probes every few minutes),
@@ -10612,6 +10722,10 @@
               (<b>Ripple Pk-Pk</b>) and strongest single tone (<b>Highest Tone</b>) seen since you last
               pressed <b>Reset Worsts</b>, with the engine operating point where each occurred. These
               worsts persist across reboots, so they only clear when you press that button.</p>
+            <p>The <b>Worst ripple &amp; tone</b> table and the <b>Resonance &amp; Ripple Map</b> are two
+              independent datasets. <b>Reset Worsts</b> (next to the table) zeros only the worst values;
+              <b>Clear Map</b> wipes only the learned map. Neither button affects the other, and clearing
+              one never re-populates from the other.</p>
           </div>
         </details>
       </div>
@@ -10754,7 +10868,7 @@
           <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="50" onclick="fastScopeZoom(50, this)">50 ms</button>
           <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="20" onclick="fastScopeZoom(20, this)">20 ms</button>
           <button type="button" class="btn-secondary btn-sm fastscope-zoom" data-ms="5" onclick="fastScopeZoom(5, this)">5 ms</button>
-          <span id="fastscope-cycle-hint" style="font-size:13px; color:#666;"></span>
+          <span id="fastscope-cycle-hint" style="font-size:13px; color:#666; flex-basis:100%; min-height:1.2em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
         </div>
         <div class="plot-container" id="fastscope-plot" style="margin-top:8px;"></div>
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">

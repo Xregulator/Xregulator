@@ -1089,6 +1089,8 @@ void altHealth_tick(uint32_t nowMs) {
   static uint32_t lastMs = 0;
   if (!altFrontBuf) return;
   if (nowMs - lastMs < 1000) return;
+  if (gHeavyRanThisPass) return;      // one-heavy-per-pass gate; defer (lastMs unchanged → still due next pass)
+  gHeavyRanThisPass = true;
   lastMs = nowMs;
   if (altSimMode >= 0.5f) {           // bench simulator: advance synthetic point + fold at 1 Hz
     altSimTick(nowMs);
@@ -1822,32 +1824,54 @@ void resetBoatPerformance() {
 // ---- tick (call from loop()): fold at ~10 Hz, send live telemetry + settings echo at ~1 Hz ----
 void boatPerf_tick(uint32_t nowMs) {
   static uint32_t lastFold = 0, lastSse = 0;
+  static uint8_t  perfSseStep = 0;   // 0 = idle; 1..4 = the 1 Hz SSE burst, SPREAD one step per loop pass
+  static uint8_t  sc = 0;            // sendPerfSettings cadence: every 5th SSE cycle
   if (!sailFrontBuf) return;
+  // One-heavy-per-pass gate: defer the whole tick if any sub-op is due (or we're mid-SSE-spread) but
+  // another heavy ran this pass (lastFold/lastSse/perfSseStep unchanged → still due next pass).
+  // The 1 Hz SSE burst (classify + 2-3 SSE pushes, ~7 ms if stacked) is split one step per pass so it
+  // never lands as a single fat tick — it was the tallest loop pole and bounded CH1/Vbus worst spacing.
+  bool foldDue  = ((uint32_t)(nowMs - lastFold) >= 100);
+  bool sseStart = ((uint32_t)(nowMs - lastSse) >= 1000);
+  if (foldDue || sseStart || perfSseStep) {
+    if (gHeavyRanThisPass) return;
+    gHeavyRanThisPass = true;
+  } else {
+    if (perfSimMode >= 0.5f) perfSimTick(nowMs);        // keep the sim feed alive on idle passes
+    return;
+  }
   if (perfSimMode >= 0.5f) perfSimTick(nowMs);          // bench simulator feeds the sim vars first
-  if ((uint32_t)(nowMs - lastFold) >= 100) { lastFold = nowMs; perfFold_tick(nowMs); }   // ~10 Hz fold
-  if ((uint32_t)(nowMs - lastSse) >= 1000) {                                              // ~1 Hz SSE + echo
-    lastSse = nowMs;
-    // 1 Hz evaluator + OUTPUT-BLIND state classifier for the active mode (mirrors altHealth_tick).
-    // NO clamp on the % — it may exceed 100 vs a stale front.
-    if (motorLiveValid) {
-      float surf[PERF_NAXIS] = { motorLive_rpm, motorLive_hw, motorLive_pitch };
-      float pred = 0;
-      motorState = (uint8_t)motorFront.classify(surf, perfRefRadius, perfIdwPower, perfRidgeFrac, perfRiskThresh, &pred);
-      motorLive_best = pred;
-      bool graded = (motorState == FRONT_MEASURED || motorState == FRONT_ESTIMATED);
-      motorLive_pct = (graded && pred > 0.1f) ? (motorLive_spd / pred * 100.0f) : 0.0f;
-    } else if (perfLiveValid) {
-      float surf[PERF_NAXIS] = { perfLive_ws, perfFoldAwa(perfLive_wa), perfLive_pitch };
-      float pred = 0;
-      perfState = (uint8_t)sailFront.classify(surf, perfRefRadius, perfIdwPower, perfRidgeFrac, perfRiskThresh, &pred);
-      perfLive_best = pred;
-      bool graded = (perfState == FRONT_MEASURED || perfState == FRONT_ESTIMATED);
-      perfLive_pct = (graded && pred > 0.1f) ? (perfLive_spd / pred * 100.0f) : 0.0f;
+  if (sseStart && perfSseStep == 0) { lastSse = nowMs; perfSseStep = 1; }   // arm the 1 Hz burst
+  // Do exactly ONE heavy sub-op per pass: advance the SSE burst if one is pending, else run the fold.
+  // (Prioritising the burst defers the 10 Hz fold by at most a few passes — jitter, not loss.)
+  if (perfSseStep) {
+    switch (perfSseStep) {
+      case 1:
+        // step 1: 1 Hz evaluator + OUTPUT-BLIND state classifier for the active mode (mirrors
+        // altHealth_tick). NO clamp on the % — it may exceed 100 vs a stale front.
+        if (motorLiveValid) {
+          float surf[PERF_NAXIS] = { motorLive_rpm, motorLive_hw, motorLive_pitch };
+          float pred = 0;
+          motorState = (uint8_t)motorFront.classify(surf, perfRefRadius, perfIdwPower, perfRidgeFrac, perfRiskThresh, &pred);
+          motorLive_best = pred;
+          bool graded = (motorState == FRONT_MEASURED || motorState == FRONT_ESTIMATED);
+          motorLive_pct = (graded && pred > 0.1f) ? (motorLive_spd / pred * 100.0f) : 0.0f;
+        } else if (perfLiveValid) {
+          float surf[PERF_NAXIS] = { perfLive_ws, perfFoldAwa(perfLive_wa), perfLive_pitch };
+          float pred = 0;
+          perfState = (uint8_t)sailFront.classify(surf, perfRefRadius, perfIdwPower, perfRidgeFrac, perfRiskThresh, &pred);
+          perfLive_best = pred;
+          bool graded = (perfState == FRONT_MEASURED || perfState == FRONT_ESTIMATED);
+          perfLive_pct = (graded && pred > 0.1f) ? (perfLive_spd / pred * 100.0f) : 0.0f;
+        }
+        perfSseStep = 2;
+        break;
+      case 2: perfSendLive();      perfSseStep = 3; break;                  // step 2: sailing live SSE
+      case 3: perfSendMotorLive(); perfSseStep = (++sc >= 5) ? 4 : 0; break; // step 3: motoring live SSE
+      case 4: sc = 0; sendPerfSettings(); perfSseStep = 0; break;           // step 4: settings echo (1-in-5)
     }
-    perfSendLive();
-    perfSendMotorLive();
-    static uint8_t sc = 0;
-    if (++sc >= 5) { sc = 0; sendPerfSettings(); }
+  } else if (foldDue) {
+    lastFold = nowMs; perfFold_tick(nowMs);                                 // ~10 Hz fold
   }
 }
 
@@ -3224,6 +3248,11 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
   static uint32_t ampN = 0;
   static uint32_t fcEaseStartMs = 0;  // EASE phase: gentle field ramp-down on exit
   static float    fcEaseFromDuty = 0.0f;
+  static float    onsetBaseline = 0.0f;  // onset-mode: amps at the first settled step (below the knee)
+  static float    onsetLastAbove = 0.0f; // onset fine-down: lowest duty still producing onset current
+  static double   rpmSum = 0.0;          // onset-mode: RPM accumulated over the same settled window as amps
+  static float    onsetLastAboveRPM = 0.0f;  // RPM sampled AT the knee-defining step (engine drifts across a sweep)
+  static float    onsetLastAboveTempF = 0.0f;// case temp sampled AT the knee-defining step
 
   // ── Abort ────────────────────────────────────────────────────────────────
   if (phase != 0 && fieldCurveAbortRequested) {
@@ -3249,9 +3278,11 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
     }
 
-    // Table limit-at-speed: the per-RPM current cap, clamped to the rated max.
+    // Table limit-at-speed: the per-RPM current cap, clamped to the rated max. The saturation
+    // sweep needs real headroom to reach the knee; the onset sweep stops at the first amps and
+    // needs none, so it skips this abort (it must run at low RPM where the cap is small).
     fieldCurveTargetLimitA = fminf(interpolateRPMTable(RPM, rpmCapCurrentTable), (float)MaxTableValue);
-    if (fieldCurveTargetLimitA < 5.0f) {
+    if (!fieldCurveOnsetMode && fieldCurveTargetLimitA < 5.0f) {
       queueConsoleMessageF("Field curve: ABORTED — table limit-at-speed only %.0fA (raise RPM)", fieldCurveTargetLimitA);
       return false;
     }
@@ -3261,14 +3292,21 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     fieldCurveOk = false;
     fieldCurveKneeDuty = -1.0f;
     fieldCurveKneeAmps = -1.0f;
+    onsetBaseline = 0.0f;
+    if (fieldCurveOnsetMode) { kneeSweepKneeDuty = -1.0f; kneeSweepOk = false; }
     stepDuty = FIELDCURVE_DUTY_START;
     stepStartMs = nowMs;
     ampSum = 0.0;
     ampN = 0;
+    rpmSum = 0.0;
     phase = 1;
     fieldCurveActive = 1;
-    queueConsoleMessageF("Field curve: ramping to %.0fA limit @ %.0f RPM (step %.1f%%, dwell %lums)",
-                         fieldCurveTargetLimitA, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
+    if (fieldCurveOnsetMode)
+      queueConsoleMessageF("Min%% knee: ramping from %.0f%% @ %.0f RPM, stop at first onset (step %.1f%%, dwell %lums)",
+                           FIELDCURVE_DUTY_START, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
+    else
+      queueConsoleMessageF("Field curve: ramping to %.0fA limit @ %.0f RPM (step %.1f%%, dwell %lums)",
+                           fieldCurveTargetLimitA, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
   }
 
   // ── RAMP ──────────────────────────────────────────────────────────────────
@@ -3279,17 +3317,55 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // so the ramp tears down cleanly. No bespoke per-target headroom abort is needed here.
     dutyOut = stepDuty;
 
-    // Accumulate amps only over the settled second half of the dwell.
+    // Accumulate amps (and RPM, for the onset knee) only over the settled second half of the dwell.
     if ((nowMs - stepStartMs) >= (FIELDCURVE_DWELL_MS / 2)) {
       ampSum += ampsRaw;
+      rpmSum += RPM;
       ampN++;
     }
 
     if ((nowMs - stepStartMs) >= FIELDCURVE_DWELL_MS) {
       float avgAmps = (ampN > 0) ? (float)(ampSum / ampN) : ampsRaw;
+      float avgRpm  = (ampN > 0) ? (float)(rpmSum / ampN) : RPM;
       if (fieldCurveCount < FIELDCURVE_MAX_PTS) {
         fieldCurveBuf[fieldCurveCount++] = { stepDuty, avgAmps };
       }
+      // ── Onset-stop mode (Min% knee) ─────────────────────────────────────────
+      // First settled step = baseline (below the knee). Stop the instant a later step lifts
+      // kneeOnsetA above it — that duty is the onset knee, and we've forced almost no current.
+      // No onset by kneeMaxFloorPct+margin → record the ceiling, flag "no clean knee".
+      if (fieldCurveOnsetMode) {
+        if (fieldCurveCount == 1) {
+          onsetBaseline = avgAmps;
+        } else if ((avgAmps - onsetBaseline) >= kneeOnsetA) {
+          // Coarse onset found (within one FIELDCURVE_DUTY_STEP). Refine by backing DOWN in fine
+          // steps until amps fall back below onset — the lowest duty still above onset is the knee.
+          queueConsoleMessageF("Min%% knee: coarse onset %.2fA at %.1f%% duty @ %.0f RPM, refining down...",
+                               avgAmps - onsetBaseline, stepDuty, avgRpm);
+          // Pair the knee with the RPM/temp measured AT this step (co-temporal), not a late read —
+          // the engine drifts hundreds of RPM across a sweep. The fine-down phase overwrites these
+          // with each lower step that still shows onset, so the final pair is the knee-defining step.
+          onsetLastAbove = stepDuty;
+          onsetLastAboveRPM = avgRpm;
+          onsetLastAboveTempF = isnan(AlternatorTemperatureF) ? kneeTempRefF : AlternatorTemperatureF;
+          stepDuty -= FIELDCURVE_ONSET_FINE_STEP;
+          if (stepDuty < FIELDCURVE_DUTY_START) stepDuty = FIELDCURVE_DUTY_START;
+          stepStartMs = nowMs; ampSum = 0.0; ampN = 0; rpmSum = 0.0;
+          phase = 3;
+          return true;
+        }
+        if (stepDuty >= (kneeMaxFloorPct + kneeMarginPct)) {
+          kneeSweepKneeDuty = stepDuty;
+          kneeSweepRPM      = avgRpm;
+          kneeSweepTempF    = isnan(AlternatorTemperatureF) ? kneeTempRefF : AlternatorTemperatureF;
+          kneeSweepOk       = false;
+          fieldCurveResultsReady = true;
+          queueConsoleMessageF("Min%% knee: no onset below %.1f%% duty @ %.0f RPM (using ceiling)", stepDuty, avgRpm);
+          fcEaseFromDuty = stepDuty; fcEaseStartMs = nowMs; phase = 2; fieldCurveActive = 2;
+          return true;
+        }
+        // no onset yet → fall through to the next step
+      } else {
       bool reachedLimit = (avgAmps >= fieldCurveTargetLimitA);
       bool reachedCeil  = (stepDuty >= FIELDCURVE_DUTY_MAX);
       bool bufFull      = (fieldCurveCount >= FIELDCURVE_MAX_PTS);
@@ -3347,12 +3423,51 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
         fieldCurveActive = 2;
         return true;
       }
+      }  // end !fieldCurveOnsetMode (saturation) branch
 
       // Next step.
       stepDuty += FIELDCURVE_DUTY_STEP;
       stepStartMs = nowMs;
       ampSum = 0.0;
       ampN = 0;
+      rpmSum = 0.0;
+    }
+    return true;
+  }
+
+  // ── ONSET FINE-DOWN (refine the coarse knee, onset mode only) ───────────────
+  // Back down in FIELDCURVE_ONSET_FINE_STEP steps from the coarse onset. Each settled step still
+  // >= kneeOnsetA over baseline becomes the new lowest-above; the first step that falls below means
+  // we've passed under the knee, so the lowest-above duty is the refined knee (rounded conservatively
+  // high = field stays primed). Bounded: at most one coarse step's worth of fine steps.
+  if (phase == 3) {
+    dutyOut = stepDuty;
+    if ((nowMs - stepStartMs) >= (FIELDCURVE_DWELL_MS / 2)) { ampSum += ampsRaw; rpmSum += RPM; ampN++; }
+    if ((nowMs - stepStartMs) >= FIELDCURVE_DWELL_MS) {
+      float avgAmps = (ampN > 0) ? (float)(ampSum / ampN) : ampsRaw;
+      float avgRpm  = (ampN > 0) ? (float)(rpmSum / ampN) : RPM;
+      bool stillAbove = ((avgAmps - onsetBaseline) >= kneeOnsetA);
+      bool atFloor = (stepDuty <= FIELDCURVE_DUTY_START + 0.001f);
+      if (stillAbove) {
+        // This step still produces onset current → it defines the knee so far. Capture its duty
+        // AND the RPM/temp measured during this same dwell, so the pair is co-temporal at the knee.
+        onsetLastAbove = stepDuty;
+        onsetLastAboveRPM = avgRpm;
+        onsetLastAboveTempF = isnan(AlternatorTemperatureF) ? kneeTempRefF : AlternatorTemperatureF;
+      }
+      if (!stillAbove || atFloor) {
+        kneeSweepKneeDuty = onsetLastAbove;
+        kneeSweepRPM      = onsetLastAboveRPM;     // RPM AT the knee-defining step, not a late read
+        kneeSweepTempF    = onsetLastAboveTempF;
+        kneeSweepOk       = true;
+        fieldCurveResultsReady = true;
+        queueConsoleMessageF("Min%% knee: refined onset at %.2f%% duty @ %.0f RPM", onsetLastAbove, onsetLastAboveRPM);
+        fcEaseFromDuty = stepDuty; fcEaseStartMs = nowMs; phase = 2; fieldCurveActive = 2;
+        return true;
+      }
+      stepDuty -= FIELDCURVE_ONSET_FINE_STEP;
+      if (stepDuty < FIELDCURVE_DUTY_START) stepDuty = FIELDCURVE_DUTY_START;
+      stepStartMs = nowMs; ampSum = 0.0; ampN = 0; rpmSum = 0.0;
     }
     return true;
   }
