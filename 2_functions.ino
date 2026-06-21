@@ -282,6 +282,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…6=Validate, 7=finished)
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
@@ -397,15 +398,14 @@ bool fsRemove(const char *path) {
 // Auto Min% learning ("knee tracker") knobs (keys <= 15 chars)
 #define NK_kneeLearnEnable "kneeLearnEn"
 #define NK_kneeMarginPct   "kneeMarginPct"
-#define NK_kneeKickInA     "kneeKickInA"
+#define NK_kneeOnsetA      "kneeOnsetA"
+#define NK_kneeReArmA      "kneeReArmA"
+#define NK_kneeStepPct     "kneeStepPct"
 #define NK_kneeDwellSec    "kneeDwellSec"
-#define NK_kneeCreepPctMin "kneeCreepPctMn"
-#define NK_kneeUpdateGain  "kneeUpdGain"
-#define NK_kneeVbusRef     "kneeVbusRef"
 #define NK_kneeTempRefF    "kneeTempRefF"
+#define NK_kneeTempComp    "kneeTempComp"
 #define NK_kneeMaxFloorPct "kneeMaxFloorPc"
 #define NK_kneeRpmTolPct   "kneeRpmTolPct"
-#define NK_kneeVbusTolV    "kneeVbusTolV"
 #define NK_kneeTempTolF    "kneeTempTolF"
 #define NK_kneeDutyTolPct  "kneeDutyTolPct"
 #define NK_ZeroLogEnable   "ZeroLogEnable"   // Zero-drift characterization log master toggle
@@ -509,6 +509,13 @@ bool commissionRestore() {
 void commissionSetState(uint8_t st) {
   commissionState = st;
   settingWrite(NK_commissionState, String((int)st).c_str());
+}
+
+// Persist the furthest wizard phase reached (0=Prep…6=Validate, 7=finished). Drives
+// the Commissioning tab checklist so step progress survives a page reload / new client.
+void commissionSetPhase(uint8_t p) {
+  commissionPhase = p;
+  settingWrite(NK_commissionPhase, String((int)p).c_str());
 }
 
 // One-time sweep at boot: move any pre-NVS settings file into NVS, then delete
@@ -1103,7 +1110,11 @@ void TempTask(void *parameter) {
     }
 
     uint32_t pollInterval = lastReadWasSuccess ? 5000 : 1000;
-    if (RPM < 200) pollInterval = 600000;  // engine off: throttle to 10 min (reads fine at 80MHz; keeps temp fresh for the zero-drift log at low standby power)
+    // Engine off: throttle to save standby power. But the CPU is already at 240MHz whenever a
+    // dashboard is connected (see enterLowPowerStandby), so reading faster then is nearly free —
+    // drop to 10s so a watching user sees live temp instead of a 12s-fresh / 10min-stale flicker.
+    // Unwatched, stay at 10 min (reads fine at 80MHz; keeps temp fresh for the zero-drift log).
+    if (RPM < 200) pollInterval = (events.count() > 0) ? 10000 : 600000;
     if (now - lastTempRead < pollInterval) {
       tempStaleSkipCount++;
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -2760,6 +2771,14 @@ void zeroLogService() {
     uint32_t interval = (RPM >= 200) ? ZEROLOG_RUN_INTERVAL_MS : ZEROLOG_IDLE_INTERVAL_MS;
     static uint32_t lastSampleMs = 0;
     if (lastSampleMs == 0 || (now - lastSampleMs) >= interval) {
+      // Right after a reboot AlternatorTemperatureF is still NaN (DS18B20 not read yet).
+      // Defer the sample (don't advance lastSampleMs) so it captures a real temperature
+      // instead of a fabricated one — the sensor reads within ~1 s of boot, so this adds
+      // no visible gap. Past the grace window the sensor is absent, so log ZEROLOG_TEMP_BLANK
+      // (rendered as an empty CSV cell) rather than block the log forever or invent a value.
+      bool tempValid = !isnan(AlternatorTemperatureF);
+      if (!tempValid && now < ZEROLOG_TEMP_GRACE_MS) return;
+
       lastSampleMs = now;
       ZeroLogRecord &r = zeroLogRing[zeroLogHead];
       r.epoch       = (uint32_t)getCurrentTimestamp();
@@ -2767,7 +2786,8 @@ void zeroLogService() {
       r.p2pAmps     = altAmpsP2P;
       r.rpm         = (int16_t)constrain((long)lroundf(RPM), -32768L, 32767L);
       r.battVx100   = (int16_t)lroundf(getBatteryVoltage() * 100.0f);
-      r.altTempFx10 = (int16_t)lroundf(AlternatorTemperatureF * 10.0f);
+      r.altTempFx10 = tempValid ? (int16_t)lroundf(AlternatorTemperatureF * 10.0f)
+                                : ZEROLOG_TEMP_BLANK;   // sensor absent → blank, never fabricated
       zeroLogHead = (zeroLogHead + 1) % ZEROLOG_RING_SIZE;
       if (zeroLogCount < ZEROLOG_RING_SIZE) zeroLogCount++;
     }
@@ -3465,6 +3485,8 @@ static float faMvSlope12 = 3100.0f / 4095.0f, faMvOff12 = 0.0f;
 #define FA_MATRIX_MAGIC 0x46414D58u  // 'FAMX'
 #define FA_MATRIX_VER 1
 #define FA_MATRIX_FLUSH_MS 900000UL  // 15-min field-off cadence, like the long-term ring
+#define FA_IEXCESS_MARGIN   4.0f     // residual-current safety margin — mirrors the commissioning Thresholds math
+#define FA_IEXCESS_FLOOR_MAX 20.0f   // A — auto-floor ceiling, matches the /get?IExcessFloorA constrain upper bound
 
 struct FaPeak {
   uint16_t freqHzX10;  // band center, Hz ×10 (parabolic-refined)
@@ -3484,6 +3506,12 @@ uint16_t faDomFreqHzX10 = 0;     // frequency, Hz ×10
 uint16_t faDomAmpAX100 = 0;      // pk-pk amplitude (2 × sine amplitude), A ×100
 uint16_t faDomRpm = 0;           // RPM (bin center) where it occurs
 static uint32_t faMatrixDirtyWindows = 0;
+// Auto-floor: continuously re-derive the over-current floor (IExcessFloorA) from the map's worst
+// binding tone, instead of freezing it at commissioning. faAutoFloorIdx is the running max of
+// (averaged peak amplitude / freq) across cells; the floor only ever RAISES from it and is persisted
+// to NVS on the field-off flush (never a live flash write). See faAutoFloorScanCell/Apply.
+static float faAutoFloorIdx = 0.0f;
+static bool  faAutoFloorDirty = false;  // a higher floor is pending NVS persistence at the next field-off flush
 static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core 0), executed on Core 1
 
 // ── Flat-top windowed FFT (replaced the constant-Q Goertzel bank 2026-06-14) ──
@@ -3777,6 +3805,35 @@ static void faCellFoldPeak(int cellIdx, float fHz, float ampA) {
   c->pk[slot].nAcc = 1;
 }
 
+// Auto-floor part 1: fold one cell's eligible tones into the running-max binding index. ONLY peaks
+// averaged over >= FA_CELL_AVG_N windows are eligible, so a transient (one cycle, one 0.5 s window,
+// even a few) can never move the floor — the tone must persist across ~2 s of qualified steady running.
+static inline void faAutoFloorScanCell(int cellIdx) {
+  const FaCell *c = &faMatrix[cellIdx];
+  for (int s = 0; s < FA_CELL_PEAKS; s++) {
+    if (c->pk[s].nAcc < FA_CELL_AVG_N) continue;  // not yet fully averaged — ineligible
+    float f = c->pk[s].freqHzX10 / 10.0f;
+    if (f < FA_MIN_TONE_HZ) continue;
+    float idx = (c->pk[s].ampAX100 / 100.0f) / f;  // residual-weighted, == a/f (matches the commissioning math)
+    if (idx > faAutoFloorIdx) faAutoFloorIdx = idx;
+  }
+}
+
+// Auto-floor part 2: turn the running-max binding index into the live floor. R = a/(2*pi*f*tau) is the
+// residual current the EMA would carry from that tone; floor = R*margin. Uses the commissioned tau
+// (IExcessTau). Only ever RAISES IExcessFloorA (a 0.05 A deadband avoids float chatter), clamped to the
+// same ceiling as the manual path, and flags persistence for the next field-off flush.
+static void faAutoFloorApply() {
+  float tauSec = IExcessTau * 0.001f;
+  if (tauSec <= 0.0f) return;
+  float cand = (faAutoFloorIdx / (6.2831853f * tauSec)) * FA_IEXCESS_MARGIN;  // 6.2831853 = 2*pi
+  if (cand > FA_IEXCESS_FLOOR_MAX) cand = FA_IEXCESS_FLOOR_MAX;
+  if (cand > IExcessFloorA + 0.05f) {
+    IExcessFloorA = cand;
+    faAutoFloorDirty = true;
+  }
+}
+
 // Window finalize — runs every FA_WIN_DECIM_N decimated samples (0.5 s, crystal-timed).
 // Applies the steady-state gate, runs the flat-top FFT and merges its peaks into the
 // disturbance matrix, and (further down the chain) feeds the flipbook + detector.
@@ -3896,6 +3953,9 @@ static void faWindowFinalize() {
         if (c->windows == 0) faCellsUsed++;
         if (c->windows < 65535) c->windows++;
         faMatrixDirtyWindows++;
+        // Re-derive the live over-current floor from this cell's now-updated tones (eligible peaks only).
+        faAutoFloorScanCell(cellIdx);
+        faAutoFloorApply();
         // Fleet scalars: per-session worsts
         if (pkpkA > faSesPkpkWorstA) {
           faSesPkpkWorstA = pkpkA;
@@ -4395,6 +4455,7 @@ void faMatrixMaybeFlush() {
     memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
     faCellsUsed = 0;
     faMatrixDirtyWindows = 0;
+    faAutoFloorIdx = 0.0f;  // map wiped — drop the auto-floor running max too (IExcessFloorA stays; it only re-raises)
     fsTakeLock();
     LittleFS.remove(FA_MATRIX_PATH);
     fsReleaseLock();
@@ -4418,9 +4479,13 @@ void faMatrixMaybeFlush() {
   bool rising = off && !prevOff;
   bool periodic = off && (millis() - lastFlushMs >= FA_MATRIX_FLUSH_MS);
   prevOff = off;
-  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty)) {
+  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty || faAutoFloorDirty)) {
     if (faMatrixDirtyWindows > 0) faMatrixFlush();
     if (faFlipDirty) faFlipFlush();
+    if (faAutoFloorDirty) {  // auto-raised floor — persist here (field-off) so it survives reboot; never a live flash write
+      settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
+      faAutoFloorDirty = false;
+    }
     lastFlushMs = millis();
   }
 }

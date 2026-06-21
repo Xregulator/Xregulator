@@ -2854,7 +2854,7 @@ void AdjustFieldLearnMode() {
     bool kneeModeOk = (sysMode == SYS_MODE_AUTO) && !sysIDRunning && tick.chargingEnabled
                       && !tick.inLockout && !IgnoreTemperature && (hardwarePresent == 1)
                       && !tick.currentDataStale;
-    kneeLearnObserve(RPM, dutyNewFloat, getBatteryVoltage(), TempToUse, MeasuredAmps,
+    kneeLearnObserve(RPM, dutyNewFloat, TempToUse, MeasuredAmps,
                      dutyRequest, tick.rpmMinDuty, kneeModeOk);
   }
 
@@ -4172,7 +4172,17 @@ void updateCurrentRPMTableIndex(float rpm) {
 
 // One-liner lookups — all boundary logic lives in findRPMSegment/interpolateRPMTable
 float getMinimumFieldForRPM(float rpm) {
-  return interpolateRPMTable(rpm, rpmMinDutyTable);
+  float floorV = interpolateRPMTable(rpm, rpmMinDutyTable);
+  // Copper temp correction — only while the learner owns the table (off = literal hand-entered Min%).
+  // The duty-knee scales with field-winding resistance (~0.218 %/degF). Stored floors are referenced
+  // to kneeTempRefF; subtract the resistance delta at the live alternator case temp. knee = floor+margin.
+  if (kneeLearnEnable && kneeTempComp && !isnan(AlternatorTemperatureF)) {
+    float knee = floorV + kneeMarginPct;
+    floorV -= knee * 0.00218f * (kneeTempRefF - AlternatorTemperatureF);
+    if (floorV < 0) floorV = 0;
+    if (floorV > kneeMaxFloorPct) floorV = kneeMaxFloorPct;
+  }
+  return floorV;
 }
 float getCapCurrentForRPM(float rpm) {
   return interpolateRPMTable(rpm, rpmCapCurrentTable);
@@ -4181,34 +4191,26 @@ float getCapCurrentForRPM(float rpm) {
 // ====================================================================================
 // AUTO MIN% LEARNING ("knee tracker")
 // ====================================================================================
-// Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and
-// parks rpmMinDutyTable a margin below it. Observer only: governor_apply / getMinimumFieldForRPM
-// are untouched — this rewrites rpmMinDutyTable like a user edit. Spec:
-// Working Markdown Docs/MinDuty_Knee_Learning.md.
+// Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and parks
+// rpmMinDutyTable a margin below it. Observer only: governor_apply is untouched — this rewrites
+// rpmMinDutyTable like a user edit, and getMinimumFieldForRPM adds the live temp correction.
+// Spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
 static bool kneeStateDirty = false;
 
-// Copper temp-coefficient correction used by the excitation proxy (matches alt-health's altExcitation).
-static inline float kneeTempCorr(float tF) {
-  float tc = (tF - 32.0f) / 1.8f;
-  float d = 1.0f + 0.00393f * (tc - 25.0f);
-  return (d < 0.5f) ? 0.5f : d;
-}
-// Convert an applied duty at live (Vbus,tF) to the duty that yields the same field excitation
-// at reference conditions (kneeVbusRef, kneeTempRefF). Keeps learning Vbus/temp-independent.
-static inline float kneeDutyToRef(float duty, float vbus, float tF) {
-  if (kneeVbusRef < 1.0f) return duty;
-  float exc = (duty / 100.0f) * vbus / kneeTempCorr(tF);
-  return exc * kneeTempCorr(kneeTempRefF) / kneeVbusRef * 100.0f;
-}
-
-// Called every control tick from the governor site (observer; cheap). On a steady, floor-active,
-// normal-AUTO sample it either confirms the knee (amps at the floor) and snaps the floor down to
-// knee-margin, or creeps the floor up to self-probe toward the knee.
-void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
+// Called every control tick from the governor site (observer; cheap). Per RPM bin it runs a
+// one-time probe: while parked at the floor and steady, capture a fresh zero, then step the floor
+// up kneeStepPct each dwell until output rises kneeOnsetA above that zero (the knee), then lock the
+// floor at knee - margin. A locked bin re-learns only if current (> kneeReArmA) later shows at its
+// floor (knee dropped) — then the floor drops one margin step. Bin 0 is permanently locked at 0%.
+// Stored floors are RAW duty @ kneeTempRefF; getMinimumFieldForRPM does the live temp correction.
+void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk) {
-  static uint32_t lastMs = 0, steadySince = 0, lastSampleMs = 0;
-  static float fRpm = 0, fVbus = 0, fTemp = 0, fDuty = 0;
+  static uint32_t lastMs = 0, steadySince = 0, lastStepMs = 0;
+  static float fRpm = 0, fTemp = 0, fDuty = 0;
   static bool fInit = false;
+  static int   probeBin = -1;     // bin whose probe is in progress (-1 = none)
+  static bool  haveZero = false;  // fresh zero captured for the current probe
+  static float probeZero = 0.0f;  // amps baseline captured at probe start (below the knee)
 
   uint32_t now = millis();
   uint32_t dtMs = (lastMs == 0) ? 0 : (now - lastMs);
@@ -4216,18 +4218,17 @@ void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float 
 
   kneeActiveBin = -1; kneeFloorActive = false; kneeSteadyNow = false;
 
-  bool valid = modeOk && !isnan(rpm) && !isnan(vbus) && !isnan(tF) && !isnan(amps)
-               && !isnan(appliedDuty) && vbus >= 6.0f && rpm > 0;
-  if (!valid) { fInit = false; steadySince = 0; return; }
+  bool valid = modeOk && !isnan(rpm) && !isnan(tF) && !isnan(amps)
+               && !isnan(appliedDuty) && rpm > 0;
+  if (!valid) { fInit = false; steadySince = 0; probeBin = -1; haveZero = false; return; }
 
   // Detector-input EMA (~0.5 s) so the steady bands reject jitter, not real operating-point moves.
   if (!fInit || dtMs == 0 || dtMs > 3000) {
-    fRpm = rpm; fVbus = vbus; fTemp = tF; fDuty = appliedDuty; fInit = true;
+    fRpm = rpm; fTemp = tF; fDuty = appliedDuty; fInit = true;
     steadySince = 0;
   } else {
     float a = (float)dtMs / (500.0f + (float)dtMs);
-    fRpm += a * (rpm - fRpm); fVbus += a * (vbus - fVbus);
-    fTemp += a * (tF - fTemp); fDuty += a * (appliedDuty - fDuty);
+    fRpm += a * (rpm - fRpm); fTemp += a * (tF - fTemp); fDuty += a * (appliedDuty - fDuty);
   }
 
   // Attribute to the nearest RPM breakpoint.
@@ -4238,52 +4239,78 @@ void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float 
   }
   kneeActiveBin = b;
 
+  // Bin 0 (lowest RPM) is permanently locked at 0% — no usable knee that slowly. Never probe it.
+  if (b == 0) {
+    kneeFloor[0] = 0; if (kneeLearnEnable) rpmMinDutyTable[0] = 0;
+    if (probeBin == 0) { probeBin = -1; haveZero = false; }
+    return;
+  }
+
   // Floor active = governor is clamping the request up to the floor (low-output regime).
   float floorEff = (rpmFloorDuty > MinDuty) ? rpmFloorDuty : MinDuty;
   bool floorActive = (dutyRequest < floorEff - 0.05f);
   kneeFloorActive = floorActive;
 
-  // Steady-band check vs. the EMA.
+  // Steady-band check vs. the EMA (RPM, temp, applied duty — voltage intentionally not gated).
   float rpmTolAbs = fmaxf(20.0f, fRpm * (kneeRpmTolPct / 100.0f));
   bool steady = (fabsf(rpm - fRpm) <= rpmTolAbs)
-              && (fabsf(vbus - fVbus) <= kneeVbusTolV)
               && (fabsf(tF - fTemp) <= kneeTempTolF)
               && (fabsf(appliedDuty - fDuty) <= kneeDutyTolPct);
-  if (!steady) { steadySince = 0; return; }
-  if (steadySince == 0) { steadySince = now; lastSampleMs = now; }
+  if (!steady) { steadySince = 0; if (probeBin == b) { probeBin = -1; haveZero = false; } return; }
+  if (steadySince == 0) { steadySince = now; lastStepMs = now; }
   kneeSteadyNow = true;
 
   if (!kneeLearnEnable || !floorActive) return;
   uint32_t dwellMs = (uint32_t)(kneeDwellSec * 1000.0f); if (dwellMs < 250) dwellMs = 250;
-  if ((now - steadySince) < dwellMs) return;     // initial settle
-  if ((now - lastSampleMs) < dwellMs) return;    // one sample per dwell
-  float dtMin = (float)(now - lastSampleMs) / 60000.0f;
-  lastSampleMs = now;
+  if ((now - steadySince) < dwellMs) return;   // initial settle after entering a steady window
+  if ((now - lastStepMs) < dwellMs) return;    // one action per dwell
+  lastStepMs = now;
 
-  float dutyRef = kneeDutyToRef(appliedDuty, vbus, tF);
-  kneeSampN[b]++;
+  float margin = (kneeMarginPct > 0) ? kneeMarginPct : 0;
+  float caseF = isnan(AlternatorTemperatureF) ? 0.0f : AlternatorTemperatureF;
 
-  if (amps > kneeKickInA) {
-    // Knee confirmed at ~dutyRef: pull estimate, bump confidence, snap floor to knee-margin.
-    float g = kneeUpdateGain; if (g < 0.01f) g = 0.01f; if (g > 1.0f) g = 1.0f;
-    kneeDutyRef[b] += g * (dutyRef - kneeDutyRef[b]);
-    kneeConf[b]    += g * (1.0f - kneeConf[b]);
-    kneeLastMs[b]   = now;
-    float margin = (kneeMarginPct > 0) ? kneeMarginPct : 0;
-    kneeFloorRef[b] = kneeDutyRef[b] - margin;
-  } else {
-    // No output at the floor yet: creep up to self-probe toward the knee.
-    float step = kneeCreepPctMin * dtMin; if (step < 0.01f) step = 0.01f;
-    kneeFloorRef[b] += step;
+  if (kneeFrozen[b]) {
+    // Locked: only act if the knee dropped below the floor (real current at the floor). Lower one step.
+    if (amps > kneeReArmA) {
+      kneeFloor[b] -= margin; if (kneeFloor[b] < 0) kneeFloor[b] = 0;
+      kneeKnee[b] = kneeFloor[b] + margin;
+      rpmMinDutyTable[b] = kneeFloor[b];
+      kneeLastMs[b] = now;
+      kneeStateDirty = true; settingsDirty = true;
+    }
+    probeBin = -1; haveZero = false;
+    return;
   }
 
-  // Clamp + publish the live floor.
-  if (kneeFloorRef[b] < 0) kneeFloorRef[b] = 0;
-  if (kneeFloorRef[b] > kneeMaxFloorPct) kneeFloorRef[b] = kneeMaxFloorPct;
-  if (kneeDutyRef[b] < 0) kneeDutyRef[b] = 0;
-  float kneeCap = kneeMaxFloorPct + kneeMarginPct + 2.0f;
-  if (kneeDutyRef[b] > kneeCap) kneeDutyRef[b] = kneeCap;
-  rpmMinDutyTable[b] = kneeFloorRef[b];
+  // Probing this bin.
+  if (probeBin != b || !haveZero) {
+    // (Re)start the probe: capture a fresh zero at the current floor (we are below the knee here).
+    probeBin = b; probeZero = amps; haveZero = true;
+    rpmMinDutyTable[b] = kneeFloor[b];   // ensure the applied floor matches our probe state
+    return;
+  }
+
+  if ((amps - probeZero) >= kneeOnsetA) {
+    // Knee found at the current commanded floor. Lock at knee - margin (raw duty @ kneeTempRefF).
+    kneeKnee[b]  = kneeFloor[b];
+    kneeFloor[b] = kneeKnee[b] - margin; if (kneeFloor[b] < 0) kneeFloor[b] = 0;
+    kneeFrozen[b] = true; kneeLearnTempF[b] = caseF;
+    rpmMinDutyTable[b] = kneeFloor[b];
+    probeBin = -1; haveZero = false;
+    kneeLastMs[b] = now;
+  } else {
+    // No output yet: step the floor up one increment and keep hunting.
+    kneeFloor[b] += kneeStepPct;
+    if (kneeFloor[b] >= kneeMaxFloorPct) {
+      // Hit the ceiling without onset → no usable knee at this RPM. Lock at the ceiling.
+      kneeFloor[b] = kneeMaxFloorPct;
+      kneeKnee[b] = kneeMaxFloorPct + margin;
+      kneeFrozen[b] = true; kneeLearnTempF[b] = caseF;
+      probeBin = -1; haveZero = false;
+      kneeLastMs[b] = now;
+    }
+    rpmMinDutyTable[b] = kneeFloor[b];
+  }
   kneeStateDirty = true;
   settingsDirty = true;   // push the CSV3 Min% echo promptly so the table cells track the learned floor (not the 60s heartbeat)
 }
@@ -4292,9 +4319,9 @@ void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float 
 void saveKneeLearnState() {
   nvs_handle_t h;
   if (nvs_open("learning", NVS_READWRITE, &h) != ESP_OK) return;
-  nvs_set_blob(h, "kneeDutyRef", kneeDutyRef, sizeof(kneeDutyRef));
-  nvs_set_blob(h, "kneeFloorRef", kneeFloorRef, sizeof(kneeFloorRef));
-  nvs_set_blob(h, "kneeConf", kneeConf, sizeof(kneeConf));
+  nvs_set_blob(h, "kneeFloor", kneeFloor, sizeof(kneeFloor));
+  nvs_set_blob(h, "kneeKnee", kneeKnee, sizeof(kneeKnee));
+  nvs_set_blob(h, "kneeFrozen", kneeFrozen, sizeof(kneeFrozen));
   nvs_commit(h);
   nvs_close(h);
   kneeStateDirty = false;
@@ -4313,13 +4340,11 @@ void kneeLearnService(bool fieldOff) {
   saveKneeLearnState();
 }
 
-// Reset learned state to the factory min-duty defaults.
+// Reset learned state: every bin back to 0% and unlocked, so learning restarts from scratch.
 void kneeLearnResetDefaults() {
   for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-    kneeDutyRef[i]  = defaultMinDutyValues[i] + kneeMarginPct;
-    kneeFloorRef[i] = defaultMinDutyValues[i];
-    kneeConf[i] = 0.0f; kneeLastMs[i] = 0; kneeSampN[i] = 0;
-    if (kneeLearnEnable) rpmMinDutyTable[i] = defaultMinDutyValues[i];
+    kneeFloor[i] = 0; kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; kneeLastMs[i] = 0;
+    if (kneeLearnEnable) rpmMinDutyTable[i] = 0;
   }
   saveKneeLearnState();
 }
@@ -4329,43 +4354,40 @@ void kneeLearnResetDefaults() {
 void kneeLearnInit() {
   if (!settingExists(NK_kneeLearnEnable)) settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
   else kneeLearnEnable = (settingRead(NK_kneeLearnEnable).toInt() != 0);
+  if (!settingExists(NK_kneeTempComp)) settingWrite(NK_kneeTempComp, kneeTempComp ? "1" : "0");
+  else kneeTempComp = (settingRead(NK_kneeTempComp).toInt() != 0);
 #define KNEE_LD_F(key, var) do { if (!settingExists(key)) settingWrite(key, String(var).c_str()); else var = settingRead(key).toFloat(); } while (0)
   KNEE_LD_F(NK_kneeMarginPct,   kneeMarginPct);
-  KNEE_LD_F(NK_kneeKickInA,     kneeKickInA);
+  KNEE_LD_F(NK_kneeOnsetA,      kneeOnsetA);
+  KNEE_LD_F(NK_kneeReArmA,      kneeReArmA);
+  KNEE_LD_F(NK_kneeStepPct,     kneeStepPct);
   KNEE_LD_F(NK_kneeDwellSec,    kneeDwellSec);
-  KNEE_LD_F(NK_kneeCreepPctMin, kneeCreepPctMin);
-  KNEE_LD_F(NK_kneeUpdateGain,  kneeUpdateGain);
-  KNEE_LD_F(NK_kneeVbusRef,     kneeVbusRef);
   KNEE_LD_F(NK_kneeTempRefF,    kneeTempRefF);
   KNEE_LD_F(NK_kneeMaxFloorPct, kneeMaxFloorPct);
   KNEE_LD_F(NK_kneeRpmTolPct,   kneeRpmTolPct);
-  KNEE_LD_F(NK_kneeVbusTolV,    kneeVbusTolV);
   KNEE_LD_F(NK_kneeTempTolF,    kneeTempTolF);
   KNEE_LD_F(NK_kneeDutyTolPct,  kneeDutyTolPct);
 #undef KNEE_LD_F
 
   nvs_handle_t h;
-  bool haveFloor = false;
+  bool haveState = false;
   if (nvs_open("learning", NVS_READONLY, &h) == ESP_OK) {
-    size_t sz = sizeof(kneeDutyRef);
-    if (nvs_get_blob(h, "kneeDutyRef", kneeDutyRef, &sz) != ESP_OK || sz != sizeof(kneeDutyRef))
-      for (int i = 0; i < RPM_TABLE_SIZE; i++) kneeDutyRef[i] = defaultMinDutyValues[i] + kneeMarginPct;
-    sz = sizeof(kneeFloorRef);
-    if (nvs_get_blob(h, "kneeFloorRef", kneeFloorRef, &sz) == ESP_OK && sz == sizeof(kneeFloorRef)) haveFloor = true;
-    sz = sizeof(kneeConf);
-    if (nvs_get_blob(h, "kneeConf", kneeConf, &sz) != ESP_OK || sz != sizeof(kneeConf))
-      memset(kneeConf, 0, sizeof(kneeConf));
+    size_t sz = sizeof(kneeFloor);
+    bool okF = (nvs_get_blob(h, "kneeFloor", kneeFloor, &sz) == ESP_OK && sz == sizeof(kneeFloor));
+    sz = sizeof(kneeKnee);
+    bool okK = (nvs_get_blob(h, "kneeKnee", kneeKnee, &sz) == ESP_OK && sz == sizeof(kneeKnee));
+    sz = sizeof(kneeFrozen);
+    bool okZ = (nvs_get_blob(h, "kneeFrozen", kneeFrozen, &sz) == ESP_OK && sz == sizeof(kneeFrozen));
+    haveState = okF && okK && okZ;
     nvs_close(h);
-  } else {
-    for (int i = 0; i < RPM_TABLE_SIZE; i++) kneeDutyRef[i] = defaultMinDutyValues[i] + kneeMarginPct;
   }
-  if (!haveFloor)
-    for (int i = 0; i < RPM_TABLE_SIZE; i++) kneeFloorRef[i] = rpmMinDutyTable[i];
+  if (!haveState)
+    for (int i = 0; i < RPM_TABLE_SIZE; i++) { kneeFloor[i] = 0; kneeKnee[i] = 0; kneeFrozen[i] = false; kneeLearnTempF[i] = 0; }
 
-  // If learning is enabled, the floor owns the table from boot.
+  // If learning is enabled, the floor owns the table from boot (bin 0 always 0%).
   if (kneeLearnEnable)
     for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-      float f = kneeFloorRef[i];
+      float f = (i == 0) ? 0.0f : kneeFloor[i];
       if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
       rpmMinDutyTable[i] = f;
     }
@@ -4376,15 +4398,14 @@ String kneeLearnStateJson() {
   String j = "{";
   j += "\"enable\":";        j += (kneeLearnEnable ? 1 : 0);
   j += ",\"marginPct\":";    j += String(kneeMarginPct, 2);
-  j += ",\"kickInA\":";      j += String(kneeKickInA, 2);
+  j += ",\"onsetA\":";       j += String(kneeOnsetA, 2);
+  j += ",\"reArmA\":";       j += String(kneeReArmA, 2);
+  j += ",\"stepPct\":";      j += String(kneeStepPct, 2);
   j += ",\"dwellSec\":";     j += String(kneeDwellSec, 1);
-  j += ",\"creepPctMin\":";  j += String(kneeCreepPctMin, 2);
-  j += ",\"updateGain\":";   j += String(kneeUpdateGain, 2);
-  j += ",\"vbusRef\":";      j += String(kneeVbusRef, 2);
   j += ",\"tempRefF\":";     j += String(kneeTempRefF, 1);
+  j += ",\"tempComp\":";     j += (kneeTempComp ? 1 : 0);
   j += ",\"maxFloorPct\":";  j += String(kneeMaxFloorPct, 2);
   j += ",\"rpmTolPct\":";    j += String(kneeRpmTolPct, 1);
-  j += ",\"vbusTolV\":";     j += String(kneeVbusTolV, 2);
   j += ",\"tempTolF\":";     j += String(kneeTempTolF, 1);
   j += ",\"dutyTolPct\":";   j += String(kneeDutyTolPct, 2);
   j += ",\"activeBin\":";    j += String(kneeActiveBin);
@@ -4395,12 +4416,12 @@ String kneeLearnStateJson() {
   for (int i = 0; i < RPM_TABLE_SIZE; i++) {
     if (i) j += ",";
     long ageS = (kneeLastMs[i] == 0) ? -1 : (long)((now - kneeLastMs[i]) / 1000UL);
-    j += "{\"rpm\":";   j += String(rpmTableRPMPoints[i]);
-    j += ",\"floor\":"; j += String(rpmMinDutyTable[i], 2);
-    j += ",\"knee\":";  j += String(kneeDutyRef[i], 2);
-    j += ",\"conf\":";  j += String(kneeConf[i], 2);
-    j += ",\"n\":";     j += String((unsigned)kneeSampN[i]);
-    j += ",\"ageS\":";  j += String(ageS);
+    j += "{\"rpm\":";    j += String(rpmTableRPMPoints[i]);
+    j += ",\"floor\":";  j += String(rpmMinDutyTable[i], 2);
+    j += ",\"knee\":";   j += String(kneeKnee[i], 2);
+    j += ",\"frozen\":"; j += (kneeFrozen[i] ? 1 : 0);
+    j += ",\"learnT\":"; j += String(kneeLearnTempF[i], 0);
+    j += ",\"ageS\":";   j += String(ageS);
     j += "}";
   }
   j += "]}";

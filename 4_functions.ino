@@ -1786,6 +1786,20 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (settingExists(NK_commissionState)) {
     commissionState = (uint8_t)settingRead(NK_commissionState).toInt();
   }
+  // Furthest commissioning phase reached (default 0 = Prep). Drives the tab checklist.
+  if (settingExists(NK_commissionPhase)) {
+    commissionPhase = (uint8_t)settingRead(NK_commissionPhase).toInt();
+  }
+  // A partial (in-progress) commissioning must NOT survive a reboot — only a COMPLETED
+  // one persists. A boot found mid-flow is treated exactly like Abort: revert every setting
+  // to the pre-commissioning snapshot and reset to NOT_COMMISSIONED, so the user starts over
+  // from scratch. (All snapshot-covered settings are loaded above, so the revert wins; it
+  // also rewrites NVS, so it stays consistent regardless of any later read.)
+  if (commissionState == 1) {
+    commissionRestore();          // revert to the Phase-0 snapshot (also removes it); no-op if missing
+    commissionSetState(0);
+    commissionSetPhase(0);
+  }
   if (!settingExists(NK_IExcessArmMarginV)) {
     settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
   } else {

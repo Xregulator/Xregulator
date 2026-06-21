@@ -978,16 +978,17 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Current Onset Threshold (A) (<span id="kneeKickInA_echo">?</span>):
+                          <span>Onset Delta (A) (<span id="kneeOnsetA_echo">?</span>):
                             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                                  much output current counts as "current is building" when probing the floor. A couple of
-                                  amps is typical.</span></span>
+                                  far output current must rise above the freshly measured zero, while probing, to count as
+                                  "the alternator just started making current" (the knee). Keep it a few times the current
+                                  sensor noise — under one amp is typical.</span></span>
                           </span>
                         </div>
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form">
                             <input type="hidden" name="password" class="password_field">
-                            <input name="kneeKickInA" id="kneeKickInA_input" type="number" step="0.1" min="0" max="100" />
+                            <input name="kneeOnsetA" id="kneeOnsetA_input" type="number" step="0.1" min="0.1" max="20" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                           </form>
                         </div>
@@ -996,10 +997,29 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Steady Dwell (s) (<span id="kneeDwellSec_echo">?</span>):
-                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                                  long RPM, voltage, temperature and field must hold steady before a reading is trusted.
-                                  Rejects transients. Longer = stricter.</span></span>
+                          <span>Re-arm Current (A) (<span id="kneeReArmA_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Once a
+                                  range is locked, if this much current ever appears at its floor the knee has dropped, so the
+                                  floor is lowered one margin step. Set above the worst current-sensor zero drift (a couple of
+                                  amps) so noise never re-triggers it.</span></span>
+                          </span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="kneeReArmA" id="kneeReArmA_input" type="number" step="0.1" min="0.1" max="100" />
+                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
+                          <span>Step Dwell (s) (<span id="kneeDwellSec_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Settle
+                                  and hold time at each probe step: RPM, temperature and field must stay steady this long
+                                  before the floor is stepped again. A few seconds is plenty; longer = stricter.</span></span>
                           </span>
                         </div>
                         <div class="form-input">
@@ -1014,16 +1034,17 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Probe Rate (%/min) (<span id="kneeCreepPctMin_echo">?</span>):
+                          <span>Probe Step (%) (<span id="kneeStepPct_echo">?</span>):
                             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                                  fast the floor is nudged upward to find the onset point. Slower = gentler, spends less
-                                  time near the onset; faster = learns each RPM range quicker.</span></span>
+                                  many field-duty points the floor climbs at each step while hunting the knee. Smaller =
+                                  finer knee resolution but slower; this is the staircase increment, taken once per Step
+                                  Dwell.</span></span>
                           </span>
                         </div>
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form">
                             <input type="hidden" name="password" class="password_field">
-                            <input name="kneeCreepPctMin" id="kneeCreepPctMin_input" type="number" step="0.05" min="0" max="20" />
+                            <input name="kneeStepPct" id="kneeStepPct_input" type="number" step="0.05" min="0.05" max="5" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                           </form>
                         </div>
@@ -1032,35 +1053,20 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Learning Gain (<span id="kneeUpdateGain_echo">?</span>):
-                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                                  strongly each new reading moves the learned onset point (0–1). Lower = smoother and more
-                                  stable, higher = adapts faster to change.</span></span>
+                          <span>Temperature Compensation (<span id="kneeTempComp_echo">?</span>):
+                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When on,
+                                  the applied floor is corrected for alternator case temperature — the field-onset point rises
+                                  with winding resistance, so a colder alternator gets a lower floor. Turn off to apply the
+                                  learned floors as-is (useful for bench comparison).</span></span>
                           </span>
                         </div>
                         <div class="form-input">
                           <form action="/get" method="GET" target="hidden-form">
                             <input type="hidden" name="password" class="password_field">
-                            <input name="kneeUpdateGain" id="kneeUpdateGain_input" type="number" step="0.01" min="0.01" max="1" />
-                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                          </form>
-                        </div>
-                      </div>
-
-                      <hr />
-                      <div class="form-row">
-                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Reference Voltage (V) (<span id="kneeVbusRef_echo">?</span>):
-                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Readings
-                                  taken at different battery voltages and temperatures are normalized to this reference
-                                  before being combined, so the learned floor stays consistent. Set near your typical
-                                  float voltage.</span></span>
-                          </span>
-                        </div>
-                        <div class="form-input">
-                          <form action="/get" method="GET" target="hidden-form">
-                            <input type="hidden" name="password" class="password_field">
-                            <input name="kneeVbusRef" id="kneeVbusRef_input" type="number" step="0.1" min="6" max="65" />
+                            <select name="kneeTempComp" id="kneeTempComp_input">
+                              <option value="1">On</option>
+                              <option value="0">Off</option>
+                            </select>
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                           </form>
                         </div>
@@ -1071,8 +1077,9 @@
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
                           <span>Reference Temperature (°F) (<span id="kneeTempRefF_echo">?</span>):
                             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The
-                                  reference rotor temperature used alongside Reference Voltage to normalize readings. A
-                                  typical warm operating temperature is fine.</span></span>
+                                  alternator case temperature the learned floors are referenced to (learning happens hot, so
+                                  ~180 °F is typical). The temperature correction lowers the floor below this and raises it
+                                  above.</span></span>
                           </span>
                         </div>
                         <div class="form-input">
@@ -1114,23 +1121,6 @@
                           <form action="/get" method="GET" target="hidden-form">
                             <input type="hidden" name="password" class="password_field">
                             <input name="kneeRpmTolPct" id="kneeRpmTolPct_input" type="number" step="0.5" min="0.5" max="50" />
-                            <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                          </form>
-                        </div>
-                      </div>
-
-                      <hr />
-                      <div class="form-row">
-                        <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Steady Band — Voltage (V) (<span id="kneeVbusTolV_echo">?</span>):
-                            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
-                                  much battery voltage may wander and still count as steady.</span></span>
-                          </span>
-                        </div>
-                        <div class="form-input">
-                          <form action="/get" method="GET" target="hidden-form">
-                            <input type="hidden" name="password" class="password_field">
-                            <input name="kneeVbusTolV" id="kneeVbusTolV_input" type="number" step="0.05" min="0.02" max="5" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                           </form>
                         </div>
@@ -1183,8 +1173,9 @@
                             <tr>
                               <th>RPM</th>
                               <th>Floor (%)</th>
-                              <th>Onset (%)</th>
-                              <th>Conf</th>
+                              <th>Knee (%)</th>
+                              <th>Locked</th>
+                              <th>Learn °F</th>
                               <th>Last seen</th>
                             </tr>
                           </thead>
@@ -5062,27 +5053,36 @@
         </p>
 
         <!-- Commissioning status badge (promoted here from the Plant Delay page). Populated by
-             updateCommissionBadge() in script.js — keep this the only #commission-badge in the DOM. -->
+             renderCommissionStatus()/updateCommissionBadge() in script.js from CSV3
+             commissionState — keep this the only #commission-badge in the DOM. -->
         <div id="commission-badge" style="display:none; margin-bottom:14px; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;"></div>
 
+        <!-- Overall status line — always present (the badge hides once commissioned). -->
+        <div class="form-row" style="margin-bottom:14px;">
+          <div class="form-label"><span>Status:</span></div>
+          <div class="form-input"><strong id="commission-overall" style="color:var(--text-muted);">…</strong></div>
+        </div>
+
         <button onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:12px;">Start / Resume Commissioning…</button>
-        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Opens the guided panel. If a session is already underway it resumes exactly where you left off.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Opens the guided panel. If a session is already underway it resumes where you left off (in-session). The steps below show the persisted progress for this alternator.</p>
+
+        <!-- Clear & start over — shown by renderCommissionStatus() only when there is progress (state != 0). -->
+        <div id="commission-clear-row" style="display:none; margin-top:12px;">
+          <button onclick="commissionClearAndRestart()" class="btn-danger-ghost" style="width:100%;padding:10px;">Clear progress &amp; start over</button>
+          <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0 0;">Reverts to your pre-commissioning settings and restarts the walkthrough from the first step.</p>
+        </div>
 
         <hr />
-        <p class="card-group-title" style="margin:12px 0 10px 0;">What this sets up</p>
-        <div style="background:var(--card-light);padding:14px 16px;border-radius:var(--radius);border-left:4px solid var(--accent);font-size:13px;line-height:1.6;">
-          <ol style="margin:0;padding-left:20px;">
-            <li><strong>Plant fit</strong> — measures the field coil's electrical lag (Plant Delay page).</li>
-            <li><strong>Current gains &amp; filters</strong> — seeds the output-current controller from the fit (Current page).</li>
-            <li><strong>Disturbance map</strong> — finds the worst over-current the field can actually react to (Diagnostics page).</li>
-            <li><strong>Over-current thresholds</strong> — sets the protection trip points above that disturbance floor.</li>
-            <li><strong>Validation</strong> — a guided current hold that confirms protections don't false-trip (Alternator page).</li>
-          </ol>
-          <p style="margin:10px 0 0 0;color:var(--text-muted);">
-            While a step runs, the relevant over-current layers may be relaxed so the test input isn't fought —
-            a red banner shows at the top of every page whenever that's the case. Everything re-enables when the flow finishes.
-          </p>
-        </div>
+        <p class="card-group-title" style="margin:12px 0 10px 0;">Steps</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. ✓ = done, ▶ = in progress, ○ = not yet run.</p>
+        <!-- Checklist rendered by renderCommissionStatus(); rows mirror CX_PHASES / COMMISSION_STEPS. -->
+        <div id="commission-checklist" style="background:var(--card-light);padding:6px 16px 12px;border-radius:var(--radius);border-left:4px solid var(--accent);"></div>
+
+        <hr />
+        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;line-height:1.55;">
+          While a step runs, the relevant over-current layers may be relaxed so the test input isn't fought —
+          a red banner shows at the top of every page whenever that's the case. Over-voltage protection always stays active, and everything re-enables when the flow finishes.
+        </p>
 
       </div>
     </div>
@@ -8796,6 +8796,16 @@
               <span class="metric-value" style="font-size: 13px;"><span id="currentPartitionTypeID">?</span></span>
             </div>
             <div class="metric-row">
+              <span class="metric-label">CPU Speed
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                  <span class="tooltip-box">Processor clock. 240 MHz = full speed (engine running or a dashboard
+                    connected). 80 MHz = engine-off low-power throttle to cut standby draw; the regulator drops here
+                    automatically when idle and bumps back up the moment it has work to do.</span>
+                </span>
+              </span>
+              <span class="metric-value"><span id="cpuFreqMhz_ID">?</span></span>
+            </div>
+            <div class="metric-row">
               <span class="metric-label">Buffered Records (count)
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Data buffered when WiFi disconnected. Will upload to Cloud at next
@@ -11809,7 +11819,7 @@
        A single dynamic body (#commission-body) is re-rendered per phase by commissionRender(). -->
   <div id="commission-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
     <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
-      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0;">
+      <div id="commission-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
         <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commissioning</span>
         <button onclick="closeCommissionModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
       </div>

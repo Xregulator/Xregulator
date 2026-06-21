@@ -619,6 +619,8 @@ enum Csv2Index {
   CSV2_accThermRms,  // thermal loop RMS error (°F ×100)
   CSV2_accThermPeak, // thermal loop worst over-temp (°F ×100)
 
+  CSV2_cpuFreqMhz,   // live CPU clock (80 or 240 MHz) — 80 = engine-off low-power throttle, 240 = full speed
+
   CSV2_FIELD_COUNT  // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
 };
 
@@ -958,8 +960,9 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Validate, 7=finished
 
-  CSV3_FIELD_COUNT  // = 305 (304 prior + commissionState)
+  CSV3_FIELD_COUNT  // = 306 (305 prior + commissionPhase)
 };
 
 
@@ -2179,9 +2182,12 @@ void setupServer() {
               uint16_t ai = (st.count < ZEROLOG_RING_SIZE) ? st.idx
                             : (uint16_t)((st.head + st.idx) % ZEROLOG_RING_SIZE);
               ZeroLogRecord &r = zeroLogRing[ai];
-              st.len = snprintf(st.line, sizeof(st.line), "%u,%d,%.2f,%.1f,%.3f,%.3f\n",
+              char altF[12];   // empty cell when the alt-temp sensor was absent (blank sentinel)
+              if (r.altTempFx10 == ZEROLOG_TEMP_BLANK) altF[0] = '\0';
+              else snprintf(altF, sizeof(altF), "%.1f", r.altTempFx10 / 10.0f);
+              st.len = snprintf(st.line, sizeof(st.line), "%u,%d,%.2f,%s,%.3f,%.3f\n",
                                 (unsigned)r.epoch, (int)r.rpm, r.battVx100 / 100.0f,
-                                r.altTempFx10 / 10.0f, r.amps, r.p2pAmps);
+                                altF, r.amps, r.p2pAmps);
               st.idx++;
             }
             st.pos = 0;
@@ -2916,6 +2922,7 @@ void setupServer() {
       foundParameter = true;
       commissionSnapshot();         // capture pre-commissioning tune for the abort path
       commissionSetState(1);        // IN_PROGRESS
+      commissionSetPhase(0);        // reset checklist (the wizard bumps it forward per phase)
       settingsDirty = true;         // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
     }
@@ -2924,6 +2931,7 @@ void setupServer() {
       faCommissionGate = false;
       bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
       commissionSetState(0);                // NOT_COMMISSIONED
+      commissionSetPhase(0);                // clear checklist progress
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: aborted — %s",
                            reverted ? "settings reverted to snapshot" : "no snapshot to revert");
@@ -2932,9 +2940,19 @@ void setupServer() {
       foundParameter = true;
       faCommissionGate = false;
       commissionSetState(2);                // COMMISSIONED
+      commissionSetPhase(7);                // all phases complete
       settingRemove(NK_commissionSnap);     // discard snapshot — commit the new tune
       settingsDirty = true;
       queueConsoleMessage("Commissioning: complete — device marked COMMISSIONED");
+    }
+    // Wizard heartbeat: persist the furthest phase reached so the tab checklist survives
+    // a page reload / a different client. Clamped 0..7. Does not change commissionState.
+    else if (request->hasParam("commissionPhase")) {
+      foundParameter = true;
+      int p = request->getParam("commissionPhase")->value().toInt();
+      if (p < 0) p = 0; if (p > 7) p = 7;
+      commissionSetPhase((uint8_t)p);
+      settingsDirty = true;
     }
 
     if (request->hasParam("TemperatureLimitF")) {
@@ -3030,9 +3048,9 @@ void setupServer() {
       kneeLearnEnable = (request->getParam("kneeLearnEnable")->value().toInt() != 0);
       settingWrite(NK_kneeLearnEnable, kneeLearnEnable ? "1" : "0");
       if (kneeLearnEnable) {
-        // Take ownership of the Min% column immediately from the learned floors.
+        // Take ownership of the Min% column immediately from the learned floors (bin 0 always 0%).
         for (int i = 0; i < RPM_TABLE_SIZE; i++) {
-          float f = kneeFloorRef[i];
+          float f = (i == 0) ? 0.0f : kneeFloor[i];
           if (f < 0) f = 0; if (f > kneeMaxFloorPct) f = kneeMaxFloorPct;
           rpmMinDutyTable[i] = f;
         }
@@ -3043,30 +3061,30 @@ void setupServer() {
       kneeMarginPct = request->getParam("kneeMarginPct")->value().toFloat();
       settingWrite(NK_kneeMarginPct, String(kneeMarginPct, 2).c_str());
     }
-    else if (request->hasParam("kneeKickInA")) {
+    else if (request->hasParam("kneeOnsetA")) {
       foundParameter = true;
-      kneeKickInA = request->getParam("kneeKickInA")->value().toFloat();
-      settingWrite(NK_kneeKickInA, String(kneeKickInA, 2).c_str());
+      kneeOnsetA = request->getParam("kneeOnsetA")->value().toFloat();
+      settingWrite(NK_kneeOnsetA, String(kneeOnsetA, 2).c_str());
+    }
+    else if (request->hasParam("kneeReArmA")) {
+      foundParameter = true;
+      kneeReArmA = request->getParam("kneeReArmA")->value().toFloat();
+      settingWrite(NK_kneeReArmA, String(kneeReArmA, 2).c_str());
     }
     else if (request->hasParam("kneeDwellSec")) {
       foundParameter = true;
       kneeDwellSec = request->getParam("kneeDwellSec")->value().toFloat();
       settingWrite(NK_kneeDwellSec, String(kneeDwellSec, 1).c_str());
     }
-    else if (request->hasParam("kneeCreepPctMin")) {
+    else if (request->hasParam("kneeStepPct")) {
       foundParameter = true;
-      kneeCreepPctMin = request->getParam("kneeCreepPctMin")->value().toFloat();
-      settingWrite(NK_kneeCreepPctMin, String(kneeCreepPctMin, 2).c_str());
+      kneeStepPct = request->getParam("kneeStepPct")->value().toFloat();
+      settingWrite(NK_kneeStepPct, String(kneeStepPct, 2).c_str());
     }
-    else if (request->hasParam("kneeUpdateGain")) {
+    else if (request->hasParam("kneeTempComp")) {
       foundParameter = true;
-      kneeUpdateGain = request->getParam("kneeUpdateGain")->value().toFloat();
-      settingWrite(NK_kneeUpdateGain, String(kneeUpdateGain, 2).c_str());
-    }
-    else if (request->hasParam("kneeVbusRef")) {
-      foundParameter = true;
-      kneeVbusRef = request->getParam("kneeVbusRef")->value().toFloat();
-      settingWrite(NK_kneeVbusRef, String(kneeVbusRef, 2).c_str());
+      kneeTempComp = (request->getParam("kneeTempComp")->value().toInt() != 0);
+      settingWrite(NK_kneeTempComp, kneeTempComp ? "1" : "0");
     }
     else if (request->hasParam("kneeTempRefF")) {
       foundParameter = true;
@@ -3082,11 +3100,6 @@ void setupServer() {
       foundParameter = true;
       kneeRpmTolPct = request->getParam("kneeRpmTolPct")->value().toFloat();
       settingWrite(NK_kneeRpmTolPct, String(kneeRpmTolPct, 1).c_str());
-    }
-    else if (request->hasParam("kneeVbusTolV")) {
-      foundParameter = true;
-      kneeVbusTolV = request->getParam("kneeVbusTolV")->value().toFloat();
-      settingWrite(NK_kneeVbusTolV, String(kneeVbusTolV, 2).c_str());
     }
     else if (request->hasParam("kneeTempTolF")) {
       foundParameter = true;
@@ -6777,7 +6790,9 @@ void SendWifiData() {
                                // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
                                "%d,%d,%d,%d,%d,"
                                // +12: inner-current-loop live accuracy (×4, amps²×10000) + CV-voltage-loop RMS error (×4, mV) + CV peak overshoot (×4, mV), 1m/10m/100m/1000m windows each
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +1: live CPU clock (80 or 240 MHz)
+                               "%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -7314,7 +7329,8 @@ void SendWifiData() {
                                SafeInt(accScoreRms(accVoltage.errAccum, accVoltage.timeAccum), 1000),    // CSV2_accVoltRms  (V→mV)
                                SafeInt(accVoltage.worstOver, 1000),       // CSV2_accVoltPeak (V→mV)
                                SafeInt(accScoreRms(accThermal.errAccum, accThermal.timeAccum), 100),     // CSV2_accThermRms (°F ×100)
-                               SafeInt(accThermal.worstOver, 100)         // CSV2_accThermPeak (°F ×100)
+                               SafeInt(accThermal.worstOver, 100),        // CSV2_accThermPeak (°F ×100)
+                               SafeInt(getCpuFrequencyMhz())              // CSV2_cpuFreqMhz   (MHz ×1)
     );
     // Clear the anti-windup latch now that this CSV2 frame has captured it (set in tempPID_tick on each CV-bleed event)
     thermalAntiWindupLatch = false;
@@ -7379,7 +7395,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,"  // 5 tuning sine params
                                "%d,"  // SystemIDStabilizeAmps
                                "%d,"  // tuningWaveFloor (Current Target Generator floor)
-                               "%d",  // commissionState
+                               "%d,"  // commissionState
+                               "%d",  // commissionPhase
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -7689,7 +7706,8 @@ void SendWifiData() {
                                SafeInt(tuningSweepCycles),
                                SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
                                SafeInt(tuningWaveFloor),                        // A (raw)
-                               (int)commissionState                             // CSV3_commissionState (0/1/2)
+                               (int)commissionState,                            // CSV3_commissionState (0/1/2)
+                               (int)commissionPhase                             // CSV3_commissionPhase (0..7)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

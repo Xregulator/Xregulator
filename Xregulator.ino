@@ -606,7 +606,9 @@ unsigned long lastAltHealthUploadTime = 0;
 int64_t lastAltHealthSyncEpoch = 0;   // unix sec of last SUCCESSFUL alt-health cloud sync this boot (0 = none) — for "synced N ago"
 int64_t lastBoatPerfSyncEpoch  = 0;   // unix sec of last SUCCESSFUL boat-perf cloud sync this boot
 // Set to PRODUCTION 2026-06-02. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min TEST.)
-const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
+// 2026-06-20: temporarily 6 hr to observe several reboot cycles per day. PRODUCTION = 43200000 (12 hr).
+const unsigned long RESTART_INTERVAL = 21600000;   // 6 hours (TEST — restore 43200000 = 12 hr for production)
+//const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
 //const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
 
 //Configuration Snapshot Stuff
@@ -980,6 +982,7 @@ bool  fieldCurveOk = false;                     // true if a usable linear regio
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…6=Validate, 7=finished); drives the Commissioning tab checklist
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
 // Weather Mode Global Variables (add with your other globals)
@@ -1669,6 +1672,11 @@ float     altAmpsP2P = 0.0f;                // latched 0.5 s peak-to-peak of Mea
 #define ZEROLOG_RUN_INTERVAL_MS  1000UL     // sample period while engine spinning (RPM>=200)
 #define ZEROLOG_IDLE_INTERVAL_MS 600000UL   // sample period while engine off (RPM<200) = 10 min
 #define ZEROLOG_FLUSH_MS         1800000UL  // field-off flush cadence = 30 min
+// After a reboot the DS18B20 hasn't produced its first reading yet (AlternatorTemperatureF
+// is NaN). Wait up to this long for a real value before sampling, so we never log a bogus
+// NaN-derived temperature. If still NaN past the window the sensor is absent → log the blank.
+#define ZEROLOG_TEMP_GRACE_MS    30000UL    // post-reboot wait for the first valid alt-temp read
+#define ZEROLOG_TEMP_BLANK       INT16_MIN  // alt-temp "sensor absent" sentinel → CSV emits an empty cell
 
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
@@ -3083,28 +3091,33 @@ float rpmMinDutyTable[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0
 float defaultMinDutyValues[RPM_TABLE_SIZE] = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };
 
 // ===== AUTO MIN% LEARNING ("knee tracker") =====
-// Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and
-// parks rpmMinDutyTable a margin below it. Observer only — governor_apply/getMinimumFieldForRPM
-// are unchanged; this just rewrites rpmMinDutyTable like a user edit. Learning runs in
-// temp/voltage-normalized excitation space; kneeDutyRef/kneeFloorRef are duty% at reference
-// conditions (kneeVbusRef/kneeTempRefF). Full spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
-float kneeDutyRef[RPM_TABLE_SIZE]   = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };  // learned knee (duty% @ reference)
-float kneeFloorRef[RPM_TABLE_SIZE]  = { 5.0, 5.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0 };  // commanded floor (creeps up, snaps down)
-float kneeConf[RPM_TABLE_SIZE]      = { 0 };  // 0..1 confidence (EMA fill per bin)
-uint32_t kneeLastMs[RPM_TABLE_SIZE] = { 0 };  // millis() of last knee confirmation (runtime only)
-uint32_t kneeSampN[RPM_TABLE_SIZE]  = { 0 };  // steady samples folded (runtime only)
+// Learns, per RPM bin, the field duty where output amps begin to build (the "knee") and parks
+// rpmMinDutyTable a margin below it. One axis: RPM. Every bin starts at 0% and probes ONCE — it
+// steps the floor up kneeStepPct each dwell until output rises kneeOnsetA above a freshly captured
+// zero (the knee), then LOCKS (freezes) the floor at knee - margin. A locked bin re-learns only if
+// real current (> kneeReArmA) later appears at its floor (knee dropped): the floor is lowered by
+// one margin step. Bin 0 (lowest RPM) is permanently locked at 0%.
+//   Stored floors are RAW duty referenced to kneeTempRefF. getMinimumFieldForRPM applies a
+//   copper-resistance temperature correction at apply time (the duty-knee scales with field-winding
+//   resistance, ~0.218 %/degF). Battery voltage is deliberately NOT used: its two effects on the
+//   knee (raising the rectifier threshold vs. strengthening the field for the same duty) cancel,
+//   leaving the duty-knee voltage-independent. Full spec: Working Markdown Docs/MinDuty_Knee_Learning.md.
+float kneeFloor[RPM_TABLE_SIZE]      = { 0 };      // learned floor (raw duty% @ kneeTempRefF); owns rpmMinDutyTable when enabled
+float kneeKnee[RPM_TABLE_SIZE]       = { 0 };      // detected knee (raw duty% @ kneeTempRefF) = floor + margin
+bool  kneeFrozen[RPM_TABLE_SIZE]     = { false };  // true once the knee is found and the floor is locked
+float kneeLearnTempF[RPM_TABLE_SIZE] = { 0 };      // alternator case temp (degF) at freeze (diagnostic, not persisted)
+uint32_t kneeLastMs[RPM_TABLE_SIZE]  = { 0 };      // millis() of last freeze / re-arm (runtime only)
 // User knobs (NVS settings namespace, NK_* keys)
 bool  kneeLearnEnable = false;   // master: when true, learner owns + auto-writes rpmMinDutyTable
 float kneeMarginPct   = 5.0f;    // park floor this many duty-% below the knee
-float kneeKickInA     = 2.0f;    // amps above this at the floor = "output building"
-float kneeDwellSec    = 4.0f;    // inputs must hold steady this long before a sample counts
-float kneeCreepPctMin = 0.5f;    // floor push-up rate (duty %/min) while probing
-float kneeUpdateGain  = 0.25f;   // EMA weight applied to each knee confirmation (0..1)
-float kneeVbusRef     = 13.6f;   // reference bus voltage for excitation<->duty conversion
-float kneeTempRefF    = 100.0f;  // reference temperature (degF) for excitation<->duty conversion
-float kneeMaxFloorPct = 12.0f;   // hard clamp on any learned floor (safety)
+float kneeOnsetA      = 0.8f;    // amps above the freshly-captured zero = "output building" (knee found)
+float kneeReArmA      = 2.0f;    // amps at a locked floor = knee dropped -> lower floor one margin step (deadband guard)
+float kneeStepPct     = 0.5f;    // probe staircase increment (duty-% per dwell) while hunting the knee
+float kneeDwellSec    = 3.0f;    // settle + hold time per probe step (s)
+float kneeTempRefF    = 180.0f;  // reference temp (degF) the stored floors are normalized to (learning runs hot)
+bool  kneeTempComp    = true;    // apply the copper temp correction to the floor at apply time
+float kneeMaxFloorPct = 30.0f;   // hard clamp on any learned floor; also the "no knee found" terminal value
 float kneeRpmTolPct   = 6.0f;    // steady band: RPM, % of reading
-float kneeVbusTolV    = 0.20f;   // steady band: Vbus, volts
 float kneeTempTolF    = 4.0f;    // steady band: temperature, degF
 float kneeDutyTolPct  = 1.0f;    // steady band: applied duty, duty-% points
 // Live diagnostics (for /kneeLearnState)
@@ -3112,7 +3125,7 @@ int   kneeActiveBin   = -1;      // bin currently being observed (-1 = none)
 bool  kneeFloorActive = false;   // governor is clamping up to the floor right now
 bool  kneeSteadyNow   = false;   // inputs currently within steady bands
 // Prototypes (defined in 6_functions.ino) — declared here so setup()/loop() and 3_functions.ino see them.
-void kneeLearnObserve(float rpm, float appliedDuty, float vbus, float tF, float amps,
+void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk);
 void kneeLearnInit();
 void kneeLearnService(bool fieldOff);
