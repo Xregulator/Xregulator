@@ -4861,6 +4861,16 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
                            && (iTermNow >= holdCeiling);
   bool freezeIntegrator = aboveSetpoint
                           && (!thermalIntegratorReleased || satFreeze || descentFreeze || risingTransientFreeze || equilibriumFreeze);
+
+  // Tier-0a instrumentation (2026-06-22): record WHICH freeze case gated this tick so a
+  // future session reads the cause directly instead of reverse-engineering it (every prior
+  // windup diagnosis had to infer this). Priority-ordered when several apply.
+  if (!freezeIntegrator)                thermalFreezeReason = 0;  // integrator winding normally
+  else if (!thermalIntegratorReleased)  thermalFreezeReason = 1;  // approach gate (present temp hasn't reached setpoint yet)
+  else if (satFreeze)                   thermalFreezeReason = 2;  // penalty pinned at live rpm cap
+  else if (descentFreeze)               thermalFreezeReason = 3;  // above setpoint and cooling (slope < 0)
+  else if (risingTransientFreeze)       thermalFreezeReason = 4;  // above setpoint and rising > flat band
+  else                                  thermalFreezeReason = 5;  // equilibrium-clamp ceiling
   {
     // Log the saturation case only (descent fires every cycle — its signature is
     // outerI flat-while-falling in the thermal log, no console spam needed).
@@ -4938,6 +4948,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // isn't. outerTermP and outerTermLookahead are only valid after a Compute()
   // call so they remain inside the pidComputed block above.
   outerTermI = (float)tempPID.GetIterm();
+
+  // Tier-0a: the raw requested penalty before output clamp + slew = P + I terms. Compared
+  // against the applied penaltyAmps and the live rpmCap, this is the textbook requested-vs-
+  // applied saturation signal needed to evaluate the Tier-1 anti-windup rework.
+  outerPenaltyRaw = outerTermP + outerTermI;
 
   // CV integrator bleed — now INERT, retained as a guard. Back when the thermal
   // penalty was allowed to go negative (the removed boost-when-cold feature), the
@@ -5188,13 +5203,15 @@ void thermalLog_tick(uint32_t nowMs) {
 
   e.antiWindupFired = outerAntiWindupFired ? 1 : 0;
   e.chargeStageDisplay = thermalLogGetStageCode();
-  e.pad = 0;
+  e.freezeWhy = thermalFreezeReason;
 
   e.outerTermP = thermalLogScale10(outerTermP);
   e.outerTermI = thermalLogScale10(outerTermI);
   e.outerTermLookahead = thermalLogScale10(outerTermLookahead);
   e.impliedPenalty = thermalLogScale10(outerImpliedPenalty);
   e.thermalSlope = (int16_t)(thermalSlopeFPerSec * 1000.0f);
+  e.penaltyRaw = thermalLogScale10(outerPenaltyRaw);
+  e.holdEstimate = thermalHoldValid ? thermalLogScale10(thermalHoldEstimate) : (int16_t)-10;  // -1.0 sentinel = no settled sample yet
 
   thermalLogHead = (thermalLogHead + 1) % THERMAL_LOG_SIZE;
   if (thermalLogCount < THERMAL_LOG_SIZE) thermalLogCount++;

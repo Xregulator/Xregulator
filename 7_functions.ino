@@ -2813,9 +2813,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     }
     float f = sineFreq[sineIdx];
     float tSec = (float)(nowMs - sineSegStartMs[sineIdx]) / 1000.0f;
-    // Unipolar-up: baseDuty is the TROUGH of the wave (not the midpoint). The (1+sin) offset
-    // keeps the swing entirely above the stabilized baseline so the current can't clip toward
-    // zero at the bottom. AC amplitude is still SystemIDStepAmplitude → lock-in gain unchanged.
+    // (1+sin) offset: baseDuty is the wave TROUGH, not the midpoint (no-clip rationale in block header).
     float drive = SystemIDStepAmplitude * (1.0f + sinf(2.0f * (float)M_PI * f * tSec));
     float d = constrain(baseDuty + drive, 0.0f, 100.0f);
     dutyOut = d;
@@ -3425,7 +3423,6 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       }
       }  // end !fieldCurveOnsetMode (saturation) branch
 
-      // Next step.
       stepDuty += FIELDCURVE_DUTY_STEP;
       stepStartMs = nowMs;
       ampSum = 0.0;

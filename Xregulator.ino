@@ -87,6 +87,7 @@ bool usingFactoryWebFiles = false;       // Track which web partition is mounted
 #include <esp_ota_ops.h>                 // secure OTA
 #include <mbedtls/pk.h>                  // secure OTA
 #include <mbedtls/base64.h>              // secure OTA
+#include <mbedtls/platform.h>            // mbedtls_platform_set_calloc_free — route TLS buffers to PSRAM
 #include "esp_system.h"                  // secure OTA
 #include <BMP388_DEV.h>                  //non blocking capability - don't upgrade, this was customized for better error handling by xengineering
 #include "esp_partition.h"               // for esp_partition_find_first
@@ -1233,7 +1234,7 @@ float currentNMPG = 0.0f;     // live fuel economy, nautical miles per gallon (S
 // UNIVERSAL SCALE: bins span [0, top configured fuel-table RPM], so binWidth auto-fits the engine
 // (default table top 4500 -> 250-RPM bins; an 8000-RPM engine -> 444-RPM bins). No hardcoded ceiling.
 #define FUELCURVE_BINS 18           // number of RPM bins (fixed); width = currentFuelTopRPM / FUELCURVE_BINS
-float fuelCurveNMPG[FUELCURVE_BINS] = { 0 };  // per-bin naut mi/gal; 0 = no qualified reading yet. Intentionally session-only — never persisted (RAM, cleared on reboot by design; UI labels it "this session").
+float fuelCurveNMPG[FUELCURVE_BINS] = { 0 };  // per-bin naut mi/gal; 0 = no qualified reading yet. Intentionally session-only (not persisted; UI labels it "this session").
 float currentFuelTopRPM = 0.0f;     // top configured fuel-table RPM; sent to the chart for x-axis scaling
 // Settle-then-measure gate: RPM+speed must hold within band for the settle time (boat speed lags throttle
 // by tens of seconds), THEN mpg is averaged over the sample window and that average freezes the bin.
@@ -3173,6 +3174,7 @@ String kneeLearnStateJson();
 String manifestConfigObject(bool includeHardware);
 String exportConfigJson(bool includeHardware);
 int applyImportConfig(const char *body, bool includeHardware);
+int doCloudPOST(const char *endpointPath, const char *payload, char *responseBuf, size_t responseBufSize);  // 3_functions.ino — lean raw-TLS POST
 
 // Admin config push (4_functions.ino) — boot-time pull of a cloud-queued config
 void executeGetPendingConfig();
@@ -3290,6 +3292,8 @@ bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next
 bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the integrator cannot wind UP (P + projection alone handle the approach — prevents approach windup overshoot)
 float thermalHoldEstimate = 0.0f;    // learned equilibrium holding penalty (amps): EMA of the integral term sampled only when genuinely settled at setpoint. The integrator is clamped to this + margin so it reaches the holding level but cannot overbuild during a hot transient dwell (the relaxation-oscillation source).
 bool  thermalHoldValid = false;      // false until the first settled-at-setpoint sample seeds thermalHoldEstimate; while false the equilibrium clamp is disabled (ceiling = penaltyMax)
+float outerPenaltyRaw = 0.0f;        // Tier-0a (2026-06-22): unclamped requested penalty (outerTermP + outerTermI) before output clamp + slew — for the requested-vs-applied saturation diagnostic
+uint8_t thermalFreezeReason = 0;     // Tier-0a: which integrator-freeze case gated this tick (see ThermalLogEntry.freezeWhy enum)
 
 float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted from target table
 double thermalPenaltyAmps_d = 0.0;  // double version for PID library
@@ -3325,7 +3329,7 @@ struct ThermalBinDLState {
   int oldest;
   int row;
   bool done;
-  uint8_t entryBuf[48];
+  uint8_t entryBuf[64];  // headroom for ThermalLogEntry (52B after Tier-0a fields); actual copy uses sizeof()
   int entryLen;
   int entryPos;
 };
@@ -3353,13 +3357,15 @@ struct ThermalLogEntry {
   uint8_t flags;
   uint8_t antiWindupFired;
   uint8_t chargeStageDisplay;
-  uint8_t pad;
+  uint8_t freezeWhy;  // Tier-0a (2026-06-22): which integrator-freeze case gated this row. 0=winding,1=approach,2=saturation,3=descent,4=risingTransient,5=equilibrium. Priority-ordered when several apply. Was the unused 'pad' byte.
 
   int16_t outerTermP;
   int16_t outerTermI;
   int16_t outerTermLookahead;  // repurposed from always-zero outerTermD; CSV column renamed to "lookahead"
   int16_t impliedPenalty;
   int16_t thermalSlope;  // thermalSlopeFPerSec × 1000 (0.001 °F/sec per count)
+  int16_t penaltyRaw;    // Tier-0a: unclamped requested penalty (Kp*eP + I), ×10. vs penaltyAmps = applied after clamp+slew. Gap to rpmCap reveals unused derate authority.
+  int16_t holdEstimate;  // Tier-0a: learned equilibrium holding level (thermalHoldEstimate), ×10. -1.0 sentinel until thermalHoldValid.
   // gainKp/Ki/Lookahead written once in pidlog CONST row
 };
 
@@ -4163,6 +4169,20 @@ const char WIFI_CONFIG_HTML[] PROGMEM =
   "</div>"
   "</body></html>";
 
+// mbedTLS allocator routed to PSRAM. This core is built with CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC, which
+// forces the two ~16KB TLS record buffers into INTERNAL RAM. Over runtime the internal heap fragments
+// (e.g. 65KB free but largest block 24KB), so a handshake can't carve two 16KB contiguous blocks and
+// fails with MBEDTLS_ERR_SSL_ALLOC_FAILED (-0x7F00) — which surfaces as a bogus "connection failed".
+// PSRAM has ~1.8MB and doesn't fragment that way. Registered at boot via mbedtls_platform_set_calloc_free
+// (MBEDTLS_PLATFORM_MEMORY is on with a runtime pointer, not a compile-time macro), so this is the
+// runtime equivalent of CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC — no custom core build needed. Internal
+// fallback covers the (near-impossible) case PSRAM can't satisfy a request. free() works on either heap.
+static void *mbedtlsPsramCalloc(size_t n, size_t size) {
+  void *p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) p = heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  return p;
+}
+
 void setup() {
 
   Serial.end();  // Force complete serial restart (might not need this delete later)
@@ -4177,6 +4197,15 @@ void setup() {
   Serial.setRxBufferSize(2048);  // optional, we don't currently Rx anyway...
   delay(100);
   Serial.println("\n\n=== SYSTEM STARTUP ===");
+
+  // Move mbedTLS handshake buffers off the fragmenting internal heap into PSRAM (see
+  // mbedtlsPsramCalloc above). MUST run before the first TLS handshake (WiFi STA / any cloud call).
+  if (mbedtls_platform_set_calloc_free(mbedtlsPsramCalloc, free) != 0) {
+    Serial.println("WARNING: mbedtls_platform_set_calloc_free failed - TLS buffers stay in internal RAM");
+  } else {
+    Serial.println("mbedTLS allocator -> PSRAM (TLS no longer needs contiguous internal RAM)");
+  }
+
   // Allocate buffers from PSRAM
   configPayloadBuffer = (char *)ps_malloc(CONFIG_PAYLOAD_SIZE);
   if (!configPayloadBuffer) Serial.println("FATAL: configPayloadBuffer ps_malloc failed");
@@ -4461,7 +4490,9 @@ void setup() {
   xTaskCreatePinnedToCore(TempTask, "TempTask", 4096, NULL, 1, &tempTaskHandle, 0);
   Serial.println("Temp task created on Core 0");
 
-  xTaskCreatePinnedToCore(httpsTask, "HTTPS", 20480, NULL, 1, &httpsTaskHandle, 0);
+  // 12288 (was 20480): with mbedTLS record buffers now in PSRAM, only call frames sit on this stack
+  // (~4KB observed peak via /debug stackHWM); 12KB keeps a ~3x margin and returns ~8KB to internal RAM.
+  xTaskCreatePinnedToCore(httpsTask, "HTTPS", 12288, NULL, 1, &httpsTaskHandle, 0);
   Serial.println("HTTPS task created on Core 0");
 
   // Rectifier fault detector compute — Core 0, priority 1 (same as TempTask/HTTPS, below the
@@ -4479,10 +4510,7 @@ void setup() {
   // is a ~4ms scan that used to run on the Core-1 control loop; here it runs every 2s only when
   // Core 0 is otherwise idle, so it yields to WiFi/uploads and can't worsen Core-0 spikes. It
   // sleeps 2s between runs, so it never starves the Core-0 idle task / watchdog.
-  // Stack lives in PSRAM (MALLOC_CAP_SPIRAM) so its 4KB doesn't compete for the scarce internal
-  // RAM that the TLS handshake needs ~34KB contiguous of — safe because the IDF suspends the other
-  // core during flash-cache-disable windows, so a PSRAM-stack task is never running while its stack
-  // is unreachable. Diagnostic task, 2s cadence — PSRAM stack latency is irrelevant here.
+  // 4KB stack in PSRAM for the same internal-RAM/TLS-floor reason as faDetTask above.
   xTaskCreatePinnedToCoreWithCaps(cpuLoadTask, "cpuLoad", 4096, NULL, 0, &cpuLoadTaskHandle, 0, MALLOC_CAP_SPIRAM);
   Serial.println("CPU-load task created on Core 0 (prio 0, PSRAM stack)");
 

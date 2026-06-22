@@ -1264,12 +1264,7 @@ void UpdateTravelStatistics(unsigned long elapsedMillis) {
     if (rollingSum > Max24hrDistance_AllTime) Max24hrDistance_AllTime = rollingSum;
   }
 
-  // ==========================================================================
-  // ANCHORAGE DETECTION — sliding 5-hr window, deepest qualifying anchorage.
-  // Sample every 60 s into PSRAM ring; evaluate trailing valid span on each push.
-  // Qualifying = max swing < 100 yd AND depth changes by 2-100 ft over the window.
-  // Records average depth (ft) of the qualifying window as candidate watermark.
-  // ==========================================================================
+  // Anchorage detection — see UpdateAnchorageDetection() for the full algorithm.
   UpdateAnchorageDetection(gpsValid);
 
   // ==========================================================================
@@ -1317,7 +1312,6 @@ void UpdateAnchorageDetection(bool gpsValid) {
     lastAnchorageSampleMs = now;  // throttle gate; skip this sample (gap will be detected on resume)
     return;
   }
-  // Push sample.
   anchorageRing[anchorageRingHead].sampleMs = now;
   anchorageRing[anchorageRingHead].lat = LatitudeNMEA;
   anchorageRing[anchorageRingHead].lon = LongitudeNMEA;
@@ -1366,7 +1360,6 @@ void UpdateAnchorageDetection(bool gpsValid) {
                                           anchorageRing[idx].lat, anchorageRing[idx].lon);
     if (d > maxSwingNm) maxSwingNm = d;
   }
-  // Apply qualifying criteria.
   if (maxSwingNm > MAX_SWING_NM) return;
   if (depthRange < MIN_DEPTH_CHANGE_FT || depthRange > MAX_DEPTH_CHANGE_FT) return;
   // Qualifying anchorage — update lifetime watermark.
@@ -2713,7 +2706,6 @@ void _ReadAnalogInputs_inner() {
                            // reflect the previous control tick — one-tick lag is acceptable for analysis.
                            cvLog_tick(millis());
 
-                           // Track max values.
                            if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; }
                            if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; }
                            }  // end AmpSensorRange scale block
@@ -3116,7 +3108,6 @@ void ReadAnalogInputs_Fake() {
     ch1FreshFlag = true;                                    // Signal PID that fresh current data is available
     MARK_FRESH(IDX_MEASURED_AMPS);
 
-    // Track max alternator current.
     if (MeasuredAmps > MeasuredAmpsMax)         { MeasuredAmpsMax         = MeasuredAmps; }
     if (MeasuredAmps > MeasuredAmpsMax_AllTime) { MeasuredAmpsMax_AllTime = MeasuredAmps; }
 
@@ -3147,7 +3138,6 @@ void ReadAnalogInputs_Fake() {
     RPM = fakeRPM;
     MARK_FRESH(IDX_RPM);
 
-    // Track RPM max.
     if (RPM > RPMMax)         { RPMMax         = RPM; }
     if (RPM > RPMMax_AllTime) { RPMMax_AllTime = RPM; }
 

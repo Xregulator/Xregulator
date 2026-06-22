@@ -1098,10 +1098,10 @@ function updateAltHealth() {
   }
   const modeLbl = document.getElementById('alt-mode-label');
   if (modeLbl) modeLbl.textContent = altLive.source>=1 ? 'FIXED' : (altLive.paused>=1 ? 'LEARNED (paused)' : 'LEARNED');
-  setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Settings (segmented, mirrors Vessel Performance)
+  setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Setup (segmented, mirrors Vessel Performance)
 }
 
-// Simulator Off(0)/On(1) — segmented toggle in Settings, parallels Vessel Performance's perfSimMode.
+// Simulator Off(0)/On(1) — segmented toggle in Setup, parallels Vessel Performance's perfSimMode.
 function altSetSim(v){
   if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
   fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&altSimMode='+(v?1:0)),{},5000).catch(()=>{});
@@ -1538,7 +1538,7 @@ function renderPerf(){
   const sea=L.pitchStd||0;
   setTxt('perf-sea-val', sea.toFixed(1)+'°'); setTxt('perf-sea-sub', seaWord(sea));
   // steady-state is now shown by the "now" dot itself (solid = banking data, hollow = not steady) — see drawPerfPlot/drawMotorPlot
-  // Learning switch (Live Data) + simulator/reference segmented toggles (Settings → Vessel Performance).
+  // Learning switch (Live Data) + simulator/reference segmented toggles (Setup → Vessel Performance).
   // All driven by perfLive, which always carries paused+sim+source.
   const paused=perfLive.paused===1;
   const sw=document.getElementById('perf-learn-switch'); if(sw) sw.checked = !paused;
@@ -5319,7 +5319,7 @@ function fetchTuningLog() {
 }
 
 function renderTuningLog(data) {
-    // Live accuracy mirror (Settings panel): data.live = [RMS error (A), worst over-current (A), 0, 0].
+    // Live accuracy mirror (Setup panel): data.live = [RMS error (A), worst over-current (A), 0, 0].
     // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
     const liveLabels = ['RMS', 'Peak'];
     const live = data.live || [];
@@ -5514,7 +5514,7 @@ function hideWaitingForRegulator() {
 }
 
 // Landing tab, applied once on open: field on → Alternator, field off → Boat Performance
-// (Motoring plot if engine running); Vessel Info incomplete overrides to Settings.
+// (Motoring plot if engine running); Vessel Info incomplete overrides to Setup.
 function applyLandingTab() {
     try {
         if (!vesselInfoComplete) {
@@ -9087,12 +9087,12 @@ window.addEventListener("load", function () {
         if (darkToggle) darkToggle.checked = true;
     }
 
-    // Pre-telemetry placeholder view only: Settings with its static sub-tab default
-    // (Alternator > Setup). Do NOT force Vessel Info here — vesselInfoComplete is still
+    // Pre-telemetry placeholder view only: the Setup tab with its static sub-tab default
+    // (Alternator > Basic). Do NOT force Vessel Info here — vesselInfoComplete is still
     // its initial false at this point (the vessel-info fetch is async and hasn't resolved),
     // and forcing vessel-info would leave it as the active settings sub-tab even after a
     // complete device lands on Live Data. The real landing (Live Data when complete, or
-    // Settings > Vessel Info when not) is applied by maybeApplyLanding() once both the
+    // Setup > Vessel Info when not) is applied by maybeApplyLanding() once both the
     // vessel-info fetch and first telemetry packet have resolved.
     showMainTab('settings');
     // // Simple WiFi disconnect tracking - ping every 10 seconds
@@ -11588,11 +11588,11 @@ function showMainTab(tabName) {
         return;
     }
 
-    // Block all tabs except Settings until vessel info complete
+    // Block all tabs except Setup until vessel info complete
     if (tabName !== 'settings' && !vesselInfoComplete) {
         // Only alert if user is actively trying to switch (not on initial load)
         if (document.getElementById(tabName)) {
-            alert('Please complete Vessel Info in Settings tab first');
+            alert('Please complete Vessel Info in Setup tab first');
         }
         showMainTab('settings');
         showSubTab('settings', 'vessel-info');
@@ -11657,9 +11657,9 @@ function showRegistrationRequiredModal(featureName) {
 
 function showSubTab(parentTab, subTabName, evt = null) {
 
-    // Block all subtabs except Settings > Vessel Info until vessel info complete
+    // Block all subtabs except Setup > Vessel Info until vessel info complete
     if (!vesselInfoComplete && !(parentTab === 'settings' && subTabName === 'vessel-info')) {
-        alert('Please complete Vessel Info in Settings tab first');
+        alert('Please complete Vessel Info in Setup tab first');
         showMainTab('settings');
         showSubTab('settings', 'vessel-info');
         return;
@@ -12202,7 +12202,7 @@ function updateUploadNowButtonState(mode) {
     uploadBtn.title = isAPMode
         ? 'Cloud upload is unavailable in AP mode (no internet). Records keep buffering and upload automatically once the regulator is on WiFi.'
         : (!cloudOn
-            ? 'Cloud upload requires Cloud Features ON (Settings). Records keep buffering locally; turn Cloud Features on and they upload automatically.'
+            ? 'Cloud upload requires Cloud Features ON (Setup). Records keep buffering locally; turn Cloud Features on and they upload automatically.'
             : uploadBtn.dataset.titleDefault);
 }
 
@@ -18315,7 +18315,7 @@ window.addEventListener('load', function () {
       el.style.cssText = 'font-size:12px;opacity:0.7;margin:6px 2px;';
       host.parentNode.insertBefore(el, host.nextSibling);
     }
-    if (mode === 'off') el.textContent = 'Showing on-device history (~1 month). Enable Cloud Features in Settings to view older data.';
+    if (mode === 'off') el.textContent = 'Showing on-device history (~1 month). Enable Cloud Features in Setup to view older data.';
     else if (mode === 'ap') el.textContent = 'Showing on-device history (~1 month). Older data needs Cloud Features, which is unavailable in Access Point mode.';
     el.style.display = mode ? '' : 'none';
   }

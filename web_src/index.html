@@ -203,7 +203,7 @@
   <!-- Main Tab Navigation -->
   <div class="main-tabs">
     <button class="main-tab" onclick="showMainTab('livedata')">Live Data</button>
-    <button class="main-tab" onclick="showMainTab('settings')">Settings</button>
+    <button class="main-tab" onclick="showMainTab('settings')">Setup</button>
     <button class="main-tab" onclick="showMainTab('tuning')">Tuning</button>
     <button class="main-tab" onclick="showMainTab('plots')">Plots</button>
     <button class="main-tab" onclick="showMainTab('console')">Console</button>
@@ -605,7 +605,7 @@
             <!-- SINGLE TAB GROUP -->
             <div class="alt-tabs alt-tabs-primary">
               <button class="alt-tab-btn alt-tab-btn-primary active"
-                      onclick="showAltTab('primary', 'alt-panel-alt-setup')">Setup</button>
+                      onclick="showAltTab('primary', 'alt-panel-alt-setup')">Basic</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
                       onclick="showAltTab('primary', 'alt-panel-quick-view')">RPM Table</button>
               <button class="alt-tab-btn alt-tab-btn-primary"
@@ -2229,7 +2229,7 @@
 
 
             <!-- ═══════════════════════════════════════════════════════════
-                 PROTECTIONS — 5th alt-tab inside Settings → Alternator
+                 PROTECTIONS — 5th alt-tab inside Setup → Alternator
                  Phase-first layout (Detection / Response / Recovery) with
                  group-filter pills. Each card preserves its existing
                  name=, password field, Set button, and echo span ID so
@@ -3113,7 +3113,7 @@
 
               <p style="font-size: 12px; color: var(--text-muted); margin: 8px 0 12px 0; line-height: 1.5;">
                 Battery-side protections that ramp the field down or cut it entirely when a battery-safety limit is exceeded.
-                These thresholds sit above the four control-loop throttling protections (Settings → Alternator → Protections)
+                These thresholds sit above the four control-loop throttling protections (Setup → Alternator → Protections)
                 and a separate hardware overvoltage backup (needs no configuration).
               </p>
 
@@ -6037,7 +6037,7 @@
 
               </details> <!-- END Output Current Controller Parameters -->
 
-              <!-- Rate Limiting moved to Settings → Alternator → Rate Limiting -->
+              <!-- Rate Limiting moved to Setup → Alternator → Rate Limiting -->
 
       </div>
     </div>
@@ -6903,7 +6903,7 @@
                   </div>
                 </div>
 
-                <!-- Temp Warning/Critical Excess and Sustained Timeout moved to Settings → Alternator → Temperature Settings -->
+                <!-- Temp Warning/Critical Excess and Sustained Timeout moved to Setup → Alternator → Temperature Settings -->
 
               </details> <!-- END Temperature Controller Parameters -->
 
@@ -7376,7 +7376,7 @@
               <span class="metric-label">Victron Battery Voltage
                 <span class="tooltip" onclick="this.classList.toggle('active')">
                   ℹ️
-                  <span class="tooltip-box">Available if VE.Direct Data is turned on in Settings→System</span>
+                  <span class="tooltip-box">Available if VE.Direct Data is turned on in Setup→System</span>
                 </span>
               </span>
               <span class="metric-value"><span id="VictronVoltageID">0</span> V</span>
@@ -7745,7 +7745,7 @@
               <span class="metric-label">Solar Power
                 <span class="tooltip" onclick="this.classList.toggle('active')">
                   ℹ️
-                  <span class="tooltip-box">Live solar panel power from a Victron MPPT over VE.Direct (PPV). Available if VE.Direct Data is turned on in Settings→System.</span>
+                  <span class="tooltip-box">Live solar panel power from a Victron MPPT over VE.Direct (PPV). Available if VE.Direct Data is turned on in Setup→System.</span>
                 </span>
               </span>
               <span class="metric-value"><span id="VictronSolarPowerID">0</span> W</span>
@@ -7904,7 +7904,7 @@
         </details>
         <hr />
 
-        <!-- learning switch + download (live display only; config/tuning live in Settings → Vessel Performance) -->
+        <!-- learning switch + download (live display only; config/tuning live in Setup → Vessel Performance) -->
         <div class="form-row">
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Learning <span id="perf-learn-label" style="color:var(--text-muted);">&mdash;</span></span>
@@ -8651,7 +8651,7 @@
             <span>Engine Fuel Consumed</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">
               ℹ️
-              <span class="tooltip-box">Based on measured RPM and RPM-consumption table defined in Settings →
+              <span class="tooltip-box">Based on measured RPM and RPM-consumption table defined in Setup →
                 Engine</span>
             </span>
           </div>
@@ -8797,7 +8797,7 @@
               <span class="metric-label">Software Image
                 <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                   <span class="tooltip-box">Factory Golden = safe working default, User Updateable = newer versions
-                    loaded from Settings→Software Updates</span>
+                    loaded from Setup→Software Updates</span>
                 </span>
               </span>
               <span class="metric-value" style="font-size: 13px;"><span id="currentPartitionTypeID">?</span></span>
@@ -10506,7 +10506,7 @@
               whether today's output is sliding below that best over time. </p>
             <p><b>Learned on the device.</b> Steady-state capture runs every control tick (~200 Hz):
               when the smoothed engine speed, field drive, voltage, temperature, AND output current
-              all hold within their bands for their set times (tunable in Settings), the run's average
+              all hold within their bands for their set times (tunable in Setup), the run's average
               is recorded as a best-ever point. The health comparison itself runs once per second.
               Instead of averaging nearby records (which reads falsely low at the edge of what has
               been visited), it fits the local slope of the best-ever surface through the nearby
@@ -10711,7 +10711,7 @@
           <div style="margin-top:8px;line-height:1.5;">
             <p><b>Channel State</b> is whether the fast current sensor is actively sampling, dormant
               (its sense wire reads open, so the regulator stopped and re-probes every few minutes),
-              or switched off in Settings below.</p>
+              or switched off in Setup below.</p>
             <p><b>Map Cells Learned</b> counts how many RPM/output-current operating points have a
               stored ripple signature yet — the Resonance &amp; Ripple Map fills in as the engine runs at
               more speeds and loads. The <b>Highest Tone</b> row below is the strongest single tone

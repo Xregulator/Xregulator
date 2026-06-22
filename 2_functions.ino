@@ -2195,14 +2195,13 @@ bool executeUploadPayload(const char *payload) {
     "POST /functions/v1/update-sensor-history HTTP/1.1\r\n"
     "Host: %s\r\n"
     "Content-Type: application/json\r\n"
-    "Authorization: Bearer %s\r\n"  // ← Changed from "apikey: %s\r\n"
+    "Authorization: Bearer %s\r\n"
     "Connection: close\r\n"
     "Content-Length: %u\r\n\r\n",
     host,
     SUPABASE_ANON_KEY,
     (unsigned)strlen(payload));
 
-  // NEW: Check header send success / connection state
   if (headerBytes <= 0 || !client.connected()) {
     Serial.println("Header send fail");
     client.stop();
@@ -2985,7 +2984,7 @@ bool executeUploadConfig(const char *payload) {
     "POST /functions/v1/update-config-snapshot HTTP/1.1\r\n"
     "Host: %s\r\n"
     "Content-Type: application/json\r\n"
-    "Authorization: Bearer %s\r\n"  // ← Changed from "apikey: %s\r\n"
+    "Authorization: Bearer %s\r\n"
     "Connection: close\r\n"
     "Content-Length: %u\r\n\r\n",
     host,

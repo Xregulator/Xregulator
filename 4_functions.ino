@@ -4002,25 +4002,25 @@ void executeGetPendingConfig() {
   if (currentMode != MODE_CLIENT) return;
   if (WiFi.RSSI() < -76) return;
 
+  // Lean raw-TLS path (doCloudPOST) instead of HTTPClient over WiFiClientSecure: the combined
+  // http.begin(client,url) pattern uses far more internal RAM (CLAUDE.md) and getString() can hang,
+  // which made this call return -1 when contiguous RAM was tight (e.g. right after the registration
+  // handshake). doCloudPOST adds the anon-key Bearer + Content-Type itself. Response holds the full
+  // tier-1 config blob (exportConfigJson reserves 8 KB), so stage it in a 16 KB PSRAM scratch buffer,
+  // copy to the String the parsing below expects, and free the scratch immediately.
   String response;
   int httpCode = -1;
-  {  // scope the TLS client so it frees before any clear-call TLS context opens
-    WiFiClientSecure client;
-    client.setInsecure();
-    client.setTimeout(8);
-    HTTPClient http;
-    String url = String(SUPABASE_URL) + "/functions/v1/get-pending-config";
-    if (!http.begin(client, url)) {
-      Serial.println("PENDING_CONFIG: HTTP begin failed");
+  {
+    const size_t CAP = 16384;
+    char *scratch = (char *)ps_malloc(CAP);
+    if (!scratch) {
+      Serial.println("PENDING_CONFIG: ps_malloc failed");
       return;
     }
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
-    http.setTimeout(8000);
     String payload = "{\"token\":\"" + authToken + "\"}";
-    httpCode = http.POST(payload);
-    if (httpCode == 200) response = http.getString();
-    http.end();
+    httpCode = doCloudPOST("/functions/v1/get-pending-config", payload.c_str(), scratch, CAP);
+    if (httpCode == 200) response = String(scratch);
+    free(scratch);
   }
   if (httpCode != 200) {
     Serial.printf("PENDING_CONFIG: HTTP %d\n", httpCode);
@@ -4066,24 +4066,12 @@ void executeClearPendingConfig() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (currentMode != MODE_CLIENT) return;
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(8);
-
-  HTTPClient http;
-  String url = String(SUPABASE_URL) + "/functions/v1/clear-pending-config";
-  if (!http.begin(client, url)) {
-    Serial.println("CLEAR_PENDING_CONFIG: HTTP begin failed");
-    return;
-  }
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", "Bearer " + String(SUPABASE_ANON_KEY));
-  http.setTimeout(8000);
-
+  // Lean raw-TLS path (doCloudPOST), same reasons as executeGetPendingConfig. Response is a tiny
+  // success ack, so a small stack buffer is plenty.
   String payload = "{\"token\":\"" + authToken + "\",\"config_id\":\"" + pendingConfigClearId + "\"}";
-  int httpCode = http.POST(payload);
+  char response[256];
+  int httpCode = doCloudPOST("/functions/v1/clear-pending-config", payload.c_str(), response, sizeof(response));
   Serial.printf("CLEAR_PENDING_CONFIG: HTTP %d\n", httpCode);
-  http.end();
 }
 void printPartitionInfo() {
   Serial.println("=== PARTITION SUMMARY ===");
@@ -4286,9 +4274,9 @@ void otaRestoreNormalOperation(bool success) {
     }
   }
 
-  // 3) Recreate HTTPS task if deleted (matches your setup: 20480 stack, priority 1, core 0)
+  // 3) Recreate HTTPS task if deleted (matches setup: 12288 stack, priority 1, core 0 — see setup() note)
   if (httpsTaskHandle == NULL) {
-    BaseType_t ok = xTaskCreatePinnedToCore(httpsTask, "HTTPS", 20480, NULL, 1, &httpsTaskHandle, 0);
+    BaseType_t ok = xTaskCreatePinnedToCore(httpsTask, "HTTPS", 12288, NULL, 1, &httpsTaskHandle, 0);
     if (ok == pdPASS) {
       Serial.println("✅ HTTPS task recreated on Core 0");
     } else {

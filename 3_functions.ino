@@ -609,9 +609,8 @@ enum Csv2Index {
   CSV2_BestUpwindVmgAT,     // best upwind VMG, kts ×100
   CSV2_LongestGaleAT,       // longest gale duration, hours ×100
 
-  // Control Accuracy Scores (accumulate-since-reset, 2026-06-18) — replaced the old 16 windowed
-  // live-score fields (4×inner ISE, 4×cvRms, 4×cvPeak, 4×thermal) with 6: RMS error + worst
-  // overshoot per loop, physical units. Current in A ×100, voltage in mV (V ×1000), thermal in °F ×100.
+  // Control Accuracy Scores (accumulate-since-reset): RMS error + worst overshoot per loop.
+  // Current in A ×100, voltage in mV (V ×1000), thermal in °F ×100.
   CSV2_accCurRms,    // inner current loop RMS error (A ×100)
   CSV2_accCurPeak,   // inner current loop worst over-current (A ×100)
   CSV2_accVoltRms,   // CV loop RMS error (mV)
@@ -1769,7 +1768,8 @@ void setupServer() {
                 "rpmCap_A,voltCap_A,uTarget_A,spLimited_A,"
                 "pidErr_A,pidOut_pct,duty_pct,RPM,battV,measAmps_A,"
                 "penaltyAmps_A,flags,chargeStageDisplay,"
-                "outerP,outerI,lookahead,impliedPenalty,antiWindupFired,thermalSlope_F_sec\n");
+                "outerP,outerI,lookahead,impliedPenalty,antiWindupFired,thermalSlope_F_sec,"
+                "freezeWhy,penaltyRaw_A,holdEst_A\n");
             } else if (state.row == 1) {
               // Constants row — written once, Python detects via "CONST" in ts_ms field
               state.lineLen = snprintf(
@@ -1782,12 +1782,13 @@ void setupServer() {
               // Data rows — index offset by 2 (header + constants row)
               int idx = (state.oldest + state.row - 2) % THERMAL_LOG_SIZE;
               ThermalLogEntry e;
-              memcpy(&e, &thermalLog[idx], 48);
+              memcpy(&e, &thermalLog[idx], sizeof(ThermalLogEntry));
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "%lu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
                 "%.1f,%.1f,%.1f,%d,%.1f,%.1f,%.1f,%u,%u,"
-                "%.1f,%.1f,%.1f,%.1f,%u,%.1f\n",
+                "%.1f,%.1f,%.1f,%.1f,%u,%.1f,"
+                "%u,%.1f,%.1f\n",
                 (unsigned long)e.ts,
                 e.tempFiltered / 10.0f,
                 e.tempProjected / 10.0f,
@@ -1810,7 +1811,10 @@ void setupServer() {
                 e.outerTermLookahead / 10.0f,
                 e.impliedPenalty / 10.0f,
                 (unsigned)e.antiWindupFired,
-                e.thermalSlope / 1000.0f);
+                e.thermalSlope / 1000.0f,
+                (unsigned)e.freezeWhy,
+                e.penaltyRaw / 10.0f,
+                e.holdEstimate / 10.0f);
             }
             state.linePos = 0;
             state.row++;
@@ -1871,8 +1875,8 @@ void setupServer() {
               return written;
             }
             int idx = (state.oldest + state.row) % THERMAL_LOG_SIZE;
-            memcpy(state.entryBuf, &thermalLog[idx], 48);
-            state.entryLen = 48;
+            memcpy(state.entryBuf, &thermalLog[idx], sizeof(ThermalLogEntry));
+            state.entryLen = sizeof(ThermalLogEntry);
             state.entryPos = 0;
             state.row++;
           }
@@ -4173,7 +4177,7 @@ void setupServer() {
       LatitudeManual  = request->getParam("LatitudeNMEA")->value().toDouble();
       LongitudeManual = request->getParam("LongitudeNMEA")->value().toDouble();
       gpsManualActive = true;
-      LatitudeNMEA  = LatitudeManual;   // apply immediately
+      LatitudeNMEA  = LatitudeManual;
       LongitudeNMEA = LongitudeManual;
       settingWrite(NK_LatitudeManual, String(LatitudeManual, 6).c_str());
       settingWrite(NK_LongitudeManual, String(LongitudeManual, 6).c_str());
@@ -4216,10 +4220,18 @@ void setupServer() {
     }
     if (request->hasParam("TriggerWeatherUpdate")) {
       foundParameter = true;
+      // Every rejection path must give user feedback — a silent fall-through (e.g. no GPS) reads as
+      // "nothing happened". Check each precondition separately so the message names the actual reason.
       if (fieldActiveStatus > 0) {
         queueConsoleMessage("Weather update refused: disable the field first");
         inputMessage = "field_on";
-      } else if (WiFi.RSSI() >= -76 && LatitudeNMEA != 0.0 && LongitudeNMEA != 0.0) {
+      } else if (LatitudeNMEA == 0.0 && LongitudeNMEA == 0.0) {
+        queueConsoleMessage("Weather update failed: no GPS position yet — wait for a fix or set a manual lat/lon");
+        inputMessage = "no_gps";
+      } else if (WiFi.RSSI() < -76) {
+        queueConsoleMessage("Weather update failed: WiFi signal too weak");
+        inputMessage = "weak_wifi";
+      } else {
         HttpsRequest req = { .type = HTTPS_FETCH_WEATHER };
         if (xQueueSend(httpsQueue, &req, 0) == pdTRUE) {
           queueConsoleMessage("Weather: Manual update triggered");
@@ -5465,9 +5477,18 @@ void setupServer() {
     int asyncTcpCore = hAsyncTcp ? (int)xTaskGetCoreID(hAsyncTcp) : -99;
     int lwipCore = hLwip ? (int)xTaskGetCoreID(hLwip) : -99;
     const char *faStateName = (faChanState == 1) ? "live" : (faChanState == 2) ? "RAILED-dormant (jumper open?)" : "off";
-    char out[2560];
+    // mbedTLS allocator self-test: do a TLS-sized alloc through mbedtls_calloc and see which heap it
+    // lands in. Proves the setup() mbedtls_platform_set_calloc_free(->PSRAM) override is live, without
+    // relying on catching the early boot serial line. "PSRAM" = TLS no longer needs contiguous internal.
+    size_t tlsPsBefore = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    void *tlsTest = mbedtls_calloc(1, 16384);
+    size_t tlsPsAfter = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const char *tlsMem = !tlsTest ? "ALLOC-FAILED" : ((tlsPsBefore - tlsPsAfter) >= 16000 ? "PSRAM" : "INTERNAL");
+    if (tlsTest) mbedtls_free(tlsTest);
+    char out[2816];
     int dpos = snprintf(out, sizeof(out),
              "Partition: %s\nVersion: %s\nFree heap: %lu\n"
+             "TLS buffers -> %s (largest internal block %u B, free PSRAM %u B)\n"
              "Net task cores (0/1=pinned, 2147483647=floating, -99=not found): async_tcp=%d lwIP=%d\n"
              "AdjustField worst full pass (ms): total=%.1f | thermal=%.1f snapshot=%.1f fastov=%.1f modes=%.1f control=%.1f duty=%.1f tail=%.1f\n"
              "Time source: %s (NMEA last sync: %lus ago, Phone last: %lus ago)\n"
@@ -5477,6 +5498,9 @@ void setupServer() {
              (running && running->label) ? running->label : "unknown",
              FIRMWARE_VERSION,
              (unsigned long)ESP.getFreeHeap(),
+             tlsMem,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
              asyncTcpCore, lwipCore,
              aflWorstTotalUs / 1000.0f,
              aflWorstSecUs[0] / 1000.0f, aflWorstSecUs[1] / 1000.0f, aflWorstSecUs[2] / 1000.0f,

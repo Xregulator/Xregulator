@@ -1,8 +1,5 @@
 // ── 8_functions.ino ── Fast alternator-current failure detector (consumer 2): algorithm bodies.
 
-// Rectifier/stator pulse-pattern fault detector (consumer 2 of the fast alternator-current
-// channel) — 
-
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
