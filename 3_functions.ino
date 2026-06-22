@@ -1545,10 +1545,38 @@ int doCloudPOST(const char *endpointPath, const char *payload,
   esp_task_wdt_reset();
 
   if (!client.connect(host, port, CONNECT_TIMEOUT)) {
+    uint32_t connElapsed = millis() - start;  // how long the failed TLS connect took (before extra probes below)
     char errBuf[128] = {0};
     int lastErr = client.lastError(errBuf, sizeof(errBuf));
-    Serial.printf("doCloudPOST(%s): connect FAIL in %u ms, mbedTLS err=%d (0x%X) '%s'\n",
-                  endpointPath, (unsigned)(millis() - start), lastErr, lastErr, errBuf);
+    // Disambiguate the three distinct failure modes for the dashboard Console — a generic
+    // mbedTLS -1 can be any of them and they need very different fixes:
+    //   (a) DNS lookup fails        -> router/WiFi DNS problem
+    //   (b) DNS ok, raw TCP blocked -> firewall/router blocking outbound 443
+    //   (c) DNS ok, TCP ok, TLS bad -> secure handshake fails (TLS version/cipher, or MTU dropping
+    //                                  the large Cloudflare cert) even though a browser works
+    IPAddress resolved;
+    bool dnsOk = WiFi.hostByName(host, resolved);
+    bool tcpOk = false;
+    if (dnsOk) {
+      WiFiClient probe;  // plain TCP, no TLS — tests whether port 443 is reachable at all
+      tcpOk = probe.connect(resolved, port, CONNECT_TIMEOUT);
+      probe.stop();
+    }
+    if (!dnsOk) {
+      queueConsoleMessageF("Cloud unreachable: DNS lookup for %s failed (check WiFi/router DNS)", host);
+    } else if (!tcpOk) {
+      queueConsoleMessageF("Cloud unreachable: %s resolves to %s but port 443 is blocked (firewall/router/client isolation)",
+                           host, resolved.toString().c_str());
+    } else {
+      // TCP works but the TLS handshake failed. The usual cause on this device is NOT the network
+      // but scarce CONTIGUOUS internal RAM — mbedTLS needs ~32-40KB in one block, and field-on
+      // workload (control loop, SSE, logging) fragments it. Report the largest free block so a
+      // low number (and a fast fail, not a ~5s timeout) points at RAM, not the network.
+      queueConsoleMessageF("Cloud unreachable: TCP reached %s:443 but TLS handshake failed in %u ms; largest free internal block %u B (mbedTLS needs ~32-40KB contiguous — if low, it's RAM not network; try with field OFF)",
+                           resolved.toString().c_str(), (unsigned)connElapsed, (unsigned)ESP.getMaxAllocHeap());
+    }
+    Serial.printf("doCloudPOST(%s): connect FAIL in %u ms, mbedTLS err=%d (0x%X) '%s', dnsOk=%d tcpOk=%d\n",
+                  endpointPath, (unsigned)(millis() - start), lastErr, lastErr, errBuf, (int)dnsOk, (int)tcpOk);
     client.stop();
     return -2;
   }
@@ -1651,6 +1679,19 @@ int doCloudPOST(const char *endpointPath, const char *payload,
 
   client.stop();
   return httpCode;
+}
+
+// Plain-English reason for a doCloudPOST() negative return code, for the dashboard Console
+// (saves a trip to the Serial Monitor). Mirrors the sentinels returned above.
+const char *cloudFailReason(int code) {
+  switch (code) {
+    case -1: return "internal memory too low for secure connection";
+    case -2: return "could not reach cloud server (check this WiFi has internet)";
+    case -3: return "timed out after connecting";
+    case -4: return "lost connection while sending";
+    case -5: return "no response from cloud server";
+    default: return "unknown error";
+  }
 }
 
 // Accumulator for the /perfUploadFront POST body (Load CSV) — filled across body chunks, then
@@ -5686,6 +5727,7 @@ void setupServer() {
     // Connection-level failure (negative sentinels from doCloudPOST)
     if (httpCode <= 0) {
       Serial.println("HTTP connection failed: " + String(httpCode));
+      queueConsoleMessageF("Registration failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
       request->send(503, "application/json",
                     "{\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
       return;
@@ -5694,6 +5736,7 @@ void setupServer() {
     // Empty body guard
     if (response.length() == 0) {
       Serial.println("Empty response from server (HTTP " + String(httpCode) + ")");
+      queueConsoleMessageF("Registration failed: empty response from cloud (HTTP %d)", httpCode);
       request->send(502, "application/json",
                     "{\"error\":\"Empty response from cloud\",\"code\":" + String(httpCode) + "}");
       return;
@@ -5771,6 +5814,7 @@ void setupServer() {
     Serial.println("Response: " + response);
 
     if (httpCode <= 0) {
+      queueConsoleMessageF("Profile update failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
       request->send(503, "application/json",
                     "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
       return;
@@ -5810,6 +5854,7 @@ void setupServer() {
     Serial.println("Response: " + response);
 
     if (httpCode <= 0) {
+      queueConsoleMessageF("Account delete failed: %s (code %d)", cloudFailReason(httpCode), httpCode);
       request->send(503, "application/json",
                     "{\"success\":false,\"error\":\"Connection to cloud failed\",\"code\":" + String(httpCode) + "}");
       return;

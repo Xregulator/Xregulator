@@ -4467,16 +4467,24 @@ void setup() {
   // Rectifier fault detector compute — Core 0, priority 1 (same as TempTask/HTTPS, below the
   // network tasks). Moves the analysis off the Core-1 control loop, which used to freeze in
   // lockstep once a minute. faResultSem returns the verdict; the task is woken by notification.
+  // Stack in PSRAM (MALLOC_CAP_SPIRAM): its 8KB was half the internal-RAM regression that pushed
+  // the TLS handshake floor (~34KB contiguous) out of reach. Safe on Core 0 — the IDF suspends the
+  // other core during flash-cache-disable windows. Its working data (faMatrix/faRawRing) is already
+  // PSRAM, so the added stack-access latency is modest; watch faDetWorstComputeUs on the dashboard.
   faResultSem = xSemaphoreCreateBinary();
-  xTaskCreatePinnedToCore(faDetTask, "faDet", 8192, NULL, 1, &faDetTaskHandle, 0);
-  Serial.println("Fault-detector task created on Core 0");
+  xTaskCreatePinnedToCoreWithCaps(faDetTask, "faDet", 8192, NULL, 1, &faDetTaskHandle, 0, MALLOC_CAP_SPIRAM);
+  Serial.println("Fault-detector task created on Core 0 (PSRAM stack)");
 
   // CPU-load sampler — Core 0, priority 0 (BELOW every network/upload task). uxTaskGetSystemState
   // is a ~4ms scan that used to run on the Core-1 control loop; here it runs every 2s only when
   // Core 0 is otherwise idle, so it yields to WiFi/uploads and can't worsen Core-0 spikes. It
   // sleeps 2s between runs, so it never starves the Core-0 idle task / watchdog.
-  xTaskCreatePinnedToCore(cpuLoadTask, "cpuLoad", 4096, NULL, 0, &cpuLoadTaskHandle, 0);
-  Serial.println("CPU-load task created on Core 0 (prio 0)");
+  // Stack lives in PSRAM (MALLOC_CAP_SPIRAM) so its 4KB doesn't compete for the scarce internal
+  // RAM that the TLS handshake needs ~34KB contiguous of — safe because the IDF suspends the other
+  // core during flash-cache-disable windows, so a PSRAM-stack task is never running while its stack
+  // is unreachable. Diagnostic task, 2s cadence — PSRAM stack latency is irrelevant here.
+  xTaskCreatePinnedToCoreWithCaps(cpuLoadTask, "cpuLoad", 4096, NULL, 0, &cpuLoadTaskHandle, 0, MALLOC_CAP_SPIRAM);
+  Serial.println("CPU-load task created on Core 0 (prio 0, PSRAM stack)");
 
   if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
     Serial.println("Starting NTP sync...");
