@@ -277,7 +277,7 @@ enum Csv2Index {
   CSV2_imu_heading_swing_120s,
   CSV2_dBcur_dt,
   CSV2_loadDumpActive,
-  CSV2_thermalTuningTestPhase,
+  CSV2_reserved_thermalTestPhase,  // dead slot — thermal step-test removed (2026-06-23), sends 0
   CSV2_ft_updateAccelMetrics_win,
   CSV2_ft_updateAccelMetrics_ses,
   // Fields 230-322: diagnostics moved from CSV1
@@ -380,7 +380,7 @@ enum Csv2Index {
   CSV2_finalLearningTarget,
   CSV2_overheatingPenaltyTimer,
   CSV2_overheatingPenaltyAmps,
-  CSV2_averageTableValue,
+  CSV2_reserved_averageTableValue,  // dead table removed — dead slot, sends 0
   CSV2_timeSinceLastOverheat,
   CSV2_socInfoAvailable,
   CSV2_overheatCount0,
@@ -711,16 +711,16 @@ enum Csv3Index {
   CSV3_LearningMemoryDuration,
   CSV3_EnableAmbientCorrection,
   CSV3_TuningMode,
-  CSV3_rpmCurrentTable_0,
-  CSV3_rpmCurrentTable_1,
-  CSV3_rpmCurrentTable_2,
-  CSV3_rpmCurrentTable_3,
-  CSV3_rpmCurrentTable_4,
-  CSV3_rpmCurrentTable_5,
-  CSV3_rpmCurrentTable_6,
-  CSV3_rpmCurrentTable_7,
-  CSV3_rpmCurrentTable_8,
-  CSV3_rpmCurrentTable_9,
+  CSV3_reserved_rpmCurrentTable_0,  // dead table removed — dead slot, sends 0
+  CSV3_reserved_rpmCurrentTable_1,
+  CSV3_reserved_rpmCurrentTable_2,
+  CSV3_reserved_rpmCurrentTable_3,
+  CSV3_reserved_rpmCurrentTable_4,
+  CSV3_reserved_rpmCurrentTable_5,
+  CSV3_reserved_rpmCurrentTable_6,
+  CSV3_reserved_rpmCurrentTable_7,
+  CSV3_reserved_rpmCurrentTable_8,
+  CSV3_reserved_rpmCurrentTable_9,
   CSV3_ShuntResistanceMicroOhm,
   CSV3_InvertAltAmps,
   CSV3_InvertBattAmps,
@@ -808,6 +808,8 @@ enum Csv3Index {
   CSV3_FIELD_COLLAPSE_DELAY,
   CSV3_SetpointRiseRate,
   CSV3_SetpointFallRate,
+  CSV3_SetpointBigStepThresh,
+  CSV3_SetpointBigStepRiseRate,
   CSV3_PIDTrackingGain,
   CSV3_CAPSIZE_THRESHOLD_DEG,
   CSV3_PITCHPOLE_THRESHOLD_DEG,
@@ -919,14 +921,15 @@ enum Csv3Index {
   CSV3_cvWavePeriodSec,
   CSV3_cvKOvershoot,
   CSV3_cvConsecutiveReads,
-  CSV3_ThermalTuningMode,
-  CSV3_thermalWaveLowF,
-  CSV3_thermalWaveHighF,
-  CSV3_thermalWaveHalfPeriodMin,
-  CSV3_thermalKOvershoot,
-  CSV3_thermalKUndershoot,
-  CSV3_thermalSettleThreshF,
-  CSV3_thermalConsecutiveReads,
+  // 8 dead slots — thermal step-test removed (2026-06-23); kept to preserve CSV3 indices, all send 0
+  CSV3_reserved_thermal0,
+  CSV3_reserved_thermal1,
+  CSV3_reserved_thermal2,
+  CSV3_reserved_thermal3,
+  CSV3_reserved_thermal4,
+  CSV3_reserved_thermal5,
+  CSV3_reserved_thermal6,
+  CSV3_reserved_thermal7,
   // Fields 266-275: settings moved from CSV1
   CSV3_webgaugesinterval,
   CSV3_plotTimeWindow,
@@ -978,9 +981,9 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…7=Validate, 8=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=finished
 
-  CSV3_FIELD_COUNT  // = 306 (305 prior + commissionPhase)
+  CSV3_FIELD_COUNT  // = 308 (306 prior + SetpointBigStepThresh + SetpointBigStepRiseRate)
 };
 
 
@@ -2929,8 +2932,7 @@ void setupServer() {
       // Mutex: refuse if any square-wave tuning test is already on. All four tests must run independently.
       const char *activeTuning = TuningMode ? "Current tuning"
                                             : (CVTuningMode ? "Voltage tuning"
-                                                            : (ThermalTuningMode ? "Thermal tuning"
-                                                                                 : (fieldCurveActive != 0 ? "Field curve" : nullptr)));
+                                                            : (fieldCurveActive != 0 ? "Field curve" : nullptr));
       if (sysMode == SYS_MODE_MANUAL) {
         queueConsoleMessage("SystemID: start blocked — not allowed in manual mode (duty is fixed; test cannot drive the field)");
       } else if (!sysidModeOK) {
@@ -2961,7 +2963,6 @@ void setupServer() {
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
                          : TuningMode ? "Current tuning"
                          : CVTuningMode ? "Voltage tuning"
-                         : ThermalTuningMode ? "Thermal tuning"
                          : (fieldCurveActive != 0) ? "Field curve" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Field curve: start blocked — only allowed in AUTO mode");
@@ -2992,7 +2993,6 @@ void setupServer() {
       const char *busy = (systemIDActive != 0) ? "Plant Delay test"
                          : TuningMode ? "Current tuning"
                          : CVTuningMode ? "Voltage tuning"
-                         : ThermalTuningMode ? "Thermal tuning"
                          : (fieldCurveActive != 0) ? "Field curve" : nullptr;
       if (sysMode != SYS_MODE_AUTO) {
         queueConsoleMessage("Min% knee: start blocked — only allowed in AUTO mode");
@@ -3025,6 +3025,13 @@ void setupServer() {
         kneeAnchorDuty[kneeAnchorN] = kneeSweepKneeDuty;
         kneeAnchorTempF[kneeAnchorN] = kneeSweepTempF;
         kneeAnchorN++;
+        // Refresh the live onset = a + C/RPM fit so /kneesweep.json (the review screen) can flag a bad
+        // point before Apply. Needs >= 2 anchors; leaves residual = -1 until then.
+        {
+          float a, C, resid; int wi;
+          if (kneeFitModel(a, C, resid, wi)) { kneeFitA = a; kneeFitC = C; kneeFitResidPct = resid; kneeFitWorstIdx = wi; }
+          else { kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; }
+        }
         queueConsoleMessageF("Min%% knee: anchor %d committed (%.1f%% @ %.0f RPM, %.0fF)",
                              kneeAnchorN, kneeSweepKneeDuty, kneeSweepRPM, kneeSweepTempF);
       }
@@ -3032,12 +3039,13 @@ void setupServer() {
     else if (request->hasParam("clearKneeAnchors")) {
       foundParameter = true;
       kneeAnchorN = 0;
+      kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; kneeFitA = 0.0f; kneeFitC = 0.0f;
       queueConsoleMessage("Min% knee: anchors cleared");
     }
     else if (request->hasParam("applyKneeCurve")) {
       foundParameter = true;
       if (!kneeCurveApply())
-        queueConsoleMessage("Min% knee: need at least 4 anchors to fit a curve");
+        queueConsoleMessage("Min% knee: need at least 3 anchors to fit a curve");
     }
 
     // ── Auto-commissioning: Phase-2 relaxed matrix gate ─────────────────────
@@ -3070,17 +3078,17 @@ void setupServer() {
       foundParameter = true;
       faCommissionGate = false;
       commissionSetState(2);                // COMMISSIONED
-      commissionSetPhase(8);                // all phases complete (8 steps: 0=Prep..7=Validate, 8=finished)
+      commissionSetPhase(7);                // all phases complete (7 steps: 0=Prep..6=Thresholds, 7=finished)
       settingRemove(NK_commissionSnap);     // discard snapshot — commit the new tune
       settingsDirty = true;
       queueConsoleMessage("Commissioning: complete — device marked COMMISSIONED");
     }
     // Wizard heartbeat: persist the furthest phase reached so the tab checklist survives
-    // a page reload / a different client. Clamped 0..8. Does not change commissionState.
+    // a page reload / a different client. Clamped 0..7. Does not change commissionState.
     else if (request->hasParam("commissionPhase")) {
       foundParameter = true;
       int p = request->getParam("commissionPhase")->value().toInt();
-      if (p < 0) p = 0; if (p > 8) p = 8;
+      if (p < 0) p = 0; if (p > 7) p = 7;
       commissionSetPhase((uint8_t)p);
       settingsDirty = true;
     }
@@ -4308,8 +4316,7 @@ void setupServer() {
       // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
       if (requested == 1 && TuningMode == 0) {
         const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
-                                                    : (CVTuningMode ? "Voltage tuning"
-                                                                    : (ThermalTuningMode ? "Thermal tuning" : nullptr));
+                                                    : (CVTuningMode ? "Voltage tuning" : nullptr);
         if (blocker != nullptr) {
           queueConsoleMessageF("Current tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
@@ -4486,6 +4493,22 @@ void setupServer() {
       if (TuningMode) tuningParamChanged = true;
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    if (request->hasParam("SetpointBigStepThresh")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SetpointBigStepThresh")->value();
+      settingWrite(NK_SetpointBigStepThresh, inputMessage.c_str());
+      SetpointBigStepThresh = inputMessage.toFloat();
+      if (TuningMode) tuningParamChanged = true;
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("SetpointBigStepRiseRate")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SetpointBigStepRiseRate")->value();
+      settingWrite(NK_SetpointBigStepRiseRate, inputMessage.c_str());
+      SetpointBigStepRiseRate = inputMessage.toFloat();
+      if (TuningMode) tuningParamChanged = true;
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
     if (request->hasParam("SetpointFallRate")) {
       foundParameter = true;
       inputMessage = request->getParam("SetpointFallRate")->value();
@@ -4589,42 +4612,32 @@ void setupServer() {
       inputMessage = request->getParam("TempPIDKp")->value();
       settingWrite(NK_TempPIDKp, inputMessage.c_str());
       TempPIDKp = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-      queueConsoleMessageF("Temp PID Kp updated to: %.6f", TempPIDKp);
+      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);      queueConsoleMessageF("Temp PID Kp updated to: %.6f", TempPIDKp);
     }
     if (request->hasParam("TempPIDKi")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKi")->value();
       settingWrite(NK_TempPIDKi, inputMessage.c_str());
       TempPIDKi = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-      queueConsoleMessageF("Temp PID Ki updated to: %.6f", TempPIDKi);
+      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);      queueConsoleMessageF("Temp PID Ki updated to: %.6f", TempPIDKi);
     }
     if (request->hasParam("ThermalLookaheadSec")) {
       foundParameter = true;
       inputMessage = request->getParam("ThermalLookaheadSec")->value();
       ThermalLookaheadSec = clamp_f(inputMessage.toFloat(), 0.0f, 300.0f);
-      settingWrite(NK_ThermalLookaheadSec, String(ThermalLookaheadSec, 1).c_str());
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-      queueConsoleMessageF("ThermalLookaheadSec set to: %.1f s", ThermalLookaheadSec);
+      settingWrite(NK_ThermalLookaheadSec, String(ThermalLookaheadSec, 1).c_str());      queueConsoleMessageF("ThermalLookaheadSec set to: %.1f s", ThermalLookaheadSec);
     }
     if (request->hasParam("TempPIDIntervalMs")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDIntervalMs")->value();
       settingWrite(NK_TempPIDIntervalMs, inputMessage.c_str());
-      TempPIDIntervalMs = inputMessage.toInt();
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-      queueConsoleMessageF("Temp PID interval updated to: %d ms", TempPIDIntervalMs);
+      TempPIDIntervalMs = inputMessage.toInt();      queueConsoleMessageF("Temp PID interval updated to: %d ms", TempPIDIntervalMs);
     }
     if (request->hasParam("TempPIDFilterAlpha")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDFilterAlpha")->value();
       settingWrite(NK_TempPIDFilterAlpha, inputMessage.c_str());
-      TempPIDFilterAlpha = inputMessage.toFloat();
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-      queueConsoleMessageF("Temp PID filter alpha updated to: %.3f", TempPIDFilterAlpha);
+      TempPIDFilterAlpha = inputMessage.toFloat();      queueConsoleMessageF("Temp PID filter alpha updated to: %.3f", TempPIDFilterAlpha);
     }
     if (request->hasParam("PidKi")) {
       foundParameter = true;
@@ -4984,8 +4997,7 @@ void setupServer() {
       // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
       if (requested == 1 && CVTuningMode == 0) {
         const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
-                                                    : (TuningMode ? "Current tuning"
-                                                                  : (ThermalTuningMode ? "Thermal tuning" : nullptr));
+                                                    : (TuningMode ? "Current tuning" : nullptr);
         if (blocker != nullptr) {
           queueConsoleMessageF("Voltage tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
         } else {
@@ -5033,71 +5045,6 @@ void setupServer() {
       inputMessage = request->getParam("cvConsecutiveReads")->value();
       cvConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
       settingWrite(NK_cvConsecutiveReads, String(cvConsecutiveReads).c_str());
-    }
-    if (request->hasParam("ThermalTuningMode")) {
-      foundParameter = true;
-      inputMessage = request->getParam("ThermalTuningMode")->value();
-      int requested = inputMessage.toInt();
-      // Mutex: refuse turn-on if another test is already running. All four tests must run independently.
-      if (requested == 1 && ThermalTuningMode == 0) {
-        const char *blocker = (systemIDActive != 0) ? "Plant Delay Test"
-                                                    : (TuningMode ? "Current tuning"
-                                                                  : (CVTuningMode ? "Voltage tuning" : nullptr));
-        if (blocker != nullptr) {
-          queueConsoleMessageF("Thermal tuning: turn-on blocked — %s is active. Turn it off first.", blocker);
-        } else {
-          settingWrite(NK_ThermalTuningMode, inputMessage.c_str());
-          ThermalTuningMode = requested;
-        }
-      } else {
-        settingWrite(NK_ThermalTuningMode, inputMessage.c_str());
-        ThermalTuningMode = requested;
-      }
-    }
-    if (request->hasParam("thermalWaveLowF")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalWaveLowF")->value();
-      thermalWaveLowF = inputMessage.toFloat();
-      settingWrite(NK_thermalWaveLowF, String(thermalWaveLowF, 1).c_str());
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-    }
-    if (request->hasParam("thermalWaveHighF")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalWaveHighF")->value();
-      thermalWaveHighF = inputMessage.toFloat();
-      settingWrite(NK_thermalWaveHighF, String(thermalWaveHighF, 1).c_str());
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-    }
-    if (request->hasParam("thermalWaveHalfPeriodMin")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalWaveHalfPeriodMin")->value();
-      thermalWaveHalfPeriodMin = inputMessage.toFloat();
-      settingWrite(NK_thermalWaveHalfPeriodMin, String(thermalWaveHalfPeriodMin, 1).c_str());
-      if (ThermalTuningMode) thermalTuningParamChanged = true;
-    }
-    if (request->hasParam("thermalKOvershoot")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalKOvershoot")->value();
-      thermalKOvershoot = inputMessage.toFloat();
-      settingWrite(NK_thermalKOvershoot, String(thermalKOvershoot, 1).c_str());
-    }
-    if (request->hasParam("thermalKUndershoot")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalKUndershoot")->value();
-      thermalKUndershoot = inputMessage.toFloat();
-      settingWrite(NK_thermalKUndershoot, String(thermalKUndershoot, 1).c_str());
-    }
-    if (request->hasParam("thermalSettleThreshF")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalSettleThreshF")->value();
-      thermalSettleThreshF = inputMessage.toFloat();
-      settingWrite(NK_thermalSettleThreshF, String(thermalSettleThreshF, 1).c_str());
-    }
-    if (request->hasParam("thermalConsecutiveReads")) {
-      foundParameter = true;
-      inputMessage = request->getParam("thermalConsecutiveReads")->value();
-      thermalConsecutiveReads = (uint8_t)constrain(inputMessage.toInt(), 1, 20);
-      settingWrite(NK_thermalConsecutiveReads, String(thermalConsecutiveReads).c_str());
     }
     if (request->hasParam("VoltageDisagreeThreshold")) {
       foundParameter = true;
@@ -6029,10 +5976,11 @@ void setupServer() {
     char *buf = bufPtr.get();
     int pos = 0;
     pos += snprintf(buf + pos, 1024 - pos,
-                    "{\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"rpm\":%.0f,\"tempF\":%.0f,\"anchors\":[",
+                    "{\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"rpm\":%.0f,\"tempF\":%.0f,"
+                    "\"fitResid\":%.2f,\"fitWorstIdx\":%d,\"anchors\":[",
                     (fieldCurveActive != 0 && fieldCurveOnsetMode) ? 1 : 0,
                     (fieldCurveResultsReady && fieldCurveOnsetMode) ? 1 : 0, kneeSweepOk ? 1 : 0,
-                    kneeSweepKneeDuty, kneeSweepRPM, kneeSweepTempF);
+                    kneeSweepKneeDuty, kneeSweepRPM, kneeSweepTempF, kneeFitResidPct, kneeFitWorstIdx);
     for (int i = 0; i < kneeAnchorN && pos < 900; i++) {
       pos += snprintf(buf + pos, 1024 - pos, "%s{\"rpm\":%.0f,\"duty\":%.1f,\"tempF\":%.0f}",
                       i > 0 ? "," : "", kneeAnchorRPM[i], kneeAnchorDuty[i], kneeAnchorTempF[i]);
@@ -6302,91 +6250,6 @@ void setupServer() {
     if (cvTuningLog) memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
     accVoltage = {};  // clear the CV loop's Control Accuracy score too
     pendingSaveCVTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
-    request->send(200, "text/plain", "OK");
-  });
-
-  server.on("/thermaltuninglog", HTTP_GET, [](AsyncWebServerRequest *request) {
-    // PSRAM-backed buffer; shared_ptr deleter frees on response destruction
-    // (normal completion OR abort). Avoids 8 KB transient on the internal heap.
-    std::shared_ptr<char> bufPtr((char *)ps_malloc(8192), [](char *p) { if (p) free(p); });
-    if (!bufPtr) { request->send(500, "text/plain", "OOM"); return; }
-    char *buf = bufPtr.get();
-
-    // Sort by score ascending (best first)
-    uint8_t sortIdx[50];
-    for (int i = 0; i < thermalTuningLogCount; i++) sortIdx[i] = i;
-    for (int i = 1; i < thermalTuningLogCount; i++) {
-      uint8_t key = sortIdx[i];
-      float keyScore = thermalTuningLog[key].score;
-      int j = i - 1;
-      while (j >= 0 && thermalTuningLog[sortIdx[j]].score > keyScore) {
-        sortIdx[j + 1] = sortIdx[j];
-        j--;
-      }
-      sortIdx[j + 1] = key;
-    }
-
-    int pos = 0;
-    pos += snprintf(buf + pos, (pos >= 8192 ? 0 : 8192 - pos), "{\"rec\":[");
-    for (int i = 0; i < thermalTuningLogCount && pos < 7800; i++) {
-      ThermalTuningRecord &r = thermalTuningLog[sortIdx[i]];
-      pos += snprintf(buf + pos, (pos >= 8192 ? 0 : 8192 - pos),
-        "%s{\"n\":%d,\"s\":%.2f,\"st\":%.0f,\"wo\":%.1f,\"io\":%.2f,\"iu\":%.2f,"
-        "\"ns\":%d,\"t\":%.0f,"
-        "\"kp\":%.4f,\"ki\":%.5f,\"la\":%.0f,\"fa\":%.3f,\"im\":%d,"
-        "\"wl\":%.0f,\"wh\":%.0f,\"wp\":%.1f,"
-        "\"rr\":%.1f,\"fr\":%.1f,"
-        "\"rpm\":%.0f,\"amb\":%.1f,\"bv\":%.2f,\"cs\":%d}",
-        i > 0 ? "," : "",
-        r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootF,
-        r.avgIntOverFs, r.avgIntUnderFs,
-        (int)r.scoredStepCount, r.activeTimeSec,
-        r.kp, r.ki, r.lookaheadSec, r.filterAlpha, (int)r.intervalMs,
-        r.waveLowF, r.waveHighF, r.waveHalfPeriodMin,
-        r.riseRate, r.fallRate,
-        r.avgRPM, r.avgAmbientF, r.battV, (int)r.chargeStage);
-    }
-    // Active test state
-    bool testActive = (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh);
-    float ts = 0.0f;
-    if (testActive && thermalTuningScore.scoredStepCount > 0) {
-      float n = (float)thermalTuningScore.scoredStepCount;
-      float avgSettle = thermalTuningScore.totalSettlingTimeSec / n;
-      float avgOver   = thermalTuningScore.totalIntOverFs / n;
-      float avgUnder  = thermalTuningScore.totalIntUnderFs / n;
-      ts = avgSettle + thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;
-    }
-    // "live" now carries the since-reset Control Accuracy score for the thermal loop: [RMS error
-    // (°F), worst over-temp (°F), 0, 0]. (4-slot shape kept for the tuning UI parser.)
-    pos += snprintf(buf + pos, (pos >= 8192 ? 0 : 8192 - pos),
-      "],\"live\":[%.4f,%.4f,%.4f,%.4f],"
-      "\"ts\":%.2f,\"tc\":%d,\"ta\":%d}",
-      accScoreRms(accThermal.errAccum, accThermal.timeAccum), accThermal.worstOver, 0.0f, 0.0f,
-      ts, (int)thermalTuningScore.scoredStepCount, testActive ? 1 : 0);
-
-    // Chunked send — only one TCP-MSS chunk (~1.5 KB) lands on the internal heap.
-    size_t total = (size_t)pos;
-    AsyncWebServerResponse *response = request->beginChunkedResponse(
-      "application/json",
-      [bufPtr, total](uint8_t *out, size_t maxLen, size_t index) -> size_t {
-        if (index >= total) return 0;
-        size_t toSend = (maxLen < (total - index)) ? maxLen : (total - index);
-        memcpy(out, bufPtr.get() + index, toSend);
-        return toSend;
-      });
-    request->send(response);
-  });
-
-  server.on("/resetthermaltuninglog", HTTP_POST, [](AsyncWebServerRequest *request) {
-    thermalTuningLogCount     = 0;
-    thermalTuningLogHead      = 0;
-    thermalTuningRunCounter   = 0;
-    thermalTuningScore        = {};
-    thermalTuningParamChanged = false;
-    thermalWaveCurrentSetpointF = 0.0f;
-    if (thermalTuningLog) memset(thermalTuningLog, 0, 50 * sizeof(ThermalTuningRecord));
-    accThermal = {};  // clear the thermal loop's Control Accuracy score too
-    pendingSaveThermalTuningLog = true;  // deferred to Core 1 — avoids blocking Core 0 SSE
     request->send(200, "text/plain", "OK");
   });
 
@@ -7218,7 +7081,7 @@ void SendWifiData() {
                                SafeInt(imu_heading_swing_120s, 10),              // ×10, 1dp degrees; -10 = no compass data
                                SafeInt(g_dBcur_dt, 10),                          // ×10, 1dp A/s battery current rate of change
                                (int)g_loadDumpActive,                            // 1 if load dump feedforward is active
-                               (ThermalTuningMode && thermalTuningScore.testStarted && thermalTuningScore.waveHigh) ? 1 : 0,
+                               0,                                                // CSV2_reserved_thermalTestPhase (dead slot — thermal step-test removed)
                                SafeInt(ft_updateAccelMetrics.worstWindow),
                                SafeInt(ft_updateAccelMetrics.worstSession),
                                // from CSV1
@@ -7321,7 +7184,7 @@ void SendWifiData() {
                                SafeInt(finalLearningTarget, 100),
                                SafeInt(overheatingPenaltyTimer / 1000),
                                SafeInt(overheatingPenaltyAmps, 100),
-                               SafeInt(averageTableValue, 100),
+                               0,  // reserved — was averageTableValue (dead table removed); sends 0
                                SafeInt(timeSinceLastOverheat / 1000),
                                SafeInt(socInfoAvailable),
                                SafeInt(overheatCount[0]),
@@ -7586,6 +7449,7 @@ void SendWifiData() {
 
     int payload3Len = snprintf(payload3, PAYLOAD3_SIZE,
                                "%d,"  // CSV3_FIELD_COUNT
+                               "%d,%d,"  // 2 added: SetpointBigStepThresh, SetpointBigStepRiseRate
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,"  // 2 removed: LearningUpwardEnabled, LearningDownwardEnabled
@@ -7665,16 +7529,16 @@ void SendWifiData() {
                                SafeInt(LearningMemoryDuration / 86400000),
                                SafeInt(EnableAmbientCorrection),
                                SafeInt(TuningMode),
-                               SafeInt(rpmCurrentTable[0]),
-                               SafeInt(rpmCurrentTable[1]),
-                               SafeInt(rpmCurrentTable[2]),
-                               SafeInt(rpmCurrentTable[3]),
-                               SafeInt(rpmCurrentTable[4]),
-                               SafeInt(rpmCurrentTable[5]),
-                               SafeInt(rpmCurrentTable[6]),
-                               SafeInt(rpmCurrentTable[7]),
-                               SafeInt(rpmCurrentTable[8]),
-                               SafeInt(rpmCurrentTable[9]),
+                               0,  // reserved — was rpmCurrentTable[0] (dead table removed); sends 0
+                               0,  // reserved — was rpmCurrentTable[1]
+                               0,  // reserved — was rpmCurrentTable[2]
+                               0,  // reserved — was rpmCurrentTable[3]
+                               0,  // reserved — was rpmCurrentTable[4]
+                               0,  // reserved — was rpmCurrentTable[5]
+                               0,  // reserved — was rpmCurrentTable[6]
+                               0,  // reserved — was rpmCurrentTable[7]
+                               0,  // reserved — was rpmCurrentTable[8]
+                               0,  // reserved — was rpmCurrentTable[9]
                                SafeInt(ShuntResistanceMicroOhm),
                                SafeInt(InvertAltAmps),
                                SafeInt(InvertBattAmps),
@@ -7762,6 +7626,8 @@ void SendWifiData() {
                                SafeInt(FIELD_COLLAPSE_DELAY),
                                SafeInt(SetpointRiseRate, 100),
                                SafeInt(SetpointFallRate, 100),
+                               SafeInt(SetpointBigStepThresh, 100),
+                               SafeInt(SetpointBigStepRiseRate, 100),
                                SafeInt(PIDTrackingGain, 100),
                                SafeInt(CAPSIZE_THRESHOLD_DEG),
                                SafeInt(PITCHPOLE_THRESHOLD_DEG),
@@ -7873,14 +7739,8 @@ void SendWifiData() {
                                (int)cvWavePeriodSec,
                                SafeInt(cvKOvershoot, 10),                        // ×10, 1dp
                                (int)cvConsecutiveReads,
-                               (int)ThermalTuningMode,
-                               SafeInt(thermalWaveLowF, 10),                     // ×10, 1dp °F
-                               SafeInt(thermalWaveHighF, 10),                    // ×10, 1dp °F
-                               SafeInt(thermalWaveHalfPeriodMin, 10),            // ×10, 1dp min
-                               SafeInt(thermalKOvershoot, 100),                  // ×100, 2dp
-                               SafeInt(thermalKUndershoot, 100),                 // ×100, 2dp
-                               SafeInt(thermalSettleThreshF, 10),                // ×10, 1dp °F
-                               (int)thermalConsecutiveReads,
+                               // 8 dead slots — thermal step-test removed (2026-06-23), all send 0
+                               0, 0, 0, 0, 0, 0, 0, 0,
                                // from CSV1 (settings)
                                SafeInt(webgaugesinterval),
                                SafeInt(plotTimeWindow),
@@ -7932,7 +7792,7 @@ void SendWifiData() {
                                SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
                                SafeInt(tuningWaveFloor),                        // A (raw)
                                (int)commissionState,                            // CSV3_commissionState (0/1/2)
-                               (int)commissionPhase                             // CSV3_commissionPhase (0..8)
+                               (int)commissionPhase                             // CSV3_commissionPhase (0..7)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

@@ -2961,13 +2961,20 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       uint32_t segStart = sineSegStartMs[p];
       uint32_t segEnd   = (p + 1 < SYSID_SINE_NPOINTS) ? sineSegStartMs[p + 1] : sineSweepEndMs;
       uint32_t anaStart = segStart + (uint32_t)(1000.0f / f);  // skip 1 settle cycle
+      // Integer-cycle window: truncate the analysis span to a WHOLE number of drive periods
+      // so the lock-in's negative-frequency leakage term cancels exactly — the window edge
+      // lands on a cycle boundary instead of wherever the next segment happened to start.
+      float periodMs = 1000.0f / f;
+      uint32_t availMs = (segEnd > anaStart) ? (segEnd - anaStart) : 0;
+      int nCyc = (int)floorf((float)availMs / periodMs);
+      uint32_t anaEnd = (nCyc >= 1) ? (anaStart + (uint32_t)((float)nCyc * periodMs)) : segEnd;
 
       // Pass 1: window mean (removes DC so a partial trailing cycle can't bias the fit).
       double mean = 0.0; int nMean = 0;
       for (int s = 0; s < sysIDSampleCount; s++) {
         uint32_t ts = sysIDBuffer[s].ts;
         if (ts < anaStart) continue;
-        if (ts >= segEnd) break;
+        if (ts >= anaEnd) break;
         mean += sysIDBuffer[s].amps; nMean++;
       }
       if (nMean > 0) mean /= (double)nMean;
@@ -2977,7 +2984,7 @@ bool systemID_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
       for (int s = 0; s < sysIDSampleCount; s++) {
         uint32_t ts = sysIDBuffer[s].ts;
         if (ts < anaStart) continue;
-        if (ts >= segEnd) break;
+        if (ts >= anaEnd) break;
         float t = (float)(ts - segStart) / 1000.0f;
         float ang = 2.0f * (float)M_PI * f * t;
         double y = (double)sysIDBuffer[s].amps - mean;
@@ -3293,6 +3300,16 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     onsetBaseline = 0.0f;
     if (fieldCurveOnsetMode) { kneeSweepKneeDuty = -1.0f; kneeSweepOk = false; }
     stepDuty = FIELDCURVE_DUTY_START;
+    // Warm-start (Min% onset only): commissioning sweeps run in DESCENDING RPM order, so each point's
+    // onset duty is strictly HIGHER than the previous (lower RPM needs more field — the 1/RPM law).
+    // Start the ramp one step below the most recent committed anchor's duty instead of from 5%, which
+    // skips re-walking duties we already know are below onset. Safe by construction: the previous
+    // (higher-RPM) onset is always below this point's onset, so we never start past the knee; the
+    // one-step backoff keeps a pre-onset baseline so the detector still sees current "begin".
+    if (fieldCurveOnsetMode && kneeAnchorN > 0) {
+      float warm = kneeAnchorDuty[kneeAnchorN - 1] - FIELDCURVE_DUTY_STEP;
+      if (warm > stepDuty) stepDuty = warm;
+    }
     stepStartMs = nowMs;
     ampSum = 0.0;
     ampN = 0;
@@ -3300,8 +3317,8 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     phase = 1;
     fieldCurveActive = 1;
     if (fieldCurveOnsetMode)
-      queueConsoleMessageF("Min%% knee: ramping from %.0f%% @ %.0f RPM, stop at first onset (step %.1f%%, dwell %lums)",
-                           FIELDCURVE_DUTY_START, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
+      queueConsoleMessageF("Min%% knee: ramping from %.1f%% @ %.0f RPM, stop at first onset (step %.1f%%, dwell %lums)",
+                           stepDuty, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
     else
       queueConsoleMessageF("Field curve: ramping to %.0fA limit @ %.0f RPM (step %.1f%%, dwell %lums)",
                            fieldCurveTargetLimitA, RPM, FIELDCURVE_DUTY_STEP, FIELDCURVE_DWELL_MS);
@@ -3565,16 +3582,25 @@ void tuningSineStep(uint32_t nowMs, float dt, float &phase, float baseA, float a
     if (rpmNow < tuningSweepRpmMin) tuningSweepRpmMin = rpmNow;
     if (rpmNow > tuningSweepRpmMax) tuningSweepRpmMax = rpmNow;
     if (dutyCycle <= MinDuty + 0.5f || dutyCycle >= 99.5f) tuningSweepDutyRailed = true;
-    if (tElapsed >= (uint32_t)(1000.0f / f)) {   // accumulate after a 1-cycle settle
+    // Integer-cycle window: settle 1 cycle, then accumulate over a WHOLE number of drive
+    // periods so the lock-in's negative-frequency leakage term cancels exactly (and the
+    // reference sin/cos sums go to ~0, keeping the DC correction clean). The raw hold
+    // (segMs, floored at 1.5 s for fast tones) is truncated down to whole cycles.
+    float periodMs = 1000.0f / f;
+    float segMs = (1.0f + (float)tuningSweepCycles) * periodMs;
+    if (segMs < 1500.0f) segMs = 1500.0f;
+    uint32_t accStartMs = (uint32_t)periodMs;                       // 1-cycle settle
+    int nCyc = (int)floorf((segMs - periodMs) / periodMs);          // whole cycles after settle
+    if (nCyc < 1) nCyc = 1;
+    uint32_t accEndMs = accStartMs + (uint32_t)((float)nCyc * periodMs);
+    if (tElapsed >= accStartMs && tElapsed < accEndMs) {   // accumulate over whole cycles only
       float c = cosf(phase);
       sAmpsSin += (double)measAmps * s;
       sAmpsCos += (double)measAmps * c;
       sAmps += measAmps; sSin += s; sCos += c; nAcc++;
       sAmpsSq += (double)measAmps * measAmps;   // for per-point coherence
     }
-    float segMs = (1.0f + (float)tuningSweepCycles) * 1000.0f / f;
-    if (segMs < 1500.0f) segMs = 1500.0f;
-    if (tElapsed >= (uint32_t)segMs) {
+    if (tElapsed >= accEndMs) {
       float gain = 0.0f, phaseDeg = 0.0f;
       if (nAcc > 0 && ampA > 0.01f) {
         double meanA = sAmps / (double)nAcc;

@@ -265,6 +265,8 @@ bool fsRemove(const char *path) {
 #define NK_SafeOperationThreshold "SafOprtnThrshld"
 #define NK_SetpointFallRate "SetpointFallRat"
 #define NK_SetpointRiseRate "SetpointRiseRat"
+#define NK_SetpointBigStepThresh "SetpntBigStpTh"
+#define NK_SetpointBigStepRiseRate "SetpntBigStpRt"
 #define NK_SettleTimeBeforeCut "SettleTimeBfrCt"
 #define NK_ShuntResistanceMicroOhm "ShntRsstncMcrOh"
 #define NK_ShutdownPhase2HoldMs "ShtdwnPhs2HldMs"
@@ -283,7 +285,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…6=Validate, 7=finished)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…6=Thresholds, final step)
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
@@ -303,7 +305,6 @@ bool fsRemove(const char *path) {
 #define NK_TempWarnExcess "TempWarnExcess"
 #define NK_TemperatureLimitF "TemperatureLmtF"
 #define NK_ThermalLookaheadSec "ThermalLookhdSc"
-#define NK_ThermalTuningMode "ThermalTuningMd"
 #define NK_TuningMode "TuningMode"
 #define NK_UVThresholdHigh "UVThresholdHigh"
 #define NK_UseFloat "UseFloat"
@@ -352,13 +353,6 @@ bool fsRemove(const char *path) {
 #define NK_plotTimeWindow "plotTimeWindow"
 #define NK_rebulkDebounceTime "rebulkDebouncTm"
 #define NK_socInfoAvailable "socInfoAvailabl"
-#define NK_thermalConsecutiveReads "thermlCnsctvRds"
-#define NK_thermalKOvershoot "thermalKOversht"
-#define NK_thermalKUndershoot "thermalKUndrsht"
-#define NK_thermalSettleThreshF "thrmlSttlThrshF"
-#define NK_thermalWaveHalfPeriodMin "thrmlWvHlfPrdMn"
-#define NK_thermalWaveHighF "thermalWaveHghF"
-#define NK_thermalWaveLowF "thermalWaveLowF"
 #define NK_timeAxisModeChanging "timeAxsMdChngng"
 #define NK_totalPowerCycles "totalPowerCycls"
 #define NK_waveAmplitude "waveAmplitude"
@@ -472,11 +466,14 @@ bool settingRemove(const char *key) {
 // restore. (Positional CSV, not JSON — dependency-free, matches the codebase ethos.)
 void commissionSnapshot() {
   char buf[160];
+  // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
+  // a commissioning run must never strand the user in the wrong mode. Older 12-field snapshots
+  // are still accepted on restore (the mode is simply left untouched).
   snprintf(buf, sizeof(buf),
-           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f",
+           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d",
            PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
-           SystemIDStabilizeAmps, SystemIDStepAmplitude);
+           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow);
   settingWrite(NK_commissionSnap, buf);
 }
 
@@ -484,11 +481,11 @@ void commissionSnapshot() {
 bool commissionRestore() {
   if (!settingExists(NK_commissionSnap)) return false;
   String s = settingRead(NK_commissionSnap);
-  float v[12];
-  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+  float v[13];
+  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
-                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11]);
-  if (n != 12) return false;
+                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12]);
+  if (n < 12) return false;  // accept 12 (legacy) or 13 (with HiLow); fewer = malformed
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
   PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
   InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
@@ -501,6 +498,16 @@ bool commissionRestore() {
   IExcessFracBulk = v[9];        settingWrite(NK_IExcessFracBulk, String(IExcessFracBulk, 3).c_str());
   SystemIDStabilizeAmps = v[10]; settingWrite(NK_SystemIDStabilizeAmps, String(SystemIDStabilizeAmps, 2).c_str());
   SystemIDStepAmplitude = v[11]; settingWrite(NK_SystemIDStepAmplitude, String(SystemIDStepAmplitude, 3).c_str());
+  // HiLow (13th field). Older 12-field snapshots omit it — leave the current mode as-is. When
+  // present and different, restore the mode AND swap the active cap tables to match.
+  if (n >= 13) {
+    int snapMode = (int)(v[12] + 0.5f);
+    if (snapMode != HiLow) {
+      HiLow = snapMode;
+      settingWrite(NK_HiLow, String(HiLow).c_str());
+      loadCapTablesForMode(HiLow);
+    }
+  }
   if (pidInitialized) currentPID.SetTunings(PidKp, PidKi, PidKd);  // re-apply gains live
   settingRemove(NK_commissionSnap);
   return true;
@@ -512,7 +519,7 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the furthest wizard phase reached (0=Prep…6=Validate, 7=finished). Drives
+// Persist the furthest wizard phase reached (0=Prep…6=Thresholds, 7=finished). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
@@ -668,7 +675,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/TempWarnExcess.txt", NK_TempWarnExcess },
   { "/TemperatureLimitF.txt", NK_TemperatureLimitF },
   { "/ThermalLookaheadSec.txt", NK_ThermalLookaheadSec },
-  { "/ThermalTuningMode.txt", NK_ThermalTuningMode },
   { "/TuningMode.txt", NK_TuningMode },
   { "/UVThresholdHigh.txt", NK_UVThresholdHigh },
   { "/UseFloat.txt", NK_UseFloat },
@@ -717,13 +723,6 @@ static const LegacySettingFile LEGACY_SETTINGS[] = {
   { "/plotTimeWindow.txt", NK_plotTimeWindow },
   { "/rebulkDebounceTime.txt", NK_rebulkDebounceTime },
   { "/socInfoAvailable.txt", NK_socInfoAvailable },
-  { "/thermalConsecutiveReads.txt", NK_thermalConsecutiveReads },
-  { "/thermalKOvershoot.txt", NK_thermalKOvershoot },
-  { "/thermalKUndershoot.txt", NK_thermalKUndershoot },
-  { "/thermalSettleThreshF.txt", NK_thermalSettleThreshF },
-  { "/thermalWaveHalfPeriodMin.txt", NK_thermalWaveHalfPeriodMin },
-  { "/thermalWaveHighF.txt", NK_thermalWaveHighF },
-  { "/thermalWaveLowF.txt", NK_thermalWaveLowF },
   { "/timeAxisModeChanging.txt", NK_timeAxisModeChanging },
   { "/totalPowerCycles.txt", NK_totalPowerCycles },
   { "/waveAmplitude.txt", NK_waveAmplitude },
@@ -2622,7 +2621,7 @@ void pushLongTermRecord() {
   LT_ENV(battCurr,    battCurr,    10, 1);
   LT_ENV(altCurr,     altCurr,     10, 2);
   LT_ENV(victronCurr, victronCurr, 10, 3);
-  LT_ENV(rpm,         rpm,         100,4);
+  LT_ENV(rpm,         rpm,         1,  4);   // store RAW RPM (fits int16; matches JS scale=1 + cloud raw). Was /100 → chart read 100× low.
   LT_ENV(duty,        dutyCycle,   1,  5);
   LT_ENV(altTemp,     altTemp,     10, 6);
   LT_ENV(tempTherm,   tempTherm,   10, 7);

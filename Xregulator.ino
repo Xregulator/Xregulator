@@ -847,7 +847,7 @@ float SystemIDStepAmplitude = 6.0f;  // % duty step — web-configurable; 6% is 
 uint8_t systemIDTestType   = 0;        // 0 = step delay, 1 = sine sweep
 float   systemIDSineFreqStart = 0.5f;  // Hz, sweep low end
 float   systemIDSineFreqEnd   = 20.0f; // Hz, sweep high end
-uint8_t systemIDSineCycles    = 6;     // analysed cycles per frequency (1 settle cycle skipped)
+uint8_t systemIDSineCycles    = 2;     // analysed cycles per frequency (1 settle cycle skipped); integer-cycle windowed, so 2 is clean
 // Fitted plant time constant (ms) from the dashboard's Plant Delay sweep fit. 0 = not yet fitted.
 // Persisted (NVS) so the Biggest Actionable Disturbance readout survives reboots/reloads; only
 // re-fit when the plant changes (alternator, belt, field wiring).
@@ -903,7 +903,7 @@ float systemIDStepAmp_A[3] = { 0.0f, 0.0f, 0.0f };    // rise step amplitude per
 float systemIDQuietPP_A[3] = { 0.0f, 0.0f, 0.0f };    // quiet-phase peak-to-peak noise per trial (quietMax - quietMin), A
 
 // ── SystemID ring buffer log (50 records, persisted to /systemidlog.bin) ──
-// Mirrors tuningLog / cvTuningLog / thermalTuningLog pattern. Captured on
+// Mirrors tuningLog / cvTuningLog pattern. Captured on
 // every test completion (success or abort) so fleet snapshots can ship a
 // short history of plant-delay results.
 struct SystemIDRecord {
@@ -992,8 +992,9 @@ char  fieldCurveAbortMsg[48] = {0};             // human reason text at the cut 
 // ── Min% onset-knee sweep (commissioning) ────────────────────────────────────
 // Reuses the field-curve ramp but STOPS the instant settled amps lift off the baseline
 // (the onset knee = where output current begins to build), so it forces almost no current.
-// Run at 3-4 held RPMs; each result is committed as an anchor; applyKneeCurve() fits a curve
-// across them and writes rpmMinDutyTable (Min% column). No physics model — empirical points only.
+// Run at 3 held RPMs in DESCENDING order (max working RPM → mid → idle), each warm-started from the
+// last; applyKneeCurve() least-squares fits the physical model onset = a + C/RPM across them and
+// writes rpmMinDutyTable (Min% column). Above the highest anchor RPM the floor is forced to ZERO.
 #define KNEE_ANCHOR_MAX 8
 volatile bool kneeSweepRequested = false;       // set by /get?startKneeSweep
 bool  fieldCurveOnsetMode = false;              // true = onset-stop sweep (Min%), false = saturation sweep (SystemID)
@@ -1005,13 +1006,21 @@ float kneeAnchorRPM[KNEE_ANCHOR_MAX]  = {0};    // committed anchors (RPM, onset
 float kneeAnchorDuty[KNEE_ANCHOR_MAX] = {0};
 float kneeAnchorTempF[KNEE_ANCHOR_MAX] = {0};
 int   kneeAnchorN = 0;                          // anchors committed so far
+// Live preview of the onset = a + C/RPM least-squares fit over the current anchors (recomputed when an
+// anchor is committed). Exposed via /kneesweep.json so the review screen can flag a bad point before
+// Apply. kneeFitResidPct = worst |measured − fit| in % duty; kneeFitWorstIdx = which anchor (capture
+// order). Valid only once kneeAnchorN >= 2; -1 / -1 otherwise.
+float kneeFitA         = 0.0f;                  // fitted intercept a (% duty, the RPM→∞ asymptote)
+float kneeFitC         = 0.0f;                  // fitted slope C (% duty · RPM; onset = a + C/RPM)
+float kneeFitResidPct  = -1.0f;                 // worst-anchor fit residual (% duty), -1 = not fitted
+int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) of the worst residual
 
 // ── Auto-commissioning state machine ──────────────────────────────────────────
 // Persistent across reboots (NVS). 0=NOT_COMMISSIONED, 1=IN_PROGRESS, 2=COMMISSIONED.
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…6=Validate, 7=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…6=Thresholds, 7=finished); drives the Commissioning tab checklist
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
 
 // Weather Mode Global Variables (add with your other globals)
@@ -2083,6 +2092,13 @@ int ChargedDetectionTime = 180;       // Time at charged state to consider 100% 
 int IgnoreTemperature = 0;            // If no temp sensor, set to 1
 int IgnoreRPM = 0;                    // If RPM sensor absent or malfunctioning, set to 1 to bypass RPM gate
 int MinRPMForField = 200;             // Field is cut when RPM is below this threshold (RPM)
+// Engine-stopped fast field cut: when RPM is a confirmed zero, drop the field immediately
+// instead of letting the graceful shutdown ramp keep it energized. At true 0 RPM the
+// alternator makes no output, so there is no load-dump risk; an energized field during the
+// slow ramp couples PWM switching noise into the LM2907 RPM sense and shows as phantom RPM
+// spikes. Confirmation window kept short (<=0.2s) so a single bad ADC read can't snap it off.
+#define RPM_ZERO_CUT_MS 200          // ms RPM must hold at exactly 0 before the immediate cut
+uint32_t rpmZeroSinceMs = 0;         // millis() when RPM first hit 0 (0 = not currently zero)
 int bmsLogic = 0;                     // if BMS is asked to turn the alternator on and off
 int bmsLogicLevelOff = 0;             // set to 0 if the BMS gives a low signal (<3V?) when no charging is desired
 bool chargingEnabled;                 // defined from other variables
@@ -2473,6 +2489,7 @@ GovernorMode govMode = GOV_NORMAL_SLEW;
 
 // Setpoint tracking
 float setpointLimited = 0.0f;
+float setpointCommand = 0.0f;   // pre-slew current command (Icv in CV, uTargetAmps in idle); global so the Control Accuracy score gate can see whether setpointLimited is still slewing toward it
 bool setpointInitialized = false;
 
 // ===== LEARNING MODE CONTROL PARAMETERS =====
@@ -2513,7 +2530,7 @@ int     tuningWaveform     = 0;        // 0 square, 1 sine manual, 2 sine auto-s
 float   tuningSineFreq     = 2.0f;     // Hz — manual sine frequency
 float   tuningSweepStart   = 0.3f;     // Hz — auto-sweep low end
 float   tuningSweepEnd      = 15.0f;   // Hz — auto-sweep high end
-uint8_t tuningSweepCycles   = 6;       // analysed cycles per frequency (1 settle cycle skipped)
+uint8_t tuningSweepCycles   = 2;       // analysed cycles per frequency (1 settle cycle skipped); integer-cycle windowed, so 2 is clean
 volatile bool tuningSweepRequested = false;  // UI "Run Sweep" → start/restart the sweep
 bool    tuningSweepActive   = false;   // sweep in progress
 bool    tuningSweepDone     = false;   // sweep finished, tuningBode[] valid
@@ -2625,7 +2642,7 @@ AccuracyScore accCurrent = {};  // inner current loop — error/overshoot in amp
 AccuracyScore accVoltage = {};  // CV voltage loop — error/overshoot in volts (displayed mV)
 AccuracyScore accThermal = {};  // thermal loop — error/overshoot in °F
 
-const uint32_t ACC_SETTLE_CURRENT_MS = 500;     // current loop reacts in ms → short settle
+const uint32_t ACC_SETTLE_CURRENT_MS = 100;     // current loop reacts in ~200 ms → tiny post-slew settle; slew gate (setpointCommand≈setpointLimited) already excludes commanded steps, so this only clears the slew-boundary residual
 const uint32_t ACC_SETTLE_VOLTAGE_MS = 2000;    // CV loop settles in seconds
 const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal loop: minutes — require sustained binding
 
@@ -2736,82 +2753,6 @@ uint16_t cvTuningRunCounter = 0;
 CVTuningScoreState cvTuningScore = {};
 bool cvTuningParamChanged = false;
 
-// ===== THERMAL STEP TEST TUNING =====
-
-struct ThermalTuningRecord {
-  uint16_t runNumber;
-  float score;  // avgSettlingTimeSec + Ko×avgIntOverFs + Ku×avgIntUnderFs
-  float avgSettlingTimeSec;
-  float worstOvershootF;  // peak above HIGH setpoint across all scored steps
-  float avgIntOverFs;     // avg integral of temp above HIGH setpoint per step (°F·s)
-  float avgIntUnderFs;    // avg integral of temp below HIGH setpoint after settle per step
-  uint16_t scoredStepCount;
-  float activeTimeSec;
-  // Tuning parameters at test time
-  float kp, ki;
-  float lookaheadSec;
-  float filterAlpha;
-  uint16_t intervalMs;
-  float waveLowF;
-  float waveHighF;
-  float waveHalfPeriodMin;
-  // Slew rates at test time
-  float riseRate;  // ThermalPenaltyRiseRate (A/s)
-  float fallRate;  // ThermalPenaltyFallRate (A/s)
-  // Operating conditions
-  float avgRPM;
-  float avgAmbientF;
-  float battV;           // bus voltage during the test
-  uint8_t chargeStage;   // getChargeStageDisplayCode() at commit
-};
-
-struct ThermalTuningScoreState {
-  bool testStarted;
-  bool waveHigh;          // true = currently in HIGH phase
-  uint32_t lastToggleMs;  // ms when HIGH phase started (for half-period timer)
-  // LOW phase stability tracking (must stabilize at thermalWaveLowF before stepping up)
-  bool lowPhaseStable;      // true once temp has been within ±thermalSettleThreshF for thermalConsecutiveReads
-  uint8_t lowConsecInBand;  // consecutive in-band reads while in LOW phase
-  // Per-HIGH-phase state (reset on each step-up)
-  uint32_t phaseStartMs;
-  bool phaseSettled;        // temperature entered settle band this phase (informational only)
-  uint32_t phaseSettledMs;  // ms when first settled (informational only)
-  uint8_t consecutiveInBand;
-  float intOverFs;        // integral of max(0, temp - thermalWaveHighF) × dt this phase
-  float intUnderFs;       // integral of max(0, thermalWaveHighF - temp) × dt from step-up (entire phase)
-  float worstOvershootF;  // peak above thermalWaveHighF this phase
-  // Accumulators across scored HIGH phases
-  float totalSettlingTimeSec;  // informational — not included in score formula
-  float totalIntOverFs;
-  float totalIntUnderFs;
-  float worstOvAll;
-  uint16_t scoredStepCount;
-  float activeTimeSec;
-  // Conditions snapshot
-  float rpmSum;
-  float ambientSum;
-  uint16_t avgSampleCount;
-};
-
-// Thermal tuning mode settings (persisted to LittleFS)
-int ThermalTuningMode = 0;               // 0=off, 1=on
-float thermalWaveLowF = 120.0f;          // LOW phase setpoint (°F)
-float thermalWaveHighF = 150.0f;         // HIGH phase setpoint (°F)
-float thermalWaveHalfPeriodMin = 10.0f;  // minutes per half-period
-float thermalKOvershoot = 10.0f;         // ISE penalty weight for above-setpoint (10× harder than undershoot)
-float thermalKUndershoot = 1.0f;         // ISE penalty weight for below-setpoint
-float thermalSettleThreshF = 2.0f;       // ±°F band for settled check
-uint8_t thermalConsecutiveReads = 3;     // consecutive in-band reads to declare settled
-bool thermalTuningParamChanged = false;
-
-float thermalWaveCurrentSetpointF = 0.0f;  // active wave setpoint; 0 = not started
-
-ThermalTuningRecord *thermalTuningLog = nullptr;  // ps_malloc(50 × sizeof(ThermalTuningRecord))
-uint8_t thermalTuningLogCount = 0;
-uint8_t thermalTuningLogHead = 0;
-uint16_t thermalTuningRunCounter = 0;
-ThermalTuningScoreState thermalTuningScore = {};
-
 float xTime = 60.0;     // seconds    PID Chart
 int yyMax = 105;        // PID Chart     Amps
 int yyMin = -25;        //  PID Chart Amps
@@ -2858,7 +2799,7 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
 float IExcessFrac     = 0.10f;   // CV threshold as fraction of setpointLimited (0.10 → 5A at a 50A command). Scales with frame size.
 float IExcessFracBulk = 0.15f;   // BULK threshold as fraction of i_ceiling_pre_ov (looser — tolerate command-vs-actual error far from the voltage limit).
-float IExcessFloorA   = 4.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual.
+float IExcessFloorA   = 7.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual.
 float IExcessCeilA    = 25.0f;   // A — max threshold; guards against too-loose on very large commands.
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (replaces the old hardcoded 2A IEXCESS_HYST, now scale-aware).
@@ -2915,7 +2856,6 @@ int CloudFeatures = 1;
 // to avoid blocking SSE delivery on Core 0
 volatile bool pendingSaveCVTuningLog = false;
 volatile bool pendingSaveTuningLog = false;
-volatile bool pendingSaveThermalTuningLog = false;
 volatile bool pendingSaveSystemIDLog = false;
 volatile bool pendingSaveTuningSweepLog = false;
 volatile bool pendingSaveSysidSweepLog = false;
@@ -2992,6 +2932,7 @@ struct TickSnapshot {
   bool ignoreTemperature;
   bool ignoreRPM;
   bool rpmBelowMinimum;
+  bool engineFullyStopped;   // RPM confirmed at 0 for >= RPM_ZERO_CUT_MS — forces immediate field cut
 
   bool voltagePlausible;
   bool voltageDisagreementCritical;
@@ -3024,6 +2965,11 @@ float DutyRampRate = 50.0f;  // %/sec - max rate of duty cycle change (protects 
 // Asymmetric setpoint slew
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
+// Large up-step gentling: up-moves whose remaining gap exceeds SetpointBigStepThresh climb at the
+// slower SetpointBigStepRiseRate (instead of SetpointRiseRate) until the gap closes inside the
+// threshold; small corrections within the threshold keep full SetpointRiseRate responsiveness.
+float SetpointBigStepThresh   = 10.0f;  // A   — gap above which a rising setpoint is gentled
+float SetpointBigStepRiseRate = 15.0f;  // A/sec — gentled rise rate used for the large-step portion
 float StartupRiseRate  = 10.0f;  // A/sec — setpoint slew rate applied only on field turn-on (OFF/FAULT→AUTO); user-adjustable
 bool  inStartupRamp    = false;  // true from field turn-on until setpointLimited catches up to command
 
@@ -3094,15 +3040,10 @@ int rpmTableRPMPoints[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100
 // Factory defaults for RPM breakpoints
 int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
 
-// ===== TARGET CURRENT TABLE =====
-// Maximum amps the regulator will command at each RPM breakpoint in Normal mode (HiLow=1).
-// In Low mode (HiLow=0) the regulator quarters these values before sending to the PID,
-// so Normal=100A → Low=25A automatically — no separate Low-mode table is needed.
-// The first entry (≤100 RPM = effectively stopped) is 0 to guarantee no field
-// current when the alternator is not spinning. The factory reset button restores
-// defaultCurrentValues below.
-float rpmCurrentTable[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
-float defaultCurrentValues[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
+// (Removed: rpmCurrentTable / defaultCurrentValues / averageTableValue — a dead "target current"
+// table that nothing read. Low charge-rate mode is the capTableLo blob via loadCapTablesForMode();
+// the live per-RPM ceiling is the CAP table (rpmCapCurrentTable) below. Their old CSV2/CSV3 slots
+// now send literal 0 as reserved placeholders so the payload positions are unchanged.)
 
 // ===== CAP CURRENT TABLE =====
 // Hard ceiling on commanded current at each RPM, always enforced regardless of
@@ -3162,6 +3103,7 @@ int   kneeActiveBin   = -1;      // bin currently being observed (-1 = none)
 bool  kneeFloorActive = false;   // governor is clamping up to the floor right now
 bool  kneeSteadyNow   = false;   // inputs currently within steady bands
 // Prototypes (defined in 6_functions.ino) — declared here so setup()/loop() and 3_functions.ino see them.
+void loadCapTablesForMode(int mode);   // also called from 2_functions.ino, which concatenates before 3_functions.ino's prototype — declare in the main sketch so the earlier file sees it
 void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk);
 void kneeLearnInit();
@@ -3250,7 +3192,6 @@ unsigned long totalLearningEvents = 0;    // Total learning updates performed
 unsigned long totalOverheats = 0;         // Sum of all overheatCount[]
 uint64_t totalSafeMs = 0;                 //   used in AdjustFieldLearningMode
 float totalSafeHours;                     //  same as above, but for displays (legacy)
-float averageTableValue = 0.0;            // Mean of rpmCurrentTable[]
 unsigned long timeSinceLastOverheat = 0;  // Global time since any overheat
 
 
@@ -3288,7 +3229,7 @@ float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=ra
 double tempPIDInput_d = 77.0;        // PID process variable (°F) = max(projected, present) — projected = filtered + slope × lookahead
 double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
-bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempPID_tick()
+bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempFilterUpdate()
 bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the integrator cannot wind UP (P + projection alone handle the approach — prevents approach windup overshoot)
 float thermalHoldEstimate = 0.0f;    // learned equilibrium holding penalty (amps): EMA of the integral term sampled only when genuinely settled at setpoint. The integrator is clamped to this + margin so it reaches the holding level but cannot overbuild during a hot transient dwell (the relaxation-oscillation source).
 bool  thermalHoldValid = false;      // false until the first settled-at-setpoint sample seeds thermalHoldEstimate; while false the equilibrium clamp is disabled (ceiling = penaltyMax)
@@ -4268,10 +4209,6 @@ void setup() {
   cvTuningLog = (CVTuningRecord *)ps_malloc(50 * sizeof(CVTuningRecord));
   if (!cvTuningLog) Serial.println("FATAL: cvTuningLog ps_malloc failed");
   else memset(cvTuningLog, 0, 50 * sizeof(CVTuningRecord));
-  // Thermal tuning score log — 50 records × ~80 bytes = ~4 KB PSRAM
-  thermalTuningLog = (ThermalTuningRecord *)ps_malloc(50 * sizeof(ThermalTuningRecord));
-  if (!thermalTuningLog) Serial.println("FATAL: thermalTuningLog ps_malloc failed");
-  else memset(thermalTuningLog, 0, 50 * sizeof(ThermalTuningRecord));
   // SystemID log — 50 records × ~76 bytes = ~3.8 KB PSRAM
   systemIDLog = (SystemIDRecord *)ps_malloc(50 * sizeof(SystemIDRecord));
   if (!systemIDLog) Serial.println("FATAL: systemIDLog ps_malloc failed");
@@ -4452,7 +4389,6 @@ void setup() {
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS
   loadCVTuningLog();          // restore CV tuning records from LittleFS
-  loadThermalTuningLog();     // restore thermal step test records from LittleFS
   loadSystemIDLog();          // restore plant-delay (SystemID) records from LittleFS
   loadSysidSweepLog();        // restore Plant Delay sine-sweep history from LittleFS
   loadTuningSweepLog();       // restore Current closed-loop sine-sweep history from LittleFS
@@ -4604,7 +4540,6 @@ void setup() {
   pidLog_init();
   cvLog_init();
   tuningScore_init();
-  thermalScore_init();
   Serial.println("=== SETUP COMPLETE ===");
 }
 
@@ -4787,10 +4722,6 @@ void loop() {
     pendingSaveTuningLog = false;
     saveTuningLog();
   }
-  if (pendingSaveThermalTuningLog) {
-    pendingSaveThermalTuningLog = false;
-    saveThermalTuningLog();
-  }
   if (pendingSaveSystemIDLog) {
     pendingSaveSystemIDLog = false;
     saveSystemIDLog();
@@ -4885,10 +4816,6 @@ void loop() {
             if (pendingSaveTuningLog) {
               pendingSaveTuningLog = false;
               saveTuningLog();
-            }
-            if (pendingSaveThermalTuningLog) {
-              pendingSaveThermalTuningLog = false;
-              saveThermalTuningLog();
             }
             if (pendingSaveSystemIDLog) {
               pendingSaveSystemIDLog = false;

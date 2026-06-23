@@ -1299,6 +1299,16 @@ input[type="submit"]:hover {
   background: rgba(213, 94, 0, 0.25);
   color: #6e3100;
 }
+/* Long-term freshness banner — up-to-date (teal) vs new-point-pending (amber). */
+#lt-freshness-banner.lt-fresh-ok {
+  background: rgba(0, 161, 154, 0.12);
+  color: #006a64;
+}
+#lt-freshness-banner.lt-fresh-pending {
+  background: rgba(235, 160, 0, 0.20);
+  color: #7a5400;
+  font-weight: 600;
+}
 .dashboard-brush-snap-btn {
   padding: 1px 7px;
   font-size: 11px;

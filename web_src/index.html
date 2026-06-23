@@ -1418,6 +1418,44 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Big-Step Threshold (A) (<span id="SetpointBigStepThresh_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">When a
+                        rising current target jumps more than this many amps above the present slew-limited setpoint, the
+                        climb is gentled to Big-Step Rise Rate instead of Setpoint Rise Rate, until the remaining gap
+                        closes to within this threshold. Smaller up-corrections (within the threshold) keep full Setpoint
+                        Rise Rate responsiveness. Avoids overshoot-driven protection trips on large jumps. Set high to
+                        disable.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SetpointBigStepThresh" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Big-Step Rise Rate (A/s) (<span id="SetpointBigStepRiseRate_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Gentled
+                        rise rate applied to the large-step portion of a rising current target (see Big-Step Threshold).
+                        Keep below Setpoint Rise Rate. Only affects up-moves; the down direction always uses Setpoint Fall
+                        Rate, so protection response is unchanged.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="SetpointBigStepRiseRate" type="number" step="0.1" min="0.1" max="9999" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Setpoint Fall Rate (A/s) (<span id="SetpointFallRate_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Maximum
                         rate the current target can decrease during AUTO operation. No effect during on/off transitions
@@ -5796,9 +5834,9 @@
                 </div>
               </div>
 
-              <!-- PID Tuning Score Log (collapsed) -->
+              <!-- Square Wave Score Log (step-test scoring; collapsed) -->
               <details id="tuningScoreSection" class="tuning-section">
-                <summary class="tuning-section-title">Tuning Score Log</summary>
+                <summary class="tuning-section-title">Square Wave Score Log</summary>
                 <div>
 
                 <div style="display:flex; gap:12px; margin-bottom:8px; flex-wrap:wrap; align-items:center; font-size:0.85em;">
@@ -6619,204 +6657,6 @@
                 </div>
               </details>
 
-              <!-- Step Test Parameters (collapsed) -->
-              <details class="tuning-section">
-                <summary class="tuning-section-title">Step Test Parameters</summary>
-
-                <p style="font-size:12px;color:var(--text-muted);margin:8px 0 12px 0;">
-                  Steps the temperature setpoint between a low and high value. Scores each step-up transition on settling time and overshoot. Requires alternator to be thermally engaged — run at steady mid-RPM with unconstrained current demand and a low setpoint so the loop is active. Allow 2 full cycles to ring in before scoring begins.
-                </p>
-
-                <!-- Enable toggle -->
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Thermal Step Test (<span id="ThermalTuningMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Enables the thermal step test. Steps TemperatureLimitF between Low and High setpoints. Ring-in (2 full cycles) runs before scoring. Turn off to commit the current test's record to the log.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Off</span>
-                      <label class="switch">
-                        <input id="ThermalTuningMode_checkbox" type="checkbox"
-                          onchange="if(checkThermalTestGate(this) && handleUserToggle('ThermalTuningMode_checkbox','ThermalTuningMode','ThermalTuningMode')){this.form.submit();submitMessage();}">
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">On</span>
-                      <input id="ThermalTuningMode" name="ThermalTuningMode" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Low Setpoint (°F) (<span id="thermalWaveLowF_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Low phase temperature setpoint. Set below the normal operating limit so the alternator heats freely during this phase. Typical: 120°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalWaveLowF" type="number" step="1" min="80" max="300" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>High Setpoint (°F) (<span id="thermalWaveHighF_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">High phase temperature setpoint. Simulates the actual operating limit. The step up from Low to High is the scored transition. Typical: 150°F.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalWaveHighF" type="number" step="1" min="80" max="350" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Half-Period (min) (<span id="thermalWaveHalfPeriodMin_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Duration of each low and high phase in minutes. Must be long enough for temperature to settle — thermal time constants are 5–15 minutes. Typical: 10–15 min.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalWaveHalfPeriodMin" type="number" step="0.5" min="2" max="60" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>K Overshoot (<span id="thermalKOvershoot_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Penalty multiplier on integrated temperature above the high setpoint (°F·s). Higher = more harshly penalised overshoot.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalKOvershoot" type="number" step="0.1" min="0.1" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>K Undershoot (<span id="thermalKUndershoot_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Penalty multiplier on integrated temperature below the high setpoint (°F·s) after the loop has settled — penalises unnecessary conservatism.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalKUndershoot" type="number" step="0.1" min="0.1" max="100" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Settle Threshold (°F) (<span id="thermalSettleThreshF_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Temperature must be within ±this value of the high setpoint for N consecutive reads to declare settled.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalSettleThreshF" type="number" step="0.1" min="0.5" max="20" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Consecutive Reads (<span id="thermalConsecutiveReads_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Number of consecutive temperature readings within the settle band required to declare settled.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="thermalConsecutiveReads" type="number" step="1" min="1" max="20" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-              </details> <!-- END Step Test Parameters -->
-
-              <!-- Score Log (collapsed) -->
-              <details id="thermalTuningScoreSection" class="tuning-section">
-                <summary class="tuning-section-title">Step Test Score Log</summary>
-                <div>
-
-                  <!-- Live accuracy: RMS error / worst over-temp (°F, since reset) -->
-                  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:13px;">
-                    <span id="thermalLiveScore0" style="color:var(--text-muted);">RMS: —</span>
-                    <span id="thermalLiveScore1" style="color:var(--text-muted);">Peak: —</span>
-                  </div>
-
-                  <!-- Active test status -->
-                  <div id="thermalTestScoreRow" style="display:none;background:rgba(99,102,241,0.1);border-radius:6px;padding:8px 12px;margin-bottom:12px;font-size:13px;">
-                    Active test: score = <strong id="thermalCurrentTestScore">—</strong> &nbsp;|&nbsp;
-                    scored steps = <strong id="thermalTestStepCount">0</strong>
-                  </div>
-
-                  <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-                    <button type="button" class="btn-secondary" onclick="fetchThermalTuningLog()">↺ Refresh</button>
-                    <button type="button" class="btn-secondary" onclick="resetThermalTuningLog()">Reset Log</button>
-                  </div>
-
-                  <div style="overflow-x:auto;">
-                    <table style="width:100%;min-width:1220px;border-collapse:collapse;font-size:12px;">
-                      <thead>
-                        <tr style="background:var(--bg-card);color:var(--text-muted);">
-                          <th style="padding:4px 6px;text-align:left;">#</th>
-                          <th style="padding:4px 6px;text-align:left;">Score</th>
-                          <th style="padding:4px 6px;text-align:left;">Settle (s)</th>
-                          <th style="padding:4px 6px;text-align:left;">Worst Over (°F)</th>
-                          <th style="padding:4px 6px;text-align:left;">Avg Over (°F·s)</th>
-                          <th style="padding:4px 6px;text-align:left;">Avg Under (°F·s)</th>
-                          <th style="padding:4px 6px;text-align:left;">Steps</th>
-                          <th style="padding:4px 6px;text-align:left;">Kp</th>
-                          <th style="padding:4px 6px;text-align:left;">Ki</th>
-                          <th style="padding:4px 6px;text-align:left;">Lookahead (s)</th>
-                          <th style="padding:4px 6px;text-align:left;">Filter α</th>
-                          <th style="padding:4px 6px;text-align:left;">Interval (ms)</th>
-                          <th style="padding:4px 6px;text-align:left;">Low (°F)</th>
-                          <th style="padding:4px 6px;text-align:left;">High (°F)</th>
-                          <th style="padding:4px 6px;text-align:left;">Half-Period (min)</th>
-                          <th style="padding:4px 6px;text-align:left;">RPM</th>
-                          <th style="padding:4px 6px;text-align:left;">Board (°F)</th>
-                          <th style="padding:4px 6px;text-align:left;">Rise (A/s)</th>
-                          <th style="padding:4px 6px;text-align:left;">Fall (A/s)</th>
-                          <th style="padding:4px 6px;text-align:left;" title="Bus voltage during the test">Bus V</th>
-                          <th style="padding:4px 6px;text-align:left;" title="Charge stage at commit">Stage</th>
-                        </tr>
-                      </thead>
-                      <tbody id="thermalTuningLogBody">
-                        <tr><td colspan="21" style="padding:12px;text-align:center;color:var(--text-muted);">No records — open section to load.</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <p style="font-size:11px;color:var(--text-muted);margin-top:12px;">
-                    Score = AvgSettle + K_over × AvgIntOver + K_under × AvgIntUnder. Lower is better.
-                    Live score (always-on) uses asymmetric ISE when loop is actively engaged.
-                  </p>
-                </div>
-              </details>
-
               <!-- Controller Parameters (open by default) -->
               <details open class="tuning-section">
                 <summary class="tuning-section-title">Controller Parameters</summary>
@@ -7022,12 +6862,13 @@
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Overview:</strong> The output current loop, the voltage loop, and the temperature loop each
-                  have their own dedicated tuning mode (Tuning Mode for the inner current loop, CV Tuning Mode for the
-                  voltage loop, Thermal Tuning Mode for the temperature loop). Tune them in that order — inner loop
-                  first, then voltage, then thermal — because each layer depends on the one beneath it being stable.
-                  This section covers the inner current loop. Voltage and thermal tuning have their own dedicated tabs
-                  with built-in step tests and live scoring.
+                  <strong>Overview:</strong> The output current loop and the voltage loop each have their own
+                  dedicated live tuning mode (Tuning Mode for the inner current loop, CV Tuning Mode for the
+                  voltage loop). Tune them in that order — inner loop first, then voltage — because each layer
+                  depends on the one beneath it being stable. This section covers the inner current loop; the
+                  voltage loop has its own dedicated tab with a built-in step test and live scoring. The
+                  temperature loop is tuned offline from logged data (no live step test) — its tab shows the live
+                  control plot and the controller parameters.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Three-Phase Process:</strong> The goal is to tune the core PID first, then verify it handles
@@ -11128,6 +10969,11 @@
          (/longTermPlots.bin). Older-than-ring data stitches in from Supabase later.
          Lazy: initLongTermPlots() runs on first open of this sub-tab. -->
     <div id="plots-longterm" class="sub-tab-content">
+      <!-- Freshness banner — long-term points are min/max/avg ENVELOPES committed once per
+           closing window (interval from the .bin header, ~10 min in production), NOT live
+           writes. So the newest point can be up to one interval old. JS (ltUpdateFreshness)
+           shows the countdown to the next averaged point and a one-tap Refresh once due. -->
+      <div id="lt-freshness-banner" class="settings-card" style="display:none; text-align:center; padding:8px; font-size:13px;"></div>
       <div class="settings-card">
         <div id="longterm-status" style="text-align:center; padding:8px; font-size:13px;">Loading long-term history…</div>
       </div>

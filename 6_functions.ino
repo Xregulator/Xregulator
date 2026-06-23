@@ -761,95 +761,6 @@ void resetAccuracyScores() {
   accThermal = {};
 }
 
-// ===== THERMAL STEP TEST TUNING — save / load / commit / live score / wave tick =====
-
-void saveThermalTuningLog() {
-  if (!thermalTuningLog) return;
-  File f = LittleFS.open("/thermaltuninglog.bin", "w");
-  if (!f) return;
-  f.write((uint8_t *)&thermalTuningLogCount, sizeof(thermalTuningLogCount));
-  f.write((uint8_t *)&thermalTuningLogHead, sizeof(thermalTuningLogHead));
-  f.write((uint8_t *)&thermalTuningRunCounter, sizeof(thermalTuningRunCounter));
-  f.write((uint8_t *)thermalTuningLog, 50 * sizeof(ThermalTuningRecord));
-  f.close();
-}
-
-void loadThermalTuningLog() {
-  if (!thermalTuningLog) return;
-  File f = LittleFS.open("/thermaltuninglog.bin", "r");
-  if (!f) return;
-  // Struct size is part of the wire format. Bail cleanly on mismatch (e.g. after
-  // ThermalTuningRecord layout changed) instead of reading garbage into the array.
-  const size_t expected = sizeof(thermalTuningLogCount) + sizeof(thermalTuningLogHead)
-                          + sizeof(thermalTuningRunCounter) + 50 * sizeof(ThermalTuningRecord);
-  if (f.size() != expected) {
-    Serial.printf("ThermalTuningLog: size mismatch (%u vs %u expected) — discarding old log\n",
-                  (unsigned)f.size(), (unsigned)expected);
-    f.close();
-    LittleFS.remove("/thermaltuninglog.bin");
-    return;
-  }
-  f.read((uint8_t *)&thermalTuningLogCount, sizeof(thermalTuningLogCount));
-  f.read((uint8_t *)&thermalTuningLogHead, sizeof(thermalTuningLogHead));
-  f.read((uint8_t *)&thermalTuningRunCounter, sizeof(thermalTuningRunCounter));
-  f.read((uint8_t *)thermalTuningLog, 50 * sizeof(ThermalTuningRecord));
-  f.close();
-  // Corrupt count/head would index past the 50-slot ring (commit writes BEFORE
-  // the %50 wrap) — discard rather than trust a bad header.
-  if (thermalTuningLogCount > 50 || thermalTuningLogHead >= 50) {
-    Serial.println("ThermalTuningLog: corrupt count/head — discarding old log");
-    thermalTuningLogCount = 0;
-    thermalTuningLogHead = 0;
-    LittleFS.remove("/thermaltuninglog.bin");
-    return;
-  }
-  Serial.printf("ThermalTuningLog: loaded %d records, counter=%d\n", thermalTuningLogCount, thermalTuningRunCounter);
-}
-
-void commitThermalTuningRecord() {
-  if (!thermalTuningLog || thermalTuningScore.scoredStepCount < 1) {
-    thermalTuningScore = {};
-    return;
-  }
-  float n = (float)thermalTuningScore.scoredStepCount;
-  float avgSettle = thermalTuningScore.totalSettlingTimeSec / n;
-  float avgOver = thermalTuningScore.totalIntOverFs / n;
-  float avgUnder = thermalTuningScore.totalIntUnderFs / n;
-
-  ThermalTuningRecord rec = {};
-  rec.runNumber = ++thermalTuningRunCounter;
-  rec.avgSettlingTimeSec = avgSettle;
-  rec.avgIntOverFs = avgOver;
-  rec.avgIntUnderFs = avgUnder;
-  rec.worstOvershootF = thermalTuningScore.worstOvAll;
-  rec.scoredStepCount = thermalTuningScore.scoredStepCount;
-  rec.activeTimeSec = thermalTuningScore.activeTimeSec;
-  rec.score = thermalKOvershoot * avgOver + thermalKUndershoot * avgUnder;  // settling time is informational only
-  rec.kp = TempPIDKp;
-  rec.ki = TempPIDKi;
-  rec.lookaheadSec = ThermalLookaheadSec;
-  rec.filterAlpha = TempPIDFilterAlpha;
-  rec.intervalMs = (uint16_t)TempPIDIntervalMs;
-  rec.waveLowF = thermalWaveLowF;
-  rec.waveHighF = thermalWaveHighF;
-  rec.waveHalfPeriodMin = thermalWaveHalfPeriodMin;
-  rec.avgRPM = (thermalTuningScore.avgSampleCount > 0) ? (thermalTuningScore.rpmSum / thermalTuningScore.avgSampleCount) : 0.0f;
-  rec.avgAmbientF = (thermalTuningScore.avgSampleCount > 0) ? (thermalTuningScore.ambientSum / thermalTuningScore.avgSampleCount) : 0.0f;
-  rec.riseRate = ThermalPenaltyRiseRate;
-  rec.fallRate = ThermalPenaltyFallRate;
-  rec.battV = BatteryV;
-  rec.chargeStage = getChargeStageDisplayCode();
-
-  thermalTuningLog[thermalTuningLogHead] = rec;
-  thermalTuningLogHead = (thermalTuningLogHead + 1) % 50;
-  if (thermalTuningLogCount < 50) thermalTuningLogCount++;
-
-  saveThermalTuningLog();
-  queueConsoleMessageF("ThermalTuning: run#%d score=%.2f settle=%.0fs overshoot=%.1f°F n=%d",
-                       rec.runNumber, rec.score, rec.avgSettlingTimeSec, rec.worstOvershootF, rec.scoredStepCount);
-  thermalTuningScore = {};
-}
-
 // ── SystemID (plant-delay) ring buffer log — mirrors tuning logs above ────
 void saveSystemIDLog() {
   if (!systemIDLog) return;
@@ -1144,128 +1055,9 @@ void commitTuningSweepRecord() {
                        rec.runNumber, rec.bandwidthHz, rec.peakGain, rec.worstPhaseDeg);
 }
 
-// Called from tempPID_tick() on every tick (16 Hz).
-// Manages the thermal step-test wave generator, scores each step-up transition,
-// and feeds the always-on asymmetric ISE live score (gated on penalty > threshold).
-void thermalTuning_tick(uint32_t nowMs, float dtSec) {
-  static bool lastThermalTuningMode = false;
-
-  // Commit on mode turn-off
-  if (lastThermalTuningMode && !ThermalTuningMode) {
-    if (thermalTuningScore.scoredStepCount >= 1) commitThermalTuningRecord();
-    else thermalTuningScore = {};
-    thermalWaveCurrentSetpointF = 0.0f;
-  }
-  lastThermalTuningMode = (ThermalTuningMode != 0);
-
-  // ===== Step-test wave generator =====
-  if (ThermalTuningMode) {
-    // Initialize test on first tick
-    if (!thermalTuningScore.testStarted) {
-      thermalWaveCurrentSetpointF = thermalWaveLowF;
-      thermalTuningScore.waveHigh = false;
-      thermalTuningScore.lowPhaseStable = false;
-      thermalTuningScore.lowConsecInBand = 0;
-      thermalTuningScore.testStarted = true;
-      queueConsoleMessageF("ThermalTuning: started — low=%.0f°F high=%.0f°F halfPeriod=%.1fmin — waiting for LOW stability",
-                           thermalWaveLowF, thermalWaveHighF, thermalWaveHalfPeriodMin);
-    }
-
-    // Commit on parameter change — reset to LOW phase and wait for stability again
-    if (thermalTuningParamChanged) {
-      if (thermalTuningScore.scoredStepCount >= 1) commitThermalTuningRecord();
-      else thermalTuningScore = {};
-      thermalTuningParamChanged = false;
-      thermalWaveCurrentSetpointF = thermalWaveLowF;
-      thermalTuningScore.waveHigh = false;
-      thermalTuningScore.lowPhaseStable = false;
-      thermalTuningScore.lowConsecInBand = 0;
-    }
-
-    uint32_t halfPeriodMs = (uint32_t)(thermalWaveHalfPeriodMin * 60000.0f);
-
-    if (!thermalTuningScore.waveHigh) {
-      // LOW phase: wait for temp to stabilize at thermalWaveLowF before scoring a step
-      if (!isnan(tempFiltered) && fabsf(tempFiltered - thermalWaveLowF) <= thermalSettleThreshF) {
-        if (++thermalTuningScore.lowConsecInBand >= thermalConsecutiveReads && !thermalTuningScore.lowPhaseStable) {
-          thermalTuningScore.lowPhaseStable = true;
-          queueConsoleMessageF("ThermalTuning: LOW stable at %.1f°F — stepping up to %.0f°F now",
-                               tempFiltered, thermalWaveHighF);
-          // Step up immediately once stable — scored HIGH phase starts now
-          thermalTuningScore.waveHigh = true;
-          thermalTuningScore.lastToggleMs = nowMs;
-          thermalWaveCurrentSetpointF = thermalWaveHighF;  // controller targets this - 5°F internally
-          thermalTuningScore.phaseStartMs = nowMs;
-          thermalTuningScore.phaseSettled = false;
-          thermalTuningScore.phaseSettledMs = 0;
-          thermalTuningScore.consecutiveInBand = 0;
-          thermalTuningScore.intOverFs = 0.0f;
-          thermalTuningScore.intUnderFs = 0.0f;
-          thermalTuningScore.worstOvershootF = 0.0f;
-        }
-      } else {
-        thermalTuningScore.lowConsecInBand = 0;
-      }
-    } else {
-      // HIGH phase: run for halfPeriodMs then step down
-      if ((uint32_t)(nowMs - thermalTuningScore.lastToggleMs) >= halfPeriodMs) {
-        // Finalize scored HIGH phase
-        float settleTime = thermalTuningScore.phaseSettled
-                             ? ((float)(thermalTuningScore.phaseSettledMs - thermalTuningScore.phaseStartMs) / 1000.0f)
-                             : ((float)halfPeriodMs / 1000.0f);  // informational — not in score formula
-        thermalTuningScore.totalSettlingTimeSec += settleTime;
-        thermalTuningScore.totalIntOverFs += thermalTuningScore.intOverFs;
-        thermalTuningScore.totalIntUnderFs += thermalTuningScore.intUnderFs;
-        thermalTuningScore.worstOvAll = fmaxf(thermalTuningScore.worstOvAll, thermalTuningScore.worstOvershootF);
-        thermalTuningScore.scoredStepCount++;
-        thermalTuningScore.activeTimeSec += (float)halfPeriodMs / 1000.0f;
-        queueConsoleMessageF("ThermalTuning: step DOWN — scored step #%d over=%.2f°F·s under=%.2f°F·s settle=%.0fs",
-                             (int)thermalTuningScore.scoredStepCount,
-                             thermalTuningScore.intOverFs, thermalTuningScore.intUnderFs, settleTime);
-        // Step down and wait for LOW stability before next step
-        thermalTuningScore.waveHigh = false;
-        thermalTuningScore.lastToggleMs = nowMs;
-        thermalTuningScore.lowPhaseStable = false;
-        thermalTuningScore.lowConsecInBand = 0;
-        thermalWaveCurrentSetpointF = thermalWaveLowF;
-      }
-    }
-
-    // Per-tick scoring accumulation during HIGH phase
-    // Error measured against thermalWaveHighF (user's declared limit, not the -5°F internal target).
-    // Undershoot accumulates from the moment of step-up — no waiting for settle.
-    if (thermalTuningScore.waveHigh && thermalTuningScore.phaseStartMs > 0) {
-      float tempNow = isnan(tempFiltered) ? 0.0f : tempFiltered;
-      float e = tempNow - thermalWaveHighF;
-
-      if (e > 0.0f) {
-        thermalTuningScore.intOverFs += e * dtSec;
-        thermalTuningScore.worstOvershootF = fmaxf(thermalTuningScore.worstOvershootF, e);
-      } else {
-        // Full undershoot from step-up — rewards fast approach and no overshoot
-        thermalTuningScore.intUnderFs += (-e) * dtSec;
-      }
-
-      // Settling check (informational only — does not gate scoring)
-      if (fabsf(e) <= thermalSettleThreshF) {
-        thermalTuningScore.consecutiveInBand++;
-        if (thermalTuningScore.consecutiveInBand >= thermalConsecutiveReads && !thermalTuningScore.phaseSettled) {
-          thermalTuningScore.phaseSettled = true;
-          thermalTuningScore.phaseSettledMs = nowMs;
-          queueConsoleMessageF("ThermalTuning: SETTLED at %.1f°F in %.0fs",
-                               tempNow, (float)(nowMs - thermalTuningScore.phaseStartMs) / 1000.0f);
-        }
-      } else {
-        thermalTuningScore.consecutiveInBand = 0;
-      }
-
-      // Conditions snapshot
-      thermalTuningScore.rpmSum += RPM;
-      thermalTuningScore.ambientSum += isnan(ambientTemp) ? 0.0f : ambientTemp;
-      thermalTuningScore.avgSampleCount++;
-    }
-  }
-
+// Called from tempPID_tick() on every tick (16 Hz). Feeds the Thermal Control
+// Accuracy live score (accumulate-since-reset), authority-gated.
+void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
   // ===== Thermal Control Accuracy score (accumulate-since-reset) =====
   // Authority gate: only score when the thermal loop is the binding constraint with no other
   // limiter in charge. The actuator here is the penalty-amps derate; a SUSTAINED penalty IS the
@@ -1283,7 +1075,7 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
   //   thermalPenaltyAmps    — must be > 2A (the binding-constraint signal; see above)
   bool voltageBindingStage = voltageControlActive && (getChargeStageDisplayCode() != CHARGE_STAGE_BULK);
   if (voltageBindingStage) thermalScoreLastExternalMs = nowMs;
-  bool thermalBinding = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered) && !ThermalTuningMode
+  bool thermalBinding = tempPIDActive && thermalSlopeBufFull && !isnan(tempFiltered)
                         && !g_fastOvClampActive && (MaintainMode == 0) && thermalPenaltyAmps > 2.0f
                         && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
   if (accBindingReady(accThermal.bindingStartMs, thermalBinding, nowMs, ACC_SETTLE_THERMAL_MS)) {
@@ -1291,12 +1083,6 @@ void thermalTuning_tick(uint32_t nowMs, float dtSec) {
     float over = err > 0.0f ? err : 0.0f;                       // over-temp side (alternator-damaging)
     accScoreAdd(accThermal.errAccum, accThermal.timeAccum, accThermal.worstOver, err, over, dtSec);
   }
-}
-
-void thermalScore_init() {
-  Serial.printf("ThermalTuning: %d record slots × %u bytes = %u bytes in PSRAM\n",
-                50, (unsigned)sizeof(ThermalTuningRecord),
-                (unsigned)(50 * sizeof(ThermalTuningRecord)));
 }
 
 void AdjustFieldLearnMode() {
@@ -1378,6 +1164,17 @@ void AdjustFieldLearnMode() {
   updateProtectionCounters(preReason);
   if (shouldImmediatelyCutGPIO4(preReason) && !gpio4IsLow) {
     applyImmediateCut(tick, preReason);
+    return;
+  }
+
+  // Engine confirmed stopped (RPM held at 0 for >= RPM_ZERO_CUT_MS): cut the field
+  // immediately, overriding any graceful shutdown ramp. CHARGING_DISABLED (priority 1a)
+  // outranks the RPM gate, so on a normal key-off + engine-stop the field would otherwise
+  // slow-ramp for ~30s while still energized — coupling PWM noise into the LM2907 RPM sense
+  // (phantom RPM spikes). Placed pre-CH1-gate so it fires at full loop rate regardless of
+  // current-sensor freshness. Forced reason RPM_TOO_LOW so the log/telemetry name the cause.
+  if (tick.engineFullyStopped && !gpio4IsLow) {
+    applyImmediateCut(tick, REASON_RPM_TOO_LOW);
     return;
   }
 
@@ -1888,7 +1685,7 @@ void AdjustFieldLearnMode() {
   if (!sysIDRunning) {
 
     // ========== SETPOINT COMPUTATION (AUTO mode only) ==========
-    float setpointCommand = 0.0f;
+    setpointCommand = 0.0f;   // global (declared in Xregulator.ino) — read by the Control Accuracy score gate
 
     // Tracks voltageControlActive across both AUTO and MANUAL branches so AUTO
     // re-entry from MANUAL correctly fires the bumpless CV seed. Declared here
@@ -1898,6 +1695,13 @@ void AdjustFieldLearnMode() {
     if (sysMode == SYS_MODE_AUTO) {
 
       static bool lastTuningMode = false;
+
+      // Keep the temperature filter / slope / projection live on EVERY auto tick, in both
+      // branches below. tempPID_tick (normal-AUTO only) used to own this, so the filtered
+      // temp froze during TuningMode and commissioning sub-steps — the plot and thermal log
+      // then showed a dead-flat line while the real alternator kept heating. Pure
+      // display/estimator math, no PID/field side effects. (2026-06-23)
+      tempFilterUpdate(currentMillis);
 
       if (TuningMode) {
         // ===== TUNING MODE (square-wave setpoint generator) =====
@@ -2011,7 +1815,10 @@ void AdjustFieldLearnMode() {
         // Detect TuningMode exit — fires exactly once.
         if (lastTuningMode) {
           tempPIDActive = false;
-          tempFilterNeedsReseed = true;
+          // No tempFilterNeedsReseed here anymore: tempFilterUpdate() kept the filter and
+          // slope live throughout tuning, so tempFiltered/projectedTempF are already on the
+          // true temperature on resume. Forcing a reseed would only discard a good live value
+          // and cold-start the IIR (and zero the slope) for no benefit. (2026-06-23)
           tuningScore = {};  // discard accumulator — commit is always manual
         }
         lastTuningMode = false;
@@ -2805,6 +2612,13 @@ void AdjustFieldLearnMode() {
         float effectiveRiseRate;
         if (inStartupRamp)              effectiveRiseRate = StartupRiseRate;
         else if (postProtectRiseActive) effectiveRiseRate = SetpointRiseRate * FastSetpointRiseRate;
+        // Large up-step gentling: when the commanded current jumps well above the current
+        // slew-limited setpoint, ramp at the slower SetpointBigStepRiseRate until the remaining
+        // gap closes to within SetpointBigStepThresh — then fall back to the normal fast rate for
+        // the final approach (preserves snappy small-error corrections). Down-moves untouched.
+        // Sits below the post-protection fast-rise so it never slows recovery out of a trip.
+        else if ((setpointCommand - setpointLimited) > SetpointBigStepThresh)
+                                        effectiveRiseRate = SetpointBigStepRiseRate;
         else                            effectiveRiseRate = SetpointRiseRate;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        effectiveRiseRate, effectiveFallRate, actualDtSec);
@@ -2886,13 +2700,20 @@ void AdjustFieldLearnMode() {
 
     // Inner current loop Control Accuracy score — authority gate: the field actuator must be
     // actively modulating (duty off both rails — not pinned at 0% nor 100%), no protection owning
-    // the output, past the startup ramp, and genuinely commanding current. Held 0.5 s before
-    // scoring (ACC_SETTLE_CURRENT_MS). A duty pinned at 100% means we can't make more current
-    // (low RPM / out of headroom), so that gap is not a tuning fault and isn't counted.
+    // the output, past the startup ramp, and genuinely commanding current. A duty pinned at 100%
+    // means we can't make more current (low RPM / out of headroom), so that gap is not a tuning
+    // fault and isn't counted.
+    // Slew gate (setpointCommand ≈ setpointLimited): while the slew-limited command is still
+    // travelling toward a new target (up to SetpointRiseRate/SetpointFallRate per sec), MeasuredAmps
+    // lags the moving command — on a commanded step-DOWN that lag reads as tens of amps of phantom
+    // "over-current" that is physics, not tuning. Scoring is suppressed for the whole slew, then
+    // held only ACC_SETTLE_CURRENT_MS (100 ms) after the command settles — short enough that a
+    // genuinely slow or ringing loop (the current loop should settle in ~200 ms) is still caught.
     {
       bool binding = !g_fastOvClampActive && !inStartupRamp
                      && dutyCycle > 1.0f && dutyCycle < 99.0f
-                     && setpointLimited > 2.0f;
+                     && setpointLimited > 2.0f
+                     && fabsf(setpointCommand - setpointLimited) <= 2.0f;  // command caught up — not mid-slew
       if (accBindingReady(accCurrent.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_CURRENT_MS)) {
         float err  = setpointLimited - MeasuredAmps;   // A; positive = under target
         float over = MeasuredAmps - setpointLimited;   // over-current side (damaging)
@@ -2904,6 +2725,18 @@ void AdjustFieldLearnMode() {
     // constraint, i.e. the CV PID output Icv is off both rails — above zero and strictly below the
     // current ceiling uTargetAmps (if Icv is pinned at the ceiling we're current-limited, not
     // voltage-regulating). No protection clamp. Held 2 s before scoring (ACC_SETTLE_VOLTAGE_MS).
+    // Target-step mirror of the current loop's slew gate: ChargingVoltageTarget steps instantly on
+    // a stage transition (e.g. absorption→float), so right after a step-DOWN IBV sits above the new
+    // target for the few ticks before Icv collapses below the binding floor — phantom over-voltage
+    // that is the stage change, not tuning. Restart the settle timer on any target change so those
+    // ticks are skipped. (ACC_SETTLE_VOLTAGE_MS stays at 2 s — the CV loop genuinely settles slowly.)
+    {
+      static float accPrevVTarget = 0.0f;
+      if (fabsf(ChargingVoltageTarget - accPrevVTarget) > 0.01f) {
+        accVoltage.bindingStartMs = 0;   // target stepped → restart settle
+        accPrevVTarget = ChargingVoltageTarget;
+      }
+    }
     if (voltageControlActive) {
       bool binding = !g_fastOvClampActive && Icv > 0.5f && Icv < (uTargetAmps - 0.5f);
       if (accBindingReady(accVoltage.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_VOLTAGE_MS)) {
@@ -3702,9 +3535,19 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   // Control state
   tick.manualMode = (ManualFieldToggle == 1);
   tick.autoZeroActive = (autoZeroStartTime > 0);
-  tick.ignoreTemperature = (IgnoreTemperature != 0) || (ThermalTuningMode != 0);
+  tick.ignoreTemperature = (IgnoreTemperature != 0);
   tick.ignoreRPM = (IgnoreRPM != 0);
   tick.rpmBelowMinimum = (!tick.ignoreRPM && RPM < (float)MinRPMForField);
+
+  // Engine confirmed stopped: RPM held at exactly 0 for >= RPM_ZERO_CUT_MS. RPM is already
+  // floored to 0 below 100 in ReadAnalogInputs, so RPM <= 0 means a true zero. Skipped when
+  // IgnoreRPM is set (no trustworthy RPM signal). Drives the immediate-cut override below.
+  if (!tick.ignoreRPM && RPM <= 0.0f) {
+    if (rpmZeroSinceMs == 0) rpmZeroSinceMs = currentMillis;
+  } else {
+    rpmZeroSinceMs = 0;
+  }
+  tick.engineFullyStopped = (rpmZeroSinceMs != 0 && (currentMillis - rpmZeroSinceMs) >= RPM_ZERO_CUT_MS);
 
   // Charging enabled (with BMS and weather mode overrides)
   bool chargingEnabledLocal = (Ignition == 1 && OnOff == 1);
@@ -3839,23 +3682,30 @@ void resetLearningTableToDefaults() {
   // Reset diagnostics
   totalLearningEvents = 0;
   totalOverheats = 0;
-  // Reset to Normal mode so saveUserTableEdits() writes Normal defaults to "capTable"
-  HiLow = 1;
-  settingWrite(NK_HiLow, "1");
-  saveUserTableEdits();  // saves Normal defaults to capTable / capPowerTable
-  // Also write Lo defaults to capTableLo so that mode starts clean
+  // Persist factory defaults for BOTH charge-rate modes explicitly, WITHOUT touching HiLow.
+  // The old code force-set HiLow=1 here purely so saveUserTableEdits() would target the "capTable"
+  // (Normal) key — but that silently kicked a Low-mode user back to Normal on every reset, including
+  // the auto-reset that fires at boot when learning NVS is missing/invalid. We now write both mode
+  // blobs directly and leave the user's selected mode alone.
   {
     float loDefaults[RPM_TABLE_SIZE];
     float loDefaultsPwr[RPM_TABLE_SIZE] = { 0 };
     for (int i = 0; i < RPM_TABLE_SIZE; i++) loDefaults[i] = defaultCapCurrentValues[i] * 0.25f;
-    nvs_handle_t nvs_lo;
-    if (nvs_open("learning", NVS_READWRITE, &nvs_lo) == ESP_OK) {
-      nvs_set_blob(nvs_lo, "capTableLo", loDefaults, sizeof(loDefaults));
-      nvs_set_blob(nvs_lo, "capPowerTableLo", loDefaultsPwr, sizeof(loDefaultsPwr));
-      nvs_commit(nvs_lo);
-      nvs_close(nvs_lo);
+    nvs_handle_t nvs_h;
+    if (nvs_open("learning", NVS_READWRITE, &nvs_h) == ESP_OK) {
+      nvs_set_blob(nvs_h, "rpmPoints", rpmTableRPMPoints, sizeof(rpmTableRPMPoints));
+      nvs_set_blob(nvs_h, "capTable", defaultCapCurrentValues, sizeof(defaultCapCurrentValues));   // Normal/High
+      nvs_set_blob(nvs_h, "capPowerTable", defaultCapPowerValues, sizeof(defaultCapPowerValues));  // Normal/High
+      nvs_set_blob(nvs_h, "capTableLo", loDefaults, sizeof(loDefaults));                            // Low (25%)
+      nvs_set_blob(nvs_h, "capPowerTableLo", loDefaultsPwr, sizeof(loDefaultsPwr));                 // Low
+      nvs_set_u8(nvs_h, "capLimitMode", capLimitMode);
+      nvs_set_blob(nvs_h, "minDutyTable", rpmMinDutyTable, sizeof(rpmMinDutyTable));
+      nvs_commit(nvs_h);
+      nvs_close(nvs_h);
     }
   }
+  // Refresh the live arrays for the user's ACTUAL mode (Normal or Low) — not a forced Normal.
+  loadCapTablesForMode(HiLow);
   queueConsoleMessage("Learning: All tables reset to factory defaults");
 }
 void loadLearningTableFromNVS() {
@@ -4096,7 +3946,6 @@ void updateRPMBucketHistory(uint32_t nowMs) {
   if (dtMs > 500) dtMs = 500;
   lastHistoryMs = nowMs;
 
-  if (ThermalTuningMode) return;  // don't record overheat history during step tests
   if (isnan(TempToUse) || TempToUse < -50.0f || TempToUse > 400.0f) return;
   if (dtMs == 0) return;
 
@@ -4341,17 +4190,62 @@ void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
   settingsDirty = true;   // push the CSV3 Min% echo promptly so the table cells track the learned floor (not the 60s heartbeat)
 }
 
-// Fit the Min% column from the committed onset-knee anchors (commissioning). Empirical only — no
-// physics model: linear interpolation across the anchors by RPM (hold the ends), enforced monotone
-// non-increasing (the knee falls as RPM rises). Each anchor's measured knee is first normalized to
-// kneeTempRefF (the same copper-temp curve getMinimumFieldForRPM applies live, so the two cancel),
-// then parked kneeMarginPct below. Writes the learner's FROZEN baseline, so the background re-arm
-// just maintains drift from here. Bin 0 stays locked at 0%. Returns false if < 4 anchors (the UI
-// requires 4 before Apply; this is the matching firmware guard).
-bool kneeCurveApply() {
-  if (kneeAnchorN < 4) return false;
+// Least-squares fit of the physical onset model  knee = a + C/RPM  over the committed anchors.
+// Physics: in the linear field region the onset duty (where output current just begins) goes as
+// R_field/(k·RPM) — inversely with RPM, battery-voltage-independent to first order. `a` absorbs the
+// small constant rectifier/brush threshold; `C` is the lumped R_field/k. Each anchor's measured knee
+// is first normalized to kneeTempRefF (knee scales with copper R, ~0.218 %/°F of itself). With a
+// 2-parameter model, 3 anchors give the fit PLUS one residual to spot a bad point — hence the UI
+// captures exactly 3. Outputs the worst |measured − fit| residual and which anchor it was, for the
+// review screen's outlier flag. Returns false if < 2 anchors or the RPM span is degenerate.
+bool kneeFitModel(float &outA, float &outC, float &outResidPct, int &outWorstIdx) {
+  outA = 0.0f; outC = 0.0f; outResidPct = -1.0f; outWorstIdx = -1;
+  if (kneeAnchorN < 2) return false;
+  // Regress y = a + C·x with x = 1/RPM, y = temp-normalized knee.
+  double sx = 0, sy = 0, sxx = 0, sxy = 0;
+  int n = kneeAnchorN;
+  float kneeRef[KNEE_ANCHOR_MAX];
+  for (int i = 0; i < n; i++) {
+    kneeRef[i] = kneeAnchorDuty[i] * (1.0f + 0.00218f * (kneeTempRefF - kneeAnchorTempF[i]));
+    double x = (kneeAnchorRPM[i] > 1.0f) ? 1.0 / kneeAnchorRPM[i] : 0.0;
+    sx += x; sy += kneeRef[i]; sxx += x * x; sxy += x * kneeRef[i];
+  }
+  double denom = (double)n * sxx - sx * sx;
+  if (fabs(denom) < 1e-12) return false;       // all anchors at ~same RPM — no leverage on C
+  double C = ((double)n * sxy - sx * sy) / denom;
+  double a = (sy - C * sx) / (double)n;
+  if (C < 0) C = 0;                            // onset must rise as RPM falls; clamp a perverse fit
+  outA = (float)a; outC = (float)C;
+  // Worst residual (in % duty) across the anchors.
+  float worst = 0.0f; int worstIdx = -1;
+  for (int i = 0; i < n; i++) {
+    float pred = (float)(a + C * ((kneeAnchorRPM[i] > 1.0f) ? 1.0 / kneeAnchorRPM[i] : 0.0));
+    float r = fabsf(kneeRef[i] - pred);
+    if (r > worst) { worst = r; worstIdx = i; }
+  }
+  outResidPct = worst; outWorstIdx = worstIdx;
+  return true;
+}
 
-  // Sort anchors ascending by RPM (tiny n — insertion sort).
+// Fit the Min% column from the committed onset-knee anchors (commissioning) via the kneeFitModel()
+// physical curve above, then write it into rpmMinDutyTable (the learner's FROZEN baseline, so the
+// background re-arm just maintains drift from here). Bin 0 stays locked at 0%. Returns false if < 3
+// anchors (the UI captures 3 before Apply; this is the matching firmware guard).
+//
+// END BEHAVIOR (SAFETY-CRITICAL — do not change to flat-hold):
+//   - BELOW the lowest anchor RPM: the model continues (onset keeps rising), clamped to maxKnee. Safe
+//     — a floor at low RPM never prevents the field from shutting off.
+//   - ABOVE the highest anchor RPM: force the floor to ZERO. The floor is a MINIMUM field the
+//     regulator is forced to hold; carrying any floor past the commissioned range would force minimum
+//     excitation the regulator could never turn off at high RPM → overvoltage/runaway. The UI captures
+//     the user's MAXIMUM working RPM as the top anchor for exactly this reason — it is the zero-ceiling.
+//     (A 1/RPM model is monotone-decreasing by construction, so it can never PRODUCE a dangerous high
+//     floor at high RPM either — but the hard zero above the ceiling is the guarantee.)
+bool kneeCurveApply() {
+  if (kneeAnchorN < 3) return false;
+
+  // Sort anchors ascending by RPM (tiny n — insertion sort). The fit is order-independent, but the
+  // ceiling (= last anchor's RPM) and the diagnostic temp average read cleanest from sorted anchors.
   for (int i = 1; i < kneeAnchorN; i++) {
     float r = kneeAnchorRPM[i], d = kneeAnchorDuty[i], t = kneeAnchorTempF[i];
     int j = i - 1;
@@ -4364,50 +4258,44 @@ bool kneeCurveApply() {
     kneeAnchorRPM[j + 1] = r; kneeAnchorDuty[j + 1] = d; kneeAnchorTempF[j + 1] = t;
   }
 
-  // Normalize each anchor knee to kneeTempRefF (knee scales with copper R, ~0.218 %/°F of itself).
-  float kneeRef[KNEE_ANCHOR_MAX];
-  for (int i = 0; i < kneeAnchorN; i++)
-    kneeRef[i] = kneeAnchorDuty[i] * (1.0f + 0.00218f * (kneeTempRefF - kneeAnchorTempF[i]));
+  float a, C, resid; int worstIdx;
+  if (!kneeFitModel(a, C, resid, worstIdx)) return false;
+  kneeFitA = a; kneeFitC = C; kneeFitResidPct = resid; kneeFitWorstIdx = worstIdx;
+
+  // Average measured case temp across the anchors — diagnostic only (the "Learn °F" column); the live
+  // correction uses the global kneeTempRefF, and the stored floors ARE normalized to kneeTempRefF.
+  float tempAvg = 0.0f;
+  for (int i = 0; i < kneeAnchorN; i++) tempAvg += kneeAnchorTempF[i];
+  tempAvg /= (float)kneeAnchorN;
 
   const float maxKnee = kneeMaxFloorPct + kneeMarginPct;
+  const float ceilingRPM = kneeAnchorRPM[kneeAnchorN - 1];  // highest commissioned RPM = the zero-ceiling
   float prev = 1e9f;  // running cap for monotone non-increasing knee-vs-RPM
   for (int b = 0; b < RPM_TABLE_SIZE; b++) {
     float rpmB = (float)rpmTableRPMPoints[b];
-    float kneeB, tempB;  // tempB = actual measured case temp at this bin's anchors (interpolated)
-    if (rpmB <= kneeAnchorRPM[0]) { kneeB = kneeRef[0]; tempB = kneeAnchorTempF[0]; }
-    else if (rpmB >= kneeAnchorRPM[kneeAnchorN - 1]) { kneeB = kneeRef[kneeAnchorN - 1]; tempB = kneeAnchorTempF[kneeAnchorN - 1]; }
-    else {
-      kneeB = kneeRef[kneeAnchorN - 1]; tempB = kneeAnchorTempF[kneeAnchorN - 1];
-      for (int i = 1; i < kneeAnchorN; i++) {
-        if (rpmB <= kneeAnchorRPM[i]) {
-          float dr = kneeAnchorRPM[i] - kneeAnchorRPM[i - 1];
-          float f = (dr > 0.001f) ? (rpmB - kneeAnchorRPM[i - 1]) / dr : 0.0f;
-          kneeB = kneeRef[i - 1] + f * (kneeRef[i] - kneeRef[i - 1]);
-          tempB = kneeAnchorTempF[i - 1] + f * (kneeAnchorTempF[i] - kneeAnchorTempF[i - 1]);
-          break;
-        }
-      }
-    }
+    float kneeB;
+    // SAFETY: above the highest commissioned RPM force the floor to ZERO (see header). Otherwise
+    // evaluate the fitted onset = a + C/RPM at this bin.
+    if (rpmB > ceilingRPM) kneeB = 0.0f;
+    else kneeB = a + C / fmaxf(rpmB, 1.0f);
+    if (kneeB < 0) kneeB = 0;
     if (kneeB > prev) kneeB = prev;  // enforce non-increasing with RPM
     prev = kneeB;
-    if (kneeB < 0) kneeB = 0;
     if (kneeB > maxKnee) kneeB = maxKnee;
 
     float floorB = (b == 0) ? 0.0f : fmaxf(0.0f, fminf(kneeB - kneeMarginPct, kneeMaxFloorPct));
     kneeKnee[b] = kneeB;
     kneeFloor[b] = floorB;
     kneeFrozen[b] = true;
-    // Diagnostic only — the live correction uses the global kneeTempRefF, not this. Store the ACTUAL
-    // measured temp (like the background learner stores caseF) so the "Learn °F" column reflects the
-    // commissioning measurement, not the reference. The stored floor IS normalized to kneeTempRefF.
-    kneeLearnTempF[b] = tempB;
+    kneeLearnTempF[b] = tempAvg;
     rpmMinDutyTable[b] = floorB;
   }
 
   kneeStateDirty = true;            // persist knee blobs on the next field-off flush
   settingsDirty = true;             // push the CSV3 Min% echo so the table cells update now
   pendingSaveUserTableEdits = true; // persist rpmMinDutyTable via the same path as a manual edit
-  queueConsoleMessageF("Min%% curve applied from %d anchors", kneeAnchorN);
+  queueConsoleMessageF("Min%% curve applied: %d anchors, fit a=%.1f%% C=%.0f, worst resid %.2f%%",
+                       kneeAnchorN, a, C, resid);
   return true;
 }
 
@@ -4584,6 +4472,73 @@ void tempPID_init() {
   Serial.printf("TempPID: Init | Kp=%.2f Ki=%.3f Lookahead=%.1fs Interval=%lums\n",
                 TempPIDKp, TempPIDKi, ThermalLookaheadSec, (unsigned long)TempPIDIntervalMs);
 }
+// ---------------------------------------------------------------------------
+//  tempFilterUpdate — IIR filter + slope estimator + projected-temp lookahead.
+//  Pure display/estimator math: updates tempFiltered, the slope buffer,
+//  thermalSlopeFPerSec, and projectedTempF. NO PID, NO field, NO persisted state.
+//  Split out of tempPID_tick (2026-06-23) and called every AUTO tick — including
+//  TuningMode and the commissioning sub-steps that toggle it — so the dashboard
+//  plot and thermal log show the REAL temperature during tuning instead of a value
+//  frozen at whatever it was when the tuning step began. Skips on invalid temp so a
+//  NaN / out-of-range sensor read never poisons the filter (same guard tempPID_tick
+//  already applied before it ran the filter inline).
+// ---------------------------------------------------------------------------
+void tempFilterUpdate(uint32_t nowMs) {
+  bool tempValueSane = !isnan(TempToUse) && (TempToUse > -50.0f) && (TempToUse < 400.0f);
+  if (!tempValueSane) return;  // hold last filtered value; do not poison with garbage
+
+  // ---------------------------------------------------------------------------
+  //  IIR filter
+  // ---------------------------------------------------------------------------
+  if (isnan(tempFiltered) || tempFilterNeedsReseed) {
+    tempFiltered = TempToUse;
+    tempFilterNeedsReseed = false;
+  } else {
+    float alpha = (TempSource == 0) ? TempPIDFilterAlpha : 0.02f;  // thermistor alpha hardcoded — not user-configurable
+    tempFiltered = alpha * TempToUse + (1.0f - alpha) * tempFiltered;
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Slope estimator: long-window backward difference.
+  //  Runs at TempPIDIntervalMs cadence (same as Compute). Buffer holds
+  //  THERMAL_SLOPE_BUF readings; window = (THERMAL_SLOPE_BUF - 1) × 5s = 60s.
+  //  Slope only valid once buffer is full. Hard clamp catches sensor garbage.
+  // ---------------------------------------------------------------------------
+  if ((uint32_t)(nowMs - thermalSlopeLastPushMs) >= TempPIDIntervalMs) {
+    thermalSlopeLastPushMs = nowMs;
+    float tempSample = (TempSource == 0) ? TempToUse : tempFiltered;
+    thermalSlopeBuffer[thermalSlopeBufIdx] = tempSample;
+    thermalSlopeBufIdx = (thermalSlopeBufIdx + 1) % THERMAL_SLOPE_BUF;
+    if (thermalSlopeBufIdx == 0) thermalSlopeBufFull = true;
+
+    if (thermalSlopeBufFull) {
+      float oldest = thermalSlopeBuffer[thermalSlopeBufIdx];
+      const float windowSec = (float)(THERMAL_SLOPE_BUF - 1) * (TempPIDIntervalMs / 1000.0f);
+      float rawSlope = (tempSample - oldest) / windowSec;
+      const float SLOPE_CLAMP = 0.5f;  // °F/sec — beyond this is sensor noise or fault
+      if (fabsf(rawSlope) > SLOPE_CLAMP) {
+        // Reject as sensor noise; hold the previous slope so a real fast rise still has
+        // predictive signal while one outlier sample rolls through the 60s window.
+        // Old behavior was to clamp to ±0.5 — that injected up to ±15 °F false lookahead.
+        static uint32_t slopeClampLastLogMs = 0;
+        if ((uint32_t)(nowMs - slopeClampLastLogMs) >= 60000) {
+          slopeClampLastLogMs = nowMs;
+          queueConsoleMessageF("TempPID: raw slope %.3f °F/s rejected as sensor noise — holding previous", rawSlope);
+        }
+        rawSlope = thermalSlopeFPerSec;  // hold previous good value
+      }
+      thermalSlopeFPerSec = rawSlope;
+    } else {
+      thermalSlopeFPerSec = 0.0f;  // buffer not yet full — no prediction yet
+    }
+  }
+  // Update projected temperature every call so PID input is always fresh.
+  {
+    float tempNow = (TempSource == 0) ? TempToUse : tempFiltered;
+    projectedTempF = isnan(tempNow) ? tempFiltered : (tempNow + thermalSlopeFPerSec * ThermalLookaheadSec);
+  }
+}
+
 void tempPID_tick(uint32_t nowMs, float actualDtSec) {
 
   // --- Hard reset path (requested externally, e.g. from web UI command) ---
@@ -4641,56 +4596,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     return;  // Hold last valid penalty — do not touch thermalPenaltyAmps.
   }
 
-  // ---------------------------------------------------------------------------
-  //  IIR filter
-  // ---------------------------------------------------------------------------
-  if (isnan(tempFiltered) || tempFilterNeedsReseed) {
-    tempFiltered = TempToUse;
-    tempFilterNeedsReseed = false;
-  } else {
-    float alpha = (TempSource == 0) ? TempPIDFilterAlpha : 0.02f;  // thermistor alpha hardcoded — not user-configurable
-    tempFiltered = alpha * TempToUse + (1.0f - alpha) * tempFiltered;
-  }
-
-  // ---------------------------------------------------------------------------
-  //  Slope estimator: long-window backward difference.
-  //  Runs at TempPIDIntervalMs cadence (same as Compute). Buffer holds
-  //  THERMAL_SLOPE_BUF readings; window = (THERMAL_SLOPE_BUF - 1) × 5s = 60s.
-  //  Slope only valid once buffer is full. Hard clamp catches sensor garbage.
-  // ---------------------------------------------------------------------------
-  if ((uint32_t)(nowMs - thermalSlopeLastPushMs) >= TempPIDIntervalMs) {
-    thermalSlopeLastPushMs = nowMs;
-    float tempSample = (TempSource == 0) ? TempToUse : tempFiltered;
-    thermalSlopeBuffer[thermalSlopeBufIdx] = tempSample;
-    thermalSlopeBufIdx = (thermalSlopeBufIdx + 1) % THERMAL_SLOPE_BUF;
-    if (thermalSlopeBufIdx == 0) thermalSlopeBufFull = true;
-
-    if (thermalSlopeBufFull) {
-      float oldest = thermalSlopeBuffer[thermalSlopeBufIdx];
-      const float windowSec = (float)(THERMAL_SLOPE_BUF - 1) * (TempPIDIntervalMs / 1000.0f);
-      float rawSlope = (tempSample - oldest) / windowSec;
-      const float SLOPE_CLAMP = 0.5f;  // °F/sec — beyond this is sensor noise or fault
-      if (fabsf(rawSlope) > SLOPE_CLAMP) {
-        // Reject as sensor noise; hold the previous slope so a real fast rise still has
-        // predictive signal while one outlier sample rolls through the 60s window.
-        // Old behavior was to clamp to ±0.5 — that injected up to ±15 °F false lookahead.
-        static uint32_t slopeClampLastLogMs = 0;
-        if ((uint32_t)(nowMs - slopeClampLastLogMs) >= 60000) {
-          slopeClampLastLogMs = nowMs;
-          queueConsoleMessageF("TempPID: raw slope %.3f °F/s rejected as sensor noise — holding previous", rawSlope);
-        }
-        rawSlope = thermalSlopeFPerSec;  // hold previous good value
-      }
-      thermalSlopeFPerSec = rawSlope;
-    } else {
-      thermalSlopeFPerSec = 0.0f;  // buffer not yet full — no prediction yet
-    }
-  }
-  // Update projected temperature every call so PID input is always fresh.
-  {
-    float tempNow = (TempSource == 0) ? TempToUse : tempFiltered;
-    projectedTempF = isnan(tempNow) ? tempFiltered : (tempNow + thermalSlopeFPerSec * ThermalLookaheadSec);
-  }
+  // tempFiltered, the slope buffer / thermalSlopeFPerSec, and projectedTempF are updated
+  // by tempFilterUpdate() — called every AUTO tick (including TuningMode) BEFORE this
+  // function runs — so they are already fresh here. Split out 2026-06-23 so the dashboard
+  // plot and thermal log keep showing real temperature during tuning/commissioning instead
+  // of freezing at the value present when the tuning step began. See tempFilterUpdate() above.
 
   // Re-enable after stale period — bumpless transfer. All three penalty state
   // vars are seeded to resumePenalty (clamped to current stage bounds) so the
@@ -4698,12 +4608,16 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //   thermalPenaltyAmps      — read by command chain this tick
   //   prevThermalPenalty      — slew limiter's "prev" on next pidComputed tick
   //   thermalPenaltyLastValid — returned by stale-hold path if temp goes stale
-  // ===== THERMAL TUNING MODE: use wave setpoint if test is active =====
-  // thermalTuning_tick() runs at the END of this function and updates
-  // thermalWaveCurrentSetpointF for the NEXT tick (one-tick lag is fine at 5s PID intervals).
-  const float activeTempLimit = (ThermalTuningMode && thermalTuningScore.testStarted)
-                                  ? thermalWaveCurrentSetpointF
-                                  : TemperatureLimitF;
+  const float activeTempLimit = TemperatureLimitF;
+
+  // Suppress the 60s warmup margin (−20°F) during commissioning and any tuning. Those flows
+  // toggle the field / TuningMode repeatedly, re-seeding the slope buffer over and over, so the
+  // margin would keep stepping the setpoint 155<->140 and derate current mid-test (corrupting
+  // sysID/stabilization/CV/thermal-tuning measurements). The hard trips (limit+TempWarnExcess
+  // warning ramp, limit+TempCritExcess critical) are NOT gated by this, so no damage protection
+  // is lost — only the soft "react-early-while-blind" margin, and only while supervised. Normal
+  // operation and post-trip resume keep the full −20°F margin. See Thermal_Loop_Dev_Summary.md.
+  const bool suppressWarmupMargin = (commissionState == 1) || (TuningMode != 0);
 
   if (!tempPIDActive) {
     tempPID.SetOutputLimits((double)penaltyMin, (double)penaltyMax);
@@ -4723,7 +4637,9 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
 
     // Warmup setpoint: buffer just cleared so slope = 0 for 60s. Apply fallback margin
     // so the PID reacts before temp reaches the hard limit during the unprotected window.
-    const float reEnableSetpoint = activeTempLimit - 20.0f;
+    // suppressWarmupMargin (commissioning + tuning, computed above) drops this to the normal
+    // −5°F so a re-seed mid-test doesn't keep seeding a spurious resume penalty.
+    const float reEnableSetpoint = activeTempLimit - (suppressWarmupMargin ? 5.0f : 20.0f);
 
     tempPIDInput_d = (double)projectedTempF;
     thermalPenaltyAmps_d = (double)thermalPenaltyLastValid;
@@ -4760,19 +4676,35 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //  effectiveSetpoint applies a 20°F fallback margin during the 60s warmup
   //  window (thermalSlopeBufFull == false) so the PID starts reacting before
   //  projected temp reaches the hard limit. Once the buffer fills, margin = 0.
+  //  suppressWarmupMargin (commissioning + tuning, computed above) forces the
+  //  margin to the normal −5°F so the live setpoint holds steady instead of
+  //  stepping 155<->140 and derating mid-test. Hard trips are unaffected.
   // ---------------------------------------------------------------------------
-  const float effectiveSetpoint = thermalSlopeBufFull ? (activeTempLimit - 5.0f) : (activeTempLimit - 20.0f);
+  const float warmupMargin = suppressWarmupMargin ? 5.0f : 20.0f;
+  const float effectiveSetpoint = thermalSlopeBufFull ? (activeTempLimit - 5.0f) : (activeTempLimit - warmupMargin);
   tempPIDSetpoint_d = (double)effectiveSetpoint;
-  // PID input is the worse of projected and present temp — projection alone forgives
-  // the entire present error whenever slope <= 0, releasing penalty while still hot.
-  // lookaheadDeltaF = how many °F the projection adds above present temp; its Kp-scaled
-  // amps equivalent is captured as outerTermLookahead in the pidComputed block below.
+  // SPLIT-INPUT (2026-06-22): PID input is PRESENT temp only. The library integrates AND
+  // proportions on present error eI = present − setpoint, so the integrator can no longer
+  // wind on projection-inflated error — that was the case-4 rising-climb windup (BigTeharm/
+  // fuckingoverheated). The projection's anticipatory lead is NOT lost: it is re-added as an
+  // external feedforward Kp·lookaheadDeltaF on the penalty output in the pidComputed block
+  // below (the same quantity already logged as outerTermLookahead). Because the gating var
+  // aboveSetpoint keys off tempPIDInput_d, the integrator freezes now correctly key off
+  // present temp, which is the right domain for them. lookaheadDeltaF = °F the projection
+  // adds above present temp (was previously only a diagnostic decomposition; now it is the
+  // actual feedforward term).
   float lookaheadDeltaF;
   float tempNowPid;
   {
     tempNowPid = (TempSource == 0) ? TempToUse : tempFiltered;
-    lookaheadDeltaF = fmaxf(0.0f, projectedTempF - tempNowPid);
-    tempPIDInput_d = (double)fmaxf(projectedTempF, tempNowPid);
+    // Feedforward = projection's amps ABOVE max(present, setpoint), NOT above present. This
+    // makes total penalty = max(0, Kp·(present−setpoint)) + Kp·lookaheadDeltaF exactly equal
+    // the old Kp·(max(proj,present)−setpoint): when hot it adds the proj-over-present lead;
+    // during the cold approach (present < setpoint) it reduces to Kp·(proj−setpoint), so the
+    // approach cut is bit-identical to the pre-split behavior. Measuring above present alone
+    // would double-count the present-to-setpoint gap and over-penalize the approach.
+    lookaheadDeltaF = fmaxf(0.0f, projectedTempF - fmaxf(tempNowPid, effectiveSetpoint));
+    tempPIDInput_d = (double)tempNowPid;
   }
 
   // One-shot approach gate: released the first time PRESENT temp (not the
@@ -4787,8 +4719,9 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
 
   // Integrator freeze — blocks UPWARD winding only (error > 0); unwinding below
   // setpoint is never blocked. Implemented by forcing Ki to 0 for the tick: the
-  // library's integrator holds exactly, P and the projection stay live, and the
-  // logged outerI shows the true frozen value. Five freeze cases:
+  // library's integrator holds exactly, P and the projection feedforward stay live, and the
+  // logged outerI shows the true frozen value. Freeze cases (case 4 RETIRED 2026-06-22 by
+  // split-input — see below):
   //   1. Approach gate not yet released (above).
   //   2. Saturation vs live authority: the applied penalty already covers the
   //      live RPM-table cap, so further winding is dead authority that must
@@ -4805,9 +4738,13 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //      rising, so it adds zero risk in the toward-the-limit direction. Bite is
   //      limited by the 60s slope-estimator latency (~30s) at the current window
   //      — safe but partial until the shorter-window future work lands.
-  //   4. Rising transient (added 2026-06-15): above setpoint and slope > flat band.
-  //      Freezes integrator overbuild on the projection-inflated rising overshoot;
-  //      slow drift (<= band) still winds so heat-soak tracks. See dev summary.
+  //   4. Rising transient (added 2026-06-15, RETIRED 2026-06-22). Was: freeze when above
+  //      setpoint and slope > flat band, to stop overbuild on the projection-inflated rising
+  //      overshoot. But it also froze the integrator through REAL sustained over-setpoint
+  //      climbs (BigTeharm rel 1282–1340 / fuckingoverheated), starving the holding derate.
+  //      Split-input removes its reason to exist: the integrator now sees present error only,
+  //      so there is no projection-inflated windup to freeze — it just builds the correct
+  //      holding level while hot. Deleted from the freeze chain below.
   //   5. Equilibrium clamp (revised 2026-06-16): the dwell at the top of an overshoot
   //      reads slope≈0 so cases 3/4 miss it — the integrator wound there to ~2x the
   //      holding level, over-cut current, and sustained a relaxation cycle (longthermal
@@ -4835,8 +4772,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
                              && (prevThermalPenalty >= capCurrent - 0.5f);
   const bool descentFreeze = aboveSetpoint && thermalIntegratorReleased
                              && (thermalSlopeFPerSec < 0.0f);
-  const bool risingTransientFreeze = aboveSetpoint && thermalIntegratorReleased
-                             && (thermalSlopeFPerSec > THERMAL_I_FLAT_BAND);
+  // (case 4 risingTransientFreeze retired 2026-06-22 — see comment block above)
 
   // Equilibrium clamp (case 5). Sample the integral term as the holding-level estimate
   // ONLY when genuinely settled at setpoint (small error AND flat slope) — there the
@@ -4860,7 +4796,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
                            && (fabsf(thermalSlopeFPerSec) <= THERMAL_I_FLAT_BAND)
                            && (iTermNow >= holdCeiling);
   bool freezeIntegrator = aboveSetpoint
-                          && (!thermalIntegratorReleased || satFreeze || descentFreeze || risingTransientFreeze || equilibriumFreeze);
+                          && (!thermalIntegratorReleased || satFreeze || descentFreeze || equilibriumFreeze);
 
   // Tier-0a instrumentation (2026-06-22): record WHICH freeze case gated this tick so a
   // future session reads the cause directly instead of reverse-engineering it (every prior
@@ -4869,8 +4805,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   else if (!thermalIntegratorReleased)  thermalFreezeReason = 1;  // approach gate (present temp hasn't reached setpoint yet)
   else if (satFreeze)                   thermalFreezeReason = 2;  // penalty pinned at live rpm cap
   else if (descentFreeze)               thermalFreezeReason = 3;  // above setpoint and cooling (slope < 0)
-  else if (risingTransientFreeze)       thermalFreezeReason = 4;  // above setpoint and rising > flat band
-  else                                  thermalFreezeReason = 5;  // equilibrium-clamp ceiling
+  else                                  thermalFreezeReason = 5;  // equilibrium-clamp ceiling (case 4 retired 2026-06-22)
   {
     // Log the saturation case only (descent fires every cycle — its signature is
     // outerI flat-while-falling in the thermal log, no console spam needed).
@@ -4922,7 +4857,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   //  All use penaltyMin / penaltyMax — no re-derivation.
   // ---------------------------------------------------------------------------
   if (pidComputed) {
-    thermalPenaltyAmps = (float)thermalPenaltyAmps_d;
+    // Split-input (2026-06-22): the library output is P+I on PRESENT temp. Re-add the
+    // projection's anticipatory lead as an external feedforward (Kp·lookaheadDeltaF, the
+    // outerTermLookahead amps) so the approach cut keeps its phase lead. The integrator
+    // itself never saw the projection, so it cannot wind on it.
+    thermalPenaltyAmps = (float)thermalPenaltyAmps_d + TempPIDKp * lookaheadDeltaF;
 
     // Asymmetric slew limiter, then re-clamp with same bounds.
     thermalPenaltyAmps = slew_limit_f(prevThermalPenalty, thermalPenaltyAmps,
@@ -4949,10 +4888,11 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   // call so they remain inside the pidComputed block above.
   outerTermI = (float)tempPID.GetIterm();
 
-  // Tier-0a: the raw requested penalty before output clamp + slew = P + I terms. Compared
-  // against the applied penaltyAmps and the live rpmCap, this is the textbook requested-vs-
-  // applied saturation signal needed to evaluate the Tier-1 anti-windup rework.
-  outerPenaltyRaw = outerTermP + outerTermI;
+  // Tier-0a: the raw requested penalty before output clamp + slew. Under split-input this is
+  // P(present) + projection feedforward + I = outerTermP + outerTermLookahead + outerTermI.
+  // Compared against applied penaltyAmps and live rpmCap, it is the requested-vs-applied
+  // saturation signal.
+  outerPenaltyRaw = outerTermP + outerTermLookahead + outerTermI;
 
   // CV integrator bleed — now INERT, retained as a guard. Back when the thermal
   // penalty was allowed to go negative (the removed boost-when-cold feature), the
@@ -5000,7 +4940,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   }
 
   // Wave generator + scoring + always-on live score
-  thermalTuning_tick(nowMs, actualDtSec);
+  thermalAccuracyScore_tick(nowMs, actualDtSec);
 }
 void pidLog_init() {
   if (!psramFound()) {
@@ -5178,9 +5118,7 @@ void thermalLog_tick(uint32_t nowMs) {
   e.tempProjected = thermalLogScale10(projectedTempF);
   // effective setpoint: mirrors the logic in tempPID_tick (slopeBufFull = 5°F margin, else 20°F warmup margin)
   {
-    float logLimit = (ThermalTuningMode && thermalTuningScore.testStarted)
-                       ? thermalWaveCurrentSetpointF
-                       : TemperatureLimitF;
+    float logLimit = TemperatureLimitF;
     float logSetpoint = thermalSlopeBufFull ? (logLimit - 5.0f) : (logLimit - 20.0f);
     e.nominalTarget = thermalLogScale10(logSetpoint);
   }

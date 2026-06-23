@@ -1258,46 +1258,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvConsecutiveReads = (uint8_t)settingRead(NK_cvConsecutiveReads).toInt();
   }
-  if (!settingExists(NK_ThermalTuningMode)) {
-    settingWrite(NK_ThermalTuningMode, String(ThermalTuningMode).c_str());
-  } else {
-    ThermalTuningMode = settingRead(NK_ThermalTuningMode).toInt();
-  }
-  if (!settingExists(NK_thermalWaveLowF)) {
-    settingWrite(NK_thermalWaveLowF, String(thermalWaveLowF, 1).c_str());
-  } else {
-    thermalWaveLowF = settingRead(NK_thermalWaveLowF).toFloat();
-  }
-  if (!settingExists(NK_thermalWaveHighF)) {
-    settingWrite(NK_thermalWaveHighF, String(thermalWaveHighF, 1).c_str());
-  } else {
-    thermalWaveHighF = settingRead(NK_thermalWaveHighF).toFloat();
-  }
-  if (!settingExists(NK_thermalWaveHalfPeriodMin)) {
-    settingWrite(NK_thermalWaveHalfPeriodMin, String(thermalWaveHalfPeriodMin, 1).c_str());
-  } else {
-    thermalWaveHalfPeriodMin = settingRead(NK_thermalWaveHalfPeriodMin).toFloat();
-  }
-  if (!settingExists(NK_thermalKOvershoot)) {
-    settingWrite(NK_thermalKOvershoot, String(thermalKOvershoot, 1).c_str());
-  } else {
-    thermalKOvershoot = settingRead(NK_thermalKOvershoot).toFloat();
-  }
-  if (!settingExists(NK_thermalKUndershoot)) {
-    settingWrite(NK_thermalKUndershoot, String(thermalKUndershoot, 1).c_str());
-  } else {
-    thermalKUndershoot = settingRead(NK_thermalKUndershoot).toFloat();
-  }
-  if (!settingExists(NK_thermalSettleThreshF)) {
-    settingWrite(NK_thermalSettleThreshF, String(thermalSettleThreshF, 1).c_str());
-  } else {
-    thermalSettleThreshF = settingRead(NK_thermalSettleThreshF).toFloat();
-  }
-  if (!settingExists(NK_thermalConsecutiveReads)) {
-    settingWrite(NK_thermalConsecutiveReads, String(thermalConsecutiveReads).c_str());
-  } else {
-    thermalConsecutiveReads = (uint8_t)settingRead(NK_thermalConsecutiveReads).toInt();
-  }
   if (!settingExists(NK_ManualSOCPoint)) {
     settingWrite(NK_ManualSOCPoint, String(ManualSOCPoint).c_str());
   } else {
@@ -1543,6 +1503,16 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_SetpointFallRate, String(SetpointFallRate, 2).c_str());
   } else {
     SetpointFallRate = settingRead(NK_SetpointFallRate).toFloat();
+  }
+  if (!settingExists(NK_SetpointBigStepThresh)) {
+    settingWrite(NK_SetpointBigStepThresh, String(SetpointBigStepThresh, 2).c_str());
+  } else {
+    SetpointBigStepThresh = settingRead(NK_SetpointBigStepThresh).toFloat();
+  }
+  if (!settingExists(NK_SetpointBigStepRiseRate)) {
+    settingWrite(NK_SetpointBigStepRiseRate, String(SetpointBigStepRiseRate, 2).c_str());
+  } else {
+    SetpointBigStepRiseRate = settingRead(NK_SetpointBigStepRiseRate).toFloat();
   }
   if (!settingExists(NK_StartupRiseRate)) {
     settingWrite(NK_StartupRiseRate, String(StartupRiseRate, 2).c_str());

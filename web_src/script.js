@@ -470,7 +470,7 @@ const CSV2_FIELDS = [
     "imu_heading_swing_120s",
     "dBcur_dt",
     "loadDumpActive",
-    "thermalTuningTestPhase",
+    "reserved_thermalTestPhase",   // dead slot — thermal step-test removed (2026-06-23)
     "ft_updateAccelMetrics_win",
     "ft_updateAccelMetrics_ses",
     "WifiStrength",
@@ -571,7 +571,7 @@ const CSV2_FIELDS = [
     "finalLearningTarget",
     "overheatingPenaltyTimer",
     "overheatingPenaltyAmps",
-    "averageTableValue",
+    "reserved_averageTableValue",  // dead table removed — dead slot, receives 0
     "timeSinceLastOverheat",
     "socInfoAvailable",
     "overheatCount0",
@@ -1245,7 +1245,8 @@ function hidpiCtx(cv, W, H) {
 }
 
 // Performance-%-vs-engine-hours trend. Bold line = worst operating region (early warning);
-// faint line = overall. Live "now" dot appended once at least one bucket has committed. Empty \u2192
+// faint line = overall. HISTORICAL ONLY \u2014 no live "now" dot (the "this session" plot above owns
+// live %). Empty \u2192
 // local "no trend yet" notice for the whole first engine-hour
 // (the trend is built on-device from engine-hours \u2014 NOT from the cloud; don't reintroduce a cloud message).
 function drawAltTrend() {
@@ -1254,19 +1255,20 @@ function drawAltTrend() {
   const W = 520, H = 300, padL = 56, padR = 18, padT = 16, padB = 40, ctx = hidpiCtx(cv, W, H);
   ctx.clearRect(0,0,W,H);
   const pts = altTrend.slice();
-  // "now" dot = the LIVE % with its state color (only while graded MEASURED/ESTIMATED) — not the
-  // ratcheted bucket-worst, which froze one bad reading on the dot for a whole engine-hour.
-  // Suppressed until the first committed bucket exists: before then the plot's only content would
-  // be a wandering/recoloring/vanishing dot, which reads as broken. The session plot covers live %.
-  const liveSt = altLive.state|0;
-  const liveGraded = altLive.valid && (liveSt===0 || liveSt===1) && altLive.pct>0;
-  if (liveGraded && pts.length > 0)
-    pts.push({eng:altLive.engHours, worst:altLive.pct, overall:altLive.overallPct, live:true});
+  // Historical-only trend: NO live "now" dot. It used to be appended here at the live engine-hours
+  // with its state color, but it (a) blinked in/out as the operating condition entered/left a graded
+  // MEASURED/ESTIMATED state, (b) dragged the X-axis length around (its fractional engine-hours
+  // became maxE), and (c) pushed committed integer-hour points off their gridlines. The "this session"
+  // plot above is the home for live %; this plot shows only committed engine-hour buckets.
   if (pts.length === 0){
     ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center';
     ctx.fillText('No trend yet — one point logs per engine-hour of running', W/2, H/2); ctx.textAlign='left'; return;
   }
-  let maxE = 0; pts.forEach(p=>{ if(p.eng>maxE)maxE=p.eng; }); if(maxE<1)maxE=1;
+  // X domain = whole engine-hours. Committed points fall on integer hours, so an integer maxE keeps
+  // them on their gridlines. Floor the span at 4 h so the first few points appear on a stable axis
+  // instead of the whole plot rescaling every time a new hourly point commits.
+  let dataMaxE = 0; pts.forEach(p=>{ if(p.eng>dataMaxE)dataMaxE=p.eng; });
+  const maxE = Math.max(4, Math.ceil(dataMaxE));
   let minY = 70; const maxY = 105;
   pts.forEach(p=>{ if(p.worst<minY)minY=Math.max(0,Math.floor(p.worst/5)*5); });
   const X = e => padL + (e/maxE)*(W-padL-padR);
@@ -1278,12 +1280,15 @@ function drawAltTrend() {
     ctx.fillStyle='#999'; ctx.fillText(v+'%', padL-7, y);
   }
   if (100>=minY && 100<=maxY){ const y=Y(100); ctx.strokeStyle='#cde'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke(); ctx.setLineDash([]); }
-  // X gridlines + engine-hour labels. Integer labels only when the range gives each tick its own
-  // integer (maxE ≥ 4); small ranges get one-decimal labels (Math.round alone produced "0 0 1 1 1").
+  // X gridlines + engine-hour labels — always at WHOLE engine-hours so committed points (which fall on
+  // integer hours) sit exactly on a labelled tick. A "nice" integer step (1,2,5,10…) keeps the tick
+  // count reasonable as the horizon grows; no more fractional/duplicate labels ("0 1 1 2 2").
+  const niceSteps=[1,2,5,10,20,50,100,200,500,1000];
+  let xStep = Math.max(1, Math.ceil(maxE/6)); xStep = niceSteps.find(s=>s>=xStep) || xStep;
   ctx.textAlign='center'; ctx.textBaseline='top';
-  for (let k=0;k<=4;k++){ const e=maxE*k/4, x=X(e);
+  for (let e=0; e<=maxE+0.001; e+=xStep){ const x=X(e);
     ctx.strokeStyle='#f3f3f3'; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,H-padB); ctx.stroke();
-    ctx.fillStyle='#999'; ctx.fillText(maxE>=4 ? String(Math.round(e)) : (Math.round(e*10)/10).toFixed(1), x, H-padB+5); }
+    ctx.fillStyle='#999'; ctx.fillText(String(e), x, H-padB+5); }
   // axes
   ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,H-padB); ctx.lineTo(W-padR,H-padB); ctx.stroke();
   // axis titles \u2014 centered, no arrows, clear of the % tick labels
@@ -1306,16 +1311,10 @@ function drawAltTrend() {
   // Committed-point markers. One point commits per engine-hour (and only after a Start Over has
   // accumulated that hour), so the trend routinely holds a single point — a polyline of one vertex
   // draws nothing, leaving a blank grid that reads as "broken". Drawing each committed worst point
-  // as a dot makes a single/sparse trend visible regardless of the (separate) live "now" dot, which
-  // blinks out whenever the live reading drops to learning/unsteady.
+  // as a dot makes a single/sparse trend visible. (The live "now" dot was removed — see top of fn.)
   ctx.fillStyle='#3a7bd5';
-  pts.forEach(p=>{ if(p.live) return; const x=X(p.eng), y=Y(Math.max(minY,Math.min(maxY,p.worst)));
+  pts.forEach(p=>{ const x=X(p.eng), y=Y(Math.max(minY,Math.min(maxY,p.worst)));
     ctx.beginPath(); ctx.arc(x,y,2.6,0,6.2832); ctx.fill(); });
-  const last = pts[pts.length-1];
-  if (last.live){ const x=X(last.eng), y=Y(Math.max(minY,Math.min(maxY,last.worst)));
-    ctx.beginPath(); ctx.arc(x,y,5,0,6.2832);
-    ctx.fillStyle = ALT_STATE_COLOR[liveSt] || '#2e9e4f'; ctx.fill();   // state color (MEASURED green / ESTIMATED amber)
-    ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke(); }
 }
 
 // ── Charging-system health session plot: every 1 Hz live % since this dashboard session began,
@@ -1822,16 +1821,16 @@ const CSV3_FIELDS = [
     "LearningMemoryDuration",
     "EnableAmbientCorrection",
     "TuningMode",
-    "rpmCurrentTable0",
-    "rpmCurrentTable1",
-    "rpmCurrentTable2",
-    "rpmCurrentTable3",
-    "rpmCurrentTable4",
-    "rpmCurrentTable5",
-    "rpmCurrentTable6",
-    "rpmCurrentTable7",
-    "rpmCurrentTable8",
-    "rpmCurrentTable9",
+    "reserved_rpmCurrentTable0",  // dead table removed — dead slot, receives 0
+    "reserved_rpmCurrentTable1",
+    "reserved_rpmCurrentTable2",
+    "reserved_rpmCurrentTable3",
+    "reserved_rpmCurrentTable4",
+    "reserved_rpmCurrentTable5",
+    "reserved_rpmCurrentTable6",
+    "reserved_rpmCurrentTable7",
+    "reserved_rpmCurrentTable8",
+    "reserved_rpmCurrentTable9",
     "ShuntResistanceMicroOhm",
     "InvertAltAmps",
     "InvertBattAmps",
@@ -1919,6 +1918,8 @@ const CSV3_FIELDS = [
     "FIELD_COLLAPSE_DELAY",
     "SetpointRiseRate",
     "SetpointFallRate",
+    "SetpointBigStepThresh",
+    "SetpointBigStepRiseRate",
     "PIDTrackingGain",
     "CAPSIZE_THRESHOLD_DEG",
     "PITCHPOLE_THRESHOLD_DEG",
@@ -2029,14 +2030,14 @@ const CSV3_FIELDS = [
     "cvWavePeriodSec",
     "cvKOvershoot",
     "cvConsecutiveReads",
-    "ThermalTuningMode",
-    "thermalWaveLowF",
-    "thermalWaveHighF",
-    "thermalWaveHalfPeriodMin",
-    "thermalKOvershoot",
-    "thermalKUndershoot",
-    "thermalSettleThreshF",
-    "thermalConsecutiveReads",
+    "reserved_thermal0",   // 8 dead slots — thermal step-test removed (2026-06-23)
+    "reserved_thermal1",
+    "reserved_thermal2",
+    "reserved_thermal3",
+    "reserved_thermal4",
+    "reserved_thermal5",
+    "reserved_thermal6",
+    "reserved_thermal7",
     "webgaugesinterval",
     "plotTimeWindow",
     "Ymin1",
@@ -2087,7 +2088,7 @@ const CSV3_FIELDS = [
     "SystemIDStabilizeAmps",         // A ×10 — plant-delay baseline/trough current
     "tuningWaveFloor",               // A — Current Target Generator wave floor (trough), shared square + sine
     "commissionState",               // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-    "commissionPhase",               // furthest wizard phase reached: 0=Prep…6=Validate, 7=finished
+    "commissionPhase",               // furthest wizard phase reached: 0=Prep…6=Thresholds (final)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -3215,6 +3216,11 @@ function startInterpLoop() {
         const renderStart = performance.now();
 
         if (plotsTabVisible()) {
+            // Backstop for a plot stuck at width 0 (built hidden, resize-on-show missed) — see healPlotWidth.
+            healPlotWidth(currentTempPlot, 'current-temp-plot', 300);
+            healPlotWidth(voltagePlot,     'voltage-plot',      300);
+            healPlotWidth(rpmPlot,         'rpm-plot',          300);
+            healPlotWidth(temperaturePlot, 'temperature-plot',  300);
             if (currentTempPlot && applyInterp(plotInterp.current, currentTempData, 4)) {
                 if (autoScaleCurrent) {
                     if (_autoScaleCurrentLeft)  currentTempPlot.setScale('current', _autoScaleCurrentLeft);
@@ -3249,6 +3255,9 @@ function startInterpLoop() {
             }
         }
         if (tuningTabVisible()) {
+            // Backstop for a plot stuck at width 0 (built hidden, resize-on-show missed) — see healPlotWidth.
+            healPlotWidth(cvTuningPlot, 'cv-tuning-plot', 350);
+            healPlotWidth(pidTuningPlot, 'pid-tuning-plot', 400);
             if (pidTuningPlot && pidTuningData && applyInterp(plotInterp.pid, pidTuningData, 7)) {
                 pidTuningPlot.setData(pidTuningData);
             }
@@ -3985,11 +3994,18 @@ function stableAutoRange(mn, mx, pad) {
 
 // Computes a padded min/max range from selected series in a data array.
 // minSpan prevents zooming in too far; marginFrac adds padding; hardMin clamps the lower bound.
-function computeScaleRange(dataArray, seriesIndices, minSpan, marginFrac, hardMin) {
+// visibleCount (optional): only scan the last N points (the on-screen X window) so an outlier that
+//   has scrolled off the left edge of the 5-min buffer can't pin the axis to something you can't see.
+// plot (optional): the uPlot instance, used to skip series the user has hidden in the legend so a
+//   hidden trace can't drag the axis either. Both params are optional — omitted = old whole-buffer,
+//   all-series behaviour.
+function computeScaleRange(dataArray, seriesIndices, minSpan, marginFrac, hardMin, visibleCount, plot) {
     let lo = Infinity, hi = -Infinity;
     for (const idx of seriesIndices) {
+        if (plot && plot.series[idx] && plot.series[idx].show === false) continue;  // hidden series: ignore
         const arr = dataArray[idx];
-        for (let i = 0; i < arr.length; i++) {
+        const start = (visibleCount && visibleCount < arr.length) ? arr.length - visibleCount : 0;
+        for (let i = start; i < arr.length; i++) {
             const v = arr[i];
             if (isFinite(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
         }
@@ -4010,6 +4026,54 @@ function computeScaleRange(dataArray, seriesIndices, minSpan, marginFrac, hardMi
     [lo, hi] = niceAxisRange(lo, hi);
     if (hardMin !== undefined) lo = Math.max(hardMin, lo);
     return { min: lo, max: hi };
+}
+
+// Number of trailing buffer points currently on-screen. The buffer always holds LIVE_BUFFER_SEC
+// (5 min) but only liveWindowSec is drawn, so this is what autoscale should look at — not the whole
+// buffer. +1 so the partial point at the left edge is included.
+function visiblePointCount() {
+    const intervalMs = window._lastKnownInterval || 200;
+    return Math.ceil((liveWindowSec * 1000) / intervalMs) + 1;
+}
+
+// Recompute the auto Y range for every auto-scaled live plot, from ONLY the visible window and ONLY
+// the currently-shown series. Called once per data frame (applyNow=false — the rAF loop applies the
+// stored ranges during interpolation), and on-demand with applyNow=true when the legend visibility
+// or the X-window length changes, so those rescale instantly even when no data is streaming.
+function recomputeAutoScales(applyNow) {
+    const vc = visiblePointCount();
+    if (autoScaleCurrent && !autoScaleCurrentLocked) {
+        _autoScaleCurrentLeft  = computeScaleRange(currentTempData, [1, 2, 3], 5, 0.10, undefined, vc, currentTempPlot);
+        _autoScaleCurrentRight = computeScaleRange(currentTempData, [4], 20, 0.10, 0, vc, currentTempPlot);
+        if (applyNow && currentTempPlot) {
+            if (_autoScaleCurrentLeft)  currentTempPlot.setScale('current', _autoScaleCurrentLeft);
+            if (_autoScaleCurrentRight) currentTempPlot.setScale('pct',     _autoScaleCurrentRight);
+        }
+    }
+    if (autoScaleVoltage && !autoScaleVoltageLocked) {
+        _autoScaleVoltageLeft  = computeScaleRange(voltageData, [1, 2], 0.5, 0.10, undefined, vc, voltagePlot);
+        _autoScaleVoltageRight = computeScaleRange(voltageData, [3], 20, 0.10, 0, vc, voltagePlot);
+        if (applyNow && voltagePlot) {
+            if (_autoScaleVoltageLeft)  voltagePlot.setScale('voltage', _autoScaleVoltageLeft);
+            if (_autoScaleVoltageRight) voltagePlot.setScale('pct',     _autoScaleVoltageRight);
+        }
+    }
+    if (autoScaleRPM && !autoScaleRPMLocked) {
+        _autoScaleRPMLeft  = computeScaleRange(rpmData, [1], 200, 0.10, undefined, vc, rpmPlot);
+        _autoScaleRPMRight = computeScaleRange(rpmData, [2], 20, 0.10, 0, vc, rpmPlot);
+        if (applyNow && rpmPlot) {
+            if (_autoScaleRPMLeft)  rpmPlot.setScale('rpm', _autoScaleRPMLeft);
+            if (_autoScaleRPMRight) rpmPlot.setScale('pct', _autoScaleRPMRight);
+        }
+    }
+    if (autoScaleTemp && !autoScaleTempLocked) {
+        _autoScaleTempLeft  = computeScaleRange(temperatureData, [1], 10, 0.10, undefined, vc, temperaturePlot);
+        _autoScaleTempRight = computeScaleRange(temperatureData, [2], 20, 0.10, 0, vc, temperaturePlot);
+        if (applyNow && temperaturePlot) {
+            if (_autoScaleTempLeft)  temperaturePlot.setScale('temperature', _autoScaleTempLeft);
+            if (_autoScaleTempRight) temperaturePlot.setScale('pct',         _autoScaleTempRight);
+        }
+    }
 }
 
 // wrapper function
@@ -4069,10 +4133,6 @@ function processCSVDataOptimized(data) {
         plotInterp.current.prevY = prevY_current;
         plotInterp.current.nextY = [battCurrent, altCurrent, fieldCurrent, fieldPct];
         plotInterp.current.arrivalTime = performance.now();
-        if (autoScaleCurrent && !autoScaleCurrentLocked) {
-            _autoScaleCurrentLeft  = computeScaleRange(currentTempData, [1, 2, 3], 5, 0.10);
-            _autoScaleCurrentRight = computeScaleRange(currentTempData, [4], 20, 0.10, 0);
-        }
 
         // ALWAYS UPDATE DATA STRUCTURES - Voltage plot data
         const adsBattV = 'BatteryV' in data ? parseFloat(data.BatteryV) / 100 : 0;
@@ -4101,10 +4161,6 @@ function processCSVDataOptimized(data) {
         plotInterp.voltage.prevY = prevY_voltage;
         plotInterp.voltage.nextY = [adsBattV, inaBattV, fieldPct];
         plotInterp.voltage.arrivalTime = performance.now();
-        if (autoScaleVoltage && !autoScaleVoltageLocked) {
-            _autoScaleVoltageLeft  = computeScaleRange(voltageData, [1, 2], 0.5, 0.10);
-            _autoScaleVoltageRight = computeScaleRange(voltageData, [3], 20, 0.10, 0);
-        }
 
         // ALWAYS UPDATE DATA STRUCTURES - RPM plot data
         const rpmValue = 'RPM' in data ? parseFloat(data.RPM) : 0;
@@ -4129,10 +4185,6 @@ function processCSVDataOptimized(data) {
         plotInterp.rpm.prevY = prevY_rpm;
         plotInterp.rpm.nextY = [rpmValue, fieldPct];
         plotInterp.rpm.arrivalTime = performance.now();
-        if (autoScaleRPM && !autoScaleRPMLocked) {
-            _autoScaleRPMLeft  = computeScaleRange(rpmData, [1], 200, 0.10);
-            _autoScaleRPMRight = computeScaleRange(rpmData, [2], 20, 0.10, 0);
-        }
 
         // ALWAYS UPDATE DATA STRUCTURES - Temperature plot data
         const altTemp = 'AlternatorTemperatureF' in data ? parseFloat(data.AlternatorTemperatureF) / 100 : 0;
@@ -4157,10 +4209,11 @@ function processCSVDataOptimized(data) {
         plotInterp.temperature.prevY = prevY_temp;
         plotInterp.temperature.nextY = [altTemp, fieldPct];
         plotInterp.temperature.arrivalTime = performance.now();
-        if (autoScaleTemp && !autoScaleTempLocked) {
-            _autoScaleTempLeft  = computeScaleRange(temperatureData, [1], 10, 0.10);
-            _autoScaleTempRight = computeScaleRange(temperatureData, [2], 20, 0.10, 0);
-        }
+
+        // All four live-plot buffers are now shifted for this frame — recompute every auto Y range
+        // from the visible window + shown series. applyNow=false: the rAF render loop applies the
+        // stored ranges during interpolation.
+        recomputeAutoScales(false);
 
         // ALWAYS UPDATE DATA STRUCTURES - protection-event markers
         // Shift the marker bitmask in lockstep with the data series (always, regardless of
@@ -4391,6 +4444,9 @@ function applyLiveWindowToPlots() {
     [currentTempPlot, voltagePlot, rpmPlot, temperaturePlot].forEach(p => {
         if (p && p.data) { try { p.setData(p.data, true); } catch (e) {} }
     });
+    // The visible window just changed size, so the set of on-screen points (what autoscale looks at)
+    // changed too — rescale immediately so the Y range tracks the new window without waiting for data.
+    recomputeAutoScales(true);
 }
 
 // Function to reinitialize plots when timing parameters change
@@ -4642,6 +4698,8 @@ function updateAllEchosOptimized(data) {
         // VoltageKd echo removed — D term removed
         { key: 'SetpointRiseRate', id: 'SetpointRiseRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SetpointFallRate', id: 'SetpointFallRate_echo', transform: v => (v / 100).toFixed(2) },
+        { key: 'SetpointBigStepThresh', id: 'SetpointBigStepThresh_echo', transform: v => (v / 100).toFixed(1) },
+        { key: 'SetpointBigStepRiseRate', id: 'SetpointBigStepRiseRate_echo', transform: v => (v / 100).toFixed(1) },
         { key: 'PIDTrackingGain', id: 'PIDTrackingGain_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'CAPSIZE_THRESHOLD_DEG', id: 'CAPSIZE_THRESHOLD_DEG_echo', transform: v => v },
         { key: 'PITCHPOLE_THRESHOLD_DEG', id: 'PITCHPOLE_THRESHOLD_DEG_echo', transform: v => v },
@@ -4705,14 +4763,6 @@ function updateAllEchosOptimized(data) {
         { key: 'cvWavePeriodSec',   id: 'cvWavePeriodSec_echo',   transform: v => v },
         { key: 'cvKOvershoot',      id: 'cvKOvershoot_echo',      transform: v => (v / 10).toFixed(1) },
         { key: 'cvConsecutiveReads', id: 'cvConsecutiveReads_echo', transform: v => v },
-        { key: 'ThermalTuningMode',         id: 'ThermalTuningMode_echo',         transform: v => v == 1 ? 'On' : 'Off' },
-        { key: 'thermalWaveLowF',           id: 'thermalWaveLowF_echo',           transform: v => (v / 10).toFixed(1) },
-        { key: 'thermalWaveHighF',          id: 'thermalWaveHighF_echo',          transform: v => (v / 10).toFixed(1) },
-        { key: 'thermalWaveHalfPeriodMin',  id: 'thermalWaveHalfPeriodMin_echo',  transform: v => (v / 10).toFixed(1) },
-        { key: 'thermalKOvershoot',         id: 'thermalKOvershoot_echo',         transform: v => (v / 100).toFixed(2) },
-        { key: 'thermalKUndershoot',        id: 'thermalKUndershoot_echo',        transform: v => (v / 100).toFixed(2) },
-        { key: 'thermalSettleThreshF',      id: 'thermalSettleThreshF_echo',      transform: v => (v / 10).toFixed(1) },
-        { key: 'thermalConsecutiveReads',   id: 'thermalConsecutiveReads_echo',   transform: v => v },
         { key: 'wifiNapEnabled',            id: 'wifiNapEnabled_echo',            transform: v => v == 1 ? 'On' : 'Off' },
         // Fast alt-current diagnostic knob echoes (Pattern B). Scales mirror the SafeInt() factors in firmware.
         { key: 'faEnabled',                 id: 'faEnabled_echo',                 transform: v => v == 1 ? 'On' : 'Off' },
@@ -5730,114 +5780,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-// ── Thermal Step Test Tuning Log ──────────────────────────────────────────
-let _thermalTuningLogPollTimer = null;
-
-function fetchThermalTuningLog() {
-    fetch(buildURL('/thermaltuninglog'))
-        .then(r => r.ok ? r.json() : null)
-        .then(data => { if (data) renderThermalTuningLog(data); })
-        .catch(() => {});
-}
-
-function renderThermalTuningLog(data) {
-    // Thermal live accuracy mirror: data.live = [RMS error (°F), worst over-temp (°F), 0, 0].
-    // The always-on Control Accuracy panel in Live Data → Diag is fed separately off CSV2.
-    const labels = ['RMS', 'Peak'];
-    const live = data.live || [];
-    for (let i = 0; i < 2; i++) {
-        const el = document.getElementById('thermalLiveScore' + i);
-        if (el) el.textContent = labels[i] + ': ' + (live[i] > 0 ? live[i].toFixed(2) + ' °F' : '—');
-    }
-
-    // Active test score banner
-    const testRow = document.getElementById('thermalTestScoreRow');
-    if (testRow) {
-        if (data.ta) {
-            testRow.style.display = '';
-            const tsel = document.getElementById('thermalCurrentTestScore');
-            const ttgl = document.getElementById('thermalTestStepCount');
-            if (tsel) tsel.textContent = data.ts > 0 ? data.ts.toFixed(2) : '—';
-            if (ttgl) ttgl.textContent = data.tc;
-            // Push live score into the floating test panel
-            if (_testPanelCurrentTest === 'thermal') {
-                updateTestPanelScore(data.ts, (data.tc || 0) + ' steps',
-                    (data.tc || 0) === 0 ? 'Waiting for LOW stable' : 'Scoring');
-            }
-        } else {
-            testRow.style.display = 'none';
-        }
-    }
-
-    // Current settings for row highlighting
-    const curKp  = parseFloat(document.getElementById('TempPIDKp_echo')?.textContent);
-    const curKi  = parseFloat(document.getElementById('TempPIDKi_echo')?.textContent);
-    const curLa  = parseFloat(document.getElementById('ThermalLookaheadSec_echo')?.textContent);
-    const curWl  = parseFloat(document.getElementById('thermalWaveLowF_echo')?.textContent);
-    const curWh  = parseFloat(document.getElementById('thermalWaveHighF_echo')?.textContent);
-    const curWp  = parseFloat(document.getElementById('thermalWaveHalfPeriodMin_echo')?.textContent);
-
-    const records = (data.rec || []).slice();
-    const tbody = document.getElementById('thermalTuningLogBody');
-    if (!tbody) return;
-
-    tbody.innerHTML = records.map(r => {
-        const scoreColor = r.s < 200 ? '#22c55e' : r.s < 600 ? '#eab308' : '#ef4444';
-        const isMatch = !isNaN(curKp) &&
-            Math.abs(r.kp - curKp) < 0.0001 &&
-            Math.abs(r.ki - curKi) < 0.00001 &&
-            Math.abs(r.la - curLa) < 1 &&
-            Math.abs(r.wl - curWl) < 0.5 &&
-            Math.abs(r.wh - curWh) < 0.5 &&
-            Math.abs(r.wp - curWp) < 0.2;
-        const rowStyle = isMatch ? 'background:rgba(99,102,241,0.18);' : '';
-        return `<tr style="${rowStyle}">
-            <td style="padding:2px 4px;">${r.n}</td>
-            <td style="padding:2px 4px;color:${scoreColor};font-weight:bold;">${r.s.toFixed(2)}</td>
-            <td style="padding:2px 4px;">${r.st.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${r.wo.toFixed(1)}</td>
-            <td style="padding:2px 4px;">${r.io.toFixed(2)}</td>
-            <td style="padding:2px 4px;">${r.iu.toFixed(2)}</td>
-            <td style="padding:2px 4px;">${r.ns}</td>
-            <td style="padding:2px 4px;">${r.kp.toFixed(4)}</td>
-            <td style="padding:2px 4px;">${r.ki.toFixed(5)}</td>
-            <td style="padding:2px 4px;">${r.la.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${r.fa.toFixed(3)}</td>
-            <td style="padding:2px 4px;">${r.im}</td>
-            <td style="padding:2px 4px;">${r.wl.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${r.wh.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${r.wp.toFixed(1)}</td>
-            <td style="padding:2px 4px;">${r.rpm.toFixed(0)}</td>
-            <td style="padding:2px 4px;">${(r.amb || 0).toFixed(1)}</td>
-            <td style="padding:2px 4px;">${(r.rr || 0).toFixed(1)}</td>
-            <td style="padding:2px 4px;">${(r.fr || 0).toFixed(1)}</td>
-            <td style="padding:2px 4px;">${(r.bv != null ? r.bv : 0).toFixed(2)}</td>
-            <td style="padding:2px 4px;">${stageLabel(r.cs)}</td>
-        </tr>`;
-    }).join('');
-}
-
-function resetThermalTuningLog() {
-    if (!confirm('Reset all thermal tuning records and live scores?')) return;
-    fetch(buildURL('/resetthermaltuninglog'), { method: 'POST' })
-        .then(() => fetchThermalTuningLog())
-        .catch(() => {});
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-    const section = document.getElementById('thermalTuningScoreSection');
-    if (!section) return;
-    section.addEventListener('toggle', e => {
-        if (e.target.open) {
-            fetchThermalTuningLog();
-            _thermalTuningLogPollTimer = setInterval(fetchThermalTuningLog, 8000);
-        } else {
-            clearInterval(_thermalTuningLogPollTimer);
-            _thermalTuningLogPollTimer = null;
-        }
-    });
-});
-
 // ── SystemID (plant-delay) log ────────────────────────────────────────────
 let _systemIDLogPollTimer = null;
 
@@ -6112,7 +6054,7 @@ function initCVTuningPlot() {
     if (!cvTuningData) initCVTuningDataStructures();
 
     const opts = {
-        width:  Math.min(plotEl.clientWidth, 800),
+        width:  Math.min(plotEl.clientWidth || 600, 800),  // || 600: never born 0-wide if built hidden
         height: 350,
         series: [
             {},
@@ -7387,7 +7329,7 @@ function initCurrentTempPlot() {
     }
 
     const opts = {
-        width: Math.min(plotEl.clientWidth, 800),
+        width: Math.min(plotEl.clientWidth || 600, 800),  // || 600: never born 0-wide if built hidden
         height: 300,
         title: "Current History",
         series: [
@@ -7531,6 +7473,8 @@ function initCurrentTempPlot() {
             currentTempPlot.setScale('current', { min: Ymin1, max: Ymax1 });
             pctMin1 = 0; pctMax1 = 100;
             currentTempPlot.setScale('pct', { min: 0, max: 100 });
+        } else {
+            recomputeAutoScales(true);  // fit to the visible window now, don't wait for the next data frame
         }
     });
 
@@ -7559,7 +7503,7 @@ function initVoltagePlot() {
     }
 
     const opts = {
-        width: Math.min(plotEl.clientWidth, 800),
+        width: Math.min(plotEl.clientWidth || 600, 800),  // || 600: never born 0-wide if built hidden
         height: 300,
         title: "Battery Voltage History",
         series: [
@@ -7695,6 +7639,8 @@ function initVoltagePlot() {
             voltagePlot.setScale('voltage', { min: Ymin2 / 100, max: Ymax2 / 100 });
             pctMin2 = 0; pctMax2 = 100;
             voltagePlot.setScale('pct', { min: 0, max: 100 });
+        } else {
+            recomputeAutoScales(true);  // fit to the visible window now, don't wait for the next data frame
         }
     });
 
@@ -7723,7 +7669,7 @@ function initRPMPlot() {
     }
 
     const opts = {
-        width: Math.min(plotEl.clientWidth, 800),
+        width: Math.min(plotEl.clientWidth || 600, 800),  // || 600: never born 0-wide if built hidden
         height: 300,
         title: "RPM History",
         series: [
@@ -7853,6 +7799,8 @@ function initRPMPlot() {
             rpmPlot.setScale('rpm', { min: Ymin3, max: Ymax3 });
             pctMin3 = 0; pctMax3 = 100;
             rpmPlot.setScale('pct', { min: 0, max: 100 });
+        } else {
+            recomputeAutoScales(true);  // fit to the visible window now, don't wait for the next data frame
         }
     });
 
@@ -7881,7 +7829,7 @@ function initTemperaturePlot() {
     }
 
     const opts = {
-        width: Math.min(plotEl.clientWidth, 800),
+        width: Math.min(plotEl.clientWidth || 600, 800),  // || 600: never born 0-wide if built hidden
         height: 300,
         title: "Alternator Temperature History",
         series: [
@@ -8010,6 +7958,8 @@ function initTemperaturePlot() {
             temperaturePlot.setScale('temperature', { min: Ymin4, max: Ymax4 });
             pctMin4 = 0; pctMax4 = 100;
             temperaturePlot.setScale('pct', { min: 0, max: 100 });
+        } else {
+            recomputeAutoScales(true);  // fit to the visible window now, don't wait for the next data frame
         }
     });
 
@@ -8390,6 +8340,11 @@ flex-wrap: wrap;
                 vis[item.label] = shown;
                 try { localStorage.setItem(visKey, JSON.stringify(vis)); } catch (e) { }
                 paint();
+                // Showing/hiding a series changes which traces drive the autoscale — rescale now so
+                // it's instant even when no data is streaming (one of the four live plots only).
+                if (u === currentTempPlot || u === voltagePlot || u === rpmPlot || u === temperaturePlot) {
+                    recomputeAutoScales(true);
+                }
             });
         }
 
@@ -8723,7 +8678,6 @@ function updateTogglesFromData(data) {
         updateCheckbox("AutoShuntGainCorrection_checkbox", data.AutoShuntGainCorrection, "AutoShuntGainCorrection");
         updateCheckbox("AutoAltCurrentZero_checkbox", data.AutoAltCurrentZero, "AutoAltCurrentZero");
         updateCheckbox("CVTuningMode_checkbox", data.CVTuningMode, "CVTuningMode");
-        updateCheckbox("ThermalTuningMode_checkbox", data.ThermalTuningMode, "ThermalTuningMode");
         // Fast alt-current diagnostic toggles (Pattern B)
         updateSegToggle("faEnabled", data.faEnabled);
         updateSegToggle("faAlarmEnable", data.faAlarmEnable);
@@ -9068,7 +9022,6 @@ window.addEventListener("load", function () {
     document.getElementById("HardwarePresent_checkbox").checked = (document.getElementById("hardwarePresent").value === "1");
     document.getElementById("UseFloat_checkbox").checked = (document.getElementById("UseFloat").value === "1");
     document.getElementById("CVTuningMode_checkbox").checked = (document.getElementById("CVTuningMode").value === "1");
-    document.getElementById("ThermalTuningMode_checkbox").checked = (document.getElementById("ThermalTuningMode").value === "1");
 
 
     //gray out Settings on a reload
@@ -10077,7 +10030,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value).toFixed(0);
                     }
                     // Values scaled by 100 on server (pid and learning fields)
-                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
+                    else if (["pidSetpoint", "FieldResistance", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
                     // safeHours: stored as seconds — display as hours
@@ -10712,9 +10665,6 @@ window.addEventListener("load", function () {
                 } else if (data.CVTuningMode) {
                     chargeStageEl.textContent = 'CV TEST';
                     chargeStageEl.className = 'charge-stage charge-stage-test';
-                } else if (data.ThermalTuningMode) {
-                    chargeStageEl.textContent = 'THERM TEST';
-                    chargeStageEl.className = 'charge-stage charge-stage-test';
                 } else if (stage === 1) {
                     chargeStageEl.textContent = 'BULK';
                     chargeStageEl.className = 'charge-stage charge-stage-bulk';
@@ -10745,7 +10695,7 @@ window.addEventListener("load", function () {
             updateVoltageModeGreyout(data.chargeStageDisplay);
 
             // Update the test-active floating panel from the CSV1/2 stream
-            _testActiveCSV1 = data.TuningMode ? 'curr' : data.CVTuningMode ? 'cv' : data.ThermalTuningMode ? 'thermal' : null;
+            _testActiveCSV1 = data.TuningMode ? 'curr' : data.CVTuningMode ? 'cv' : null;
             updateTestActivePanel();
 
             updateFirmwareVersion(data.firmwareVersionInt);
@@ -10911,7 +10861,7 @@ window.addEventListener("load", function () {
             updateAllEchosOptimized(data);
             updateTogglesFromData(data);
             // Auto-commissioning: refresh the badge + step checklist + clear button from the
-            // persisted state (0/1/2) and furthest phase reached (0..7).
+            // persisted state (0/1/2) and furthest phase reached (0..6).
             if (data.commissionState !== undefined) {
                 try {
                     renderCommissionStatus(parseInt(data.commissionState, 10),
@@ -10996,7 +10946,7 @@ window.addEventListener("load", function () {
                         newTextContent = (value / 1000).toFixed(0);
                     }
                     // Values scaled by 100 
-                    else if (["pidSetpoint", "FieldResistance", "averageTableValue", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
+                    else if (["pidSetpoint", "FieldResistance", "TailCurrent_A", "RebulkVoltage", "SOC_BlockRebulk_percent", "SOC_AllowRebulk_percent", "DutySlowRampRate", "VoltageKi", "VoltageKp"].includes(key)) {
                         newTextContent = (value / 100).toFixed(2);
                     }
 
@@ -11567,6 +11517,18 @@ function updatePidInitializedDisplay(data) {
 // chart shows squished until the observer fires. Call this the moment a chart's tab/sub-tab becomes
 // visible to size it immediately. The clientWidth>0 guard makes it a no-op for any chart whose
 // sub-tab is still hidden, so it's safe to call for the whole Plots/Tuning family unconditionally.
+// Backstop for live plots built at width 0 while their tab is hidden: if resize-on-show and the
+// ResizeObserver both miss, the plot stays 0-wide and uPlot draws a blank box. Called per frame from
+// the interp loop only while the owning tab is visible; steady-state cost is one property compare
+// (setSize fires only on a real width mismatch).
+function healPlotWidth(plot, elId, height) {
+    if (!plot) return;
+    const el = document.getElementById(elId);
+    if (!el) return;
+    const w = el.clientWidth;
+    if (w > 0 && plot.width !== w) plot.setSize({ width: w, height });
+}
+
 function resizeLivePlotsOnShow() {
     const fix = (plot, elId, height) => {
         if (!plot) return;
@@ -12633,7 +12595,7 @@ function initPidTuningPlot() {
     }
 
     const opts = {
-        width: Math.min(plotEl.clientWidth, 800),
+        width: Math.min(plotEl.clientWidth || 600, 800),  // || 600: never born 0-wide if built hidden
         height: 400,
         series: [
             {},
@@ -13373,7 +13335,7 @@ async function pollLogRequest() {
         g_logRelayBusy = true;
 
         // Fetch every log from the device over LAN (tolerate individual failures).
-        const [thermal, pid, cvB64, systemid, tuning, cvtuning, thermaltuning, famatrix, fascopeBuf, faflipBuf,
+        const [thermal, pid, cvB64, systemid, tuning, cvtuning, famatrix, fascopeBuf, faflipBuf,
                debugText, vesselInfo, longtermB64, alttrendCsv] = await Promise.all([
             fetchLogText('/thermallog.csv'),
             fetchLogText('/pidlog.csv'),
@@ -13381,7 +13343,6 @@ async function pollLogRequest() {
             fetchLogJson('/systemidlog'),
             fetchLogJson('/tuninglog'),
             fetchLogJson('/cvtuninglog'),
-            fetchLogJson('/thermaltuninglog'),
             fetchLogText('/famatrix.csv'),    // Resonance & Ripple Map (alt-current disturbance matrix) rides along
             fetchLogArrayBuffer('/fastscope.bin'), // Live Oscilloscope capture (FSC1) — parsed to metadata-rich CSV below
             fetchLogArrayBuffer('/faflip.bin'),    // Reference Flipbook (FFLP) — parsed to per-page metadata-rich CSV below
@@ -13399,7 +13360,6 @@ async function pollLogRequest() {
         if (systemid != null) { logs.systemid = systemid; logsIncluded.push('systemid'); }
         if (tuning != null) { logs.tuning = tuning; logsIncluded.push('tuning'); }
         if (cvtuning != null) { logs.cvtuning = cvtuning; logsIncluded.push('cvtuning'); }
-        if (thermaltuning != null) { logs.thermaltuning = thermaltuning; logsIncluded.push('thermaltuning'); }
         if (famatrix != null) { logs.famatrix = famatrix; logsIncluded.push('famatrix'); }
         // Oscilloscope + reference-flipbook waveforms as metadata-rich CSV (commented header with
         // per-capture RPM/temp/time + both raw and boxcar-16 filtered columns) — the same content the
@@ -15017,7 +14977,7 @@ const CS_IDLE        = 7;
 // Panel sits outside .tab-content in the HTML so position:fixed keeps it
 // visible regardless of which tab is active.
 
-let _testActiveCSV1 = null;   // 'curr' | 'cv' | 'thermal' | null  (updated from CSV1/2 stream)
+let _testActiveCSV1 = null;   // 'curr' | 'cv' | null  (updated from CSV1/2 stream)
 let _testActiveCSV3 = null;   // 'sysid' | null                     (updated from CSV3 stream)
 let _testPanelCurrentTest = null;
 
@@ -15149,8 +15109,6 @@ function updateTestPanelParams(testName) {
         el.textContent = 'Amp: ' + g('waveAmplitude_echo') + ' A  •  Period: ' + g('wavePeriod_echo') + ' s';
     } else if (testName === 'cv') {
         el.textContent = 'Amp: ' + g('cvWaveAmplitudeV_echo') + ' V  •  Period: ' + g('cvWavePeriodSec_echo') + ' s';
-    } else if (testName === 'thermal') {
-        el.textContent = g('thermalWaveLowF_echo') + '°F → ' + g('thermalWaveHighF_echo') + '°F\n' + g('thermalWaveHalfPeriodMin_echo') + ' min half-period';
     } else {
         el.innerHTML = '<button onclick="document.getElementById(\'sysid-modal-overlay\').style.display=\'block\'" class="btn-secondary" style="width:100%;font-size:0.88em;">Show test details ↗</button>';
     }
@@ -15185,9 +15143,6 @@ function ensureTestPollRunning(testName) {
     } else if (testName === 'cv' && !_cvTuningLogPollTimer) {
         fetchCVTuningLog();
         _cvTuningLogPollTimer = setInterval(fetchCVTuningLog, 4000);
-    } else if (testName === 'thermal' && !_thermalTuningLogPollTimer) {
-        fetchThermalTuningLog();
-        _thermalTuningLogPollTimer = setInterval(fetchThermalTuningLog, 8000);
     }
 }
 
@@ -15198,7 +15153,7 @@ function turnOffActiveTest() {
     if (test === 'sysid') { abortSystemIDTest(); return; }
     const pw = currentAdminPassword;
     if (!pw) { alert('Enter your password first.'); return; }
-    const paramMap = { curr: 'TuningMode', cv: 'CVTuningMode', thermal: 'ThermalTuningMode' };
+    const paramMap = { curr: 'TuningMode', cv: 'CVTuningMode' };
     const param = paramMap[test];
     if (!param) return;
     fetchWithTimeout(buildURL('/get?' + param + '=0&password=' + encodeURIComponent(pw)), {}, 4000)
@@ -15251,23 +15206,6 @@ function checkCVTestGate(checkbox) {
         }
     }
 
-    return true;
-}
-
-function checkThermalTestGate(checkbox) {
-    if (!checkbox.checked) return true;
-    const conflict = getActiveTestKey();
-    if (conflict && conflict !== 'thermal') {
-        checkbox.checked = false;
-        alert((TEST_PANEL_META[conflict]?.title ?? conflict) + ' is already running.\n\nTurn it off before starting another test.');
-        return false;
-    }
-    const amps = parseFloat(getField('MeasAmpsID') ?? 0);
-    if (amps < 5) {
-        checkbox.checked = false;
-        alert('Thermal Step Test requires the alternator to be actively producing current (> 5 A).\n\nStart the engine, bring the alternator under load, then enable the test.');
-        return false;
-    }
     return true;
 }
 
@@ -15750,11 +15688,9 @@ function sysidUpdatePreflight() {
     // hidden <input> value (not the _echo span, which contains "On"/"Off" text).
     const tuningOn = parseInt(getField("TuningMode") ?? 0) === 1;
     const cvTuningOn = parseInt(getField("CVTuningMode") ?? 0) === 1;
-    const thermalTuningOn = parseInt(getField("ThermalTuningMode") ?? 0) === 1;
-    const testsOK = !tuningOn && !cvTuningOn && !thermalTuningOn;
+    const testsOK = !tuningOn && !cvTuningOn;
     const activeTestName = tuningOn ? 'Current tuning'
-                                    : (cvTuningOn ? 'Voltage tuning'
-                                                  : (thermalTuningOn ? 'Thermal tuning' : null));
+                                    : (cvTuningOn ? 'Voltage tuning' : null);
     const testsMsg = testsOK
         ? '✅ No other tuning tests active'
         : '❌ ' + activeTestName + ' is on — turn it off first';
@@ -16383,7 +16319,7 @@ function computeActionableDisturbance() {
 // existing SystemID / tuning-sweep / matrix endpoints; the operator only holds or
 // slowly changes engine speed when prompted — the regulator drives the field.
 // ============================================================================
-const CX_PHASES = ['Prep', 'Field curve', 'Min% floor', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds', 'Validate'];
+const CX_PHASES = ['Prep', 'Field curve', 'Min% floor', 'Plant fit', 'Verify', 'Disturbances', 'Thresholds'];
 let cx = null;             // orchestrator state object; persists across panel close (in-session resume)
 let cxPollTimer = null;
 
@@ -16420,22 +16356,21 @@ function cxSafetyText(phase) {
   else ov = hv.toFixed(2) + ' V (Alternator Hard Shutdown Voltage)';
   const openLoop = (phase >= 1 && phase <= 4);
   return openLoop
-    ? 'Protections active this step: <strong>over-voltage only</strong>. If battery voltage reaches ' + ov + ', the field is cut instantly, backed up by a hardware over-current cutoff on the current sensor. Current-limit and load-dump are paused for this test — there is no current target for them to act on.'
-    : 'Protections active this step: <strong>all of them</strong> — over-voltage (instant field cut at ' + ov + ', plus the voltage clamps), current-limit, load-dump, over-current, and the hardware cutoff on the current sensor. Nothing is paused.';
+    ? 'Protections active this step: <strong>over-voltage only</strong>.'
+    : 'Protections active this step: <strong>all of them</strong>.';
 }
 
 // Per-phase technical fine print — the "details" the simple instructions deliberately omit.
 // Shown muted at the bottom of the panel, above the protection statement.
 function cxFinePrint(phase) {
   switch (phase) {
-    case 0: return 'Commissioning measures your alternator and sets the whole current-control and over-current chain from those measurements (~3–5 min). It runs from your current mode — <strong>Manual is fine</strong>. Your existing tune is snapshotted first; Abort (or a reboot found mid-run) reverts to it. "Headroom" is how far the bus sits below your Bulk target — you need room to push test current, so run earlier in a charge cycle, not near absorption/float.';
+    case 0: return 'Commissioning runs some semi-automated tests on your alternator and uses the results to optimize configuration settings. Time required is ~ 5 minutes and requires some charging headroom in the battery SOC to avoid tripping overvoltage protections.';
     case 1: return 'Open-loop field-duty ramp across the full range maps duty→amps, finds the saturation knee, and proposes the plant test\'s wave floor (baseline current) and step size. No feedback control — raw duty only.';
-    case 2: return 'Briefly ramps field at each held RPM until output current just begins (the onset knee), stopping immediately so almost no current is forced into the battery. Do 3–4 RPMs across your range; the Min% column is fitted as a curve through those points and parked a margin below, then maintained automatically as the alternator wears. Only over-voltage is active during the ramp.';
+    case 2: return 'Briefly ramps field at each held RPM until output current just begins (the onset knee). The onset follows a 1/RPM law, so those three points fit the whole Min% column, parked a margin below and maintained automatically over alternator life. Above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Only over-voltage is active during the ramp.';
     case 3: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry) — it is not taken from the Plant Delay tab\'s sweep fields.';
-    case 4: { const p = cxVerifyParams(); return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are <strong>computed from the plant fit and field curve, not read from the Tuning ▸ Current tab</strong>: floor ' + p.floor + ' A, amplitude ' + p.amp + ' A, sweep ' + p.fStart + '–' + p.fEnd + ' Hz, ' + p.cycles + ' cycles/point. The range runs from below the measured plant corner f = 1/(2πτ) up to ~10× it (a bit past the expected crossover, so a resonant peak still lands inside the sweep).'; }
-    case 5: return 'Records the worst low-frequency disturbance at each engine speed into the disturbance map; ~80% coverage of the 500–2000 RPM band is enough. The field runs under your normal control while you creep the throttle.';
-    case 6: return 'Proposes the over-current detector\'s averaging time (= the plant τ) and trip floor (= max(default, post-EMA residual × margin)) from the disturbance map; you review and Apply it here. After that the floor keeps learning on its own — during normal running the regulator maps more of the speed range and <strong>raises</strong> the floor if it later finds a rougher operating point than this one-pass sweep caught. It never lowers the floor on its own (that\'s always a manual choice), so you won\'t need to re-run this step.';
-    case 7: { const t = (cx.thresh && cx.thresh.rpm) ? cx.thresh.rpm : null; return 'Watches for a false current-limit (iExcess) or load-dump trip while you hold ~' + (cx.valTarget || '?') + ' A for 8 s' + (t ? ' near ~' + t + ' RPM' : '') + '. Target is half the saturation knee (≥ 15 A). You raise the current; the panel only monitors.'; }
+    case 4: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve.';
+    case 5: return 'Records the worst low-frequency disturbance at each engine speed into a map; ~80% coverage of the &lt;2000 RPM band is enough.';
+    case 6: return 'Proposes the over-current detector\'s averaging time (= the plant τ) and trip floor (= max(default, post-EMA residual × margin)) from the disturbance map; you review and Apply it here.';
     default: return '';
   }
 }
@@ -16493,8 +16428,8 @@ function openCommissionModal() {
 
 function closeCommissionModal() {
     // Pause ≠ abort: closing leaves the firmware state IN_PROGRESS and KEEPS cx so the flow
-    // resumes on reopen. But never leave a test running, the device in closed-loop tuning, the
-    // relaxed matrix gate, or a validation ramp live — clean up whatever this session left active.
+    // resumes on reopen. But never leave a test running, the device in closed-loop tuning, or the
+    // relaxed matrix gate live — clean up whatever this session left active.
     cxStopPoll();
     if (cx) {
         if (cx.fieldRunning) cxGet('cancelFieldCurve=1').catch(() => { });
@@ -16516,19 +16451,6 @@ function cxGoto(phase) {
     // No tab switch on phase entry — only the field-action buttons move the tab (cxShowTab).
     commissionRender();
     if (phase === 0) { cxPollTimer = setInterval(cxPrepRefresh, 1000); cxPrepRefresh(); }      // live Prep precheck
-    else if (phase === 7) { cxPollTimer = setInterval(cxValGateRefresh, 1000); cxValGateRefresh(); }  // live RPM gate (Validate)
-}
-// Phase-6 RPM gate: enable "Start validation" only once engine speed is near the rough target.
-function cxValGateRefresh() {
-    if (!cx || cx.phase !== 7) return;
-    if (cx.val && (cx.val.running || cx.val.result)) return;  // gate not shown in those views
-    const tgtRpm = (cx.thresh && cx.thresh.rpm) ? cx.thresh.rpm : null;
-    const live = cxLive();
-    const rpmOk = !tgtRpm || (!isNaN(live.rpm) && Math.abs(live.rpm - tgtRpm) <= 200);
-    const g = document.getElementById('cx-val-gate');
-    if (g) g.textContent = tgtRpm ? ('Target ' + tgtRpm + ' RPM · now ' + (isNaN(live.rpm) ? '—' : Math.round(live.rpm)) + ' RPM') : 'Bring engine to the roughest RPM, then start.';
-    const btn = document.getElementById('cx-val-start');
-    if (btn) btn.disabled = !rpmOk;
 }
 
 function commissionRender() {
@@ -16539,7 +16461,7 @@ function commissionRender() {
         (i < cx.phase ? '✓ ' : (i + 1) + '. ') + nm + '</span>').join('<span style="color:#444;"> › </span>');
     document.getElementById('commission-abort-row').style.display = (cx.phase > 0) ? 'block' : 'none';
     const b = document.getElementById('commission-body');
-    const R = [cxRenderPrep, cxRenderField, cxRenderKnee, cxRenderPlant, cxRenderVerify, cxRenderMatrix, cxRenderThresh, cxRenderDone];
+    const R = [cxRenderPrep, cxRenderField, cxRenderKnee, cxRenderPlant, cxRenderVerify, cxRenderMatrix, cxRenderThresh];
     // Wrap render so a transient error can never blank/close the panel mid-flow.
     try { R[cx.phase](b); } catch (e) { console.warn('commissionRender', e); return; }
     // One muted footer under a single rule: technical "details" for this phase, then the
@@ -16555,7 +16477,7 @@ function commissionRender() {
 // ── Step 1 · Prep — preconditions & snapshot ────────────────────────────────
 function cxRenderPrep(b) {
     b.innerHTML =
-        '<p style="font-size:15px;line-height:1.5;"><strong>Start the engine and hold a steady speed</strong> in your normal range. When both checks below turn green, press Start.</p>' +
+        '<p style="font-size:15px;line-height:1.5;"><strong>Start the engine and hold a steady speed</strong> in your normal range.</p>' +
         '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
         '<div>Engine: <span id="cx-prep-rpm">…</span></div>' +
         '<div>Charging headroom: <span id="cx-prep-headroom">…</span></div>' +
@@ -16592,7 +16514,7 @@ function cxStart() {
 function cxRenderField(b) {
     const r = cx.fieldResult;
     let body =
-        '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to your normal cruising speed and hold it steady</strong> (the highest you usually run, e.g. ~2000 RPM). Press Run, then just hold the throttle (~30 s).</p>';
+        '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to your normal cruising speed and hold it steady</strong>, then press Run, hold steady for ~30s until test is complete.</p>';
     if (cx.fieldRunning) {
         body += '<p style="color:#4a9eff;">Running field-% ramp… hold RPM steady. <span id="cx-field-prog"></span></p>';
     } else if (cx.fieldAbort) {
@@ -16602,7 +16524,7 @@ function cxRenderField(b) {
     } else if (r) {
         body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
             'Captured <strong>' + r.pts.length + '</strong> points. ' +
-            (r.kneeAmps > 0 ? 'Saturation knee ~<strong>' + r.kneeAmps.toFixed(0) + ' A</strong> (' + r.kneeDuty.toFixed(0) + '% duty).'
+            (r.kneeAmps > 0 ? 'Saturation knee ~<strong>' + r.kneeAmps.toFixed(0) + ' A</strong> (' + r.kneeDuty.toFixed(0) + '% duty). Data is valid.'
                 : 'No saturation knee within range.') +
             '<br>Proposed <strong>Stabilize current</strong> ' + r.propStabA.toFixed(0) + ' A &nbsp;·&nbsp; <strong>Step amplitude</strong> ' + r.propStepPct.toFixed(1) + '% duty.' +
             (r.ok ? '' : '<br><span style="color:#f0a500;">Curve looks marginal — review before applying.</span>') +
@@ -16645,44 +16567,87 @@ function cxFieldApply() {
         .catch(e => alert('Apply failed: ' + e));
 }
 
-// ── Step 3 · Min% floor — onset-knee sweeps at a few RPMs → Min% column ───────
-// Reuses the field ramp in onset-stop mode (firmware: fieldCurveOnsetMode). Each completed sweep
-// is committed as an anchor; Apply (gated at 4 minimum) fits a curve through them into rpmMinDutyTable.
+// ── Step 3 · Min% floor — GUIDED onset-knee sweeps at 3 DESCENDING RPMs → Min% column ──
+// Reuses the field ramp in onset-stop mode (firmware: fieldCurveOnsetMode). The wizard walks the user
+// DOWN the throttle through three held speeds (max working RPM → mid → idle) — one "Start" per step.
+// Each clean sweep auto-commits as an anchor; the firmware warm-starts each sweep from the previous
+// point (onset only rises as RPM falls), so only the first reaches high RPM and only briefly.
+// applyKneeCurve least-squares fits onset = a + C/RPM across the 3 points (2-param model: 3 points
+// give the fit PLUS an outlier residual). SAFETY: the HIGHEST captured RPM (step 1) is the zero-ceiling
+// — above it the floor is forced to 0, so the field can always shut fully off at high speed.
+const CX_KNEE_STEPS = [
+    { tag: 'your maximum working RPM', hint: 'Rev to ~ the highest RPM you typically run and hold — test takes a few seconds.' },
+    { tag: 'a mid/typical cruising RPM', hint: 'Ease the throttle down to a middle speed and hold.' },
+    { tag: 'idle', hint: 'Let the engine settle to idle and hold.' }
+];
 function cxRenderKnee(b) {
     if (cx.kneeAnchors === undefined) { cx.kneeAnchors = []; cxKneeRefresh(); }
-    const res = cx.kneeResult;
     const anchors = cx.kneeAnchors || [];
-    let body = '<p style="font-size:15px;line-height:1.5;"><strong>Set the minimum-field floor.</strong> Hold a steady RPM, press Run — the regulator briefly raises field until output current just begins, records the point, and backs off. Capture <strong>at least 4 different RPMs</strong> spread across your range (more is fine), then Apply.</p>';
+    const NSTEP = CX_KNEE_STEPS.length;
+    const step = anchors.length;          // 0..2 = next guided capture; >=3 = review & approve
+    let body = '<p style="font-size:15px;line-height:1.5;">In this step you\'ll hold three speeds while the regulator ' +
+        'searches for the onset knee (where the field begins to produce an output current).</p>';
+
+    // Progress dots — done (✓), current (highlighted), pending.
+    let dots = '';
+    for (let i = 0; i < NSTEP; i++) {
+        const done = i < anchors.length, cur = i === step && step < NSTEP;
+        dots += '<span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;margin-right:6px;font-size:12px;' +
+            (done ? 'background:#2a5a2a;color:#9f9;' : cur ? 'background:#234;color:#4a9eff;border:1px solid #4a9eff;' : 'background:#222;color:#778;') + '">' +
+            (done ? '✓' : (i + 1)) + '</span>';
+    }
+    body += '<div style="margin:4px 0 12px;">' + dots + '</div>';
+
     if (cx.kneeRunning) {
-        body += '<p style="color:#4a9eff;">Sweeping… hold RPM steady. <span id="cx-knee-prog"></span></p>';
-    } else {
+        body += '<p style="color:#4a9eff;">Sweeping field… keep speed steady as possible. <span id="cx-knee-prog"></span></p>';
+    } else if (step < NSTEP) {
+        const s = CX_KNEE_STEPS[step];
         if (cx.kneeAbort) {
             body += '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' +
                 'Sweep stopped: <strong>' + cx.kneeAbort + '</strong><br>' +
-                '<span style="font-size:13px;color:#caa;">See the Console (below the dashboard) for full detail, fix the cause, then run again.</span></div>';
+                '<span style="font-size:13px;color:#caa;">See the Console (below the dashboard) for full detail, fix the cause, then Start again.</span></div>';
+        } else if (cx.kneeNoOnset) {
+            body += '<div style="margin:10px 0;padding:8px 10px;background:#3a3322;border:1px solid #a85;border-radius:6px;color:#f0a500;">' +
+                'No clean onset at that speed — nothing recorded. Hold a slightly different steady RPM in the same range, then Start again.</div>';
         }
-        if (res && res.kneeDuty > 0) {
-            body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
-                'Last sweep: onset at <strong>' + res.kneeDuty.toFixed(1) + '% duty</strong> @ ' + res.rpm.toFixed(0) + ' RPM' +
-                (res.ok ? '' : ' <span style="color:#f0a500;">(no clean onset — using ceiling)</span>') + '<br>' +
-                '<button onclick="cxKneeAdd()" class="btn-primary btn-sm">Add this point</button> ' +
-                '<button onclick="cxKneeDiscard()" class="btn-secondary btn-sm">Discard</button></div>';
+        body += '<div style="margin:10px 0;padding:10px 12px;background:#1c2530;border-radius:6px;">' +
+            '<div style="font-size:15px;"><strong>Step ' + (step + 1) + ' of ' + NSTEP + '</strong> — hold the engine at <strong style="color:#4a9eff;">' + s.tag + '</strong>.</div>' +
+            '<div style="margin-top:4px;color:#9aa;font-size:13px;">' + s.hint + '</div></div>';
+        body += '<button onclick="cxKneeStart()" class="btn-primary" style="width:100%;padding:9px;">Start sweep — hold ' + s.tag + ' steady</button>';
+    } else {
+        body += '<div style="margin:10px 0;padding:8px 10px;background:#1e2a1e;border:1px solid #3a5a3a;border-radius:6px;color:#bdb;">' +
+            'All three speeds captured. Review below, then approve.</div>';
+        // Outlier flag — the 3 points should fall on one onset = a + C/RPM curve. A large residual means
+        // one hold drifted or caught a load step during that sweep.
+        if (typeof cx.kneeFitResid === 'number' && cx.kneeFitResid > 2.0) {
+            const wi = cx.kneeFitWorstIdx, wlabel = (wi >= 0 && CX_KNEE_STEPS[wi]) ? CX_KNEE_STEPS[wi].tag : 'one point';
+            body += '<div style="margin:10px 0;padding:8px 10px;background:#3a3322;border:1px solid #a85;border-radius:6px;color:#f0a500;">' +
+                'These three don\'t sit on one curve (off by ' + cx.kneeFitResid.toFixed(1) + '% at <strong>' + wlabel + '</strong>). ' +
+                'Likely a drifting hold or a load change during that sweep. You can still approve, but Start over is cheap now that sweeps are warm-started.</div>';
         }
-        body += '<button onclick="cxKneeStart()" class="btn-primary" style="width:100%;padding:9px;">Run sweep at this RPM</button>';
     }
+
+    // Captured-so-far table, labelled by which guided target produced each point.
     if (anchors.length) {
-        const rows = anchors.map(a => '<tr><td>' + a.rpm.toFixed(0) + '</td><td>' + a.duty.toFixed(1) + '%</td><td>' + a.tempF.toFixed(0) + '°F</td></tr>').join('');
-        body += '<table style="width:100%;margin-top:10px;font-size:13px;border-collapse:collapse;"><tr style="text-align:left;color:#9aa;"><th>RPM</th><th>Onset</th><th>Temp</th></tr>' + rows + '</table>';
-        body += '<div style="margin-top:6px;color:' + (anchors.length >= 4 ? '#5a5' : '#9aa') + ';font-size:13px;">' + anchors.length + ' point' + (anchors.length === 1 ? '' : 's') + ' — ' + (anchors.length >= 4 ? '4 minimum met (more optional).' : ('need ' + (4 - anchors.length) + ' more.')) + '</div>';
-        body += '<div style="margin-top:8px;"><button onclick="cxKneeApply()" class="btn-primary btn-sm"' + (anchors.length < 4 ? ' disabled' : '') + '>Apply curve</button> <button onclick="cxKneeClear()" class="btn-secondary btn-sm">Clear points</button></div>';
-        if (cx.kneeApplied) body += '<div style="margin-top:6px;"><span style="color:#5a5;">Applied — Min% column filled.</span></div>';
+        const rows = anchors.map((a, i) => '<tr><td>' + (CX_KNEE_STEPS[i] ? CX_KNEE_STEPS[i].tag : '—') + '</td><td>' + a.rpm.toFixed(0) + '</td><td>' + a.duty.toFixed(1) + '%</td><td>' + a.tempF.toFixed(0) + '°F</td></tr>').join('');
+        body += '<table style="width:100%;margin-top:12px;font-size:13px;border-collapse:collapse;"><tr style="text-align:left;color:#9aa;"><th>Target</th><th>RPM</th><th>Onset</th><th>Temp</th></tr>' + rows + '</table>';
     }
+
+    if (step >= NSTEP) {
+        body += '<div style="margin-top:12px;">' +
+            '<button onclick="cxKneeApply()" class="btn-primary btn-sm">Approve &amp; apply</button> ' +
+            '<button onclick="cxKneeRestart()" class="btn-secondary btn-sm">Start over</button></div>';
+        if (cx.kneeApplied) body += '<div style="margin-top:6px;"><span style="color:#5a5;">Applied — Min% column filled.</span></div>';
+    } else if (anchors.length) {
+        body += '<div style="margin-top:8px;"><button onclick="cxKneeRestart()" class="btn-secondary btn-sm">Start over</button></div>';
+    }
+
     body += '<div style="margin-top:12px;"><button onclick="cxGoto(3)" class="btn-secondary btn-sm"' + (cx.kneeApplied ? '' : ' disabled') + '>Next: plant fit →</button></div>';
     b.innerHTML = body;
 }
 function cxKneeStart() {
     cxShowTab('plots', 'displays');   // onset ramp → watch on Plots ▸ Short Term
-    cx.kneeResult = null; cx.kneeAbort = null; cx.kneeRunning = true; commissionRender();
+    cx.kneeAbort = null; cx.kneeNoOnset = false; cx.kneeRunning = true; commissionRender();
     cxGet('startKneeSweep=1').then(() => {
         cxStopPoll();
         let waited = 0, sawActive = false;
@@ -16693,8 +16658,14 @@ function cxKneeStart() {
                 if (j.active) sawActive = true;
                 if (j.abort && !j.active) {              // a protection cut this run — reason latched in firmware
                     cxStopPoll(); cx.kneeRunning = false; cx.kneeAbort = j.abort; commissionRender();
-                } else if (j.ready && !j.active) {        // completed normally
-                    cxStopPoll(); cx.kneeRunning = false; cx.kneeResult = j; commissionRender();
+                } else if (j.ready && !j.active) {        // completed — auto-commit only a CLEAN onset
+                    cxStopPoll();
+                    if (j.ok && j.kneeDuty > 0) {         // good point → commit and advance to next step
+                        cxGet('addKneeAnchor=1').then(() => { cx.kneeRunning = false; cxKneeRefresh(); })
+                            .catch(e => { cx.kneeRunning = false; alert('Add failed: ' + e); commissionRender(); });
+                    } else {                              // no clean onset → record nothing, let them retry
+                        cx.kneeRunning = false; cx.kneeNoOnset = true; commissionRender();
+                    }
                 } else if (sawActive && !j.active) {      // ran then stopped, no result/reason (e.g. cancel)
                     cxStopPoll(); cx.kneeRunning = false; commissionRender();
                 } else if (!sawActive && waited > 12) {   // never started
@@ -16704,13 +16675,13 @@ function cxKneeStart() {
         }, 1500);
     }).catch(e => { cx.kneeRunning = false; alert('Knee sweep start failed: ' + e); commissionRender(); });
 }
-function cxKneeAdd() { cxGet('addKneeAnchor=1').then(() => { cx.kneeResult = null; cxKneeRefresh(); }).catch(e => alert('Add failed: ' + e)); }
-function cxKneeDiscard() { cx.kneeResult = null; commissionRender(); }
-function cxKneeClear() { cxGet('clearKneeAnchors=1').then(() => { cx.kneeApplied = false; cxKneeRefresh(); }).catch(e => alert('Clear failed: ' + e)); }
 function cxKneeApply() { cxGet('applyKneeCurve=1').then(() => { cx.kneeApplied = true; commissionRender(); }).catch(e => alert('Apply failed: ' + e)); }
+function cxKneeRestart() { cxGet('clearKneeAnchors=1').then(() => { cx.kneeApplied = false; cx.kneeNoOnset = false; cx.kneeAbort = null; cx.kneeFitResid = undefined; cx.kneeFitWorstIdx = -1; cxKneeRefresh(); }).catch(e => alert('Clear failed: ' + e)); }
 function cxKneeRefresh() {
     fetch(buildURL('/kneesweep.json')).then(r => r.json()).then(j => {
         cx.kneeAnchors = j.anchors || [];
+        cx.kneeFitResid = (typeof j.fitResid === 'number' && j.fitResid >= 0) ? j.fitResid : undefined;
+        cx.kneeFitWorstIdx = (typeof j.fitWorstIdx === 'number') ? j.fitWorstIdx : -1;
         if (cx.phase === 2) commissionRender();
     }).catch(() => { });
 }
@@ -16718,7 +16689,7 @@ function cxKneeRefresh() {
 // ── Step 4 · Plant fit — open-loop sweep → PI gains + filters ─────────────────
 function cxRenderPlant(b) {
     const fit = cx.fit;
-    let body = '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine back to a steady cruising speed and hold it.</strong> Press Run and wait — this measures how fast the alternator responds.</p>';
+    let body = '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine back to a typical cruising speed, hold, and press Run.</strong></p>';
     if (cx.plantRunning) body += '<p style="color:#4a9eff;">Sine sweep running… hold RPM steady. <span id="cx-plant-prog"></span></p>';
     else if (fit) {
         if (!fit.ok) body += '<div style="margin:10px 0;color:#f0a500;">No −3 dB corner found in the swept range. Widening the sweep and retrying…</div>';
@@ -16780,7 +16751,7 @@ function cxPlantApply() {
 
 // ── Step 4 · Verify — closed-loop stability check ────────────────────────────
 function cxRenderVerify(b) {
-    let body = '<p style="font-size:15px;line-height:1.5;"><strong>Keep holding the same speed.</strong> Press Run — this double-checks the new tune is stable.</p>';
+    let body = '<p style="font-size:15px;line-height:1.5;"><strong>Keep holding the same speed.</strong> Press Run.</p>';
     if (cx.verifyRunning) body += '<p style="color:#4a9eff;">Closed-loop sweep running… <span id="cx-verify-prog"></span></p>';
     else if (cx.verify) {
         const v = cx.verify;
@@ -16834,7 +16805,7 @@ function cxVerifyDone() { cxGet('TuningMode=0').finally(() => cxGoto(5)); }
 
 // ── Step 5 · Disturbances — guided slow sweep populates the matrix ────────────
 function cxRenderMatrix(b) {
-    let body = '<p style="font-size:15px;line-height:1.5;">Press Start, then <strong>from idle slowly creep the throttle up to ~2000 RPM</strong> in one smooth, continuous pass — don\'t hold, just raise it as slowly as you comfortably can.</p>';
+    let body = '<p style="font-size:15px;line-height:1.5;">Press Start, then <strong>from idle slowly creep the throttle up to ~2000 RPM</strong> in a smooth, continuous pass, to ensure adequate coverage. Note: this step may be optional depending on data already collected — follow wizard prompts.</p>';
     if (cx.matrixOn) {
         body += '<div id="cx-cov" style="margin:10px 0;">Coverage: checking…</div>' +
             '<button onclick="cxMatrixStop()" class="btn-secondary btn-sm">I\'m done sweeping</button>';
@@ -16870,7 +16841,7 @@ function cxMatrixStop() {
 
 // ── Step 6 · Thresholds — over-current thresholds from the matrix ─────────────
 function cxRenderThresh(b) {
-    let body = '<p style="font-size:15px;line-height:1.5;"><strong>No throttle action needed.</strong> Review the proposed over-current limits below, then press Apply.</p>';
+    let body = '<p style="font-size:15px;line-height:1.5;">Review the proposed over-current limits below, then press Apply.</p>';
     if (!cx.thresh) { body += '<p style="color:#4a9eff;">Computing…</p>'; cxComputeThresholds(); }
     else if (cx.thresh.err) body += '<div style="color:#f0a500;margin:10px 0;">' + cx.thresh.err + '</div>';
     else {
@@ -16883,7 +16854,11 @@ function cxRenderThresh(b) {
             (cx.threshApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>' +
             (cx.threshApplied ? '' : '<button onclick="cxThreshApply()" class="btn-primary btn-sm">Apply proposed thresholds</button>');
     }
-    body += '<div style="margin-top:12px;"><button onclick="cxGoto(7)" class="btn-secondary btn-sm">Next →</button></div>';
+    // Summary of everything applied this run (this is now the final step).
+    body += '<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">Applied settings</summary>' +
+        '<div style="font-size:12px;color:#bbb;line-height:1.6;margin-top:6px;">' + cxAppliedSummary() + '</div></details>';
+    body += '<p style="font-size:12px;color:#999;margin-top:12px;">Finishing discards the pre-commissioning snapshot and clears the warning badge.</p>' +
+        '<button onclick="cxFinish()" class="btn-primary" style="width:100%;padding:9px;">Finish — mark commissioned</button>';
     b.innerHTML = body;
 }
 function cxComputeThresholds() {
@@ -16921,42 +16896,6 @@ function cxThreshApply() {
         .catch(e => alert('Apply failed: ' + e));
 }
 
-// ── Step 7 · Validate — confirm no false trips, then commit ───────────────────
-function cxRenderDone(b) {
-    const tgtRpm = (cx.thresh && cx.thresh.rpm) ? cx.thresh.rpm : null;
-    // Validation current target: half the field-curve saturation knee if we have it, floor 15 A.
-    const knee = (cx.fieldResult && cx.fieldResult.kneeAmps > 0) ? cx.fieldResult.kneeAmps : 0;
-    cx.valTarget = Math.max(15, Math.round(knee * 0.5));
-    const v = cx.val;
-    let body = '<p style="font-size:15px;line-height:1.5;"><strong>Bring the engine to ' + (tgtRpm ? '~' + tgtRpm + ' RPM' : 'the roughest speed the sweep found') + ', press Start, then slowly raise output current to ~' + cx.valTarget + ' A and hold.</strong> Raise it gently so you don\'t load the engine fast.</p>';
-
-    if (v && v.running) {
-        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
-            '<div>RPM <strong id="cx-val-rpm">…</strong> · current <strong id="cx-val-amps">…</strong> (max <span id="cx-val-max">…</span>)</div>' +
-            '<div id="cx-val-prog" style="color:#4a9eff;">hold steady at target…</div></div>' +
-            '<button onclick="cxValStop()" class="btn-secondary btn-sm">Stop validation</button>';
-    } else if (v && v.result) {
-        const pass = v.result === 'pass';
-        body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
-            (pass ? '<span style="color:#5a5;">PASS — held ~' + cx.valTarget + ' A with no false current-limit / load-dump trip.</span>'
-                  : '<span style="color:#f0a500;">REVIEW — ' + v.firedName + ' fired during the hold. Re-check the Thresholds step before trusting it.</span>') +
-            '</div><button onclick="cxValStart()" class="btn-secondary btn-sm">Re-run validation</button>';
-    } else {
-        const live = cxLive();
-        const rpmOk = !tgtRpm || (!isNaN(live.rpm) && Math.abs(live.rpm - tgtRpm) <= 200);
-        body += '<div id="cx-val-gate" style="font-size:12px;color:#999;margin:6px 0;">' +
-            (tgtRpm ? ('Target ' + tgtRpm + ' RPM · now ' + (isNaN(live.rpm) ? '—' : Math.round(live.rpm)) + ' RPM') : 'Bring engine to the roughest RPM, then start.') + '</div>' +
-            '<button id="cx-val-start" onclick="cxValStart()" class="btn-primary" style="width:100%;padding:9px;"' + (rpmOk ? '' : ' disabled') + '>Start validation</button>';
-    }
-
-    // Summary of everything applied this run.
-    body += '<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:12px;color:#aaa;">Applied settings</summary>' +
-        '<div style="font-size:12px;color:#bbb;line-height:1.6;margin-top:6px;">' + cxAppliedSummary() + '</div></details>';
-
-    body += '<p style="font-size:12px;color:#999;margin-top:12px;">Finishing discards the pre-commissioning snapshot and clears the warning badge.</p>' +
-        '<button onclick="cxFinish()" class="btn-primary" style="width:100%;padding:9px;">Finish — mark commissioned</button>';
-    b.innerHTML = body;
-}
 function cxAppliedSummary() {
     const r = cx.fieldResult, f = cx.fit, t = cx.thresh;
     const rows = [];
@@ -16965,33 +16904,6 @@ function cxAppliedSummary() {
     if (t && !t.err) rows.push('Over-current: averaging τ ' + t.tau.toFixed(0) + ' ms, floor ' + t.floor.toFixed(1) + ' A');
     return rows.length ? rows.join('<br>') : 'No settings applied yet — earlier phases were skipped.';
 }
-// Guided + monitored validation: the operator raises current; the panel watches for a
-// false current-limit (iExcess, bit2) or load-dump (bit4) trip while ~valTarget A is held.
-function cxValStart() {
-    cxShowTab('plots', 'displays');   // validation hold → watch current + any trip on Plots ▸ Short Term
-    cx.val = { running: true, max: 0, holdMs: 0, lastMs: Date.now(), result: null, firedName: '' };
-    commissionRender();
-    cxStopPoll();
-    cxPollTimer = setInterval(() => {
-        const v = cx.val; if (!v || !v.running) return;
-        const L = cxLive(), now = Date.now(), dt = now - v.lastMs; v.lastMs = now;
-        if (!isNaN(L.amps) && L.amps > v.max) v.max = L.amps;
-        const rEl = document.getElementById('cx-val-rpm'); if (rEl) rEl.textContent = isNaN(L.rpm) ? '—' : Math.round(L.rpm) + ' RPM';
-        const aEl = document.getElementById('cx-val-amps'); if (aEl) aEl.textContent = isNaN(L.amps) ? '—' : L.amps.toFixed(1) + ' A';
-        const mEl = document.getElementById('cx-val-max'); if (mEl) mEl.textContent = v.max.toFixed(1) + ' A';
-        // False-fire detection: current-limit or load-dump while merely holding current.
-        if (L.prot & 2) { v.firedName = 'Current-limit (iExcess)'; v.result = 'fail'; v.running = false; }
-        else if (L.prot & 4) { v.firedName = 'Load-dump'; v.result = 'fail'; v.running = false; }
-        else if (!isNaN(L.amps) && L.amps >= cx.valTarget) {
-            v.holdMs += dt;
-            const pEl = document.getElementById('cx-val-prog');
-            if (pEl) pEl.textContent = 'holding ' + (v.holdMs / 1000).toFixed(0) + ' / 8 s at target…';
-            if (v.holdMs >= 8000) { v.result = 'pass'; v.running = false; }
-        } else { v.holdMs = 0; const pEl = document.getElementById('cx-val-prog'); if (pEl) pEl.textContent = 'raise current toward ' + cx.valTarget + ' A…'; }
-        if (!v.running) { cxStopPoll(); commissionRender(); }
-    }, 700);
-}
-function cxValStop() { if (cx.val) { cx.val.running = false; cx.val.result = null; } cxStopPoll(); commissionRender(); }
 function cxFinish() {
     cxGet('commissionDone=1').then(() => { alert('Commissioning complete.'); closeCommissionModal(); cx = null; }).catch(e => alert('Finish failed: ' + e));
 }
@@ -17015,22 +16927,21 @@ function updateCommissionBadge(state) {
     }
 }
 
-// The seven wizard phases, mirrored from CX_PHASES, with a one-line plain-English purpose.
+// The seven wizard steps, mirrored from CX_PHASES, with a one-line plain-English purpose.
 // Single source for the Commissioning tab checklist; indices match the persisted commissionPhase.
 const COMMISSION_STEPS = [
     { name: 'Prep', desc: 'Preconditions checked, current tune snapshotted for safe revert.' },
     { name: 'Field curve', desc: 'Map field duty → current and find the saturation knee.' },
-    { name: 'Min% floor', desc: 'Find the field-duty onset knee at a few RPMs and set the per-RPM Min% floor.' },
+    { name: 'Min% floor', desc: 'Guided onset-knee sweeps down the throttle at three RPMs (max working → mid → idle) fit the per-RPM Min% floor; above the max it is forced to zero.' },
     { name: 'Plant fit', desc: 'Measure the field coil\'s electrical lag (plant delay) and set the filters.' },
     { name: 'Verify', desc: 'Seed the current-loop gains and confirm the loop responds.' },
     { name: 'Disturbances', desc: 'Map the worst over-current the field can actually react to.' },
     { name: 'Thresholds', desc: 'Set the over-current trip points above that disturbance floor.' },
-    { name: 'Validate', desc: 'Guided current hold confirms protections don\'t false-trip.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
 
 // Render the whole Commissioning tab status block: badge + overall line + 8-step checklist +
-// clear/restart button. Driven by persisted state (0/1/2) and furthest phase reached (0..8).
+// clear/restart button. Driven by persisted state (0/1/2) and furthest phase reached (0..7).
 function renderCommissionStatus(state, phase) {
     cxLastState = state;
     updateCommissionBadge(state);
@@ -17047,7 +16958,7 @@ function renderCommissionStatus(state, phase) {
     const ov = document.getElementById('commission-overall');
     if (ov) {
         if (state === 2) { ov.textContent = 'Commissioned'; ov.style.color = '#2e7d32'; }
-        else if (state === 1) { ov.textContent = 'In progress — step ' + Math.min(phase + 1, 8) + ' of 8'; ov.style.color = '#b8860b'; }
+        else if (state === 1) { ov.textContent = 'In progress — step ' + Math.min(phase + 1, 7) + ' of 7'; ov.style.color = '#b8860b'; }
         else { ov.textContent = 'Not commissioned'; ov.style.color = 'var(--text-muted)'; }
     }
 
@@ -17055,7 +16966,7 @@ function renderCommissionStatus(state, phase) {
     if (cl) {
         cl.innerHTML = COMMISSION_STEPS.map((s, i) => {
             const done = (state === 2) || (i < phase);
-            const current = (state === 1) && (i === phase) && (phase < 8);
+            const current = (state === 1) && (i === phase) && (phase < 7);
             const mark = done ? '✓' : (current ? '▶' : '○');
             const markColor = done ? '#2e7d32' : (current ? '#1565c0' : 'var(--text-muted)');
             return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--border);">' +
@@ -17897,6 +17808,11 @@ window.addEventListener('load', function () {
     if (_brushState.stalenessTimerId == null) {
       _brushState.stalenessTimerId = (typeof setTrackedInterval === 'function' ? setTrackedInterval : setInterval)(_brushUpdateStaleness, 10000);
     }
+    // Freshness banner shares a tracked timer (5 s so the countdown isn't too jumpy).
+    ltUpdateFreshness();
+    if (_ltFreshTimerId == null) {
+      _ltFreshTimerId = (typeof setTrackedInterval === 'function' ? setTrackedInterval : setInterval)(ltUpdateFreshness, 5000);
+    }
     const clr = document.getElementById('dashboard-crosshair-clear');
     if (clr && !clr._ltWired) { clr._ltWired = true; clr.addEventListener('click', () => { ltPinnedTime = null; ltRedrawMarkers(); ltUpdateCrosshairIndicator(); }); }
   }
@@ -18265,6 +18181,43 @@ window.addEventListener('load', function () {
     const card = status.closest('.settings-card') || status;
     if (msg) { status.textContent = msg; card.style.display = ''; }
     else { card.style.display = 'none'; }   // hide the whole card, not just the text
+  }
+
+  // Freshness banner. Long-term points are min/max/avg ENVELOPES the firmware commits once
+  // per closing window (ltData.interval — ~10 min in production), NOT instant writes — so the
+  // newest point lags live by up to one interval. This is the averaging window, not slow
+  // PSRAM. Banner shows the countdown to the next averaged point, and once that point is due
+  // (the device should have committed it) flips to a one-tap Refresh that re-pulls the ring.
+  let _ltFreshTimerId = null;
+  function ltUpdateFreshness() {
+    const banner = document.getElementById('lt-freshness-banner');
+    if (!banner) return;
+    // Need loaded data with a real epoch (unsynced clock → lastEpoch 0 → nothing to count from).
+    if (!ltLoaded || !ltData || !ltData.n || !ltData.lastEpoch) { banner.style.display = 'none'; return; }
+    const interval = ltData.interval || 600;             // seconds between committed points
+    const nowSec   = Math.floor(Date.now() / 1000);
+    const dueIn    = ltData.lastEpoch + interval - nowSec; // seconds until the next point commits
+    const mins     = Math.max(1, Math.round(interval / 60));
+    if (dueIn > 0) {                                       // up to date — show the countdown
+      const m = Math.floor(dueIn / 60), s = dueIn % 60;
+      const cd = m > 0 ? (m + 'm ' + s + 's') : (s + 's');
+      banner.className = 'settings-card lt-fresh-ok';
+      banner.innerHTML = 'Up to date — points are ' + mins +
+        '-min averaged envelopes. Next point in <strong>' + cd + '</strong>.';
+      banner.style.display = '';
+    } else if (dueIn > -interval) {                        // overdue by < one interval → new point ready
+      banner.className = 'settings-card lt-fresh-pending';
+      banner.innerHTML = '<strong>New data pending</strong> — a fresh ' + mins +
+        '-min averaged point is ready on the device. ' +
+        '<button class="btn btn-sm btn-primary" id="lt-fresh-refresh" style="margin-left:8px;">Refresh</button>';
+      const btn = document.getElementById('lt-fresh-refresh');
+      if (btn) btn.onclick = () => { if (typeof window.initLongTermPlots === 'function') window.initLongTermPlots(); };
+      banner.style.display = '';
+    } else {
+      // Overdue by more than a full interval = the device hasn't been logging (engine/board off).
+      // That's staleness, not a pending write — the brush-bar "Last data: X ago" already shows it.
+      banner.style.display = 'none';
+    }
   }
 
   // ======================================================================
