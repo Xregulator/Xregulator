@@ -981,9 +981,20 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=CV plant fit, 8=finished
+  CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
+  CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
+  CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
+  CSV3_coldChargeLockoutEnable, // cold-charge lockout master on/off (1=on)
+  CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (lambda-based)
+  CSV3_cvLambdaMult,            // lambda = N x dead-time; ×10
+  CSV3_cvPlantK,                // measured plant gain K (V/A); ×10000
+  CSV3_cvPlantTau,              // measured rise time tau (s); ×100
+  CSV3_cvPlantL,                // measured dead time L (s); ×100
+  CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
+  CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
 
-  CSV3_FIELD_COUNT  // = 308 (306 prior + SetpointBigStepThresh + SetpointBigStepRiseRate)
+  CSV3_FIELD_COUNT  // = 319 (dutyCeilingEnable removed — Max Field % is now the real per-bus cap, WYSIWYG)
 };
 
 
@@ -2276,12 +2287,17 @@ void setupServer() {
   server.on("/altrecords.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     altFrontRecordsCsvSend(request);
   });
+  // Full alt-health state dump for offline / AI debugging (Download Debug CSV) — streamed.
+  server.on("/altdebug.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    altDebugCsvSend(request);
+  });
   // Performance-vs-engine-hours trend (header + points, chunked). This is the headline. Decimated to
   // <= TR_MAXOUT output points for readability + payload (full hourly history stays on the device):
   // each output point is one bucket of source hours — worst = min (preserve the early-warning
   // envelope), overall = mean. stride==1 (<= TR_MAXOUT total) streams every hour, as before.
+  extern float altTrendBucketSec;   // defined in 7_functions.ino (concatenated later) — needed to convert bucket index → engine-hours
   server.on("/alttrend.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (!altTrend) { request->send(200, "text/plain", "engHour,worstPct,overallPct\n"); return; }
+    if (!altTrend) { request->send(200, "text/plain", "engHours,worstPct,overallPct\n"); return; }
     const int TR_MAXOUT = 200;
     struct TrExp { int total, stride, outIdx, numOut; bool header, done; char line[64]; int len, pos; };
     TrExp st;
@@ -2296,7 +2312,7 @@ void setupServer() {
         while (written < maxLen) {
           if (st.pos >= st.len) {
             if (st.header) {
-              st.len = snprintf(st.line, sizeof(st.line), "engHour,worstPct,overallPct\n");
+              st.len = snprintf(st.line, sizeof(st.line), "engHours,worstPct,overallPct\n");
               st.header = false;
             } else {
               if (st.outIdx >= st.numOut) { st.done = true; return written; }
@@ -2308,8 +2324,10 @@ void setupServer() {
                 if (w < worst) worst = w;
                 sum += altTrend[i].overallPct / 10.0f; n++;
               }
-              unsigned eh = (unsigned)altTrend[end - 1].engHour;   // bucket labelled by its most-recent hour
-              st.len = snprintf(st.line, sizeof(st.line), "%u,%.1f,%.1f\n", eh, worst, n ? sum / n : 0.0f);
+              // Stored engHour is a BUCKET INDEX. Convert to true engine-hours so the X axis is correct at
+              // any bucket size (index × bucketSec/3600): at 3600 s index==hours; at 600 s six buckets = 1 h.
+              float ehHours = (float)altTrend[end - 1].engHour * (altTrendBucketSec / 3600.0f);
+              st.len = snprintf(st.line, sizeof(st.line), "%.3f,%.1f,%.1f\n", ehHours, worst, n ? sum / n : 0.0f);
               st.outIdx++;
             }
             st.pos = 0;
@@ -2449,8 +2467,8 @@ void setupServer() {
 
     uint32_t cnt = (uint32_t)cvLogCount;
     uint32_t entrySize = (uint32_t)sizeof(CvLogEntry);
-    float kp = (float)VoltageKp;
-    float ki = (float)VoltageKi;
+    float kp = (float)VoltageKp_active;  // gains ACTUALLY in effect (Manual or Auto-λ, 12V-block normalized) — not the raw manual VoltageKp, which the loop ignores in Auto mode / on 24-48V
+    float ki = (float)VoltageKi_active;
     float kd = 0.0f;  // reserved — was VoltageKd; D term removed; 0 preserves binary header layout
     uint32_t interval = (uint32_t)VoltageLoopInterval;
 
@@ -2708,7 +2726,14 @@ void setupServer() {
     }
     ENGINE_MAKE = doc["engine_make"].as<String>();
     ENGINE_HP = doc["engine_hp"];
-    BATTERY_VOLTAGE = doc["battery_voltage"];
+    // System voltage is the sole source of truth for the 12/24/48V class. On a change, rescale the
+    // whole charge-voltage profile + re-derive the hard-shutdown trip + the INA228 OV limit + both
+    // control loops' normalized gains (CV and CC). The dashboard warns the user before submitting.
+    int oldBatteryVoltage = BATTERY_VOLTAGE;
+    int newBatteryVoltage = doc["battery_voltage"] | (int)BATTERY_VOLTAGE;
+    if (newBatteryVoltage != 12 && newBatteryVoltage != 24 && newBatteryVoltage != 48) newBatteryVoltage = oldBatteryVoltage;
+    BATTERY_VOLTAGE = (uint8_t)newBatteryVoltage;
+    applyNominalVoltageChange(oldBatteryVoltage, newBatteryVoltage);
     BatteryCapacity_Ah = doc["battery_capacity_ah"];
     BATTERY_TYPE = doc["battery_type"].as<String>();
     ALTERNATOR_BRAND_MODEL = doc["alternator_brand_model"].as<String>();
@@ -3059,10 +3084,25 @@ void setupServer() {
     else if (request->hasParam("commissionStart")) {
       foundParameter = true;
       commissionSnapshot();         // capture pre-commissioning tune for the abort path
-      commissionSetState(1);        // IN_PROGRESS
-      commissionSetPhase(0);        // reset checklist (the wizard bumps it forward per phase)
+      commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
+      commissionSetPhase(0);        // reset furthest-phase (the wizard bumps it forward per phase)
+      commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
+      // Wipe the live onset-knee FIT SCRATCH so step 3 starts the sweeps clean if it is run.
+      // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
+      // which are left intact so a partial re-run that skips Min% keeps its learned floors.)
+      kneeAnchorN = 0;
+      kneeFitResidPct = -1.0f; kneeFitWorstIdx = -1; kneeFitA = 0.0f; kneeFitC = 0.0f;
       settingsDirty = true;         // push the CSV3 state echo promptly
       queueConsoleMessage("Commissioning: started — settings snapshotted");
+    }
+    // Mark one wizard stage complete (i = 0=Prep…7=CV plant fit). Sets its done bit and clears
+    // any downstream stage it feeds (coupling: see commissionDependentsMask). Drives the ✓ marks.
+    else if (request->hasParam("commissionStageDone")) {
+      foundParameter = true;
+      int s = request->getParam("commissionStageDone")->value().toInt();
+      commissionMarkStage(s);
+      settingsDirty = true;
+      queueConsoleMessageF("Commissioning: step %d complete", s + 1);
     }
     else if (request->hasParam("commissionAbort")) {
       foundParameter = true;
@@ -3070,6 +3110,8 @@ void setupServer() {
       bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
       commissionSetState(0);                // NOT_COMMISSIONED
       commissionSetPhase(0);                // clear checklist progress
+      commissionDoneMask = 0;               // revert also drops all per-stage completion
+      commissionWriteDoneMask();
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: aborted — %s",
                            reverted ? "settings reverted to snapshot" : "no snapshot to revert");
@@ -3077,20 +3119,32 @@ void setupServer() {
     else if (request->hasParam("commissionDone")) {
       foundParameter = true;
       faCommissionGate = false;
-      commissionSetState(2);                // COMMISSIONED
-      commissionSetPhase(7);                // all phases complete (7 steps: 0=Prep..6=Thresholds, 7=finished)
-      settingRemove(NK_commissionSnap);     // discard snapshot — commit the new tune
+      settingRemove(NK_commissionSnap);     // commit the new tune (no snapshot ⇒ reboot won't revert)
+      commissionClearMinPctBackup();        // discard the Min% backup too — the new floors stay
+      commissionRecomputeState();           // COMMISSIONED if every stage done, else IN_PROGRESS (partial)
+      commissionSetPhase(COMMISSION_STAGE_COUNT);  // wizard pass finished (= one past the last step)
       settingsDirty = true;
-      queueConsoleMessage("Commissioning: complete — device marked COMMISSIONED");
+      queueConsoleMessageF("Commissioning: pass finished — %s",
+                           commissionDoneMask >= COMMISSION_ALL_DONE ? "all steps complete, device COMMISSIONED"
+                                                                     : "partial — some steps still pending");
     }
     // Wizard heartbeat: persist the furthest phase reached so the tab checklist survives
-    // a page reload / a different client. Clamped 0..7. Does not change commissionState.
+    // a page reload / a different client. Clamped 0..COMMISSION_STAGE_COUNT (last value = finished).
+    // Does not change commissionState.
     else if (request->hasParam("commissionPhase")) {
       foundParameter = true;
       int p = request->getParam("commissionPhase")->value().toInt();
-      if (p < 0) p = 0; if (p > 7) p = 7;
+      if (p < 0) p = 0; if (p > COMMISSION_STAGE_COUNT) p = COMMISSION_STAGE_COUNT;
       commissionSetPhase((uint8_t)p);
       settingsDirty = true;
+    }
+    // Commissioning idle-rest heartbeat. The open wizard pings =1 every ~2 s to keep the field "rested"
+    // at a low duty between steps; on a clean close it pings =0 to drop the hold and resume charging
+    // immediately. A missing ping (crash / Wi-Fi drop) goes stale on its own after the firmware timeout.
+    else if (request->hasParam("commissionHeartbeat")) {
+      foundParameter = true;
+      lastCommissionHeartbeatMs = (request->getParam("commissionHeartbeat")->value().toInt() != 0)
+                                  ? millis() : 0;   // 0 = explicit exit → stale now → charging resumes
     }
 
     if (request->hasParam("TemperatureLimitF")) {
@@ -3098,6 +3152,21 @@ void setupServer() {
       inputMessage = request->getParam("TemperatureLimitF")->value();
       settingWrite(NK_TemperatureLimitF, inputMessage.c_str());
       TemperatureLimitF = inputMessage.toInt();
+    }
+    // Cold-charge lockout (lithium protection) — master on/off. Turning it OFF is the user "override".
+    if (request->hasParam("coldChargeLockoutEnable")) {
+      foundParameter = true;
+      inputMessage = request->getParam("coldChargeLockoutEnable")->value();
+      coldChargeLockoutEnable = inputMessage.toInt() != 0;
+      settingWrite(NK_coldChargeLockoutEnable, String((int)coldChargeLockoutEnable).c_str());
+      queueConsoleMessageF("Cold-charge lockout (board-temp battery proxy): %s", coldChargeLockoutEnable ? "ENABLED" : "DISABLED");
+    }
+    // Cold-charge lockout temperature floor (board temp °F, stored raw)
+    if (request->hasParam("MinChargeTempF")) {
+      foundParameter = true;
+      inputMessage = request->getParam("MinChargeTempF")->value();
+      settingWrite(NK_MinChargeTempF, inputMessage.c_str());
+      MinChargeTempF = inputMessage.toFloat();
     }
     if (request->hasParam("ClearBuffer")) {
       foundParameter = true;
@@ -3348,6 +3417,9 @@ void setupServer() {
       BulkVoltage = inputMessage.toFloat();
       updateINA228OvervoltageThreshold();  // important!  update the hardware overvoltage limit provided by INA228
     }
+    // NOTE: system voltage (12/24/48V) is NOT a /get setting — it lives in Vessel Info and the whole
+    // class-change rescale (charge profile, hard-shutdown, INA228 OV, normalized CV/CC gains) runs in
+    // the /saveVesselInfo handler via applyNominalVoltageChange(). BATTERY_VOLTAGE is the sole source.
     if (request->hasParam("wavePeriod")) {
       foundParameter = true;
       inputMessage = request->getParam("wavePeriod")->value();
@@ -3479,7 +3551,14 @@ void setupServer() {
         HiLow = newMode;
         settingWrite(NK_HiLow, inputMessage.c_str());
         loadCapTablesForMode(HiLow);  // swap active cap tables to match new mode
-        tempPIDActive = false;        // re-seeds thermal integrator for new cap on next tick
+        // Do NOT deactivate the thermal PID here. The new cap is already honored: the
+        // always-runs path re-applies tempPID.SetOutputLimits((penaltyMin, penaltyMax))
+        // every tick (penaltyMax = MaxTableValue, which just changed), and the PID library
+        // re-clamps the integrator to the new bounds immediately. Setting tempPIDActive=false
+        // would instead force the re-enable path, which CLEARS the slope buffer — that restarts
+        // the 60s warmup window and drops the setpoint to limit-20 (the spurious 20°F reduction
+        // seen on a Lo<->Hi switch), and also re-seeds the integrator from P-only, dumping the
+        // learned holding level. A mode switch must be bumpless for the thermal loop.
         stateRevision++;              // force immediate CSVData echo of new table values
         if (HiLow == 0) {
           // Switching to Low drops the ceiling. Capture the present ceiling and arm the glide so the
@@ -4030,6 +4109,7 @@ void setupServer() {
       inputMessage = request->getParam("VoltageKp")->value();
       settingWrite(NK_VoltageKp, inputMessage.c_str());
       VoltageKp = inputMessage.toFloat();
+      recomputeCvGains();  // manual gain changed → refresh the active gain
       if (CVTuningMode) cvTuningParamChanged = true;
     }
 
@@ -4289,7 +4369,6 @@ void setupServer() {
       settingWrite(NK_CloudFeatures, inputMessage.c_str());
       CloudFeatures = inputMessage.toInt();
     }
-    // AutoSaveLearningTable handler — OBSOLETE REMOVE LATER
     if (request->hasParam("EnableAmbientCorrection")) {
       foundParameter = true;
       inputMessage = request->getParam("EnableAmbientCorrection")->value();
@@ -4395,8 +4474,10 @@ void setupServer() {
         firstRun = false;
       }
 
+      bool rpmPointChanged = false;
       for (int i = 0; i < RPM_TABLE_SIZE; i++) {
         if (rpmTableRPMPoints[i] != previousRPMPoints[i]) {
+          rpmPointChanged = true;
           overheatCount[i] = 0;
           lastOverheatTime[i] = 0;
           cumulativeNoOverheatTime[i] = 0;
@@ -4412,6 +4493,16 @@ void setupServer() {
           queueConsoleMessageF("Learning: RPM bin %d changed - cleared affected history", i);
           previousRPMPoints[i] = rpmTableRPMPoints[i];
         }
+      }
+
+      // An RPM breakpoint moved → every learned Min% floor is now keyed to the wrong RPM
+      // (the per-RPM onset-knee fit spans all bins). Wipe the knee tracker entirely and flag the
+      // Min% floor commissioning step (index 2) for re-run, so the floors are re-measured at the
+      // new breakpoints instead of silently re-applied at shifted RPMs.
+      if (rpmPointChanged) {
+        kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
+        commissionClearStage(2);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
+        queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
       }
 
       pendingSaveUserTableEdits = true;  // deferred to Core 1 to avoid SSE gap
@@ -4545,7 +4636,7 @@ void setupServer() {
       settingWrite(NK_PidKp, inputMessage.c_str());
       PidKp = inputMessage.toFloat();
       if (pidInitialized) {
-        currentPID.SetTunings(PidKp, PidKi, PidKd);
+        recomputeCcGains();  // apply voltage-normalized PidK*_active
       }
       if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("PID Kp updated to: %.6f", PidKp);
@@ -4582,7 +4673,41 @@ void setupServer() {
       inputMessage = request->getParam("VoltageKi")->value();
       VoltageKi = inputMessage.toFloat();
       settingWrite(NK_VoltageKi, String(VoltageKi).c_str());
+      recomputeCvGains();  // manual gain changed → refresh the active gain
       if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    // ── CV gain-mode system: mode toggle, λ multiplier, and (bench) hand-entered plant ──
+    if (request->hasParam("cvGainMode")) {
+      foundParameter = true;
+      cvGainMode = (uint8_t)(request->getParam("cvGainMode")->value().toInt() != 0 ? 1 : 0);
+      settingWrite(NK_cvGainMode, String((int)cvGainMode).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
+    }
+    if (request->hasParam("cvLambdaMult")) {
+      foundParameter = true;
+      cvLambdaMult = clamp_f(request->getParam("cvLambdaMult")->value().toFloat(), 0.5f, 15.0f);
+      settingWrite(NK_cvLambdaMult, String(cvLambdaMult, 2).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("CV lambda multiple: %.1f x dead-time", cvLambdaMult);
+    }
+    if (request->hasParam("cvPlantK")) {  // hand-entered plant gain (bench) — the fit step writes these directly
+      foundParameter = true;
+      cvPlantK = request->getParam("cvPlantK")->value().toFloat();
+      settingWrite(NK_cvPlantK, String(cvPlantK, 5).c_str());
+      recomputeCvGains();
+    }
+    if (request->hasParam("cvPlantTau")) {
+      foundParameter = true;
+      cvPlantTau = request->getParam("cvPlantTau")->value().toFloat();
+      settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
+      recomputeCvGains();
+    }
+    if (request->hasParam("cvPlantL")) {
+      foundParameter = true;
+      cvPlantL = request->getParam("cvPlantL")->value().toFloat();
+      settingWrite(NK_cvPlantL, String(cvPlantL, 3).c_str());
+      recomputeCvGains();
     }
     // VoltageKd server handler removed — D term removed.
     // ProtectionProxGateV /get handler removed 2026-05-22 — variable removed entirely.
@@ -4599,6 +4724,13 @@ void setupServer() {
       SlopeBleedK = inputMessage.toFloat();
       settingWrite(NK_SlopeBleedK, String(SlopeBleedK, 1).c_str());
       queueConsoleMessageF("Slope bleed gain: %.1f A/(V/s)", SlopeBleedK);
+    }
+    if (request->hasParam("cvHelpersEnabled")) {
+      foundParameter = true;
+      inputMessage = request->getParam("cvHelpersEnabled")->value();
+      cvHelpersEnabled = inputMessage.toInt() != 0;
+      settingWrite(NK_cvHelpersEnabled, String((int)cvHelpersEnabled).c_str());
+      queueConsoleMessageF("CV tuning helpers (asymmetric unwind + slope bleed): %s", cvHelpersEnabled ? "ENABLED" : "DISABLED");
     }
     if (request->hasParam("SlopeBleedProxV")) {
       foundParameter = true;
@@ -4645,7 +4777,7 @@ void setupServer() {
       settingWrite(NK_PidKi, inputMessage.c_str());
       PidKi = inputMessage.toFloat();
       if (pidInitialized) {
-        currentPID.SetTunings(PidKp, PidKi, PidKd);
+        recomputeCcGains();  // apply voltage-normalized PidK*_active
       }
       if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("PID Ki updated to: %.6f", PidKi);
@@ -4656,7 +4788,7 @@ void setupServer() {
       settingWrite(NK_PidKd, inputMessage.c_str());
       PidKd = inputMessage.toFloat();
       if (pidInitialized) {
-        currentPID.SetTunings(PidKp, PidKi, PidKd);
+        recomputeCcGains();  // apply voltage-normalized PidK*_active
       }
       if (TuningMode) tuningParamChanged = true;
       queueConsoleMessageF("PID Kd updated to: %.6f", PidKd);
@@ -4696,7 +4828,6 @@ void setupServer() {
       HardOCTripAmps = MaxTableValue + 10.0f;  // always 10A above current limit
       queueConsoleMessageF("Alternator current limit set to %.1fA — OC trip threshold: %.1fA", MaxTableValue, HardOCTripAmps);
     }
-    // MinTableValue handler — OBSOLETE REMOVE LATER
     if (request->hasParam("MaxPenaltyPercent")) {
       foundParameter = true;
       inputMessage = request->getParam("MaxPenaltyPercent")->value();
@@ -4728,7 +4859,6 @@ void setupServer() {
       settingWrite(NK_LearningMemoryDuration, inputMessage.c_str());
       LearningMemoryDuration = inputMessage.toInt();
     }
-    // LearningTableSaveInterval handler — OBSOLETE REMOVE LATER
     if (request->hasParam("DutyRampRate")) {
       foundParameter = true;
       inputMessage = request->getParam("DutyRampRate")->value();
@@ -5410,7 +5540,8 @@ void setupServer() {
     const char *timeSrcName = (currentTimeSource == TIME_GPS)   ? "NMEA-GPS"
                             : (currentTimeSource == TIME_PHONE) ? "Phone"
                             : (currentTimeSource == TIME_NTP)   ? "NTP"
-                            : (currentTimeSource == TIME_MILLIS) ? "drifting" : "none";
+                            : (currentTimeSource == TIME_MILLIS) ? "drifting"
+                            : (currentTimeSource == TIME_ESTIMATED) ? "estimated" : "none";
     const char *gpsSrcName  = (currentGpsSource == GPS_NMEA)   ? "NMEA"
                             : (currentGpsSource == GPS_PHONE)  ? "Phone"
                             : (currentGpsSource == GPS_MANUAL) ? "Manual" : "none";
@@ -5878,13 +6009,13 @@ void setupServer() {
         "\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.5f,"
         "\"sd\":%d,\"tg\":%.2f,\"dr\":%.1f,"
         "\"wa\":%d,\"wp\":%d,\"wf\":%d,"
-        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f,\"bv\":%.2f,\"cs\":%d}",
+        "\"rpm\":%.0f,\"temp\":%.1f,\"worst\":%.1f,\"bv\":%.2f,\"cs\":%d,\"ts\":%u}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.activeTimeSec,
         r.kp, r.ki, r.kd,
         r.sampleDivisor, r.trackingGain, r.dutyRampRate,
         (int)r.waveAmplitude, (int)r.wavePeriod, (int)r.waveFloor,
-        r.avgRPM, r.avgAltTempF, r.worstErrorA, r.battV, (int)r.chargeStage);
+        r.avgRPM, r.avgAltTempF, r.worstErrorA, r.battV, (int)r.chargeStage, (unsigned)r.epoch);
     }
     bool testActive = (TuningMode && tuningScore.toggleCount > 0);
     float ts = (tuningScore.activeTimeSec > 0.0f)
@@ -5941,9 +6072,13 @@ void setupServer() {
                       systemIDBode[i].freqHz, systemIDBode[i].gainApPct, systemIDBode[i].phaseDeg);
     }
     bool active = (systemIDActive != 0 && systemIDTestType == 1);
-    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"ready\":%d,\"amp\":%.1f}",
+    // "aborted" = protection-abort latch (systemIDAbortRequested), reported independently of "active":
+    // a protection cut leaves systemIDActive set until systemID_tick clears it, and that tick is gated
+    // out during the fault/lockout, so the plant-fit poller would otherwise wait the full 240s timeout.
+    pos += snprintf(buf + pos, 2048 - pos, "],\"active\":%d,\"ready\":%d,\"aborted\":%d,\"amp\":%.1f}",
                     active ? 1 : 0,
                     (systemIDResultsReady && systemIDTestType == 1) ? 1 : 0,
+                    systemIDAbortRequested ? 1 : 0,
                     SystemIDStepAmplitude);
     request->send(200, "application/json", buf);
   });
@@ -5960,12 +6095,17 @@ void setupServer() {
       pos += snprintf(buf + pos, 2048 - pos, "%s{\"d\":%.1f,\"a\":%.2f}",
                       i > 0 ? "," : "", fieldCurveBuf[i].duty, fieldCurveBuf[i].amps);
     }
+    // "aborted" is the protection-abort latch (fieldCurveAbortRequested). It is reported INDEPENDENTLY
+    // of "active" because a protection cut latches the abort but leaves fieldCurveActive set until
+    // fieldCurve_tick next runs — and that tick is gated out during the fault/30s lockout, so "active"
+    // can stay 1 indefinitely. The poller checks "aborted" so it never hangs waiting for !active.
     pos += snprintf(buf + pos, 2048 - pos,
                     "],\"active\":%d,\"ready\":%d,\"ok\":%d,\"kneeDuty\":%.1f,\"kneeAmps\":%.2f,"
-                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f,\"abort\":\"%s\"}",
+                    "\"targetA\":%.1f,\"propStabA\":%.1f,\"propStepPct\":%.2f,\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\"}",
                     fieldCurveActive != 0 ? 1 : 0, fieldCurveResultsReady ? 1 : 0, fieldCurveOk ? 1 : 0,
                     fieldCurveKneeDuty, fieldCurveKneeAmps, fieldCurveTargetLimitA,
-                    fieldCurvePropStabA, fieldCurvePropStepPct, fieldCurveAbortMsg);
+                    fieldCurvePropStabA, fieldCurvePropStepPct, fieldCurveCeilingLimited ? 1 : 0,
+                    fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -5985,7 +6125,10 @@ void setupServer() {
       pos += snprintf(buf + pos, 1024 - pos, "%s{\"rpm\":%.0f,\"duty\":%.1f,\"tempF\":%.0f}",
                       i > 0 ? "," : "", kneeAnchorRPM[i], kneeAnchorDuty[i], kneeAnchorTempF[i]);
     }
-    pos += snprintf(buf + pos, 1024 - pos, "],\"abort\":\"%s\"}", fieldCurveAbortMsg);
+    // "aborted" = protection-abort latch, reported independently of "active" (see /fieldcurve.json note).
+    // "ceilLimited" = the sweep stopped at the 24/48V field-duty ceiling before finding onset.
+    pos += snprintf(buf + pos, 1024 - pos, "],\"ceilLimited\":%d,\"aborted\":%d,\"abort\":\"%s\"}",
+                    fieldCurveCeilingLimited ? 1 : 0, fieldCurveAbortRequested ? 1 : 0, fieldCurveAbortMsg);
     request->send(200, "application/json", buf);
   });
 
@@ -6017,13 +6160,13 @@ void setupServer() {
         "\"kp\":%.4f,\"ki\":%.4f,\"kd\":%.5f,\"f0\":%.2f,\"f1\":%.2f,\"cy\":%d,"
         "\"rpm\":%.0f,\"temp\":%.1f,"
         "\"amp\":%.2f,\"base\":%.2f,\"bv\":%.2f,\"rmin\":%.0f,\"rmax\":%.0f,"
-        "\"coh\":%.3f,\"clip\":%d,\"cs\":%d,\"pts\":[",
+        "\"coh\":%.3f,\"clip\":%d,\"cs\":%d,\"ts\":%u,\"pts\":[",
         i > 0 ? "," : "",
         r.runNumber, r.bandwidthHz, r.peakGain, r.peakGainFreqHz, r.worstPhaseDeg, r.worstPhaseFreqHz,
         r.kp, r.ki, r.kd, r.sweepStartHz, r.sweepEndHz, (int)r.cycles,
         r.avgRPM, r.avgAltTempF,
         r.sineAmpA, r.baseA, r.battV, r.rpmMin, r.rpmMax,
-        r.worstCoherence, (int)r.dutyRailed, (int)r.chargeStage);
+        r.worstCoherence, (int)r.dutyRailed, (int)r.chargeStage, (unsigned)r.epoch);
       for (int k = 0; k < r.nPoints && k < TUNING_SWEEP_NPOINTS && pos < CAP - 60; k++) {
         pos += snprintf(buf + pos, CAP - pos, "%s{\"f\":%.2f,\"g\":%.4f,\"ph\":%.1f}",
                         k > 0 ? "," : "", r.curve[k].freqHz, r.curve[k].gain, r.curve[k].phaseDeg);
@@ -6070,11 +6213,11 @@ void setupServer() {
       pos += snprintf(buf + pos, CAP - pos,
         "%s{\"n\":%d,\"ro\":%.2f,\"dc\":%.4f,\"wp\":%.0f,\"wpf\":%.2f,"
         "\"amp\":%.1f,\"floor\":%.1f,\"f0\":%.2f,\"f1\":%.2f,\"cy\":%d,"
-        "\"rpm\":%.0f,\"temp\":%.1f,\"bv\":%.2f,\"cs\":%d,\"pts\":[",
+        "\"rpm\":%.0f,\"temp\":%.1f,\"bv\":%.2f,\"cs\":%d,\"ts\":%u,\"pts\":[",
         i > 0 ? "," : "",
         r.runNumber, r.rolloffHz, r.dcGainApPct, r.worstPhaseDeg, r.worstPhaseFreqHz,
         r.setupAmplitude, r.stabilizeAmps, r.sweepStartHz, r.sweepEndHz, (int)r.cycles,
-        r.avgRPM, r.avgAltTempF, r.battV, (int)r.chargeStage);
+        r.avgRPM, r.avgAltTempF, r.battV, (int)r.chargeStage, (unsigned)r.epoch);
       for (int k = 0; k < r.nPoints && k < SYSID_SINE_NPOINTS && pos < CAP - 60; k++) {
         pos += snprintf(buf + pos, CAP - pos, "%s{\"f\":%.2f,\"g\":%.4f,\"ph\":%.1f}",
                         k > 0 ? "," : "", r.curve[k].freqHz, r.curve[k].gainApPct, r.curve[k].phaseDeg);
@@ -6129,7 +6272,7 @@ void setupServer() {
         "\"ra\":%.1f,\"fa\":%.1f,"
         "\"sa\":[%.2f,%.2f,%.2f],\"qp\":[%.3f,%.3f,%.3f],"
         "\"ar\":%u,\"ap\":%u,\"amp\":%.2f,"
-        "\"rpm\":%.0f,\"temp\":%.1f,\"bv\":%.2f,\"cs\":%d}",
+        "\"rpm\":%.0f,\"temp\":%.1f,\"bv\":%.2f,\"cs\":%d,\"ts\":%u}",
         i > 0 ? "," : "",
         (unsigned)r.runNumber, r.score,
         r.riseDelays[0], r.riseDelays[1], r.riseDelays[2],
@@ -6138,7 +6281,7 @@ void setupServer() {
         r.stepAmps[0], r.stepAmps[1], r.stepAmps[2],
         r.quietPP[0], r.quietPP[1], r.quietPP[2],
         (unsigned)r.abortReason, (unsigned)r.abortPhase, r.setupStepAmplitude,
-        r.avgRPM, r.avgAltTempF, r.battV, (int)r.chargeStage);
+        r.avgRPM, r.avgAltTempF, r.battV, (int)r.chargeStage, (unsigned)r.epoch);
     }
     pos += snprintf(buf + pos, 10240 - pos,
       "],\"active\":%d,\"ready\":%d}",
@@ -6193,7 +6336,7 @@ void setupServer() {
         "\"iefr\":%.3f,\"ietau\":%.0f,\"iekb\":%.2f,"
         "\"lddt\":%.0f,\"ldt1\":%.0f,\"ldt3\":%.0f,"
         "\"tc\":%.0f,\"wa\":%.2f,\"wp\":%d,\"ko\":%.1f,\"cr\":%d,"
-        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f,\"cs\":%d}",
+        "\"rpm\":%.0f,\"tmp\":%.1f,\"bv\":%.2f,\"soc\":%.1f,\"cvt\":%.2f,\"cs\":%d,\"ts\":%u}",
         i > 0 ? "," : "",
         r.runNumber, r.score, r.avgSettlingTimeSec, r.worstOvershootV,
         r.avgIntegratedOvershootVs, r.activeTimeSec,
@@ -6207,7 +6350,7 @@ void setupServer() {
         r.loadDumpDtThresh, r.loadDumpDtThresh1, r.loadDumpDtThresh3,
         r.inputFilterTC, r.waveAmplitudeV, (int)r.wavePeriodSec, r.kOvershoot, (int)r.consecutiveReads,
         r.avgRPM, r.avgAltTempF, r.battVAtStart, r.socAtStart * 100.0f, r.chargingVoltageTarget,
-        (int)r.chargeStage);
+        (int)r.chargeStage, (unsigned)r.epoch);
     }
     // Active test state
     bool cvTestActive = (CVTuningMode && cvTuningScore.testStarted);
@@ -7485,7 +7628,18 @@ void SendWifiData() {
                                "%d,"  // SystemIDStabilizeAmps
                                "%d,"  // tuningWaveFloor (Current Target Generator floor)
                                "%d,"  // commissionState
-                               "%d",  // commissionPhase
+                               "%d,"  // commissionPhase
+                               "%d,"  // commissionDoneMask
+                               "%d,"  // cvHelpersEnabled
+                               "%d,"  // MinChargeTempF
+                               "%d,"  // coldChargeLockoutEnable
+                               "%d,"  // cvGainMode
+                               "%d,"  // cvLambdaMult
+                               "%d,"  // cvPlantK
+                               "%d,"  // cvPlantTau
+                               "%d,"  // cvPlantL
+                               "%d,"  // cvComputedKp
+                               "%d",  // cvComputedKi
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -7792,7 +7946,18 @@ void SendWifiData() {
                                SafeInt(SystemIDStabilizeAmps, 10),              // A ×10
                                SafeInt(tuningWaveFloor),                        // A (raw)
                                (int)commissionState,                            // CSV3_commissionState (0/1/2)
-                               (int)commissionPhase                             // CSV3_commissionPhase (0..7)
+                               (int)commissionPhase,                            // CSV3_commissionPhase (0..8)
+                               (int)commissionDoneMask,                         // CSV3_commissionDoneMask (bit i = stage i done)
+                               (int)cvHelpersEnabled,                           // CSV3_cvHelpersEnabled (asymmetric unwind + slope bleed master switch)
+                               SafeInt(MinChargeTempF),                         // CSV3_MinChargeTempF (cold-charge lockout board-temp floor, °F)
+                               (int)coldChargeLockoutEnable,                    // CSV3_coldChargeLockoutEnable (cold-charge lockout master on/off)
+                               (int)cvGainMode,                                 // CSV3_cvGainMode (0=Manual, 1=Auto λ-based)
+                               SafeInt(cvLambdaMult, 10),                       // CSV3_cvLambdaMult (λ = N × dead-time, ×10)
+                               SafeInt(cvPlantK, 10000),                        // CSV3_cvPlantK (measured plant gain V/A, ×10000)
+                               SafeInt(cvPlantTau, 100),                        // CSV3_cvPlantTau (measured rise time s, ×100)
+                               SafeInt(cvPlantL, 100),                          // CSV3_cvPlantL (measured dead time s, ×100)
+                               SafeInt(cvComputedKp, 100),                      // CSV3_cvComputedKp (Auto-computed Kp 12V-equiv, ×100)
+                               SafeInt(cvComputedKi, 100)                       // CSV3_cvComputedKi (Auto-computed Ki 12V-equiv, ×100)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

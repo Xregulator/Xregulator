@@ -232,7 +232,9 @@ static float   altLive_pct = 0;            // live output-% = amps ÷ LWLR predi
 static bool    altRefOk = false;           // state is MEASURED/ESTIMATED → the % is trustworthy
 static float   altRefDist = 999.0f;        // normalized distance to nearest support point (diagnostics)
 static bool    altLiveValid = false;
-static bool    altSteady = false;          // currently inside a steady episode run (live indicator)
+static bool    altSteady = false;          // FULL steady run (temp held STEADY_TEMP_SEC) — feeds surface+trend, draws the orange ring
+static bool    altSessSteady = false;      // SESSION steady (temp held SESSION_TEMP_SEC = half) — gates a Session-plot dot
+static uint8_t altRefSource = 0;           // active reference surface for grading: 0 = My History (learned), 1 = Uploaded File
 static uint8_t altState = FRONT_NO_REFERENCE;   // confidence state (FrontStore::classify, 1 Hz)
 static uint32_t altLastFoldMs = 0;         // last fold time — stale fold (field off) → live point not graded
 static float   altWorstPctLive = 0;        // worst output-% of the in-progress trend bucket
@@ -256,7 +258,9 @@ float altVbusTol       = 0.05f;  // bus-voltage deviation band (V, filtered)
 float altMinAmps = 2.0f;
 float altMinDuty = 5.0f;
 // Mode:
-float altPaused       = 0.0f;    // 1 = halt learning/persist (sticky); live display still updates
+float altPaused       = 0.0f;    // 1 = halt LEARNING into My History (sticky). INDEPENDENT of altRefSource: you can
+                                 // grade against the Uploaded surface (altRefSource=1) while still learning My History.
+                                 // Selecting Uploaded defaults this ON; live display + trend still update either way.
 float altSimMode      = 0.0f;    // 1 = inject synthetic operating points for bench testing (not persisted)
 
 // ============================================================
@@ -874,6 +878,7 @@ struct SysIDSweepRecord {
   float    avgAltTempF;
   float    battV;          // bus voltage during the sweep
   uint8_t  chargeStage;    // getChargeStageDisplayCode() at commit
+  uint32_t epoch;          // wall-clock Unix seconds at commit (0 = clock not synced)
   SysIDBodePoint curve[SYSID_SINE_NPOINTS];
 };
 SysIDSweepRecord *sysidSweepLog = nullptr;
@@ -922,6 +927,7 @@ struct SystemIDRecord {
   float    avgAltTempF;        // AlternatorTemperatureF snapshot at commit
   float    battV;              // bus voltage snapshot at commit
   uint8_t  chargeStage;        // getChargeStageDisplayCode() at commit
+  uint32_t epoch;              // wall-clock Unix seconds at commit (0 = clock not synced)
 };
 
 SystemIDRecord *systemIDLog = nullptr;  // ps_malloc(50 × sizeof(SystemIDRecord))
@@ -983,6 +989,10 @@ float fieldCurveTargetLimitA = 0.0f;           // table limit-at-speed used for 
 float fieldCurvePropStabA  = 0.0f;             // proposed SystemIDStabilizeAmps (A)
 float fieldCurvePropStepPct = 0.0f;            // proposed SystemIDStepAmplitude (% duty)
 bool  fieldCurveOk = false;                     // true if a usable linear region + proposals were found
+bool  fieldCurveCeilingLimited = false;         // true if the ramp was capped by the Max Field % limit
+                                                // (MaxDuty, the real per-bus cap) BEFORE reaching the amp target —
+                                                // curve is truncated; dashboard tells the user to raise Max Field %
+                                                // and re-run. Cleared at each sweep start.
 // Abort reason for the field-curve / knee sweeps (latched at the protection cut, cleared at each start).
 // fieldCurveAbortMsg is built from reasonToString() in 6_functions.ino and read back by the dashboard
 // via /fieldcurve.json & /kneesweep.json so the commissioning dialog can say WHY a test stopped.
@@ -1020,8 +1030,21 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…6=Thresholds, 7=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished); drives the Commissioning tab checklist
+// Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
+// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit. Drives the
+// per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0xFF.
+uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
+
+// Commissioning "rest" hold (between guided steps). The open wizard dialog pings commissionHeartbeat
+// every ~2 s; if the ping goes stale (dialog closed / crashed / Wi-Fi dropped) the hold drops and
+// normal charging resumes within COMMISSION_HEARTBEAT_TIMEOUT_MS. Both the floor and the ramp scale
+// ×12/BATTERY_VOLTAGE (vNorm), so a 12 V base gives 4/2/1 % and 5/2.5/1.25 %/s at 12/24/48 V.
+volatile uint32_t lastCommissionHeartbeatMs = 0;        // millis() of the last dialog heartbeat (0 = stale/exited)
+#define COMMISSION_REST_FLOOR_PCT 4.0f                  // 12 V-base rest hold floor (% duty); bench-tune knob
+#define COMMISSION_REST_RAMP_PCT 5.0f                   // 12 V-base rest ramp rate (%/s)
+#define COMMISSION_HEARTBEAT_TIMEOUT_MS 5000UL          // stale ping → drop the hold, resume charging
 
 // Weather Mode Global Variables (add with your other globals)
 float UVToday = 0.0;
@@ -1060,12 +1083,21 @@ float uTargetAmps = 3;                           // the one that gets used as th
 // Armed by the /get?HiLow=0 handler; self-clears in the control loop once the new (lower) cap is reached.
 float modeCapSlew = 0.0f;          // imposed ceiling during the down-glide (A)
 bool modeCapSlewActive = false;    // true while a Hi->Lo glide is in progress
+uint32_t modeCapSlewEndMs = 0;     // millis() the glide self-cleared; iExcess stays suppressed for
+                                   // MODE_CAP_GLIDE_GRACE_MS after, to cover the field-current settling tail
+#define MODE_CAP_GLIDE_SEC 2.5f      // full-scale Hi->Lo glide time (s); rate = MaxTableValue / this
+#define MODE_CAP_GLIDE_GRACE_MS 1000 // iExcess suppression hold AFTER the glide ends (ms)
 
 float FloatVoltage = 13.4;                       // self-explanatory
 float BulkVoltage = 14.5;                        // this could have been called Target Bulk Voltage to be more clear
 float ChargingVoltageTarget = 0;                 // This becomes active target
 float VoltageHardwareLimit = BulkVoltage + 0.1;  // could make this a setting later, but this should be decently safe
 bool inBulkStage = true;
+
+// System voltage class (12/24/48V) lives in BATTERY_VOLTAGE (set from Vessel Info). It is the sole
+// source of truth: the CV/CC gain normalization, knee/slew scaling, and duty ceiling all divide by
+// it, and a class change (via /saveVesselInfo → applyNominalVoltageChange) rescales the charge-voltage
+// profile + hard-shutdown trip. The boot SoC anchor auto-detects class from measured voltage instead.
 
 enum ChargeStageDisplayCode : uint8_t {
   CHARGE_STAGE_NONE = 0,
@@ -1119,6 +1151,11 @@ uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absor
 
 float FieldAdjustmentInterval = 50;  // The regulator field output is updated once every this many milliseconds
 float TemperatureLimitF = 212;       // measured at the case probe; internal/metal temps run roughly +40 to +50 °F above this depending on sensor installation. Strategy rationale: docs Charging Strategy page
+// Cold-charge lockout: board temp (BMP388 ambientTemp, °F) is a proxy for battery temp and reads
+// warmer than ambient, so set MinChargeTempF with margin. Default ON (lithium); lead-acid can opt out.
+bool  coldChargeLockoutEnable = true;    // master on/off for the cold-charge lockout (default ON)
+float MinChargeTempF = 40.0f;            // board-temp floor below which charging is locked out (°F)
+const float ColdChargeHysteresisF = 2.0f;// °F rise above MinChargeTempF before charging re-arms (anti-chatter)
 int ManualFieldToggle = 0;           // 0 = Auto (PID) — fresh-flash default. Set to 1 for manual field control (debugging).
 int SwitchControlOverride = 1;       // set to 1 for web interface switches to override physical switch panel
 int MaintainMode = 0;                // Set to 1 to target 0 amps at battery
@@ -1145,6 +1182,11 @@ const int pwmResolution = 12;          // Error = +0.010%    PWM Resolution = ±
 float SwitchingFrequency = 400;        // Field switching frequency (doesn't much matter, avoid human hearing range is nice depending on install location)
 const int MIN_SAFE_FREQUENCY = 50;     // Above most audible issues // set to 2000 later
 const int MAX_SAFE_FREQUENCY = 25000;  // Below core loss and EMI concerns
+// Max Field % is the REAL per-bus field-duty cap (no hidden scaling). Its default is scaled down at
+// first boot for higher-voltage banks (~99%@12V, ~50%@24V, ~25%@48V) and rescaled on a voltage change,
+// so worst-case field current never exceeds the 12V-at-MaxDuty case. setDutyPercent() clamps commanded
+// duty to it across the open-loop paths (manual/limp/fault) too on >12V banks. The user-visible Max
+// Field box IS the cap; set it to 99 for full duty. A duty-RATIO proxy (no field-current sensor).
 float MaxDuty = 99.0;
 float MinDuty = 1.0;       //33 works on my boat to make sure RPM is always present, may need to make funciton of RPM?? Later
 int ManualDutyTarget = 4;  // example manual override value
@@ -1157,7 +1199,7 @@ float ShuntVoltage_mV;                        // Battery shunt voltage from INA2
 float Bcur;                                   // battery shunt current from INA228
 float targetCurrent;                          // This is used in the field adjustment loop, gets set to the desired source of current info (ie battery shunt, alt hall sensor, victron, etc.)
 float IBV;                                    // Ina 228 battery voltage
-float IBVMax = 6;                             // used to track maximum battery voltage    TEMPORARY TROUBLESHOOTING
+float IBVMax = 6;                             // used to track maximum battery voltage (NVS-persisted, shown on dashboard)
 float dutyCycle;                              // Field outout %--- this is just what's transmitted over Wifi (case sensitive)
 float FieldResistance = 2;                    // Field resistance in Ohms usually between 2 and 6 Ω, changes 10-20% with temp
 float vvout;                                  // Calculated field volts (approximate)
@@ -1356,8 +1398,16 @@ enum TimeSource { TIME_NONE,
                   TIME_GPS,
                   TIME_PHONE,
                   TIME_NTP,
-                  TIME_MILLIS };
+                  TIME_MILLIS,
+                  TIME_ESTIMATED };  // soft clock: RTC-retained (soft reboot) or NVS-restored (cold boot), pending a real source
 TimeSource currentTimeSource = TIME_NONE;
+
+// Lower sanity bound for any recovered/retained epoch (Jan 1 2020, matches the GPS
+// gate). Below this we treat the clock as garbage and stay unsynced. Used by
+// restoreSoftClock() — the boot-time soft clock that keeps Long Term history records
+// from being stamped 0 (and rendered as phantom multi-hour gaps) on a no-connectivity
+// device with no NTP/phone/GPS source.
+const time_t SOFTCLOCK_SANE_EPOCH = 1577836800;
 
 // Freshness trackers for the priority chain (NMEA → Phone → NTP).
 // Without these, once a source sets currentTimeSource, the device never
@@ -2572,6 +2622,7 @@ struct TuningSweepRecord {
   float    worstCoherence;  // min per-point fit coherence (0..1; low = noisy/unreliable point)
   uint8_t  dutyRailed;      // 1 if field duty hit 0%/100% during the sweep (clipped sine)
   uint8_t  chargeStage;     // getChargeStageDisplayCode() at commit
+  uint32_t epoch;           // wall-clock Unix seconds at commit (0 = clock not synced)
   TuningBodePoint curve[TUNING_SWEEP_NPOINTS];
 };
 TuningSweepRecord *tuningSweepLog = nullptr;
@@ -2596,6 +2647,7 @@ struct TuningRecord {
   float worstErrorA;
   float battV;           // bus voltage during the test
   uint8_t chargeStage;   // getChargeStageDisplayCode() at commit
+  uint32_t epoch;        // wall-clock Unix seconds at commit (0 = clock not synced)
 };
 
 struct TuningScoreState {
@@ -2704,6 +2756,7 @@ struct CVTuningRecord {
   float avgLowIntOvVs;  // avg integrated overvoltage above lowTarget (V·s)
   float worstLowOvV;          // peak above lowTarget during any scored LOW phase (after zero crossing)
   float worstLowUndershootV;  // peak below lowTarget during any scored LOW phase
+  uint32_t epoch;             // wall-clock Unix seconds at commit (0 = clock not synced)
 };
 
 struct CVTuningScoreState {
@@ -2768,16 +2821,37 @@ float pidError = 0.0f;  // PID error for display (A)
 // ===       AdjustFieldLearnMode() in 6_functions.ino — not globals.
 // =====================================================================================
 // --- Output current PID ---
-float PidKp = 0.5f;   // A/% duty — proportional gain
-float PidKi = 2.0f;   // integral gain
-float PidKd = 0.01f;  // derivative gain
+// PidKp/Ki/Kd are 12V-EQUIVALENT (normalized) gains — the same numbers work on 12/24/48V banks.
+// recomputeCcGains() bakes in ×(12/BATTERY_VOLTAGE) to get the duty-space gains the loop actually
+// applies (PidK*_active), because field current per duty-% scales with bus voltage. Mirror of the CV
+// loop's recomputeCvGains(). Do NOT scale these per-class by hand — the normalization does it.
+float PidKp = 0.5f;   // 12V-equivalent proportional gain
+float PidKi = 2.0f;   // 12V-equivalent integral gain
+float PidKd = 0.01f;  // 12V-equivalent derivative gain
+volatile float PidKp_active = 0.5f;   // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
+volatile float PidKi_active = 2.0f;   // DERIVED duty-space Ki.
+volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // --- Voltage (CV) PID ---
+// ── CV gain-mode system (Auto λ-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
+// VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
+// them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
+// selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
+uint8_t cvGainMode   = 1;         // 0 = Manual (use the typed VoltageKp/Ki); 1 = AUTO λ-based (default)
+float   cvLambdaMult = 2.0f;      // λ = cvLambdaMult × L (dead time); default 2× (conservative); UI range 0.5–15
+float   cvPlantK     = 0.0f;      // measured plant gain K (V/A at the pack) from the CV plant-fit step; 0 = no valid fit
+float   cvPlantTau   = 0.0f;      // measured rise time τ (s)
+float   cvPlantL     = 0.0f;      // measured dead time L (s)
+float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
+float   cvComputedKi = 25.0f;
+volatile float VoltageKp_active = 30.0f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
+volatile float VoltageKi_active = 25.0f;  // DERIVED pack-space Ki the loop uses.
 volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)
 volatile float VoltageKi = 25.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi. 15→40 2026-06-11: Ki=15 step test settled ~9.7s (TC ~4.4s at measured ~15mV/A plant gain); 40 targeted ~1.7s. 40→25 2026-06-14: idle up-step at Ki=40 showed +50mV windup overshoot + ~3s ring (cv_I wound to ~59A vs ~50A hold eq — integrator winding against the idle current ceiling, not a too-high-Ki failure); 25 is a user trial that trades some blip cv_I-deficit recovery speed for less up-step overshoot — proper fix is the deferred cv_I anti-windup (see CV_Loop_Dev_Summary.md Future Work)
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
 float SlopeBleedProxV = 0.20f;      // V — proximity gate: bleed scales linearly from 0 (e >= ProxV) to full (e <= 0); default 0.50→0.20, 2026-06-10
+bool  cvHelpersEnabled = true;      // master switch for the two non-linear CV "helpers" (asymmetric 7× KiDown unwind + slope-aware integrator bleed). ON = both active (reduce overshoot / speed OV recovery). OFF = symmetric plain PI, easier to tune/understand. Does NOT touch real OV protections.
 uint32_t VoltageLoopInterval = 100;  // ms — PI fires at this interval
 float VoltageTargetRiseRate = 0.3f;  // V/s — governor slew rate for voltage target rises only
 // --- FastOV supervisor ---
@@ -2839,7 +2913,7 @@ unsigned long MaxPenaltyDuration = 60000;  // Max penalty time (ms)
 
 // Advanced Learning
 float NeighborLearningFactor = 0.25;                // Neighbor reduction factor
-unsigned long LearningMemoryDuration = 2592000000;  // How long to remember events (30 days in ms) SEEMS UNUSED, DELETE LATER
+unsigned long LearningMemoryDuration = 2592000000;  // How long to remember events (30 days in ms)
 
 // Safety Overrides
 int IgnoreLearningDuringPenalty = 1;  // Block learning during penalty
@@ -2889,7 +2963,10 @@ enum FieldControlMode {
   MODE_LOCKOUT_RAMP,              // Lockout/auto-zero: ramp to 0, cut when settled
   MODE_DISABLED_RAMP,             // Normal shutdown: ramp to 0, cut when settled
   MODE_NORMAL_MANUAL,             // Manual control with rate limiting
-  MODE_NORMAL_AUTO_PID            // PID control with learning
+  MODE_NORMAL_AUTO_PID,           // PID control with learning
+  MODE_COMMISSION_IDLE            // Commissioning "rest" between guided steps: hold field at a low
+                                  // duty (per-RPM floor or a voltage-scaled minimum), slow ramp, no
+                                  // GPIO4 cut — keeps the RPM pickup alive instead of resuming charging
 };
 
 enum FieldEventReason : uint8_t {
@@ -2910,7 +2987,9 @@ enum FieldEventReason : uint8_t {
   REASON_HARD_OVERCURRENT,
   REASON_RPM_TOO_LOW,
   REASON_CURRENT_STALE,
-  REASON_FAST_OVERVOLTAGE          // absolute OV ceiling — fires in ALL modes incl. MANUAL (live per-tick, immediate cut)
+  REASON_FAST_OVERVOLTAGE,         // absolute OV ceiling — fires in ALL modes incl. MANUAL (live per-tick, immediate cut)
+  REASON_BATTERY_TOO_COLD,         // board temp (battery proxy) below MinChargeTempF — cold-charge lockout (opt-in, lithium protection)
+  REASON_COMMISSION_REST           // commissioning idle-rest hold between guided steps (not a fault)
 };
 
 // ==================== TICK SNAPSHOT STRUCT ====================
@@ -2955,13 +3034,16 @@ struct TickSnapshot {
   bool currentDataStale;
 
   bool inAbsorptionStage;
+
+  bool batteryTooCold;   // cold-charge lockout active (board temp proxy < MinChargeTempF, with hysteresis)
+  bool commissioningResting;  // commissioning session live + dialog alive + no test running → hold field at rest duty
 };
 
 // ==================== CONFIGURABLE PARAMETERS ====================
 // Expose these in web UI for tuning
 
 // --- Rate Limiting (LM2907 coupling cap protection) ---
-float DutyRampRate = 50.0f;  // %/sec - max rate of duty cycle change (protects coupling cap from harsh transitions, includes OnOff toggle!)
+float DutyRampRate = 40.0f;  // %/sec - max rate of duty cycle change (protects coupling cap from harsh transitions, includes OnOff toggle!)
 // Asymmetric setpoint slew
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
@@ -3032,13 +3114,15 @@ float g_I_cap = 0.0f;  // RPM table current ceiling this tick (A); set each AUTO
 
 
 // ===== RPM TABLE BREAKPOINTS =====
-// 10 evenly-spaced RPM points covering the alternator's full operating range.
+// 10 RPM points covering the alternator's full operating range, denser at the low
+// end (extra breakpoint at 300) so a sub-600 RPM idle isn't lumped in with the 0 RPM
+// box; evenly balanced across the top up to the unchanged 4600 ceiling.
 // Linear interpolation is used between points. Values at or below the first
 // breakpoint (100 RPM) use the first entry directly — no extrapolation below it.
 #define RPM_TABLE_SIZE 10
-int rpmTableRPMPoints[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
+int rpmTableRPMPoints[RPM_TABLE_SIZE] = { 100, 300, 600, 1100, 1500, 2000, 2650, 3300, 3950, 4600 };
 // Factory defaults for RPM breakpoints
-int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 600, 1100, 1600, 2100, 2600, 3100, 3600, 4100, 4600 };
+int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 300, 600, 1100, 1500, 2000, 2650, 3300, 3950, 4600 };
 
 // (Removed: rpmCurrentTable / defaultCurrentValues / averageTableValue — a dead "target current"
 // table that nothing read. Low charge-rate mode is the capTableLo blob via loadCapTablesForMode();
@@ -3104,6 +3188,11 @@ bool  kneeFloorActive = false;   // governor is clamping up to the floor right n
 bool  kneeSteadyNow   = false;   // inputs currently within steady bands
 // Prototypes (defined in 6_functions.ino) — declared here so setup()/loop() and 3_functions.ino see them.
 void loadCapTablesForMode(int mode);   // also called from 2_functions.ino, which concatenates before 3_functions.ino's prototype — declare in the main sketch so the earlier file sees it
+// Min%-floor commissioning snapshot helpers (defined in 6_functions.ino) — called from
+// commissionSnapshot()/commissionRestore() in 2_functions.ino, so declare them here too.
+void commissionBackupMinPct();
+bool commissionRestoreMinPct();
+void commissionClearMinPctBackup();
 void kneeLearnObserve(float rpm, float appliedDuty, float tF, float amps,
                       float dutyRequest, float rpmFloorDuty, bool modeOk);
 void kneeLearnInit();
@@ -3171,6 +3260,13 @@ uint8_t thermalSlopeBufIdx = 0;
 bool thermalSlopeBufFull = false;
 float projectedTempF = NAN;           // tempNow + slopeF_per_sec × ThermalLookaheadSec — PID process variable
 uint32_t thermalSlopeLastPushMs = 0;  // gates slope buffer push to TempPIDIntervalMs cadence
+// One-shot: set when the thermal PID is being re-enabled after a DORMANT-but-not-stale period
+// (TuningMode exit) where tempFilterUpdate() kept the slope buffer live the whole time. Tells
+// the re-enable path in tempPID_tick() to PRESERVE the slope buffer instead of clearing it, so
+// thermalSlopeBufFull stays true and the setpoint stays at limit-5 (no spurious limit-20 warmup
+// drop that would derate the field for 60s right after a test). NOT set on a true sensor gap —
+// there the trend really is stale and must be cleared. Consumed (reset) inside the re-enable path.
+bool thermalPreserveSlopeOnResume = false;
 
 float cvDSlope = 0.0f;              // V/s — mirrors g_fastOvDvdt; used by slope-aware integrator bleed (SlopeBleedK)
 
@@ -3235,6 +3331,7 @@ float thermalHoldEstimate = 0.0f;    // learned equilibrium holding penalty (amp
 bool  thermalHoldValid = false;      // false until the first settled-at-setpoint sample seeds thermalHoldEstimate; while false the equilibrium clamp is disabled (ceiling = penaltyMax)
 float outerPenaltyRaw = 0.0f;        // Tier-0a (2026-06-22): unclamped requested penalty (outerTermP + outerTermI) before output clamp + slew — for the requested-vs-applied saturation diagnostic
 uint8_t thermalFreezeReason = 0;     // Tier-0a: which integrator-freeze case gated this tick (see ThermalLogEntry.freezeWhy enum)
+uint32_t tempInvalidSinceMs = 0;     // millis() when TempToUse first went invalid (0 = currently valid). Debounces the tempPID deactivation so a single bad sample no longer forces a buffer-clear warmup re-init (the spurious "140°F setpoint" artifact). Added 2026-06-23.
 
 float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted from target table
 double thermalPenaltyAmps_d = 0.0;  // double version for PID library
@@ -4126,7 +4223,7 @@ static void *mbedtlsPsramCalloc(size_t n, size_t size) {
 
 void setup() {
 
-  Serial.end();  // Force complete serial restart (might not need this delete later)
+  // Serial.end();  // Disabled 2026-06-24 to test if needed — at first line of setup() Serial was never begun, so this should be a no-op. Delete if next flash is fine.
   delay(100);
   Serial.begin(230400);  //note, the below settings only apply to Serial, not Serial1 or Serial2
   // Serial.setTxTimeoutMs(500);    // avoid long stalls on any possible big serial monitor bursts     DOESN'T WORK ON NEW ESP32 BOARD DEFINITION IN ARDUINO IDE
@@ -4355,6 +4452,7 @@ void setup() {
   ensurePreferredBootPartition();  // Ensure we boot from preferred partition
   loadNVSData();                   // Load persistent variables from NVS- everything from last session is restored
   initNVSCache();                  // Sync change-detection cache with loaded NVS values to prevent false writes
+  restoreSoftClock();              // Re-establish a usable timebase (retained RTC, else NVS epoch) so AP-mode/no-internet Long Term records aren't stamped 0 and rendered as phantom gaps. Snaps to truth when a real source reports.
   //Reset some parameters to zero since we are re-starting on a re-boot
   CurrentSessionDuration = 0;
   prevSessionMaxLoopTime = MaxLoopTime;  // snapshot last session's worst before zeroing

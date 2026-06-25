@@ -679,9 +679,11 @@
                                   to derive the amp ceiling, so the load stays constant regardless of voltage sag or
                                   rise. In <b>Amps</b> mode, this is calculated for reference only.</span></span></th>
                             <th>Min<br>(%) <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                                  class="tooltip-box">Minimum field duty cycle (%) for this RPM range. Protects the
-                                  tachometer signal coupling capacitor from dropout at low duty. Set to 0 if unsure —
-                                  the only penalty is occasional tach signal dropout.</span></span>
+                                  class="tooltip-box">Lowest field duty cycle (%) the regulator will hold at this engine
+                                  speed, even when the controls want less. The commissioning step initially fills this
+                                  column, and it self-maintains automatically (Learning). Stored values are referenced to
+                                  a 150&deg;F winding temperature and adjusted to the live alternator temperature each
+                                  tick. Turn off Learning below to edit values by hand.</span></span>
                               <span id="minduty-managed-hint" class="learning-info-label"
                                     style="display:none; font-weight:400;">auto</span></th>
                           </tr>
@@ -935,10 +937,15 @@
                           class="btn-secondary" />
                       </form>
                     </div>
+                  </div>
+                </div>
+              </div>
 
-                    <!-- ===== Automatic Min% Learning ("knee tracker") ===== -->
-                    <hr style="margin-top:18px; border-color:var(--border);" />
-                    <div class="knee-learn-panel" style="margin-top:8px;">
+              <!-- ===== Automatic Min% Learning ("knee tracker") — lifted out of the cap-table scroll
+                   wrapper into its own card so it reads as a separate section, not part of the RPM cap
+                   table's box above ===== -->
+              <div class="alt-subsection-card">
+                <div class="knee-learn-panel">
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
                           <span><b>Automatic Min% Learning</b>
@@ -1097,7 +1104,7 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Reference Temperature (°F) (<span id="kneeTempRefF_echo">?</span>):
+                          <span>Reference Temperature (<span class="temp-unit-label">°F</span>) (<span id="kneeTempRefF_echo">?</span>):
                             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The
                                   alternator case temperature the learned floors are referenced to (learning happens hot, so
                                   ~180 °F is typical). The temperature correction lowers the floor below this and raises it
@@ -1105,7 +1112,7 @@
                           </span>
                         </div>
                         <div class="form-input">
-                          <form action="/get" method="GET" target="hidden-form">
+                          <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'kneeTempRefF',false)">
                             <input type="hidden" name="password" class="password_field">
                             <input name="kneeTempRefF" id="kneeTempRefF_input" type="number" step="1" min="-40" max="300" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -1151,13 +1158,13 @@
                       <hr />
                       <div class="form-row">
                         <div class="form-label" style="display:flex; align-items:center; justify-content:space-between;">
-                          <span>Steady Band — Temperature (°F) (<span id="kneeTempTolF_echo">?</span>):
+                          <span>Steady Band — Temperature (<span class="temp-unit-label">°F</span>) (<span id="kneeTempTolF_echo">?</span>):
                             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How
                                   much temperature may wander and still count as steady.</span></span>
                           </span>
                         </div>
                         <div class="form-input">
-                          <form action="/get" method="GET" target="hidden-form">
+                          <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'kneeTempTolF',true)">
                             <input type="hidden" name="password" class="password_field">
                             <input name="kneeTempTolF" id="kneeTempTolF_input" type="number" step="0.5" min="0.5" max="50" />
                             <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -1212,12 +1219,9 @@
                       </div>
                     </div>
                     <!-- ===== end Automatic Min% Learning ===== -->
-                  </div>
-                </div>
-              </div>
 
-              <hr style="margin-top:16px; border-color:var(--border);" />
-              <!-- Table Details -->
+                <hr style="margin-top:16px; border-color:var(--border);" />
+                <!-- Table Details -->
               <div class="learning-info-grid" style="margin-top: 8px;">
                   <div class="learning-info-item">
                     <span class="learning-info-label">Current RPM Index:
@@ -1238,6 +1242,8 @@
                     <span class="learning-info-value"><span id="pidInitialized_display">No</span></span>
                   </div>
                 </div>
+              </div>
+              <!-- ===== end Min% Learning + Table Details card ===== -->
 
               <!-- Sticky Header -->
               <div id="stickyHeader" aria-hidden="true">
@@ -1325,10 +1331,14 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Max Field (%) (<span id="MaxDuty_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Set ≤99%
-                        to ensure bootstrap capacitor refresh for the gate driver. At 100% duty the high-side may not
-                        fully refresh, risking incomplete gate drive and increased MOSFET heating. 99% is effectively
-                        maximum in practice.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Hard cap on
+                        commanded field duty, enforced across every mode. Set ≤99% to ensure bootstrap capacitor refresh for
+                        the gate driver — at 100% duty the high-side may not fully refresh, risking incomplete gate drive and
+                        increased MOSFET heating; 99% is effectively maximum in practice. On 24 V / 48 V banks each
+                        duty-percent drives ~2× / ~4× the field current, so the default is scaled down (≈50% at 24 V, ≈25%
+                        at 48 V) to keep worst-case field current at the 12 V level, and it rescales automatically if you
+                        change system voltage in Vessel Info. The value shown here is exactly what's enforced — raise it if
+                        a large alternator needs more field and you accept the higher field current.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -1564,6 +1574,60 @@
                     <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TemperatureLimitF',false)">
                       <input type="hidden" name="password" class="password_field">
                       <input name="TemperatureLimitF" type="number" step="1" min="0" max="350" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <!-- Cold-Charge Lockout (lithium protection) — master on/off -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Cold-Charge Lockout (<span id="coldChargeLockoutEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Refuses to charge when the battery is too cold — protects
+                        lithium (LiFePO4/Li-ion) batteries, which are permanently damaged by charging below
+                        freezing. When ON, charging is locked out (field ramps to zero and cuts) whenever the
+                        regulator <strong>board temperature</strong> drops below the Min Charge Temp set below,
+                        and the alarm sounds if alarms are enabled.<br><br><strong>The board temperature is only
+                        a proxy for battery temperature, and it runs WARMER than the surrounding air</strong>
+                        (the regulator makes its own heat), so set Min Charge Temp with margin above the real
+                        battery cutoff. Leave this <strong>OFF for lead-acid/AGM</strong> batteries, which charge
+                        fine in the cold. Turning this toggle off is the override.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="coldChargeLockoutEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('coldChargeLockoutEnable_checkbox', 'coldChargeLockoutEnable', 'coldChargeLockoutEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="coldChargeLockoutEnable" name="coldChargeLockoutEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <!-- Cold-Charge Lockout temperature floor (board temp, battery proxy) -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Min Charge Temp (<span class="temp-unit-label">°F</span>) (<span id="MinChargeTempF_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Board-temperature floor for the Cold-Charge Lockout above. Below
+                        this, charging is disabled. Because board temperature reads warmer than the battery, set
+                        this above the battery's true cutoff (lithium is conventionally 32°F / 0°C) — a value
+                        around 40°F is a conservative default. Re-arms after the board climbs ~2°F back above
+                        this floor (hysteresis prevents on/off chatter). Has no effect unless the lockout is ON.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'MinChargeTempF',false)">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="MinChargeTempF" type="number" step="1" min="-40" max="120" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2009,9 +2073,9 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Temperature band (&deg;F) (<span id="altThermDegF_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Temperature band (<span class="temp-unit-label">°F</span>) (<span id="altThermDegF_echo">?</span>):</span></div>
                   <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
+                    <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'altThermDegF',true)">
                       <input type="hidden" name="password" class="password_field">
                       <input name="altThermDegF" type="number" step="0.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
@@ -2020,11 +2084,67 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Temperature steady time (s) (<span id="altThermSec_echo">?</span>):</span></div>
+                  <div class="form-label"><span>Temperature steady time, full (s) (<span id="altThermSec_echo">?</span>):</span></div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="altThermSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Temperature steady time, session (s) (<span id="altSessTempSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The lighter temperature dwell used by the This Session plot. A point can appear once temperature has held this long (normally half the full time above). The reference surface and the engine-hours trend still wait for the full time.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altSessTempSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Trend bucket length (s) (<span id="altTrendBuckSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Engine-seconds per point on the % vs Engine-Hours trend. 3600 = one point per engine-hour (production). Set 600 to see points fill in every 10 minutes for testing.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altTrendBuckSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Trend sample spacing (s) (<span id="altTrendFeedSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Minimum spacing between full steady-run samples that feed a trend bucket. Throttles a long steady run so it contributes several spread-out samples rather than a flood.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altTrendFeedSec" type="number" step="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Trend min samples per bucket (<span id="altTrendMinSamp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A trend bucket needs at least this many full steady-run samples before it commits a point. A sparser bucket shows a gap instead of a single-reading artifact.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="altTrendMinSamp" type="number" step="1" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2228,12 +2348,26 @@
                 </div>
                 <hr>
                 <p class="card-group-title" style="margin:12px 0 4px;">Reference &amp; Data</p>
-                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Learn or freeze the reference, back it up, simulate, or reset.</div>
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 8px;">Choose which reference to grade against, pause or continue learning, back it up, simulate, or reset.</div>
                 <div class="form-row">
-                  <div class="form-label"><span>Reference mode (<span id="alt-mode-label">?</span>):</span></div>
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reference source (<span id="alt-mode-label">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which reference surface grades the live % and the trend. "My History" is what this device learned. "Uploaded File" is a borrowed surface from Load CSV — selecting it defaults Pause ON, but you can Continue to keep learning My History while graded against the uploaded one. Learning never modifies an uploaded surface.</span></span>
+                  </div>
                   <div class="form-input">
-                    <input type="button" value="LEARNED (resume)" class="btn-secondary" onclick="altSetSource(0)" />
-                    <input type="button" value="FIXED (freeze)" class="btn-secondary" onclick="altSetSource(1)" />
+                    <input type="button" value="My History" class="btn-secondary" onclick="altSetSource(0)" />
+                    <input type="button" value="Uploaded File" class="btn-secondary" onclick="altSetSource(1)" />
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Learning</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Pause / Continue learning into My History. Independent of the reference source — you can pause learning and still grade against either surface. Live display and the trend keep updating either way.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <input type="button" value="Continue Learning" class="btn-secondary" onclick="altSetPaused(0)" />
+                    <input type="button" value="Pause Learning" class="btn-secondary" onclick="altSetPaused(1)" />
                   </div>
                 </div>
                 <hr>
@@ -2252,12 +2386,22 @@
                 <hr>
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Reset health data</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Start Over wipes ALL learned alternator-health data and restarts the trend at engine-hour 0. Do this after replacing the alternator, regulator, or drive belt, since the old best-ever baseline no longer applies. Cannot be undone.</span></span>
+                    <span>Debug data</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Downloads a single CSV with everything useful for debugging this subsystem: all parameters, live/gate state, both reference surfaces (My History + Uploaded), the trend buckets (committed + in-progress), and the engine-hour frame. Hand it to an AI or engineer to diagnose behaviour.</span></span>
                   </div>
                   <div class="form-input">
-                    <input type="button" value="Start Over (new baseline)" class="btn-danger"
-                      onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Wipe ALL learned alternator-health data and restart the trend at engine-hour 0? Do this after replacing the alternator, regulator, or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}" />
+                    <input type="button" value="Download Debug CSV" class="btn-secondary" onclick="altDownloadDebug()" />
+                  </div>
+                </div>
+                <hr>
+                <div class="form-row">
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Reset / Start Over</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Clears the learned reference surface (My History), the entire % vs Engine-Hours trend (committed buckets AND the current partial hour), and the session stats, then restarts the engine-hour axis at zero and reverts the reference source to My History. Your tuning settings are kept. Do this after replacing the alternator, regulator, or drive belt. Cannot be undone.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <input type="button" value="Reset / Start Over" class="btn-danger"
+                      onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear My History, the whole % vs Engine-Hours trend (including the current partial hour) and the session stats, restart the engine-hour axis at 0, and revert the source to My History? Tuning settings are kept. Do this after replacing the alternator, regulator, or belt. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&ResetAlternatorHealth=1'),{},5000).then(()=>{altTrend=[];drawAltTrend();}).catch(()=>{});}" />
                   </div>
                 </div>
                 <hr>
@@ -2811,6 +2955,12 @@
         <!-- Battery Settings Sub-tab -->
         <div id="settings-battery" class="sub-tab-content">
           <div class="settings-card">
+
+            <!-- System voltage (12/24/48 V) is set in Vessel Info; changing it there rescales the
+                 whole charge profile AND the field-duty knobs (Max Field %, Duty Ramp Rate, knee
+                 margins) so field current stays safe on higher-voltage banks. There is no separate
+                 field-duty-ceiling toggle: Max Field % below IS the real per-bus cap — set it to 99
+                 for full duty. -->
 
             <!-- Bulk Phase -->
             <details open style="margin-top: 20px;">
@@ -3798,29 +3948,35 @@
               </div>
             </div>
 
-            <!-- Temperature Alarm -->
-            <hr />
-            <div class="form-row">
-              <div class="form-label">High Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarm_echo">0</span>):</div>
-              <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarm',false)">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="TempAlarm" type="number" step="1" min="0" max="350" />
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                </form>
-              </div>
-            </div>
+            <!-- Temperature Alarms Section -->
+            <details open style="margin-top: 20px;">
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Temperature Alarms</summary>
 
-            <div class="form-row">
-              <div class="form-label">Low Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarmLow_echo">0</span>):</div>
-              <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarmLow',false)">
-                  <input type="hidden" name="password" class="password_field">
-                  <input name="TempAlarmLow" type="number" step="1" min="0" max="350" />
-                  <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                </form>
+              <div class="form-row">
+                <div class="form-label">High Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarm_echo">0</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarm',false)">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="TempAlarm" type="number" step="1" min="0" max="350" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
               </div>
-            </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Low Temp Alarm (<span class="temp-unit-label">°F</span>) (<span id="TempAlarmLow_echo">0</span>):</div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form" onsubmit="return convertTempFormIfNeeded(this,'TempAlarmLow',false)">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="TempAlarmLow" type="number" step="1" min="0" max="350" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+            </details>
 
             <!-- Voltage Alarms Section -->
             <details open style="margin-top: 20px;">
@@ -4303,31 +4459,6 @@
               </div>
             </details>
 
-            <hr />
-            <div class="form-row">
-              <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                <span>Switch Panel Override (<span id="SwitchControlOverride_echo">?</span>):</span>
-                <span class="tooltip" onclick="this.classList.toggle('active')">
-                  ℹ️
-                  <span class="tooltip-box">Coming soon</span>
-                </span>
-              </div>
-              <div class="form-input">
-                <form action="/get" method="GET" target="hidden-form">
-                  <input type="hidden" name="password" class="password_field">
-                  <span class="toggle-label">Off</span>
-                  <label class="switch">
-                    <input id="SwitchControlOverride_checkbox" type="checkbox"
-                      onchange="if(handleUserToggle('SwitchControlOverride_checkbox', 'SwitchControlOverride', 'SwitchControlOverride')) { this.form.submit(); submitMessage(); }" />
-                    <span class="slider round"></span>
-                  </label>
-                  <span class="toggle-label">On</span>
-                  <input id="SwitchControlOverride" name="SwitchControlOverride" type="number" value=""
-                    style="display:none;" />
-                </form>
-              </div>
-            </div>
-
             <!-- Engine & Alternator Parameters Section -->
             <details open style="margin-top: 20px;">
               <summary
@@ -4521,7 +4652,7 @@
                       <span class="toggle-label">Off</span>
                       <label class="switch">
                         <input id="LimpHome_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('LimpHome_checkbox', 'LimpHome', 'LimpHome')) { this.form.submit(); submitMessage(); }" />
+                          onchange="if(this.checked) warnHighVoltageOpenLoop('Limp-home mode'); if(handleUserToggle('LimpHome_checkbox', 'LimpHome', 'LimpHome')) { this.form.submit(); submitMessage(); }" />
                         <span class="slider round"></span>
                       </label>
                       <span class="toggle-label">On</span>
@@ -4549,6 +4680,31 @@
                     <span class="slider round"></span>
                   </label>
                   <span class="toggle-label">On</span>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Switch Panel Override (<span id="SwitchControlOverride_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">Coming soon</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <span class="toggle-label">Off</span>
+                    <label class="switch">
+                      <input id="SwitchControlOverride_checkbox" type="checkbox"
+                        onchange="if(handleUserToggle('SwitchControlOverride_checkbox', 'SwitchControlOverride', 'SwitchControlOverride')) { this.form.submit(); submitMessage(); }" />
+                      <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">On</span>
+                    <input id="SwitchControlOverride" name="SwitchControlOverride" type="number" value=""
+                      style="display:none;" />
+                  </form>
                 </div>
               </div>
             </details>
@@ -4721,13 +4877,13 @@
             <!-- reference mode (now a segmented toggle to match the other choices) -->
             <div class="form-row">
               <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                <span>Reference mode</span>
-                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">LEARNED keeps updating the best-ever reference as conditions are sailed. FIXED freezes the current (or loaded) reference so it stops changing — useful to hold a known-good baseline while comparing.</span></span>
+                <span>Reference</span>
+                <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Learning keeps updating the best-ever reference as conditions are sailed. Frozen holds the current (or loaded) reference so it stops changing — useful to keep a known-good baseline while comparing.</span></span>
               </div>
               <div class="form-input">
                 <div class="cap-mode-toggle">
-                  <button type="button" id="perf-ref-0" class="cap-mode-btn" onclick="perfSetSource(0)">LEARNED (resume)</button>
-                  <button type="button" id="perf-ref-1" class="cap-mode-btn" onclick="perfSetSource(1)">FIXED (freeze)</button>
+                  <button type="button" id="perf-ref-0" class="cap-mode-btn" onclick="perfSetSource(0)">Learning</button>
+                  <button type="button" id="perf-ref-1" class="cap-mode-btn" onclick="perfSetSource(1)">Frozen</button>
                 </div>
               </div>
             </div>
@@ -5087,18 +5243,9 @@
     <div id="tuning-commissioning" class="sub-tab-content active">
       <div class="settings-card">
 
-        <p class="card-group-title" style="margin:0 0 10px 0;">Commissioning</p>
         <p style="font-size:13px;color:var(--text-muted);margin:0 0 14px 0;line-height:1.55;">
-          A single guided walkthrough that sets up the current-control loop and its over-current
-          protection for <strong>this</strong> alternator. You hold the engine at a steady speed; the
-          regulator drives the field and measures everything it needs. The dashboard switches pages
-          automatically as each step runs.
+          A  wizard to pre-tune the current and voltage control loops (and some additional parameters) for this alternator.
         </p>
-
-        <!-- Commissioning status badge (promoted here from the Plant Delay page). Populated by
-             renderCommissionStatus()/updateCommissionBadge() in script.js from CSV3
-             commissionState — keep this the only #commission-badge in the DOM. -->
-        <div id="commission-badge" style="display:none; margin-bottom:14px; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;"></div>
 
         <!-- Overall status line — always present (the badge hides once commissioned). -->
         <div class="form-row" style="margin-bottom:14px;">
@@ -5106,28 +5253,22 @@
           <div class="form-input"><strong id="commission-overall" style="color:var(--text-muted);">…</strong></div>
         </div>
 
-        <!-- Label/class/help adapt to commissionState in renderCommissionStatus(): start (0) / resume (1) / re-commission (2). -->
-        <button id="commission-start-btn" onclick="openCommissionModal()" class="btn-primary" style="width:100%;padding:12px;">Start commissioning…</button>
-        <p id="commission-start-help" style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Opens the guided walkthrough for this alternator. The steps below show the persisted progress.</p>
-
-        <!-- Clear & start over — shown by renderCommissionStatus() only while a run is in progress (state == 1),
-             where resume-vs-restart is a real choice. When already commissioned, re-commissioning IS starting over. -->
-        <div id="commission-clear-row" style="display:none; margin-top:12px;">
-          <button onclick="commissionClearAndRestart()" class="btn-danger-ghost" style="width:100%;padding:10px;">Clear progress &amp; start over</button>
-          <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0 0;">Reverts to your pre-commissioning settings and restarts the walkthrough from the first step.</p>
-        </div>
-
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Steps</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. ✓ = done, ▶ = in progress, ○ = not yet run.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. ✓ = done, ▶ = in progress, ○ = not yet run. Tick the steps to run, then press the button below — coupled steps are selected automatically.</p>
+        <!-- Select-all master + per-step checkboxes rendered by renderCommissionStatus(). -->
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:6px 0 2px 2px;cursor:pointer;">
+          <input type="checkbox" id="commission-select-all" onchange="cxToggleSelectAll(this.checked)" checked> Select all steps
+        </label>
         <!-- Checklist rendered by renderCommissionStatus(); rows mirror CX_PHASES / COMMISSION_STEPS. -->
         <div id="commission-checklist" style="background:var(--card-light);padding:6px 16px 12px;border-radius:var(--radius);border-left:4px solid var(--accent);"></div>
 
-        <hr />
-        <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;line-height:1.55;">
-          While a step runs, the relevant over-current layers may be relaxed so the test input isn't fought —
-          a red banner shows at the top of every page whenever that's the case. Over-voltage protection always stays active, and everything re-enables when the flow finishes.
-        </p>
+        <!-- Start button moved BELOW the checklist so the steps are chosen first. Label/class/help/action
+             adapt to the ticked plan vs. done-mask in renderCommissionStatus()/cxStartIntent():
+             Start / Continue / Clear-and-restart. commissionPrimaryAction() routes a wholesale redo
+             through the revert path; the old separate "Clear & start over" row is folded into this button. -->
+        <button id="commission-start-btn" onclick="commissionPrimaryAction()" class="btn-primary" style="width:100%;padding:12px;margin-top:12px;">Start commissioning…</button>
+        <p id="commission-start-help" style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0;">Only the ticked steps will run.</p>
 
       </div>
     </div>
@@ -5142,7 +5283,7 @@
           <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
             <span>Test Type (<span id="systemIDTestType_echo">?</span>):</span>
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-              <span class="tooltip-box">Step = the classic rise/fall delay test (PID off, duty steps up and down). Sine Sweep = drives a swept sine on duty with the PID off and measures the plant's gain and phase lag at each frequency — an open-loop Bode plot. Use Sine Sweep to see how much of the plant delay is true dead-time versus field L/R lag, and where the plant rolls off.</span>
+              <span class="tooltip-box">Sine Sweep (recommended) drives a swept sine on the field with the control loop off (PID off) and measures the plant's gain and phase lag at each frequency — an open-loop Bode plot. It characterizes the plant across the whole frequency range, so you can see how much of the plant delay is true dead-time versus field L/R lag, and where the plant rolls off. Step (legacy) is the original rise/fall delay test: with the PID off, duty steps up and down and you read the response time at a single step. Kept for reference — prefer Sine Sweep, which gives the full frequency picture instead of one point.</span>
             </span>
           </div>
           <div class="form-input">
@@ -5341,6 +5482,7 @@
                     <th style="padding:4px 6px;text-align:left;" title="Bus voltage at commit">Bus V</th>
                     <th style="padding:4px 6px;text-align:left;" title="Charge stage at commit">Stage</th>
                     <th style="padding:4px 6px;text-align:left;">Abort</th>
+                    <th style="padding:4px 6px;text-align:left;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
                   </tr>
                 </thead>
                 <tbody id="systemIDLogBody">
@@ -5378,6 +5520,7 @@
                     <th style="padding:4px 6px;">Alt Temp (°F)</th>
                     <th style="padding:4px 6px;" title="Bus voltage during the sweep">Bus V</th>
                     <th style="padding:4px 6px;" title="Charge stage at commit">Stage</th>
+                    <th style="padding:4px 6px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
                   </tr>
                 </thead>
                 <tbody id="sysidSweepLogBody">
@@ -5871,6 +6014,7 @@
                         <th style="padding:3px 5px;">t(s)</th>
                         <th style="padding:3px 5px;" title="Bus voltage during the test">BusV</th>
                         <th style="padding:3px 5px;" title="Charge stage at commit">Stage</th>
+                        <th style="padding:3px 5px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
                       </tr>
                     </thead>
                     <tbody id="tuningLogBody"></tbody>
@@ -5916,6 +6060,7 @@
                           <th style="padding:4px 6px;" title="Worst per-point fit coherence (0–1). Below ~0.7 = noisy/unreliable point in this run">Coh</th>
                           <th style="padding:4px 6px;" title="Field duty hit 0%/100% during the sweep — the sine was clipped, gain understated">Clip</th>
                           <th style="padding:4px 6px;" title="Charge stage at the moment the run was logged">Stage</th>
+                          <th style="padding:4px 6px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
                         </tr>
                       </thead>
                       <tbody id="tuningSweepLogBody">
@@ -5946,7 +6091,9 @@
                     <span>PID Kp (Proportional) (<span id="PidKp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                         class="tooltip-box">Immediate response to current error. Higher = faster correction but more
-                        overshoot. Start with 0.3, increase if too slow, decrease if oscillating.</span></span>
+                        overshoot. Start with 0.3, increase if too slow, decrease if oscillating. <strong>Voltage-normalized:</strong>
+                        the value you enter produces the same field-current response on a 12, 24, or 48 V system, so you never
+                        re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5963,7 +6110,9 @@
                     <span>PID Ki (Integral) (<span id="PidKi_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
                         class="tooltip-box">Eliminates steady-state error over time. Higher = faster elimination of
-                        offset but may cause instability. Start with 0.5, increase slowly if needed.</span></span>
+                        offset but may cause instability. Start with 0.5, increase slowly if needed. <strong>Voltage-normalized:</strong>
+                        the value you enter produces the same field-current response on a 12, 24, or 48 V system, so you never
+                        re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -5979,7 +6128,9 @@
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>PID Kd (Derivative) (<span id="PidKd_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Dampens
-                        rapid changes to reduce overshoot. Usually kept at or near zero (default 0.01).</span></span>
+                        rapid changes to reduce overshoot. Usually kept at or near zero (default 0.01). <strong>Voltage-normalized:</strong>
+                        the value you enter produces the same field-current response on a 12, 24, or 48 V system, so you never
+                        re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6375,6 +6526,7 @@
                         <th style="padding:3px 4px;">SOC%</th>
                         <th style="padding:3px 4px;">CVT</th>
                         <th style="padding:3px 4px;" title="Charge stage at commit">Stage</th>
+                        <th style="padding:3px 4px;" title="Wall-clock date/time the run was committed (— if the clock was not set)">Date/Time</th>
                       </tr>
                     </thead>
                     <tbody id="cvTuningLogBody">
@@ -6411,12 +6563,79 @@
                   <span class="tooltip" onclick="this.classList.toggle('active')" style="margin-left:6px;">ℹ️<span class="tooltip-box">Zeroes the voltage loop integrator. Use if it's stuck at zero or wound up to a bad value — the PI will rebuild from scratch on the next tick. Useful after changing Voltage Loop Kp/Ki during a tuning session.</span></span>
                 </div>
 
+                <hr />
+                <!-- CV gain source: Auto (λ-based) vs Manual -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto (λ-based)</strong> computes them from the measured plant (from the CV plant-fit commissioning step) using lambda tuning — you set only how lazy the loop is (λ). <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Manual</span>
+                      <label class="switch">
+                        <input id="cvGainMode_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('cvGainMode_checkbox', 'cvGainMode', 'cvGainMode')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">Auto λ</span>
+                      <input id="cvGainMode" name="cvGainMode" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Auto (λ-based) controls — shown only in Auto mode -->
+                <div id="cvAutoBlock">
+                  <hr />
+                  <div class="form-row">
+                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                      <span>Response Speed&nbsp; λ = <span id="cvLambdaMult_echo">2.0</span> × dead-time&nbsp; <span style="opacity:0.7;">(settle <span id="cvPredSettle">—</span>)</span>:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single "laziness" knob for Auto tuning. λ is a multiple of the loop's measured dead time L. Larger = slower, smoother, more stability margin, no overshoot; smaller = faster, tighter. Default 2× is conservative. Kp/Ki are recomputed live from the measured plant whenever you move this.</span></span>
+                    </div>
+                    <div class="form-input">
+                      <input id="cvLambdaSlider" type="range" min="0.5" max="15" step="0.5" value="2"
+                             style="width:100%;" oninput="onCvLambdaInput(this)" onchange="onCvLambdaCommit(this)" />
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
+                      <span id="cvFitStatus">No plant fit yet — run the CV plant-fit step in commissioning. Auto uses safe defaults until then.</span>
+                      <div style="margin-top:4px;">Computed gains (12V-equiv): Kp = <strong><span id="cvComputedKp_echo">?</span></strong> A/V,&nbsp; Ki = <strong><span id="cvComputedKi_echo">?</span></strong> A/(V·s)</div>
+                    </div>
+                  </div>
+                </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>CV Tuning Helpers (<span id="cvHelpersEnabled_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for two non-linear "helpers" that sit on top of the plain voltage PI: <strong>(1) asymmetric integrator unwind</strong> — when battery voltage goes above target the integrator drains 7× faster than it builds, and <strong>(2) slope-aware integrator bleed</strong> — drains the integrator early when voltage is rising fast near the target. Both exist for one purpose only: they <strong>REDUCE OVERSHOOT</strong> and <strong>HELP SPEED OVERVOLTAGE RECOVERY</strong>. They never make the loop more aggressive, so leaving them ON is always at least as safe.<br><br>Turn them <strong>OFF</strong> while tuning Voltage Loop Kp/Ki: the loop becomes a clean symmetric PI, so its overshoot and settling behaviour reflect Kp/Ki directly and are far <strong>easier to understand</strong>. Once Kp/Ki are dialled in, turn them back ON to add the overshoot/OV-recovery polish. This does NOT touch the real overvoltage protections (hardware OV, fast OV, hard clamp) — those stay live regardless.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="cvHelpersEnabled_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('cvHelpersEnabled_checkbox', 'cvHelpersEnabled', 'cvHelpersEnabled')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="cvHelpersEnabled" name="cvHelpersEnabled" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <!-- Manual gains — shown only in Manual mode; ignored (but preserved) when Auto λ is active -->
+                <div id="cvManualBlock">
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Kp (A/V) (<span id="VoltageKp_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage loop proportional gain. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. Sets the fast-response term of the CV PI: CV loop output = Voltage Loop Kp × voltage error + voltage loop integrator. That output becomes the current setpoint sent to the output current loop, then clamped to the RPM/thermal current ceiling.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Voltage loop proportional gain. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. Sets the fast-response term of the CV PI: CV loop output = Voltage Loop Kp × voltage error + voltage loop integrator. That output becomes the current setpoint sent to the output current loop, then clamped to the RPM/thermal current ceiling. <strong>Voltage-normalized:</strong> the value you enter behaves the same on a 12, 24, or 48 V bank, so you never re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6431,7 +6650,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Voltage Loop Ki (<span id="VoltageKi_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× multiplier is hard-coded — only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Higher values reach target faster after a target change or disturbance; too high causes overshoot at the target crossing. The default suits a typical AGM bank — large lithium banks (stiffer voltage) may need more.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Integral gain for the voltage loop — the slow-correction term that pulls battery voltage exactly to target over time. Active in bulk, absorption, float, Target Voltage mode, and Maintain Mode. <strong>Asymmetric:</strong> when battery voltage is below target the integrator builds up at this rate (gentle, patient approach), but when it goes above target the integrator unwinds 7× faster (aggressive recovery from overshoot). The 7× faster unwind is gated by the <strong>CV Tuning Helpers</strong> toggle above — turn that OFF and the loop becomes a symmetric PI (unwinds at this same rate). The 7× multiplier itself is hard-coded; only the build-up rate (this setting) is user-tunable. On CV entry the integrator is seeded so the current setpoint matches the output PID's current value — no step in setpoint. Set to 0 to disable integral action. Higher values reach target faster after a target change or disturbance; too high causes overshoot at the target crossing. The default suits a typical AGM bank — large lithium banks (stiffer voltage) may need more. <strong>Voltage-normalized:</strong> the value you enter behaves the same on a 12, 24, or 48 V bank, so you never re-tune it when you change system voltage (it is scaled to the bus behind the scenes).</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6441,6 +6660,7 @@
                     </form>
                   </div>
                 </div>
+                </div> <!-- end cvManualBlock -->
 
                 <hr />
                 <div class="form-row">
@@ -10324,20 +10544,18 @@
         <hr />
         <p class="card-group-title">
           <span>This Session</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Every second's health reading since this page was opened. Green dots are measured comparisons (a recorded best exists at that operating point); amber dashes are estimated (interpolated between nearby records). Shaded spans are periods with no fair comparison — learning a new operating region, no reference recorded yet, or not running — where no number is shown on purpose. Click the axis numbers to set the plot range.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A health reading every 5 seconds since this page was opened, but only while the operating point is holding steady (the lighter session gate: all inputs steady for a few seconds and temperature steady for half the full record-book dwell). Green dots are measured comparisons (a recorded best exists at that operating point); blue dots are estimated (interpolated between nearby records). A dot ringed in orange is also a full steady run — the same kind of point that updates the reference and the engine-hours trend. Shaded spans are periods with no dot — not holding steady, no reference yet, or not running — where no number is shown on purpose. (A full steady run in brand-new territory has no reference to grade against, so it shows no dot and no ring here, by design.) Click the axis numbers to set the plot range.</span></span>
         </p>
         <div id="alt-session-plot" style="width:100%;max-width:560px;margin:0 auto;"></div>
         <hr />
         <p class="card-group-title">
           <span>Charging-System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only graded readings enter a point: comparisons made while learning a new operating region or with no reference recorded nearby are excluded, and an engine-hour needs at least 5 graded steady-state runs before it commits a point — a single noisy reading can no longer stamp a whole hour. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only FULL steady runs feed this trend — graded against the active reference (Measured/Estimated only; learning-a-new-region and no-reference runs are excluded), at most one sample every 10 seconds. A bucket needs at least 2 such samples (the "min samples per bucket" setting) before it commits a point; a sparser bucket shows a gap rather than a single-reading artifact. The bucket spans one engine-hour in normal use (shorter for testing). The in-progress bucket persists across reboots, so a part-finished hour resumes where it left off. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
         </p>
         <canvas id="alt-trend" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
         <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>worst</span>
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid rgba(58,123,213,.45);"></i>average</span>
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px dashed #bbccdd;"></i>best</span>
-          <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#5cb85c;"></i>now</span>
         </div>
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
           <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
@@ -10367,10 +10585,10 @@
         <span class="metric-value" style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:8px;flex-wrap:wrap;">
           <input type="button" value="Export Health Dataset" class="btn-secondary"
             onclick="downloadCsv('/altcurve.csv','Alternator Health Data')"
-            title="Save the alternator's learned best-ever data — the reference both charts above are graded against, not the chart image — to your Downloads as a dated CSV. Use it to back up, move to another unit, or share, then reload with Import Health Dataset." />
+            title="Save this device's learned best-ever data (My History) to your Downloads as a dated CSV — not the chart image. Use it to back up, move to another unit, or share, then load on another unit with Import Health Dataset." />
           <input type="button" id="alt-load-btn" value="Import Health Dataset" class="btn-secondary"
             onclick="altLoadCsv()"
-            title="Load a health dataset exported from another unit or a backup. You'll choose Freeze (hold it exactly as imported, learning paused) or Learn (adopt it as your own and keep refining from your engine)." />
+            title="Load a health dataset (from another unit or a backup) into the Uploaded reference surface — resident alongside My History, which is kept. It switches grading to the uploaded surface; you'll choose Pause learning (just compare) or Continue learning My History while graded against it." />
           <input type="file" id="alt-load-file" accept=".csv,text/csv,text/plain" style="display:none;" onchange="altUploadCsvFile(this)" />
         </span>
         </div>
@@ -10896,13 +11114,13 @@
         <div class="plot-container" id="current-temp-plot"></div>
       </div>
       <div class="settings-card">
+        <div class="plot-container" id="voltage-plot"></div>
+      </div>
+      <div class="settings-card">
         <div class="plot-container" id="rpm-plot"></div>
       </div>
       <div class="settings-card">
         <div class="plot-container" id="temperature-plot"></div>
-      </div>
-      <div class="settings-card">
-        <div class="plot-container" id="voltage-plot"></div>
       </div>
 
       <!-- Plot display controls (moved here from the removed Plot Controls sub-tab) -->
@@ -11778,7 +11996,7 @@
   <!-- Auto-commissioning orchestrator modal — reuses the Plant Delay modal styling.
        A single dynamic body (#commission-body) is re-rendered per phase by commissionRender(). -->
   <div id="commission-modal-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; z-index:9000; pointer-events:none;">
-    <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:80px; right:20px; background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
+    <div id="commission-modal-panel" style="pointer-events:auto; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e1e1e; color:#ddd; width:430px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); overflow-y:auto;">
       <div id="commission-drag-handle" style="cursor:move; padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
         <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Commissioning</span>
         <button onclick="closeCommissionModal()" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>

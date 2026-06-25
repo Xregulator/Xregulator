@@ -1048,15 +1048,10 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   // =================================================================
   // Calculate charge cycles based on total energy throughput
   // One cycle = one full battery capacity worth of energy charged
-  // Determine nominal voltage: <16V = 12V, <32V = 24V, else 48V
-  float nominalVoltage;
-  if (currentBatteryVoltage < 16.0f) {
-    nominalVoltage = 12.0f;
-  } else if (currentBatteryVoltage < 32.0f) {
-    nominalVoltage = 24.0f;
-  } else {
-    nominalVoltage = 48.0f;
-  }
+  // Use the user-entered nominal bank class (BATTERY_VOLTAGE) directly — this runs continuously, well
+  // after InitSystemSettings has loaded it, so there's no need to (mis)guess the class from the measured
+  // voltage. A deeply-discharged 24V bank sagging below 16V no longer mis-buckets as 12V (2× cycle error).
+  float nominalVoltage = (float)BATTERY_VOLTAGE;
 
   float batteryCapacity_Wh = BatteryCapacity_Ah * nominalVoltage;
 
@@ -1630,6 +1625,20 @@ void CheckAlarms() {
       lastTempLowAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
     }
 
+    // Cold-charge lockout alarm — fail-open on stale/NaN board sensor, matching buildTickSnapshot().
+    static unsigned long lastColdChargeAlarmMsgMs = 0;
+    if (coldChargeLockoutEnable && !IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp) && ambientTemp < MinChargeTempF) {
+      currentAlarmCondition = true;
+      alarmReason = "Battery too cold to charge";
+      if (millis() - lastColdChargeAlarmMsgMs >= 30000) {
+        lastColdChargeAlarmMsgMs = millis();
+        queueConsoleMessageF("Cold-charge lockout: board temp %.1f°F below %.0f°F floor — charging disabled",
+                             ambientTemp, MinChargeTempF);
+      }
+    } else {
+      lastColdChargeAlarmMsgMs = 0;  // Reset so it fires immediately when condition returns
+    }
+
     // (Alternator-health is advisory-only now — no audible alarm. See Phase 2 redesign.)
 
     // Fast alt-current pulse-pattern fault (rectifier/stator) — opt-in audible alarm (item 5).
@@ -1663,7 +1672,9 @@ void CheckAlarms() {
     }
 
     static unsigned long lastVoltLowMsgMs = 0;
-    if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0) {
+    // The > floor rejects a disconnected/0V reading; scale it by bank class (8V on 12V → 16/32V on
+    // 24/48V) so it stays a "sensor disconnected" floor and never sits above a real low-V alarm point.
+    if (VoltageAlarmLow > 0 && currentVoltage < VoltageAlarmLow && currentVoltage > 8.0 * BATTERY_VOLTAGE / 12.0f) {
       currentAlarmCondition = true;
       alarmReason = "Low battery voltage";
       if (millis() - lastVoltLowMsgMs >= 30000) {
@@ -4129,6 +4140,15 @@ void saveNVSDataFull() {
     chg = true;
   }
 
+  // Soft clock anchor — persist the current wall epoch so a cold power-up can seed a
+  // usable timebase before any live source reports (restoreSoftClock, step 2). Written
+  // whenever time is known; the field-off-edge/shutdown cadence keeps flash wear low
+  // (no periodic commits — same discipline as the rest of this function).
+  if (timeIsSynced && timeBase > 0) {
+    nvs_set_u32(h, "SoftClockEp", (uint32_t)getCurrentTimestamp());
+    chg = true;
+  }
+
   if (chg) nvs_commit(h);
   nvs_close(h);
   lastNVSSaveTime = millis();
@@ -4297,13 +4317,24 @@ void loadNVSData() {
     float voltage = getBatteryVoltage();
     int estimatedSoC = 50;  // Default to 50%
 
-    // Simple voltage-based estimation for 12V battery
-    if (voltage >= 12.7) estimatedSoC = 100;
-    else if (voltage >= 12.5) estimatedSoC = 90;
-    else if (voltage >= 12.4) estimatedSoC = 80;
-    else if (voltage >= 12.2) estimatedSoC = 60;
-    else if (voltage >= 12.0) estimatedSoC = 40;
-    else if (voltage >= 11.8) estimatedSoC = 20;
+    // Simple voltage-based estimation. The open-circuit thresholds below are 12V-bank values; scale
+    // them by the bank class so a 24/48V bank doesn't read a flat 100%. Read the user-entered class
+    // straight from NVS (NK_BatteryVoltage, the authoritative store) rather than auto-detecting from
+    // the measured voltage — a sagging higher-voltage bank no longer mis-buckets. This runs in
+    // loadNVSData() (before InitSystemSettings loads the vessel mirror), so on a brand-new device with
+    // the key not yet seeded it falls back to 12V class — same as the prior fresh-device behavior.
+    float socM = 1.0f;  // 12V class
+    if (settingExists(NK_BatteryVoltage)) {
+      int nomV = settingRead(NK_BatteryVoltage).toInt();
+      if (nomV == 24) socM = 2.0f;
+      else if (nomV == 48) socM = 4.0f;
+    }
+    if (voltage >= 12.7 * socM) estimatedSoC = 100;
+    else if (voltage >= 12.5 * socM) estimatedSoC = 90;
+    else if (voltage >= 12.4 * socM) estimatedSoC = 80;
+    else if (voltage >= 12.2 * socM) estimatedSoC = 60;
+    else if (voltage >= 12.0 * socM) estimatedSoC = 40;
+    else if (voltage >= 11.8 * socM) estimatedSoC = 20;
     else estimatedSoC = 10;
 
     SOC_percent = estimatedSoC * 100;

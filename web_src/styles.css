@@ -269,6 +269,12 @@ textarea {
   animation: stage-pulse 1.5s ease-in-out infinite;
 }
 
+/* COMMISSIONING — outranks the test labels while a wizard step is driving the field */
+.charge-stage-commission {
+  color: #29b6f6;
+  animation: stage-pulse 1.5s ease-in-out infinite;
+}
+
 /* UNKNOWN */
 .charge-stage-unknown {
   color: #666;
@@ -2233,6 +2239,17 @@ input:focus {
   max-width: 600px;
   margin-left: auto;
   margin-right: auto;
+}
+
+/* Automatic Min% Learning + the table-details readouts: lifted out of the RPM cap table's
+   box into their own recessed sub-card (page-background fill + border + gap) so they read as
+   a distinct section rather than part of the cap table above. Themes via vars (light + dark). */
+.alt-subsection-card {
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-top: 22px;
 }
 
 /* Live Oscilloscope + Reference Flipbook are stacked into one visual unit so the

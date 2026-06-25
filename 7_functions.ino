@@ -87,6 +87,8 @@ struct Episode {
   int       dqCap[NAXIS + 1];       // each deque ring's capacity (samples), sized from maxDwellSec in init
   uint32_t  dataStartMs;            // time of the first eligible sample after the last hard barrier
   bool      haveData, ready;
+  bool      axisSteady[NAXIS + 1];  // per-axis (+ output band) "steady now" — ADDITIVE: lets a caller build a
+                                    // lighter gate from a subset of axes (alt-health session gate uses all but temp).
 
   RawSample<NAXIS> *avgRing; int avgCap;          // trailing boxcar buffer (the caller's PSRAM ring)
   int       ringHead, ringCount;    // boxcar head/count (named ringHead/ringCount for caller compatibility)
@@ -121,6 +123,7 @@ struct Episode {
     for (int a = 0; a < NAXIS + 1; a++) { maxDQ[a].clear(); minDQ[a].clear(); }
     ringHead = 0; ringCount = 0; count = 0;
     for (int a = 0; a < NAXIS; a++) avgSumX[a] = 0;
+    for (int a = 0; a < NAXIS + 1; a++) axisSteady[a] = false;
     avgSumEx[0] = avgSumEx[1] = 0; avgSumOut = 0;
     dataStartMs = 0; haveData = false; lastFeedMs = 0; lastEmitMs = 0;
   }
@@ -144,8 +147,10 @@ struct Episode {
       if (win > winMax) win = winMax;
       maxDQ[a].push(s.tMs, s.x[a], win);
       minDQ[a].push(s.tMs, s.x[a], win);
-      if ((uint32_t)(s.tMs - dataStartMs) < win) qualified = false;                  // not enough dwell yet
-      else if (maxDQ[a].front() - minDQ[a].front() > cfg[a].tol) qualified = false;  // window range too wide
+      bool aok = ((uint32_t)(s.tMs - dataStartMs) >= win)                            // enough dwell …
+                 && (maxDQ[a].front() - minDQ[a].front() <= cfg[a].tol);             // … and window range in band
+      axisSteady[a] = aok;
+      if (!aok) qualified = false;
     }
     if (outCfg.tol > 0) {
       uint32_t win = (uint32_t)(outCfg.steadySec * 1000.0f);
@@ -153,8 +158,12 @@ struct Episode {
       if (win > winMax) win = winMax;
       maxDQ[NAXIS].push(s.tMs, s.out, win);
       minDQ[NAXIS].push(s.tMs, s.out, win);
-      if ((uint32_t)(s.tMs - dataStartMs) < win ||
-          maxDQ[NAXIS].front() - minDQ[NAXIS].front() > outCfg.tol) qualified = false;
+      bool ook = ((uint32_t)(s.tMs - dataStartMs) >= win)
+                 && (maxDQ[NAXIS].front() - minDQ[NAXIS].front() <= outCfg.tol);
+      axisSteady[NAXIS] = ook;
+      if (!ook) qualified = false;
+    } else {
+      axisSteady[NAXIS] = true;   // output band disabled (vessel-perf) → never blocks
     }
 
     // Trailing boxcar average (the emitted value): push, then evict samples older than EP_AVG_WIN_MS.
@@ -477,11 +486,50 @@ static inline float altExcitation(float duty, float vbus, float tF) {
 #define ALT_PENDING_CAP  4096     // = front cap: holds every unsynced point through weeks offline (PSRAM)
 
 static Episode<ALT_NAXIS>     altEpisode;
-static FrontStore<ALT_NAXIS>  altFront2;
+static FrontStore<ALT_NAXIS>  altFront2;                // "My History" — the LEARNED surface (always the learn target)
+static FrontStore<ALT_NAXIS>  altFrontUp;               // "Uploaded File" — a borrowed surface, resident alongside My History
 static RawSample<ALT_NAXIS>  *altEpRing   = nullptr;
 static FrontPoint<ALT_NAXIS> *altFrontBuf = nullptr;
+static FrontPoint<ALT_NAXIS> *altFrontUpBuf = nullptr;  // backing store for the Uploaded surface
+static bool altHaveUpload     = false;                  // true once a file has been uploaded (Uploaded surface populated)
 static FrontPoint<ALT_NAXIS> *altPending  = nullptr;   // accepted-since-last-upload (raw points out)
 static int altPendingCount   = 0;
+
+// Active grading surface = the one altRefSource selects. Learning ALWAYS writes altFront2 (My History);
+// grading (session % + trend) reads whichever this returns. Uploaded falls back to My History if empty.
+static inline FrontStore<ALT_NAXIS> &altGradeFront() {
+  return (altRefSource == 1 && altHaveUpload) ? altFrontUp : altFront2;
+}
+
+// ---- session-temp gate: a lighter temp dwell (altSessTempSec) than the Episode's full temp dwell ----
+// Same monotonic-deque sliding-window min/max as Episode, fed the same decimated tF. Lets the Session
+// plot show a dot once temp has held for HALF the full steady time, while the surface/trend still wait
+// for the full dwell. PSRAM-backed (sized in init for headroom past altSessTempSec).
+struct AltTempGate {
+  MonoDeque maxDQ, minDQ;
+  uint32_t  startMs, lastFeedMs; bool have, steady; int cap;
+  void init(int c) {
+    cap = c;
+    uint32_t *tA = (uint32_t *)ps_malloc((size_t)cap * sizeof(uint32_t)); float *vA = (float *)ps_malloc((size_t)cap * sizeof(float));
+    uint32_t *tB = (uint32_t *)ps_malloc((size_t)cap * sizeof(uint32_t)); float *vB = (float *)ps_malloc((size_t)cap * sizeof(float));
+    if (!tA || !vA || !tB || !vB) { steady = false; have = false; return; }
+    maxDQ.bind(tA, vA, cap, true); minDQ.bind(tB, vB, cap, false);
+    clear();
+  }
+  void clear() { maxDQ.clear(); minDQ.clear(); startMs = 0; lastFeedMs = 0; have = false; steady = false; }
+  void feed(bool eligible, float tF, uint32_t nowMs, float tol, float secs) {
+    if (!eligible) { clear(); return; }
+    if (have && (uint32_t)(nowMs - lastFeedMs) < EP_FEED_DT_MS) return;   // decimate to match the fold's Episode feed
+    lastFeedMs = nowMs;
+    if (!have) { startMs = nowMs; have = true; }
+    uint32_t win = (uint32_t)(secs * 1000.0f);
+    uint32_t winMax = (uint32_t)((cap - 2) * EP_FEED_DT_MS);
+    if (win > winMax) win = winMax;
+    maxDQ.push(nowMs, tF, win); minDQ.push(nowMs, tF, win);
+    steady = ((uint32_t)(nowMs - startMs) >= win) && (maxDQ.front() - minDQ.front() <= tol);
+  }
+};
+static AltTempGate altSessTempGate;
 static String altPendingSeededFrom = "";   // non-empty → this pending batch is an adopted import (provenance tag)
 static int altFrontEmitCount = 0;        // episode points emitted (whether or not they pushed the front)
 
@@ -491,7 +539,12 @@ float altRpmSec       = 3.0f;    // RPM steady time (s)
 float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
 float altThermDegF    = 2.0f;    // temperature deviation bound (°F) — tightened from 5 °F (record only at thermal equilibrium)
-float altThermSec     = 120.0f;  // temperature steady time (s) — raised from 30 s (temp has a long thermal lag)
+float altThermSec     = 120.0f;  // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
+float altSessTempSec  = 60.0f;   // SESSION_TEMP_SEC — SESSION-steady temp dwell (s), half of altThermSec. Gates a Session-plot dot only.
+// ---- engine-hours trend knobs (spec §5) ----
+float altTrendBucketSec = 3600.0f;  // TREND_BUCKET_SEC — engine-seconds per trend bucket (production 3600 = 1 h; testing 600)
+float altTrendFeedSec   = 10.0f;    // TREND_FEED_SEC — min spacing between graded samples entering a bucket (intake throttle)
+float altTrendMinSamp   = 2.0f;     // MIN_SAMPLES — a bucket needs ≥ this many graded steady-run samples before it commits
 // Output-steadiness band (5th criterion: the measured amps themselves must hold steady — directly
 // guards what gets recorded, letting the input bands stay tight) + detector signal conditioning:
 float altAmpsTolPct   = 5.0f;    // output-amps band, % of the filtered reading
@@ -510,18 +563,51 @@ float altHiFieldPct   = 80.0f;   // field duty at/above this counts as high driv
 float altLowOutAmps   = 10.0f;   // output at/below this counts as low (A)
 float altHiFieldSec   = 30.0f;   // both conditions must persist this long before the alert fires (s)
 
+// GUI-adjustable settings registry (defined here, before altDebugCsvSend uses it; handlers/echo live
+// further down). One float registry → one /get handler loop + boot-load loop + "AltSettings" echo.
+struct AltSetting { const char *name; float *ptr; };
+static AltSetting ALT_SETTINGS[] = {
+  {"altRpmTol", &altRpmTol},   {"altRpmSec", &altRpmSec},
+  {"altDutyTolPct", &altDutyTolPct}, {"altDutySec", &altDutySec},
+  {"altVbusTol", &altVbusTol}, {"altVbusSec", &altVbusSec},
+  {"altThermDegF", &altThermDegF}, {"altThermSec", &altThermSec},
+  {"altSessTempSec", &altSessTempSec},                                  // SESSION_TEMP_SEC (session-plot temp dwell)
+  {"altTrendBuckSec", &altTrendBucketSec},                             // TREND_BUCKET_SEC (name ≤15 chars; var is altTrendBucketSec)
+  {"altTrendFeedSec", &altTrendFeedSec},                               // TREND_FEED_SEC (trend intake throttle)
+  {"altTrendMinSamp", &altTrendMinSamp},                               // MIN_SAMPLES (bucket commit gate)
+  {"altAmpsTolPct", &altAmpsTolPct}, {"altAmpsFloorA", &altAmpsFloorA}, {"altAmpsSec", &altAmpsSec},
+  {"altEmaSec", &altEmaSec}, {"altMinRunSec", &altMinRunSec}, {"altRefRadius", &altRefRadius},
+  {"altMinAmps", &altMinAmps}, {"altMinDuty", &altMinDuty},
+  {"altSafetyMargin", &altSafetyMargin}, {"altIdwPower", &altIdwPower}, {"altPruneK", &altPruneK},
+  {"altRidgeFrac", &altRidgeFrac}, {"altRiskThresh", &altRiskThresh},
+  {"altHiFieldPct", &altHiFieldPct}, {"altLowOutAmps", &altLowOutAmps}, {"altHiFieldSec", &altHiFieldSec},
+  {"altPaused", &altPaused},
+};
+static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTINGS[0]);
+
 // ---- performance-vs-engine-hours trend (engine-hour buckets: average + worst output-%) ----
-// Each emitted steady episode adds its output-% (amps ÷ best-ever-front) to the current engine-hour
-// bucket; the bucket's average + worst (min) are committed to the ring when the hour index advances.
-// Engine-hours measured since the last "Start Over". NO clamp — % may exceed 100 vs a stale front.
-static float altEngineHoursSinceBaseline() {
+// Source = FULL-steady runs only, graded against the active surface, throttled to one per
+// altTrendFeedSec (fed from altProcessEmits). A bucket spans altTrendBucketSec of engine-time
+// (production 3600 = 1 h; testing 600) and stores its samples' average + worst (min) output-%. It
+// commits when the engine-time bucket index advances AND it holds ≥ altTrendMinSamp samples; a bucket
+// short of that many qualifying steady samples shows a gap, by design (spec §2/§5). The in-progress
+// bucket (sum/count/worst/index) PERSISTS across reboot, so a 50-min partial hour commits after only
+// 10 more minutes of the next session — the commit fires on the real engine-time rollover regardless
+// of how many reboots happen inside the bucket. NO clamp — % may exceed 100 vs a stale reference.
+static float altEngineHoursSinceBaseline() {        // engine-HOURS since Start Over (live display)
   double s = EngineRunTime_AllTime - altTrendBaselineSec;
   if (s < 0) s = 0;
   return (float)(s / 3600.0);
 }
+static int altTrendBucketIndex() {                  // which bucket the current engine-time falls in
+  double s = EngineRunTime_AllTime - altTrendBaselineSec;
+  if (s < 0) s = 0;
+  double bsec = (altTrendBucketSec > 1.0f) ? (double)altTrendBucketSec : 1.0;
+  return (int)(s / bsec);
+}
 static void altCommitTrendBucket() {
-  // n gate ≥ 5: a 1-sample hour must not commit (the old single-sample ratcheted-worst artifact)
-  if (altCurEngHour < 0 || altBucket_n < 5 || !altTrend) return;
+  // sample gate ≥ altTrendMinSamp: a too-thin bucket must not commit (gap, not a single-sample artifact)
+  if (altCurEngHour < 0 || altBucket_n < (double)altTrendMinSamp || !altTrend) return;
   float overall = (float)(altBucket_sum / altBucket_n) * 100.0f;
   float worst   = altBucket_worst * 100.0f;
   if (altTrendCount >= ALT_TREND_CAP) {  // ring full → drop oldest
@@ -535,9 +621,9 @@ static void altCommitTrendBucket() {
   p.overallPct = (int16_t)lroundf(overall * 10.0f);
 }
 static void altTrendAdd(float perfFrac) {
-  int eh = (int)altEngineHoursSinceBaseline();
+  int eh = altTrendBucketIndex();
   if (altCurEngHour < 0) altCurEngHour = eh;
-  if (eh != altCurEngHour) {             // engine-hour bucket advanced → commit + reset
+  if (eh != altCurEngHour) {             // engine-time bucket advanced → commit the prior bucket + reset
     altCommitTrendBucket();
     altBucket_sum = 0; altBucket_n = 0; altBucket_worst = perfFrac;
     altCurEngHour = eh;
@@ -546,7 +632,25 @@ static void altTrendAdd(float perfFrac) {
   altBucket_sum += perfFrac; altBucket_n += 1;
   altOverallPctLive = (float)(altBucket_sum / altBucket_n) * 100.0f;
   altWorstPctLive   = altBucket_worst * 100.0f;
+  // NOTE: the partial bucket is NOT written here. It is persisted only at the ignition-off shutdown
+  // flush (altHealthSave → altPersistTrendBucket, Phase 2 after the field cuts) and on Reset. Every
+  // shutdown goes through field-off while the device is still powered, so that one write always lands —
+  // no per-tick NVS churn needed.
   // (no verdict here — healthy/drifting editorializing removed; trends are read from the plots)
+}
+// Persist the in-progress bucket to NVS (4 scalars). The committed buckets live in /alttrend.bin; this
+// covers ONLY the partial current bucket so a reboot mid-bucket keeps its accumulated samples.
+static void altPersistTrendBucket() {
+  settingWrite("altBkSum", String(altBucket_sum, 4).c_str());
+  settingWrite("altBkN",   String(altBucket_n, 0).c_str());
+  settingWrite("altBkWst", String(altBucket_worst, 5).c_str());
+  settingWrite("altBkHr",  String(altCurEngHour).c_str());
+}
+static void altRestoreTrendBucket() {    // boot restore — resume the partial bucket exactly where it stopped
+  if (settingExists("altBkHr")) altCurEngHour   = settingRead("altBkHr").toInt();
+  if (settingExists("altBkSum")) altBucket_sum  = settingRead("altBkSum").toDouble();
+  if (settingExists("altBkN"))   altBucket_n    = settingRead("altBkN").toDouble();
+  if (settingExists("altBkWst")) altBucket_worst = settingRead("altBkWst").toFloat();
 }
 
 // ---- NMEA-style bench simulator (no engine) ----
@@ -618,7 +722,8 @@ void altFold_tick(uint32_t nowMs) {
   if (!altFrontBuf || !altEpRing) return;
 
   // IgnoreTemperature → the ENTIRE alt-health system is disabled: no live, no points, no trend.
-  if (IgnoreTemperature) { altLiveValid = false; altSteady = false; altStatusCode = 3; return; }
+  if (IgnoreTemperature) { altLiveValid = false; altSteady = false; altSessSteady = false; altStatusCode = 3; return; }
+  if (altStatusCode == 3) altStatusCode = 0;   // temp re-enabled → clear the "disabled" status
 
   float rpm, tF, vbus, amps, duty;
   if (altSimMode >= 0.5f) {
@@ -656,24 +761,39 @@ void altFold_tick(uint32_t nowMs) {
   altLiveValid = (!isnan(fRpm) && !isnan(exc) && !isnan(fVbus) && fVbus >= ALT_MIN_BATT_V);
   altLastFoldMs = nowMs;
 
-  if (hardwarePresent != 1 && altSimMode < 0.5f) { altSteady = false; return; }    // display only
-  if (altPaused >= 0.5f || altFront2.source == 1) { altSteady = false; return; }   // FIXED/paused: no learning
+  // Detection runs regardless of Pause / Reference Source: the trend (full-steady runs graded against
+  // the ACTIVE surface) and the Session orange ring must work even while learning is paused or grading
+  // against an Uploaded surface. Only surface ADMISSION into My History is gated by Pause (altProcessEmits).
+  if (hardwarePresent != 1 && altSimMode < 0.5f) {                                   // no real hardware → display only
+    altSteady = false; altSessSteady = false;
+    altSessTempGate.clear(); altEpisode.clearRun();
+    return;
+  }
 
   // Feed the Episode detector (steadiness/averaging axes {RPM, duty %, Vbus, tempF} + the
   // output-amps band) — all filtered, including the admission floors, so a single noise dip
   // can't act as a barrier that wipes the look-back ring mid-run.
   altEpisodeSyncCfg(fAmps);
   bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
+  altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempSec);   // lighter (half-dwell) temp gate for the session plot
   RawSample<ALT_NAXIS> s;
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
   s.ex[0] = fDuty; s.ex[1] = 0;   // retain run duty (excitation is derived from it) for cloud diagnosis
   FrontPoint<ALT_NAXIS> ep;
   bool emitted = altEpisode.feed(eligible, s, &ep);
-  altSteady = (altEpisode.count > 0);
+  altSteady = (altEpisode.count > 0);                              // FULL steady (temp held altThermSec) → ring + surface + trend
+  // SESSION steady = all axes EXCEPT temperature steady on their ~3 s windows (Episode per-axis flags for
+  // {RPM,duty,Vbus} + the amps band) AND temperature steady for the HALF dwell (altSessTempGate). Lets a
+  // Session-plot dot appear before the full record-book dwell is reached.
+  altSessSteady = eligible
+                  && altEpisode.axisSteady[0] && altEpisode.axisSteady[1] && altEpisode.axisSteady[2]
+                  && altEpisode.axisSteady[ALT_NAXIS] && altSessTempGate.steady;
   if (!emitted) return;
 
-  // Steady run completed → build the surface point (excitation derived from run averages) and
-  // STASH it; grading/admission solves run in the 1 Hz altProcessEmits, never in the control tick.
+  // Full steady run completed → build the surface point (excitation derived from run averages) and STASH
+  // it UNCONDITIONALLY (even when paused) so the trend still sees it; altProcessEmits grades it against the
+  // active surface (→ trend) and admits it into My History only when learning is active. Solves run there
+  // at 1 Hz, never in this ~200 Hz control tick.
   altFrontEmitCount++;
   FrontPoint<ALT_NAXIS> sp;
   sp.x[0] = ep.x[0];                                    // RPM
@@ -690,18 +810,33 @@ void altFold_tick(uint32_t nowMs) {
 // emits per tick so a single loop() pass never blocks more than a couple ms; emits arrive at least
 // one steady-run apart, so the queue drains faster than it fills.
 static void altProcessEmits() {
-  if (altEmitQCount > 0 && (altPaused >= 0.5f || altFront2.source == 1)) {
-    altEmitQCount = 0; return;   // paused/FIXED flipped after the stash → stale runs must not touch the front
-  }
   int n = (altEmitQCount < 2) ? altEmitQCount : 2;
+  bool learn = (altPaused < 0.5f);   // learning active → also admit into My History; else trend-only
   for (int k = 0; k < n; k++) {
     FrontPoint<ALT_NAXIS> &sp = altEmitQ[k].sp;
-    // Trend feed (pre-add): only MEASURED/ESTIMATED runs enter the engine-hour buckets.
-    // yref = LWLR prediction; bar = the min(IDW, LWLR) admission bar from the SAME solve.
+
+    // (1) TREND FEED — every FULL-steady run is graded against the ACTIVE surface (My History or Uploaded)
+    // and fed to the engine-hours trend, throttled to one sample per altTrendFeedSec. This is the trend's
+    // ONLY source (reverted 2026-06-24 from the 1 Hz live feed): the spec wants the trend built purely from
+    // full steady runs. Only Measured/Estimated runs carry a %; No-reference/risky-fit runs feed nothing.
+    {
+      static uint32_t lastTrendFeedMs = 0;
+      float pred = 0;
+      int st = altGradeFront().classify(sp.x, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
+      bool graded = (st == FRONT_MEASURED || st == FRONT_ESTIMATED) && pred > 0.1f;
+      uint32_t nowMs = millis();
+      if (graded && (lastTrendFeedMs == 0 || (uint32_t)(nowMs - lastTrendFeedMs) >= (uint32_t)(altTrendFeedSec * 1000.0f))) {
+        lastTrendFeedMs = nowMs;
+        altTrendAdd((sp.y / pred));   // output-% as a fraction; altTrendAdd scales ×100 + buckets it
+      }
+    }
+
+    // (2) SURFACE ADMISSION — into My History only, and only while learning is active. The Uploaded surface
+    // is never modified by learning. Admission grades against My History (the learn target), not the active
+    // surface, so a borrowed reference can't gate what you record.
+    if (!learn) continue;
     float yref = 0, bar = 0;
-    int emitState = altFront2.classify(sp.x, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &yref, &bar);
-    if ((emitState == FRONT_MEASURED || emitState == FRONT_ESTIMATED) && yref > 0.1f)
-      altTrendAdd(sp.y / yref);
+    altFront2.classify(sp.x, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &yref, &bar);
     // Cell-local admit gate: unvisited cell → unconditional; same-cell support → beat bar − margin.
     bool localSup = altFront2.hasLocalSupport(sp.x);
     if (localSup && !(sp.y > bar - altSafetyMargin)) continue;
@@ -735,12 +870,14 @@ static float alf_pct()       { return altLive_pct; }
 static float alf_worst()     { return altWorstPctLive; }
 static float alf_overall()   { return altOverallPctLive; }
 static float alf_status()    { return (float)altStatusCode; }
-static float alf_steady()    { return (float)altSteady; }
+static float alf_steady()    { return (float)altSteady; }                        // FULL steady run (temp held STEADY_TEMP_SEC) → orange ring
+static float alf_sessSteady(){ return (float)altSessSteady; }                    // SESSION steady (temp held SESSION_TEMP_SEC) → session-plot dot gate
 static float alf_engHours()  { return altEngineHoursSinceBaseline(); }
-static float alf_coverage()  { return altFrontBuf ? (100.0f * (float)altFront2.count / (float)ALT_FRONT_CAP) : 0.0f; }
-static float alf_haveCurve() { return (float)(altFront2.count > 0 ? 1 : 0); }   // have a usable front
-static float alf_ptCount()   { return (float)altFront2.count; }                 // front support points
-static float alf_source()    { return (float)altFront2.source; }                // 0 LEARNED, 1 FIXED
+static float alf_coverage()  { return altFrontBuf ? (100.0f * (float)altGradeFront().count / (float)ALT_FRONT_CAP) : 0.0f; }
+static float alf_haveCurve() { return (float)(altGradeFront().count > 0 ? 1 : 0); }   // active surface has a usable front
+static float alf_ptCount()   { return (float)altGradeFront().count; }           // active-surface support points
+static float alf_source()    { return (float)altRefSource; }                    // 0 = My History, 1 = Uploaded File (active grading surface)
+static float alf_haveUpload(){ return altHaveUpload ? 1.0f : 0.0f; }            // an Uploaded surface is resident
 static float alf_paused()    { return (altPaused >= 0.5f) ? 1.0f : 0.0f; }
 static float alf_refOk()     { return altRefOk ? 1.0f : 0.0f; }          // state is MEASURED/ESTIMATED → % shown
 static float alf_refDist()   { return altRefDist; }                       // normalized distance to nearest support
@@ -761,9 +898,9 @@ static float alf_syncAgo()   { if (lastAltHealthSyncEpoch <= 0 || !timeIsSynced)
 static AltLiveField ALT_LIVE[] = {
   {"valid", alf_valid}, {"rpm", alf_rpm}, {"exc", alf_exc}, {"amps", alf_amps},
   {"pred", alf_pred}, {"pct", alf_pct}, {"worstPct", alf_worst}, {"overallPct", alf_overall},
-  {"status", alf_status}, {"steady", alf_steady}, {"engHours", alf_engHours},
+  {"status", alf_status}, {"steady", alf_steady}, {"sessSteady", alf_sessSteady}, {"engHours", alf_engHours},
   {"coverage", alf_coverage}, {"haveCurve", alf_haveCurve}, {"ptCount", alf_ptCount},
-  {"source", alf_source}, {"paused", alf_paused},
+  {"source", alf_source}, {"haveUpload", alf_haveUpload}, {"paused", alf_paused},
   {"refOk", alf_refOk}, {"refDist", alf_refDist},
   {"state", alf_state},
   {"sessionMean", alf_sessMean}, {"sessionP10", alf_sessP10}, {"sessionN", alf_sessN},
@@ -772,7 +909,7 @@ static AltLiveField ALT_LIVE[] = {
 };
 static const size_t ALT_LIVE_COUNT = sizeof(ALT_LIVE) / sizeof(ALT_LIVE[0]);
 static void altSendLive() {
-  char buf[320];
+  char buf[384];
   int off = 0;
   for (size_t i = 0; i < ALT_LIVE_COUNT; i++)
     off += snprintf(buf + off, sizeof(buf) - off, (i ? ",%.3f" : "%.3f"), ALT_LIVE[i].get());
@@ -859,8 +996,98 @@ void altFrontRecordsCsvSend(AsyncWebServerRequest *request) {
   response->addHeader("Cache-Control", "no-cache");
   request->send(response);
 }
-// Parse a BEFRONT1 CSV (the cloud's pruned front, or a saved file) into altFront2, replacing it.
-bool altIngestFrontCsv(char *body) {
+// Full alt-health state dump for offline / AI debugging (spec §4.5 "Download Debug CSV"). Streamed
+// row-by-row (constant internal RAM at any front size). Self-describing "section,key,v0…" rows, in
+// phases: PARAM (every registry knob), LIVE/GATE/BUCKET/SESSION scalars, then MYHIST + UPLOAD front
+// points and the committed TREND buckets. Served at /altdebug.csv.
+void altDebugCsvSend(AsyncWebServerRequest *request) {
+  struct St { int phase, idx, myN, upN, trN; bool done; char line[176]; int len, pos; };
+  St st; st.phase = 0; st.idx = 0; st.done = false; st.len = 0; st.pos = 0;
+  st.myN = altFrontBuf ? altFront2.count : 0;
+  st.upN = altFrontUpBuf ? altFrontUp.count : 0;
+  st.trN = altTrend ? altTrendCount : 0;
+  AsyncWebServerResponse *response = request->beginChunkedResponse("text/csv",
+    [st](uint8_t *buf, size_t maxLen, size_t) mutable -> size_t {
+      size_t written = 0;
+      while (written < maxLen) {
+        if (st.pos >= st.len) {
+          if (st.done) return written;
+          st.len = 0;
+          if (st.phase == 0) {                                   // header
+            st.len = snprintf(st.line, sizeof(st.line), "section,key,v0,v1,v2,v3,v4,v5,v6\n");
+            st.phase = 1; st.idx = 0;
+          } else if (st.phase == 1) {                            // PARAM — every registry knob
+            if (st.idx < (int)ALT_SETTING_COUNT) {
+              st.len = snprintf(st.line, sizeof(st.line), "PARAM,%s,%.4f\n", ALT_SETTINGS[st.idx].name, *ALT_SETTINGS[st.idx].ptr);
+              st.idx++;
+            } else { st.phase = 2; st.idx = 0; }
+          } else if (st.phase == 2) {                            // scalar state
+            switch (st.idx) {
+              case 0: st.len = snprintf(st.line, sizeof(st.line), "LIVE,rpm_exc_vbus_tF_amps,%.0f,%.3f,%.2f,%.1f,%.2f\n", altLive_rpm, altLive_exc, altLive_vbus, altLive_tF, altLive_amps); break;
+              case 1: st.len = snprintf(st.line, sizeof(st.line), "LIVE,duty_pred_pct,%.1f,%.2f,%.1f\n", altLive_duty, altLive_pred, altLive_pct); break;
+              case 2: st.len = snprintf(st.line, sizeof(st.line), "LIVE,state_refOk_refDist,%d,%d,%.3f\n", (int)altState, (int)altRefOk, altRefDist); break;
+              case 3: st.len = snprintf(st.line, sizeof(st.line), "GATE,sessSteady_fullSteady_valid,%d,%d,%d\n", (int)altSessSteady, (int)altSteady, (int)altLiveValid); break;
+              case 4: st.len = snprintf(st.line, sizeof(st.line), "GATE,ignoreTemp_paused_refSrc_haveUp_sim,%d,%.0f,%d,%d,%.0f\n", (int)IgnoreTemperature, altPaused, (int)altRefSource, (int)altHaveUpload, altSimMode); break;
+              case 5: st.len = snprintf(st.line, sizeof(st.line), "BUCKET,sum_n_worst_idx,%.4f,%.0f,%.4f,%d\n", altBucket_sum, altBucket_n, altBucket_worst, altCurEngHour); break;
+              case 6: st.len = snprintf(st.line, sizeof(st.line), "BUCKET,baseline_engNow_bucketSec,%.1f,%.1f,%.0f\n", altTrendBaselineSec, EngineRunTime_AllTime, altTrendBucketSec); break;
+              case 7: st.len = snprintf(st.line, sizeof(st.line), "SESSION,mean_p10_n,%.1f,%.1f,%lu\n", alf_sessMean(), alf_sessP10(), (unsigned long)altSessN); break;
+              case 8: st.len = snprintf(st.line, sizeof(st.line), "COUNT,myHist_upload_trend_myHistSrc_upSrc,%d,%d,%d,%d,%d\n", st.myN, st.upN, st.trN, (int)altFront2.source, (int)altFrontUp.source); break;
+              case 9: {   // elapsed steadiness dwell (ms): session-temp gate + episode (full) data window
+                uint32_t now = millis();
+                uint32_t sessTempMs = altSessTempGate.have ? (now - altSessTempGate.startMs) : 0;
+                uint32_t epDataMs   = altEpisode.haveData  ? (now - altEpisode.dataStartMs) : 0;
+                st.len = snprintf(st.line, sizeof(st.line), "GATE,sessTempDwellMs_epDataMs,%u,%u\n", (unsigned)sessTempMs, (unsigned)epDataMs);
+                break;
+              }
+              default: st.phase = 3; st.idx = 0; break;
+            }
+            if (st.len > 0) st.idx++;
+          } else if (st.phase == 3) {                            // My History front points (x0..x3,y,nSamp,tEmit)
+            if (st.idx < st.myN) {
+              FrontPoint<ALT_NAXIS> &p = altFrontBuf[st.idx];
+              st.len = snprintf(st.line, sizeof(st.line), "MYHIST,%d,%.0f,%.3f,%.2f,%.1f,%.2f,%u,%u\n", st.idx, p.x[0], p.x[1], p.x[2], p.x[3], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit);
+              st.idx++;
+            } else { st.phase = 4; st.idx = 0; }
+          } else if (st.phase == 4) {                            // Uploaded front points (x0..x3,y,nSamp,tEmit)
+            if (st.idx < st.upN) {
+              FrontPoint<ALT_NAXIS> &p = altFrontUpBuf[st.idx];
+              st.len = snprintf(st.line, sizeof(st.line), "UPLOAD,%d,%.0f,%.3f,%.2f,%.1f,%.2f,%u,%u\n", st.idx, p.x[0], p.x[1], p.x[2], p.x[3], p.y, (unsigned)p.nSamp, (unsigned)p.tEmit);
+              st.idx++;
+            } else { st.phase = 5; st.idx = 0; }
+          } else if (st.phase == 5) {                            // committed trend buckets
+            if (st.idx < st.trN) {
+              AltTrendPt &p = altTrend[st.idx];
+              st.len = snprintf(st.line, sizeof(st.line), "TREND,%u,%.1f,%.1f\n", (unsigned)p.engHour, p.worstPct / 10.0f, p.overallPct / 10.0f);
+              st.idx++;
+            } else { st.phase = 6; st.idx = 0; }
+          } else {                                               // phase 6: session % histogram (60 × 2%-wide bins; key = bin low %)
+            if (st.idx < 60) {
+              if (altSessHist[st.idx] > 0)
+                st.len = snprintf(st.line, sizeof(st.line), "SESSHIST,%d,%u\n", st.idx * 2, (unsigned)altSessHist[st.idx]);
+              st.idx++;
+            } else { st.done = true; return written; }
+          }
+          if (st.len <= 0) continue;                             // phase transition produced no line → loop to next phase
+          if (st.len > (int)sizeof(st.line) - 1) st.len = sizeof(st.line) - 1;
+          st.pos = 0;
+        }
+        size_t tw = min((size_t)(st.len - st.pos), maxLen - written);
+        memcpy(buf + written, st.line + st.pos, tw);
+        written += tw; st.pos += (int)tw;
+      }
+      return written;
+    });
+  response->addHeader("Cache-Control", "no-cache");
+  request->send(response);
+}
+// Parse a BEFRONT1 CSV (the cloud's pruned front, or a saved/uploaded file) into a TARGET surface +
+// its backing buffer, replacing it. toUploaded=false → My History (cloud sync-back); true → Uploaded
+// surface (browser Load CSV). Uses a bool (not a FrontStore<> reference) so Arduino's auto-prototype
+// generator — which can't parse template types in signatures — leaves it alone.
+static bool altIngestFrontCsvInto(char *body, bool toUploaded) {
+  FrontStore<ALT_NAXIS> &fs  = toUploaded ? altFrontUp : altFront2;
+  FrontPoint<ALT_NAXIS> *buf = toUploaded ? altFrontUpBuf : altFrontBuf;
+  if (!buf) return false;
   char *p = strstr(body, "BEFRONT1");
   if (!p) return false;
   char *nl = strchr(p, '\n');
@@ -884,17 +1111,19 @@ bool altIngestFrontCsv(char *body) {
       q.x[0] = x0; q.x[1] = x1; q.x[2] = x2; q.x[3] = x3; q.y = y;
       q.ex[0] = 0; q.ex[1] = 0;   // raw extras live in the cloud table, not the front CSV
       q.nSamp = (uint32_t)ns; q.tEmit = (uint32_t)te;
-      altFrontBuf[newCount++] = q;
+      buf[newCount++] = q;
     }
     if (!eol) break;
     line = eol + 1;
   }
-  if (line && *line && newCount >= ALT_FRONT_CAP)   // cloud sent more points than we can hold
+  if (line && *line && newCount >= ALT_FRONT_CAP)   // source sent more points than we can hold
     queueConsoleMessageF("WARN: alt front truncated at %d pts — raise ALT_FRONT_CAP", ALT_FRONT_CAP);
-  altFront2.count = newCount;
-  altFront2.source = newSource;
+  fs.count = newCount;
+  fs.source = newSource;
   return true;
 }
+// Back-compat: cloud sync-back replaces My History (the learned surface the cloud prunes).
+bool altIngestFrontCsv(char *body) { return altIngestFrontCsvInto(body, false); }
 
 // Append-only engine-hour trend log: 8-byte {magic,ver} header + AltTrendPt records. Each field-off
 // appends only the newly committed buckets (~6 B/hour) instead of rewriting the whole 120 KB ring;
@@ -952,8 +1181,12 @@ void altHealthSave() {
   if (!altFrontBuf || hardwarePresent != 1) return;
   uint32_t uw = ((uint32_t)altFront2.source << 8) | (uint32_t)ALT_NAXIS;   // stash source + naxis
   writePsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, uw, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, 0, altFront2.count);
-  altTrendPersist();                                                       // append-only trend log
+  if (altHaveUpload && altFrontUpBuf)                                       // Uploaded surface (separate file)
+    writePsramBlob("/altfrontup.bin", ALT_FRONT_MAGIC, ALT_VER, (uint32_t)ALT_NAXIS, altFrontUpBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, 0, altFrontUp.count);
+  altTrendPersist();                                                       // append-only committed-bucket log
+  altPersistTrendBucket();                                                 // partial in-progress bucket (4 scalars)
   settingWrite(NK_altbaseSec, String(altTrendBaselineSec, 1).c_str());   // trend X-axis origin
+  settingWrite("altRefSrc", String((int)altRefSource).c_str());          // active reference source
 }
 static void altLoad() {
   uint32_t uw = 0;
@@ -961,38 +1194,37 @@ static void altLoad() {
     altFront2.count = (int)readPsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, &uw, false);
     altFront2.source = (uint8_t)((uw >> 8) & 0xFF);
   }
-  altTrendLoad();                                                          // append-only trend log
+  if (altFrontUpBuf && fsExists("/altfrontup.bin")) {                       // restore the Uploaded surface if present
+    uint32_t uw2 = 0;
+    altFrontUp.count = (int)readPsramBlob("/altfrontup.bin", ALT_FRONT_MAGIC, ALT_VER, altFrontUpBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, &uw2, false);
+    altFrontUp.source = 1;
+    altHaveUpload = (altFrontUp.count > 0);
+  }
+  altTrendLoad();                                                          // committed buckets
+  altRestoreTrendBucket();                                                 // partial in-progress bucket
   if (settingExists(NK_altbaseSec)) altTrendBaselineSec = settingRead(NK_altbaseSec).toFloat();
+  if (settingExists("altRefSrc")) altRefSource = (uint8_t)settingRead("altRefSrc").toInt();
+  if (altRefSource == 1 && !altHaveUpload) altRefSource = 0;               // no uploaded surface → fall back to My History
 }
 
-// Ingest a BEFRONT1 front UPLOADED from the browser (Load CSV) — replace the front, then apply the
-// mode the user chose at import: fixed=true → FIXED + paused (hold the borrowed curve exactly as-is,
-// local only, never uploaded); fixed=false → LEARNED + resumed AND adopt to cloud (stage the imported
-// points into pending, tagged "import", so the next field-off upload inserts them under THIS device —
-// the cloud then treats them as native history). Persists immediately so the import survives reboot.
-// Non-static so the /altUploadFront handler in 3_functions.ino can call it. Mutates the body buffer.
+// Ingest a BEFRONT1 front UPLOADED from the browser (Load CSV) into the UPLOADED surface — resident
+// ALONGSIDE My History, never overwriting it (spec §4). Switches the active Reference Source to Uploaded
+// and defaults Pause per the user's choice: fixed=true → Pause ON (just grade against the borrowed curve);
+// fixed=false → keep learning My History while graded against Uploaded. My History (and its cloud upload
+// pending) is untouched. Persists immediately so the upload survives reboot. Mutates the body buffer.
 bool altUploadFrontCsv(char *body, bool fixed) {
-  if (!altFrontBuf || !body) return false;
-  bool ok = altIngestFrontCsv(body);
+  if (!altFrontUpBuf || !body) return false;
+  bool ok = altIngestFrontCsvInto(body, true);
   if (!ok) return false;
-  if (fixed) {                                  // FREEZE — local only
-    altFront2.source = 1; altPaused = 1.0f;
-    settingWrite(NK_altPaused, "1.0000");
-    altPendingCount = 0; altPendingSeededFrom = "";   // freeze never uploads
-    queueConsoleMessageF("AltFront: UPLOADED %d pts (FIXED, paused)", altFront2.count);
-  } else {                                      // LEARN — adopt to cloud, then keep refining
-    altPendingCount = 0;                        // replace pending with the imported set (pure seeded batch)
-    for (int i = 0; i < altFront2.count && altPendingCount < ALT_PENDING_CAP; i++)
-      altPending[altPendingCount++] = altFrontBuf[i];
-    altPendingSeededFrom = "import";
-    altFront2.source = 0; altPaused = 0.0f;
-    settingWrite(NK_altPaused, "0.0000");
-    if (altPendingCount < altFront2.count)
-      queueConsoleMessageF("AltFront: UPLOADED %d pts (LEARNED); only %d queued to cloud (cap)", altFront2.count, altPendingCount);
-    else
-      queueConsoleMessageF("AltFront: UPLOADED %d pts (LEARNED, adopting to cloud)", altFront2.count);
-  }
-  altHealthSave();   // persist the front now (field-off-safe)
+  altFrontUp.source = 1;                        // borrowed surface
+  altHaveUpload = true;
+  altRefSource = 1;                             // grade session + trend against the uploaded surface
+  altPaused = fixed ? 1.0f : 0.0f;              // Uploaded defaults Pause ON; user may keep learning My History
+  settingWrite(NK_altPaused, fixed ? "1.0000" : "0.0000");
+  settingWrite("altRefSrc", "1");
+  queueConsoleMessageF("AltFront: UPLOADED %d pts to Uploaded surface (%s); My History kept",
+                       altFrontUp.count, fixed ? "Pause ON" : "still learning My History");
+  altHealthSave();   // persist both surfaces now (field-off-safe)
   return true;
 }
 
@@ -1032,8 +1264,8 @@ void initAlternatorHealth() {
   altTrendCount = 0; altCurEngHour = -1;
   altFrontInit();          // ps_malloc front + episode ring + pending; init the engine instance
   altLoad();               // restore front + trend + baseline (after the buffers exist)
-  queueConsoleMessageF("AltHealth init: %d front pts (%s), %d trend pts",
-                       altFront2.count, altFront2.source ? "FIXED" : "LEARNED", altTrendCount);
+  queueConsoleMessageF("AltHealth init: My History %d pts, Uploaded %d pts, source=%s, %d trend pts",
+                       altFront2.count, altFrontUp.count, altRefSource ? "Uploaded" : "MyHistory", altTrendCount);
 }
 void resetAlternatorHealth() {
   if (!altFrontBuf) return;
@@ -1042,8 +1274,11 @@ void resetAlternatorHealth() {
   altEpisode.clearRun(); altEpisode.ringHead = 0; altEpisode.ringCount = 0;
   altTrendCount = 0; altTrendFlushed = 0; altTrendRewrite = true;   // /alttrend.bin removed below → fresh log
   altBucket_sum = 0; altBucket_n = 0; altBucket_worst = 0; altCurEngHour = -1;
+  altPersistTrendBucket();                       // overwrite the persisted partial bucket with the cleared one
   altWorstPctLive = 0; altOverallPctLive = 0; altStatusCode = 0; altLive_pct = 0;
   altState = FRONT_NO_REFERENCE; altHiFieldAlert = false;
+  altSteady = false; altSessSteady = false; altSessTempGate.clear();
+  altRefSource = 0;                              // revert active reference to My History (Uploaded surface kept, just inactive)
   memset(altSessHist, 0, sizeof(altSessHist)); altSessN = 0; altSessSum = 0;   // session stats restart with the data
   altTrendBaselineSec = EngineRunTime_AllTime;   // new baseline → trend X-axis restarts at 0
   fsTakeLock();
@@ -1051,17 +1286,20 @@ void resetAlternatorHealth() {
   LittleFS.remove("/alttrend.bin");
   fsReleaseLock();
   settingWrite(NK_altbaseSec, String(altTrendBaselineSec, 1).c_str());
-  queueConsoleMessage("AltHealth: full reset (Start Over)");
+  settingWrite("altRefSrc", "0");
+  queueConsoleMessage("AltHealth: full reset (Reset / Start Over) — My History + trend + session cleared, baseline restarted");
 }
 
 // ---- engine allocation (PSRAM): front points + episode reseed ring + pending-upload buffer ----
 void altFrontInit() {
-  altEpRing   = (RawSample<ALT_NAXIS>  *)ps_malloc((size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
-  altFrontBuf = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
+  altEpRing     = (RawSample<ALT_NAXIS>  *)ps_malloc((size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
+  altFrontBuf   = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
+  altFrontUpBuf = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   altPending  = (FrontPoint<ALT_NAXIS> *)ps_malloc((size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
-  if (!altEpRing || !altFrontBuf || !altPending) { queueConsoleMessage("ERROR: AltFront ps_malloc failed"); return; }
-  memset(altEpRing,   0, (size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
-  memset(altFrontBuf, 0, (size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
+  if (!altEpRing || !altFrontBuf || !altFrontUpBuf || !altPending) { queueConsoleMessage("ERROR: AltFront ps_malloc failed"); return; }
+  memset(altEpRing,     0, (size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>));
+  memset(altFrontBuf,   0, (size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
+  memset(altFrontUpBuf, 0, (size_t)ALT_FRONT_CAP   * sizeof(FrontPoint<ALT_NAXIS>));
   memset(altPending,  0, (size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
   altPendingCount = 0;
   // Per-axis deque window caps (max steady time the axis can be set to): RPM/duty/Vbus/amps ~30 s
@@ -1069,13 +1307,16 @@ void altFrontInit() {
   static const float ALT_MAXDWELL[ALT_NAXIS + 1] = { 30.0f, 30.0f, 30.0f, 240.0f, 30.0f };
   altEpisode.init(altEpRing, ALT_EP_RING_CAP, ALT_MAXDWELL);
   altEpisodeSyncCfg(0.0f);   // amps band starts at the floor; resized from filtered amps every fold
+  altSessTempGate.init(2600);   // session-temp 60 s dwell, ~240 s of 10 Hz headroom (matches temp axis maxdwell)
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
+  altFrontUp.init(altFrontUpBuf, ALT_FRONT_CAP);
   // axisScale ≈ the span of each axis that moves output a comparable amount (rationale + rebalance
   // history: ALT_HEALTH_LWLR_ENGINE_SPEC.md). MUST match AXIS_SCALE in the update-alt-health edge fn.
   altFront2.axisScale[0] = 25.0f;   // RPM
   altFront2.axisScale[1] = 0.2f;    // excitation (temp-normalized field volts)
   altFront2.axisScale[2] = 0.1f;    // Vbus
   altFront2.axisScale[3] = 5.0f;    // tempF
+  for (int a = 0; a < ALT_NAXIS; a++) altFrontUp.axisScale[a] = altFront2.axisScale[a];   // same metric for the borrowed surface
   queueConsoleMessageF("AltFront init: cap %d pts, ring %d, %.1fKB PSRAM",
     ALT_FRONT_CAP, ALT_EP_RING_CAP,
     (float)((size_t)ALT_EP_RING_CAP * sizeof(RawSample<ALT_NAXIS>) +
@@ -1102,14 +1343,19 @@ void altHealth_tick(uint32_t nowMs) {
   if (!foldFresh) altLiveValid = false;
   if (foldFresh && altLiveValid) {
     float surf[ALT_NAXIS] = { altLive_rpm, altLive_exc, altLive_vbus, altLive_tF };
-    altRefDist = altFront2.nearestNormDist(surf);
+    // Grade against the ACTIVE reference surface (My History or Uploaded). The trend uses the same
+    // surface (in altProcessEmits) — session % and trend are graded identically (spec §1/§4.2).
+    FrontStore<ALT_NAXIS> &gf = altGradeFront();
+    altRefDist = gf.nearestNormDist(surf);
     if (altRefDist > 999.0f) altRefDist = 999.0f;
     float pred = 0;
-    altState = (uint8_t)altFront2.classify(surf, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
+    altState = (uint8_t)gf.classify(surf, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
     altLive_pred = pred;
     altRefOk = (altState == FRONT_MEASURED || altState == FRONT_ESTIMATED);
     altLive_pct = (altRefOk && pred > 0.1f) ? (altLive_amps / pred * 100.0f) : 0.0f;
-    if (altRefOk && altLive_pct > 0.0f) {     // session stats accumulate graded samples only
+    // Session stats = the SESSION-PLOTTED points: session-steady (lighter gate) AND graded. The trend is
+    // NO LONGER fed here — it is built purely from FULL-steady runs in altProcessEmits (spec §2).
+    if (altSessSteady && altRefOk && altLive_pct > 0.0f) {
       altSessSum += altLive_pct; altSessN++;
       int bin = (int)(altLive_pct * 0.5f);    // 2%-wide histogram bins, 0..120%
       if (bin < 0) bin = 0;
@@ -1145,24 +1391,9 @@ void altHealth_tick(uint32_t nowMs) {
 // ============================================================
 // ALTERNATOR HEALTH — GUI-adjustable settings (registry-driven)
 //   One float registry → one /get handler loop + one boot-load loop +
-//   one "AltSettings" SSE echo. Avoids 16× fragile CSV3 plumbing.
+//   one "AltSettings" SSE echo. (ALT_SETTINGS[] is defined up with the param
+//   declarations so altDebugCsvSend can iterate it.) Avoids fragile CSV3 plumbing.
 // ============================================================
-struct AltSetting { const char *name; float *ptr; };
-static AltSetting ALT_SETTINGS[] = {
-  {"altRpmTol", &altRpmTol},   {"altRpmSec", &altRpmSec},
-  {"altDutyTolPct", &altDutyTolPct}, {"altDutySec", &altDutySec},
-  {"altVbusTol", &altVbusTol}, {"altVbusSec", &altVbusSec},
-  {"altThermDegF", &altThermDegF}, {"altThermSec", &altThermSec},
-  {"altAmpsTolPct", &altAmpsTolPct}, {"altAmpsFloorA", &altAmpsFloorA}, {"altAmpsSec", &altAmpsSec},
-  {"altEmaSec", &altEmaSec}, {"altMinRunSec", &altMinRunSec}, {"altRefRadius", &altRefRadius},
-  {"altMinAmps", &altMinAmps}, {"altMinDuty", &altMinDuty},
-  {"altSafetyMargin", &altSafetyMargin}, {"altIdwPower", &altIdwPower}, {"altPruneK", &altPruneK},
-  {"altRidgeFrac", &altRidgeFrac}, {"altRiskThresh", &altRiskThresh},
-  {"altHiFieldPct", &altHiFieldPct}, {"altLowOutAmps", &altLowOutAmps}, {"altHiFieldSec", &altHiFieldSec},
-  {"altPaused", &altPaused},
-};
-static const size_t ALT_SETTING_COUNT = sizeof(ALT_SETTINGS) / sizeof(ALT_SETTINGS[0]);
-
 void altSettingsLoad() {
   for (size_t i = 0; i < ALT_SETTING_COUNT; i++) {
     char key[16];
@@ -1182,12 +1413,23 @@ bool altSettingsHandle(AsyncWebServerRequest *request) {
       handled = true;
     }
   }
-  // Action (not a float knob): LEARNED↔FIXED source toggle.
-  if (request->hasParam("altSource")) {   // 1 = FIXED (freeze + pause), 0 = LEARNED (resume)
+  // Action (not a float knob): Reference Source selector — My History (0) | Uploaded File (1).
+  // INDEPENDENT of Pause (altPaused is its own registry knob, handled above). Per spec §4.3, selecting
+  // Uploaded defaults Pause = ON (the user may then flip Continue); switching back to My History leaves
+  // Pause untouched. Selecting Uploaded with no uploaded surface present is ignored.
+  if (request->hasParam("altSource")) {
     int src = request->getParam("altSource")->value().toInt();
-    altFront2.source = (uint8_t)(src ? 1 : 0);
-    altPaused = src ? 1.0f : 0.0f;
-    settingWrite(NK_altPaused, String(altPaused, 4).c_str());
+    if (src == 1 && altHaveUpload) {
+      if (altRefSource != 1) {                              // default Pause ON only when SWITCHING into Uploaded
+        altPaused = 1.0f;                                   // (spec §4.3 "on select") — a repeat click won't clobber a deliberate Continue
+        settingWrite(NK_altPaused, "1.0000");
+      }
+      altRefSource = 1;
+      settingWrite("altRefSrc", "1");
+    } else {
+      altRefSource = 0;
+      settingWrite("altRefSrc", "0");
+    }
     handled = true;
   }
   return handled;
@@ -3295,6 +3537,7 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     fieldCurveCount = 0;
     fieldCurveResultsReady = false;
     fieldCurveOk = false;
+    fieldCurveCeilingLimited = false;
     fieldCurveKneeDuty = -1.0f;
     fieldCurveKneeAmps = -1.0f;
     onsetBaseline = 0.0f;
@@ -3330,6 +3573,14 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
     // control path (REASON_FAST_OVERVOLTAGE: live bus > AlternatorHardShutdownV → immediate
     // field cut, fires before this override runs). That cut also flags fieldCurveAbortRequested,
     // so the ramp tears down cleanly. No bespoke per-target headroom abort is needed here.
+    //
+    // Effective ramp ceiling: Max Field % (MaxDuty) is the real per-bus field-duty cap and setDutyPercent
+    // clamps the APPLIED duty down to it on a 24/48V bank. Cap the ramp at that same ceiling so we STOP
+    // there instead of marching stepDuty up into a frozen-duty region that records flat/false amps and a
+    // bogus curve. If the amp target isn't reached by then, we flag fieldCurveCeilingLimited so the
+    // dashboard can tell the user to raise Max Field % and re-run for the full curve.
+    float effDutyCeil = FIELDCURVE_DUTY_MAX;
+    if (MaxDuty < effDutyCeil) effDutyCeil = MaxDuty;
     dutyOut = stepDuty;
 
     // Accumulate amps (and RPM, for the onset knee) only over the settled second half of the dwell.
@@ -3369,23 +3620,42 @@ bool fieldCurve_tick(float &dutyOut, float ampsRaw, uint32_t nowMs) {
           phase = 3;
           return true;
         }
-        if (stepDuty >= (kneeMaxFloorPct + kneeMarginPct)) {
+        // Stop ceiling for "no onset found": the configured Min%-floor ceiling, but never command above
+        // the 24/48V field-duty limit (a real onset above that limit can't be reached anyway).
+        float onsetCeil = kneeMaxFloorPct + kneeMarginPct;
+        bool  onsetCeilDutyCapped = false;
+        if (effDutyCeil < onsetCeil) { onsetCeil = effDutyCeil; onsetCeilDutyCapped = true; }
+        if (stepDuty >= onsetCeil) {
           kneeSweepKneeDuty = stepDuty;
           kneeSweepRPM      = avgRpm;
           kneeSweepTempF    = isnan(AlternatorTemperatureF) ? kneeTempRefF : AlternatorTemperatureF;
           kneeSweepOk       = false;
           fieldCurveResultsReady = true;
-          queueConsoleMessageF("Min%% knee: no onset below %.1f%% duty @ %.0f RPM (using ceiling)", stepDuty, avgRpm);
+          if (onsetCeilDutyCapped) {
+            fieldCurveCeilingLimited = true;
+            queueConsoleMessageF("Min%% knee: no onset below %.1f%% duty (Max Field %% limit) @ %.0f RPM — "
+                                 "raise Max Field %% and re-run if onset is higher", stepDuty, avgRpm);
+          } else {
+            queueConsoleMessageF("Min%% knee: no onset below %.1f%% duty @ %.0f RPM (using ceiling)", stepDuty, avgRpm);
+          }
           fcEaseFromDuty = stepDuty; fcEaseStartMs = nowMs; phase = 2; fieldCurveActive = 2;
           return true;
         }
         // no onset yet → fall through to the next step
       } else {
       bool reachedLimit = (avgAmps >= fieldCurveTargetLimitA);
-      bool reachedCeil  = (stepDuty >= FIELDCURVE_DUTY_MAX);
+      bool reachedCeil  = (stepDuty >= effDutyCeil);
       bool bufFull      = (fieldCurveCount >= FIELDCURVE_MAX_PTS);
 
       if (reachedLimit || reachedCeil || bufFull) {
+        // Stopped at the duty-limit ceiling (not the natural 92% backstop) without hitting the amp
+        // target → the curve is truncated by the 24/48V field-duty limit. Flag it + tell the user.
+        if (reachedCeil && !reachedLimit && effDutyCeil < FIELDCURVE_DUTY_MAX) {
+          fieldCurveCeilingLimited = true;
+          queueConsoleMessageF("Field curve: stopped at %.0f%% duty (Max Field %% limit) before reaching %.0fA — "
+                               "raise Max Field %% and re-run for the full curve",
+                               effDutyCeil, fieldCurveTargetLimitA);
+        }
         // ── Post-process: knee + proposals ──────────────────────────────────
         fieldCurveActive = 2;
         // Max early slope over the lower third of the captured range.

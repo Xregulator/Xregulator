@@ -160,6 +160,7 @@ bool fsRemove(const char *path) {
 #define NK_BatteryCOffset "BatteryCOffset"
 #define NK_BatteryCapacity_Ah "BatteryCapctyAh"
 #define NK_BatteryCurrentSource "BatteryCrrntSrc"
+#define NK_BatteryVoltage "BatteryVoltage"   // 12/24/48 nominal bank class — authoritative copy lives in NVS (vessel_info.json is a mirror)
 #define NK_Beta "Beta"
 #define NK_BulkVoltage "BulkVoltage"
 #define NK_CAPSIZE_THRESHOLD_DEG "CAPSIZETHRESHOL"
@@ -270,6 +271,12 @@ bool fsRemove(const char *path) {
 #define NK_SettleTimeBeforeCut "SettleTimeBfrCt"
 #define NK_ShuntResistanceMicroOhm "ShntRsstncMcrOh"
 #define NK_ShutdownPhase2HoldMs "ShtdwnPhs2HldMs"
+#define NK_cvHelpersEnabled "cvHelpersEn"
+#define NK_cvGainMode "cvGainMode"
+#define NK_cvLambdaMult "cvLambdaMult"
+#define NK_cvPlantK "cvPlantK"
+#define NK_cvPlantTau "cvPlantTau"
+#define NK_cvPlantL "cvPlantL"
 #define NK_SlopeBleedK "SlopeBleedK"
 #define NK_SlopeBleedProxV "SlopeBleedProxV"
 #define NK_SlopeBleedThresh "SlopeBleedThrsh"
@@ -285,7 +292,8 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…6=Thresholds, final step)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished)
+#define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
 #define NK_TailCurrent "TailCurrent"
@@ -304,6 +312,8 @@ bool fsRemove(const char *path) {
 #define NK_TempSustainedTimeout "TempSustaindTmt"
 #define NK_TempWarnExcess "TempWarnExcess"
 #define NK_TemperatureLimitF "TemperatureLmtF"
+#define NK_coldChargeLockoutEnable "coldChrgLock"
+#define NK_MinChargeTempF "MinChargeTempF"
 #define NK_ThermalLookaheadSec "ThermalLookhdSc"
 #define NK_TuningMode "TuningMode"
 #define NK_UVThresholdHigh "UVThresholdHigh"
@@ -475,6 +485,9 @@ void commissionSnapshot() {
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
            SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow);
   settingWrite(NK_commissionSnap, buf);
+  // The Min% floor table + knee tracker don't fit this positional CSV (10 floats × 3 + bools), so
+  // they are backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
+  commissionBackupMinPct();
 }
 
 // Restore from the Phase-0 snapshot (abort path). Returns false if none exists.
@@ -508,7 +521,8 @@ bool commissionRestore() {
       loadCapTablesForMode(HiLow);
     }
   }
-  if (pidInitialized) currentPID.SetTunings(PidKp, PidKi, PidKd);  // re-apply gains live
+  recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
+  commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
   settingRemove(NK_commissionSnap);
   return true;
 }
@@ -519,11 +533,69 @@ void commissionSetState(uint8_t st) {
   settingWrite(NK_commissionState, String((int)st).c_str());
 }
 
-// Persist the furthest wizard phase reached (0=Prep…6=Thresholds, 7=finished). Drives
+// Persist the furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished). Drives
 // the Commissioning tab checklist so step progress survives a page reload / new client.
 void commissionSetPhase(uint8_t p) {
   commissionPhase = p;
   settingWrite(NK_commissionPhase, String((int)p).c_str());
+}
+
+// ── Per-stage completion tracking ─────────────────────────────────────────────
+// commissionDoneMask carries one bit per stage (0=Prep … 7=CV plant fit). It is the
+// source of truth for the per-step ✓ marks and for the default checkbox selection of a
+// partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
+// mask wherever it is recomputed below.
+#define COMMISSION_STAGE_COUNT 8
+#define COMMISSION_ALL_DONE    0xFF   // bits 0..7 set = every stage complete
+
+// Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
+// analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
+// Disturbances(5) feeds Thresholds(6). CV plant fit(7) measures the current→voltage plant, which
+// sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
+// Plant fit 3, or Verify 4) makes the CV fit stale and clears bit 7. Re-doing an upstream stage
+// clears its dependents' done bits; the wizard forces them back into the same run to be re-measured.
+static uint16_t commissionDependentsMask(int stage) {
+  switch (stage) {
+    case 1: return (1 << 3) | (1 << 4) | (1 << 7);  // Field curve → Plant fit, Verify, CV plant fit
+    case 3: return (1 << 4) | (1 << 7);             // Plant fit   → Verify, CV plant fit
+    case 4: return (1 << 7);                        // Verify      → CV plant fit
+    case 5: return (1 << 6);                        // Disturbances → Thresholds
+    default: return 0;
+  }
+}
+
+void commissionWriteDoneMask() {
+  settingWrite(NK_commissionDoneMask, String((int)commissionDoneMask).c_str());
+}
+
+// Derive the lifecycle byte from the mask: none done → NOT, all done → COMMISSIONED, anything
+// in between → IN_PROGRESS. Called at FINISH only — during an active wizard, commissionState is
+// held at IN_PROGRESS explicitly (set by commissionStart) so the badge reads "in progress" even
+// while the mask is briefly still all-set on a re-commission.
+void commissionRecomputeState() {
+  uint8_t st = (commissionDoneMask == 0) ? 0 : (commissionDoneMask >= COMMISSION_ALL_DONE ? 2 : 1);
+  if (st != commissionState) commissionSetState(st);
+}
+
+// Mark a stage complete, then invalidate (clear) every downstream stage it feeds so an
+// interrupted partial run can't leave a dependent showing a stale ✓. Does NOT touch
+// commissionState — that is owned by start/abort/done.
+void commissionMarkStage(int stage) {
+  if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
+  commissionDoneMask |= (1 << stage);
+  commissionDoneMask &= ~commissionDependentsMask(stage);
+  commissionWriteDoneMask();
+}
+
+// Clear a single stage's done bit (e.g. RPM breakpoints changed → Min% floor must be redone),
+// plus anything downstream of it. A previously-COMMISSIONED device with a now-stale step is
+// demoted to IN_PROGRESS so the badge nags that a step needs re-running.
+void commissionClearStage(int stage) {
+  if (stage < 0 || stage >= COMMISSION_STAGE_COUNT) return;
+  commissionDoneMask &= ~(1 << stage);
+  commissionDoneMask &= ~commissionDependentsMask(stage);
+  commissionWriteDoneMask();
+  if (commissionState == 2) commissionSetState(1);
 }
 
 // One-time sweep at boot: move any pre-NVS settings file into NVS, then delete

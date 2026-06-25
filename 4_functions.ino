@@ -887,6 +887,20 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     capLimitMode = constrain(settingRead(NK_capLimitMode).toInt(), 0, 1);
   }
+  // System voltage class (12/24/48) — NVS (NK_BatteryVoltage) is the AUTHORITATIVE source of truth.
+  // vessel_info.json (parsed into BATTERY_VOLTAGE above, ~line 810) is only a mirror, used here ONLY to
+  // migrate pre-existing devices on the first boot after this key was introduced. Keeping the class in
+  // the same store as the rescaled charge profile is what prevents an overvoltage-trip mismatch if
+  // LittleFS (formatOnFail) ever loses vessel_info.json. The CV/CC gain normalization
+  // (recomputeCv/CcGains, called at the end of this function) divides by BATTERY_VOLTAGE.
+  if (!settingExists(NK_BatteryVoltage)) {
+    if (BATTERY_VOLTAGE != 12 && BATTERY_VOLTAGE != 24 && BATTERY_VOLTAGE != 48) BATTERY_VOLTAGE = 12;  // validate the mirror before seeding
+    settingWrite(NK_BatteryVoltage, String((int)BATTERY_VOLTAGE).c_str());  // migrate: seed NVS from the vessel-JSON mirror
+  } else {
+    int v = settingRead(NK_BatteryVoltage).toInt();
+    if (v != 12 && v != 24 && v != 48) v = 12;  // reject corrupt NVS value (guards vNorm = 12/BATTERY_VOLTAGE div-by-zero/NaN)
+    BATTERY_VOLTAGE = (uint8_t)v;  // NVS wins over the vessel-JSON mirror
+  }
   if (!settingExists(NK_BulkVoltage)) {
     settingWrite(NK_BulkVoltage, String(BulkVoltage).c_str());
   } else {
@@ -1319,6 +1333,10 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     Ymax4 = settingRead(NK_Ymax4).toInt();
   }
   if (!settingExists(NK_MaxDuty)) {
+    // Max Field % is the REAL per-bus field-duty cap. The hardcoded default (99) is a 12V value, so on
+    // first creation scale it by ×(12/BATTERY_VOLTAGE) (→ ~50%@24V, ~25%@48V) so worst-case field
+    // current never exceeds the 12V case. WYSIWYG: the dashboard box shows the actual cap; user-adjustable.
+    MaxDuty = (int)lroundf(MaxDuty * 12.0f / (float)BATTERY_VOLTAGE);
     settingWrite(NK_MaxDuty, String(MaxDuty).c_str());
   } else {
     MaxDuty = settingRead(NK_MaxDuty).toInt();
@@ -1563,6 +1581,50 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     SlopeBleedK = settingRead(NK_SlopeBleedK).toFloat();
   }
+  // cvHelpersEnabled — master switch for the asymmetric KiDown unwind + slope-aware bleed
+  if (!settingExists(NK_cvHelpersEnabled)) {
+    settingWrite(NK_cvHelpersEnabled, String((int)cvHelpersEnabled).c_str());
+  } else {
+    cvHelpersEnabled = settingRead(NK_cvHelpersEnabled).toInt() != 0;
+  }
+  // ── CV gain-mode system (Auto λ-based vs Manual) + measured plant ──
+  if (!settingExists(NK_cvGainMode)) {
+    settingWrite(NK_cvGainMode, String((int)cvGainMode).c_str());
+  } else {
+    cvGainMode = (uint8_t)settingRead(NK_cvGainMode).toInt();
+  }
+  if (!settingExists(NK_cvLambdaMult)) {
+    settingWrite(NK_cvLambdaMult, String(cvLambdaMult, 2).c_str());
+  } else {
+    cvLambdaMult = settingRead(NK_cvLambdaMult).toFloat();
+  }
+  if (!settingExists(NK_cvPlantK)) {
+    settingWrite(NK_cvPlantK, String(cvPlantK, 5).c_str());
+  } else {
+    cvPlantK = settingRead(NK_cvPlantK).toFloat();
+  }
+  if (!settingExists(NK_cvPlantTau)) {
+    settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
+  } else {
+    cvPlantTau = settingRead(NK_cvPlantTau).toFloat();
+  }
+  if (!settingExists(NK_cvPlantL)) {
+    settingWrite(NK_cvPlantL, String(cvPlantL, 3).c_str());
+  } else {
+    cvPlantL = settingRead(NK_cvPlantL).toFloat();
+  }
+  // coldChargeLockoutEnable — master on/off for the board-temp cold-charge lockout (lithium protection)
+  if (!settingExists(NK_coldChargeLockoutEnable)) {
+    settingWrite(NK_coldChargeLockoutEnable, String((int)coldChargeLockoutEnable).c_str());
+  } else {
+    coldChargeLockoutEnable = settingRead(NK_coldChargeLockoutEnable).toInt() != 0;
+  }
+  // MinChargeTempF — board-temp floor below which charging is locked out (°F)
+  if (!settingExists(NK_MinChargeTempF)) {
+    settingWrite(NK_MinChargeTempF, String(MinChargeTempF).c_str());
+  } else {
+    MinChargeTempF = settingRead(NK_MinChargeTempF).toFloat();
+  }
   if (!settingExists(NK_SlopeBleedProxV)) {
     settingWrite(NK_SlopeBleedProxV, String(SlopeBleedProxV, 2).c_str());
   } else {
@@ -1651,7 +1713,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     MaxTableValue = settingRead(NK_MaxTableValue).toFloat();
   }
   HardOCTripAmps = MaxTableValue + 10.0f;  // always derived, not persisted
-  // MinTableValue — OBSOLETE REMOVE LATER (LittleFS init removed)
   if (!settingExists(NK_MaxPenaltyPercent)) {
     settingWrite(NK_MaxPenaltyPercent, String(MaxPenaltyPercent, 2).c_str());
   } else {
@@ -1677,8 +1738,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     LearningMemoryDuration = settingRead(NK_LearningMemoryDuration).toInt();
   }
-  // LearningTableSaveInterval — OBSOLETE REMOVE LATER (LittleFS init removed)
   if (!settingExists(NK_DutyRampRate)) {
+    // Duty-domain knob stored in REAL %/s for THIS bus. The hardcoded default is a 12V value, so on
+    // first creation scale it by ×(12/BATTERY_VOLTAGE) (40%/s → 10%/s @48V) before persisting — the
+    // field-current slew stays constant across banks, and the dashboard box shows what's actually used.
+    DutyRampRate = DutyRampRate * 12.0f / (float)BATTERY_VOLTAGE;
     settingWrite(NK_DutyRampRate, String(DutyRampRate, 1).c_str());
   } else {
     DutyRampRate = settingRead(NK_DutyRampRate).toFloat();
@@ -1774,15 +1838,26 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   if (settingExists(NK_commissionPhase)) {
     commissionPhase = (uint8_t)settingRead(NK_commissionPhase).toInt();
   }
-  // A partial (in-progress) commissioning must NOT survive a reboot — only a COMPLETED
-  // one persists. A boot found mid-flow is treated exactly like Abort: revert every setting
-  // to the pre-commissioning snapshot and reset to NOT_COMMISSIONED, so the user starts over
-  // from scratch. (All snapshot-covered settings are loaded above, so the revert wins; it
-  // also rewrites NVS, so it stays consistent regardless of any later read.)
-  if (commissionState == 1) {
-    commissionRestore();          // revert to the Phase-0 snapshot (also removes it); no-op if missing
+  // Per-stage completion bitmask (default 0 = nothing done). Loaded BEFORE the in-progress
+  // revert below so that revert can also clear it. This is the source of truth for the
+  // per-step ✓ marks; commissionState is derived from it.
+  if (settingExists(NK_commissionDoneMask)) {
+    commissionDoneMask = (uint16_t)settingRead(NK_commissionDoneMask).toInt();
+  }
+  // A genuinely INTERRUPTED wizard run must NOT survive a reboot — detect it by the Phase-0
+  // snapshot still being present (it is removed on both Finish and Abort). Such a boot is
+  // treated exactly like Abort: revert every setting to the snapshot, reset to NOT_COMMISSIONED,
+  // and clear the done mask so the user starts over from the reverted baseline. (All
+  // snapshot-covered settings are loaded above, so the revert wins.)
+  // NOTE: a COMMITTED-but-partial config (e.g. a commissioned device whose Min% floor was
+  // invalidated by an RPM-breakpoint change) is also state==1 but has NO snapshot — it must
+  // persist across reboot so the badge keeps nagging that a step needs re-running.
+  if (commissionState == 1 && settingExists(NK_commissionSnap)) {
+    commissionRestore();          // revert to the Phase-0 snapshot (also removes it)
     commissionSetState(0);
     commissionSetPhase(0);
+    commissionDoneMask = 0;
+    commissionWriteDoneMask();
   }
   if (!settingExists(NK_IExcessArmMarginV)) {
     settingWrite(NK_IExcessArmMarginV, String(IExcessArmMarginV, 3).c_str());
@@ -1912,6 +1987,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     VoltageKp = settingRead(NK_VoltageKp).toFloat();
   }
+  // Derive the active CV gains now that gain mode, λ, plant, and manual Kp/Ki are all loaded.
+  recomputeCvGains();
+  recomputeCcGains();  // and the active CC (output-current) gains, normalized to BATTERY_VOLTAGE
   if (!settingExists(NK_VoltageLoopInterval)) {
     settingWrite(NK_VoltageLoopInterval, String(VoltageLoopInterval).c_str());
   } else {
@@ -2288,7 +2366,7 @@ void updateAccelMetrics() {
     imu_total_accel_g = sqrt(ax * ax + ay * ay + az * az);
     wmIgnUpdate(wmIgn_vacc, imu_vertical_accel_g);  // ignition-cycle watermark
 
-    // TODO: Wave period decimation and processing
+    // Wave period decimation and processing is handled inline below (10 Hz decimation, zero-crossing)
 
     imuWindow->lastUpdateTime_us = now_us;
     imuRingBuffer->accel_tail = (imuRingBuffer->accel_tail + 1) % ACCEL_RING_SIZE;
@@ -2698,15 +2776,6 @@ void updateAccelMetrics() {
     float pitch_penalty = min(imu_pitch_deviation_60s /  8.0f, 1.0f) * 35.0f;  //  8 deg pitch dev -> full penalty
     imu_anchorage_comfort = constrain(100.0f - roll_penalty - pitch_penalty, 0.0f, 100.0f);
   }
-}
-// ============================================================================
-// STUB FUNCTIONS - IMPLEMENT LATER
-// ============================================================================
-void updateWavePeriod() {
-  // Implemented inline in updateAccelMetrics() — 10 Hz decimation, DC EWMA, zero-crossing with hysteresis
-}
-void updateVibrationEnergy() {
-  // Implemented inline in updateAccelMetrics() — HP filter + RMS² + EWMA per accel sample batch
 }
 
 
@@ -4281,6 +4350,55 @@ time_t getCurrentTimestamp() {
     return timeBase + elapsedSeconds;
   }
   return 0;
+}
+
+// ── Soft clock recovery ─────────────────────────────────────────────────────
+// Fixes the phantom multi-hour gaps in the Long Term history plots on a device
+// with NO live time source (AP mode, no NTP/phone/GPS). Without a clock the
+// long-term records are stamped 0, and the dashboard back-projects those
+// zero-stamped records onto the wrong part of the time axis — good data renders
+// as a giant gap. Re-establish a usable timebase at boot from two free sources,
+// lowest-risk first:
+//   1. RTC retention — the ESP32 system clock keeps running across a SOFTWARE
+//      reset (OTA install, scheduled restart, crash/WDT). If a prior boot ran
+//      settimeofday() (every real source does), time(nullptr) is still valid AND
+//      already includes the brief reboot downtime → accurate, no estimate.
+//   2. NVS-persisted epoch ("SoftClockEp", written at each field-off save) —
+//      survives a cold power-up. Downtime is unknown, so this is an ESTIMATE
+//      (assumes ~0 off-time); it snaps to truth the moment a real source reports.
+// Either way the source is labeled TIME_ESTIMATED (low confidence) until a real
+// source overwrites timeBase. CRITICAL: timeBaseMillis is anchored to the CURRENT
+// millis() (it restarts at 0 each boot). Restoring a PRIOR boot's timeBaseMillis
+// would wrap getCurrentTimestamp() ~49.7 days forward — exactly the hazard the old
+// RAM-only design avoided. We never persist millis, only the epoch, so we're safe.
+void restoreSoftClock() {
+  if (timeIsSynced) return;   // a live source already won during early boot — leave it
+
+  time_t rtc = time(nullptr);
+  if (rtc > SOFTCLOCK_SANE_EPOCH) {            // RTC survived a soft reset → adopt as-is
+    timeBase = rtc;
+    timeBaseMillis = millis();
+    timeIsSynced = true;
+    currentTimeSource = TIME_ESTIMATED;
+    Serial.printf("Soft clock: adopted retained RTC epoch=%ld\n", (long)rtc);
+    return;
+  }
+
+  // Cold boot — seed from the epoch we persisted at the previous field-off edge.
+  nvs_handle_t h;
+  if (nvs_open("storage", NVS_READONLY, &h) == ESP_OK) {
+    uint32_t saved = 0;
+    if (nvs_get_u32(h, "SoftClockEp", &saved) == ESP_OK && (time_t)saved > SOFTCLOCK_SANE_EPOCH) {
+      timeBase = (time_t)saved;
+      timeBaseMillis = millis();
+      timeIsSynced = true;
+      currentTimeSource = TIME_ESTIMATED;
+      struct timeval tv = { (time_t)saved, 0 };
+      settimeofday(&tv, nullptr);              // keep time(nullptr) consistent for AP-mode callers
+      Serial.printf("Soft clock: restored NVS epoch=%lu (estimate, downtime unknown)\n", (unsigned long)saved);
+    }
+    nvs_close(h);
+  }
 }
 void syncTimeFromGPS(uint16_t daysSince1970, double secondsSinceMidnight) {
   // Manual mode gate: only AUTO and NMEA-forced accept NMEA time.
