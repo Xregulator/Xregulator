@@ -749,6 +749,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "TempSustainedTimeout", NK_TempSustainedTimeout, 1 },
   { "TempPIDKp", NK_TempPIDKp, 1 },
   { "TempPIDKi", NK_TempPIDKi, 1 },
+  { "TempPIDKiDownFrac", NK_TempPIDKiDownFrac, 1 },
   { "TempPIDIntervalMs", NK_TempPIDIntervalMs, 1 },
   { "TempPIDFilterAlpha", NK_TempPIDFilterAlpha, 1 },
   { "ThermalLookaheadSec", NK_ThermalLookaheadSec, 1 },

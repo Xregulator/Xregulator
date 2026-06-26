@@ -314,6 +314,7 @@ bool fsRemove(const char *path) {
 #define NK_TempPIDFilterAlpha "TempPIDFltrAlph"
 #define NK_TempPIDIntervalMs "TempPIDIntrvlMs"
 #define NK_TempPIDKi "TempPIDKi"
+#define NK_TempPIDKiDownFrac "TmpKiDownFrac"
 #define NK_TempPIDKp "TempPIDKp"
 #define NK_TempSource "TempSource"
 #define NK_TempSustainedTimeout "TempSustaindTmt"

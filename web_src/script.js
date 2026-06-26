@@ -962,9 +962,9 @@ function drawCxRpmSpark(c) {
         const v = S.rpm[i]; if (!isFinite(v)) { started = false; continue; }
         const x = X(i), y = Y(v); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true;
     }
-    g.strokeStyle = '#E91E63'; g.lineWidth = 1.7; g.stroke();
+    g.strokeStyle = '#2ec4b6'; g.lineWidth = 1.7; g.stroke();
     const last = S.rpm[N - 1];
-    if (isFinite(last)) { g.fillStyle = '#E91E63'; g.beginPath(); g.arc(X(N - 1), Y(last), 2.6, 0, 7); g.fill(); }
+    if (isFinite(last)) { g.fillStyle = '#2ec4b6'; g.beginPath(); g.arc(X(N - 1), Y(last), 2.6, 0, 7); g.fill(); }
 }
 
 // ── Charging-system health (v2): schema-driven live + settings, perf-vs-engine-hours trend ──
@@ -2178,6 +2178,7 @@ const CSV3_FIELDS = [
     "CommissionTempF",               // board temp when CV fit applied — derate reference (°F ×10; -32768 = unset)
     "battTempDerateEnable",          // battery-temp gain derate master on/off (0/1)
     "battTempCoeff",                 // battery fractional resistance change per °C; ×10000
+    "TempPIDKiDownFrac",             // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -4810,6 +4811,7 @@ function updateAllEchosOptimized(data) {
         { key: 'SOC_AllowRebulk_percent', id: 'SOC_AllowRebulk_percent_echo', transform: v => v.toFixed(1) },
         { key: 'TempPIDKp', id: 'TempPIDKp_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKi', id: 'TempPIDKi_echo', transform: v => (v / 1000).toFixed(3) },
+        { key: 'TempPIDKiDownFrac', id: 'TempPIDKiDownFrac_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'ThermalLookaheadSec', id: 'ThermalLookaheadSec_echo', transform: v => v },
         { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
@@ -4821,16 +4823,16 @@ function updateAllEchosOptimized(data) {
         { key: 'FastSetpointRiseWindowMs', id: 'FastSetpointRiseWindowMs_echo', transform: v => v },
         { key: 'FastSetpointRiseHeadroomV', id: 'FastSetpointRiseHeadroomV_echo', transform: v => (v / 100).toFixed(2) },
         // cvPlantK / cvPlantTau / cvPlantL + the ω slider are rendered in updateCvGainModeUI() (drag-guarded).
-        { key: 'cvComputedKp',      id: 'cvComputedKp_echo',      transform: v => (v / 100).toFixed(1) },
-        { key: 'cvComputedKi',      id: 'cvComputedKi_echo',      transform: v => (v / 100).toFixed(1) },
-        { key: 'cvOmega',           id: 'cvOmega_echo',           transform: v => (v / 100).toFixed(2) },
+        // cvComputedKp/Ki echoes retired 2026-06-26 — cvFitStatus now shows committed K_dc→Kp/Ki (JS-computed,
+        // same formula as the live preview), so the firmware-echoed copy was redundant. CSV3 still carries them.
+        { key: 'cvOmega',           id: 'cvRespS_echo',           transform: v => Math.round(4 / ((v / 100) || 0.2)) },  // ω(rad/s)→settle seconds = 4/ω
         { key: 'cvKiRatio',         id: 'cvKiRatio_echo',         transform: v => (v / 100).toFixed(2) },
         { key: 'vTgtRampUp',        id: 'vTgtRampUp_echo',        transform: v => (v / 1000).toFixed(3) },
         { key: 'vTgtRampDn',        id: 'vTgtRampDn_echo',        transform: v => (v / 1000).toFixed(3) },
         { key: 'vTgtRampEnable',    id: 'vTgtRampEnable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'battTempDerateEnable', id: 'battTempDerateEnable_echo', transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'battTempCoeff',     id: 'battTempCoeff_echo',     transform: v => (v / 10000).toFixed(3) + ' /°C (' + (v / 10000 * 100).toFixed(1) + ' %/°C)' },
-        { key: 'cvGainMode',        id: 'cvGainMode_echo',        transform: v => v == 1 ? 'Auto ω' : 'Manual' },
+        { key: 'cvGainMode',        id: 'cvGainMode_echo',        transform: v => v == 1 ? 'Auto' : 'Manual' },
         { key: 'OvGroup1Enable',    id: 'OvGroup1Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'OvGroup2Enable',    id: 'OvGroup2Enable_echo',    transform: v => v == 1 ? 'ON' : 'OFF' },
         { key: 'cvHelpersEnabled',  id: 'cvHelpersEnabled_echo',  transform: v => v == 1 ? 'ON' : 'OFF' },
@@ -5801,7 +5803,7 @@ function renderCVTuningLog(data) {
         }
     }
 
-    // Commit section: show when CV test is active, enable button when ≥1 scored HIGH cycle
+    // Commit section: show when Waveform Generator is active, enable button when ≥1 scored HIGH cycle
     const cvCommitSection = document.getElementById('cvTuningCommitSection');
     if (cvCommitSection) {
         cvCommitSection.style.display = data.ta ? '' : 'none';
@@ -8898,39 +8900,53 @@ function handleUserToggle(checkboxId, hiddenInputId, dataKey) {
 }
 
 // ── CV gain-mode UI (Auto ω-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
-let _cvOmegaEditing = false;
 function updateCvGainModeUI(data) {
     if (data.cvGainMode === undefined) return;
     // Refresh the live auto-tune constants from the device so the fit preview matches what it will apply.
-    if (data.cvOmega   !== undefined) CV_OMEGA_TARGET = (parseFloat(data.cvOmega)   || 20) / 100;
+    if (data.cvOmega   !== undefined) CV_OMEGA_TARGET = (parseFloat(data.cvOmega)   || 28.6) / 100;
     if (data.cvKiRatio !== undefined) CV_KI_RATIO     = (parseFloat(data.cvKiRatio) || 70) / 100;
     const auto = (parseInt(data.cvGainMode, 10) === 1);
     const autoBlk = document.getElementById('cvAutoBlock');
     const manBlk  = document.getElementById('cvManualBlock');
     if (autoBlk) autoBlk.style.display = auto ? '' : 'none';
     if (manBlk)  manBlk.style.display  = auto ? 'none' : '';
-    // ω slider — the live response-speed knob (drives cvOmega). Skip while the user is dragging.
-    const omega = (parseFloat(data.cvOmega) || 20) / 100;
-    const sl = document.getElementById('cvOmegaSlider');
-    if (sl && !_cvOmegaEditing) sl.value = omega;
-    const le = document.getElementById('cvOmegaSlider_echo');
-    if (le && !_cvOmegaEditing) le.textContent = omega.toFixed(2);
     // measured DC gain + computed gains (new measured-K_dc rule — see CV_AUTOTUNE_PLAN.md §E). τ/λ are
     // retired; only K_dc drives the gains via Kp = ω_target/K_dc, Ki = ρ·Kp (in 12V-equiv space).
     const K   = (parseFloat(data.cvPlantK) || 0) / 10000;   // V/A (K_dc)
     const valid = (K > 1e-6);
     const sysV  = window._nominalStored || 12;
     const Knorm = K * (12 / sysV);
+    window._cvKdc = K; window._cvKnorm = Knorm;             // stashed for previewCvResp() (the before-Set preview)
     const Kp = valid ? Math.min(120, Math.max(2, CV_OMEGA_TARGET / Knorm)) : 0;
     const Ki = valid ? Math.min(80, Math.max(1, CV_KI_RATIO * Kp)) : 0;
     const status = document.getElementById('cvFitStatus');
     if (status) status.textContent = valid
         ? `Measured DC gain: K_dc = ${(K * 1000).toFixed(1)} mV/A  →  Kp ≈ ${Kp.toFixed(1)}, Ki ≈ ${Ki.toFixed(1)} (12 V-equiv)`
         : 'No plant fit yet — run the CV plant-fit step in commissioning. Auto uses safe defaults until then.';
-    // rough closed-loop settle for the conservative target crossover (~a few / ω_target)
-    const ps = document.getElementById('cvPredSettle');
-    if (ps) ps.textContent = valid ? '≈ ' + (4 / CV_OMEGA_TARGET).toFixed(0) + ' s' : '—';
+    previewCvResp();
     renderBattTempDerate();
+}
+
+// Live "what Set will apply" preview under the CV Response Time box. Uses the typed seconds if the user is
+// editing, else the device's committed ω (4/sec). Same formula as cvFitStatus / firmware recomputeCvGains so
+// pending and committed only differ by the number being typed.
+function previewCvResp() {
+    const out = document.getElementById('cvRespPreview');
+    const ramp = document.getElementById('cvRespRampNote');   // live field ramp-rate, shown in the tooltip floor note
+    if (ramp) { const r = getEchoText('DutyRampRate_echo'); if (r && r !== '--' && r !== '?') ramp.textContent = r; }
+    if (!out) return;
+    const el  = document.getElementById('cvRespS_input');
+    let sec = (el && el.value !== '') ? parseFloat(el.value) : (4 / (CV_OMEGA_TARGET || 0.2));
+    if (!(sec > 0)) { out.innerHTML = '&nbsp;'; return; }
+    const omega = 4 / sec;
+    const Knorm = window._cvKnorm || 0;
+    if (!(Knorm > 1e-6)) {
+        out.innerHTML = `≈ ${Math.round(sec)} s settle (ω ≈ ${omega.toFixed(2)} rad/s) — run the CV plant fit to compute Kp/Ki.`;
+        return;
+    }
+    const Kp = Math.min(120, Math.max(2, omega / Knorm));
+    const Ki = Math.min(80, Math.max(1, (CV_KI_RATIO || 0.7) * Kp));
+    out.innerHTML = `Will apply: <strong>Kp ≈ ${Kp.toFixed(1)}</strong>, <strong>Ki ≈ ${Ki.toFixed(1)}</strong> (12 V-equiv) · ω ≈ ${omega.toFixed(2)} rad/s · K_dc = ${((window._cvKdc || 0) * 1000).toFixed(1)} mV/A`;
 }
 
 // Battery-temperature derate readout. Pulls the commissioning reference temp + coefficient from CSV3
@@ -8961,19 +8977,6 @@ function renderBattTempDerate() {
     }
     el.innerHTML = s;
 }
-function onCvOmegaInput(sl) {
-    _cvOmegaEditing = true;
-    const v = parseFloat(sl.value);
-    const le = document.getElementById('cvOmegaSlider_echo');
-    if (le) le.textContent = v.toFixed(2);
-    const ps = document.getElementById('cvPredSettle');   // live settle estimate (~4/ω) while dragging
-    if (ps) ps.textContent = v > 0 ? '≈ ' + (4 / v).toFixed(0) + ' s' : '—';
-}
-function onCvOmegaCommit(sl) {
-    fetch(buildURL('/get?cvOmega=' + encodeURIComponent(sl.value)))
-        .finally(() => { _cvOmegaEditing = false; });
-}
-
 // Initialize learning table flag BEFORE any event handlers
 if (typeof window.learningTableInitialized === 'undefined') {
     window.learningTableInitialized = false;
@@ -10975,7 +10978,7 @@ window.addEventListener("load", function () {
                     chargeStageEl.textContent = 'CURR TEST';
                     chargeStageEl.className = 'charge-stage charge-stage-test';
                 } else if (cvTuningModeActive) {
-                    chargeStageEl.textContent = 'CV TEST';
+                    chargeStageEl.textContent = 'WAVE GEN';
                     chargeStageEl.className = 'charge-stage charge-stage-test';
                 } else if (stage === 1) {
                     chargeStageEl.textContent = 'BULK';
@@ -10999,6 +11002,11 @@ window.addEventListener("load", function () {
                 } else if (stage === 7) {
                     chargeStageEl.textContent = 'IDLE';
                     chargeStageEl.className = 'charge-stage charge-stage-idle';
+                } else if (stage === 8) {
+                    // Firmware reports commissioning (another client has the wizard open). The
+                    // cxModalOpen/cxStepActive checks above already cover THIS client's own wizard.
+                    chargeStageEl.textContent = 'COMMISSIONING';
+                    chargeStageEl.className = 'charge-stage charge-stage-commission';
                 } else {
                     chargeStageEl.textContent = '';
                     chargeStageEl.className = 'charge-stage charge-stage-hidden';
@@ -14020,6 +14028,7 @@ const THERMAL_MODE_COLORS = {
     targetV: '#9467bd',     // purple
     manual: '#e377c2',      // pink
     idle: '#7f7f7f',        // gray
+    commissioning: '#8c564b', // brown — wizard open
     antiWindup: '#111111'   // tick (light mode); dark mode overrides to white
 };
 function modeFromStage(stage, flags) {
@@ -14035,6 +14044,7 @@ function modeFromStage(stage, flags) {
         case 5: return { label: 'Maintain', color: THERMAL_MODE_COLORS.maintain };
         case 6: return { label: 'Target V', color: THERMAL_MODE_COLORS.targetV };
         case 7: return { label: 'Idle', color: THERMAL_MODE_COLORS.idle };
+        case 8: return { label: 'Commissioning', color: THERMAL_MODE_COLORS.commissioning };
         default: return { label: '', color: 'transparent' };
     }
 }
@@ -14396,6 +14406,7 @@ function renderThermalPlotState(data, tMin, flagsArr, antiWindupArr, stageArr, t
         { label: 'Target V', color: THERMAL_MODE_COLORS.targetV },
         { label: 'Manual', color: THERMAL_MODE_COLORS.manual },
         { label: 'Idle', color: THERMAL_MODE_COLORS.idle },
+        { label: 'Commissioning', color: THERMAL_MODE_COLORS.commissioning },
         { label: 'Anti-Windup Fired', color: THERMAL_MODE_COLORS.antiWindup, tick: true }
     ].forEach(item => {
         const wrap = document.createElement('div');
@@ -15298,6 +15309,7 @@ const CS_MANUAL      = 4;
 const CS_MAINTAIN    = 5;
 const CS_TARGET_V    = 6;
 const CS_IDLE        = 7;
+const CS_COMMISSION  = 8;
 
 // ── Test Active Floating Panel ──────────────────────────────────────────────
 // Panel sits outside .tab-content in the HTML so position:fixed keeps it
@@ -15309,7 +15321,7 @@ let _testPanelCurrentTest = null;
 
 const TEST_PANEL_META = {
     curr:    { title: 'Current Waveform Test', dot: '#f97316' },
-    cv:      { title: 'CV Step Test',          dot: '#4a9eff' },
+    cv:      { title: 'Waveform Generator',     dot: '#4a9eff' },
     thermal: { title: 'Thermal Step Test',     dot: '#ef4444' },
     sysid:   { title: 'Plant Delay Test',      dot: '#a855f7' },
 };
@@ -15512,7 +15524,7 @@ function checkCVTestGate(checkbox) {
     const voltageStages = [CS_ABSORPTION, CS_FLOAT, CS_MAINTAIN, CS_TARGET_V];
     if (!voltageStages.includes(gLastChargeStage)) {
         checkbox.checked = false;
-        alert('CV Step Test requires voltage-controlled mode.\n\nThe CV loop is only active in ABSORPTION, FLOAT, MAINTAIN, or TARGET V. In BULK the voltage loop has no authority and the test produces no useful data.\n\nEnter a voltage-controlled stage, then enable the test.');
+        alert('Waveform Generator requires voltage-controlled mode.\n\nThe CV loop is only active in ABSORPTION, FLOAT, MAINTAIN, or TARGET V. In BULK the voltage loop has no authority and the test produces no useful data.\n\nEnter a voltage-controlled stage, then enable the test.');
         return false;
     }
 
@@ -15531,7 +15543,7 @@ function checkCVTestGate(checkbox) {
             if (stepTarget > bulkV) {
                 checkbox.checked = false;
                 alert(
-                    `CV Step Test blocked: the HIGH-phase target (${stepTarget.toFixed(2)} V) exceeds BulkVoltage (${bulkV.toFixed(2)} V).\n\n` +
+                    `Waveform Generator blocked: the HIGH-phase target (${stepTarget.toFixed(2)} V) exceeds BulkVoltage (${bulkV.toFixed(2)} V).\n\n` +
                     `The charging stage machine runs continuously during this test. Stepping the voltage target above BulkVoltage can cause a stage transition that cuts the output mid-test.\n\n` +
                     `Reduce Wave Amplitude, raise BulkVoltage, or use TARGET V mode (which suppresses the stage machine) to run this step test safely.`
                 );
@@ -16009,6 +16021,7 @@ function sysidUpdatePreflight() {
         [CS_MAINTAIN]:   'Maintain',
         [CS_IDLE]:       'Idle',
         [CS_MANUAL]:     'Manual',
+        [CS_COMMISSION]: 'Commissioning',
     }[stage] ?? null;
     const modeMsg = modeOK
         ? '✅ Mode: ' + stageLabel + ' — OK to run (no limits enforced during test)'
@@ -16719,6 +16732,7 @@ function cxToggleSelectAll(on) {
 //     would be steamrolled by a full restart.
 function cxStartIntent() {
     let doneCount = 0, planCount = 0, allSelected = true;
+    const optional = CX_PHASES.length - 1;   // every step except Prep (always run, ignored here)
     for (let i = 1; i < CX_PHASES.length; i++) {
         if (cxLastMask & (1 << i)) doneCount++;
         if (cxPlan[i]) planCount++; else allSelected = false;
@@ -16727,6 +16741,11 @@ function cxStartIntent() {
         return { label: 'Start commissioning…', help: 'Tick at least one step to run.', className: 'btn-primary', disabled: true, action: 'open' };
     if (doneCount === 0)
         return { label: 'Start commissioning…', help: 'Only the ticked steps will run.', className: 'btn-primary', disabled: false, action: 'open' };
+    // Every step done but the device isn't COMMISSIONED (state≠2) = a completed run that was never
+    // committed (Finish dropped / wizard closed at the end). Offer to commit it — NOT "clear and
+    // restart", which would revert the finished work to the pre-commissioning snapshot.
+    if (doneCount === optional && cxLastState !== 2)
+        return { label: 'Finish commissioning…', help: 'Every step is done but the run was never saved. This commits it and marks the device commissioned — nothing is re-run or reverted.', className: 'btn-primary', disabled: false, action: 'finish' };
     if (allSelected)
         return { label: 'Clear and restart commissioning…', help: 'Every step is ticked, so this reverts to your pre-commissioning settings and runs the whole walkthrough again from the top.', className: 'btn-secondary', disabled: false, action: 'restart' };
     return { label: 'Continue commissioning…', help: 'Runs just the ticked steps and keeps everything already done. Re-running a step also re-runs the steps it feeds.', className: 'btn-primary', disabled: false, action: 'open' };
@@ -16737,7 +16756,18 @@ function commissionPrimaryAction() {
     const intent = cxStartIntent();
     if (intent.disabled) return;
     if (intent.action === 'restart') commissionClearAndRestart();
+    else if (intent.action === 'finish') commissionCommitUncommitted();
     else openCommissionModal();
+}
+// Commit a completed-but-uncommitted run: every step is done but Finish never fired (wizard closed
+// at the end, or the network dropped between the last step and Finish). Sends commissionDone=1 to
+// persist the new tune and flip the badge to COMMISSIONED — without reopening the wizard or reverting.
+function commissionCommitUncommitted() {
+    if (!currentAdminPassword) { alert('Unlock settings first (enter the admin password).'); return; }
+    cxGet('commissionDone=1').then(() => {
+        cxLastState = 2;
+        renderCommissionStatus(2, CX_PHASES.length, cxLastMask);   // phase=length clears the ▶ marker
+    }).catch(e => alert('Finish failed: ' + e));
 }
 // Wizard navigation honouring the plan: next selected stage in 1..last, or -1 if none remain.
 function cxNextSelected(from) { for (let i = from + 1; i < CX_PHASES.length; i++) if (cxPlan[i]) return i; return -1; }
@@ -16812,7 +16842,7 @@ function cxFinePrint(phase) {
     case 4: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve.';
     case 5: return 'Records the worst low-frequency disturbance at each engine speed into a map; ~80% coverage of the &lt;2000 RPM band is enough.';
     case 6: return 'Proposes the over-current detector\'s averaging time (= the plant τ) and trip floor (= max(default, post-EMA residual × margin)) from the disturbance map; you review and Apply it here.';
-    case 7: return 'Commands a small current square wave (~10–20 A) through the already-tuned current loop and records how battery voltage responds, measuring the step gain K_dc from each up/down edge with the slow charge ramp removed (so the bank never has to fully settle). A deliberately slow target sets the voltage-loop Kp = ω/K_dc and Ki = ρ·Kp (conservative) and switches the CV gain source to Auto. The fit runs locally in this app — no internet. Only over-voltage hard-shutdown is active; keep all other battery loads constant during the test.';
+    case 7: return 'Commands a small current square wave (~10–20 A) through the already-tuned current loop and records how battery voltage responds, measuring the step gain K_dc from each up/down edge with the slow charge ramp removed (so the bank never has to fully settle). A conservative response-time target (~14 s settle) then sets the voltage-loop Kp = ω/K_dc and Ki = ρ·Kp and switches the CV gain source to Auto. The fit runs locally in this app — no internet. Only over-voltage hard-shutdown is active; keep all other battery loads constant during the test.';
     default: return '';
   }
 }
@@ -16911,7 +16941,7 @@ function commissionRender() {
     const steps = document.getElementById('commission-steps');
     steps.innerHTML = CX_PHASES.map((nm, i) => {
         const skipped = !cxPlan[i];   // not in this run's plan — shown dimmed/struck, not ✓
-        if (i === cx.phase) return '<span style="color:#4a9eff;font-weight:600;">' + (i + 1) + '. ' + nm + '</span>';
+        if (i === cx.phase) return '<span style="color:#2ec4b6;font-weight:600;">' + (i + 1) + '. ' + nm + '</span>';
         if (skipped) return '<span style="color:#666;text-decoration:line-through;">' + nm + '</span>';
         if (i < cx.phase) return '<span style="color:#5a5;">✓ ' + nm + '</span>';
         return '<span>' + (i + 1) + '. ' + nm + '</span>';
@@ -17312,7 +17342,7 @@ function cvFitOnCsv1(data) {
 // CV_OMEGA_TARGET / CV_KI_RATIO in 6_functions.ino recomputeCvGains() (the authoritative compute).
 // These mirror the device settings cvOmega / cvKiRatio (Tuning ▸ Voltage). They're `let` and refreshed
 // from the CSV3 echo in updateCvGainModeUI() so the fit preview matches whatever the device will apply.
-let CV_OMEGA_TARGET = 0.20;   // rad/s — target CV closed-loop crossover (default; live value from device)
+let CV_OMEGA_TARGET = 0.286;  // rad/s — target CV closed-loop crossover (≈14 s response default; live value from device)
 let CV_KI_RATIO     = 0.70;   // ρ — Ki = ρ·Kp (default; live value from device)
 // floorA/ampA = commanded low level + step size; sysV = nominal system voltage (12/24/48).
 // Returns {ok, K (V/A = K_dc), Kp, Ki (12V-equiv preview), nUp, relK, deadMs} or {ok:false, reason}.
@@ -17409,7 +17439,8 @@ function cxRenderCVPlant(b) {
     let body = '';
     if (cx.cvFitRunning) {
         const rem = cx.cvFitEndMs ? Math.max(0, Math.ceil((cx.cvFitEndMs - performance.now()) / 1000)) : (cx.cvFitSecs || 64);
-        body += '<p style="color:#4a9eff;">Current square wave running… hold RPM steady, leave other loads alone. <strong>Up to <span id="cvFitCountdown">' + rem + '</span> s</strong> — stops early as soon as two steps agree.</p>';
+        body += '<p style="color:#4a9eff;">Current square wave running… hold RPM steady, leave other loads alone. <strong>Up to <span id="cvFitCountdown">' + rem + '</span> s</strong> — stops early as soon as two steps agree.</p>' +
+            '<p id="cvFitEdgeDbg" style="color:#888;font-size:12px;margin-top:-4px;">Measuring steps…</p>';
     }
     else if (f) {
         if (!f.ok) {
@@ -17449,7 +17480,7 @@ function cxRenderCVPlant(b) {
             const stepsMv = Array.isArray(f.steps) ? f.steps.map(k => (k * 1000).toFixed(1)) : null;
             body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
                 'Measured DC gain: K_dc <strong>' + (f.K * 1000).toFixed(1) + ' mV/A</strong> (±' + (f.relK * 100).toFixed(0) + '% confidence, ' + f.nUp + ' up-steps' + (showDead ? ', dead time ~' + (f.deadMs / 1000).toFixed(2) + ' s' : '') + ').<br>' +
-                'Proposed (12 V-equiv, conservative ω≈' + CV_OMEGA_TARGET.toFixed(2) + ' rad/s): <strong>Kp ' + f.Kp.toFixed(1) + '</strong>, <strong>Ki ' + f.Ki.toFixed(1) + '</strong>.' +
+                'Proposed (12 V-equiv, ~' + Math.round(4 / (CV_OMEGA_TARGET || 0.2)) + ' s response): <strong>Kp ' + f.Kp.toFixed(1) + '</strong>, <strong>Ki ' + f.Ki.toFixed(1) + '</strong>.' +
                 (cx.cvApplied ? '<br><span style="color:#5a5;">Applied — CV gain source set to Auto.</span>' : '') +
                 (stepsMv ? '<div style="margin-top:6px;font-size:12px;color:#999;line-height:1.6;">' +
                     'Per-step gains (mV/A): ' + stepsMv.join(', ') + ' — agree to ' + (f.spread * 100).toFixed(0) + '% (limit 35%).<br>' +
@@ -17506,6 +17537,18 @@ function cxCVPlantStart() {
         if (el && cx && cx.cvFitEndMs) el.textContent = Math.max(0, Math.ceil((cx.cvFitEndMs - performance.now()) / 1000));
         if (cx.cvFitDone || !cvFitCapture) return;
         const e = cvEdgeGains(cvFitCapture.samples, floorA + ampA * 0.5);
+        // Live readout so the early-exit decision is visible (and diagnosable if it never fires).
+        const dbg = document.getElementById('cvFitEdgeDbg');
+        if (dbg) {
+            if (e.edges.length >= 2) {
+                const a = e.edges[0].K, b = e.edges[1].K, m = (a + b) / 2;
+                const agree = m > 1e-4 ? Math.abs(a - b) / m : 1;
+                dbg.textContent = 'Steps so far: ' + (a * 1000).toFixed(1) + ', ' + (b * 1000).toFixed(1) +
+                    ' mV/A (first two ' + (agree * 100).toFixed(0) + '% apart; stops at ' + (EARLY_TOL * 100) + '%).';
+            } else {
+                dbg.textContent = 'Measuring steps (' + e.edges.length + ' read so far)…';
+            }
+        }
         if (e.edges.length >= 2) {
             const a = e.edges[0].K, b = e.edges[1].K, m = (a + b) / 2;
             if (m > 1e-4 && Math.abs(a - b) / m <= EARLY_TOL) finishFit(true);
@@ -17514,7 +17557,9 @@ function cxCVPlantStart() {
     cvFitCapture = { active: true, samples: [], t0: performance.now() };
     // Arm the current square wave via the proven current-tuning path. TuningMode gates G1/G2;
     // fast-OV (hard shutdown) stays live as the backstop. Requires AUTO mode + no other test running.
-    cxGet('wavePeriod=' + (HALF * 2) + '&tuningWaveFloor=' + floorA + '&waveAmplitude=' + ampA + '&tuningWaveform=0&TuningMode=1')
+    // tuningSquareAbrupt=1 → firmware bypasses the setpoint slew so each current edge is a true step
+    // (well-defined instant for the edge-gain fit). Firmware auto-clears it on TuningMode exit.
+    cxGet('tuningSquareAbrupt=1&wavePeriod=' + (HALF * 2) + '&tuningWaveFloor=' + floorA + '&waveAmplitude=' + ampA + '&tuningWaveform=0&TuningMode=1')
         .then(() => {
             cxStopPoll();
             cxPollTimer = setTimeout(() => finishFit(false), MAXRUN * 1000);
@@ -17522,7 +17567,7 @@ function cxCVPlantStart() {
             cx.cvFitDone = true;
             if (cx.cvFitCdTimer) { clearInterval(cx.cvFitCdTimer); cx.cvFitCdTimer = null; }
             if (cvFitCapture) cvFitCapture.active = false;
-            cx.cvFitRunning = false; cxGet('TuningMode=0').catch(() => { });
+            cx.cvFitRunning = false; cxGet('tuningSquareAbrupt=0&TuningMode=0').catch(() => { });
             alert('CV plant fit start failed: ' + err); commissionRender();
         });
 }
@@ -17669,6 +17714,7 @@ function cxFinish() {
         const allDone = (cxLastMask & _ALL) === _ALL;
         if (!allDone) alert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
         closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
+        showMainTab('livedata');   // hop back to the homepage when the wizard finishes
     }).catch(e => alert('Finish failed: ' + e));
 }
 function commissionAbort() {
@@ -17701,7 +17747,7 @@ const COMMISSION_STEPS = [
     { name: 'Verify', desc: 'Seed the current-loop gains and confirm the loop responds.' },
     { name: 'Disturbances', desc: 'Map the worst over-current the field can actually react to.' },
     { name: 'Thresholds', desc: 'Set the over-current trip points above that disturbance floor.' },
-    { name: 'CV plant fit', desc: 'Step the charge current and measure the battery-voltage step gain K_dc (fast edge, slow charge ramp removed); set the voltage-loop Kp = ω/K_dc, Ki = ρ·Kp (conservative) and switch the CV gain source to Auto.' },
+    { name: 'CV plant fit', desc: 'Step the charge current and measure the battery-voltage step gain K_dc (fast edge, slow charge ramp removed); set the voltage-loop Kp = ω/K_dc, Ki = ρ·Kp at the recommended ~14 s response and switch the CV gain source to Auto.' },
 ];
 let cxLastState = 0;   // remembered from the last CSV3 frame, for the clear/restart confirm text
 
@@ -17730,7 +17776,12 @@ function renderCommissionStatus(state, phase, mask) {
     if (ov) {
         let doneCount = 0; for (let i = 0; i < COMMISSION_STEPS.length; i++) if (cxLastMask & (1 << i)) doneCount++;
         if (state === 2) { ov.textContent = 'Commissioned'; ov.style.color = '#2e7d32'; }
-        else if (state === 1) { ov.textContent = 'In progress — ' + doneCount + ' of ' + COMMISSION_STEPS.length + ' steps done'; ov.style.color = '#b8860b'; }
+        else if (state === 1) {
+            // Every step done but state still 1 = the run completed but Finish never committed it
+            // (closed early / dropped network). Say so instead of "in progress" — the button offers Finish.
+            if (doneCount === COMMISSION_STEPS.length) { ov.textContent = 'All steps done — press “Finish commissioning” to save'; ov.style.color = '#b8860b'; }
+            else { ov.textContent = 'In progress — ' + doneCount + ' of ' + COMMISSION_STEPS.length + ' steps done'; ov.style.color = '#b8860b'; }
+        }
         else { ov.textContent = 'Not commissioned'; ov.style.color = '#c62828'; }
     }
 
@@ -17738,20 +17789,33 @@ function renderCommissionStatus(state, phase, mask) {
     if (cl) {
         cl.innerHTML = COMMISSION_STEPS.map((s, i) => {
             const done = !!(cxLastMask & (1 << i));   // ✓ now comes from the per-stage done mask
-            const current = (state === 1) && (i === phase) && (phase < COMMISSION_STEPS.length);
-            const mark = done ? '✓' : (current ? '▶' : '○');
-            const markColor = done ? '#2e7d32' : (current ? '#1565c0' : 'var(--text-muted)');
+            // "Current" = the step the wizard is on. Done always wins, so a finished current step shows ✓.
+            const current = (state === 1) && (i === phase) && (phase < COMMISSION_STEPS.length) && !done;
             const prep = (i === 0);
             const cbAttrs = (cxPlan[i] ? 'checked ' : '') + (prep ? 'disabled ' : '');
             const cbTitle = prep ? 'Prep always runs (snapshot + preconditions)' : 'Run this step in the next commissioning pass';
-            return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--border);">' +
-                '<input type="checkbox" ' + cbAttrs + 'onchange="cxToggleStage(' + i + ', this.checked)" title="' + cbTitle + '" style="margin-top:3px;flex:0 0 auto;cursor:' + (prep ? 'default' : 'pointer') + ';">' +
-                '<span style="flex:0 0 16px;font-weight:700;color:' + markColor + ';line-height:1.5;">' + mark + '</span>' +
-                '<span style="flex:1;line-height:1.45;">' +
-                '<span style="font-weight:' + (current ? '600' : '500') + ';">' + (i + 1) + '. ' + s.name + '</span>' +
-                (current ? ' <span style="color:#1565c0;font-size:12px;">— in progress</span>' : '') +
+            // Status badge sits at the RIGHT of the row (not between the checkbox and the name) so a
+            // completed step is unmistakable next to the run checkboxes. Big bold ✓ DONE when complete;
+            // ▶ RUNNING while the wizard is open on this step, ▶ RESUME when paused (modal closed); ○ otherwise.
+            let badge;
+            if (done) {
+                badge = '<span style="font-size:22px;font-weight:800;color:#2e7d32;line-height:1;">✓</span>' +
+                        '<span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#2e7d32;">DONE</span>';
+            } else if (current) {
+                const lbl = _panelOpen ? 'RUNNING' : 'RESUME';
+                badge = '<span style="font-size:16px;color:#1565c0;line-height:1;">▶</span>' +
+                        '<span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:#1565c0;">' + lbl + '</span>';
+            } else {
+                badge = '<span style="font-size:16px;color:var(--text-muted);line-height:1;">○</span>';
+            }
+            return '<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--border);">' +
+                '<input type="checkbox" ' + cbAttrs + 'onchange="cxToggleStage(' + i + ', this.checked)" title="' + cbTitle + '" style="flex:0 0 auto;cursor:' + (prep ? 'default' : 'pointer') + ';">' +
+                '<span style="flex:1;min-width:0;line-height:1.45;">' +
+                '<span style="font-weight:' + (current ? '700' : '500') + ';">' + (i + 1) + '. ' + s.name + '</span>' +
                 '<br><span style="font-size:12px;color:var(--text-muted);">' + s.desc + '</span>' +
-                '</span></div>';
+                '</span>' +
+                '<span style="flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:1px;min-width:46px;">' + badge + '</span>' +
+                '</div>';
         }).join('');
     }
     // Master "Select all steps" reflects whether every optional stage (1..last) is selected.
@@ -18401,9 +18465,9 @@ window.addEventListener('load', function () {
 
   // Charge-stage palette — matches the live `.charge-stage-*` badge colors in styles.css.
   // Codes per firmware LongTermRecord.chargeStage: 1 bulk,2 absorption,3 float,4 manual,
-  // 5 maintain,6 targetV,7 idle (0 = off/none → bare track).
-  const LT_STAGE_COLORS = { 1:'#00c853', 2:'#7e57c2', 3:'#ffb300', 4:'#ef5350', 5:'#66bb6a', 6:'#42a5f5', 7:'#78909c' };
-  const LT_STAGE_NAMES  = { 1:'Bulk', 2:'Absorption', 3:'Float', 4:'Manual', 5:'Maintain', 6:'Target V', 7:'Idle' };
+  // 5 maintain,6 targetV,7 idle,8 commissioning (0 = off/none → bare track).
+  const LT_STAGE_COLORS = { 1:'#00c853', 2:'#7e57c2', 3:'#ffb300', 4:'#ef5350', 5:'#66bb6a', 6:'#42a5f5', 7:'#78909c', 8:'#8d6e63' };
+  const LT_STAGE_NAMES  = { 1:'Bulk', 2:'Absorption', 3:'Float', 4:'Manual', 5:'Maintain', 6:'Target V', 7:'Idle', 8:'Commissioning' };
 
   // ---- Decimation (ported from the cloud viewer's applyBinning) ----------------
   const LT_MAX_BINS = 120;   // matches the viewer's cap: ≤120 points drawn per chart

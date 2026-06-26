@@ -601,9 +601,9 @@ int forcedFwVersionInt = 0;
 // WiFiClientSecure secureClient;  // Reusable SSL client to prevent stack overflow when we had individual ones for each upload   ABANDONED, THIS WAS NOT GOOD IN FLAKY WIFI
 unsigned long lastHttpsOperationTime = 0;
 const unsigned long HTTPS_MIN_INTERVAL = 500;            // was 2 seconds between any HTTPS calls becasue core0 tiny system stacks (ipc0 = 1024 bytes) , not sure it was necessary
-const unsigned long CONFIG_SNAPSHOT_INTERVAL = 300000;    // 5 min — TEST (production: 86400000 = 24 hr)
+const unsigned long CONFIG_SNAPSHOT_INTERVAL = 86400000;    // 24 hr — production (TEST value was 300000 = 5 min)
 // SENSOR_UPLOAD_INTERVAL is firmware-only (no UI, no LittleFS) — edit + reflash to change.
-const unsigned long SENSOR_UPLOAD_INTERVAL = 120000;          // 2 min — TEST (production: 600000 = 10 min)
+const unsigned long SENSOR_UPLOAD_INTERVAL = 600000;          // 10 min — production (TEST value was 120000 = 2 min)
 const unsigned long BUFFER_UPLOAD_INTERVAL = 13000;  // 13 seconds
 const unsigned long BOATPERF_UPLOAD_INTERVAL = 900000;  // 15 min — field-off-gated upload + cloud re-fit cadence
 unsigned long lastBoatPerfUploadTime = 0;
@@ -613,8 +613,8 @@ int64_t lastAltHealthSyncEpoch = 0;   // unix sec of last SUCCESSFUL alt-health 
 int64_t lastBoatPerfSyncEpoch  = 0;   // unix sec of last SUCCESSFUL boat-perf cloud sync this boot
 // Set to PRODUCTION 2026-06-02. (Other commented options: 14400000 = 4 hr, 1800000 = 30 min TEST.)
 // 2026-06-20: temporarily 6 hr to observe several reboot cycles per day. PRODUCTION = 43200000 (12 hr).
-const unsigned long RESTART_INTERVAL = 21600000;   // 6 hours (TEST — restore 43200000 = 12 hr for production)
-//const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
+const unsigned long RESTART_INTERVAL = 43200000;   // 12 hours (PRODUCTION)
+//const unsigned long RESTART_INTERVAL = 21600000;   // 6 hours (TEST)
 //const unsigned long RESTART_INTERVAL= 1800000;     // 30 mins(TEST)
 
 //Configuration Snapshot Stuff
@@ -1111,7 +1111,8 @@ enum ChargeStageDisplayCode : uint8_t {
   CHARGE_STAGE_MANUAL = 4,
   CHARGE_STAGE_MAINTAIN = 5,
   CHARGE_STAGE_TARGET_V = 6,
-  CHARGE_STAGE_IDLE = 7
+  CHARGE_STAGE_IDLE = 7,
+  CHARGE_STAGE_COMMISSION = 8   // wizard dialog open (commissionHeartbeat fresh) — outranks all charge stages
 };
 uint8_t chargeStageDisplay = 0;
 
@@ -2583,6 +2584,11 @@ int wavePeriod = 10;     //For PID tuning
 int waveAmplitude = 10;  //For PID tuning
 int tuningWaveFloor = 5; // A — floor (trough) the Current Target Generator wave sits on; shared by square + sine. Separate from the Plant tab's SystemIDStabilizeAmps.
 int TuningMode = 0;      //
+bool tuningSquareAbrupt = false;  // when set, the TuningMode square wave bypasses the setpoint slew so the
+                                  // current makes abrupt edges (only the current loop's own bandwidth limits
+                                  // the rise). Used by the CV plant fit, which needs a well-defined step
+                                  // instant for its edge-gain extraction. Transient — auto-cleared on
+                                  // TuningMode exit; never persisted.
 
 // ── Tuning→Current closed-loop sine generator (Stage 2) ───────────────────────
 // Waveform: 0 = square (existing ISE tuning), 1 = sine manual, 2 = sine auto-sweep.
@@ -2712,7 +2718,7 @@ const uint32_t ACC_SETTLE_THERMAL_MS = 120000;  // thermal loop: minutes — req
 
 // === CV Loop Tuning Score System ===
 float cvWaveAmplitudeV = 0.30f;   // V — target rises by this during HIGH phase (LOW phase sits at the real target)
-int cvWavePeriodSec = 30;         // s — full period of CV test wave (one LOW + one HIGH); each half-period = this / 2. Default matches the UI input minimum.
+int cvWavePeriodSec = 30;         // s — full period of the Waveform Generator wave (one LOW + one HIGH); each half-period = this / 2. Default matches the UI input minimum.
 float cvKOvershoot = 10.0f;       // penalty weight on integrated overshoot (user-exposed)
 uint8_t cvConsecutiveReads = 10;  // consecutive filtered reads within ±0.1V to declare settled (~1s at 100ms rate)
 int CVTuningMode = 0;             // 0=off, 1=on
@@ -2861,7 +2867,8 @@ float   cvComputedKi = 25.0f;
 // CV measured-K_dc auto-tune knobs (were #defines CV_OMEGA_TARGET / CV_KI_RATIO; now user-adjustable in
 // Tuning ▸ Voltage). recomputeCvGains() uses these: Kp = cvOmega / K_dc(12V-equiv), Ki = cvKiRatio · Kp.
 // See Working Markdown Docs/CV_AUTOTUNE_PLAN.md §E.
-float   cvOmega      = 0.20f;     // rad/s — target CV closed-loop crossover (conservative; lower = slower/safer)
+float   cvOmega      = 0.286f;    // rad/s — target CV closed-loop crossover. User sets this as a RESPONSE TIME in
+                                  // seconds (dashboard relabels ω as settle = 4/ω); 0.286 ≈ 14 s, the recommended default.
 float   cvKiRatio    = 0.70f;     // ρ — Ki = ρ·Kp (integral zero placement)
 // Battery-temperature gain derate. Board temp (ambientTemp, °F) is a PROXY for battery temp; as the
 // battery cools its internal resistance — which IS the CV plant gain K_dc — rises, so gains computed at
@@ -3276,9 +3283,9 @@ float innerTermP = 0.0f;
 float innerTermI = 0.0f;
 float innerTermD = 0.0f;
 
-// Temperature loop (tempPID) — units: amps
-// Only updated when tempPID.Compute() returns true (~every TempPIDIntervalMs).
-// Values hold between computes, which is correct — the integrator state is stable.
+// Temperature loop diagnostics — units: amps. Logging-only decomposition of the velocity-form
+// penalty (outerTermP + outerTermLookahead + outerTermI == the accumulated penalty); recomputed
+// every tempPID_tick(). See tempPID_tick() in 6_functions.ino for the control law.
 float outerTermP = 0.0f;
 float outerTermI = 0.0f;
 float outerTermLookahead = 0.0f;   // look-ahead share of outerTermP: Kp × max(0, projected − present temp), penalty-signed. Replaced always-zero outerTermD (Kd is hardwired 0; derivative action lives in the projected input)
@@ -3346,6 +3353,7 @@ uint32_t ShutdownPhase2HoldMs = 500;  // ms - hold at rpmMinDuty before slow ram
 // Tuning — all web UI configurable
 float TempPIDKp = 3.0f;             // A/°F proportional gain
 float TempPIDKi = 0.1f;             // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error)
+float TempPIDKiDownFrac = 0.33f;   // velocity-form asymmetric bleed (2026-06-26): below setpoint (eI<0) the integral bleed uses TempPIDKi×this instead of TempPIDKi, so a transient sub-setpoint undershoot does NOT collapse the learned holding penalty (the fridaytherm.csv grow-to-trip cycle). Ratio (not absolute) so it auto-scales with any Ki. 1.0 = symmetric (old behavior); lower = slower release. Clamped [0,1].
 float ThermalLookaheadSec = 60.0f;  // prediction horizon: project this many seconds ahead; size ~= plant dead time (~20s measured) + slope-estimator latency (~30s), NOT the settling time constant
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
@@ -3353,7 +3361,8 @@ float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease 
 
 float WarmupRampRate = 0.0f;      // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
 float warmupCeiling = 0.0f;       // runtime warmup ceiling (not persisted)
-float prevThermalPenalty = 0.0f;  // file-scope, tracks previous slew-limited value
+float prevThermalPenalty = 0.0f;  // velocity-form accumulator: the thermal loop's SOLE memory (always the clamped penalty output). Anti-windup by construction — see tempPID_tick().
+float eP_prev = 0.0f;             // previous-tick floored eP (max(proj,present)−setpoint, ≥0) — the dP=Kp·ΔeP term's history
 
 uint32_t TempPIDIntervalMs = 5000;  // Temperature loop update period (ms) — independent of output current loop and sensor rate
 float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
@@ -3363,18 +3372,18 @@ double tempPIDInput_d = 77.0;        // PID process variable (°F) = max(project
 double tempPIDSetpoint_d = 0.0;      // Setpoint = TemperatureLimitF (real damage limit)
 bool tempPIDActive = false;          // true when temperature PID is in AUTO
 bool tempFilterNeedsReseed = false;  // Set true to force IIR cold-start on next tempFilterUpdate()
-bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the integrator cannot wind UP (P + projection alone handle the approach — prevents approach windup overshoot)
-float thermalHoldEstimate = 0.0f;    // learned equilibrium holding penalty (amps): EMA of the integral term sampled only when genuinely settled at setpoint. The integrator is clamped to this + margin so it reaches the holding level but cannot overbuild during a hot transient dwell (the relaxation-oscillation source).
-bool  thermalHoldValid = false;      // false until the first settled-at-setpoint sample seeds thermalHoldEstimate; while false the equilibrium clamp is disabled (ceiling = penaltyMax)
-float outerPenaltyRaw = 0.0f;        // Tier-0a (2026-06-22): unclamped requested penalty (outerTermP + outerTermI) before output clamp + slew — for the requested-vs-applied saturation diagnostic
+bool thermalIntegratorReleased = false;  // false until PRESENT temp first reaches the regulation setpoint; while false the up-driving dI is held off (P + projection dP alone handle the approach — prevents approach windup overshoot)
+float outerPenaltyRaw = 0.0f;        // Tier-0a (2026-06-22): unclamped requested penalty (prevThermalPenalty + dP + dI) before clamp + slew — for the requested-vs-applied saturation diagnostic
 uint8_t thermalFreezeReason = 0;     // Tier-0a: which integrator-freeze case gated this tick (see ThermalLogEntry.freezeWhy enum)
 uint32_t tempInvalidSinceMs = 0;     // millis() when TempToUse first went invalid (0 = currently valid). Debounces the tempPID deactivation so a single bad sample no longer forces a buffer-clear warmup re-init (the spurious "140°F setpoint" artifact). Added 2026-06-23.
 
-float thermalPenaltyAmps = 0.0f;    // temperature PID output: amps subtracted from target table
-double thermalPenaltyAmps_d = 0.0;  // double version for PID library
+float thermalPenaltyAmps = 0.0f;    // temperature loop output: amps subtracted from target table
 
-//REVERSE because rising temperature should increase the penalty
-PID tempPID(&tempPIDInput_d, &thermalPenaltyAmps_d, &tempPIDSetpoint_d, TempPIDKp, TempPIDKi, 0.0, REVERSE);
+// Velocity-form refactor (2026-06-25): the thermal loop no longer uses a PID_v1_xeng library
+// object — penalty is accumulated directly in prevThermalPenalty (see tempPID_tick()). The
+// former `PID tempPID(...)` instance and its thermalPenaltyAmps_d output double were removed.
+// tempPIDInput_d / tempPIDSetpoint_d remain as plain CSV2 telemetry globals. currentPID (the
+// field/output-current loop) is a SEPARATE instance and is untouched.
 
 
 
@@ -3432,15 +3441,15 @@ struct ThermalLogEntry {
   uint8_t flags;
   uint8_t antiWindupFired;
   uint8_t chargeStageDisplay;
-  uint8_t freezeWhy;  // Tier-0a (2026-06-22): which integrator-freeze case gated this row. 0=winding,1=approach,2=saturation,3=descent,4=risingTransient,5=equilibrium. Priority-ordered when several apply. Was the unused 'pad' byte.
+  uint8_t freezeWhy;  // which dI-accumulation gate applied this row. Re-enumed 2026-06-25 (velocity form): 0=dI applied (winding),1=approach (dI held below setpoint),2=saturation (penaltyRaw clamped to live cap),3=descent (above setpoint+cooling, dI held). Values 4/5 retired. Priority: approach>saturation>descent. Was the unused 'pad' byte.
 
   int16_t outerTermP;
   int16_t outerTermI;
   int16_t outerTermLookahead;  // repurposed from always-zero outerTermD; CSV column renamed to "lookahead"
   int16_t impliedPenalty;
   int16_t thermalSlope;  // thermalSlopeFPerSec × 1000 (0.001 °F/sec per count)
-  int16_t penaltyRaw;    // Tier-0a: unclamped requested penalty (Kp*eP + I), ×10. vs penaltyAmps = applied after clamp+slew. Gap to rpmCap reveals unused derate authority.
-  int16_t holdEstimate;  // Tier-0a: learned equilibrium holding level (thermalHoldEstimate), ×10. -1.0 sentinel until thermalHoldValid.
+  int16_t penaltyRaw;    // Tier-0a: unclamped requested penalty (prevThermalPenalty + dP + dI), ×10. vs penaltyAmps = applied after clamp+slew. Gap to rpmCap reveals unused derate authority.
+  int16_t holdEstimate;  // DEAD since 2026-06-25 velocity-form refactor (no holding estimator). Always the -1.0 sentinel (-10). Kept for log layout / sizeof / analysis-script stability.
   // gainKp/Ki/Lookahead written once in pidlog CONST row
 };
 

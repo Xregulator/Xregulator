@@ -1003,8 +1003,9 @@ enum Csv3Index {
   CSV3_CommissionTempF,         // board temp when CV fit applied — derate reference (°F ×10; -32768 = unset/NaN)
   CSV3_battTempDerateEnable,    // battery-temp gain derate master on/off (0/1)
   CSV3_battTempCoeff,           // battery fractional resistance change per °C; ×10000
+  CSV3_TempPIDKiDownFrac,       // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
 
-  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25
+  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26
 };
 
 
@@ -3562,14 +3563,14 @@ void setupServer() {
         HiLow = newMode;
         settingWrite(NK_HiLow, inputMessage.c_str());
         loadCapTablesForMode(HiLow);  // swap active cap tables to match new mode
-        // Do NOT deactivate the thermal PID here. The new cap is already honored: the
-        // always-runs path re-applies tempPID.SetOutputLimits((penaltyMin, penaltyMax))
-        // every tick (penaltyMax = MaxTableValue, which just changed), and the PID library
-        // re-clamps the integrator to the new bounds immediately. Setting tempPIDActive=false
-        // would instead force the re-enable path, which CLEARS the slope buffer — that restarts
-        // the 60s warmup window and drops the setpoint to limit-20 (the spurious 20°F reduction
-        // seen on a Lo<->Hi switch), and also re-seeds the integrator from P-only, dumping the
-        // learned holding level. A mode switch must be bumpless for the thermal loop.
+        // Do NOT deactivate the thermal loop here. The new cap is already honored: the
+        // velocity-form penalty update clamps to the LIVE capCurrent (which tracks the new
+        // table) every tick, so the penalty re-bounds to the new cap immediately. Setting
+        // tempPIDActive=false would instead force the re-enable path, which CLEARS the slope
+        // buffer — that restarts the 60s warmup window and drops the setpoint to limit-20 (the
+        // spurious 20°F reduction seen on a Lo<->Hi switch), and also re-seeds the penalty
+        // accumulator from P-only, dumping the learned holding level. A mode switch must be
+        // bumpless for the thermal loop.
         stateRevision++;              // force immediate CSVData echo of new table values
         if (HiLow == 0) {
           // Switching to Low drops the ceiling. Capture the present ceiling and arm the glide so the
@@ -4418,6 +4419,10 @@ void setupServer() {
         TuningMode = requested;
       }
     }
+    if (request->hasParam("tuningSquareAbrupt")) {
+      foundParameter = true;   // transient (NOT persisted): CV plant fit asks for abrupt square edges
+      tuningSquareAbrupt = (request->getParam("tuningSquareAbrupt")->value().toInt() != 0);
+    }
     if (request->hasParam("commitTuningScore")) {
       foundParameter = true;
       manualCommitTuningRequested = true;
@@ -4698,10 +4703,20 @@ void setupServer() {
     // cvLambdaMult handler removed 2026-06-25 — λ tuning retired; the Response Speed slider now drives cvOmega.
     if (request->hasParam("cvOmega")) {  // CV auto-tune target crossover ω (rad/s) — drives Kp = ω/K_dc
       foundParameter = true;
-      cvOmega = clamp_f(request->getParam("cvOmega")->value().toFloat(), 0.05f, 0.60f);
+      cvOmega = clamp_f(request->getParam("cvOmega")->value().toFloat(), 0.05f, 0.80f);  // 0.80 ≈ 5 s, fast end of the seconds control
       settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
       recomputeCvGains();
       queueConsoleMessageF("CV auto-tune omega: %.2f rad/s", cvOmega);
+    }
+    // User-facing CV Response Time in seconds → ω = 4/sec (settle ≈ 4 time constants). Stored as cvOmega;
+    // the dashboard relabels ω as seconds, but ω stays the internal/NVS unit so recomputeCvGains is unchanged.
+    if (request->hasParam("cvRespS")) {
+      foundParameter = true;
+      float respS = request->getParam("cvRespS")->value().toFloat();
+      cvOmega = clamp_f((respS > 0.0f) ? (4.0f / respS) : 0.286f, 0.05f, 0.80f);
+      settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("CV response time: %.0f s (omega %.2f rad/s)", 4.0f / cvOmega, cvOmega);
     }
     if (request->hasParam("cvKiRatio")) {  // CV auto-tune Ki/Kp ratio ρ — Ki = ρ·Kp
       foundParameter = true;
@@ -4801,14 +4816,23 @@ void setupServer() {
       inputMessage = request->getParam("TempPIDKp")->value();
       settingWrite(NK_TempPIDKp, inputMessage.c_str());
       TempPIDKp = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);      queueConsoleMessageF("Temp PID Kp updated to: %.6f", TempPIDKp);
+      // Velocity form reads TempPIDKp directly each tick — no library object to retune.
+      queueConsoleMessageF("Temp PID Kp updated to: %.6f", TempPIDKp);
     }
     if (request->hasParam("TempPIDKi")) {
       foundParameter = true;
       inputMessage = request->getParam("TempPIDKi")->value();
       settingWrite(NK_TempPIDKi, inputMessage.c_str());
       TempPIDKi = inputMessage.toFloat();
-      tempPID.SetTunings(TempPIDKp, TempPIDKi, 0.0);      queueConsoleMessageF("Temp PID Ki updated to: %.6f", TempPIDKi);
+      // Velocity form reads TempPIDKi directly each tick — no library object to retune.
+      queueConsoleMessageF("Temp PID Ki updated to: %.6f", TempPIDKi);
+    }
+    if (request->hasParam("TempPIDKiDownFrac")) {
+      foundParameter = true;
+      inputMessage = request->getParam("TempPIDKiDownFrac")->value();
+      TempPIDKiDownFrac = constrain(inputMessage.toFloat(), 0.0f, 1.0f);  // ratio of Ki used to bleed below setpoint
+      settingWrite(NK_TempPIDKiDownFrac, String(TempPIDKiDownFrac, 3).c_str());
+      queueConsoleMessageF("Temp PID below-setpoint bleed ratio set to: %.2f x Ki", TempPIDKiDownFrac);
     }
     if (request->hasParam("ThermalLookaheadSec")) {
       foundParameter = true;
@@ -7707,7 +7731,8 @@ void SendWifiData() {
                                "%d,"  // vTgtRampEnable
                                "%d,"  // CommissionTempF
                                "%d,"  // battTempDerateEnable
-                               "%d",  // battTempCoeff
+                               "%d,"  // battTempCoeff
+                               "%d",  // TempPIDKiDownFrac
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8033,7 +8058,8 @@ void SendWifiData() {
                                (int)vTgtRampEnable,                             // CSV3_vTgtRampEnable (slew master switch 0/1)
                                isnan(CommissionTempF) ? -32768 : (int)lroundf(CommissionTempF * 10.0f),  // CSV3_CommissionTempF (°F ×10; -32768 = unset)
                                (int)battTempDerateEnable,                       // CSV3_battTempDerateEnable (0/1)
-                               SafeInt(battTempCoeff, 10000)                    // CSV3_battTempCoeff (fractional R change per °C, ×10000)
+                               SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
+                               SafeInt(TempPIDKiDownFrac, 1000)                 // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

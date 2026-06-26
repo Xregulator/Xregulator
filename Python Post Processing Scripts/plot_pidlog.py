@@ -348,6 +348,7 @@ STAGE_COLORS = {
     5: ("#388e3c", "MAINTAIN"),
     6: ("#1565c0", "TARGET-V"),
     7: ("#888888", "IDLE"),
+    8: ("#795548", "COMMISSIONING"),
 }
 
 EV_COLOR_CV     = "#00838f"   # enteringCV vlines

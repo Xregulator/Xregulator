@@ -215,6 +215,7 @@ THERMAL_MODE_COLORS = {
     "maintain":   "#388e3c",
     "targetV":    "#1565c0",
     "idle":       "#777777",
+    "commissioning": "#795548",
     "antiWindup": "#c62828",
 }
 
@@ -243,6 +244,8 @@ def mode_label_color(row):
         return "MAINTAIN", THERMAL_MODE_COLORS["maintain"]
     if stage == 6:
         return "TARGET V", THERMAL_MODE_COLORS["targetV"]
+    if stage == 8:
+        return "COMMISSIONING", THERMAL_MODE_COLORS["commissioning"]
 
     return "IDLE", THERMAL_MODE_COLORS["idle"]
 

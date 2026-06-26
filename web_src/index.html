@@ -5247,7 +5247,7 @@
 
         <hr />
         <p class="card-group-title" style="margin:12px 0 10px 0;">Steps</p>
-        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. ✓ = done, ▶ = in progress, ○ = not yet run. Tick the steps to run, then press the button below — coupled steps are selected automatically.</p>
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 4px 0;">Progress is saved on the regulator, so it survives a page reload and shows the same on any device. The badge on the right of each step shows its state: <strong style="color:#2e7d32;">✓ DONE</strong> = finished, <strong style="color:#1565c0;">▶</strong> = the step you're on (RUNNING while the wizard is open, RESUME when paused), ○ = not yet run. Tick the steps to run, then press the button below — coupled steps are selected automatically.</p>
         <!-- Select-all master + per-step checkboxes rendered by renderCommissionStatus(). -->
         <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin:6px 0 2px 2px;cursor:pointer;">
           <input type="checkbox" id="commission-select-all" onchange="cxToggleSelectAll(this.checked)" checked> Select all steps
@@ -6348,7 +6348,7 @@
                 <!-- Enable/Disable Test Mode -->
                 <div class="form-row">
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>CV Tuning Mode (<span id="CVTuningMode_echo">?</span>):</span>
+                    <span>Waveform Generator (<span id="CVTuningMode_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
                       <span class="tooltip-box">Enables the square-wave voltage dithering test. The regulator briefly raises the target by the wave amplitude for half a period (HIGH phase), then drops back to the real target (LOW phase), repeating to score step-up settling time and overshoot. At least 1 scored HIGH-phase cycle is required before a log entry can be committed. Disable to commit the current run.</span>
                     </span>
@@ -6560,7 +6560,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned plant fit (the measured K_dc from the CV plant-fit step) via Kp = ω ÷ K_dc, Ki = ρ × Kp — you set only the response speed ω (the slider/field below). <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned plant fit (the measured K_dc from the CV plant-fit step) via Kp = ω ÷ K_dc, Ki = ρ × Kp — you set only the desired recovery speed in the "CV Response Time (s)" field below (ω is derived from it). <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6571,7 +6571,7 @@
                           onchange="if(handleUserToggle('cvGainMode_checkbox', 'cvGainMode', 'cvGainMode')) { this.form.submit(); submitMessage(); }" />
                         <span class="slider round"></span>
                       </label>
-                      <span class="toggle-label">Auto ω</span>
+                      <span class="toggle-label">Auto</span>
                       <input id="cvGainMode" name="cvGainMode" type="number" value="" style="display:none;" />
                     </form>
                   </div>
@@ -6581,19 +6581,8 @@
                 <div id="cvAutoBlock">
                   <hr />
                   <div class="form-row">
-                    <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                      <span>Response Speed&nbsp; ω = <span id="cvOmegaSlider_echo">0.20</span> rad/s&nbsp; <span style="opacity:0.7;">(settle <span id="cvPredSettle">—</span>)</span>:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single "laziness" knob for Auto tuning — the target closed-loop crossover ω (loop speed) in radians/second. Larger ω = faster, tighter; smaller = slower, smoother, more overshoot margin. Default 0.20 (~20 s settle) is conservative. Kp/Ki are recomputed from the commissioned plant fit (the measured K_dc from the CV plant-fit step) using Kp = ω ÷ K_dc whenever you move this — they are NOT continuously re-measured. This is the same value as the "CV auto-tune ω target" field below; the slider just makes it easy to sweep.</span></span>
-                    </div>
-                    <div class="form-input">
-                      <input id="cvOmegaSlider" type="range" min="0.05" max="0.6" step="0.01" value="0.20"
-                             style="width:100%;" oninput="onCvOmegaInput(this)" onchange="onCvOmegaCommit(this)" />
-                    </div>
-                  </div>
-                  <div class="form-row">
                     <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
                       <span id="cvFitStatus">No plant fit yet — run the CV plant-fit step in commissioning. Auto uses safe defaults until then.</span>
-                      <div style="margin-top:4px;">Computed gains (12V-equiv): Kp = <strong><span id="cvComputedKp_echo">?</span></strong> A/V,&nbsp; Ki = <strong><span id="cvComputedKi_echo">?</span></strong> A/(V·s)</div>
                     </div>
                   </div>
                 </div>
@@ -6657,13 +6646,13 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>CV auto-tune ω target (rad/s) (<span id="cvOmega_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how fast the <strong>Auto</strong> gain mode makes the voltage loop respond — the target closed-loop crossover (loop speed), in radians/second. The CV plant-fit step measures the battery's DC gain K_dc and then sets <strong>Kp = ω ÷ K_dc</strong> and <strong>Ki = (Ki/Kp ratio) × Kp</strong>. Lower ω = slower, gentler, more overshoot margin (safer for lithium near absorption); higher ω = faster but closer to overshoot. Default 0.20 (~10 s response). Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
+                    <span>CV Response Time (s) (<span id="cvRespS_echo">?</span>):<span id="cvRespPreview" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">&nbsp;</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how fast the auto gain mode pulls battery voltage back to target after a disturbance or target change. Valid range 5–80 s; recommended 13–15 s (leaves some margin for cold batteries, which have higher internal resistance and can lead to overshoot). The other floor is the field ramp-rate limit (currently <strong><span id="cvRespRampNote">—</span> %/s</strong> of duty), so stay clear of that or you'll start seeing a more linear / less exponential recovery. Only affects Auto mode.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="cvOmega" type="number" step="0.01" min="0.05" max="0.6" />
+                      <input id="cvRespS_input" name="cvRespS" type="number" step="1" min="5" max="80" oninput="previewCvResp()" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -6689,7 +6678,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Battery-Temp Gain Derate (<span id="battTempDerateEnable_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The CV plant fit measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — whatever the board was when you commissioned. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present board temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the ω target or Ki/Kp ratio. Board temperature is a <strong>proxy</strong> for battery temperature, but the derate uses only the <strong>change</strong> in board temp since commissioning — so a constant board-warmer-than-battery offset cancels out; it only needs that offset to stay roughly stable, which it does. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The CV plant fit measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — whatever the board was when you commissioned. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present board temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the response-time target or Ki/Kp ratio. Board temperature is a <strong>proxy</strong> for battery temperature, but the derate uses only the <strong>change</strong> in board temp since commissioning — so a constant board-warmer-than-battery offset cancels out; it only needs that offset to stay roughly stable, which it does. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -7039,6 +7028,21 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Below-Setpoint Bleed (× Ki) (<span id="TempPIDKiDownFrac_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Asymmetric integral release. When the temperature is BELOW the control target, the penalty unwinds at this fraction of the integral gain instead of the full rate. Lower values make the loop "remember" its holding penalty through a brief dip below target, so the next heat-soak climb starts near the level needed to hold setpoint instead of rebuilding from near zero — this is what stops the slow temperature oscillation from growing into an over-temperature trip on a hard/hot installation. A genuinely cold alternator still releases derate, just more slowly. 1.00 = symmetric (releases as fast as it builds); 0.33 default. Above target, the full integral gain always applies. Clamped 0–1.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="TempPIDKiDownFrac" type="number" step="0.01" min="0" max="1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. Projected temperature = current temperature + rate of rise × this lookahead, where the current temperature is the raw sensor reading (DS18B20) or the smoothed reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Works best when sized to the sensor's heat-conduction delay plus the rate-measurement window (~50–60 s for a typical case-mounted sensor); oversizing causes a slow temperature oscillation around the target. Clamped to 0–300s.</span></span>
                   </div>
@@ -7201,7 +7205,7 @@
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Overview:</strong> The output current loop and the voltage loop each have their own
-                  dedicated live tuning mode (Tuning Mode for the inner current loop, CV Tuning Mode for the
+                  dedicated live tuning mode (Tuning Mode for the inner current loop, Waveform Generator for the
                   voltage loop). Tune them in that order — inner loop first, then voltage — because each layer
                   depends on the one beneath it being stable. This section covers the inner current loop; the
                   voltage loop has its own dedicated tab with a built-in step test and live scoring. The
@@ -11027,11 +11031,11 @@
             <button type="button" id="faScopeFiltBtn" class="cap-mode-btn" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
           </div>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
-            <b>Raw</b> shows every sample at the channel's full 20,000-per-second rate — individual rectifier
-            ripple pulses, plus single-sample noise glitches. <b>Filtered</b> applies the same 16-sample moving
-            average (boxcar-16) the firmware uses before analysis: it rolls off above roughly 550 Hz (first null
-            at 1.25 kHz) and shrinks single-sample spikes about 16×. Filtered is what the Resonance &amp; Ripple Map and
-            the fault detector's loudness measurement actually see. Download CSV always saves both columns.</span></span>
+            The "scope" displays a snapshot of alternator output current, sampled 20,000 times per second — fast
+            enough to show the rectifier ripple pulses, mechanical drive resonances, and other content the normal
+            current reading averages away. It is diagnostic only (plays no part in regulation) and refreshes every
+            few seconds. The Filtered trace applies a 16 sample boxcar moving average (same one used by Resonance
+            and Ripple Map).</span></span>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadFaScopeCsv()">Download CSV</button>
           <span id="fastscope-status" style="font-size:13px; color:#666;">No capture yet. Refreshes every 5 seconds; each capture is a 20,000-per-second snapshot.</span>
         </div>
@@ -11048,24 +11052,6 @@
           <span id="fastscope-cycle-hint" style="font-size:13px; color:#666; flex-basis:100%; min-height:1.2em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
         </div>
         <div class="plot-container" id="fastscope-plot" style="margin-top:8px;"></div>
-        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
-          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
-          <div style="margin-top:8px;line-height:1.5;">
-            <p><b>What you are seeing.</b> A half-second snapshot of alternator output current, sampled
-              20,000 times per second — fast enough to show the individual ripple pulses the rectifier
-              produces, belt and mounting vibration, and electrical noise that the normal once-per-tick
-              current reading averages away. It refreshes automatically every few seconds with the most recent half second.</p>
-            <p><b>Reading the trace.</b> A healthy alternator shows an even comb of small ripple pulses
-              riding on the average current. The view buttons set how many milliseconds of the capture
-              are shown; the hint above the plot reports roughly how many engine and alternator
-              revolutions that window spans, worked out from the live engine speed and the pulley
-              ratio (the alternator turns faster than the engine), so you can relate what you see to
-              shaft rotation.</p>
-            <p><b>Measurement-only.</b> This channel is a diagnostic instrument. It plays no part in
-              voltage or current regulation, and if its sense wire is broken the regulator notes it in
-              the Console and simply stops sampling.</p>
-          </div>
-        </details>
       </div>
 
       <!-- Reference flipbook: one frozen page per 1000-RPM band + anomaly captures.
@@ -11079,6 +11065,12 @@
             <button type="button" id="faFlipRawBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('raw')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
             <button type="button" id="faFlipFiltBtn" class="cap-mode-btn" onclick="faFlipViewToggle('filt')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
           </div>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
+            A photo album of healthy waveforms. The first time the engine runs steadily in each RPM band (and
+            alternator is charging at 20–100 A), the regulator permanently freezes a snapshot of the current
+            waveform, a "known good" record to compare against at any point in the future. Anomaly captures sit
+            alongside so you can see before/after. Diagnostic only. Filtered trace is a 16 sample boxcar moving
+            average (same one used by Resonance and Ripple Map).</span></span>
           <button type="button" class="btn-secondary btn-sm" onclick="downloadFaFlipPageCsv()">Download CSV</button>
           <span id="fastflip-status" style="font-size:13px; color:#666;"></span>
         </div>
@@ -11098,22 +11090,6 @@
 
         <div id="fastflip-meta" style="font-size:13px; color:#666; margin-top:8px;"></div>
         <div class="plot-container" id="fastflip-plot" style="margin-top:8px;"></div>
-        <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
-          <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
-          <div style="margin-top:8px;line-height:1.5;">
-            <p><b>A photo album of healthy waveforms.</b> The first time the engine runs steadily in each
-              1000-RPM band (with output between 20 and 100 amps), the regulator freezes a 200-millisecond
-              snapshot of the current waveform as that band's reference page. Pages never change once
-              captured — they are the "known good" record to compare against later in life.</p>
-            <p><b>Anomaly captures.</b> If the rectifier/stator monitor ever flags an abnormal pulse
-              pattern, it saves a snapshot alongside the references so you can see before-and-after on
-              the same screen. The chart's Pause button freezes these so a newer fault can't overwrite
-              one you're examining.</p>
-            <p><b>Re-baseline</b> wipes the reference pages only (after an alternator or belt replacement,
-              for example); fresh references are captured automatically on the next steady runs. Anomaly
-              captures are kept.</p>
-          </div>
-        </details>
       </div>
       </details>
 
@@ -12126,7 +12102,7 @@
         <div style="margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
           <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:#888; margin-bottom:4px;">
             <span>Engine RPM (last ~15 s) — hold steady during tests</span>
-            <strong id="cx-rpm-spark-val" style="color:#E91E63; font-size:13px;">—</strong>
+            <strong id="cx-rpm-spark-val" style="color:#2ec4b6; font-size:13px;">—</strong>
           </div>
           <canvas id="cxRpmSpark" style="display:block; width:100%; height:48px;"></canvas>
         </div>

@@ -1687,6 +1687,12 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempPIDKi = settingRead(NK_TempPIDKi).toFloat();
   }
 
+  if (!settingExists(NK_TempPIDKiDownFrac)) {
+    settingWrite(NK_TempPIDKiDownFrac, String(TempPIDKiDownFrac, 3).c_str());
+  } else {
+    TempPIDKiDownFrac = settingRead(NK_TempPIDKiDownFrac).toFloat();
+  }
+
 
   if (!settingExists(NK_TempPIDIntervalMs)) {
     settingWrite(NK_TempPIDIntervalMs, String(TempPIDIntervalMs).c_str());

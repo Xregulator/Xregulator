@@ -11,7 +11,7 @@ State strip (below each plot):
   - binding-cap track (capReason): which layer actually set the current ceiling each tick
     (purple=KHard, teal=iExcess, orange=loadDump; blank=unclamped) — answers "is KHard
     doing anything?". Console also prints the per-reason sample share at load time.
-  - cvActive bar (green when CV active, grey otherwise)
+  - mode bar (brown=COMMISSIONING stage, green=CV active, grey=CV off)
   - fastOvActive overlay (red when FastOV or iExcess active; load dump has its own track)
   - Tick marks: voltLoopFired (pink), hardClamp (purple),
                 iExcess (teal), loadDumpActive (orange)
@@ -299,6 +299,7 @@ df["iExcess"]        = _to_int("iExcess")
 df["iExcessBulk"]    = _to_int("iExcessBulk")   # Group 3 BULK sub-mode (current-control phase); older logs lack it → all 0
 df["loadDumpActive"] = _to_int("loadDumpActive")
 df["capReason"]      = _to_int("capReason")   # 0=none 1=KHard_G1 2=KHard_G2 3=iExcess 4=loadDump 5=iExcessBulk (binding cap; older logs lack it → all 0)
+df["chargeStageDisplay"] = _to_int("chargeStageDisplay")   # 8 = COMMISSIONING (older logs lack it → all 0, band never drawn)
 
 # capReason: which protection layer was the BINDING current cap each tick. This answers
 # "does KHard actually do anything?" — KHard only matters when capReason is 1 or 2.
@@ -463,6 +464,9 @@ def add_ov_shading(ax, df):
         ax.axvspan(ov_start, df["t_plot"].iloc[-1], color="#c62828", alpha=0.08)
 
 
+COMMISSIONING_COLOR = "#795548"   # brown — matches plot_pidlog / plot_thermallog commissioning mode
+
+
 def add_voltloop_vlines(ax, df):
     """Faint pink vlines where voltage loop fired."""
     for t in df.loc[df["voltLoopFired"] == 1, "t_plot"]:
@@ -542,20 +546,28 @@ def draw_flag_bars(ax, df):
                     va="bottom", ha="center", fontsize=7, fontweight="bold",
                     color=tcol, clip_on=False)
 
-    # --- Row 5: cvActive mode bar — green/grey segments ---
+    # --- Row 5: mode bar — brown=COMMISSIONING (stage 8), green=CV active, grey=CV off ---
+    # COMMISSIONING is a charge-stage mode, not a protection event, so it lives in this
+    # mode row (overriding cv on/off) the same way it does in plot_pidlog / plot_thermallog.
     cv_offset = 5 * spacing
+    _cv  = df["cvActive"].values
+    _stg = (df["chargeStageDisplay"].values if "chargeStageDisplay" in df.columns
+            else np.zeros(len(df), dtype="int64"))
+    def _mode_color(i):
+        if _stg[i] == 8:
+            return COMMISSIONING_COLOR
+        return "#2e7d32" if _cv[i] else "#aaaaaa"
     prev_t   = df["t_plot"].iloc[0]
-    prev_val = df["cvActive"].iloc[0]
+    prev_col = _mode_color(0)
     for i in range(1, len(df)):
-        val = df["cvActive"].iloc[i]
-        if val != prev_val or i == len(df) - 1:
+        col = _mode_color(i)
+        if col != prev_col or i == len(df) - 1:
             t     = df["t_plot"].iloc[i]
-            color = "#2e7d32" if prev_val else "#aaaaaa"
             width = t - prev_t
             ax.barh(cv_offset + flag_h / 2, width, left=prev_t, height=flag_h,
-                    color=color, alpha=0.85, align="center")
+                    color=prev_col, alpha=0.85, align="center")
             prev_t   = t
-            prev_val = val
+            prev_col = col
 
     # --- Row 4: voltLoopFired — tick marks (fires every loop tick) ---
     vl_offset = 4 * spacing
@@ -593,7 +605,7 @@ def draw_flag_bars(ax, df):
     # Row names in the left gutter (y-tick labels) — never painted over the data.
     row_centers = [k * spacing + flag_h / 2 for k in range(n_rows)]
     row_names   = ["loadDump", "iExcess", "hardClamp", "fastOV",
-                   "voltLoop", "cvActive", "binding cap"]   # rows 0..6, bottom -> top
+                   "voltLoop", "mode", "binding cap"]   # rows 0..6, bottom -> top (row 5 = CV on/off + COMMISSIONING)
     ax.set_yticks(row_centers)
     ax.set_yticklabels(row_names, fontsize=7.5)
     ax.tick_params(axis="y", length=0, pad=2)
@@ -609,6 +621,7 @@ def draw_flag_bars(ax, df):
         Patch(color="#8c564b",            label="hardClamp"),
         Patch(color="#2e7d32",            label="cvActive (CV on)"),
         Patch(color=EV_COLOR_VLOOP,       label="voltLoop tick"),
+        Patch(color=COMMISSIONING_COLOR,  label="COMMISSIONING (mode)"),
     ]
     _evleg = ax.figure.legend(handles=_key, loc="upper right", bbox_to_anchor=(0.995, 0.995),
                               ncol=2, fontsize=7, framealpha=0.9, borderpad=0.4,
