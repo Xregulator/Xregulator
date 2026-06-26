@@ -1593,10 +1593,30 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvGainMode = (uint8_t)settingRead(NK_cvGainMode).toInt();
   }
-  if (!settingExists(NK_cvLambdaMult)) {
-    settingWrite(NK_cvLambdaMult, String(cvLambdaMult, 2).c_str());
+  if (!settingExists(NK_cvOmega)) {
+    settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
   } else {
-    cvLambdaMult = settingRead(NK_cvLambdaMult).toFloat();
+    cvOmega = settingRead(NK_cvOmega).toFloat();
+  }
+  if (!settingExists(NK_cvKiRatio)) {
+    settingWrite(NK_cvKiRatio, String(cvKiRatio, 3).c_str());
+  } else {
+    cvKiRatio = settingRead(NK_cvKiRatio).toFloat();
+  }
+  if (!settingExists(NK_vTgtRampEnable)) {
+    settingWrite(NK_vTgtRampEnable, String((int)vTgtRampEnable).c_str());
+  } else {
+    vTgtRampEnable = (uint8_t)settingRead(NK_vTgtRampEnable).toInt();
+  }
+  if (!settingExists(NK_vTgtRampUp)) {
+    settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
+  } else {
+    vTgtRampUp = settingRead(NK_vTgtRampUp).toFloat();
+  }
+  if (!settingExists(NK_vTgtRampDn)) {
+    settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
+  } else {
+    vTgtRampDn = settingRead(NK_vTgtRampDn).toFloat();
   }
   if (!settingExists(NK_cvPlantK)) {
     settingWrite(NK_cvPlantK, String(cvPlantK, 5).c_str());
@@ -1612,6 +1632,21 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_cvPlantL, String(cvPlantL, 3).c_str());
   } else {
     cvPlantL = settingRead(NK_cvPlantL).toFloat();
+  }
+  // CommissionTempF — board temp stamped when the CV plant fit was applied; reference for the battery-
+  // temp gain derate. No default write: absence = never commissioned = no derate (stays NaN).
+  if (settingExists(NK_CommissionTempF)) {
+    CommissionTempF = settingRead(NK_CommissionTempF).toFloat();
+  }
+  if (!settingExists(NK_battTempDerateEn)) {
+    settingWrite(NK_battTempDerateEn, String((int)battTempDerateEnable).c_str());
+  } else {
+    battTempDerateEnable = settingRead(NK_battTempDerateEn).toInt() != 0;
+  }
+  if (!settingExists(NK_battTempCoeff)) {
+    settingWrite(NK_battTempCoeff, String(battTempCoeff, 4).c_str());
+  } else {
+    battTempCoeff = settingRead(NK_battTempCoeff).toFloat();
   }
   // coldChargeLockoutEnable — master on/off for the board-temp cold-charge lockout (lithium protection)
   if (!settingExists(NK_coldChargeLockoutEnable)) {

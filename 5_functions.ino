@@ -2866,6 +2866,15 @@ void _ReadAnalogInputs_inner() {
                          if (isfinite(newTemp) && newTemp > -40.0f && newTemp < 85.0f) {  // BMP388 rated range in °C
                            ambientTemp = newTemp * 1.8f + 32.0f;  // convert °C to °F for storage
                            MARK_FRESH(IDX_AMBIENT_TEMP);
+                           // Board temp drifted → refresh the battery-temp gain derate. Gated to a ≥0.5°F move
+                           // and only when a commissioned reference exists, so it's near-free. recomputeCvGains
+                           // is already called cross-core from Core-0 web handlers; this task is also Core 0.
+                           static float lastDerateTempF = NAN;
+                           if (battTempDerateEnable && !isnan(CommissionTempF) &&
+                               (isnan(lastDerateTempF) || fabsf(ambientTemp - lastDerateTempF) >= 0.5f)) {
+                             lastDerateTempF = ambientTemp;
+                             recomputeCvGains();
+                           }
                          }
                        }
 

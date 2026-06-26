@@ -4406,21 +4406,13 @@
                   <span>Dashboard Update Rate (ms) (<span id="webgaugesinterval_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
-                    <span class="tooltip-box">How often this dashboard / phone app receives fresh sensor data
-                      from the regulator, in milliseconds. About 10 updates per second is right for almost
-                      everyone.
+                    <span class="tooltip-box">How often the dashboard receives fresh sensor data, in milliseconds
+                      (default 100 ms ≈ 10/s). Affects the display only, not how the regulator controls the
+                      alternator.
                       <br><br>
-                      <b>Lower values</b> (e.g. 50 ms) make gauges and plots feel snappier but increase the
-                      regulator's WiFi and CPU load. Going much below 50 ms can start to crowd out the regulator's
-                      other tasks.
-                      <br><br>
-                      <b>Higher values</b> (e.g. 1000 ms or more) reduce network traffic but make the live display
-                      feel laggy and stretch plot points apart.
-                      <br><br>
-                      This setting only affects how fast data is pushed to your <i>display</i>. It has no effect
-                      on how fast the regulator actually controls the alternator. <b>Most users should leave this
-                      at the default.</b>
-                    </span>
+                      <b>Advanced — not recommended.</b> Several display features assume the default rate; changing
+                      it has downstream effects (plot spacing, buffer windows) that may need firmware changes to
+                      track correctly. Leave at default unless you know why you're changing it.</span>
                   </span>
                 </div>
                 <div class="form-input">
@@ -6568,7 +6560,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto (λ-based)</strong> computes them from the measured plant (from the CV plant-fit commissioning step) using lambda tuning — you set only how lazy the loop is (λ). <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned plant fit (the measured K_dc from the CV plant-fit step) via Kp = ω ÷ K_dc, Ki = ρ × Kp — you set only the response speed ω (the slider/field below). <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6579,7 +6571,7 @@
                           onchange="if(handleUserToggle('cvGainMode_checkbox', 'cvGainMode', 'cvGainMode')) { this.form.submit(); submitMessage(); }" />
                         <span class="slider round"></span>
                       </label>
-                      <span class="toggle-label">Auto λ</span>
+                      <span class="toggle-label">Auto ω</span>
                       <input id="cvGainMode" name="cvGainMode" type="number" value="" style="display:none;" />
                     </form>
                   </div>
@@ -6590,12 +6582,12 @@
                   <hr />
                   <div class="form-row">
                     <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                      <span>Response Speed&nbsp; λ = <span id="cvLambdaMult_echo">2.0</span> × dead-time&nbsp; <span style="opacity:0.7;">(settle <span id="cvPredSettle">—</span>)</span>:</span>
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single "laziness" knob for Auto tuning. λ is a multiple of the loop's measured dead time L. Larger = slower, smoother, more stability margin, no overshoot; smaller = faster, tighter. Default 2× is conservative. Kp/Ki are recomputed live from the measured plant whenever you move this.</span></span>
+                      <span>Response Speed&nbsp; ω = <span id="cvOmegaSlider_echo">0.20</span> rad/s&nbsp; <span style="opacity:0.7;">(settle <span id="cvPredSettle">—</span>)</span>:</span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The single "laziness" knob for Auto tuning — the target closed-loop crossover ω (loop speed) in radians/second. Larger ω = faster, tighter; smaller = slower, smoother, more overshoot margin. Default 0.20 (~20 s settle) is conservative. Kp/Ki are recomputed from the commissioned plant fit (the measured K_dc from the CV plant-fit step) using Kp = ω ÷ K_dc whenever you move this — they are NOT continuously re-measured. This is the same value as the "CV auto-tune ω target" field below; the slider just makes it easy to sweep.</span></span>
                     </div>
                     <div class="form-input">
-                      <input id="cvLambdaSlider" type="range" min="0.5" max="15" step="0.5" value="2"
-                             style="width:100%;" oninput="onCvLambdaInput(this)" onchange="onCvLambdaCommit(this)" />
+                      <input id="cvOmegaSlider" type="range" min="0.05" max="0.6" step="0.01" value="0.20"
+                             style="width:100%;" oninput="onCvOmegaInput(this)" onchange="onCvOmegaCommit(this)" />
                     </div>
                   </div>
                   <div class="form-row">
@@ -6661,6 +6653,132 @@
                   </div>
                 </div>
                 </div> <!-- end cvManualBlock -->
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>CV auto-tune ω target (rad/s) (<span id="cvOmega_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sets how fast the <strong>Auto</strong> gain mode makes the voltage loop respond — the target closed-loop crossover (loop speed), in radians/second. The CV plant-fit step measures the battery's DC gain K_dc and then sets <strong>Kp = ω ÷ K_dc</strong> and <strong>Ki = (Ki/Kp ratio) × Kp</strong>. Lower ω = slower, gentler, more overshoot margin (safer for lithium near absorption); higher ω = faster but closer to overshoot. Default 0.20 (~10 s response). Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvOmega" type="number" step="0.01" min="0.05" max="0.6" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvKiRatio_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">In <strong>Auto</strong> gain mode the integral gain is set as a fixed fraction of the proportional gain: <strong>Ki = ρ × Kp</strong>. This places the integrator's corner (where it starts pulling out steady-state error) relative to the loop's response speed. Lower ρ = lazier integral (slower to erase residual error, less windup); higher ρ = more aggressive integral. Default 0.70. Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="cvKiRatio" type="number" step="0.05" min="0.2" max="1.5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <!-- Battery-temperature gain derate -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Battery-Temp Gain Derate (<span id="battTempDerateEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The CV plant fit measures the battery's internal resistance (the plant gain K_dc) at <strong>one</strong> temperature — whatever the board was when you commissioned. A battery's resistance <strong>rises as it gets colder</strong>, which would make those gains run too aggressively in the cold (more overshoot, exactly when over-voltage matters most) and too sluggishly when warmer. With this <strong>On</strong>, the loop scales Kp <em>and</em> Ki by the estimated resistance ratio between the commissioning temperature and the present board temperature — keeping the loop's speed and damping roughly constant across temperature. This is a gain scale, <strong>not</strong> a change to the ω target or Ki/Kp ratio. Board temperature is a <strong>proxy</strong> for battery temperature, but the derate uses only the <strong>change</strong> in board temp since commissioning — so a constant board-warmer-than-battery offset cancels out; it only needs that offset to stay roughly stable, which it does. The absolute over-voltage protections are independent and always live. Set the strength with the coefficient below. Off = use the commissioned gains unchanged at all temperatures.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="battTempDerateEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('battTempDerateEnable_checkbox', 'battTempDerateEnable', 'battTempDerateEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="battTempDerateEnable" name="battTempDerateEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-label" style="font-size:0.9em; opacity:0.85; line-height:1.5;">
+                    <span id="battTempDerate_status">Not yet commissioned — run the CV plant-fit step.</span>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Battery-Temp Resistance Coefficient (<span id="battTempCoeff_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How strongly the gain derate reacts to temperature: the battery's fractional internal-resistance change <strong>per °C</strong>, entered as a fraction (0.03 = 3 %/°C). The derate scales the gains by exp(coeff × ΔT in °C) between the commissioning temperature and now. Higher = stronger correction. Typical battery internal resistance rises roughly 2–4 %/°C as it cools; default <strong>3 %/°C</strong> is a conservative middle value. The result is clamped to a safe band (gains never fall below 30% or rise above 120% of the commissioned value) and the temperatures are clamped to 0–100 °C, so a wild proxy reading can't produce dangerous gains. Set to 0 to make the derate inert without turning it off.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="battTempCoeff" type="number" step="0.001" min="0" max="0.1" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Target voltage ramp limiter (<span id="vTgtRampEnable_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                      <span class="tooltip-box">Master switch for the voltage-target slew. <strong>On</strong> (default): the active charge target voltage can only move at the up/down rates below, so a commanded change (stage transition or a new setpoint) glides instead of stepping. <strong>Off:</strong> the target changes instantly — byte-for-byte the old behaviour, for A/B comparison. This limiter also applies during the CV-tuning square-wave test so you can study the loop with it on or off. <strong>It changes nothing about the protections:</strong> over-voltage detection fires at the same speed relative to the current target, and the absolute backstops (hardware over-voltage comparator + software hard-shutdown, both fixed voltages) are completely independent of this and always instant.</span>
+                    </span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Off</span>
+                      <label class="switch">
+                        <input id="vTgtRampEnable_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('vTgtRampEnable_checkbox', 'vTgtRampEnable', 'vTgtRampEnable')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">On</span>
+                      <input id="vTgtRampEnable" name="vTgtRampEnable" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Target voltage ramp — up rate (V/s) (<span id="vTgtRampUp_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Limits how fast the active charge <strong>target voltage</strong> is allowed to RISE when it changes (a stage transition like Bulk→Absorption, or a new manual setpoint). The voltage loop and the over-voltage protections both follow this smoothed target instead of a sudden step. Rising steps are already paced by the current loop, so this rate is mostly a gentle smoother. <strong>0 = instant</strong> (no up-ramp). Default 0.025 V/s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="vTgtRampUp" type="number" step="0.001" min="0" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Target voltage ramp — down rate (V/s) (<span id="vTgtRampDn_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Limits how fast the active charge <strong>target voltage</strong> is allowed to FALL when it changes (e.g. Absorption→Float, or a lower manual setpoint). <strong>This is the important one:</strong> an instant target DROP leaves the battery momentarily far above the new target, which correctly fires the over-voltage protection and hard-cuts the field — causing a voltage undershoot and a messy recovery. Ramping the target down at this rate lets the loop simply ease the current off, so the protections never trip. The absolute hard-shutdown (a genuine over-voltage emergency) stays instant and is NOT affected by this. <strong>0 = instant</strong> (old behaviour). Default 0.025 V/s (~12 s for a 0.3 V drop).</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="vTgtRampDn" type="number" step="0.001" min="0" max="5" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
 
                 <hr />
                 <div class="form-row">
@@ -12003,9 +12121,18 @@
       </div>
       <div style="padding:20px;">
         <div id="commission-steps" style="display:flex; flex-wrap:wrap; gap:4px 8px; margin-bottom:14px; font-size:11px; color:#777;"></div>
+        <!-- Permanent RPM sparkline — lives ABOVE the per-phase #commission-body so the
+             body's innerHTML re-render each phase never wipes it. Fed off CSV1 (cxRpmSparkOnCsv1). -->
+        <div style="margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:#888; margin-bottom:4px;">
+            <span>Engine RPM (last ~15 s) — hold steady during tests</span>
+            <strong id="cx-rpm-spark-val" style="color:#E91E63; font-size:13px;">—</strong>
+          </div>
+          <canvas id="cxRpmSpark" style="display:block; width:100%; height:48px;"></canvas>
+        </div>
         <div id="commission-body" style="font-size:0.92em; line-height:1.5; color:#ddd;"></div>
         <div id="commission-abort-row" style="margin-top:16px; padding-top:10px; border-top:1px solid #333; display:none;">
-          <button onclick="commissionAbort()" class="btn-danger-ghost btn-sm" style="width:100%;">Abort &amp; revert to pre-commissioning settings</button>
+          <button onclick="commissionAbort()" class="btn-danger-ghost btn-sm" style="width:100%;">Abort and revert all</button>
         </div>
       </div>
     </div>

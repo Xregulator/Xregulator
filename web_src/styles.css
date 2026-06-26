@@ -807,6 +807,22 @@ input[type="submit"]:hover {
   color: #4fd6ce !important;
 }
 
+/* Commissioning modal run/start buttons — solid teal gradient + glow so the primary
+   action reads as the obvious thing to click against the hardcoded dark panel. The
+   tonal .btn-primary looks greyed-out here, worst in light mode where the panel stays
+   dark but the button keeps the dark-teal light-mode text. Scoped to the modal so the
+   global tonal button (and the light-area "Start commissioning…" button) is unchanged. */
+#commission-modal-panel .btn-primary {
+  background: linear-gradient(180deg, #14b8af 0%, #00908a 100%) !important;
+  color: #fff !important;
+  border-color: #16c2b8 !important;
+  box-shadow: 0 2px 10px rgba(0, 161, 154, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+#commission-modal-panel .btn-primary:hover {
+  background: linear-gradient(180deg, #18c4ba 0%, #00a39c 100%) !important;
+  box-shadow: 0 4px 16px rgba(0, 161, 154, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
 /* Secondary (neutral) */
 .btn-secondary {
   background: rgba(0, 0, 0, 0.05);

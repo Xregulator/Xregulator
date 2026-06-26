@@ -1090,7 +1090,11 @@ uint32_t modeCapSlewEndMs = 0;     // millis() the glide self-cleared; iExcess s
 
 float FloatVoltage = 13.4;                       // self-explanatory
 float BulkVoltage = 14.5;                        // this could have been called Target Bulk Voltage to be more clear
-float ChargingVoltageTarget = 0;                 // This becomes active target
+float ChargingVoltageTarget = 0;                 // This becomes active target — now the SLEWED/smoothed value the
+                                                 // CV loop AND the over-voltage protections read (rate-limited from
+                                                 // ChargingVoltageTargetReq by the slew in AdjustFieldLearnMode).
+float ChargingVoltageTargetReq = 0;              // Instantaneous DESIRED target (set each tick by stage logic /
+                                                 // TargetVoltageMode / MaintainMode). ChargingVoltageTarget ramps to it.
 float VoltageHardwareLimit = BulkVoltage + 0.1;  // could make this a setting later, but this should be decently safe
 bool inBulkStage = true;
 
@@ -2178,6 +2182,14 @@ int ResetThermTemp = 0;  // Max thermistor temp reset
 unsigned long fieldCollapseTime = 0;
 unsigned long FIELD_COLLAPSE_DELAY = 30000;  // ms
 // Lockout period after temperature or voltage spike faults.
+// RPM-too-low is NOT a fault — it's a normal idle/engine-stop state — so it gets its own short
+// lockout instead of borrowing the 30s fault cooldown. Lets charging resume ~immediately on engine
+// restart. Only the RPM-gate path uses this; every real fault (OV, OT, voltage disagreement) keeps
+// FIELD_COLLAPSE_DELAY. Not user-adjustable by design.
+unsigned long RPM_RECOVERY_DELAY = 2000;  // ms
+// Delay applied to the CURRENTLY-armed lockout, set at arm time (RPM_RECOVERY_DELAY for the RPM gate,
+// else FIELD_COLLAPSE_DELAY). The remaining/clear/inLockout checks read this, not the constant.
+unsigned long activeCollapseDelay = 30000;  // ms
 // Charging resumes automatically once this expires and the fault has cleared.
 // NOTE: INA228 hardware overvoltage is NOT governed by this timer — it uses
 // its own independent 10s latch in CheckAlarms() and bypasses the lockout
@@ -2836,13 +2848,38 @@ volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
-uint8_t cvGainMode   = 1;         // 0 = Manual (use the typed VoltageKp/Ki); 1 = AUTO λ-based (default)
-float   cvLambdaMult = 2.0f;      // λ = cvLambdaMult × L (dead time); default 2× (conservative); UI range 0.5–15
+uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
+                                  // device shows Manual 30/25; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
+                                  // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
+// cvLambdaMult removed 2026-06-25 — the λ/SIMC tuning path was retired (gains come from cvOmega now);
+// its CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged.
 float   cvPlantK     = 0.0f;      // measured plant gain K (V/A at the pack) from the CV plant-fit step; 0 = no valid fit
 float   cvPlantTau   = 0.0f;      // measured rise time τ (s)
 float   cvPlantL     = 0.0f;      // measured dead time L (s)
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
 float   cvComputedKi = 25.0f;
+// CV measured-K_dc auto-tune knobs (were #defines CV_OMEGA_TARGET / CV_KI_RATIO; now user-adjustable in
+// Tuning ▸ Voltage). recomputeCvGains() uses these: Kp = cvOmega / K_dc(12V-equiv), Ki = cvKiRatio · Kp.
+// See Working Markdown Docs/CV_AUTOTUNE_PLAN.md §E.
+float   cvOmega      = 0.20f;     // rad/s — target CV closed-loop crossover (conservative; lower = slower/safer)
+float   cvKiRatio    = 0.70f;     // ρ — Ki = ρ·Kp (integral zero placement)
+// Battery-temperature gain derate. Board temp (ambientTemp, °F) is a PROXY for battery temp; as the
+// battery cools its internal resistance — which IS the CV plant gain K_dc — rises, so gains computed at
+// the commissioning temperature run too hot when it's colder (and sluggish when warmer). We counter-
+// scale Kp AND Ki by the resistance ratio R(T_commission)/R(T_now), holding the loop bandwidth ω and
+// damping ρ put (NOT a λ/ω change). CommissionTempF is stamped when the CV plant fit is applied; NaN =
+// never commissioned → no derate. See recomputeCvGains()/computeCvTempScale() in 6_functions.ino.
+float   CommissionTempF      = NAN;   // board temp (°F) when K_dc was measured; reference for the derate
+bool    battTempDerateEnable = true;  // master on/off for the battery-temp gain derate
+float   battTempCoeff        = 0.03f; // battery fractional resistance change per °C (R rises as T falls)
+float   cvTempDerateScale    = 1.0f;  // live multiplier recomputeCvGains() applies to the active gains (dashboard diag)
+// CV voltage-target slew (bidirectional ramp). ChargingVoltageTarget ramps toward ...Req at these rates so a
+// COMMANDED target change (absorption→float, manual setpoint) no longer steps instantly and trips fast-OV; the
+// CV loop AND the OV protections see the smooth value. 0 = instant for that direction. Hard-shutdown unaffected.
+uint8_t vTgtRampEnable = 1;       // master switch for the target slew (1=on, default). 0 = instant target,
+                                  // byte-identical to pre-ramp behaviour; lets you A/B the limiter, incl. in CV tuning.
+float   vTgtRampUp   = 0.025f;    // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
+float   vTgtRampDn   = 0.025f;    // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
 volatile float VoltageKp_active = 30.0f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
 volatile float VoltageKi_active = 25.0f;  // DERIVED pack-space Ki the loop uses.
 volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)

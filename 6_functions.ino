@@ -85,26 +85,54 @@ float clamp_f(float x, float lo, float hi) {
   return x;
 }
 
+// CV AUTO-tune design constants — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md §E (2026-06-25).
+// The old λ/SIMC fit (cvPlantTau, cvPlantL, cvLambdaMult) is RETIRED: a real step test showed the
+// loop is stability-robust (86–95° phase margin even at the "disaster" gains), so neither phase
+// margin nor a precise τ/L fit binds. The only per-install unknown that matters is the DC gain
+// K_dc (cvPlantK, settled ΔV/ΔI). Set a deliberately slow target crossover and scale Kp ∝ 1/K_dc;
+// this stays well below the polarization pole (~0.7 rad/s) and the dead-time limit, so we never
+// need to measure them. ω_target/ρ are bench-tuned by disturbance-rejection (no protection trips), NOT
+// to match any prior hand tune — they are the user-adjustable settings cvOmega / cvKiRatio (Tuning ▸
+// Voltage; were #defines, defaults 0.20 / 0.70). cvPlantTau/cvPlantL are still captured for diagnostics
+// but no longer drive the gains.
+
+// computeCvTempScale — battery-temperature gain derate factor (see the globals block in Xregulator.ino).
+// Board temp (ambientTemp, °F) is a proxy for battery temp; the battery's internal resistance — which IS
+// the CV plant gain K_dc — rises as it cools, so gains set at the commissioning temperature run too hot
+// when colder. Returns R(T_commission)/R(T_now) = exp(coeff·(T_now−T_comm)) (coeff = fractional resistance
+// rise per °C): colder now → exponent<0 → factor<1 → gains scaled DOWN (the safe direction). Returns 1.0
+// (no change) when disabled, never commissioned, or the proxy is stale/invalid — never amplifies blindly.
+// Temps clamped to [0,100]°C; result clamped to [0.30,1.20] so a wild proxy reading can't make the gains
+// dangerous. This is a Kp+Ki scale, NOT a λ/ω change — ω and ρ are held fixed.
+float computeCvTempScale() {
+  if (!battTempDerateEnable) return 1.0f;
+  if (isnan(CommissionTempF)) return 1.0f;
+  if (IS_STALE(IDX_AMBIENT_TEMP) || !isfinite(ambientTemp)) return 1.0f;
+  float tCommC = clamp_f((CommissionTempF - 32.0f) / 1.8f, 0.0f, 100.0f);
+  float tNowC  = clamp_f((ambientTemp     - 32.0f) / 1.8f, 0.0f, 100.0f);
+  float s = expf(battTempCoeff * (tNowC - tCommC));
+  return clamp_f(s, 0.30f, 1.20f);
+}
+
 // recomputeCvGains — derive the gains the CV loop actually uses (VoltageKp_active / VoltageKi_active)
-// from the selected gain mode, the measured plant, λ, and the 12V-block normalization. Call after any
-// related setting change (cvGainMode, cvLambdaMult, manual VoltageKp/Ki, a plant fit, or BATTERY_VOLTAGE)
-// and once at boot. Everything is computed in 12V-equivalent ("normalized") space — so the same gain
-// numbers work on 12/24/48 V — then ×(12/BATTERY_VOLTAGE) bakes it back to the pack-space gain the loop
-// multiplies by the raw pack-volt error. See Working Markdown Docs/CV_AUTOTUNE_PLAN.md.
+// from the selected gain mode, the measured DC gain K_dc, and the 12V-block normalization. Call after
+// any related setting change (cvGainMode, manual VoltageKp/Ki, a plant fit, or BATTERY_VOLTAGE), on a
+// board-temp drift (for the temp derate), and once at boot. Everything is computed in 12V-equivalent
+// ("normalized") space — so the same gain numbers work on 12/24/48 V — then ×(12/BATTERY_VOLTAGE) bakes
+// it back to the pack-space gain the loop multiplies by the raw pack-volt error. The battery-temp derate
+// (computeCvTempScale) is the final multiplier on the active gains and applies in BOTH modes (the plant
+// changes with temperature regardless of how the base gains were chosen). See CV_AUTOTUNE_PLAN.md §E.
 void recomputeCvGains() {
   float vNorm = 12.0f / (float)BATTERY_VOLTAGE;     // 1, 0.5, 0.25 for 12/24/48 V
-  bool plantValid = (cvPlantK > 1e-6f && cvPlantTau > 1e-4f);
+  bool plantValid = (cvPlantK > 1e-6f);             // only K_dc is required now (τ/L no longer used)
   float kpNorm, kiNorm;                             // 12V-equivalent gains (what the user sees)
   if (cvGainMode == 1 && plantValid) {
-    // AUTO (λ-based, SIMC first-order-plus-dead-time). Normalize the measured pack-space K so the
-    // resulting gain is system-voltage-independent like the manual numbers.
+    // AUTO (measured-K_dc rule). Normalize the measured pack-space K_dc into 12V-equivalent space so
+    // the resulting gain is system-voltage-independent like the manual numbers, then set the gains
+    // from the conservative target crossover. Kp ∝ 1/K_dc is the per-install gain schedule.
     float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A
-    float L     = fmaxf(cvPlantL, 0.0f);
-    float lam   = cvLambdaMult * fmaxf(L, 0.05f);   // λ = N·L (floor L so λ never collapses to 0)
-    float denom = fmaxf(lam + L, 0.05f);
-    kpNorm = (1.0f / Knorm) * cvPlantTau / denom;
-    float Ti = fmaxf(fminf(cvPlantTau, 4.0f * denom), 1e-3f);
-    kiNorm = kpNorm / Ti;
+    kpNorm = cvOmega / Knorm;                        // Kp = ω_target / K_dc
+    kiNorm = cvKiRatio * kpNorm;                     // Ki = ρ · Kp
     // Safety bounds — a bad fit must never produce dangerous gains.
     kpNorm = clamp_f(kpNorm, 2.0f, 120.0f);
     kiNorm = clamp_f(kiNorm, 1.0f, 80.0f);
@@ -113,10 +141,11 @@ void recomputeCvGains() {
     kpNorm = VoltageKp;
     kiNorm = VoltageKi;
   }
-  cvComputedKp = kpNorm;                            // expose for the dashboard
+  cvComputedKp = kpNorm;                            // expose for the dashboard — BASE design gain (no temp derate)
   cvComputedKi = kiNorm;
-  VoltageKp_active = kpNorm * vNorm;                // pack-space gains the loop uses with raw pack-volt error
-  VoltageKi_active = kiNorm * vNorm;
+  cvTempDerateScale = computeCvTempScale();         // battery-temp correction (1.0 unless commissioned + enabled)
+  VoltageKp_active = kpNorm * vNorm * cvTempDerateScale;   // pack-space gains the loop uses with raw pack-volt error
+  VoltageKi_active = kiNorm * vNorm * cvTempDerateScale;
 }
 
 // recomputeCcGains — CC (output-current) analog of recomputeCvGains. PidKp/Ki/Kd are 12V-equivalent;
@@ -357,7 +386,7 @@ void applyImmediateCut(const TickSnapshot &tick, FieldEventReason reason) {
   gpio4IsLow = true;
   // Fast OV: arm the cooldown lockout so the field can't re-engage for FIELD_COLLAPSE_DELAY (30s).
   // applyImmediateCut returns before runShutdownPath's line-482 lockout-arm ever runs, so set it here.
-  if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) fieldCollapseTime = tick.nowMs;
+  if (reason == REASON_FAST_OVERVOLTAGE && fieldCollapseTime == 0) { fieldCollapseTime = tick.nowMs; activeCollapseDelay = FIELD_COLLAPSE_DELAY; }
   if (alreadyCut) return;  // hardware already cut — skip logging, don't spam
   apply_pwm_float(0.0f);
   lastAppliedDuty = 0.0f;
@@ -617,16 +646,21 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
 
   if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
     fieldCollapseTime = tick.nowMs;
+    activeCollapseDelay = (reason == REASON_RPM_TOO_LOW) ? RPM_RECOVERY_DELAY : FIELD_COLLAPSE_DELAY;
     queueConsoleMessageF("Charging stopped - %.1fs cooldown before restart",
-                         FIELD_COLLAPSE_DELAY / 1000.0f);
+                         activeCollapseDelay / 1000.0f);
   }
 
   reportFieldModeEvent(tick.nowMs, mode, reason, tick, gpio4IsLow, dutyCycle);
 }
 
-// runCommissionIdle — "rest" hold between commissioning steps. Holds the field at the larger of the
-// per-RPM floor (rpmMinDuty) and a voltage-scaled minimum (COMMISSION_REST_FLOOR_PCT × 12/Vbatt), eased
-// in at a slow dedicated rate (COMMISSION_REST_RAMP_PCT × 12/Vbatt). GPIO4 stays ENABLED — a little
+// runCommissionIdle — "rest" hold between commissioning steps. Holds the field at a flat voltage-scaled
+// minimum (COMMISSION_REST_FLOOR_PCT × 12/Vbatt), eased in at a slow dedicated rate
+// (COMMISSION_REST_RAMP_PCT × 12/Vbatt). Deliberately does NOT max() in the per-RPM onset floor
+// (rpmMinDuty): that floor lives in rpmMinDutyTable, the very table commissioning is (re)learning, so
+// resting on it means leaning on a possibly stale/half-written table; it also lets a held high-RPM-low
+// onset duty briefly exceed the (lower) onset after RPM rises, producing a real output blip until the
+// slew catches up. A flat floor is predictable and table-independent. GPIO4 stays ENABLED — a little
 // field load keeps the RPM pickup alive (going fully to 0 can drop the signal). Deliberately bypasses
 // the whole AUTO/MANUAL/fault/stage machinery (the caller returns right after this), so no charging
 // stage runs, no "Charging stopped/enabled" spam, and no GPIO4 cut. A real fault never lands here —
@@ -640,7 +674,7 @@ void runCommissionIdle(const TickSnapshot &tick, FieldEventReason reason, float 
   const float vNorm = 12.0f / fmaxf(1.0f, (float)BATTERY_VOLTAGE);
   const float restFloor = COMMISSION_REST_FLOOR_PCT * vNorm;   // 4 / 2 / 1 % @ 12 / 24 / 48 V
   const float restRamp = COMMISSION_REST_RAMP_PCT * vNorm;     // 5 / 2.5 / 1.25 %/s
-  const float restTarget = fmaxf(tick.rpmMinDuty, restFloor);
+  const float restTarget = restFloor;
 
   // Dedicated slow slew toward the target (both directions), THEN governor in bypass-slew so it only
   // clamps (duty ceiling) and writes the PWM — we already did the slewing at the rest rate.
@@ -1690,7 +1724,7 @@ void AdjustFieldLearnMode() {
   }
   lockoutWasActive = lockoutActiveNow;
 
-  if (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) >= FIELD_COLLAPSE_DELAY) {
+  if (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) >= activeCollapseDelay) {
     fieldCollapseTime = 0;
   }
   uint32_t aflM3 = micros();  // end of section 3: CH1 gate + stage/governor/mode transitions
@@ -2362,7 +2396,7 @@ void AdjustFieldLearnMode() {
           // suppressed while TVMode=1, so those flags are irrelevant during execution.
           // Mutating them caused all three stage flags to be false on TVMode exit, which
           // fell through to the FLOAT branch on the first updateChargingStage() call back.
-          ChargingVoltageTarget = TargetVoltageSetpoint;
+          ChargingVoltageTargetReq = TargetVoltageSetpoint;   // slewed into ChargingVoltageTarget below
           if (enteringTargetVoltageMode) {
             pidLog_enteringTargetVoltageMode = 1;
             queueConsoleMessageF("TargetVoltageMode: active, target=%.2fV", TargetVoltageSetpoint);
@@ -2377,7 +2411,7 @@ void AdjustFieldLearnMode() {
         if (MaintainMode == 1) {
           // Ceiling enforcer: PI runs at BulkVoltage but uTargetAmps=0 caps Icv→0, so setpoint stays 0; Groups 1/2 arm.
           voltageControlActive = true;
-          ChargingVoltageTarget = BulkVoltage;
+          ChargingVoltageTargetReq = BulkVoltage;
           if (enteringMaintainMode) {
             queueConsoleMessage("MaintainMode: active, targeting 0 net battery amps");
           }
@@ -2494,15 +2528,43 @@ void AdjustFieldLearnMode() {
             // Override ChargingVoltageTarget for this tick.
             // LOW phase = normal setpoint (battery rests here naturally).
             // HIGH phase = normal setpoint + amplitude (the step-up response being scored).
-            ChargingVoltageTarget = cvTuningScore.waveHigh ? (cvBaseTarget + cvWaveAmplitudeV)
-                                                           : cvBaseTarget;
+            ChargingVoltageTargetReq = cvTuningScore.waveHigh ? (cvBaseTarget + cvWaveAmplitudeV)
+                                                              : cvBaseTarget;   // slew below applies if vTgtRampEnable (study on/off)
           }
         }
 
-        // Voltage target rise governor.
-        // Clamps voltageTargetSlewed to IBV + e_needed, where e_needed is the voltage
-        // error the current cv_I can support at current uTargetAmps. This prevents the
-        // integrator from seeing a large step when target jumps. Falls are instantaneous.
+        // ── Voltage-target slew (bidirectional) — NEW outer layer; master switch vTgtRampEnable ──
+        // The commanded target lives in ChargingVoltageTargetReq (set THIS tick by stage logic /
+        // TargetVoltageMode / MaintainMode above, and by updateChargingStage()). We rate-limit the REAL
+        // ChargingVoltageTarget toward it at vTgtRampUp / vTgtRampDn (V/s). ChargingVoltageTarget is what
+        // BOTH the CV PI error AND the *relative* over-voltage protections read, so a commanded DROP
+        // (absorption→float, manual lower) now glides down instead of stepping — fast-OV / iExcess no
+        // longer trip on a deliberate target change.
+        //   PROTECTIONS ARE UNCHANGED: no protection code, margin, or timing was touched. They still fire
+        //   at the same speed relative to whatever the target currently is — we only limit how fast the
+        //   target itself may move. The ABSOLUTE backstops are fully independent of the target and
+        //   untouched: AlternatorHardShutdownV (software hard-cut) and the INA228 hardware comparator at
+        //   VoltageHardwareLimit (cuts before any software runs) both fire at fixed voltages.
+        //   vTgtRampEnable=0 → instant target (byte-identical to pre-ramp behaviour). The ramp DOES apply
+        //   in CVTuningMode when enabled, so the square-wave test can be studied with the limiter on/off.
+        //   Always snap (no ramp) when not doing voltage control, or on the first CV tick (bumpless seed —
+        //   start the target at the right value rather than ramping it up from a stale one). 0 = instant.
+        if (vTgtRampEnable == 0 || !voltageControlActive || enteringCV) {
+          ChargingVoltageTarget = ChargingVoltageTargetReq;            // snap (disabled / idle / CV entry)
+        } else if (ChargingVoltageTargetReq > ChargingVoltageTarget) {
+          float step = (vTgtRampUp > 0.0f) ? (vTgtRampUp * actualDtSec) : 1.0e9f;
+          ChargingVoltageTarget = fminf(ChargingVoltageTargetReq, ChargingVoltageTarget + step);
+        } else if (ChargingVoltageTargetReq < ChargingVoltageTarget) {
+          float step = (vTgtRampDn > 0.0f) ? (vTgtRampDn * actualDtSec) : 1.0e9f;
+          ChargingVoltageTarget = fmaxf(ChargingVoltageTargetReq, ChargingVoltageTarget - step);
+        }
+
+        // ── Voltage target rise governor (RESTORED — inner windup guard, unchanged from original) ──
+        // Clamps voltageTargetSlewed to IBV + e_needed, where e_needed is the voltage error the current
+        // cv_I can support at the present current cap. Prevents the integrator from seeing a large up-step
+        // when the target jumps. Falls are instantaneous. It now operates on the (slew-limited)
+        // ChargingVoltageTarget and feeds the CV PI error below — kept so the windup protection that was
+        // here before the target ramp is not lost.
         static float voltageTargetSlewed = 0.0f;
         if (enteringCV) {
           voltageTargetSlewed = ChargingVoltageTarget;
@@ -2519,7 +2581,7 @@ void AdjustFieldLearnMode() {
           }
         }
 
-        // CC/CV phase determination — must be after voltageTargetSlewed is updated.
+        // CC/CV phase determination — must be after the target slew above.
         // Bumpless transfer: track cv_I toward the operating-point value when CV is inactive.
         // While CV is active, cv_I_track stays in sync for seamless re-entry.
         {
@@ -2639,7 +2701,7 @@ void AdjustFieldLearnMode() {
             pidLog_voltageLoopRanThisTick = 1;
             pidLog_enteringCV = enteringCV ? 1 : 0;
 
-            float e = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on PI error
+            float e = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on PI error (governor output)
             float dtSec = (prevVoltageLoopMs == 0)
                             ? ((float)VoltageLoopInterval / 1000.0f)
                             : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
@@ -2717,7 +2779,7 @@ void AdjustFieldLearnMode() {
         // Per-tick Icv recompute — proportional path responds every output current loop tick;
         // cv_I still updates only on VoltageLoopInterval cadence.
         {
-          float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional
+          float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional (governor output)
           float icvHi_tick = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
           if (!enteringCV) {
             Icv = clamp_f(VoltageKp_active * e_now + cv_I, 0.0f, icvHi_tick);
@@ -3048,7 +3110,7 @@ void updateChargingStage() {
 
   if (inBulkStage && !inAbsorptionStage) {
     // ===== BULK (CC) =====
-    ChargingVoltageTarget = BulkVoltage;
+    ChargingVoltageTargetReq = BulkVoltage;
 
     if (bulkVoltageHoldTimer == 0) {
       if (v >= (BulkVoltage - BULK_V_BAND_ENTER)) bulkVoltageHoldTimer = now;
@@ -3056,7 +3118,7 @@ void updateChargingStage() {
       bulkVoltageHoldTimer = 0;
     } else if ((uint32_t)(now - bulkVoltageHoldTimer) >= bulkVoltageHoldMs) {
       inAbsorptionStage = true;
-      ChargingVoltageTarget = AbsorptionVoltage;
+      ChargingVoltageTargetReq = AbsorptionVoltage;
       absorptionStartTime = now;
       absorptionTailTimer = 0;
       bulkVoltageHoldTimer = 0;
@@ -3068,7 +3130,7 @@ void updateChargingStage() {
 
   } else if (inBulkStage && inAbsorptionStage) {
     // ===== ABSORPTION (CV) =====
-    ChargingVoltageTarget = AbsorptionVoltage;
+    ChargingVoltageTargetReq = AbsorptionVoltage;
 
     const bool thermallyConstrained = (thermalPenaltyAmps > 2.0f) && (uTargetAmps <= TailCurrent_A * 2.0f);  //if you ever want CV-awareness here you'd change it to Icv <= TailCurrent_A * 2.0f.
     const bool tailReached = !thermallyConstrained && (Bcur <= TailCurrent_A);
@@ -3180,7 +3242,7 @@ void updateChargingStage() {
       return;
     }
 
-    ChargingVoltageTarget = FloatVoltage;
+    ChargingVoltageTargetReq = FloatVoltage;
 
     const uint32_t tFloat = (uint32_t)(now - floatStartTime);
     const bool floatTimedOut = (tFloat >= (uint32_t)(FLOAT_DURATION * 1000UL));
@@ -3600,7 +3662,7 @@ void reportFieldModeEvent(uint32_t nowMs, FieldControlMode mode, FieldEventReaso
   // Calculate lockout time remaining
   char lockoutStatus[32] = "none";
   if (tick.inLockout) {
-    float remaining = (FIELD_COLLAPSE_DELAY - (tick.nowMs - fieldCollapseTime)) / 1000.0f;
+    float remaining = (activeCollapseDelay - (tick.nowMs - fieldCollapseTime)) / 1000.0f;
     snprintf(lockoutStatus, sizeof(lockoutStatus), "%.1fs remaining", remaining);
   }
 
@@ -3853,7 +3915,14 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   {
     bool dialogAlive = (lastCommissionHeartbeatMs != 0) &&
                        ((uint32_t)(currentMillis - lastCommissionHeartbeatMs) < COMMISSION_HEARTBEAT_TIMEOUT_MS);
+    // Include the PENDING request flags, not just the active ones. selectFieldControlMode returns
+    // MODE_COMMISSION_IDLE → AdjustField early-returns at runCommissionIdle() BEFORE fieldCurve_tick/
+    // systemID_tick run, so a freshly-queued request would never be consumed and fieldCurveActive/
+    // systemIDActive would never rise — a permanent rest deadlock (the field ramp only started once the
+    // dialog closed and resting cleared). Treating a pending request as "test active" lets the control
+    // path fall through and consume it on the same tick.
     bool anyTestActive = (fieldCurveActive != 0) || (systemIDActive != 0) ||
+                         fieldCurveRequested || systemIDRequested ||
                          TuningMode || CVTuningMode || faCommissionGate;
     tick.commissioningResting = (commissionState == 1) && dialogAlive && !anyTestActive;
   }
@@ -3925,7 +3994,7 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
   }
 
   // Lockout
-  tick.inLockout = (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) < FIELD_COLLAPSE_DELAY);
+  tick.inLockout = (fieldCollapseTime > 0 && (tick.nowMs - fieldCollapseTime) < activeCollapseDelay);
 
   // Thresholds
   tick.bulkVoltage = BulkVoltage;

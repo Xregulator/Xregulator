@@ -639,6 +639,8 @@ enum Csv2Index {
   CSV2_httpsUpload_win, // Core-0 cloud op time, LAST (ms)  [_win = LAST, matching the faDetector row]
   CSV2_httpsUpload_ses, // Core-0 cloud op time, WORST since last Reset Peak Values (ms)
 
+  CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
+
   CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
 };
 
@@ -987,14 +989,22 @@ enum Csv3Index {
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
   CSV3_coldChargeLockoutEnable, // cold-charge lockout master on/off (1=on)
   CSV3_cvGainMode,              // CV gain mode: 0=Manual, 1=Auto (lambda-based)
-  CSV3_cvLambdaMult,            // lambda = N x dead-time; ×10
+  CSV3_EXTRA1,                  // reserved placeholder (was cvLambdaMult; λ tuning retired 2026-06-25) — sends 0
   CSV3_cvPlantK,                // measured plant gain K (V/A); ×10000
   CSV3_cvPlantTau,              // measured rise time tau (s); ×100
   CSV3_cvPlantL,                // measured dead time L (s); ×100
   CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
   CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
+  CSV3_cvOmega,                 // CV auto-tune ω target (rad/s); ×100
+  CSV3_cvKiRatio,               // CV auto-tune Ki/Kp ratio ρ; ×100
+  CSV3_vTgtRampUp,              // CV voltage-target ramp UP rate (V/s); ×1000
+  CSV3_vTgtRampDn,              // CV voltage-target ramp DOWN rate (V/s); ×1000
+  CSV3_vTgtRampEnable,          // CV voltage-target slew master switch (0/1)
+  CSV3_CommissionTempF,         // board temp when CV fit applied — derate reference (°F ×10; -32768 = unset/NaN)
+  CSV3_battTempDerateEnable,    // battery-temp gain derate master on/off (0/1)
+  CSV3_battTempCoeff,           // battery fractional resistance change per °C; ×10000
 
-  CSV3_FIELD_COUNT  // = 319 (dutyCeilingEnable removed — Max Field % is now the real per-bus cap, WYSIWYG)
+  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25
 };
 
 
@@ -3114,7 +3124,8 @@ void setupServer() {
       commissionWriteDoneMask();
       settingsDirty = true;
       queueConsoleMessageF("Commissioning: aborted — %s",
-                           reverted ? "settings reverted to snapshot" : "no snapshot to revert");
+                           reverted ? "settings reverted to the pre-commissioning snapshot"
+                                    : "nothing to revert (no commissioning was in progress, so no pre-state was saved)");
     }
     else if (request->hasParam("commissionDone")) {
       foundParameter = true;
@@ -4684,17 +4695,63 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
     }
-    if (request->hasParam("cvLambdaMult")) {
+    // cvLambdaMult handler removed 2026-06-25 — λ tuning retired; the Response Speed slider now drives cvOmega.
+    if (request->hasParam("cvOmega")) {  // CV auto-tune target crossover ω (rad/s) — drives Kp = ω/K_dc
       foundParameter = true;
-      cvLambdaMult = clamp_f(request->getParam("cvLambdaMult")->value().toFloat(), 0.5f, 15.0f);
-      settingWrite(NK_cvLambdaMult, String(cvLambdaMult, 2).c_str());
+      cvOmega = clamp_f(request->getParam("cvOmega")->value().toFloat(), 0.05f, 0.60f);
+      settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
       recomputeCvGains();
-      queueConsoleMessageF("CV lambda multiple: %.1f x dead-time", cvLambdaMult);
+      queueConsoleMessageF("CV auto-tune omega: %.2f rad/s", cvOmega);
+    }
+    if (request->hasParam("cvKiRatio")) {  // CV auto-tune Ki/Kp ratio ρ — Ki = ρ·Kp
+      foundParameter = true;
+      cvKiRatio = clamp_f(request->getParam("cvKiRatio")->value().toFloat(), 0.2f, 1.5f);
+      settingWrite(NK_cvKiRatio, String(cvKiRatio, 3).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("CV auto-tune Ki/Kp ratio: %.2f", cvKiRatio);
+    }
+    if (request->hasParam("battTempDerateEnable")) {  // master on/off for the battery-temp gain derate
+      foundParameter = true;
+      battTempDerateEnable = (request->getParam("battTempDerateEnable")->value().toInt() != 0);
+      settingWrite(NK_battTempDerateEn, String((int)battTempDerateEnable).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("Battery-temp gain derate: %s", battTempDerateEnable ? "ON" : "OFF");
+    }
+    if (request->hasParam("battTempCoeff")) {  // battery fractional resistance change per °C (R rises as T falls)
+      foundParameter = true;
+      battTempCoeff = clamp_f(request->getParam("battTempCoeff")->value().toFloat(), 0.0f, 0.10f);
+      settingWrite(NK_battTempCoeff, String(battTempCoeff, 4).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("Battery-temp resistance coeff: %.3f /°C", battTempCoeff);
+    }
+    if (request->hasParam("vTgtRampEnable")) {  // master switch for the voltage-target slew (1=on, 0=instant)
+      foundParameter = true;
+      vTgtRampEnable = (uint8_t)(request->getParam("vTgtRampEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_vTgtRampEnable, String((int)vTgtRampEnable).c_str());
+      queueConsoleMessageF("CV target ramp limiter: %s", vTgtRampEnable ? "ON" : "OFF (instant)");
+    }
+    if (request->hasParam("vTgtRampUp")) {  // CV voltage-target ramp UP rate (V/s); 0 = instant
+      foundParameter = true;
+      vTgtRampUp = clamp_f(request->getParam("vTgtRampUp")->value().toFloat(), 0.0f, 5.0f);
+      settingWrite(NK_vTgtRampUp, String(vTgtRampUp, 3).c_str());
+      queueConsoleMessageF("CV target ramp up: %.3f V/s", vTgtRampUp);
+    }
+    if (request->hasParam("vTgtRampDn")) {  // CV voltage-target ramp DOWN rate (V/s); 0 = instant
+      foundParameter = true;
+      vTgtRampDn = clamp_f(request->getParam("vTgtRampDn")->value().toFloat(), 0.0f, 5.0f);
+      settingWrite(NK_vTgtRampDn, String(vTgtRampDn, 3).c_str());
+      queueConsoleMessageF("CV target ramp down: %.3f V/s", vTgtRampDn);
     }
     if (request->hasParam("cvPlantK")) {  // hand-entered plant gain (bench) — the fit step writes these directly
       foundParameter = true;
       cvPlantK = request->getParam("cvPlantK")->value().toFloat();
       settingWrite(NK_cvPlantK, String(cvPlantK, 5).c_str());
+      // Stamp the board temp at the moment K_dc was measured — the reference for the battery-temp gain
+      // derate. Only when the proxy reading is live; otherwise leave the prior stamp (no false reference).
+      if (!IS_STALE(IDX_AMBIENT_TEMP) && isfinite(ambientTemp)) {
+        CommissionTempF = ambientTemp;
+        settingWrite(NK_CommissionTempF, String(CommissionTempF, 2).c_str());
+      }
       recomputeCvGains();
     }
     if (request->hasParam("cvPlantTau")) {
@@ -7002,7 +7059,9 @@ void SendWifiData() {
                                // +4: CSV2 send-cost (build last/worst, send last/worst, µs)
                                "%d,%d,%d,%d,"
                                // +2: Core-0 HTTPS task cloud op time (last/worst, ms)
-                               "%d,%d",
+                               "%d,%d,"
+                               // +1: live battery-temp CV gain derate multiplier (×1000)
+                               "%d",
 
                                CSV2_FIELD_COUNT,
                                SafeInt(IBVMax, 100),
@@ -7550,7 +7609,8 @@ void SendWifiData() {
                                SafeInt(csv2SendLastUs),                   // CSV2_csv2SendLast   (µs)
                                SafeInt(csv2SendWorstUs),                  // CSV2_csv2SendWorst  (µs)
                                SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
-                               SafeInt(httpsUploadWorstMs)                // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
+                               SafeInt(httpsUploadWorstMs),               // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
+                               SafeInt(cvTempDerateScale, 1000)           // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
     );
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
@@ -7634,12 +7694,20 @@ void SendWifiData() {
                                "%d,"  // MinChargeTempF
                                "%d,"  // coldChargeLockoutEnable
                                "%d,"  // cvGainMode
-                               "%d,"  // cvLambdaMult
+                               "%d,"  // CSV3_EXTRA1 (reserved placeholder, was cvLambdaMult)
                                "%d,"  // cvPlantK
                                "%d,"  // cvPlantTau
                                "%d,"  // cvPlantL
                                "%d,"  // cvComputedKp
-                               "%d",  // cvComputedKi
+                               "%d,"  // cvComputedKi
+                               "%d,"  // cvOmega
+                               "%d,"  // cvKiRatio
+                               "%d,"  // vTgtRampUp
+                               "%d,"  // vTgtRampDn
+                               "%d,"  // vTgtRampEnable
+                               "%d,"  // CommissionTempF
+                               "%d,"  // battTempDerateEnable
+                               "%d",  // battTempCoeff
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -7952,12 +8020,20 @@ void SendWifiData() {
                                SafeInt(MinChargeTempF),                         // CSV3_MinChargeTempF (cold-charge lockout board-temp floor, °F)
                                (int)coldChargeLockoutEnable,                    // CSV3_coldChargeLockoutEnable (cold-charge lockout master on/off)
                                (int)cvGainMode,                                 // CSV3_cvGainMode (0=Manual, 1=Auto λ-based)
-                               SafeInt(cvLambdaMult, 10),                       // CSV3_cvLambdaMult (λ = N × dead-time, ×10)
+                               0,                                              // CSV3_EXTRA1 (reserved placeholder, was cvLambdaMult)
                                SafeInt(cvPlantK, 10000),                        // CSV3_cvPlantK (measured plant gain V/A, ×10000)
                                SafeInt(cvPlantTau, 100),                        // CSV3_cvPlantTau (measured rise time s, ×100)
                                SafeInt(cvPlantL, 100),                          // CSV3_cvPlantL (measured dead time s, ×100)
                                SafeInt(cvComputedKp, 100),                      // CSV3_cvComputedKp (Auto-computed Kp 12V-equiv, ×100)
-                               SafeInt(cvComputedKi, 100)                       // CSV3_cvComputedKi (Auto-computed Ki 12V-equiv, ×100)
+                               SafeInt(cvComputedKi, 100),                      // CSV3_cvComputedKi (Auto-computed Ki 12V-equiv, ×100)
+                               SafeInt(cvOmega, 100),                           // CSV3_cvOmega (auto-tune ω target rad/s, ×100)
+                               SafeInt(cvKiRatio, 100),                         // CSV3_cvKiRatio (auto-tune Ki/Kp ratio ρ, ×100)
+                               SafeInt(vTgtRampUp, 1000),                       // CSV3_vTgtRampUp (target ramp up rate V/s, ×1000)
+                               SafeInt(vTgtRampDn, 1000),                       // CSV3_vTgtRampDn (target ramp down rate V/s, ×1000)
+                               (int)vTgtRampEnable,                             // CSV3_vTgtRampEnable (slew master switch 0/1)
+                               isnan(CommissionTempF) ? -32768 : (int)lroundf(CommissionTempF * 10.0f),  // CSV3_CommissionTempF (°F ×10; -32768 = unset)
+                               (int)battTempDerateEnable,                       // CSV3_battTempDerateEnable (0/1)
+                               SafeInt(battTempCoeff, 10000)                    // CSV3_battTempCoeff (fractional R change per °C, ×10000)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
