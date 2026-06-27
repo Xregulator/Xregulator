@@ -2084,25 +2084,14 @@
                 </div>
                 <hr>
                 <div class="form-row">
-                  <div class="form-label"><span>Temperature steady time, full (s) (<span id="altThermSec_echo">?</span>):</span></div>
+                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
+                    <span>Temperature steady time, full (s) (<span id="altThermSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long alternator temperature must hold steady before a run counts as a full steady run — the points that get the orange ring and that update the reference surface and the engine-hours trend. The This Session plot automatically uses half this time for its lighter "brief point" gate, so there is only one number to set.</span></span>
+                  </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <input name="altThermSec" type="number" step="1" />
-                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-                <hr>
-                <div class="form-row">
-                  <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
-                    <span>Temperature steady time, session (s) (<span id="altSessTempSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The lighter temperature dwell used by the This Session plot. A point can appear once temperature has held this long (normally half the full time above). The reference surface and the engine-hours trend still wait for the full time.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="altSessTempSec" type="number" step="1" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -6935,7 +6924,7 @@
                     <div class="metric-row telemetry-row">
                       <span class="metric-label telemetry-label">Temp Slope (°F/s)
                         <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
-                          <span class="tooltip-box">Temperature rate of change in °F/s, computed as a backward difference over a 60-second window (12 intervals × Temp PID Interval). Zero while the buffer fills after startup or reset. Readings implying more than ±0.5 °F/s are rejected as sensor noise and the previous rate is held. Used to compute: projected temperature = current temperature + rate × Thermal Lookahead.</span>
+                          <span class="tooltip-box">Temperature rate of change in °F/s, computed as a backward difference over the Thermal Slope Window. Zero while the buffer fills after startup or reset. Readings implying more than ±0.5 °F/s are rejected as sensor noise and the previous rate is held. Used to compute: projected temperature = current temperature + rate × Thermal Lookahead.</span>
                         </span>
                       </span>
                       <span class="metric-value telemetry-value"><span id="thermalSlopeFPerSec_display">?</span> <span class="temp-rate-label">°F/s</span></span>
@@ -7044,7 +7033,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Lookahead (s) (<span id="ThermalLookaheadSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. Projected temperature = current temperature + rate of rise × this lookahead, where the current temperature is the raw sensor reading (DS18B20) or the smoothed reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Works best when sized to the sensor's heat-conduction delay plus the rate-measurement window (~50–60 s for a typical case-mounted sensor); oversizing causes a slow temperature oscillation around the target. Clamped to 0–300s.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Lookahead horizon in seconds. Projected temperature = current temperature + rate of rise × this lookahead, where the current temperature is the raw sensor reading (DS18B20) or the smoothed reading (thermistor). Larger = earlier derating before the limit is reached; smaller = tighter control near the limit. Works best when sized to the sensor's heat-conduction delay plus the rate-measurement window; oversizing causes a slow temperature oscillation around the target. Clamped to 0–300s.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -7059,7 +7048,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Thermal Slope Window (s) (<span id="ThermalSlopeWindowSec_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time window over which the temperature rate-of-rise (slope) is measured, which in turn drives the projected temperature. A SHORTER window makes the loop react faster to rate changes — less control lag, so the slow temperature oscillation around the target gets smaller — but the slope reads noisier. A LONGER window is smoother but laggier. 60s is the original full window; try 30s to tighten the cycle. Independent of Thermal Lookahead. Does not affect the 60s cold-start warmup. Clamped 10–60s.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time window over which the temperature rate-of-rise (slope) is measured, which in turn drives the projected temperature. A SHORTER window makes the loop react faster to rate changes — less control lag, so the slow temperature oscillation around the target gets smaller — but the slope reads noisier. A LONGER window is smoother but laggier. Independent of Thermal Lookahead. Does not affect the cold-start warmup. Clamped 10–60s.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -11044,7 +11033,7 @@
           <!-- Series selector mirrors the Reference Flipbook header below for UX consistency. Independent show/hide toggles, not an A/B switch: any combination of Raw+Filtered (incl. both or neither). Swatch matches the trace color. Refresh Capture removed (auto-refreshes every 5 s); Pause now lives on the chart top-right, matching the flipbook. -->
           <div class="cap-mode-toggle">
             <button type="button" id="faScopeRawBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('raw',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
-            <button type="button" id="faScopeFiltBtn" class="cap-mode-btn" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
+            <button type="button" id="faScopeFiltBtn" class="cap-mode-btn cap-mode-active" onclick="fastScopeViewToggle('filt',this)"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
           </div>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
             The "scope" displays a snapshot of alternator output current, sampled 20,000 times per second — fast
@@ -11079,7 +11068,7 @@
                is the same boxcar-16 moving average, computed in-browser from the saved raw samples. -->
           <div class="cap-mode-toggle">
             <button type="button" id="faFlipRawBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('raw')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#2196F3;margin-right:5px;vertical-align:middle;"></span>Raw</button>
-            <button type="button" id="faFlipFiltBtn" class="cap-mode-btn" onclick="faFlipViewToggle('filt')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
+            <button type="button" id="faFlipFiltBtn" class="cap-mode-btn cap-mode-active" onclick="faFlipViewToggle('filt')"><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:#FF9800;margin-right:5px;vertical-align:middle;"></span>Filtered</button>
           </div>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">
             A photo album of healthy waveforms. The first time the engine runs steadily in each RPM band (and

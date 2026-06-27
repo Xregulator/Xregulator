@@ -1142,9 +1142,12 @@ function updateAltHealth() {
       ? (Math.round(altLive.ptCount)+' best surface points \u00b7 '+Math.round(altLive.engHours)+' engine-hr')
       : 'no best surface points yet';
   }
+  // Default reference (own history) is not labelled — it's the uninteresting common case. Only the
+  // genuinely distinct states are surfaced: an actively uploaded reference, and learning paused.
   const modeLbl = document.getElementById('alt-mode-label');
-  if (modeLbl) modeLbl.textContent = (altLive.source>=1 ? 'Uploaded' : 'My History')
-                                   + (altLive.paused>=1 ? ' · learning paused' : '');
+  if (modeLbl) modeLbl.textContent = [altLive.source>=1 ? 'Uploaded reference' : '',
+                                      altLive.paused>=1 ? 'learning paused' : '']
+                                     .filter(Boolean).join(' · ');
   setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Setup (segmented, mirrors Vessel Performance)
 }
 
@@ -1447,6 +1450,10 @@ let altSessT = [], altSessMeas = [], altSessEst = [], altSessGap = [], altSessRi
 // Per-dot condition snapshot, parallel to the arrays above, so a click can show the operating
 // point behind a dot. Only the fields already arriving in altLive each tick — no firmware change.
 let altSessInfo = [];
+let altSessHoverIdx = -1;   // dot index under the cursor (highlight ring), -1 = none
+// Repeated-click cycling so overlapping dots in a cluster are all reachable: a click near the same
+// spot as the last advances through the stacked candidates instead of re-picking the same top dot.
+let altSessCycle = { x: -999, y: -999, list: [], idx: 0 };
 let altSessYManual = null;
 try { altSessYManual = JSON.parse(localStorage.getItem('altSessY') || 'null'); } catch(e){}
 
@@ -1522,6 +1529,16 @@ function buildAltSessPlot(){
           ctx.lineWidth = 1.6; ctx.strokeStyle = ALT_RING_COLOR; ctx.stroke();
         }
       }
+      // Hover highlight: a dark halo around the dot the next click would pick (cluster disambiguation).
+      if (altSessHoverIdx >= 0 && altSessHoverIdx < altSessT.length) {
+        const hv = altSessMeas[altSessHoverIdx] != null ? altSessMeas[altSessHoverIdx] : altSessEst[altSessHoverIdx];
+        if (hv != null) {
+          const hx = u.valToPos(altSessT[altSessHoverIdx], 'x', true);
+          const hy = u.valToPos(hv, 'y', true);
+          ctx.beginPath(); ctx.arc(hx, hy, 7, 0, 6.2832);
+          ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(40,40,40,0.85)'; ctx.stroke();
+        }
+      }
       ctx.restore();
     }] }
   };
@@ -1530,25 +1547,49 @@ function buildAltSessPlot(){
     if (altSessPlot) altSessPlot.setSize({ width: Math.max(el.clientWidth, 320), height: 200 });
   }).observe(el);
 
-  // Click-to-inspect: find the nearest plotted dot to the click (same valToPos mapping the draw
-  // hook uses) and render its captured operating point into the panel below the plot.
-  altSessPlot.over.addEventListener('click', e => {
-    // Work in CSS px relative to the over (plotting) element. valToPos(...,false) is CSS px relative
-    // to the whole canvas, so subtract the bbox inset (canvas px → CSS via pxRatio) to match.
+  // Click-to-inspect: find plotted dots near the pointer (same valToPos mapping the draw hook uses)
+  // and render the operating point behind one into the panel below the plot. valToPos(...,false) is
+  // CSS px relative to the whole canvas, so subtract the bbox inset (canvas px → CSS via pxRatio).
+  // Returns dot indices within `radius`, nearest first, plus the cursor position in over-element px.
+  const altSessPick = (e, radius) => {
     const dpr = altSessPlot.pxRatio || (window.devicePixelRatio || 1);
     const r = altSessPlot.over.getBoundingClientRect();
     const cx = e.clientX - r.left, cy = e.clientY - r.top;
     const offX = altSessPlot.bbox.left / dpr, offY = altSessPlot.bbox.top / dpr;
-    let best = -1, bestD = 14 * 14;                          // 14px pick radius
+    const rr = radius * radius, hits = [];
     for (let i = 0; i < altSessT.length; i++) {
       const v = altSessMeas[i] != null ? altSessMeas[i] : altSessEst[i];
       if (v == null) continue;
       const dx = (altSessPlot.valToPos(altSessT[i], 'x', false) - offX) - cx;
       const dy = (altSessPlot.valToPos(v, 'y', false) - offY) - cy;
       const d = dx * dx + dy * dy;
-      if (d < bestD) { bestD = d; best = i; }
+      if (d <= rr) hits.push({ i, d });
     }
-    if (best >= 0) renderAltSessPoint(best);
+    hits.sort((a, b) => a.d - b.d);
+    return { list: hits.map(h => h.i), cx, cy };
+  };
+
+  altSessPlot.over.addEventListener('mousemove', e => {
+    const idx = altSessPick(e, 18).list[0];
+    const hov = (idx == null) ? -1 : idx;
+    altSessPlot.over.style.cursor = hov >= 0 ? 'pointer' : 'default';
+    if (hov !== altSessHoverIdx) { altSessHoverIdx = hov; altSessPlot.redraw(); }
+  });
+  altSessPlot.over.addEventListener('mouseleave', () => {
+    if (altSessHoverIdx !== -1) { altSessHoverIdx = -1; altSessPlot.redraw(); }
+  });
+
+  altSessPlot.over.addEventListener('click', e => {
+    const { list, cx, cy } = altSessPick(e, 18);
+    if (!list.length) return;
+    // Same cluster as the last click (cursor within 6px, identical candidate set) → step to the next
+    // stacked dot so an overlapped point underneath is reachable; otherwise start at the nearest.
+    const sameSpot = Math.abs(cx - altSessCycle.x) <= 6 && Math.abs(cy - altSessCycle.y) <= 6
+                     && list.length === altSessCycle.list.length
+                     && list.every((v, k) => v === altSessCycle.list[k]);
+    altSessCycle.idx = sameSpot ? (altSessCycle.idx + 1) % list.length : 0;
+    altSessCycle.x = cx; altSessCycle.y = cy; altSessCycle.list = list;
+    renderAltSessPoint(list[altSessCycle.idx]);
   });
 
   // Auto checkbox (top-right) — same convention as the other plots. No lock button:
@@ -1635,7 +1676,6 @@ function renderAltSessPoint(i){
   const ago = Math.max(0, Math.round((Date.now()/1000 - altSessT[i]) / 60));
   const conf = d.state===0 ? 'Measured' : 'Estimated';
   const ringTxt = d.ring ? ' · full steady run' : ' · brief point';
-  const ref = d.source>=1 ? 'Uploaded reference' : 'My History';
   const n = (v, dp, u) => (v == null || !isFinite(v)) ? '—' : v.toFixed(dp) + u;
   el.style.color = d.state===0 ? ALT_STATE_COLOR[0] : ALT_STATE_COLOR[1];
   el.innerHTML =
@@ -1647,7 +1687,7 @@ function renderAltSessPoint(i){
     + ' · ' + n(d.tempF, 0, ' °F') + ' alt temp'
     + ' · ' + n(d.fieldPct, 0, '%') + ' field'
     + ' · expected ' + n(d.pred, 1, ' A')
-    + ' · ' + ref + '</span>';
+    + '</span>';
 }
 
 // ── Boat performance (Phase 3): schema-driven live + settings, sailing polar plot ──
@@ -19549,9 +19589,9 @@ let fastScopeAmpsMin = null, fastScopeAmpsMax = null;  // null = auto-scale; set
 let fastScopePaused = false;
 // Raw and Filtered are independent show/hide toggles (plot series 1 and 2), not an A/B switch.
 // Raw = the full 20 kHz samples; Filtered = the boxcar-16 the analysis uses (≈550 Hz bandwidth).
-// Any combination is allowed, including both or neither. Default: Raw on, Filtered off.
+// Any combination is allowed, including both or neither. Default: Raw on, Filtered on.
 let fastScopeShowRaw = true;
-let fastScopeShowFilt = false;
+let fastScopeShowFilt = true;
 const FA_SCOPE_BOXCAR_N = 16;   // matches the firmware FA_DECIM — first null 20 kHz/16 = 1.25 kHz, −3 dB ≈ 550 Hz
 
 // Trailing N-sample moving average (same shape as the firmware boxcar-16 decimation, but kept
@@ -19956,9 +19996,9 @@ let fastFlipPlot = null;
 let fastFlipSelected = -1;
 let faFlipAxis = {};   // per-slot Y-axis state, in-session only: { auto, locked, min, max }
 // Raw/Filtered toggles mirror the live scope above (same two series, same colors). Default
-// matches the scope: Raw on, Filtered off. Independent show/hide, any combination allowed.
+// matches the scope: Raw on, Filtered on. Independent show/hide, any combination allowed.
 let faFlipShowRaw = true;
-let faFlipShowFilt = false;
+let faFlipShowFilt = true;
 // Frame paging: a page is 200 ms; the shared Time-window buttons split it into N equal frames
 // (200 ms = 1 frame = whole page; 100 ms = 2; 50 ms = 4; …). faFlipFrame is which one is shown,
 // 0 = the FIRST window. We page from the start (the scope above stays trailing/live) so the

@@ -9,9 +9,10 @@ plot_altcapture.py
     2. Temp  vs time   (same shading)
     3. Blocker map     — for each non-temp axis, lit where temp IS steady but THAT
                          axis is what's stopping the capture (why orange isn't green).
-- All sliders start at the firmware defaults (temp ±2 F / 120 s, RPM ±30 / 3 s, etc.).
-  Maps back to the firmware knobs altThermDegF/altThermSec, altRpmTol/altRpmSec,
-  altDutyTolPct/altDutySec, altVbusTol/altVbusSec, altAmpsTolPct/altAmpsSec, altMinAmps.
+- Slider start values are the study working-points (see SLIDERS below for the live numbers —
+  not restated here so they can't drift). Each maps back to a firmware knob:
+  altThermDegF/altThermSec, altRpmTol/altRpmSec, altDutyTolPct/altDutySec,
+  altVbusTol/altVbusSec, altAmpsTolPct/altAmpsSec, altMinAmps.
 
 Detector replication notes (must track 7_functions.ino if those change):
 - Inputs RPM/duty/Vbus/amps get a 0.5 s EMA (altEmaSec); temperature uses tempFilt_F raw.
@@ -386,7 +387,8 @@ def redraw(p):
     title.set_text(txt)
     fig.canvas.draw_idle()
 
-# slider specs: key, label, min, max, init, valfmt   (init = firmware defaults; tweaked per session)
+# SLIDERS — slider specs: key, label, min, max, init, valfmt. init = study working-points; the temp
+# dwell init here tracks the firmware altThermSec default (keep them in step when either changes).
 specs=[
  ("temp_tol","temp ±°F",0.5,15,2.0,"%.1f"),   ("temp_sec","temp dwell s",2,180,80,"%.0f"),
  ("rpm_tol","RPM ±",5,200,30,"%.0f"),         ("rpm_sec","RPM dwell s",1,30,3,"%.0f"),

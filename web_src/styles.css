@@ -2397,6 +2397,7 @@ hr {
 @media (min-width: 1024px) {
   .responsive-console {
     height: 800px;
+    width: 75%;
     max-width: 1200px;
   }
 }

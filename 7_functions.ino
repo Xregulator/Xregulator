@@ -501,10 +501,10 @@ static inline FrontStore<ALT_NAXIS> &altGradeFront() {
   return (altRefSource == 1 && altHaveUpload) ? altFrontUp : altFront2;
 }
 
-// ---- session-temp gate: a lighter temp dwell (altSessTempSec) than the Episode's full temp dwell ----
+// ---- session-temp gate: a lighter temp dwell (half of altThermSec) than the Episode's full temp dwell ----
 // Same monotonic-deque sliding-window min/max as Episode, fed the same decimated tF. Lets the Session
 // plot show a dot once temp has held for HALF the full steady time, while the surface/trend still wait
-// for the full dwell. PSRAM-backed (sized in init for headroom past altSessTempSec).
+// for the full dwell. PSRAM-backed (cap sized in init for ample headroom past any half-dwell).
 struct AltTempGate {
   MonoDeque maxDQ, minDQ;
   uint32_t  startMs, lastFeedMs; bool have, steady; int cap;
@@ -539,8 +539,10 @@ float altRpmSec       = 3.0f;    // RPM steady time (s)
 float altDutySec      = 3.0f;    // field-duty % steady time (s)
 float altVbusSec      = 3.0f;    // bus-voltage steady time (s)
 float altThermDegF    = 2.0f;    // temperature deviation bound (°F) — tightened from 5 °F (record only at thermal equilibrium)
-float altThermSec     = 120.0f;  // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
-float altSessTempSec  = 60.0f;   // SESSION_TEMP_SEC — SESSION-steady temp dwell (s), half of altThermSec. Gates a Session-plot dot only.
+float altThermSec     = 80.0f;   // STEADY_TEMP_SEC — FULL-steady temp dwell (s). Feeds the surface + trend + orange ring.
+// SESSION-steady temp dwell is DERIVED as half of altThermSec (see altSessTempDwell()) — no separate
+// knob, so the session gate auto-tracks whenever the full dwell above is changed.
+static inline float altSessTempDwell() { return altThermSec * 0.5f; }
 // ---- engine-hours trend knobs (spec §5) ----
 float altTrendBucketSec = 3600.0f;  // TREND_BUCKET_SEC — engine-seconds per trend bucket (production 3600 = 1 h; testing 600)
 float altTrendFeedSec   = 10.0f;    // TREND_FEED_SEC — min spacing between graded samples entering a bucket (intake throttle)
@@ -571,7 +573,6 @@ static AltSetting ALT_SETTINGS[] = {
   {"altDutyTolPct", &altDutyTolPct}, {"altDutySec", &altDutySec},
   {"altVbusTol", &altVbusTol}, {"altVbusSec", &altVbusSec},
   {"altThermDegF", &altThermDegF}, {"altThermSec", &altThermSec},
-  {"altSessTempSec", &altSessTempSec},                                  // SESSION_TEMP_SEC (session-plot temp dwell)
   {"altTrendBuckSec", &altTrendBucketSec},                             // TREND_BUCKET_SEC (name ≤15 chars; var is altTrendBucketSec)
   {"altTrendFeedSec", &altTrendFeedSec},                               // TREND_FEED_SEC (trend intake throttle)
   {"altTrendMinSamp", &altTrendMinSamp},                               // MIN_SAMPLES (bucket commit gate)
@@ -775,7 +776,7 @@ void altFold_tick(uint32_t nowMs) {
   // can't act as a barrier that wipes the look-back ring mid-run.
   altEpisodeSyncCfg(fAmps);
   bool eligible = (!isnan(fVbus) && fVbus >= ALT_MIN_BATT_V && fAmps >= altMinAmps && fDuty >= altMinDuty && fRpm >= 0);
-  altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempSec);   // lighter (half-dwell) temp gate for the session plot
+  altSessTempGate.feed(eligible, tF, nowMs, altThermDegF, altSessTempDwell());   // lighter (half-dwell) temp gate for the session plot
   RawSample<ALT_NAXIS> s;
   s.x[0] = fRpm; s.x[1] = fDuty; s.x[2] = fVbus; s.x[3] = tF; s.out = fAmps; s.tMs = nowMs;
   s.ex[0] = fDuty; s.ex[1] = 0;   // retain run duty (excitation is derived from it) for cloud diagnosis
@@ -1303,11 +1304,11 @@ void altFrontInit() {
   memset(altPending,  0, (size_t)ALT_PENDING_CAP * sizeof(FrontPoint<ALT_NAXIS>));
   altPendingCount = 0;
   // Per-axis deque window caps (max steady time the axis can be set to): RPM/duty/Vbus/amps ~30 s
-  // headroom, temperature 240 s (covers the 120 s dwell + room). Index 4 = the output (amps) band.
+  // headroom, temperature 240 s (covers the full temp dwell + room). Index 4 = the output (amps) band.
   static const float ALT_MAXDWELL[ALT_NAXIS + 1] = { 30.0f, 30.0f, 30.0f, 240.0f, 30.0f };
   altEpisode.init(altEpRing, ALT_EP_RING_CAP, ALT_MAXDWELL);
   altEpisodeSyncCfg(0.0f);   // amps band starts at the floor; resized from filtered amps every fold
-  altSessTempGate.init(2600);   // session-temp 60 s dwell, ~240 s of 10 Hz headroom (matches temp axis maxdwell)
+  altSessTempGate.init(2600);   // session-temp (half-dwell) gate, ~240 s of 10 Hz headroom (matches temp axis maxdwell)
   altFront2.init(altFrontBuf, ALT_FRONT_CAP);
   altFrontUp.init(altFrontUpBuf, ALT_FRONT_CAP);
   // axisScale ≈ the span of each axis that moves output a comparable amount (rationale + rebalance
