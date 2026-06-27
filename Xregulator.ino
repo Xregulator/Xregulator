@@ -1710,9 +1710,9 @@ struct LongTermRecord {                 // naturally aligned; see static_assert 
   int16_t twa[3];                       // deg ×10 (signed)
   int16_t heel[3];                      // deg ×100 (signed, IMU)
   int16_t pitch[3];                     // deg ×100 (signed, IMU)
+  int16_t soc[3];                       // %   ×10 (envelope — window already tracks soc_min/max)
 
-  // AVG-ONLY — 7 fields × int16
-  int16_t soc_avg;                      // %   ×10
+  // AVG-ONLY — 6 fields × int16
   int16_t baro_avg;                     // mbar×10
   int16_t ambTemp_avg;                  // °F  ×10
   int16_t cog_avg, heading_avg;         // deg ×10
@@ -1723,10 +1723,10 @@ struct LongTermRecord {                 // naturally aligned; see static_assert 
   uint8_t chargeStage;                  // 0 off,1 bulk,2 absorption,3 float,4 manual,5 maintain,6 targetV,7 idle
   uint8_t _pad;
 };
-// 16 (4-byte block) + 96 (16 envelope) + 14 (7 avg) + 2 (byte) = 128, a multiple of
+// 16 (4-byte block) + 102 (17 envelope) + 12 (6 avg) + 2 (byte) = 132, a multiple of
 // 4 (no tail padding). Use sizeof() as recordSize everywhere; this pins it so a
 // layout edit can't silently desync the scaffold guard.
-static_assert(sizeof(LongTermRecord) == 128, "LongTermRecord layout changed — update the scaffold recordSize guard");
+static_assert(sizeof(LongTermRecord) == 132, "LongTermRecord layout changed — update the scaffold recordSize guard");
 
 const uint16_t LONGTERM_RING_SIZE = 4320;    // 30 d × 24 h × 6/h at 10-min cadence (~501 KB @ 116 B)
 LongTermRecord *longTermRing      = nullptr; // ps_malloc'd in setup()
@@ -1736,7 +1736,7 @@ uint16_t   prev_longTermHead      = 0xFFFF;  // shadow — persist only when hea
 time_t     longTermLastEpoch      = 0;       // epoch of newest record (0 = unsynced)
 #define LONGTERM_BACKUP_PATH  "/longterm_ring.bin"
 #define LONGTERM_BACKUP_MAGIC 0x4C54504Cu    // 'LTPL'
-#define LONGTERM_BACKUP_VER   2u    // v2: +timestamp, awa/twa → envelope (116→128 B)
+#define LONGTERM_BACKUP_VER   3u    // v3: soc avg-only → envelope (128→132 B); old rings discarded
 // Periodic field-off dump interval. The rising-edge dump alone captures a nearly
 // empty ring on a bench (field never cycles), so accumulated records were lost on
 // reboot/power-loss. This re-dumps every interval WHILE field-off (only when the
@@ -3355,14 +3355,16 @@ float TempPIDKp = 3.0f;             // A/°F proportional gain
 float TempPIDKi = 0.1f;             // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error)
 float TempPIDKiDownFrac = 0.33f;   // velocity-form asymmetric bleed (2026-06-26): below setpoint (eI<0) the integral bleed uses TempPIDKi×this instead of TempPIDKi, so a transient sub-setpoint undershoot does NOT collapse the learned holding penalty (the fridaytherm.csv grow-to-trip cycle). Ratio (not absolute) so it auto-scales with any Ki. 1.0 = symmetric (old behavior); lower = slower release. Clamped [0,1].
 float ThermalLookaheadSec = 60.0f;  // prediction horizon: project this many seconds ahead; size ~= plant dead time (~20s measured) + slope-estimator latency (~30s), NOT the settling time constant
+float ThermalSlopeWindowSec = 30.0f;  // backward-difference window for the slope estimate (2026-06-26, live-tunable). Default set to 30 (was 60) on 2026-06-27 to START the smoothness sweep — 30 halves the slope latency (~30→15s) vs the proven 60 baseline to shrink the TTT.csv ±3-4°F relaxation cycle, at the cost of a noisier slope. SWEEP IN PROGRESS — 60 is the validated fallback; settle the final value (or revert to 60) after the bench sweep. Lookahead deliberately left at 60 for this first step (see Thermal_Loop_Dev_Summary.md). Clamped firmware-side [10,60]s. Does NOT change the 60s cold-start warmup gate.
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
 
 float WarmupRampRate = 0.0f;      // A/s — rate at which output ceiling rises from 0 on field enable; 0 = disabled
 float warmupCeiling = 0.0f;       // runtime warmup ceiling (not persisted)
-float prevThermalPenalty = 0.0f;  // velocity-form accumulator: the thermal loop's SOLE memory (always the clamped penalty output). Anti-windup by construction — see tempPID_tick().
-float eP_prev = 0.0f;             // previous-tick floored eP (max(proj,present)−setpoint, ≥0) — the dP=Kp·ΔeP term's history
+float prevThermalPenalty = 0.0f;  // last applied penalty (slew "prev" + stale-hold seed). penalty = FF + thermalIntegral, clamped to the live cap — see tempPID_tick().
+float thermalIntegral = 0.0f;     // HYBRID (2026-06-26): holding-level integral (amps). The P + projection term is POSITIONAL feedforward (instant, FF = Kp·max(0,max(proj,present)−sp)); only this integral is accumulated, with the live-cap anti-windup clamp (I ≤ cap−FF), asymmetric below-setpoint bleed, and approach/descent gates. Pure velocity form (2026-06-26 longthermal.csv) silently zeroed the projection's constant lead — a difference form can't carry a feedforward level — so the approach cut landed at ~1/6 strength and tripped; making P+projection positional restores it.
+float thermalIntegralCeil = 0.0f; // instrumentation (2026-06-26): the live integral ceiling cap−FF (amps), logged in the thermal log's iCeil_A column. When this falls below outerI, the I≤cap−FF clamp is actively DELETING earned holding integral (RPM dip / FF spike) — watch for a reheat transient on cap recovery (ChatGPT caveat). Diagnostic only, drives nothing.
 
 uint32_t TempPIDIntervalMs = 5000;  // Temperature loop update period (ms) — independent of output current loop and sensor rate
 float TempPIDFilterAlpha = 0.2f;    // IIR smoothing for DS18B20 (0=frozen, 1=raw); feeds slowly at 16Hz on a frozen 5s sample
@@ -3449,7 +3451,7 @@ struct ThermalLogEntry {
   int16_t impliedPenalty;
   int16_t thermalSlope;  // thermalSlopeFPerSec × 1000 (0.001 °F/sec per count)
   int16_t penaltyRaw;    // Tier-0a: unclamped requested penalty (prevThermalPenalty + dP + dI), ×10. vs penaltyAmps = applied after clamp+slew. Gap to rpmCap reveals unused derate authority.
-  int16_t holdEstimate;  // DEAD since 2026-06-25 velocity-form refactor (no holding estimator). Always the -1.0 sentinel (-10). Kept for log layout / sizeof / analysis-script stability.
+  int16_t holdEstimate;  // REPURPOSED 2026-06-26 → live integral ceiling cap−FF, ×10 (CSV column renamed holdEst_A → iCeil_A). iCeil < outerI ⇒ the I≤cap−FF clamp is deleting earned holding integral. (Was the dead -1.0 estimator sentinel.)
   // gainKp/Ki/Lookahead written once in pidlog CONST row
 };
 
@@ -4016,6 +4018,10 @@ volatile uint32_t tempCoreBusySkipCount = 0;
 volatile uint32_t tempStaleSkipCount = 0;
 volatile float tempLastGoodF = -99.0f;
 volatile unsigned long tempLastSuccessMillis = 0;
+// Failure-counter snapshot taken at the moment of each good read, so a staleness trip can report
+// the DELTA (what failed during the gap that starved the controller), not just boot totals.
+volatile uint32_t tempFailSnapConn = 0, tempFailSnapEnum = 0, tempFailSnapCrc = 0,
+                  tempFailSnapReq = 0, tempFailSnapRead = 0, tempFailSnapAllFF = 0;
 
 
 //VictronEnergy

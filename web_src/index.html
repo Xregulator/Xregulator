@@ -7058,6 +7058,21 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>Thermal Slope Window (s) (<span id="ThermalSlopeWindowSec_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Time window over which the temperature rate-of-rise (slope) is measured, which in turn drives the projected temperature. A SHORTER window makes the loop react faster to rate changes — less control lag, so the slow temperature oscillation around the target gets smaller — but the slope reads noisier. A LONGER window is smoother but laggier. 60s is the original full window; try 30s to tighten the cycle. Independent of Thermal Lookahead. Does not affect the 60s cold-start warmup. Clamped 10–60s.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="ThermalSlopeWindowSec" type="number" step="5" min="10" max="60" />
+                      <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Temp PID Interval (ms) (<span id="TempPIDIntervalMs_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How often the temperature PID runs and the slope buffer is updated. Also sets the slope window: 12 intervals × this value. Independent of the output current loop rate.</span></span>
                   </div>
@@ -10669,12 +10684,23 @@
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A health reading every 5 seconds since this page was opened, but only while the operating point is holding steady (the lighter session gate: all inputs steady for a few seconds and temperature steady for half the full record-book dwell). Green dots are measured comparisons (a recorded best exists at that operating point); blue dots are estimated (interpolated between nearby records). A dot ringed in orange is also a full steady run — the same kind of point that updates the reference and the engine-hours trend. Shaded spans are periods with no dot — not holding steady, no reference yet, or not running — where no number is shown on purpose. (A full steady run in brand-new territory has no reference to grade against, so it shows no dot and no ring here, by design.) Click the axis numbers to set the plot range.</span></span>
         </p>
         <div id="alt-session-plot" style="width:100%;max-width:560px;margin:0 auto;"></div>
+        <div id="alt-session-point" style="max-width:560px;margin:6px auto 0;font-size:11px;color:#888;text-align:center;">Click a dot to see the conditions behind it.</div>
         <hr />
         <p class="card-group-title">
           <span>Charging-System Health vs Engine Hours <span id="alt-cloud-status" style="font-weight:normal;font-size:11px;color:#888;"></span></span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only FULL steady runs feed this trend — graded against the active reference (Measured/Estimated only; learning-a-new-region and no-reference runs are excluded), at most one sample every 10 seconds. A bucket needs at least 2 such samples (the "min samples per bucket" setting) before it commits a point; a sparser bucket shows a gap rather than a single-reading artifact. The bucket spans one engine-hour in normal use (shorter for testing). The in-progress bucket persists across reboots, so a part-finished hour resumes where it left off. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Each point is the alternator's output as a percentage of its own best-ever, plotted against engine-hours since the last "Start Over". The bold line tracks the WORST operating region (the early warning); the faint line is the overall average. Only FULL steady runs feed this trend — graded against the active reference (Measured/Estimated only; learning-a-new-region and no-reference runs are excluded), at most one sample every 10 seconds. A bucket needs at least 2 such samples (the "min samples per bucket" setting) before it commits a point; a sparser bucket shows a gap rather than a single-reading artifact. The bucket spans one engine-hour in normal use (shorter for testing). The in-progress bucket persists across reboots, so a part-finished hour resumes where it left off. A healthy charging system holds a roughly flat line in the mid-90s — a steady downward trend is what to watch for. A clean 100% is not expected (sensor noise + battery acceptance scatter). Absolute standing vs other alternators comes from the cloud, not this self-baseline. Use the Window buttons (10 h / 100 h / All) to zoom the engine-hours axis; click the axis numbers to set the % range, or the "auto" box to refit.</span></span>
         </p>
-        <canvas id="alt-trend" width="520" height="300" style="width:100%;max-width:560px;aspect-ratio:520/300;display:block;margin:0 auto;"></canvas>
+        <div style="display:flex;justify-content:center;margin:0 auto 8px;max-width:560px;">
+          <span class="time-window-input" id="altTrendWinButtons" style="white-space:nowrap;display:inline-flex;gap:6px;align-items:center;font-size:12px;color:#555;">
+            Window:
+            <span class="seg">
+              <button type="button" value="10"  onclick="setAltTrendWindow(10)">10 h</button>
+              <button type="button" value="100" onclick="setAltTrendWindow(100)">100 h</button>
+              <button type="button" value="0"   onclick="setAltTrendWindow(0)">All</button>
+            </span>
+          </span>
+        </div>
+        <div id="alt-trend" style="width:100%;max-width:560px;margin:0 auto;"></div>
         <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#555;">
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid #3a7bd5;"></i>worst</span>
           <span style="display:inline-flex;align-items:center;gap:6px;"><i style="display:inline-block;width:18px;border-top:3px solid rgba(58,123,213,.45);"></i>average</span>
@@ -10682,25 +10708,15 @@
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
           <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How it works</summary>
           <div style="margin-top:8px;line-height:1.5;">
-            <p><b>What it measures.</b> The highest output the alternator has ever produced at a given steady-state operating
-              point — engine speed (RPM), field drive (excitation), bus voltage, and temperature — and
-              whether today's output is sliding below that best over time. </p>
-            <p><b>Learned on the device.</b> Steady-state capture runs every control tick (~200 Hz):
-              when the smoothed engine speed, field drive, voltage, temperature, AND output current
-              all hold within their bands for their set times (tunable in Setup), the run's average
-              is recorded as a best-ever point. The health comparison itself runs once per second.
-              Instead of averaging nearby records (which reads falsely low at the edge of what has
-              been visited), it fits the local slope of the best-ever surface through the nearby
-              records and compares today's output against that fit. The label under the headline says
-              what the comparison is based on: <b>MEASURED</b> — a recorded best exists at this
-              operating point; <b>ESTIMATED</b> — interpolated between trustworthy nearby records;
-              <b>Learning this operating region</b> — the recorded data around this point is too
-              one-sided to grade fairly, so no number is shown; <b>No reference here yet</b> — nothing
-              recorded nearby, and a steady run here records a new point instead of guessing.</p>
-            <p><b>Pruned in the cloud (optional).</b> About every 15 minutes, engine off and device online, any new
-              frontier points upload. The cloud then drops points that
-              have become redundant (sitting below the envelope of their neighbours) and returns the cleaned
-              set. Raw history is kept server-side so the envelope can always be rebuilt.</p>
+            <p>Today's output vs. the highest the alternator has produced at the same conditions.</p>
+            <p><b>MEASURED</b> — a recorded best exists at this operating point; <b>ESTIMATED</b> —
+              interpolated between trustworthy nearby records; <b>Learning this operating region</b> —
+              the recorded data around this point is too one-sided to grade fairly, so no number is
+              shown; <b>No reference here yet</b> — nothing recorded nearby, and a steady run here
+              records a new point instead of guessing.</p>
+            <p>Data is optionally pruned in the cloud. Every 15 minutes, if the engine is off and
+              device online, new frontier points upload. The cloud then drops points that have become
+              redundant (sitting below the envelope of their neighbours) and returns the cleaned set.</p>
           </div>
         </details>
         <hr />

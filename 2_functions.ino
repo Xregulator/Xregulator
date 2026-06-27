@@ -323,6 +323,7 @@ bool fsRemove(const char *path) {
 #define NK_coldChargeLockoutEnable "coldChrgLock"
 #define NK_MinChargeTempF "MinChargeTempF"
 #define NK_ThermalLookaheadSec "ThermalLookhdSc"
+#define NK_ThermalSlopeWindowSec "ThrmSlopeWinS"
 #define NK_TuningMode "TuningMode"
 #define NK_UVThresholdHigh "UVThresholdHigh"
 #define NK_UseFloat "UseFloat"
@@ -1150,6 +1151,7 @@ void TempTask(void *parameter) {
   static bool lastReadWasSuccess = true;  // false after any failure; drives 1s retry vs 5s normal poll
   static float lastValidTemp = -99;  // Track last valid reading (-99 = uninitialized)
   static bool sensorEnumerated = false;
+  static uint8_t connFailStreak = 0;  // consecutive isConnected() misses before forcing re-enumeration
 
 // Config byte derived from global resolution (9..12 bit -> 0x1F/0x3F/0x5F/0x7F); target is 12-bit (0x7F)
 #define DS18B20_CFG_BYTE (0x1F | ((resolution - 9) << 5))
@@ -1178,7 +1180,10 @@ void TempTask(void *parameter) {
         sensorEnumerated = true;
       } else {
         tempEnumerateFailCount++;
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        // While charging (RPM>=200) the 20s control-staleness gate is armed, so a failed enumerate must
+        // retry fast — stacked 5s delays here are what cut the field on a brief bus glitch. Engine-off
+        // keeps the slow retry to save standby power (field is already off, staleness can't cut it).
+        vTaskDelay(pdMS_TO_TICKS(RPM >= 200 ? 1000 : 5000));
         continue;
       }
     }
@@ -1207,12 +1212,21 @@ void TempTask(void *parameter) {
     float pendingMaxTemp = 0.0f;
     float pendingMaxTempAllTime = 0.0f;
 
+    // A single isConnected() false-negative is usually OneWire noise (field-PWM coupling), not a real
+    // disconnect. Tearing down enumeration on the first miss forces the slow re-enumerate path and its
+    // retry delays, which can stack past the 20s control-staleness gate and needlessly cut the field.
+    // Only re-enumerate after 3 consecutive misses; otherwise fast-retry (1s, post-failure) and keep
+    // the enumerated address so a good read on the very next poll clears staleness.
     if (!sensors.isConnected(tempDeviceAddress)) {
       tempConnectedFailCount++;
-      lastValidTemp = -99;
-      sensorEnumerated = false;
+      if (++connFailStreak >= 3) {
+        lastValidTemp = -99;
+        sensorEnumerated = false;
+        connFailStreak = 0;
+      }
       goto cleanup;
     }
+    connFailStreak = 0;
 
     if (!sensors.requestTemperaturesByAddress(tempDeviceAddress)) {
       tempRequestFailCount++;
@@ -1330,6 +1344,13 @@ void TempTask(void *parameter) {
         tempReadSuccessCount++;
         tempLastGoodF = tempF;
         tempLastSuccessMillis = millis();
+        // Snapshot failure counters at this good read so a later staleness trip can report deltas.
+        tempFailSnapConn = tempConnectedFailCount;
+        tempFailSnapEnum = tempEnumerateFailCount;
+        tempFailSnapCrc = tempCrcFailCount;
+        tempFailSnapReq = tempRequestFailCount;
+        tempFailSnapRead = tempReadFailCount;
+        tempFailSnapAllFF = tempAllFFCount;
 
         AlternatorTemperatureF = tempF;
         lastValidTemp = tempF;
@@ -2661,9 +2682,9 @@ static inline int16_t ltScale(int32_t v100, int32_t divisor) {
 // into the month-long PSRAM ring. Called every SENSOR_UPLOAD_INTERVAL from
 // uploadSensorHistory() (both paths) so the fixed-cadence timeline never gaps within
 // a session. validMask bit per field (set only when that field had valid data):
-//   ENVELOPE 0..13: battVolt battCurr altCurr victronCurr rpm duty altTemp tempTherm
-//                   sog tws vmg aws heel pitch
-//   AVG-ONLY 14..22: soc baro ambTemp cog heading awa twa leeway altZero
+//   ENVELOPE 0..16: battVolt battCurr altCurr victronCurr rpm duty altTemp tempTherm
+//                   sog tws vmg aws awa twa heel pitch soc
+//   AVG-ONLY 17..22: baro ambTemp cog heading leeway altZero
 //   POSITION 23: lat/lon. (Mirror this order in the dashboard JS.)
 // envelope (min,max,avg) from currentWindow; avg = area/valid, then rescaled+clamped.
 #define LT_ENV(dst, field, divisor, bit) do { \
@@ -2713,8 +2734,8 @@ void pushLongTermRecord() {
   LT_ENV(twa,         twa,         10, 13);   // moved avg-only → envelope
   LT_IMU(heel,        heel,        1,  14);
   LT_IMU(pitch,       pitch,       1,  15);
+  LT_ENV(soc,         soc,         10, 16);   // moved avg-only → envelope (window already tracks soc_min/max)
 
-  LT_AVG(soc_avg,     soc,     10, 16);
   LT_AVG(baro_avg,    baro,    10, 17);
   LT_AVG(ambTemp_avg, ambTemp, 10, 18);
   LT_AVG(cog_avg,     cog,     10, 19);

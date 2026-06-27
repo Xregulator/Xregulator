@@ -1004,6 +1004,7 @@ enum Csv3Index {
   CSV3_battTempDerateEnable,    // battery-temp gain derate master on/off (0/1)
   CSV3_battTempCoeff,           // battery fractional resistance change per °C; ×10000
   CSV3_TempPIDKiDownFrac,       // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
+  CSV3_ThermalSlopeWindowSec,   // thermal slope backward-difference window (s); integer
 
   CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26
 };
@@ -1794,15 +1795,23 @@ void setupServer() {
                 "pidErr_A,pidOut_pct,duty_pct,RPM,battV,measAmps_A,"
                 "penaltyAmps_A,flags,chargeStageDisplay,"
                 "outerP,outerI,lookahead,impliedPenalty,antiWindupFired,thermalSlope_F_sec,"
-                "freezeWhy,penaltyRaw_A,holdEst_A\n");
+                "freezeWhy,penaltyRaw_A,iCeil_A\n");
             } else if (state.row == 1) {
               // Constants row — written once, Python detects via "CONST" in ts_ms field
+              // limit/warn/crit added so the plotter can draw the limit + warning-trip
+              // (limit+warn) + critical-trip (limit+crit) reference lines. nominalTarget
+              // column already carries the live regulation setpoint in °F.
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
-                "CONST,kp=%.6g,ki=%.6g,lookahead=%.1f\n",
+                "CONST,kp=%.6g,ki=%.6g,lookahead=%.1f,limit=%.1f,warn=%.1f,crit=%.1f,kidownfrac=%.3g,slopewin=%.1f\n",
                 TempPIDKp,
                 TempPIDKi,
-                ThermalLookaheadSec);
+                ThermalLookaheadSec,
+                TemperatureLimitF,
+                TempWarnExcess,
+                TempCritExcess,
+                TempPIDKiDownFrac,
+                ThermalSlopeWindowSec);
             } else {
               // Data rows — index offset by 2 (header + constants row)
               int idx = (state.oldest + state.row - 2) % THERMAL_LOG_SIZE;
@@ -2310,9 +2319,25 @@ void setupServer() {
   server.on("/alttrend.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!altTrend) { request->send(200, "text/plain", "engHours,worstPct,overallPct\n"); return; }
     const int TR_MAXOUT = 200;
-    struct TrExp { int total, stride, outIdx, numOut; bool header, done; char line[64]; int len, pos; };
+    // Optional ?hours=N window: decimate WITHIN the last N engine-hours so the dashboard's
+    // 10h/100h shortcuts aren't starved. A single global 200-pt stride over a multi-thousand-hour
+    // history lands ~0 points inside a recent 10h slice; windowing the base index first fixes that.
+    // hours<=0 or absent = full history (the "All" shortcut).
+    int base = 0;
+    if (request->hasParam("hours")) {
+      int winHours = request->getParam("hours")->value().toInt();
+      if (winHours > 0 && altTrendCount > 0) {
+        float hrPerBucket = altTrendBucketSec / 3600.0f;
+        float cutoff = altTrend[altTrendCount - 1].engHour * hrPerBucket - (float)winHours;
+        for (int i = 0; i < altTrendCount; i++) {
+          if (altTrend[i].engHour * hrPerBucket >= cutoff) { base = i; break; }
+        }
+      }
+    }
+    struct TrExp { int base, total, stride, outIdx, numOut; bool header, done; char line[64]; int len, pos; };
     TrExp st;
-    st.total = altTrendCount;
+    st.base = base;
+    st.total = altTrendCount - base;
     st.stride = (st.total > TR_MAXOUT) ? ((st.total + TR_MAXOUT - 1) / TR_MAXOUT) : 1;
     st.numOut = (st.stride > 0) ? ((st.total + st.stride - 1) / st.stride) : 0;
     st.outIdx = 0; st.header = true; st.done = false; st.len = 0; st.pos = 0;
@@ -2327,8 +2352,8 @@ void setupServer() {
               st.header = false;
             } else {
               if (st.outIdx >= st.numOut) { st.done = true; return written; }
-              int start = st.outIdx * st.stride, end = start + st.stride;
-              if (end > st.total) end = st.total;
+              int start = st.base + st.outIdx * st.stride, end = start + st.stride;
+              if (end > st.base + st.total) end = st.base + st.total;
               float worst = 1e9f, sum = 0; int n = 0;
               for (int i = start; i < end; i++) {
                 float w = altTrend[i].worstPct / 10.0f;
@@ -4839,6 +4864,13 @@ void setupServer() {
       inputMessage = request->getParam("ThermalLookaheadSec")->value();
       ThermalLookaheadSec = clamp_f(inputMessage.toFloat(), 0.0f, 300.0f);
       settingWrite(NK_ThermalLookaheadSec, String(ThermalLookaheadSec, 1).c_str());      queueConsoleMessageF("ThermalLookaheadSec set to: %.1f s", ThermalLookaheadSec);
+    }
+    if (request->hasParam("ThermalSlopeWindowSec")) {
+      foundParameter = true;
+      inputMessage = request->getParam("ThermalSlopeWindowSec")->value();
+      ThermalSlopeWindowSec = clamp_f(inputMessage.toFloat(), 10.0f, 60.0f);  // slope backward-difference window
+      settingWrite(NK_ThermalSlopeWindowSec, String(ThermalSlopeWindowSec, 1).c_str());
+      queueConsoleMessageF("ThermalSlopeWindowSec set to: %.1f s", ThermalSlopeWindowSec);
     }
     if (request->hasParam("TempPIDIntervalMs")) {
       foundParameter = true;
@@ -7732,7 +7764,8 @@ void SendWifiData() {
                                "%d,"  // CommissionTempF
                                "%d,"  // battTempDerateEnable
                                "%d,"  // battTempCoeff
-                               "%d",  // TempPIDKiDownFrac
+                               "%d,"  // TempPIDKiDownFrac
+                               "%d",  // ThermalSlopeWindowSec
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8059,7 +8092,8 @@ void SendWifiData() {
                                isnan(CommissionTempF) ? -32768 : (int)lroundf(CommissionTempF * 10.0f),  // CSV3_CommissionTempF (°F ×10; -32768 = unset)
                                (int)battTempDerateEnable,                       // CSV3_battTempDerateEnable (0/1)
                                SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
-                               SafeInt(TempPIDKiDownFrac, 1000)                 // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
+                               SafeInt(TempPIDKiDownFrac, 1000),                // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
+                               SafeInt(ThermalSlopeWindowSec)                   // CSV3_ThermalSlopeWindowSec (slope difference window, s)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

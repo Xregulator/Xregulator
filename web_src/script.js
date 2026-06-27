@@ -977,6 +977,11 @@ let altLive = { valid:false, rpm:0, exc:0, amps:0, pred:0, pct:0, worstPct:0, ov
                 sessionMean:0, sessionP10:0, sessionN:0, hiFieldAlert:0, sim:0 };
 let altTrend = [];     // committed trend points: [{eng, worst, overall}]
 let _altTrendPending = false, _altTrendLastFetch = 0;
+let altTrendPlot = null;
+let altTrendWindow = '0';   // engine-hours X window: '0'=all, '10', '100'
+try { altTrendWindow = localStorage.getItem('altTrendWin') || '0'; } catch(e){}
+let altTrendYManual = null;
+try { altTrendYManual = JSON.parse(localStorage.getItem('altTrendY') || 'null'); } catch(e){}
 
 function fetchAltSchema(){ return fetch('/altschema').then(r=>r.json()).then(j=>{ altSchema=j; }).catch(()=>{}); }
 
@@ -1266,7 +1271,11 @@ function altUploadCsvFile(inp){
 }
 
 function fetchAltTrend() {
-  fetch('/alttrend.csv').then(r=>r.text()).then(txt=>{
+  // The firmware decimates WITHIN the requested window (?hours=N), so the short shortcuts keep
+  // full resolution instead of being starved by a single global 200-point stride. All = no param.
+  const win = +altTrendWindow;
+  const url = '/alttrend.csv' + (win > 0 ? ('?hours=' + win) : '');
+  fetch(url).then(r=>r.text()).then(txt=>{
     const ln = txt.trim().split('\n'); altTrend = [];
     for (let i=1;i<ln.length;i++){ const c=ln[i].split(','); if(c.length<3) continue;
       altTrend.push({eng:+c[0], worst:+c[1], overall:+c[2]}); }
@@ -1282,6 +1291,20 @@ function queueAltTrendUpdate() {
   requestAnimationFrame(()=>{ _altTrendPending = false; drawAltTrend(); });
 }
 
+// Engine-hours X window shortcut (10 h / 100 h / All). Each window re-fetches with ?hours=N so the
+// firmware decimates inside the requested span; persisted so the choice survives a reload.
+function setAltTrendWindow(w) {
+  altTrendWindow = String(w);
+  try { localStorage.setItem('altTrendWin', altTrendWindow); } catch(e){}
+  updateAltTrendWinButtons();
+  _altTrendLastFetch = Date.now(); fetchAltTrend();   // immediate refetch with the new window
+}
+function updateAltTrendWinButtons() {
+  document.querySelectorAll('#altTrendWinButtons button').forEach(b => {
+    b.classList.toggle('on', String(b.value) === String(altTrendWindow));   // segmented-control active pill
+  });
+}
+
 // Hi-DPI canvas: size the backing store to the on-screen CSS box × devicePixelRatio, then
 // map a fixed logical coordinate space (W×H) onto it. Kills the blurry/greyed "retina" look
 // while letting every draw fn keep its existing W/H-based layout math unchanged.
@@ -1295,78 +1318,121 @@ function hidpiCtx(cv, W, H) {
   return ctx;
 }
 
-// Performance-%-vs-engine-hours trend. Bold line = worst operating region (early warning);
-// faint line = overall. HISTORICAL ONLY \u2014 no live "now" dot (the "this session" plot above owns
-// live %). Empty \u2192
-// local "no trend yet" notice for the whole first engine-hour
-// (the trend is built on-device from engine-hours \u2014 NOT from the cloud; don't reintroduce a cloud message).
-function drawAltTrend() {
-  const cv = document.getElementById('alt-trend');
-  if (!cv || !cv.getContext) return;
-  const W = 520, H = 300, padL = 56, padR = 18, padT = 16, padB = 40, ctx = hidpiCtx(cv, W, H);
-  ctx.clearRect(0,0,W,H);
-  const pts = altTrend.slice();
-  // Historical-only trend: NO live "now" dot. It used to be appended here at the live engine-hours
-  // with its state color, but it (a) blinked in/out as the operating condition entered/left a graded
-  // MEASURED/ESTIMATED state, (b) dragged the X-axis length around (its fractional engine-hours
-  // became maxE), and (c) pushed committed integer-hour points off their gridlines. The "this session"
-  // plot above is the home for live %; this plot shows only committed engine-hour buckets.
-  if (pts.length === 0){
-    ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center';
-    ctx.fillText('No trend yet — one point logs per bucket (an engine-hour in normal use)', W/2, H/2); ctx.textAlign='left'; return;
-  }
-  // X domain = whole engine-hours. Committed points fall on integer hours, so an integer maxE keeps
-  // them on their gridlines. Floor the span at 4 h so the first few points appear on a stable axis
-  // instead of the whole plot rescaling every time a new hourly point commits.
-  let dataMaxE = 0; pts.forEach(p=>{ if(p.eng>dataMaxE)dataMaxE=p.eng; });
-  const maxE = Math.max(4, Math.ceil(dataMaxE));
-  let minY = 70; const maxY = 105;
-  pts.forEach(p=>{ if(p.worst<minY)minY=Math.max(0,Math.floor(p.worst/5)*5); });
-  const X = e => padL + (e/maxE)*(W-padL-padR);
-  const Y = v => H-padB - ((v-minY)/(maxY-minY))*(H-padT-padB);
-  // Y gridlines + % labels
-  ctx.font='10px sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
-  for (let v=Math.ceil(minY/10)*10; v<=maxY; v+=10){
-    const y=Y(v); ctx.strokeStyle='#eee'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke();
-    ctx.fillStyle='#999'; ctx.fillText(v+'%', padL-7, y);
-  }
-  if (100>=minY && 100<=maxY){ const y=Y(100); ctx.strokeStyle='#cde'; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke(); ctx.setLineDash([]); }
-  // X gridlines + engine-hour labels — always at WHOLE engine-hours so committed points (which fall on
-  // integer hours) sit exactly on a labelled tick. A "nice" integer step (1,2,5,10…) keeps the tick
-  // count reasonable as the horizon grows; no more fractional/duplicate labels ("0 1 1 2 2").
-  const niceSteps=[1,2,5,10,20,50,100,200,500,1000];
-  let xStep = Math.max(1, Math.ceil(maxE/6)); xStep = niceSteps.find(s=>s>=xStep) || xStep;
-  ctx.textAlign='center'; ctx.textBaseline='top';
-  for (let e=0; e<=maxE+0.001; e+=xStep){ const x=X(e);
-    ctx.strokeStyle='#f3f3f3'; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,H-padB); ctx.stroke();
-    ctx.fillStyle='#999'; ctx.fillText(String(e), x, H-padB+5); }
-  // axes
-  ctx.strokeStyle='#ccc'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,H-padB); ctx.lineTo(W-padR,H-padB); ctx.stroke();
-  // axis titles \u2014 centered, no arrows, clear of the % tick labels
-  ctx.fillStyle='#888'; ctx.font='11px sans-serif';
-  ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.fillText('engine-hours', (padL+W-padR)/2, H-6);
-  ctx.save(); ctx.translate(13,(padT+H-padB)/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('% of best-ever',0,0); ctx.restore();
-  // lines \u2014 break across engine-hour gaps > GAP so missing data (e.g. engine on but alternator off) shows
-  //         as a gap rather than a misleading slide toward 0. Firmware never commits 0-points (eligibility gate).
-  // Break only across REAL data gaps, not normal point spacing (which grows when the firmware
-  // decimates a long history). Threshold = 3x the median step between points (floor 3 engine-hours).
+// Performance-%-vs-engine-hours trend — uPlot, same family as the session plot above and the Plots
+// tab (so it inherits the click-to-edit Y limits, the "auto" checkbox, and pixel-correct rendering).
+// Bold line = worst operating region (early warning); faint line = overall average. HISTORICAL ONLY —
+// no live "now" dot (the "this session" plot above owns live %). Empty → "no trend yet" notice (the
+// trend is built on-device from engine-hours — NOT from the cloud; don't reintroduce a cloud message).
+
+// X domain follows the active window: a window shows the last N engine-hours (full width even before it
+// fills); "All" floors the span at 4 h so the first points sit on a stable axis instead of rescaling
+// every time a new hourly point commits.
+function altTrendXRange() {
+  let maxE = 0; altTrend.forEach(p=>{ if(p.eng>maxE)maxE=p.eng; });
+  const win = +altTrendWindow;
+  if (win > 0) return [Math.max(0, maxE - win), Math.max(win, maxE)];
+  return [0, Math.max(4, Math.ceil(maxE))];
+}
+
+// Y auto-fit keeps the old 70–105 frame and only expands it: floor drops (to a /5 boundary) if the
+// worst line dips below 70, ceiling rises if any series tops 105 (so a >100 reading is never clipped).
+function altTrendYRange() {
+  if (altTrendYManual) return altTrendYManual;
+  let lo = 70, hi = 105;
+  altTrend.forEach(p=>{
+    if (p.worst   != null && p.worst   < lo) lo = Math.max(0, Math.floor(p.worst/5)*5);
+    if (p.worst   != null && p.worst   > hi) hi = Math.ceil(p.worst);
+    if (p.overall != null && p.overall > hi) hi = Math.ceil(p.overall);
+  });
+  return [lo, hi];
+}
+
+// Build the uPlot data triple [xs, overall, worst] from the committed points. uPlot breaks a line only
+// at null y, so a REAL engine-hour gap (engine on, alternator off) is rendered by inserting a synthetic
+// null sample between the two points straddling the gap — markers skip nulls too, so no phantom dot.
+// Gap threshold = 3x the median point spacing (floor 3 h) so normal decimated spacing isn't broken.
+function altTrendData() {
+  const pts = altTrend.slice().sort((a,b)=>a.eng-b.eng);
   let steps=[]; for(let i=1;i<pts.length;i++){ const d=pts[i].eng-pts[i-1].eng; if(d>0) steps.push(d); }
   steps.sort((a,b)=>a-b);
   const GAP = Math.max(3, (steps.length?steps[Math.floor(steps.length/2)]:1)*3);
-  const line=(key,color,width)=>{ ctx.strokeStyle=color; ctx.lineWidth=width; ctx.beginPath();
-    let pen=false, prevE=0;
-    pts.forEach(p=>{ const x=X(p.eng), y=Y(Math.max(minY,Math.min(maxY,p[key])));
-      if(pen && (p.eng-prevE)<=GAP) ctx.lineTo(x,y); else ctx.moveTo(x,y); pen=true; prevE=p.eng; }); ctx.stroke(); };
-  line('overall','rgba(58,123,213,0.35)',1.5);   // faint overall
-  line('worst','#3a7bd5',2.2);                    // bold worst-region
-  // Committed-point markers. One point commits per bucket (an engine-hour in normal use; the X axis is
-  // always true engine-hours, so a 600 s testing bucket lands at a fractional hour), so the trend often
-  // holds a single point — a polyline of one vertex
-  // draws nothing, leaving a blank grid that reads as "broken". Drawing each committed worst point
-  // as a dot makes a single/sparse trend visible. (The live "now" dot was removed — see top of fn.)
-  ctx.fillStyle='#3a7bd5';
-  pts.forEach(p=>{ const x=X(p.eng), y=Y(Math.max(minY,Math.min(maxY,p.worst)));
-    ctx.beginPath(); ctx.arc(x,y,2.6,0,6.2832); ctx.fill(); });
+  const xs=[], overall=[], worst=[]; let prevE=null;
+  pts.forEach(p=>{
+    if (prevE!==null && (p.eng-prevE) > GAP){ xs.push(prevE+(p.eng-prevE)/2); overall.push(null); worst.push(null); }
+    xs.push(p.eng); overall.push(p.overall); worst.push(p.worst); prevE=p.eng;
+  });
+  return [xs, overall, worst];
+}
+
+function buildAltTrendPlot() {
+  const el = document.getElementById('alt-trend');
+  if (!el || typeof uPlot === 'undefined') return;
+  el.innerHTML = '';
+  el.style.position = 'relative';
+  const opts = {
+    width: Math.max(el.clientWidth, 320),
+    height: 240,
+    padding: [30, 8, 0, 0],   // top inset clears the auto checkbox
+    series: [
+      { label: 'engine-hours' },
+      { label: 'average', stroke: 'rgba(58,123,213,0.45)', width: 1.5, points: { show: false } },
+      { label: 'worst',   stroke: '#3a7bd5', width: 2.2, points: { show: true, size: 5, fill: '#3a7bd5' } },
+    ],
+    scales: {
+      x: { time: false, range: () => altTrendXRange() },
+      y: { auto: false, range: () => altTrendYRange() },
+    },
+    axes: [
+      { grid: { show: true }, values: (u, t) => t.map(v => String(v)) },
+      { scale: 'y', grid: { show: true }, side: 3, values: (u, t) => t.map(v => v + '%') },
+    ],
+    legend: { show: false },
+    cursor: { drag: { x: false, y: false } },
+    hooks: { draw: [u => {
+      const ctx = u.ctx; ctx.save();
+      if (!altTrend.length) {
+        ctx.fillStyle='#999'; ctx.font='13px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText('No trend yet — one point logs per engine-hour', u.bbox.left+u.bbox.width/2, u.bbox.top+u.bbox.height/2);
+        ctx.restore(); return;
+      }
+      const y = u.valToPos(100, 'y', true);   // 100% reference dashed line
+      if (y >= u.bbox.top && y <= u.bbox.top + u.bbox.height) {
+        ctx.strokeStyle='#cde'; ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.moveTo(u.bbox.left, y); ctx.lineTo(u.bbox.left+u.bbox.width, y); ctx.stroke();
+      }
+      ctx.restore();
+    }] }
+  };
+  altTrendPlot = new uPlot(opts, altTrendData(), el);
+  new ResizeObserver(() => {
+    if (altTrendPlot) altTrendPlot.setSize({ width: Math.max(el.clientWidth, 320), height: 240 });
+  }).observe(el);
+
+  // "auto" checkbox (top-right) — same convention as the session plot. Checked = auto-fit; unchecked
+  // pins to whatever is currently shown.
+  const exAs = el.querySelector('.autoscale-ctrl'); if (exAs) exAs.remove();
+  const asDiv = document.createElement('div');
+  asDiv.className = 'autoscale-ctrl';
+  asDiv.style.cssText = 'position:absolute;top:6px;right:8px;z-index:10;display:flex;align-items:center;gap:3px;font-size:11px;opacity:0.6;';
+  asDiv.innerHTML = '<input type="checkbox" id="autoscale-alttrend-cb" style="cursor:pointer;width:12px;height:12px;margin:0;"><label for="autoscale-alttrend-cb" style="cursor:pointer;user-select:none;">auto</label>';
+  el.appendChild(asDiv);
+  const asCb = document.getElementById('autoscale-alttrend-cb');
+  asCb.checked = (altTrendYManual == null);
+  asCb.addEventListener('change', e => {
+    if (e.target.checked) { altTrendYManual = null; localStorage.removeItem('altTrendY'); }
+    else if (altTrendPlot) { altTrendYManual = [altTrendPlot.scales.y.min, altTrendPlot.scales.y.max]; localStorage.setItem('altTrendY', JSON.stringify(altTrendYManual)); }
+    if (altTrendPlot) altTrendPlot.redraw();
+  });
+  attachYAxisEdit(altTrendPlot, [{
+    scale: 'y', decimals: 0,
+    apply: (mn, mx) => { altTrendYManual = [mn, mx]; asCb.checked = false; localStorage.setItem('altTrendY', JSON.stringify(altTrendYManual)); altTrendPlot.redraw(); }
+  }]);
+  updateAltTrendWinButtons();
+}
+
+function drawAltTrend() {
+  if (!altTrendPlot) { buildAltTrendPlot(); if (!altTrendPlot) return; }
+  altTrendPlot.setData(altTrendData());   // setData re-runs the range fns (window + Y auto/manual)
 }
 
 // ── Charging-system health session plot: a point every 5 s while the session steady gate holds,
@@ -1378,6 +1444,9 @@ let altSessPlot = null;
 const ALT_SESS_MAX = 28800;   // 8 h of 1 Hz samples, then the oldest roll off
 const ALT_SESS_WINDOW_S = 1800;  // X axis shows a fixed last-30-minutes window, labelled "minutes ago"
 let altSessT = [], altSessMeas = [], altSessEst = [], altSessGap = [], altSessRing = [];
+// Per-dot condition snapshot, parallel to the arrays above, so a click can show the operating
+// point behind a dot. Only the fields already arriving in altLive each tick — no firmware change.
+let altSessInfo = [];
 let altSessYManual = null;
 try { altSessYManual = JSON.parse(localStorage.getItem('altSessY') || 'null'); } catch(e){}
 
@@ -1461,6 +1530,27 @@ function buildAltSessPlot(){
     if (altSessPlot) altSessPlot.setSize({ width: Math.max(el.clientWidth, 320), height: 200 });
   }).observe(el);
 
+  // Click-to-inspect: find the nearest plotted dot to the click (same valToPos mapping the draw
+  // hook uses) and render its captured operating point into the panel below the plot.
+  altSessPlot.over.addEventListener('click', e => {
+    // Work in CSS px relative to the over (plotting) element. valToPos(...,false) is CSS px relative
+    // to the whole canvas, so subtract the bbox inset (canvas px → CSS via pxRatio) to match.
+    const dpr = altSessPlot.pxRatio || (window.devicePixelRatio || 1);
+    const r = altSessPlot.over.getBoundingClientRect();
+    const cx = e.clientX - r.left, cy = e.clientY - r.top;
+    const offX = altSessPlot.bbox.left / dpr, offY = altSessPlot.bbox.top / dpr;
+    let best = -1, bestD = 14 * 14;                          // 14px pick radius
+    for (let i = 0; i < altSessT.length; i++) {
+      const v = altSessMeas[i] != null ? altSessMeas[i] : altSessEst[i];
+      if (v == null) continue;
+      const dx = (altSessPlot.valToPos(altSessT[i], 'x', false) - offX) - cx;
+      const dy = (altSessPlot.valToPos(v, 'y', false) - offY) - cy;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0) renderAltSessPoint(best);
+  });
+
   // Auto checkbox (top-right) — same convention as the other plots. No lock button:
   // this is a slow point-per-update plot, so unchecking (which pins to what's shown)
   // already covers the "stop it moving" case. Checked = auto-fit (null manual range);
@@ -1526,9 +1616,38 @@ function altSessionPush(){
   altSessEst.push (graded && st===1 ? altLive.pct : null);
   altSessGap.push(graded ? 0 : 1);
   altSessRing.push(graded && altLive.steady>=1 ? 1 : 0);   // full steady run → orange ring overlay
-  if (altSessT.length > ALT_SESS_MAX){ altSessT.shift(); altSessMeas.shift(); altSessEst.shift(); altSessGap.shift(); altSessRing.shift(); }
+  altSessInfo.push(graded ? {
+    rpm: altLive.rpm, amps: altLive.amps, pred: altLive.pred, pct: altLive.pct,
+    tempF: window._lastAltTempF, fieldPct: window._lastFieldPct, measAmps: window._lastMeasAmps,
+    state: st, source: altLive.source|0, ring: altLive.steady>=1 ? 1 : 0
+  } : null);
+  if (altSessT.length > ALT_SESS_MAX){ altSessT.shift(); altSessMeas.shift(); altSessEst.shift(); altSessGap.shift(); altSessRing.shift(); altSessInfo.shift(); }
   if (!altSessPlot) buildAltSessPlot();
   if (altSessPlot) altSessPlot.setData([altSessT, altSessMeas, altSessEst]);
+}
+
+// Fill the panel below the session plot with the operating point behind dot index i.
+function renderAltSessPoint(i){
+  const el = document.getElementById('alt-session-point');
+  if (!el) return;
+  const d = altSessInfo[i];
+  if (!d){ el.style.color = '#888'; el.textContent = 'No conditions stored for that dot.'; return; }
+  const ago = Math.max(0, Math.round((Date.now()/1000 - altSessT[i]) / 60));
+  const conf = d.state===0 ? 'Measured' : 'Estimated';
+  const ringTxt = d.ring ? ' · full steady run' : ' · brief point';
+  const ref = d.source>=1 ? 'Uploaded reference' : 'My History';
+  const n = (v, dp, u) => (v == null || !isFinite(v)) ? '—' : v.toFixed(dp) + u;
+  el.style.color = d.state===0 ? ALT_STATE_COLOR[0] : ALT_STATE_COLOR[1];
+  el.innerHTML =
+    '<b>' + Math.round(d.pct) + '%</b> · ' + conf + ringTxt
+    + ' · ' + (ago===0 ? 'just now' : ago + ' min ago') + '<br>'
+    + '<span style="color:#444;">'
+    + 'RPM ' + Math.round(d.rpm)
+    + ' · ' + n(d.measAmps != null ? d.measAmps : d.amps, 1, ' A') + ' output'
+    + ' · ' + n(d.tempF, 0, ' °F') + ' alt temp'
+    + ' · ' + n(d.fieldPct, 0, '%') + ' field'
+    + ' · expected ' + n(d.pred, 1, ' A')
+    + ' · ' + ref + '</span>';
 }
 
 // ── Boat performance (Phase 3): schema-driven live + settings, sailing polar plot ──
@@ -2179,6 +2298,7 @@ const CSV3_FIELDS = [
     "battTempDerateEnable",          // battery-temp gain derate master on/off (0/1)
     "battTempCoeff",                 // battery fractional resistance change per °C; ×10000
     "TempPIDKiDownFrac",             // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
+    "ThermalSlopeWindowSec",         // thermal slope backward-difference window (s); integer
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -4197,6 +4317,11 @@ function processCSVDataOptimized(data) {
         const altCurrent = 'MeasuredAmps' in data ? parseFloat(data.MeasuredAmps) / 100 : 0;
         const fieldCurrent = 'iiout' in data ? parseFloat(data.iiout) / 100 : 0;
         const fieldPct = 'dutyCycle' in data ? parseFloat(data.dutyCycle) / 100 : 0;
+        // Latch the real telemetry the alt-health session plot wants to show per dot — these live in
+        // CSV1, not in altLive, so the session push (on the alt channel) can't read them directly.
+        if ('AlternatorTemperatureF' in data) window._lastAltTempF = parseFloat(data.AlternatorTemperatureF) / 100;
+        if ('dutyCycle' in data) window._lastFieldPct = fieldPct;
+        if ('MeasuredAmps' in data) window._lastMeasAmps = altCurrent;
 
         // Shift all current data left and add new data at the end
         const prevY_current = [
@@ -4813,6 +4938,7 @@ function updateAllEchosOptimized(data) {
         { key: 'TempPIDKi', id: 'TempPIDKi_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'TempPIDKiDownFrac', id: 'TempPIDKiDownFrac_echo', transform: v => (v / 1000).toFixed(2) },
         { key: 'ThermalLookaheadSec', id: 'ThermalLookaheadSec_echo', transform: v => v },
+        { key: 'ThermalSlopeWindowSec', id: 'ThermalSlopeWindowSec_echo', transform: v => v },
         { key: 'TempPIDIntervalMs', id: 'TempPIDIntervalMs_echo', transform: v => v },
         { key: 'TempPIDFilterAlpha', id: 'TempPIDFilterAlpha_echo', transform: v => (v / 1000).toFixed(3) },
         { key: 'AwBleedRate',       id: 'AwBleedRate_echo',       transform: v => (v / 10).toFixed(1) },
@@ -5758,12 +5884,13 @@ function fetchCVTuningLog() {
 // Control Accuracy cell: divide the raw CSV value by `scale`, write it with `unit` and `decimals`,
 // and color green/orange/red by its thresholds (compared in display units). v <= 0 → dash, muted
 // ("no qualifying data scored yet"). Caches the last render on the element so it's scope-independent.
-function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax) {
+function accScoreCell(elId, raw, scale, unit, decimals, greenMax, orangeMax, muted) {
     const el = document.getElementById(elId);
     if (!el || raw === undefined) return;
     const v = raw / scale;
     let txt, color;
     if (!(v > 0)) { txt = '—'; color = 'var(--text-muted)'; }
+    else if (muted) { txt = v.toFixed(decimals) + unit; color = 'var(--text-muted)'; }
     else {
         txt = v.toFixed(decimals) + unit;
         color = v < greenMax ? '#21c25e' : (v < orangeMax ? '#f08c1d' : '#ef4444');
@@ -10919,11 +11046,11 @@ window.addEventListener("load", function () {
             // Control Accuracy Scores (always-on, fed off CSV2). Six color-coded cells: RMS error +
             // worst overshoot per loop, in physical units. Current/thermal are ×100 in CSV2, voltage
             // is already in mV. Thresholds are in display units (A, mV, °F) — tune on the bench.
-            accScoreCell('accCurRms',    data.accCurRms,    100, ' A',  2, 1,  3);
-            accScoreCell('accCurPeak',   data.accCurPeak,   100, ' A',  2, 2,  5);
-            accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 50, 150);
-            accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 50, 200);
-            accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 2,  5);
+            accScoreCell('accCurRms',    data.accCurRms,    100, ' A',  2, 3,  5);
+            accScoreCell('accCurPeak',   data.accCurPeak,   100, ' A',  2, 2,  5, true);  // greyed: single-sample peak is too easily polluted by one bad reading
+            accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 200, 300);
+            accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 100, 150);
+            accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 6,  10);
             accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, 3,  8);
 
             // Update GPS display and manual entry form visibility
@@ -17714,27 +17841,13 @@ function cxFinish() {
         const allDone = (cxLastMask & _ALL) === _ALL;
         if (!allDone) alert('Selected steps saved. Some steps are still pending — the badge shows what remains.');
         closeCommissionModal(); cx = null; cxPlanUserSet = false;   // re-default the plan next time
-        showMainTab('livedata');   // hop back to the homepage when the wizard finishes
+        showMainTab('tuning'); showSubTab('tuning', 'commissioning');   // land on the Commissioning checklist when the wizard finishes
     }).catch(e => alert('Finish failed: ' + e));
 }
 function commissionAbort() {
     if (!confirm('Abort commissioning and revert all settings to the pre-commissioning snapshot?')) return;
     cxStopPoll();
     cxGet('commissionAbort=1').then(() => { alert('Reverted to pre-commissioning settings.'); closeCommissionModal(); cx = null; cxPlanUserSet = false; }).catch(e => alert('Abort failed: ' + e));
-}
-
-// Warning badge on the Tuning > Commissioning tab, driven from the persisted commissionState (CSV3).
-function updateCommissionBadge(state) {
-    const el = document.getElementById('commission-badge'); if (!el) return;
-    if (state === 2) { el.style.display = 'none'; return; }
-    el.style.display = 'block';
-    if (state === 1) {
-        el.style.background = '#2a2a00'; el.style.border = '1px solid #886'; el.style.color = '#e8e0a0';
-        el.innerHTML = '⚠️ Commissioning in progress — the current loop is partially set. Resume to continue, or clear progress to start over.';
-    } else {
-        el.style.background = '#2a1a00'; el.style.border = '1px solid #864'; el.style.color = '#e8c0a0';
-        el.innerHTML = '⚠️ Current loop not commissioned — over-current protection is on default thresholds. Run commissioning for this alternator.';
-    }
 }
 
 // The eight wizard steps, mirrored from CX_PHASES, with a one-line plain-English purpose.
@@ -17761,7 +17874,6 @@ function renderCommissionStatus(state, phase, mask) {
     // Until the user touches a checkbox, keep the run plan defaulted to the pending stages (so a
     // fresh device pre-selects all and a single stale step pre-selects just that one).
     if (!cxPlanUserSet) cxDefaultPlanFromMask(cxLastMask);
-    updateCommissionBadge(state);
 
     // A partial is wiped on reboot (firmware aborts in-progress at boot). If the device now
     // reports NOT_COMMISSIONED while we still hold stale in-session state past Prep — and the
@@ -18390,10 +18502,10 @@ window.addEventListener('load', function () {
     ['battVolt',100], ['battCurr',10], ['altCurr',10], ['victronCurr',10],
     ['rpm',1], ['duty',100], ['altTemp',10], ['tempTherm',10],
     ['sog',100], ['tws',100], ['vmg',100], ['aws',100],
-    ['awa',10], ['twa',10], ['heel',100], ['pitch',100]
+    ['awa',10], ['twa',10], ['heel',100], ['pitch',100], ['soc',10]
   ];
   const AVG = [
-    ['soc',10], ['baro',10], ['ambTemp',10], ['cog',10], ['heading',10],
+    ['baro',10], ['ambTemp',10], ['cog',10], ['heading',10],
     ['leeway',10], ['altZero',100]
   ];
 
@@ -18428,8 +18540,8 @@ window.addEventListener('load', function () {
       AVG.forEach(([k]) => fields[k].avg.push(null));
     };
 
-    // Record layout (128 B): u32 timestamp @0, i32 lat @4, i32 lon @8, u32 validMask @12,
-    // envelope [min,max,avg]×16 from @16, avg-only ×7 after, u8 chargeStage + pad.
+    // Record layout (132 B): u32 timestamp @0, i32 lat @4, i32 lon @8, u32 validMask @12,
+    // envelope [min,max,avg]×17 from @16, avg-only ×6 after, u8 chargeStage + pad.
     // Records arrive in chronological order (oldest first), so read them linearly.
     let prevTs = null;
     for (let i = 0; i < count; i++) {
@@ -18842,8 +18954,8 @@ window.addEventListener('load', function () {
     if (!ltCharts.length) {
     // Groupings mirror the cloud "My History" viewer minus the eliminated fields
     // (u_target_amps, temp_margin, ign_duty, eng_duty). Every envelope-recorded field
-    // gets band:true; line-only series (SOC, Board temp, Baro, COG, Heading, Leeway)
-    // are avg-only in the 128 B record itself, so a band would need a record-layout
+    // gets band:true; line-only series (Board temp, Baro, COG, Heading, Leeway)
+    // are avg-only in the 132 B record itself, so a band would need a record-layout
     // change. heel/pitch (Motion) is a local-only bonus.
     buildLtChart('lt-current-plot', {
       title: 'Currents (A)',
@@ -18857,7 +18969,7 @@ window.addEventListener('load', function () {
       scales: [ { name:'V', label:'Volts', side:3 },
                 { name:'pct', label:'SOC %', side:1, range:[0,100], fmt:v=>Math.round(v)+'%' } ],
       series: [ { key:'battVolt', scale:'V', color:'#4CAF50', label:'Battery (V)', band:true },
-                { key:'soc', scale:'pct', color:'#2196F3', label:'SOC (%)' } ]
+                { key:'soc', scale:'pct', color:'#2196F3', label:'SOC (%)', band:true } ]
     });
     buildLtChart('lt-temp-plot', {
       title: 'Temperatures & Barometric Pressure',
@@ -18950,6 +19062,15 @@ window.addEventListener('load', function () {
       item.appendChild(sw); item.appendChild(document.createTextNode(LT_STAGE_NAMES[code]));
       el.appendChild(item);
     });
+    // Bare-track entry: the strip leaves stage 0 (field not active) and no-data gaps unpainted,
+    // so its swatch uses the same rgba(128,128,128,0.15) fill as the track (+ faint border so the
+    // near-transparent swatch is still findable). No causal claim — not "engine off".
+    const off = document.createElement('span');
+    off.style.cssText = 'display:inline-flex;align-items:center;gap:4px;';
+    const osw = document.createElement('span');
+    osw.style.cssText = 'width:11px;height:11px;border-radius:2px;display:inline-block;background:rgba(128,128,128,0.15);border:1px solid rgba(128,128,128,0.35);';
+    off.appendChild(osw); off.appendChild(document.createTextNode('Not Charging'));
+    el.appendChild(off);
   }
 
   // Paint the charge-stage strip over the currently-rendered range. One bar (not per-chart

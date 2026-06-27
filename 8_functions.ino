@@ -753,6 +753,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "TempPIDIntervalMs", NK_TempPIDIntervalMs, 1 },
   { "TempPIDFilterAlpha", NK_TempPIDFilterAlpha, 1 },
   { "ThermalLookaheadSec", NK_ThermalLookaheadSec, 1 },
+  { "ThermalSlopeWindowSec", NK_ThermalSlopeWindowSec, 1 },
   { "TempSource", NK_TempSource, 1 },
   { "R_fixed", NK_R_fixed, 1 },
   { "Beta", NK_Beta, 1 },

@@ -151,7 +151,23 @@ with open(path) as f:
 kp       = constants.get("kp",       float("nan"))
 ki       = constants.get("ki",       float("nan"))
 lookahead = constants.get("lookahead", float("nan"))
+# limit/warn/crit added to CONST 2026-06-26 so the limit + protection-trip lines can be
+# drawn. Older logs omit them (NaN) — the reference-line code below skips on NaN.
+temp_limit = constants.get("limit", float("nan"))
+temp_warn  = constants.get("warn",  float("nan"))
+temp_crit  = constants.get("crit",  float("nan"))
+# kidownfrac added to CONST 2026-06-26 (hybrid asymmetric below-setpoint integral bleed ratio).
+# Older logs omit it (NaN).
+kidownfrac = constants.get("kidownfrac", float("nan"))
+# slopewin added to CONST 2026-06-26 (tunable slope backward-difference window, s). Older logs omit it.
+slopewin = constants.get("slopewin", float("nan"))
 const_label = f"Kp={kp}  Ki={ki}  Lookahead={lookahead}s"
+if slopewin == slopewin:  # not NaN
+    const_label += f"  SlopeWin={slopewin:g}s"
+if kidownfrac == kidownfrac:  # not NaN
+    const_label += f"  KiDownFrac={kidownfrac:g}"
+if temp_limit == temp_limit:  # not NaN
+    const_label += f"  Limit={temp_limit:.0f}°F"
 print(f"Constants: {const_label}")
 
 # Load data rows — parse raw lines first so the trimmer has _lines/_header_idx/_col_names
@@ -177,7 +193,8 @@ numeric_cols = [
     "voltCap_A", "uTarget_A", "spLimited_A", "pidErr_A", "pidOut_pct",
     "duty_pct", "RPM", "battV", "measAmps_A", "penaltyAmps_A", "flags",
     "chargeStageDisplay", "outerP", "outerI", "lookahead", "impliedPenalty",
-    "antiWindupFired", "thermalSlope_F_sec"
+    "antiWindupFired", "thermalSlope_F_sec",
+    "freezeWhy", "penaltyRaw_A", "iCeil_A"  # iCeil_A repurposed from holdEst_A 2026-06-26; iCeil<outerI = clamp deleting earned hold
 ]
 
 for col in numeric_cols:
@@ -348,6 +365,21 @@ fig1.subplots_adjust(right=0.80, bottom=0.10)
 
 ax1a.plot(df["t_plot"], df["tempFilt_F"],  color="#c62828", lw=2.5, label="tempFilt_F (measured)")
 ax1a.plot(df["t_plot"], df["tempProj_F"], color="#e91e63", lw=2.2, linestyle="--", label="tempProj_F (PID input)")
+# nominalTarget column carries the live thermal regulation setpoint in °F (limit−5 steady /
+# limit−20 warmup) despite its legacy "_A" header name — plot it on the temperature axis.
+if "nominalTarget_A" in df.columns:
+    ax1a.plot(df["t_plot"], df["nominalTarget_A"], color="#1565c0", lw=2.0, linestyle=":",
+              label="regulation target (°F)")
+# Protection reference lines from the CONST row (skipped if the log predates limit logging).
+if temp_limit == temp_limit:
+    ax1a.axhline(temp_limit, color="#ef6c00", lw=1.8, linestyle="-",
+                 label=f"limit ({temp_limit:.0f}°F)")
+    if temp_warn == temp_warn:
+        ax1a.axhline(temp_limit + temp_warn, color="#b71c1c", lw=1.6, linestyle="--",
+                     label=f"warning trip (+{temp_warn:.0f}°F)")
+    if temp_crit == temp_crit:
+        ax1a.axhline(temp_limit + temp_crit, color="#4a148c", lw=1.4, linestyle="-.",
+                     label=f"critical trip (+{temp_crit:.0f}°F)")
 ax1b.plot(df["t_plot"], df["penaltyAmps_A"], color="#2e7d32", lw=2.2, label="penaltyAmps_A")
 
 ax1a.set_ylabel("Temperature (°F)", color="#c62828")
@@ -384,6 +416,12 @@ fig2.subplots_adjust(right=0.80)
 ax2.plot(df["t_plot"], -(df["outerP"] - df["lookahead"]), color="#1565c0", lw=2.2, label="present temp (P)")
 ax2.plot(df["t_plot"], -df["lookahead"],       color="#2e7d32", lw=2.2, label="look-ahead")
 ax2.plot(df["t_plot"], -df["outerI"],          color="#f9a825", lw=2.2, label="integrator (I)")
+# Integral ceiling cap−FF (repurposed iCeil_A column, 2026-06-26). When the yellow integrator
+# trace is pushed DOWN onto this dashed line, the I≤cap−FF clamp is deleting earned holding
+# integral (RPM dip / FF spike) — watch the temperature axis for a reheat on recovery.
+if "iCeil_A" in df.columns and df["iCeil_A"].notna().any():
+    ax2.plot(df["t_plot"], -df["iCeil_A"], color="#9c27b0", lw=1.3, linestyle="--",
+             alpha=0.8, label="integral ceiling (cap−FF)")
 ax2.plot(df["t_plot"], df["thermalSlope_F_sec"], color="#00838f", lw=2.0, linestyle=":", label="thermalSlope_F_sec")
 
 ax2.set_ylabel("Effect on Current Target (A)")

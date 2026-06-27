@@ -1681,6 +1681,12 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     ThermalLookaheadSec = max(0.0f, settingRead(NK_ThermalLookaheadSec).toFloat());
   }
 
+  if (!settingExists(NK_ThermalSlopeWindowSec)) {
+    settingWrite(NK_ThermalSlopeWindowSec, String(ThermalSlopeWindowSec, 1).c_str());
+  } else {
+    ThermalSlopeWindowSec = constrain(settingRead(NK_ThermalSlopeWindowSec).toFloat(), 10.0f, 60.0f);
+  }
+
   if (!settingExists(NK_TempPIDKi)) {
     settingWrite(NK_TempPIDKi, String(TempPIDKi, 6).c_str());
   } else {
