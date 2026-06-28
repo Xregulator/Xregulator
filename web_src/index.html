@@ -2654,7 +2654,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Threshold Floor — minimum amps (<span id="IExcessFloorA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.<br><br>This floor now governs <strong>both</strong> over-current detectors: the bulk alternator-current detector and the CV <strong>battery-current</strong> detector (absorption/float, when the CV loop regulates battery current). Commissioning derives it from <em>alternator</em>-current ripple and applies it to both — a conservative proxy for the battery detector, since battery ripple is usually ≤ alternator ripple. A separate battery-ripple floor is planned future work.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2686,7 +2686,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Averaging Time Constant (<span id="IExcessTau_echo">?</span> ms)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the alternator current is time-averaged before Group 3 checks it against the threshold. A larger value smooths out brief fluctuations more, so momentary spikes won't trip it, but it reacts a little slower to a real, sustained overshoot. The default suits most installations across the full speed range.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the current is time-averaged before Group 3 checks it against the threshold. A larger value smooths out brief fluctuations more, so momentary spikes won't trip it, but it reacts a little slower to a real, sustained overshoot. The default suits most installations across the full speed range. This timescale governs both detectors — the bulk alternator-current detector and the CV battery-current detector (it is just a time constant, equally valid for either signal).</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -3616,6 +3616,164 @@
             </details>
 
           </div><!-- closes .settings-card for Battery -->
+
+          <!-- ════════════ Battery Health (active DCIR test + capacity trend) ════════════ -->
+          <div class="settings-card">
+            <details open>
+              <summary
+                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                Health
+              </summary>
+
+              <p style="margin: 6px 0 12px 0;">
+                Estimates how the lithium bank is aging from two signals: an active internal-resistance test
+                (internal resistance, DCIR) you run on demand, and a capacity estimate captured automatically
+                each time the bank reaches full charge. The battery is assumed brand-new when first installed —
+                the first capacity reading becomes the 100% baseline. Press <strong>Start Over</strong> if you
+                replace the bank.
+              </p>
+
+              <details style="margin-bottom: 12px;">
+                <summary style="cursor: pointer; font-weight: 600;">How it works</summary>
+                <div style="padding: 8px 0; font-size: 14px; line-height: 1.5;">
+                  <p><strong>Resistance test (DCIR):</strong> with the engine running, the regulator commands a
+                    repeated abrupt step in charge current and measures how far the battery voltage moves for a
+                    known change in current (ΔV ÷ ΔI). Rising resistance over months is an early aging signal.
+                    The absolute value depends on temperature and state of charge, so compare runs taken under
+                    similar conditions — the trend matters more than any single number.</p>
+                  <p><strong>Capacity:</strong> each time the bank charges from a low point all the way to full,
+                    the amp-hours returned are extrapolated to a full 0–100% span. Plotted against charge cycles,
+                    a falling line is real capacity fade. Only reasonably deep charges are used, so the plot fills
+                    in slowly.</p>
+                  <p style="opacity: 0.8;">This reads the whole bank through one shunt — it cannot see an
+                    individual weak cell. A pack-level number can look healthy while one cell is failing.</p>
+                </div>
+              </details>
+
+              <!-- Run / status -->
+              <div class="form-row">
+                <div class="form-label">Test status:</div>
+                <div class="form-input">
+                  <span id="bh_status" class="reading" style="white-space: normal;">—</span>
+                </div>
+              </div>
+              <div class="form-row">
+                <div class="form-label">Last resistance (DCIR):</div>
+                <div class="form-input">
+                  <span id="bh_lastdcir" class="reading">—</span>
+                </div>
+              </div>
+              <div style="display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0;">
+                <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
+                  <input type="hidden" name="password" class="password_field">
+                  <input type="hidden" name="BatteryHealthTest" value="1">
+                  <input type="submit" value="Run Health Test" class="btn-primary"
+                    onclick="setTimeout(pollBatteryHealth, 600);" />
+                </form>
+                <form action="/get" method="GET" target="hidden-form" style="margin: 0;"
+                  onsubmit="return confirm('Clear all battery-health history and reset the 100% baseline? Use this only when the battery has been replaced.');">
+                  <input type="hidden" name="password" class="password_field">
+                  <input type="hidden" name="bhStartOver" value="1">
+                  <input type="submit" value="Start Over (battery replaced)" class="btn-danger-ghost"
+                    onclick="setTimeout(pollBatteryHealth, 600);" />
+                </form>
+              </div>
+
+              <!-- Test settings -->
+              <details style="margin: 10px 0;">
+                <summary style="cursor: pointer; font-weight: 600;">Test settings</summary>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label">
+                    <span>Step low current (A) (<span id="bhStepLowA_echo">?</span>):</span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="bhStepLowA" type="number" step="0.5" min="0" max="200" />
+                      <input type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label">
+                    <span>Step size (A) (<span id="bhStepDeltaA_echo">?</span>):</span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="bhStepDeltaA" type="number" step="0.5" min="1" max="200" />
+                      <input type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label">
+                    <span>Dwell per level (sec) (<span id="bhDwellSec_echo">?</span>):</span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="bhDwellSec" type="number" step="0.5" min="1" max="30" />
+                      <input type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <div class="form-row">
+                  <div class="form-label">
+                    <span>Scored steps (<span id="bhNumEdges_echo">?</span>):</span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <input name="bhNumEdges" type="number" step="1" min="3" max="60" />
+                      <input type="submit" value="Set" class="btn-primary" />
+                    </form>
+                  </div>
+                </div>
+              </details>
+
+              <hr />
+              <!-- DCIR result table -->
+              <div style="font-weight: 600; margin: 10px 0 6px 0;">Resistance test history</div>
+              <div style="overflow-x: auto;">
+                <table class="data-table" style="width: 100%; font-size: 13px;">
+                  <thead>
+                    <tr>
+                      <th>When</th>
+                      <th>DCIR (mΩ)</th>
+                      <th>SoC</th>
+                      <th>Batt V</th>
+                      <th>Board °F</th>
+                      <th>Step</th>
+                      <th>Steps</th>
+                    </tr>
+                  </thead>
+                  <tbody id="bhResultsBody">
+                    <tr><td colspan="7" style="text-align:center; opacity:0.7;">No tests yet</td></tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <hr />
+              <!-- Capacity vs cycles trend -->
+              <div style="font-weight: 600; margin: 10px 0 6px 0;">
+                Capacity health vs charge cycles (<span id="bh_caplatest">—</span>)
+              </div>
+              <canvas id="bhCapCanvas" width="600" height="220"
+                style="width: 100%; max-width: 600px; height: 220px; background: var(--card-bg, #111); border: 1px solid var(--border, #333); border-radius: 6px;"></canvas>
+              <div id="bh_capempty" style="opacity: 0.7; font-size: 13px; margin-top: 6px;">
+                No capacity points yet — they appear after the bank charges from a low point to full.
+              </div>
+            </details>
+          </div>
         </div>
 
         <!-- Weather Mode Settings Section -->
@@ -6549,7 +6707,7 @@
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>CV Gain Source (<span id="cvGainMode_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned plant fit (the measured K_dc from the CV plant-fit step) via Kp = ω ÷ K_dc, Ki = ρ × Kp — you set only the desired recovery speed in the "CV Response Time (s)" field below (ω is derived from it). <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How Voltage Loop Kp/Ki are set. <strong>Auto</strong> computes them from the commissioned plant fit (the measured finite-horizon gain <strong>K20</strong> from the CV plant-fit step) via the exact PI magnitude condition at the target crossover ω_c: <strong>Kp = 1 ÷ (K20 × √(1 + (ρ/ω_c)²))</strong>, <strong>Ki = ρ × Kp</strong> — you set only the desired recovery speed in the "CV Response Time (s)" field below (ω_c is derived from it) and the integral-zero ratio ρ. <strong>Manual</strong> uses the Kp/Ki you type below. The two paths are independent: switching does not change the other's stored values. Both are normalized to 12V-equivalent, so the same numbers work on 12 / 24 / 48 V systems.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -6595,6 +6753,28 @@
                       </label>
                       <span class="toggle-label">On</span>
                       <input id="cvHelpersEnabled" name="cvHelpersEnabled" type="number" value="" style="display:none;" />
+                    </form>
+                  </div>
+                </div>
+
+                <hr />
+                <!-- CV current source: battery current (Bcur) vs forced alternator current -->
+                <div class="form-row">
+                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                    <span>CV Current Source (<span id="cvCurrentSrc_echo">?</span>):</span>
+                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which current the voltage loop's inner current loop regulates while holding absorption / float voltage. <strong>Battery</strong> (default) regulates the battery current measured at the shunt (INA228) — it is co-sampled with the battery voltage and reacts faster, so a switched house load is rejected at inner-loop speed instead of waiting for the slow voltage loop. <strong>Alternator (forced)</strong> reverts to the legacy behaviour (regulate alternator current) for A/B comparison. Battery mode only engages when the battery-current sensor is the INA228 shunt and it is healthy; otherwise it automatically uses alternator current. Bulk (current-limited) charging always uses alternator current regardless of this setting, and the alternator's own current ceiling is still enforced. The live state is reported in System / Diagnostics.</span></span>
+                  </div>
+                  <div class="form-input">
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <span class="toggle-label">Battery</span>
+                      <label class="switch">
+                        <input id="cvCurrentSrc_checkbox" type="checkbox"
+                          onchange="if(handleUserToggle('cvCurrentSrc_checkbox', 'cvCurrentSrc', 'cvCurrentSrc')) { this.form.submit(); submitMessage(); }" />
+                        <span class="slider round"></span>
+                      </label>
+                      <span class="toggle-label">Alternator</span>
+                      <input id="cvCurrentSrc" name="cvCurrentSrc" type="number" value="" style="display:none;" />
                     </form>
                   </div>
                 </div>
@@ -6650,13 +6830,13 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvKiRatio_echo">?</span>):</span>
+                    <span>CV auto-tune Ki/Kp ratio ρ (<span id="cvPiZero_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">In <strong>Auto</strong> gain mode the integral gain is set as a fixed fraction of the proportional gain: <strong>Ki = ρ × Kp</strong>. This places the integrator's corner (where it starts pulling out steady-state error) relative to the loop's response speed. Lower ρ = lazier integral (slower to erase residual error, less windup); higher ρ = more aggressive integral. Default 0.70. Only affects Auto mode. (Was a hard-coded constant; exposed here for bench tuning.)</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="cvKiRatio" type="number" step="0.05" min="0.2" max="1.5" />
+                      <input name="cvPiZero" type="number" step="0.05" min="0.2" max="1.5" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>

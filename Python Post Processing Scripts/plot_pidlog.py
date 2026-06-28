@@ -328,6 +328,8 @@ df["TargetVoltageMode"]         = _to_int("TargetVoltageMode")
 
 _flags_num = pd.to_numeric(df["flags"], errors="coerce").fillna(0)
 df["f_govBypass"] = (_flags_num // 16 % 2).astype(int)
+df["f_cvBatt"]    = (_flags_num // 32 % 2).astype(int)   # bit5 (§G): inner loop regulating BATTERY current
+                                                          # (pidInput = battI, not measAmps) — see shading below
 
 _ov_num = pd.to_numeric(df["ovFlags"] if "ovFlags" in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
 df["f_fastOvActive"]  = (_ov_num       % 2).astype(int)   # bit 0
@@ -562,7 +564,7 @@ fig3.subplots_adjust(right=0.80)
 ax3a.plot(df["t_plot"], df["pidSetpoint"],
           color="#e91e63", lw=2.5, linestyle="--", label="pidSetpoint")
 ax3a.plot(df["t_plot"], df["pidInput"],
-          color="#c62828", lw=2.2, label="pidInput (measAmps)")
+          color="#c62828", lw=2.2, label="pidInput (loop PV: battery current in §G amber spans, else alternator measAmps)")
 ax3a.plot(df["t_plot"], df["iMeas_filt"],
           color="#00838f", lw=2.5, label="iMeas_filt (filtered)", alpha=0.90)
 ax3a.plot(df["t_plot"], df["pidOutput"],
@@ -573,6 +575,18 @@ ax3a.plot(df["t_plot"], df["pidUnsatOutput"],
 ax3a.fill_between(df["t_plot"], df["pidOutput"], df["pidUnsatOutput"],
                   where=(df["pid_saturation"] > 0.1),
                   color="#455a64", alpha=0.18, label="saturation zone")
+
+# §G: amber band where the inner loop regulates BATTERY current (pidInput = battI, not alternator measAmps).
+if "f_cvBatt" in df.columns and df["f_cvBatt"].any():
+    _cb_in, _cb_start = False, None
+    for _i, _r in df.iterrows():
+        if _r["f_cvBatt"] and not _cb_in:
+            _cb_start, _cb_in = _r["t_plot"], True
+        elif not _r["f_cvBatt"] and _cb_in:
+            ax3a.axvspan(_cb_start, _r["t_plot"], color="#f9a825", alpha=0.07)
+            _cb_in = False
+    if _cb_in:
+        ax3a.axvspan(_cb_start, df["t_plot"].iloc[-1], color="#f9a825", alpha=0.07)
 
 ax3a.set_ylabel("Amps / Duty %")
 ax3a.grid(**GRID_KW)

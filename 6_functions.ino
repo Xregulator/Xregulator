@@ -92,7 +92,7 @@ float clamp_f(float x, float lo, float hi) {
 // K_dc (cvPlantK, settled ΔV/ΔI). Set a deliberately slow target crossover and scale Kp ∝ 1/K_dc;
 // this stays well below the polarization pole (~0.7 rad/s) and the dead-time limit, so we never
 // need to measure them. ω_target/ρ are bench-tuned by disturbance-rejection (no protection trips), NOT
-// to match any prior hand tune — they are the user-adjustable settings cvOmega / cvKiRatio (Tuning ▸
+// to match any prior hand tune — they are the user-adjustable settings cvCrossover / cvPiZero (Tuning ▸
 // Voltage; were #defines, defaults 0.20 / 0.70). cvPlantTau/cvPlantL are still captured for diagnostics
 // but no longer drive the gains.
 
@@ -130,9 +130,17 @@ void recomputeCvGains() {
     // AUTO (measured-K_dc rule). Normalize the measured pack-space K_dc into 12V-equivalent space so
     // the resulting gain is system-voltage-independent like the manual numbers, then set the gains
     // from the conservative target crossover. Kp ∝ 1/K_dc is the per-install gain schedule.
-    float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A
-    kpNorm = cvOmega / Knorm;                        // Kp = ω_target / K_dc
-    kiNorm = cvKiRatio * kpNorm;                     // Ki = ρ · Kp
+    float Knorm = cvPlantK * vNorm;                 // V per 12V-equivalent, per A (K20, finite-horizon gain)
+    // Exact PI magnitude condition at the target crossover (CV_AUTOTUNE_PLAN.md §F.3). With the plant a
+    // pure gain in this regime (P≈K_norm) and C = Kp·(1 + ρ/(jω)), |C·P| = 1 at ω_c gives
+    //   Kp = 1 / ( K_norm · sqrt(1 + (ρ/ω_c)²) ),   Ki = ρ·Kp.
+    // cvCrossover holds the TRUE crossover ω_c (CV_CROSSOVER_TARGET, ≈0.20 rad/s); cvPiZero is the PI
+    // integral zero ρ (CV_PI_ZERO, ≈0.70 rad/s). This SUPERSEDES the old Kp = ω_target/K_norm
+    // approximation (misnamed 0.286 constant), which ran ~24 % hot under the honest formula.
+    float omega_c = (cvCrossover > 1e-3f) ? cvCrossover : 0.20f;
+    float rho     = cvPiZero;
+    kpNorm = 1.0f / (Knorm * sqrtf(1.0f + (rho / omega_c) * (rho / omega_c)));
+    kiNorm = rho * kpNorm;                            // Ki = ρ · Kp
     // Safety bounds — a bad fit must never produce dangerous gains.
     kpNorm = clamp_f(kpNorm, 2.0f, 120.0f);
     kiNorm = clamp_f(kiNorm, 1.0f, 80.0f);
@@ -1917,6 +1925,7 @@ void AdjustFieldLearnMode() {
     if (sysMode == SYS_MODE_AUTO) {
 
       static bool lastTuningMode = false;
+      static bool lastBattHealth = false;
 
       // tempFilterUpdate() now runs unconditionally at the TOP of this function (hoisted
       // 2026-06-26) so the filtered temp / slope / projection stay live in FAULT/MANUAL/OFF
@@ -1924,7 +1933,32 @@ void AdjustFieldLearnMode() {
       // is why the plot flat-lined the moment an over-temp event dropped the system to FAULT.
       // Kept earlier-than-tempPID_tick ordering, so the PID input is unchanged. (was: 2026-06-23)
 
-      if (TuningMode) {
+      if (batteryHealthTestActive) {
+        // Active DCIR step generator. Protections are NOT suppressed: if one fires the
+        // step won't manifest and bhComputeDcir() rejects the run (fail-safe).
+        if (tick.nowMs - bhLastToggleMs >= bhDwellMs) {
+          bhWaveHigh = !bhWaveHigh;
+          bhLastToggleMs = tick.nowMs;
+          if (bhToggleCount < BH_MAX_TOGGLES) bhToggleMs[bhToggleCount] = tick.nowMs;
+          bhToggleCount++;
+          bhEdgeCount++;
+          // 2 ring-in + bhNumEdges scored + 1 trailing toggle to bound the last edge's window
+          if (bhEdgeCount >= (int)bhNumEdges + 3) batteryHealthTestActive = false;
+        }
+        float bhTarget = bhWaveHigh ? (bhStepLowA + bhStepDeltaA) : bhStepLowA;
+        setpointCommand = bhTarget;
+        setpointLimited = bhTarget;            // abrupt: no slew
+        voltageControlActive = false;
+        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                       : g_pidI_filtered;
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
+        bhSample(tick.nowMs);
+        lastBattHealth = true;
+
+      } else if (TuningMode) {
         // ===== TUNING MODE (square-wave setpoint generator) =====
         static bool tuningWaveHigh = false;
         static uint32_t lastTuningWaveToggle = 0;
@@ -2039,6 +2073,13 @@ void AdjustFieldLearnMode() {
       } else {
         // ===== NORMAL AUTO =====
 
+        // Health test just ended — bumpless PID reseed to applied duty (avoids a field bump).
+        if (lastBattHealth) {
+          currentPID.ResetIntegratorTo((double)lastAppliedDuty);
+          pidOutput = (double)lastAppliedDuty;
+          lastBattHealth = false;
+        }
+
         // Detect TuningMode exit — fires exactly once.
         if (lastTuningMode) {
           tempPIDActive = false;  // PID was dormant during tuning — force the bumpless re-seed
@@ -2141,6 +2182,40 @@ void AdjustFieldLearnMode() {
         // Hoisted here so iExcess block can reset it on event onset.
         static float cv_I_aw_cap = 100.0f;
 
+        // ── CV battery-current control gate + load-offset filter (§G) ────────
+        // In absorption/float, regulate BATTERY current (Bcur) instead of alternator current
+        // (MeasuredAmps): Bcur is co-sampled with the controlled voltage IBV at the fast-INA cadence
+        // and couples the inner loop directly to what charges the battery. Bulk stays alternator-current
+        // (bulk IS an alternator-current limit). MaintainMode is independent (already uses Bcur below).
+        //   Availability is LATCHED per CV session at enteringCV (cvBattSessionLatched, set further down)
+        //   so config/source changes don't thrash mid-session; the live stage + fast-INA are checked here.
+        //   cvBattSessionLatched / cvLoadOffset_filt / lastCvBattActive persist across ticks (function
+        //   statics, like cv_I_track / voltageTargetSlewed below). Read here uses last tick's latch — it
+        //   only changes at session boundaries, and the CV iExcess that depends on it can't arm until
+        //   absorption (many ticks after the latch is set).
+        static bool  cvBattSessionLatched = false;
+        static float cvLoadOffset_filt = 0.0f;   // EMA of MeasuredAmps − Bcur (house-load offset, A)
+        static bool  lastCvBattActive = false;
+        int  cvStageNow = getChargeStageDisplayCode();
+        bool cvBattActive = cvBattSessionLatched && inaFastModeActive
+                            && (cvStageNow == CHARGE_STAGE_ABSORPTION || cvStageNow == CHARGE_STAGE_FLOAT);
+        g_cvBattCurrentActive = cvBattActive;
+        bool enteringCvBatt = (cvBattActive && !lastCvBattActive);  // bulk→absorption source handoff edge
+        lastCvBattActive = cvBattActive;
+        // House-load offset I_load = MeasuredAmps − Bcur (alternator minus battery current). Light EMA so it
+        // tracks real load changes within ~1 s without chasing INA ripple. Used ONLY to lower the
+        // battery-current ceiling (icvCeil below) so I_alt = Bcur + I_load stays at/below uTargetAmps.
+        {
+          const float ldoTC = 0.25f;  // s
+          static bool ldoInit = false;
+          float instLoad = MeasuredAmps - Bcur;
+          if (!ldoInit) { cvLoadOffset_filt = instLoad; ldoInit = true; }
+          else {
+            float a = actualDtSec / (ldoTC + actualDtSec);
+            cvLoadOffset_filt += a * (instLoad - cvLoadOffset_filt);
+          }
+        }
+
         // ── iExcess supervisor (EMA / leaky-integral detector) ──────────────
         // Fires on a SUSTAINED current excess over the CV command: an EMA of
         // (MeasuredAmps − setpointLimited) crossing E = clamp(IExcessFrac × setpointLimited,
@@ -2179,7 +2254,11 @@ void AdjustFieldLearnMode() {
               // a tick can't corrupt the time constant — same pattern as g_fastOvDvdt.
               float tauSec = IExcessTau * 0.001f;
               float alpha  = actualDtSec / (tauSec + actualDtSec);
-              mExcessEma  += alpha * ((MeasuredAmps - setpointLimited) - mExcessEma);  // setpointLimited = previous tick — acceptable
+              // §G.5: under battery-current control setpointLimited IS the battery-current command, so the
+              // mismatch detector reads BATTERY current (raw Bcur — its own IExcessTau EMA does the
+              // filtering, matching the raw-MeasuredAmps pattern). Apples-to-apples, no house-load offset.
+              float ieActual = cvBattActive ? Bcur : MeasuredAmps;
+              mExcessEma  += alpha * ((ieActual - setpointLimited) - mExcessEma);  // setpointLimited = previous tick — acceptable
 
               // Rising edge — fire once.
               if (!iExcessActive && mExcessEma > E) {
@@ -2402,6 +2481,20 @@ void AdjustFieldLearnMode() {
         // ── Apply fastOvCurrentCap to uTargetAmps (fastOV + iExcess + load dump) ──
         uTargetAmps = fminf((float)uTargetAmps, fastOvCurrentCap);
 
+        // ── Battery-current command ceiling (§G.5, Option A — load-adjusted, NOT a 2nd PI) ──
+        // The CV command Icv/cv_I is the upper-loop output the inner PID tracks. Under battery-current
+        // control it is a BATTERY-current command, so its ceiling must be in battery units that keep the
+        // ALTERNATOR at/below its thermal/RPM-derated ceiling uTargetAmps: I_alt = Bcur + I_load ⇒ cap the
+        // battery command at uTargetAmps − I_load. At steady state I_alt = (uTargetAmps − I_load) + I_load =
+        // uTargetAmps exactly — the alternator-ceiling "governor" folded into the existing clamp, with one
+        // integrator (cv_I), no min-select. (§G.5's "min(battery-PID, alt-ceiling) duties" wording is
+        // SUPERSEDED by the 2026-06-27 decision.) SAFE because cvBattActive REQUIRES a healthy INA (§G.6) —
+        // a Bcur over-read would under-read I_load and RAISE this cap, so do NOT remove that gate; fast-OV
+        // and the absolute alt cut remain independent hard backstops. Noise on the offset only lowers the
+        // cap (more conservative). uTargetAmps itself is unchanged (alt-side bulk path + telemetry).
+        float icvCeil = (float)uTargetAmps;
+        if (cvBattActive) icvCeil = fmaxf(0.0f, (float)uTargetAmps - cvLoadOffset_filt);
+
         // TargetVoltageMode: run CV at a user-specified voltage target.
         // Forces float-equivalent stage flags so voltageControlActive goes true
         // below, then overrides ChargingVoltageTarget with the user value.
@@ -2438,6 +2531,15 @@ void AdjustFieldLearnMode() {
         // MANUAL branch also resets it — see voltageControlActive=false in MANUAL below.)
         bool enteringCV = (!lastVoltageControlActive && voltageControlActive);
         lastVoltageControlActive = voltageControlActive;
+
+        // §G.6: latch the slow availability conditions for this CV session at CV engage — user toggle
+        // (cvCurrentSrc=0 = battery), INA228 selected as the battery-current source (not laggy Victron/NMEA),
+        // and a configured shunt. inaFastModeActive is NOT latched (it's just turning on at bulk entry) — it
+        // is checked live in cvBattActive above. No mid-CV auto-fallback (deferred, §G.6).
+        if (enteringCV) {
+          cvBattSessionLatched = (cvCurrentSrc == 0) && (BatteryCurrentSource == 0)
+                                 && (ShuntResistanceMicroOhm > 0);
+        }
 
         // ===== WAVEFORM GENERATOR: voltage square-wave generator (CVTuningMode) =====
         // Dithers ChargingVoltageTarget between base (HIGH) and base−amp (LOW) so the
@@ -2587,7 +2689,7 @@ void AdjustFieldLearnMode() {
         }
         if (voltageControlActive) {
           if (ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
-            float icvHi_gov = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+            float icvHi_gov = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
             float e_needed = (icvHi_gov - cv_I) / VoltageKp_active;
             e_needed = fmaxf(e_needed, 0.02f);
             voltageTargetSlewed = fminf(ChargingVoltageTarget,
@@ -2617,6 +2719,22 @@ void AdjustFieldLearnMode() {
             cv_I_aw_cap = (float)MaxTableValue;    // clear AW cap — stale values constrain CV entry
             awSeedProtectStartMs = currentMillis;  // start seed-protection window
           }
+          // ── Battery-current source-handoff bumpless seed (§G.5) ────────────────────
+          // cvBattActive turns true on the bulk→absorption transition — NOT a fresh enteringCV, so the seed
+          // above does not fire. Re-seed cv_I from the FILTERED battery current so Icv ≈ Bcur_filtered and
+          // the inner-PID error stays ~0 as its PV flips MeasuredAmps→Bcur. setpointLimited is snapped to
+          // match at the slew site below (without it, setpointLimited lags by the slew rate while Bcur < the
+          // alt current it replaces, transiently driving the field — and alternator current — up).
+          // ASYMMETRY (deliberate): the REVERSE edge (cvBattActive true→false — absorption→bulk, or a
+          // mid-session INA fast→slow fallback) has NO matching seed. It's the safe direction: re-entering
+          // bulk means "ramp current up," which the setpoint slew already rate-limits, and the PV flips
+          // Bcur→alternator (a higher value) so the inner error only goes more negative = less field. Bench
+          // watch only; if it ever bumps, mirror this seed on the falling edge.
+          if (voltageControlActive && enteringCvBatt) {
+            float e_cb = ChargingVoltageTarget - IBV;
+            cv_I = clamp_f(Bcur_filtered - VoltageKp_active * e_cb, 0.0f, clamp_f(icvCeil, 0.0f, (float)MaxTableValue));
+            cv_I_track = cv_I;
+          }
           // ── Unified protection-release reseed + unified telemetry export ───────────
           // Single falling-edge handler for ALL three protection paths (Group 1/2 OV,
           // iExcess, LoadDump). Fires when fastOvClampActive goes 1 → 0 — i.e., every
@@ -2628,7 +2746,7 @@ void AdjustFieldLearnMode() {
           // g_fastOvClampActive (read here, written at end of this block) is the
           // unified flag — every supervisor has voted by the time we reach this point.
           if (voltageControlActive && g_fastOvClampActive && !fastOvClampActive) {
-            float icvHi_seed = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+            float icvHi_seed = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
             cv_I = clamp_f(preEventCvI * ReseedFrac, 0.0f, icvHi_seed);
             cv_I_track = cv_I;
             awSeedProtectStartMs = currentMillis;     // engage seed-protection window
@@ -2723,7 +2841,7 @@ void AdjustFieldLearnMode() {
                             : ((float)(currentMillis - prevVoltageLoopMs) / 1000.0f);
             dtSec = constrain(dtSec, 0.001f, 0.5f);
 
-            float icvHi = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+            float icvHi = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
             float icvLo = 0.0f;
 
             // cvDSlope: backward diff of getFiltV() over one voltage loop interval (V/s).
@@ -2796,7 +2914,7 @@ void AdjustFieldLearnMode() {
         // cv_I still updates only on VoltageLoopInterval cadence.
         {
           float e_now = voltageTargetSlewed - IBV;  // raw INA228 — no filter lag on per-tick proportional (governor output)
-          float icvHi_tick = clamp_f((float)uTargetAmps, 0.0f, (float)MaxTableValue);
+          float icvHi_tick = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
           if (!enteringCV) {
             Icv = clamp_f(VoltageKp_active * e_now + cv_I, 0.0f, icvHi_tick);
           }
@@ -2906,6 +3024,9 @@ void AdjustFieldLearnMode() {
         else                            effectiveRiseRate = SetpointRiseRate;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                        effectiveRiseRate, effectiveFallRate, actualDtSec);
+        // §G.5: snap (no slew) on the battery-current source-handoff tick so the inner-PID setpoint and its
+        // newly-swapped PV (Bcur) start equal — bumpless. setpointCommand = Icv was seeded to Bcur_filtered.
+        if (enteringCvBatt) setpointLimited = setpointCommand;
         // Clear startup ramp once setpointLimited has caught up to command
         if (inStartupRamp && setpointLimited >= setpointCommand - 0.5f) {
           inStartupRamp = false;
@@ -2915,11 +3036,15 @@ void AdjustFieldLearnMode() {
         // MaintainMode regulates to 0 net battery amps. Feedback is always INA228 (Bcur),
         // never getBatteryCurrent() — picking Victron as Battery Current Source would add
         // ~1–2 s of lag that destabilizes this loop. The dropdown only governs SoC display.
-        // Normal AUTO uses signal selected by OutputPIDSigSrc.
+        // §G: in CV (absorption/float) with the battery-current gate open, the PV is the FILTERED battery
+        // current (Bcur_filtered) — the loop regulates what charges the battery, co-sampled with IBV. Bulk
+        // and non-CV use the alternator-current signal selected by OutputPIDSigSrc (unchanged).
         {
           float pidSig = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                         : g_pidI_filtered;
-          targetCurrent = (MaintainMode == 1) ? Bcur : pidSig;
+          if (MaintainMode == 1)   targetCurrent = Bcur;            // 0-net-amps, raw INA228 (unchanged)
+          else if (cvBattActive)   targetCurrent = Bcur_filtered;   // CV battery-current control (§G)
+          else                     targetCurrent = pidSig;          // bulk / non-CV: alternator current
         }
         pidInput = (double)targetCurrent;
         pidSetpoint = (double)setpointLimited;
@@ -2999,8 +3124,15 @@ void AdjustFieldLearnMode() {
                      && setpointLimited > 2.0f
                      && fabsf(setpointCommand - setpointLimited) <= 2.0f;  // command caught up — not mid-slew
       if (accBindingReady(accCurrent.bindingStartMs, binding, tick.nowMs, ACC_SETTLE_CURRENT_MS)) {
-        float err  = setpointLimited - MeasuredAmps;   // A; positive = under target
-        float over = MeasuredAmps - setpointLimited;   // over-current side (damaging)
+        // Score against the SAME signal the inner loop regulates: BATTERY current (Bcur) in CV
+        // battery-current control (§G), alternator current otherwise. Using MeasuredAmps in CV would book
+        // the alternator-vs-battery-command gap (≈ house load) as permanent tracking error. Raw Bcur
+        // (not filtered) mirrors the raw-MeasuredAmps convention so the over-current peak is honest.
+        // (g_cvBattCurrentActive is the global mirror of cvBattActive, set earlier this tick — the local
+        // is out of scope in this block.)
+        float accPv = g_cvBattCurrentActive ? Bcur : MeasuredAmps;
+        float err  = setpointLimited - accPv;          // A; positive = under target
+        float over = accPv - setpointLimited;          // over-current side (damaging)
         accScoreAdd(accCurrent.errAccum, accCurrent.timeAccum, accCurrent.worstOver, err, over > 0.0f ? over : 0.0f, actualDtSec);
       }
     }
@@ -5402,6 +5534,7 @@ void pidLog_tick(uint32_t nowMs) {
   if (sysMode == SYS_MODE_AUTO) e.flags |= (1 << 0);
   if (voltageControlActive) e.flags |= (1 << 1);
   if (govMode != GOV_NORMAL_SLEW) e.flags |= (1 << 4);
+  if (g_cvBattCurrentActive) e.flags |= (1 << 5);  // §G: CV regulating BATTERY current — track setpoint vs battI, not measAmps
   e.ovFlags = 0;
   if (g_fastOvClampActive) e.ovFlags |= (1 << 0);
   if (g_iExcessBulkActive) e.ovFlags |= (1 << 1);  // iExcess BULK sub-mode (current-control phase)

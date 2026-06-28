@@ -1202,6 +1202,8 @@ uint32_t Freq = 0;         // ESP32 switching Frequency in case we want to repor
 //Variables to store measurements
 float ShuntVoltage_mV;                        // Battery shunt voltage from INA228
 float Bcur;                                   // battery shunt current from INA228
+float Bcur_filtered = 0.0f;                   // EMA of Bcur (OutputPIDFilterTC) — inner-PID PV for CV battery-current control (§G); raw Bcur stays the load-dump derivative source
+bool  g_cvBattCurrentActive = false;          // telemetry: true when the inner loop is live-regulating BATTERY current in CV (absorption/float). CSV2.
 float targetCurrent;                          // This is used in the field adjustment loop, gets set to the desired source of current info (ie battery shunt, alt hall sensor, victron, etc.)
 float IBV;                                    // Ina 228 battery voltage
 float IBVMax = 6;                             // used to track maximum battery voltage (NVS-persisted, shown on dashboard)
@@ -2590,6 +2592,82 @@ bool tuningSquareAbrupt = false;  // when set, the TuningMode square wave bypass
                                   // instant for its edge-gain extraction. Transient — auto-cleared on
                                   // TuningMode exit; never persisted.
 
+// Battery Health: active DCIR test + passive capacity-%-vs-cycles. Lithium-only.
+// All NVS writes are field-off-deferred — a DCIR test always ends with the engine on.
+struct BattHealthSample {
+  uint32_t tMs;
+  float    v;   // IBV
+  float    i;   // Bcur (+ = charging)
+};
+struct BattHealthResult {
+  uint32_t epoch;        // 0 if clock wasn't synced when the test ran
+  float    dcir_mOhm;
+  float    soh_pct;      // NaN until a capacity point exists
+  float    boardTempF;
+  float    soc_pct;
+  float    battV;
+  float    stepLowA;
+  float    stepDeltaA;
+  uint8_t  edgesUsed;
+};
+struct BattCapPoint {
+  float    cycles;
+  float    capacityAh;
+  float    soh_pct;
+  float    socStart_pct;
+  float    boardTempF;
+};
+
+float    bhStepLowA   = 10.0f;
+float    bhStepDeltaA = 10.0f;  // crest = low + delta
+uint32_t bhDwellMs    = 3000;
+uint8_t  bhNumEdges   = 6;
+
+volatile uint8_t bhTestState = 0;          // 0 IDLE, 1 RUNNING, 2 DONE, 3 ABORTED
+bool     batteryHealthTestActive = false;  // read by the control loop's health branch
+const char *bhAbortReason = "";
+BattHealthSample *bhSamples = nullptr;
+int      bhSampleCap = 0;
+int      bhSampleCount = 0;
+bool     bhWaveHigh = false;
+uint32_t bhLastToggleMs = 0;
+int      bhEdgeCount = 0;
+#define  BH_MAX_TOGGLES 64
+uint32_t bhToggleMs[BH_MAX_TOGGLES];        // actual toggle instants (robust to skipped ticks)
+int      bhToggleCount = 0;
+uint32_t bhTestStartMs = 0;
+float    bhLastResultDcir = 0.0f;
+
+BattHealthResult *bhResults = nullptr;
+int      bhResultCap = 64;
+int      bhResultCount = 0;
+int      bhResultHead = 0;
+
+BattCapPoint *bhCapRing = nullptr;
+int      bhCapCap = 512;
+int      bhCapCount = 0;
+int      bhCapHead = 0;
+bool     bhCapDirty = false;
+bool     bhResultsDirty = false;
+float    bhBaselineCapacityAh = 0.0f;       // 0 = not yet established (battery assumed NEW at install)
+float    bhCycleMinCoulomb_scaled = 1e12f;  // deepest CoulombCount_Ah_scaled this cycle → capacity depth
+int      bhCycleMinSoC_x100 = 10000;        // SOC_percent at that deepest point
+
+// Explicit prototypes: String-return / String& functions don't survive auto-prototype ordering.
+void   bhSample(uint32_t nowMs);
+bool   bhStartTest();
+void   bhAbort(const char *reason);
+void   bhComputeDcir();
+void   bhServiceCompletion();
+void   bhAppendCapacityPoint(float capacityAh, float socStart_pct);
+void   bhFlushCapNVS();
+void   bhInitSettings();
+String bhSerializeResults();
+String bhSerializeCap();
+void   bhDeserializeResults(const String &blob);
+void   bhDeserializeCap(const String &blob);
+String bhBuildStatusJson();
+
 // ── Tuning→Current closed-loop sine generator (Stage 2) ───────────────────────
 // Waveform: 0 = square (existing ISE tuning), 1 = sine manual, 2 = sine auto-sweep.
 // Sine modes drive a sine setpoint (reference) and let the current PID chase it, then
@@ -2854,22 +2932,29 @@ volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
+// CV current source (§G): 0 = battery current (Bcur) when available — DEFAULT; 1 = force alternator current
+// (MeasuredAmps, legacy/A-B test escape). Battery-current control only actually engages when the availability
+// gate passes (INA source + healthy shunt + fast INA + absorption/float) — see cvBattActive in 6_functions.
+uint8_t cvCurrentSrc = 0;
 uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
                                   // device shows Manual 30/25; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
-// cvLambdaMult removed 2026-06-25 — the λ/SIMC tuning path was retired (gains come from cvOmega now);
+// cvLambdaMult removed 2026-06-25 — the λ/SIMC tuning path was retired (gains come from cvCrossover/ω_c now);
 // its CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged.
 float   cvPlantK     = 0.0f;      // measured plant gain K (V/A at the pack) from the CV plant-fit step; 0 = no valid fit
 float   cvPlantTau   = 0.0f;      // measured rise time τ (s)
 float   cvPlantL     = 0.0f;      // measured dead time L (s)
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
 float   cvComputedKi = 25.0f;
-// CV measured-K_dc auto-tune knobs (were #defines CV_OMEGA_TARGET / CV_KI_RATIO; now user-adjustable in
-// Tuning ▸ Voltage). recomputeCvGains() uses these: Kp = cvOmega / K_dc(12V-equiv), Ki = cvKiRatio · Kp.
-// See Working Markdown Docs/CV_AUTOTUNE_PLAN.md §E.
-float   cvOmega      = 0.286f;    // rad/s — target CV closed-loop crossover. User sets this as a RESPONSE TIME in
-                                  // seconds (dashboard relabels ω as settle = 4/ω); 0.286 ≈ 14 s, the recommended default.
-float   cvKiRatio    = 0.70f;     // ρ — Ki = ρ·Kp (integral zero placement)
+// CV measured-gain auto-tune knobs (design constants CV_CROSSOVER_TARGET / CV_PI_ZERO; user-adjustable in
+// Tuning ▸ Voltage). recomputeCvGains() uses these in the exact PI magnitude condition:
+// Kp = 1/(K20(12V-equiv)·sqrt(1+(ρ/ω_c)²)), Ki = ρ·Kp. See CV_AUTOTUNE_PLAN.md §F.3.
+// NVS keys NK_cvCrossover / NK_cvPiZero (CSV3 fields cvCrossover / cvPiZero). Renamed 2026-06-27 from the
+// misnamed cvOmega/cvKiRatio (§F.3) via a mint-new-key + migrate in InitSystemSettings, which also folds in
+// the old 0.286 → 0.20 default fix so the honest formula lands on the validated 30/25 neighborhood.
+float   cvCrossover  = 0.20f;     // rad/s — TRUE CV closed-loop crossover ω_c (CV_CROSSOVER_TARGET). User sets it as a
+                                  // RESPONSE TIME in seconds (dashboard shows settle = 4/ω_c); 0.20 ≈ 20 s, recommended default.
+float   cvPiZero     = 0.70f;     // rad/s — PI integral zero ρ (CV_PI_ZERO); Ki = ρ·Kp
 // Battery-temperature gain derate. Board temp (ambientTemp, °F) is a PROXY for battery temp; as the
 // battery cools its internal resistance — which IS the CV plant gain K_dc — rises, so gains computed at
 // the commissioning temperature run too hot when it's colder (and sluggish when warmer). We counter-
@@ -3644,7 +3729,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t spLimited;
   int16_t iMeas;
   int16_t duty;
-  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive
+  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=cvBattActive(§G)
   uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV × 100    (V)
@@ -4325,6 +4410,16 @@ void setup() {
   if (!anchorageRing) Serial.println("FATAL: anchorageRing ps_malloc failed");
   else memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
+  // Battery Health PSRAM buffers (sample buffer interval-gated, so a ~24s test fits 4096).
+  bhSampleCap = 4096;
+  bhSamples = (BattHealthSample *)ps_malloc(bhSampleCap * sizeof(BattHealthSample));
+  if (!bhSamples) Serial.println("FATAL: bhSamples ps_malloc failed");
+  bhResults = (BattHealthResult *)ps_malloc(bhResultCap * sizeof(BattHealthResult));
+  if (!bhResults) Serial.println("FATAL: bhResults ps_malloc failed");
+  else memset(bhResults, 0, bhResultCap * sizeof(BattHealthResult));
+  bhCapRing = (BattCapPoint *)ps_malloc(bhCapCap * sizeof(BattCapPoint));
+  if (!bhCapRing) Serial.println("FATAL: bhCapRing ps_malloc failed");
+  else memset(bhCapRing, 0, bhCapCap * sizeof(BattCapPoint));
   taskArray = (TaskStatus_t *)ps_malloc(MAX_TASKS * sizeof(TaskStatus_t));
   if (!taskArray) Serial.println("FATAL: taskArray ps_malloc failed");
   // CH1 interval ring — 30 KB to PSRAM
@@ -4536,6 +4631,7 @@ void setup() {
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "*");
 
   InitSystemSettings();       // load all settings from NVS (one-time LittleFS import sweep first).  If no keys exist, create them.
+  bhInitSettings();           // Battery Health: DCIR test config + persisted DCIR/capacity blobs
   initWeatherModeSettings();  // Add weather mode settings--- otherwise similar to line above (InitSystemSettings)
   loadTuningLog();            // restore last session's tuning records from LittleFS
   loadCVTuningLog();          // restore CV tuning records from LittleFS
@@ -4799,6 +4895,8 @@ void loop() {
   bool passFieldOn = !gpio4IsLow;
   currentTime = millis();
 
+  bhServiceCompletion();  // Battery Health: runs the DCIR fit once a test finishes / aborts on timeout
+
   // SOC and runtime update every 2 seconds (runs regardless of hardwarePresent)
   if (currentTime - lastSOCUpdateTime >= SOCUpdateInterval) {
     CurrentSessionDuration = (millis() - sessionStartTime) / 1000;  // seconds
@@ -4812,6 +4910,7 @@ void loop() {
     TIMED_CALL(ft_handleSocGainReset, handleSocGainReset());                            // do the dynamic updates
     TIMED_CALL(ft_handleAltZeroReset, handleAltZeroReset());                            // do the dynamic udpates
     kneeLearnService(fieldOffSettled(2000));  // Auto Min% learning: NVS flush of learned floors, field-off-gated (never stalls control)
+    if (fieldOffSettled(2000)) bhFlushCapNVS();  // Battery Health NVS persist — field-off only
 
     // Barometric pressure history sampler — 5-min cadence into baroPressureHistory ring.
     // Skipped if BMP388 hasn't reported (NAN). Wall-clock epoch stamped only if timeIsSynced

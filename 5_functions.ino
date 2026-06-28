@@ -929,6 +929,12 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
   wmIgnUpdate(wmIgn_SOC, SoC_float);     // ignition-cycle watermark (float percent, 0..100)
 
+  // Battery Health: track the cycle's deepest point for the capacity extrapolation below.
+  if (CoulombCount_Ah_scaled < bhCycleMinCoulomb_scaled) {
+    bhCycleMinCoulomb_scaled = CoulombCount_Ah_scaled;
+    bhCycleMinSoC_x100 = SOC_percent;
+  }
+
   // =================================================================
   //     FULL CHARGE DETECTION - WORKS FROM ANY CHARGING SOURCE
   // =================================================================
@@ -953,6 +959,26 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
                              Voltage_scaled / 100.0, ChargedVoltage_Scaled / 100.0,
                              BatteryCurrent_scaled / 100.0, FullChargeTimer);
         lastFullChargeMessage = millis();
+      }
+
+      // Battery Health capacity point, once per full-charge event (gated by !FullChargeDetected).
+      // Admit only deep cycles (started ≤80% SoC) — shallow top-offs are too noisy.
+      if (!FullChargeDetected) {
+        float fullAh   = (float)BatteryCapacity_Ah;             // CoulombCount was just reset to full
+        float minAh    = bhCycleMinCoulomb_scaled / 100.0f;
+        float socStart = bhCycleMinSoC_x100 / 100.0f;          // percent
+        float ahAdded  = fullAh - minAh;
+        if (socStart <= 80.0f && ahAdded > 0.0f) {
+          float depth = (100.0f - socStart) / 100.0f;
+          if (depth > 0.05f) {
+            float capacityEst = ahAdded / depth;
+            if (capacityEst > 0.3f * BatteryCapacity_Ah && capacityEst < 3.0f * BatteryCapacity_Ah) {
+              bhAppendCapacityPoint(capacityEst, socStart);
+            }
+          }
+        }
+        bhCycleMinCoulomb_scaled = (float)BatteryCapacity_Ah * 100.0f;  // reset cycle trackers to full
+        bhCycleMinSoC_x100 = 10000;
       }
 
       FullChargeDetected = true;
@@ -2408,6 +2434,7 @@ void _ReadAnalogInputs_inner() {
       INA.setBusVoltageConversionTime(4);   // 540µs
       INA.setShuntVoltageConversionTime(4); // 540µs — total update: 4×1080µs ≈ 4.3ms
       IBV_filtered = IBV;                   // reseed EMA so CV loop starts clean
+      Bcur_filtered = Bcur;                 // §G: match IBV_filtered — reseed the CV battery-current PV on fast-mode entry
       inaReadInterval = INA_FAST_INTERVAL_MS;
       inaFastModeActive = true;
     } else if (!fieldGateOpen && inaFastModeActive) {
@@ -2487,6 +2514,25 @@ void _ReadAnalogInputs_inner() {
                          }
                          bcurPrev = Bcur;
                          bcurPrevMs = nowIna;
+                       }
+
+                       // Bcur EMA — inner-PID process variable for CV battery-current control (§G).
+                       // Mirrors g_pidI_filtered's EMA on MeasuredAmps, reusing OutputPIDFilterTC, but co-sampled
+                       // with IBV at the fast-INA cadence (fresher than the loop fires). Raw Bcur above stays the
+                       // load-dump dBcur/dt source; this filtered copy is only the PID feedback.
+                       {
+                         uint32_t nowBc = millis();
+                         static bool bcur_ema_init = false;
+                         static uint32_t lastBcurEmaMs = 0;
+                         if (!bcur_ema_init) {
+                           Bcur_filtered = Bcur;
+                           bcur_ema_init = true;
+                         } else {
+                           float dt_f = fmaxf(1.0f, (float)(nowBc - lastBcurEmaMs));
+                           float alpha = dt_f / (OutputPIDFilterTC + dt_f);
+                           Bcur_filtered = alpha * Bcur + (1.0f - alpha) * Bcur_filtered;
+                         }
+                         lastBcurEmaMs = nowBc;
                        }
 
                        if (IBV > IBVMax)              { IBVMax              = IBV; }
@@ -3145,6 +3191,7 @@ void ReadAnalogInputs_Fake() {
     //if (fakeBattCurrent > 180.0) fakeBattCurrent = 180.0;
     fakeBattCurrent = 100;
     Bcur = fakeBattCurrent * (InvertBattAmps ? -1 : 1);  // Apply invert flag
+    Bcur_filtered = Bcur;                                 // fake mode: no EMA lag needed (§G CV battery-current PV)
     BatteryCurrent_scaled = Bcur * 100;
     VictronCurrent = Bcur + (random(-80, 80) / 10.0);  // ±8 A offset
     MARK_FRESH(IDX_BCUR);

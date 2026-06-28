@@ -711,8 +711,9 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "FastSetpointRiseWindowMs", NK_FastSetpointRiseWindowMs, 1 },
   { "cvHelpersEnabled", NK_cvHelpersEnabled, 1 },
   { "cvGainMode", NK_cvGainMode, 1 },
-  { "cvOmega", NK_cvOmega, 1 },
-  { "cvKiRatio", NK_cvKiRatio, 1 },
+  { "cvCurrentSrc", NK_cvCurrentSrc, 1 },
+  { "cvCrossover", NK_cvCrossover, 1 },
+  { "cvPiZero", NK_cvPiZero, 1 },
   { "vTgtRampEnable", NK_vTgtRampEnable, 1 },
   { "vTgtRampUp", NK_vTgtRampUp, 1 },
   { "vTgtRampDn", NK_vTgtRampDn, 1 },
@@ -944,4 +945,291 @@ int applyImportConfig(const char *body, bool includeHardware) {
     }
   }
   return applied;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  BATTERY HEALTH MONITOR — active DCIR test + capacity-vs-cycles trend.
+//  Step generator: 6_functions.ino.  Globals/structs: Xregulator.ino.
+// ══════════════════════════════════════════════════════════════════════════════
+
+static uint32_t      bhSampleLastMs   = 0;
+static const uint32_t BH_SAMPLE_INTERVAL_MS = 15;   // ~INA228 cadence; bounds buffer fill
+
+// Per-tick sampler (control loop). INA228 IBV/Bcur directly — Victron's ~1 Hz is useless
+// for a step edge, so bhStartTest() requires the INA source.
+void bhSample(uint32_t nowMs) {
+  if (!bhSamples || bhSampleCount >= bhSampleCap) return;
+  if (nowMs - bhSampleLastMs < BH_SAMPLE_INTERVAL_MS) return;
+  bhSampleLastMs = nowMs;
+  bhSamples[bhSampleCount].tMs = nowMs;
+  bhSamples[bhSampleCount].v   = IBV;
+  bhSamples[bhSampleCount].i   = Bcur;
+  bhSampleCount++;
+}
+
+void bhAbort(const char *reason) {
+  batteryHealthTestActive = false;
+  bhTestState = 3;
+  bhAbortReason = reason;
+  queueConsoleMessageF("BATT HEALTH: test aborted — %s", reason);
+}
+
+bool bhStartTest() {
+  if (bhTestState == 1)        { bhAbortReason = "already running";          return false; }
+  if (!bhSamples || !bhResults){ bhAbortReason = "buffers unallocated";      return false; }
+  if (RPM < 100)               { bhAbortReason = "engine not running";       return false; }
+  if (sysMode != SYS_MODE_AUTO){ bhAbortReason = "must be in AUTO mode";     return false; }   // generator only runs in the AUTO control path
+  if (TuningMode || CVTuningMode || systemIDActive) { bhAbortReason = "another test active"; return false; }
+  if (BatteryCurrentSource != 0){ bhAbortReason = "needs INA228 battery shunt"; return false; }
+  if (bhNumEdges < 3) bhNumEdges = 3;
+  if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
+  bhSampleCount  = 0;
+  bhSampleLastMs = 0;
+  bhWaveHigh     = false;
+  bhEdgeCount    = 0;
+  bhToggleCount  = 0;
+  bhTestStartMs  = millis();
+  bhLastToggleMs = bhTestStartMs;
+  bhAbortReason  = "";
+  bhTestState    = 1;
+  batteryHealthTestActive = true;
+  queueConsoleMessageF("BATT HEALTH: DCIR test started (%.1f<->%.1fA, %lus dwell, %u edges)",
+                       bhStepLowA, bhStepLowA + bhStepDeltaA, (unsigned long)(bhDwellMs / 1000), bhNumEdges);
+  return true;
+}
+
+// A macro, not a helper: a free function taking BattHealthResult by reference makes
+// Arduino's auto-prototype generator hoist a prototype above the struct definition
+// ("does not name a type"). Keep ALL struct types out of free-function signatures.
+#define BH_APPEND_RESULT(r) do {                         \
+    bhResults[bhResultHead] = (r);                       \
+    bhResultHead = (bhResultHead + 1) % bhResultCap;     \
+    if (bhResultCount < bhResultCap) bhResultCount++;    \
+  } while (0)
+
+// Resistance at the dwell timescale (ohmic + polarization within one dwell). The absolute
+// value is timescale-dependent but consistent run-to-run, so the TREND is what matters.
+// SEAM for a 3-level sweep (linearity check): the per-edge math already differences whatever
+// ΔI occurred, so only the generator + reporting need to fan out to multiple magnitudes.
+void bhComputeDcir() {
+  uint32_t bhT0 = micros();   // this fit runs in a field-on loop pass — report its cost so a spike is attributable
+  if (bhSampleCount < 8 || bhToggleCount < (int)bhNumEdges + 3) { bhAbort("not enough samples"); return; }
+
+  uint32_t settleSkip = bhDwellMs / 3; if (settleSkip > 1000) settleSkip = 1000;
+  uint32_t win        = bhDwellMs / 3; if (win < 200) win = 200;
+
+  float Rsum = 0.0f; int Rn = 0;
+  // Score toggle numbers k = 3 .. bhNumEdges+2 (1-indexed). Array index = k-1.
+  for (int k = 3; k <= (int)bhNumEdges + 2; k++) {
+    if (k >= bhToggleCount) break;
+    uint32_t tEdge = bhToggleMs[k - 1];
+    uint32_t tNext = bhToggleMs[k];
+    float vb = 0, ib = 0, va = 0, ia = 0;
+    int   nb = 0, na = 0;
+    for (int s = 0; s < bhSampleCount; s++) {
+      uint32_t t = bhSamples[s].tMs;
+      if (t + win >= tEdge && t < tEdge)               { vb += bhSamples[s].v; ib += bhSamples[s].i; nb++; }   // settled end of prior level
+      else if (t >= tEdge + settleSkip && t < tNext)   { va += bhSamples[s].v; ia += bhSamples[s].i; na++; }   // settled new level
+    }
+    if (nb < 2 || na < 2) continue;
+    vb /= nb; ib /= nb; va /= na; ia /= na;
+    float dV = va - vb, dI = ia - ib;
+    if (fabsf(dI) < 0.5f * bhStepDeltaA) continue;     // step never manifested (protection clamp / field cut)
+    float R = (dV / dI) * 1000.0f;                     // mΩ
+    if (R < 0.1f || R > 500.0f) continue;              // sanity bound
+    Rsum += R; Rn++;
+  }
+  if (Rn < 2) { bhAbort("insufficient valid steps (protections firing or step too small?)"); return; }
+
+  BattHealthResult r = {};
+  r.epoch      = timeIsSynced ? (timeBase + (millis() - timeBaseMillis) / 1000) : 0;
+  r.dcir_mOhm  = Rsum / Rn;
+  r.soh_pct    = (bhCapCount > 0) ? bhCapRing[(bhCapHead - 1 + bhCapCap) % bhCapCap].soh_pct : NAN;
+  r.boardTempF = ambientTemp;                          // board-temp proxy (°F)
+  r.soc_pct    = SOC_percent / 100.0f;
+  r.battV      = IBV;
+  r.stepLowA   = bhStepLowA;
+  r.stepDeltaA = bhStepDeltaA;
+  r.edgesUsed  = (uint8_t)Rn;
+  BH_APPEND_RESULT(r);
+  bhLastResultDcir = r.dcir_mOhm;
+  bhTestState = 2;
+  bhResultsDirty = true;   // NVS persist deferred to field-off — a test always ends field-on
+  queueConsoleMessageF("BATT HEALTH: DCIR = %.2f mOhm (%d/%u edges, SoC %.0f%%, %.1fF, fit %luus)",
+                       r.dcir_mOhm, Rn, bhNumEdges, r.soc_pct, r.boardTempF, (unsigned long)(micros() - bhT0));
+}
+
+// Called every loop() iteration. Cheap: a couple of compares unless a test is live.
+void bhServiceCompletion() {
+  if (bhTestState != 1) return;
+  if (!batteryHealthTestActive) {           // control loop finished the last edge
+    bhComputeDcir();
+    return;
+  }
+  // Watchdog: if the engine stops mid-test the health branch stops toggling and the
+  // test would hang RUNNING forever.
+  uint32_t budget = (uint32_t)(bhNumEdges + 4) * bhDwellMs + 5000;
+  if (millis() - bhTestStartMs > budget) bhAbort("timed out (engine stopped or left AUTO?)");
+}
+
+// Battery assumed NEW at install: the first admitted measurement defines the 100% baseline.
+void bhAppendCapacityPoint(float capacityAh, float socStart_pct) {
+  if (!bhCapRing || capacityAh <= 0.0f) return;
+  if (bhBaselineCapacityAh <= 0.0f) bhBaselineCapacityAh = capacityAh;
+  BattCapPoint p = {};
+  p.cycles       = ChargeCycles_AllTime;
+  p.capacityAh   = capacityAh;
+  p.soh_pct      = (bhBaselineCapacityAh > 0) ? (capacityAh / bhBaselineCapacityAh * 100.0f) : 100.0f;
+  p.socStart_pct = socStart_pct;
+  p.boardTempF   = ambientTemp;
+  bhCapRing[bhCapHead] = p;
+  bhCapHead = (bhCapHead + 1) % bhCapCap;
+  if (bhCapCount < bhCapCap) bhCapCount++;
+  bhCapDirty = true;
+  queueConsoleMessageF("BATT HEALTH: capacity point %.1f Ah (SOH %.0f%%, depth from %.0f%%, cyc %.1f)",
+                       capacityAh, p.soh_pct, socStart_pct, p.cycles);
+}
+
+// Persist DCIR results + capacity ring to NVS. Caller gates on field-off.
+void bhFlushCapNVS() {
+  if (bhCapDirty) {
+    settingWrite(NK_bhCapBlob, bhSerializeCap().c_str());
+    settingWrite(NK_bhBaseline, String(bhBaselineCapacityAh, 3).c_str());
+    bhCapDirty = false;
+  }
+  if (bhResultsDirty) {
+    settingWrite(NK_bhResults, bhSerializeResults().c_str());
+    bhResultsDirty = false;
+  }
+}
+
+// ── Serialize / deserialize (compact CSV; records joined by ';') ────────────────
+String bhSerializeResults() {
+  String out; out.reserve(bhResultCount * 56);
+  int start = (bhResultCount < bhResultCap) ? 0 : bhResultHead;
+  for (int n = 0; n < bhResultCount; n++) {
+    BattHealthResult &r = bhResults[(start + n) % bhResultCap];
+    if (n) out += ';';
+    out += String(r.epoch);            out += ',';
+    out += String(r.dcir_mOhm, 2);     out += ',';
+    out += (isnan(r.soh_pct) ? String("nan") : String(r.soh_pct, 1)); out += ',';
+    out += String(r.boardTempF, 1);    out += ',';
+    out += String(r.soc_pct, 1);       out += ',';
+    out += String(r.battV, 2);         out += ',';
+    out += String(r.stepLowA, 1);      out += ',';
+    out += String(r.stepDeltaA, 1);    out += ',';
+    out += String((int)r.edgesUsed);
+  }
+  return out;
+}
+
+static float bhTok(const String &s, int &pos) {   // next comma/semicolon-delimited float
+  int e = pos;
+  while (e < (int)s.length() && s[e] != ',' && s[e] != ';') e++;
+  String t = s.substring(pos, e);
+  pos = e + 1;
+  if (t == "nan") return NAN;
+  return t.toFloat();
+}
+
+void bhDeserializeResults(const String &blob) {
+  bhResultCount = 0; bhResultHead = 0;
+  if (blob.length() == 0) return;
+  int pos = 0;
+  while (pos < (int)blob.length()) {
+    BattHealthResult r = {};
+    r.epoch      = (uint32_t)bhTok(blob, pos);
+    r.dcir_mOhm  = bhTok(blob, pos);
+    r.soh_pct    = bhTok(blob, pos);
+    r.boardTempF = bhTok(blob, pos);
+    r.soc_pct    = bhTok(blob, pos);
+    r.battV      = bhTok(blob, pos);
+    r.stepLowA   = bhTok(blob, pos);
+    r.stepDeltaA = bhTok(blob, pos);
+    r.edgesUsed  = (uint8_t)bhTok(blob, pos);
+    BH_APPEND_RESULT(r);
+  }
+}
+
+String bhSerializeCap() {
+  String out; out.reserve(bhCapCount * 36);
+  int start = (bhCapCount < bhCapCap) ? 0 : bhCapHead;
+  for (int n = 0; n < bhCapCount; n++) {
+    BattCapPoint &p = bhCapRing[(start + n) % bhCapCap];
+    if (n) out += ';';
+    out += String(p.cycles, 2);       out += ',';
+    out += String(p.capacityAh, 1);   out += ',';
+    out += String(p.soh_pct, 1);      out += ',';
+    out += String(p.socStart_pct, 1); out += ',';
+    out += String(p.boardTempF, 1);
+  }
+  return out;
+}
+
+void bhDeserializeCap(const String &blob) {
+  bhCapCount = 0; bhCapHead = 0;
+  if (blob.length() == 0) return;
+  int pos = 0;
+  while (pos < (int)blob.length()) {
+    BattCapPoint p = {};
+    p.cycles       = bhTok(blob, pos);
+    p.capacityAh   = bhTok(blob, pos);
+    p.soh_pct      = bhTok(blob, pos);
+    p.socStart_pct = bhTok(blob, pos);
+    p.boardTempF   = bhTok(blob, pos);
+    bhCapRing[bhCapHead] = p;
+    bhCapHead = (bhCapHead + 1) % bhCapCap;
+    if (bhCapCount < bhCapCap) bhCapCount++;
+  }
+}
+
+// Call after InitSystemSettings() — needs the NVS settings layer up.
+void bhInitSettings() {
+  if (!settingExists(NK_bhStepLowA))   settingWrite(NK_bhStepLowA, String(bhStepLowA, 1).c_str());   else bhStepLowA   = settingRead(NK_bhStepLowA).toFloat();
+  if (!settingExists(NK_bhStepDeltaA)) settingWrite(NK_bhStepDeltaA, String(bhStepDeltaA, 1).c_str()); else bhStepDeltaA = settingRead(NK_bhStepDeltaA).toFloat();
+  if (!settingExists(NK_bhDwellMs))    settingWrite(NK_bhDwellMs, String(bhDwellMs).c_str());         else bhDwellMs    = (uint32_t)settingRead(NK_bhDwellMs).toInt();
+  if (!settingExists(NK_bhNumEdges))   settingWrite(NK_bhNumEdges, String(bhNumEdges).c_str());       else bhNumEdges   = (uint8_t)settingRead(NK_bhNumEdges).toInt();
+  if (settingExists(NK_bhBaseline))    bhBaselineCapacityAh = settingRead(NK_bhBaseline).toFloat();
+  if (bhNumEdges < 3) bhNumEdges = 3;
+  if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
+  if (settingExists(NK_bhResults)) bhDeserializeResults(settingRead(NK_bhResults));
+  if (settingExists(NK_bhCapBlob)) bhDeserializeCap(settingRead(NK_bhCapBlob));
+}
+
+String bhBuildStatusJson() {
+  String j = "{";
+  j += "\"state\":" + String(bhTestState);
+  j += ",\"reason\":\"" + String(bhAbortReason) + "\"";
+  j += ",\"lastDcir\":" + String(bhLastResultDcir, 2);
+  j += ",\"baselineAh\":" + String(bhBaselineCapacityAh, 1);
+  j += ",\"low\":" + String(bhStepLowA, 1);
+  j += ",\"delta\":" + String(bhStepDeltaA, 1);
+  j += ",\"dwellMs\":" + String(bhDwellMs);
+  j += ",\"edges\":" + String(bhNumEdges);
+  j += ",\"results\":[";
+  int start = (bhResultCount < bhResultCap) ? 0 : bhResultHead;
+  for (int n = 0; n < bhResultCount; n++) {
+    BattHealthResult &r = bhResults[(start + n) % bhResultCap];
+    if (n) j += ',';
+    j += "{\"epoch\":" + String(r.epoch);
+    j += ",\"dcir\":" + String(r.dcir_mOhm, 2);
+    j += ",\"soh\":" + (isnan(r.soh_pct) ? String("null") : String(r.soh_pct, 1));
+    j += ",\"tF\":" + String(r.boardTempF, 1);
+    j += ",\"soc\":" + String(r.soc_pct, 1);
+    j += ",\"v\":" + String(r.battV, 2);
+    j += ",\"low\":" + String(r.stepLowA, 1);
+    j += ",\"delta\":" + String(r.stepDeltaA, 1);
+    j += ",\"edges\":" + String((int)r.edgesUsed) + "}";
+  }
+  j += "],\"cap\":[";
+  int cstart = (bhCapCount < bhCapCap) ? 0 : bhCapHead;
+  for (int n = 0; n < bhCapCount; n++) {
+    BattCapPoint &p = bhCapRing[(cstart + n) % bhCapCap];
+    if (n) j += ',';
+    j += "{\"cyc\":" + String(p.cycles, 2);
+    j += ",\"ah\":" + String(p.capacityAh, 1);
+    j += ",\"soh\":" + String(p.soh_pct, 1) + "}";
+  }
+  j += "]}";
+  return j;
 }

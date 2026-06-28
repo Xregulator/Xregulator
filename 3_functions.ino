@@ -640,6 +640,7 @@ enum Csv2Index {
   CSV2_httpsUpload_ses, // Core-0 cloud op time, WORST since last Reset Peak Values (ms)
 
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
+  CSV2_cvBattCurrentActive, // §G: 1 = inner loop is live-regulating BATTERY current in CV (absorption/float)
 
   CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
 };
@@ -995,8 +996,8 @@ enum Csv3Index {
   CSV3_cvPlantL,                // measured dead time L (s); ×100
   CSV3_cvComputedKp,            // Auto-computed Kp (12V-equiv); ×100
   CSV3_cvComputedKi,            // Auto-computed Ki (12V-equiv); ×100
-  CSV3_cvOmega,                 // CV auto-tune ω target (rad/s); ×100
-  CSV3_cvKiRatio,               // CV auto-tune Ki/Kp ratio ρ; ×100
+  CSV3_cvCrossover,             // CV crossover ω_c (rad/s); ×100  (§F.3 rename, was cvOmega)
+  CSV3_cvPiZero,                // CV PI integral zero ρ (rad/s); ×100  (§F.3 rename, was cvKiRatio)
   CSV3_vTgtRampUp,              // CV voltage-target ramp UP rate (V/s); ×1000
   CSV3_vTgtRampDn,              // CV voltage-target ramp DOWN rate (V/s); ×1000
   CSV3_vTgtRampEnable,          // CV voltage-target slew master switch (0/1)
@@ -1005,6 +1006,7 @@ enum Csv3Index {
   CSV3_battTempCoeff,           // battery fractional resistance change per °C; ×10000
   CSV3_TempPIDKiDownFrac,       // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
   CSV3_ThermalSlopeWindowSec,   // thermal slope backward-difference window (s); integer
+  CSV3_cvCurrentSrc,            // CV current source: 0=battery-when-available, 1=force alternator (§G)
 
   CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26
 };
@@ -1962,7 +1964,7 @@ void setupServer() {
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "# PID diagnostic log — CV loop / output current PID / duty pipeline\n"
-                "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass\n"
+                "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass bit5=cvBattActive(CV regulating battery current)\n"
                 "# ovFlags: bit0=fastOvActive bit1=iExcessBulk(current-control phase) bit2=hardClamp bit3=iExcess bit4=loadDumpActive\n"
                 "# voltageLoopRanThisTick=1 means Icv/cv_I updated this row\n"
                 "# vError: always fresh every tick regardless of loop interval\n"
@@ -2237,6 +2239,10 @@ void setupServer() {
   // Auto Min% learning ("knee tracker") state: knobs + live status + per-bin learned floors.
   server.on("/kneeLearnState", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "application/json", kneeLearnStateJson());
+  });
+  // Battery Health: DCIR test status + result table + capacity-vs-cycles trend.
+  server.on("/batteryHealth", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "application/json", bhBuildStatusJson());
   });
   // Zero-drift characterization log: small status JSON for the dashboard panel (enable, fill, span).
   server.on("/zerologstate", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -4453,6 +4459,45 @@ void setupServer() {
       manualCommitTuningRequested = true;
       queueConsoleMessage("TuningScore: manual commit requested via UI");
     }
+    // ── Battery Health (DCIR active test) ──
+    if (request->hasParam("BatteryHealthTest")) {
+      foundParameter = true;
+      if (!bhStartTest()) queueConsoleMessageF("BATT HEALTH: cannot start — %s", bhAbortReason);
+    }
+    if (request->hasParam("bhStepLowA")) {
+      foundParameter = true;
+      bhStepLowA = request->getParam("bhStepLowA")->value().toFloat();
+      settingWrite(NK_bhStepLowA, String(bhStepLowA, 1).c_str());
+    }
+    if (request->hasParam("bhStepDeltaA")) {
+      foundParameter = true;
+      bhStepDeltaA = request->getParam("bhStepDeltaA")->value().toFloat();
+      settingWrite(NK_bhStepDeltaA, String(bhStepDeltaA, 1).c_str());
+    }
+    if (request->hasParam("bhDwellSec")) {
+      foundParameter = true;   // UI is seconds, internal is ms
+      bhDwellMs = (uint32_t)(request->getParam("bhDwellSec")->value().toFloat() * 1000.0f);
+      settingWrite(NK_bhDwellMs, String(bhDwellMs).c_str());
+    }
+    if (request->hasParam("bhNumEdges")) {
+      foundParameter = true;
+      int e = request->getParam("bhNumEdges")->value().toInt();
+      if (e < 3) e = 3;
+      if (e > BH_MAX_TOGGLES - 3) e = BH_MAX_TOGGLES - 3;
+      bhNumEdges = (uint8_t)e;
+      settingWrite(NK_bhNumEdges, String(bhNumEdges).c_str());
+    }
+    if (request->hasParam("bhStartOver")) {
+      foundParameter = true;   // battery replaced: re-baseline + wipe history
+      bhBaselineCapacityAh = 0.0f;
+      bhResultCount = 0; bhResultHead = 0;
+      bhCapCount = 0; bhCapHead = 0; bhCapDirty = false;
+      bhTestState = 0;
+      settingWrite(NK_bhResults, "");
+      settingWrite(NK_bhCapBlob, "");
+      settingWrite(NK_bhBaseline, "0");
+      queueConsoleMessage("BATT HEALTH: history cleared, baseline reset (battery replaced)");
+    }
     if (request->hasParam("LogAllLearningEvents")) {
       foundParameter = true;
       inputMessage = request->getParam("LogAllLearningEvents")->value();
@@ -4725,30 +4770,37 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
     }
-    // cvLambdaMult handler removed 2026-06-25 — λ tuning retired; the Response Speed slider now drives cvOmega.
-    if (request->hasParam("cvOmega")) {  // CV auto-tune target crossover ω (rad/s) — drives Kp = ω/K_dc
+    // CV current source (§G): 0 = battery-when-available (default), 1 = force alternator (legacy / A-B test).
+    if (request->hasParam("cvCurrentSrc")) {
       foundParameter = true;
-      cvOmega = clamp_f(request->getParam("cvOmega")->value().toFloat(), 0.05f, 0.80f);  // 0.80 ≈ 5 s, fast end of the seconds control
-      settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
-      recomputeCvGains();
-      queueConsoleMessageF("CV auto-tune omega: %.2f rad/s", cvOmega);
+      cvCurrentSrc = (uint8_t)(request->getParam("cvCurrentSrc")->value().toInt() != 0 ? 1 : 0);
+      settingWrite(NK_cvCurrentSrc, String((int)cvCurrentSrc).c_str());
+      queueConsoleMessageF("CV current source: %s", cvCurrentSrc ? "ALTERNATOR (forced)" : "BATTERY (when available)");
     }
-    // User-facing CV Response Time in seconds → ω = 4/sec (settle ≈ 4 time constants). Stored as cvOmega;
-    // the dashboard relabels ω as seconds, but ω stays the internal/NVS unit so recomputeCvGains is unchanged.
+    // cvLambdaMult handler removed 2026-06-25 — λ tuning retired; the Response Speed slider now drives cvCrossover.
+    if (request->hasParam("cvCrossover")) {  // CV crossover ω_c (rad/s) — exact magnitude formula, §F.3 (was cvOmega)
+      foundParameter = true;
+      cvCrossover = clamp_f(request->getParam("cvCrossover")->value().toFloat(), 0.05f, 0.80f);  // 0.80 ≈ 5 s, fast end of the seconds control
+      settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
+      recomputeCvGains();
+      queueConsoleMessageF("CV crossover omega_c: %.2f rad/s", cvCrossover);
+    }
+    // User-facing CV Response Time in seconds → ω_c = 4/sec (settle ≈ 4 time constants). Stored as cvCrossover;
+    // the dashboard relabels ω_c as seconds, but ω_c stays the internal/NVS unit so recomputeCvGains is unchanged.
     if (request->hasParam("cvRespS")) {
       foundParameter = true;
       float respS = request->getParam("cvRespS")->value().toFloat();
-      cvOmega = clamp_f((respS > 0.0f) ? (4.0f / respS) : 0.286f, 0.05f, 0.80f);
-      settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
+      cvCrossover = clamp_f((respS > 0.0f) ? (4.0f / respS) : 0.20f, 0.05f, 0.80f);
+      settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
       recomputeCvGains();
-      queueConsoleMessageF("CV response time: %.0f s (omega %.2f rad/s)", 4.0f / cvOmega, cvOmega);
+      queueConsoleMessageF("CV response time: %.0f s (crossover %.2f rad/s)", 4.0f / cvCrossover, cvCrossover);
     }
-    if (request->hasParam("cvKiRatio")) {  // CV auto-tune Ki/Kp ratio ρ — Ki = ρ·Kp
+    if (request->hasParam("cvPiZero")) {  // CV PI integral zero ρ (rad/s) — Ki = ρ·Kp (§F.3 rename, was cvKiRatio)
       foundParameter = true;
-      cvKiRatio = clamp_f(request->getParam("cvKiRatio")->value().toFloat(), 0.2f, 1.5f);
-      settingWrite(NK_cvKiRatio, String(cvKiRatio, 3).c_str());
+      cvPiZero = clamp_f(request->getParam("cvPiZero")->value().toFloat(), 0.2f, 1.5f);
+      settingWrite(NK_cvPiZero, String(cvPiZero, 3).c_str());
       recomputeCvGains();
-      queueConsoleMessageF("CV auto-tune Ki/Kp ratio: %.2f", cvKiRatio);
+      queueConsoleMessageF("CV PI zero (Ki/Kp ratio): %.2f", cvPiZero);
     }
     if (request->hasParam("battTempDerateEnable")) {  // master on/off for the battery-temp gain derate
       foundParameter = true;
@@ -7117,6 +7169,8 @@ void SendWifiData() {
                                // +2: Core-0 HTTPS task cloud op time (last/worst, ms)
                                "%d,%d,"
                                // +1: live battery-temp CV gain derate multiplier (×1000)
+                               "%d,"
+                               // +1: CV battery-current-control live flag (§G)
                                "%d",
 
                                CSV2_FIELD_COUNT,
@@ -7666,7 +7720,8 @@ void SendWifiData() {
                                SafeInt(csv2SendWorstUs),                  // CSV2_csv2SendWorst  (µs)
                                SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
                                SafeInt(httpsUploadWorstMs),               // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
-                               SafeInt(cvTempDerateScale, 1000)           // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
+                               SafeInt(cvTempDerateScale, 1000),          // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
+                               (int)g_cvBattCurrentActive                 // CSV2_cvBattCurrentActive -> CV battery-current-control live flag (§G)
     );
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
@@ -7756,8 +7811,8 @@ void SendWifiData() {
                                "%d,"  // cvPlantL
                                "%d,"  // cvComputedKp
                                "%d,"  // cvComputedKi
-                               "%d,"  // cvOmega
-                               "%d,"  // cvKiRatio
+                               "%d,"  // cvCrossover
+                               "%d,"  // cvPiZero
                                "%d,"  // vTgtRampUp
                                "%d,"  // vTgtRampDn
                                "%d,"  // vTgtRampEnable
@@ -7765,7 +7820,8 @@ void SendWifiData() {
                                "%d,"  // battTempDerateEnable
                                "%d,"  // battTempCoeff
                                "%d,"  // TempPIDKiDownFrac
-                               "%d",  // ThermalSlopeWindowSec
+                               "%d,"  // ThermalSlopeWindowSec
+                               "%d",  // cvCurrentSrc
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8084,8 +8140,8 @@ void SendWifiData() {
                                SafeInt(cvPlantL, 100),                          // CSV3_cvPlantL (measured dead time s, ×100)
                                SafeInt(cvComputedKp, 100),                      // CSV3_cvComputedKp (Auto-computed Kp 12V-equiv, ×100)
                                SafeInt(cvComputedKi, 100),                      // CSV3_cvComputedKi (Auto-computed Ki 12V-equiv, ×100)
-                               SafeInt(cvOmega, 100),                           // CSV3_cvOmega (auto-tune ω target rad/s, ×100)
-                               SafeInt(cvKiRatio, 100),                         // CSV3_cvKiRatio (auto-tune Ki/Kp ratio ρ, ×100)
+                               SafeInt(cvCrossover, 100),                       // CSV3_cvCrossover (crossover ω_c rad/s, ×100)
+                               SafeInt(cvPiZero, 100),                          // CSV3_cvPiZero (PI integral zero ρ rad/s, ×100)
                                SafeInt(vTgtRampUp, 1000),                       // CSV3_vTgtRampUp (target ramp up rate V/s, ×1000)
                                SafeInt(vTgtRampDn, 1000),                       // CSV3_vTgtRampDn (target ramp down rate V/s, ×1000)
                                (int)vTgtRampEnable,                             // CSV3_vTgtRampEnable (slew master switch 0/1)
@@ -8093,7 +8149,8 @@ void SendWifiData() {
                                (int)battTempDerateEnable,                       // CSV3_battTempDerateEnable (0/1)
                                SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
                                SafeInt(TempPIDKiDownFrac, 1000),                // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
-                               SafeInt(ThermalSlopeWindowSec)                   // CSV3_ThermalSlopeWindowSec (slope difference window, s)
+                               SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
+                               (int)cvCurrentSrc                                // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

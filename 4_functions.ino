@@ -1593,15 +1593,34 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvGainMode = (uint8_t)settingRead(NK_cvGainMode).toInt();
   }
-  if (!settingExists(NK_cvOmega)) {
-    settingWrite(NK_cvOmega, String(cvOmega, 3).c_str());
+  // CV current source (§G): 0 = battery-when-available (default), 1 = force alternator
+  if (!settingExists(NK_cvCurrentSrc)) {
+    settingWrite(NK_cvCurrentSrc, String((int)cvCurrentSrc).c_str());
   } else {
-    cvOmega = settingRead(NK_cvOmega).toFloat();
+    cvCurrentSrc = (uint8_t)settingRead(NK_cvCurrentSrc).toInt();
   }
-  if (!settingExists(NK_cvKiRatio)) {
-    settingWrite(NK_cvKiRatio, String(cvKiRatio, 3).c_str());
+  // CV crossover ω_c — NVS key renamed cvOmega → cvCrossover (§F.3). Mint-new-key + migrate: adopt the old
+  // value if present, folding in the misnamed-0.286 → 0.20 default fix (else ~24 % hot under the exact
+  // magnitude formula), write the new key, and remove the orphaned old one. Dev-units-only window.
+  if (settingExists(NK_cvCrossover)) {
+    cvCrossover = settingRead(NK_cvCrossover).toFloat();
+  } else if (settingExists("cvOmega")) {
+    float old = settingRead("cvOmega").toFloat();
+    cvCrossover = (fabsf(old - 0.286f) < 0.003f) ? 0.20f : old;
+    settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
+    settingRemove("cvOmega");
   } else {
-    cvKiRatio = settingRead(NK_cvKiRatio).toFloat();
+    settingWrite(NK_cvCrossover, String(cvCrossover, 3).c_str());
+  }
+  // CV PI zero ρ — NVS key renamed cvKiRatio → cvPiZero (§F.3). Same mint-new-key + migrate (value unchanged).
+  if (settingExists(NK_cvPiZero)) {
+    cvPiZero = settingRead(NK_cvPiZero).toFloat();
+  } else if (settingExists("cvKiRatio")) {
+    cvPiZero = settingRead("cvKiRatio").toFloat();
+    settingWrite(NK_cvPiZero, String(cvPiZero, 3).c_str());
+    settingRemove("cvKiRatio");
+  } else {
+    settingWrite(NK_cvPiZero, String(cvPiZero, 3).c_str());
   }
   if (!settingExists(NK_vTgtRampEnable)) {
     settingWrite(NK_vTgtRampEnable, String((int)vTgtRampEnable).c_str());

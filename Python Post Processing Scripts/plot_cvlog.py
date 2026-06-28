@@ -236,10 +236,13 @@ if "ovFlags" in df.columns:
     df["iExcess"]        = ((_ov & 8) > 0).astype("int64")
     df["loadDumpActive"] = ((_ov & 16) > 0).astype("int64")
 
-# Unpack flags bitmask → cvActive (bit1 = voltCtrl = CV loop running)
-if "flags" in df.columns and "cvActive" not in df.columns:
+# Unpack flags bitmask → cvActive (bit1 = voltCtrl = CV loop running) + cvBattActive (bit5, §G:
+# inner loop regulating BATTERY current battI_A instead of alternator current iMeas_A)
+if "flags" in df.columns:
     _fl = pd.to_numeric(df["flags"], errors="coerce").fillna(0).astype("int64")
-    df["cvActive"] = ((_fl & 2) > 0).astype("int64")
+    if "cvActive" not in df.columns:
+        df["cvActive"] = ((_fl & 2) > 0).astype("int64")
+    df["cvBattActive"] = ((_fl & 32) > 0).astype("int64")
 
 # ---------------------------------------------------------------------------
 
@@ -462,6 +465,23 @@ def add_ov_shading(ax, df):
             in_ov = False
     if in_ov:
         ax.axvspan(ov_start, df["t_plot"].iloc[-1], color="#c62828", alpha=0.08)
+
+
+def add_cvbatt_shading(ax, df):
+    """Light amber background where cvBattActive=1 (§G): the CV loop is regulating BATTERY current,
+    so the PID command (spLimited_A) is tracked against battI_A, NOT iMeas_A (alternator). Outside the
+    bands the loop is on alternator current as before."""
+    if "cvBattActive" not in df.columns:
+        return
+    in_b, b_start = False, None
+    for _, row in df.iterrows():
+        if row["cvBattActive"] and not in_b:
+            b_start, in_b = row["t_plot"], True
+        elif not row["cvBattActive"] and in_b:
+            ax.axvspan(b_start, row["t_plot"], color="#f9a825", alpha=0.07)
+            in_b = False
+    if in_b:
+        ax.axvspan(b_start, df["t_plot"].iloc[-1], color="#f9a825", alpha=0.07)
 
 
 COMMISSIONING_COLOR = "#795548"   # brown — matches plot_pidlog / plot_thermallog commissioning mode
@@ -739,8 +759,10 @@ if "iMeas_filt_A" in df.columns:
     ax2a.plot(df["t_plot"], df["iMeas_filt_A"],
               color="#ef9a9a", lw=1.4, linestyle="--", label="Actual current EMA  (iMeas_filt_A)", alpha=0.75)
 if "battI_A" in df.columns:
+    # In amber-shaded spans (cvBattActive) THIS is the regulated PV the loop tracks against spLimited_A.
+    _batt_lbl = "Battery current  (battI_A — tracked PV in shaded spans)" if "cvBattActive" in df.columns else "Battery current  (battI_A)"
     ax2a.plot(df["t_plot"], df["battI_A"],
-              color="#f9a825", lw=1.8, alpha=0.80, label="Battery current  (battI_A)")
+              color="#f9a825", lw=1.8, alpha=0.80, label=_batt_lbl)
 
 ax2a.set_ylabel("Current (A)")
 ax2a.grid(**GRID_KW)
@@ -754,6 +776,7 @@ _leg2a = ax2a_d.legend(_h2a + _h2a_duty, [l.get_label() for l in _h2a + _h2a_dut
 _leg2a.set_draggable(True)
 
 add_ov_shading(ax2a, df)
+add_cvbatt_shading(ax2a, df)   # §G: amber band = CV regulating battery current (track spLimited vs battI)
 add_voltloop_vlines(ax2a, df)
 
 # Variable key table — maps legend nicknames to internal variable names; drag anywhere to reposition
@@ -764,7 +787,10 @@ _p2_key = (
     "  PID command              =  spLimited_A    (A)\n"
     "  Actual current (raw)     =  iMeas_A        (A)\n"
     "  Actual current (EMA)     =  iMeas_filt_A   (A)\n"
-    "  Field duty               =  duty_pct       (%)"
+    "  Battery current          =  battI_A        (A)\n"
+    "  Field duty               =  duty_pct       (%)\n"
+    "  Amber band = CV regulating BATTERY current (§G):\n"
+    "    track spLimited_A vs battI_A there, not iMeas_A"
 )
 _key_text = fig2.text(
     0.01, 0.30, _p2_key,
