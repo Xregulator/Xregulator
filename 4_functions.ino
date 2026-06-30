@@ -786,6 +786,7 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
 
       if (!error) {
         BOAT_LENGTH_FT = doc["boat_length_ft"] | 0.0f;
+        BOAT_DISPLACEMENT_LBS = doc["boat_displacement_lbs"] | 0.0f;
 
         const char *boat_type = doc["boat_type"] | "monohull";
         BOAT_TYPE = boat_type;
@@ -812,6 +813,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
 
         const char *battery_type = doc["battery_type"] | "lifepo4";
         BATTERY_TYPE = battery_type;
+
+        const char *battery_make_model = doc["battery_make_model"] | "";
+        BATTERY_MAKE_MODEL = battery_make_model;
 
         const char *alt_brand = doc["alternator_brand_model"] | "";
         ALTERNATOR_BRAND_MODEL = alt_brand;
@@ -1247,11 +1251,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     LoadDumpDtThresh3 = settingRead(NK_LoadDumpDtThresh3).toFloat();
   }
-  if (!settingExists(NK_CVTuningMode)) {
-    settingWrite(NK_CVTuningMode, String(CVTuningMode).c_str());
-  } else {
-    CVTuningMode = settingRead(NK_CVTuningMode).toInt();
-  }
+  // A live test must NEVER auto-resume after a reboot — force OFF on boot, ignoring any stored value (write back only if it was stuck on).
+  CVTuningMode = 0;
+  if (settingExists(NK_CVTuningMode) && settingRead(NK_CVTuningMode).toInt() != 0) settingWrite(NK_CVTuningMode, "0");
   if (!settingExists(NK_cvWaveAmplitudeV)) {
     settingWrite(NK_cvWaveAmplitudeV, String(cvWaveAmplitudeV).c_str());
   } else {
@@ -1467,11 +1469,9 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     EnableAmbientCorrection = settingRead(NK_EnableAmbientCorrection).toInt();
   }
-  if (!settingExists(NK_TuningMode)) {
-    settingWrite(NK_TuningMode, String(TuningMode).c_str());
-  } else {
-    TuningMode = settingRead(NK_TuningMode).toInt();
-  }
+  // A live test must NEVER auto-resume after a reboot — force OFF on boot, ignoring any stored value (write back only if it was stuck on).
+  TuningMode = 0;
+  if (settingExists(NK_TuningMode) && settingRead(NK_TuningMode).toInt() != 0) settingWrite(NK_TuningMode, "0");
   if (!settingExists(NK_LogAllLearningEvents)) {
     settingWrite(NK_LogAllLearningEvents, String(LogAllLearningEvents).c_str());
   } else {
@@ -1642,6 +1642,8 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvPlantK = settingRead(NK_cvPlantK).toFloat();
   }
+  if (!settingExists(NK_cvFloorK0)) { settingWrite(NK_cvFloorK0, String(cvFloorK0, 4).c_str()); } else { cvFloorK0 = settingRead(NK_cvFloorK0).toFloat(); }
+  if (!settingExists(NK_cvFloorK1)) { settingWrite(NK_cvFloorK1, String(cvFloorK1, 4).c_str()); } else { cvFloorK1 = settingRead(NK_cvFloorK1).toFloat(); }
   if (!settingExists(NK_cvPlantTau)) {
     settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
   } else {
@@ -1875,6 +1877,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
   } else {
     IExcessFloorA = settingRead(NK_IExcessFloorA).toFloat();
+  }
+  if (!settingExists(NK_IExcessFloorABatt)) {
+    settingWrite(NK_IExcessFloorABatt, String(IExcessFloorABatt, 1).c_str());
+  } else {
+    IExcessFloorABatt = settingRead(NK_IExcessFloorABatt).toFloat();
   }
   if (!settingExists(NK_IExcessCeilA)) {
     settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());

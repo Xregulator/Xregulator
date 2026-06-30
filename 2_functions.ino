@@ -190,6 +190,7 @@ bool fsRemove(const char *path) {
 #define NK_IExcessArmMarginV "IExcessArmMrgnV"
 #define NK_IExcessCeilA "IExcessCeilA"
 #define NK_IExcessFloorA "IExcessFloorA"
+#define NK_IExcessFloorABatt "IExFloorBatt"
 #define NK_IExcessFrac "IExcessFrac"
 #define NK_IExcessFracBulk "IExcessFrcBlk"
 #define NK_IExcessKBleed "IExcessKBleed"
@@ -280,6 +281,8 @@ bool fsRemove(const char *path) {
 #define NK_vTgtRampUp "vTgtRampUp"
 #define NK_vTgtRampDn "vTgtRampDn"
 #define NK_cvPlantK "cvPlantK"
+#define NK_cvFloorK0 "cvFloorK0"
+#define NK_cvFloorK1 "cvFloorK1"
 #define NK_cvPlantTau "cvPlantTau"
 #define NK_cvPlantL "cvPlantL"
 #define NK_CommissionTempF "CommissionTmpF"
@@ -391,6 +394,19 @@ bool fsRemove(const char *path) {
 #define NK_bhBaseline "bhBaselineAh"
 #define NK_bhResults "bhResultsBlob"
 #define NK_bhCapBlob "bhCapBlob"
+// Capacity tracker (OCV-anchored) config. Keys ≤15 chars.
+#define NK_capOcvBlob "capOcvBlob"
+#define NK_capRestFrac "capRestFrac"
+#define NK_capRestFloor "capRestFloorMin"
+#define NK_capSettleRate "capSettleRate"
+#define NK_capSocLowMax "capSocLowMax"
+#define NK_capMinSpan "capMinSpan"
+#define NK_capChgEff "capChgEff"
+#define NK_capFullSoc "capFullSoc"
+#define NK_capRefMode "capRefMode"
+#define NK_capTempNorm "capTempNorm"
+#define NK_capTempCoeff "capTempCoeff"
+#define NK_capTempRef "capTempRef"
 #define NK_weatherDataValid "weatherDataVald"
 #define NK_weatherModeEnabled "weatherModEnbld"
 #define NK_webgaugesinterval "webgaugesintrvl"
@@ -493,15 +509,17 @@ bool settingRemove(const char *key) {
 // pre-commissioning tune. The field order is fixed and MUST match between save and
 // restore. (Positional CSV, not JSON — dependency-free, matches the codebase ethos.)
 void commissionSnapshot() {
-  char buf[160];
+  char buf[180];
   // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
   // a commissioning run must never strand the user in the wrong mode. Older 12-field snapshots
   // are still accepted on restore (the mode is simply left untouched).
+  // 14th field = IExcessFloorABatt (CV battery-current detector floor) — Step 6 overwrites it,
+  // so the abort path must capture it. Older ≤13-field snapshots omit it (left untouched on restore).
   snprintf(buf, sizeof(buf),
-           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d",
+           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f",
            PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
-           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow);
+           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow, IExcessFloorABatt);
   settingWrite(NK_commissionSnap, buf);
   // The Min% floor table + knee tracker don't fit this positional CSV (10 floats × 3 + bools), so
   // they are backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
@@ -512,11 +530,11 @@ void commissionSnapshot() {
 bool commissionRestore() {
   if (!settingExists(NK_commissionSnap)) return false;
   String s = settingRead(NK_commissionSnap);
-  float v[13];
-  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
+  float v[14];
+  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
-                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12]);
-  if (n < 12) return false;  // accept 12 (legacy) or 13 (with HiLow); fewer = malformed
+                 &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]);
+  if (n < 12) return false;  // accept 12 (legacy) / 13 (+HiLow) / 14 (+IExcessFloorABatt); fewer = malformed
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
   PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
   InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
@@ -538,6 +556,11 @@ bool commissionRestore() {
       settingWrite(NK_HiLow, String(HiLow).c_str());
       loadCapTablesForMode(HiLow);
     }
+  }
+  // IExcessFloorABatt (14th field). Older ≤13-field snapshots omit it — leave the current value as-is.
+  if (n >= 14) {
+    IExcessFloorABatt = v[13];
+    settingWrite(NK_IExcessFloorABatt, String(IExcessFloorABatt, 1).c_str());
   }
   recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
   commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
@@ -3630,6 +3653,108 @@ static float faAutoFloorIdx = 0.0f;
 static bool  faAutoFloorDirty = false;  // a higher floor is pending NVS persistence at the next field-off flush
 static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core 0), executed on Core 1
 
+// ── Battery-current ripple capture (commissioning Step 5) ──
+// The disturbance matrix above characterizes ripple on ALTERNATOR current, but the CV over-current
+// detector now runs on BATTERY current (§G). Battery ripple is much smaller (the belt-resonance AC
+// mostly returns through bus capacitance, not the battery — measured ~3× on a real idle CV log), so
+// the alternator-derived floor is an over-conservative proxy for the CV detector. This captures the
+// worst battery-current ripple per 50-RPM bin during the Step-5 idle→2000 sweep so Step 6 can set a
+// battery-specific floor (IExcessFloorABatt). Sampled off the INA fast path (~4.3 ms, field-active) —
+// fast enough for the belt band (~28 Hz), too slow to FFT, so this is a direct drift-removed pk-pk,
+// not a tone decomposition. The browser pairs it with the alternator matrix's binding frequency to
+// derive the post-EMA residual, exactly parallel to the alternator floor math. Persisted to a tiny
+// blob so a reboot between Step 5 and Step 6 doesn't lose it; absent data → Step 6 falls back to the
+// alternator proxy (prior behavior). Bins mirror the matrix (FA_RPM_BINS × FA_RPM_BIN_W).
+#define BCUR_RIPPLE_PATH "/bcurripp.bin"
+#define BCUR_RIPPLE_MAGIC 0x42435252u  // 'BCRR'
+#define BCUR_RIPPLE_VER 1
+#define BCUR_RIPI_PATH "/bcurripi.bin"
+#define BCUR_RIPI_MAGIC 0x42435249u    // 'BCRI' — parallel per-bin operating current at each worst pk-pk
+#define BCUR_RIPPLE_SLOW_TC 0.5f       // s — drift/DC baseline EMA; passes the belt band, blocks the charge ramp
+#define BCUR_RIPPLE_WIN_MS 500UL       // pk-pk measurement window (matches the matrix window)
+uint16_t bcurRipplePkpkX100[FA_RPM_BINS];  // worst drift-removed pk-pk of Bcur per RPM bin, A ×100 (0 = unvisited)
+// Operating battery current (A ×100) at the moment each bin's worst pk-pk was captured. Ripple from belt/
+// alternator torque scales ~with load current, so Step 6 uses this to project the measured ripple up to the
+// device's max charge current instead of trusting a floor measured at whatever current happened to flow.
+uint16_t bcurRippleIatX100[FA_RPM_BINS];
+static float bcurRippleSlow = 0.0f, bcurRippleWinMin = 1e9f, bcurRippleWinMax = -1e9f;
+static uint32_t bcurRippleLastMs = 0, bcurRippleWinStartMs = 0;
+static bool bcurRippleArmed = false;   // false until the first sample after the gate opens (seed, don't measure)
+static bool bcurRippleDirty = false;   // new worst-per-bin pending blob persistence at the next field-off flush
+
+// Active 3-current resonance test (COMMISSIONING_SPEC §3.2): when armed, log each completed window's
+// (rpm, operating current, pk-pk) so the browser can fit ripple = a0 + a1·I and project to max output.
+// Unlike the per-bin max above, this keeps MULTIPLE samples so a slope can be fit. RAM-only (ephemeral
+// test), cleared on arm. Capture only runs while faCommissionGate is also open (same window path).
+#define BCUR_RTEST_CAP 64
+struct BcurRtestPt { uint16_t rpm; uint16_t iX100; uint16_t pkpkX100; };
+BcurRtestPt bcurRtest[BCUR_RTEST_CAP];
+volatile bool bcurRtestActive = false;
+volatile uint16_t bcurRtestCount = 0;  // appends stop at CAP; browser stops well before
+// Wizard-commanded current levels for the resonance test (§3.2): when active, the control loop drives the
+// alternator to resTestTargetA (slewed, protections live — modeled on the Battery-Health DCIR generator).
+volatile bool resTestActive = false;
+volatile float resTestTargetA = 0.0f;
+volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this; loop auto-releases if it goes stale
+#define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
+
+// Fold one INA battery-current sample into the per-RPM-bin ripple capture. No-op (one bool test) unless
+// the commissioning matrix gate is open. Called from the INA fast-read path in 5_functions.ino.
+void bcurRippleCommissionUpdate(float bcur, float rpm) {
+  if (!faCommissionGate) { bcurRippleArmed = false; return; }
+  uint32_t now = millis();
+  if (!bcurRippleArmed) {  // gate just opened — seed the baseline, start a fresh window, measure next time
+    bcurRippleSlow = bcur;
+    bcurRippleLastMs = now;
+    bcurRippleWinStartMs = now;
+    bcurRippleWinMin = 1e9f;
+    bcurRippleWinMax = -1e9f;
+    bcurRippleArmed = true;
+    return;
+  }
+  float dt = (now - bcurRippleLastMs) * 0.001f;
+  bcurRippleLastMs = now;
+  if (dt <= 0.0f || dt > 1.0f) { bcurRippleSlow = bcur; return; }  // stall/gap → reseed baseline, drop this window
+  float aSlow = dt / (BCUR_RIPPLE_SLOW_TC + dt);
+  bcurRippleSlow += aSlow * (bcur - bcurRippleSlow);
+  float resid = bcur - bcurRippleSlow;  // band-limited AC ripple (drift removed)
+  if (resid < bcurRippleWinMin) bcurRippleWinMin = resid;
+  if (resid > bcurRippleWinMax) bcurRippleWinMax = resid;
+  if (now - bcurRippleWinStartMs >= BCUR_RIPPLE_WIN_MS) {
+    float pkpk = bcurRippleWinMax - bcurRippleWinMin;
+    int bin = (int)(rpm / FA_RPM_BIN_W);
+    if (rpm > 0.0f && bin >= 0 && bin < FA_RPM_BINS) {
+      uint16_t v = (uint16_t)fminf(pkpk * 100.0f + 0.5f, 65535.0f);
+      if (v > bcurRipplePkpkX100[bin]) {
+        bcurRipplePkpkX100[bin] = v;
+        bcurRippleIatX100[bin] = (uint16_t)fminf(fabsf(bcurRippleSlow) * 100.0f + 0.5f, 65535.0f);  // current at this worst
+        bcurRippleDirty = true;
+      }
+      if (bcurRtestActive && bcurRtestCount < BCUR_RTEST_CAP) {  // active test: keep every sample, not just the max
+        BcurRtestPt &p = bcurRtest[bcurRtestCount];
+        p.rpm = (uint16_t)fminf(rpm + 0.5f, 65535.0f);
+        p.iX100 = (uint16_t)fminf(fabsf(bcurRippleSlow) * 100.0f + 0.5f, 65535.0f);
+        p.pkpkX100 = v;
+        bcurRtestCount++;
+      }
+    }
+    bcurRippleWinMin = 1e9f;
+    bcurRippleWinMax = -1e9f;
+    bcurRippleWinStartMs = now;
+  }
+}
+
+// Persist the per-RPM-bin battery ripple array (field-off flush, alongside the matrix). Tiny blob.
+void bcurRippleFlush() {
+  uint32_t n = writePsramBlob(BCUR_RIPPLE_PATH, BCUR_RIPPLE_MAGIC, BCUR_RIPPLE_VER,
+                              0, bcurRipplePkpkX100, sizeof(uint16_t),
+                              FA_RPM_BINS, 0, FA_RPM_BINS);
+  writePsramBlob(BCUR_RIPI_PATH, BCUR_RIPI_MAGIC, BCUR_RIPPLE_VER,
+                 0, bcurRippleIatX100, sizeof(uint16_t),
+                 FA_RPM_BINS, 0, FA_RPM_BINS);  // parallel operating-current array (separate file, same gate)
+  if (n > 0) bcurRippleDirty = false;
+}
+
 // ── Flat-top windowed FFT (replaced the constant-Q Goertzel bank 2026-06-14) ──
 // One FFT per 0.5 s window over the decimated 1.25 kSPS AC stream. Replaces the 16-bin log
 // Goertzel bank, which scalloped: its bins spaced ~28% apart with main lobes only ~f/10 wide
@@ -4581,7 +4706,12 @@ void faMatrixMaybeFlush() {
     faAutoFloorIdx = 0.0f;  // map wiped — drop the auto-floor running max too (IExcessFloorA stays; it only re-raises)
     fsTakeLock();
     LittleFS.remove(FA_MATRIX_PATH);
+    LittleFS.remove(BCUR_RIPPLE_PATH);  // battery ripple is part of the same disturbance characterization
+    LittleFS.remove(BCUR_RIPI_PATH);
     fsReleaseLock();
+    memset(bcurRipplePkpkX100, 0, sizeof(bcurRipplePkpkX100));
+    memset(bcurRippleIatX100, 0, sizeof(bcurRippleIatX100));
+    bcurRippleDirty = false;
     faDomReset();  // map wiped — clear the Highest Tone in Map headline too (persists at the next save)
     queueConsoleMessage("Resonance & Ripple Map cleared");
     return;
@@ -4602,9 +4732,10 @@ void faMatrixMaybeFlush() {
   bool rising = off && !prevOff;
   bool periodic = off && (millis() - lastFlushMs >= FA_MATRIX_FLUSH_MS);
   prevOff = off;
-  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty || faAutoFloorDirty)) {
+  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty || faAutoFloorDirty || bcurRippleDirty)) {
     if (faMatrixDirtyWindows > 0) faMatrixFlush();
     if (faFlipDirty) faFlipFlush();
+    if (bcurRippleDirty) bcurRippleFlush();
     if (faAutoFloorDirty) {  // auto-raised floor — persist here (field-off) so it survives reboot; never a live flash write
       settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
       faAutoFloorDirty = false;
@@ -4715,6 +4846,14 @@ void faInit() {
   if (readPsramBlob(FA_FLIP_PATH, FA_FLIP_MAGIC, FA_FLIP_VER,
                     faFlip, sizeof(FaFlipPage), FA_FLIP_SLOTS, &anomNext32, false) > 0)
     faAnomNext = (uint8_t)(anomNext32 % FA_FLIP_ANOM);
+  // Battery-current ripple capture (Step 5) — restore the per-RPM-bin worsts so a reboot between
+  // Step 5 and Step 6 keeps them; absent/mismatched blob leaves the zeroed array (Step 6 proxy fallback).
+  memset(bcurRipplePkpkX100, 0, sizeof(bcurRipplePkpkX100));
+  memset(bcurRippleIatX100, 0, sizeof(bcurRippleIatX100));
+  readPsramBlob(BCUR_RIPPLE_PATH, BCUR_RIPPLE_MAGIC, BCUR_RIPPLE_VER,
+                bcurRipplePkpkX100, sizeof(uint16_t), FA_RPM_BINS, NULL, false);
+  readPsramBlob(BCUR_RIPI_PATH, BCUR_RIPI_MAGIC, BCUR_RIPPLE_VER,
+                bcurRippleIatX100, sizeof(uint16_t), FA_RPM_BINS, NULL, false);  // absent on old units → 0 → no projection
   faFftInit();
   faWinReset();
   // Global ON/OFF (Pattern B, item 4). InitSystemSettings() runs AFTER faInit() in setup(),

@@ -538,30 +538,18 @@ const CSV2_FIELDS = [
     "ft_checkWiFiConnection_ses",
     "ft_ch1_compute_stats_win",
     "ft_ch1_compute_stats_ses",
-    "ft_UpdateEngineRuntime_win",
-    "ft_UpdateEngineRuntime_ses",
-    "ft_UpdateEngineFuel_win",
-    "ft_UpdateEngineFuel_ses",
     "ft_UpdateBatterySOC_win",
     "ft_UpdateBatterySOC_ses",
-    "ft_UpdateTravelStatistics_win",
-    "ft_UpdateTravelStatistics_ses",
-    "ft_UpdateBoardTempPressureMaximums_win",
-    "ft_UpdateBoardTempPressureMaximums_ses",
-    "ft_handleSocGainReset_win",
-    "ft_handleSocGainReset_ses",
-    "ft_handleAltZeroReset_win",
-    "ft_handleAltZeroReset_ses",
-    "ft_calculateChargeTimes_win",
-    "ft_calculateChargeTimes_ses",
-    "ft_UpdateSailingMetrics_win",
-    "ft_UpdateSailingMetrics_ses",
-    "ft_updateWeatherMode_win",
-    "ft_updateWeatherMode_ses",
     "ft_updateSensorWindow_win",
     "ft_updateSensorWindow_ses",
     "ft_checkTimeSync_win",
     "ft_checkTimeSync_ses",
+    "ft_zeroLogService_win",
+    "ft_zeroLogService_ses",
+    "ft_bhFlushCapNVS_win",
+    "ft_bhFlushCapNVS_ses",
+    "ft_kneeLearnService_win",
+    "ft_kneeLearnService_ses",
     "currentRPMTableIndex",
     "pidInitialized",
     "pidSetpoint",
@@ -938,6 +926,10 @@ function cxRpmSparkOnCsv1(data) {
     const canvas = document.getElementById('cxRpmSpark');
     if (!canvas || !canvas.clientWidth) return;  // modal closed / not laid out
     const rpm = Number(data.RPM);
+    if (cx) {                                  // green/red in-range check for the resonance current-check
+        cx.liveRpm = isFinite(rpm) ? rpm : NaN;
+        if (cx.rtestState === 'leveling') cxRtTick();
+    }
     const S = _cxRpmSpark;
     S.rpm.push(isFinite(rpm) ? rpm : NaN); S.rpm.shift();
     const ve = document.getElementById('cx-rpm-spark-val');
@@ -2341,6 +2333,8 @@ const CSV3_FIELDS = [
     "TempPIDKiDownFrac",             // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
     "ThermalSlopeWindowSec",         // thermal slope backward-difference window (s); integer
     "cvCurrentSrc",                  // CV current source: 0=battery-when-available, 1=force alternator (§G)
+    "IExcessFloorABatt",             // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA, set from battery ripple in Step 6
+    "cvFloorK1",                     // CV battery iExcess current-tracking floor slope; ×10000 (0 = static floor)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -4939,7 +4933,7 @@ function updateAllEchosOptimized(data) {
         { key: 'VMGTargetBearing', id: 'VMGTargetBearing_echo', transform: v => v },
         { key: 'DutyRampRate', id: 'DutyRampRate_echo', transform: v => (v / 100).toFixed(2) },
         { key: 'SettleTimeBeforeCut', id: 'SettleTimeBeforeCut_echo', transform: v => Math.round(v) },
-        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
+        { key: 'TempWarnExcess', id: 'TempWarnExcess_echo', transform: v => { window._tempWarnExcessF = v / 100; return toDisplayTempDelta(v / 100).toFixed(1); } },  // stash native °F so the Control Accuracy thermal-peak red line tracks the actual shutdown trip
         { key: 'TempCritExcess', id: 'TempCritExcess_echo', transform: v => toDisplayTempDelta(v / 100).toFixed(1) },
         { key: 'TempSustainedTimeout', id: 'TempSustainedTimeout_echo', transform: v => Math.round(v) },
         { key: 'AlternatorHardShutdownV', id: 'AlternatorHardShutdownV_echo', transform: v => (v / 100).toFixed(2) },
@@ -4948,6 +4942,8 @@ function updateAllEchosOptimized(data) {
         { key: 'IExcessFrac', id: 'IExcessFrac_echo', transform: v => (v / 10).toFixed(1) },          // ×1000 → % of command
         { key: 'IExcessFracBulk', id: 'IExcessFracBulk_echo', transform: v => (v / 10).toFixed(1) },  // ×1000 → % of ceiling
         { key: 'IExcessFloorA', id: 'IExcessFloorA_echo', transform: v => (v / 10).toFixed(1) },      // ×10 → A
+        { key: 'IExcessFloorABatt', id: 'IExcessFloorABatt_echo', transform: v => (v / 10).toFixed(1) },  // ×10 → A (CV battery-current detector floor)
+        { key: 'cvFloorK1', id: 'cvFloorK1_echo', transform: v => (v / 10000).toFixed(4) },  // ×10000 → A/A (current-tracking floor slope; 0 = static)
         { key: 'IExcessCeilA', id: 'IExcessCeilA_echo', transform: v => (v / 10).toFixed(1) },        // ×10 → A
         { key: 'IExcessTau', id: 'IExcessTau_echo', transform: v => Math.round(v) },                  // raw ms
         { key: 'IExcessRelFrac', id: 'IExcessRelFrac_echo', transform: v => (v / 10).toFixed(1) },    // ×1000 → % of threshold
@@ -5347,6 +5343,7 @@ async function fetchAndPopulateVesselInfo() {
         if (!form) return;
 
         form.BOAT_LENGTH_FT.value = data.boat_length_ft || '';
+        form.BOAT_DISPLACEMENT_LBS.value = data.boat_displacement_lbs || '';
         form.BOAT_TYPE.value = data.boat_type || 'monohull';
         form.BOAT_MAKE_MODEL.value = data.boat_make_model || '';
         form.BOAT_YEAR.value = data.boat_year || new Date().getFullYear();
@@ -5357,6 +5354,7 @@ async function fetchAndPopulateVesselInfo() {
         window._nominalStored = data.battery_voltage || 12;  // baseline class for the save-rescale warning + open-loop warnings
         form.BATTERY_CAPACITY_AH.value = data.battery_capacity_ah || '';
         form.BATTERY_TYPE.value = data.battery_type || '';
+        form.BATTERY_MAKE_MODEL.value = data.battery_make_model || '';
         form.ALTERNATOR_BRAND_MODEL.value = data.alternator_brand_model || '';
         form.SOLAR_WATTS.value = data.solar_watts || '';
 
@@ -5426,6 +5424,7 @@ async function handleVesselInfoSave(event) {
     // Build vessel data object
     const vesselData = {
         boat_length_ft: parseFloat(form.BOAT_LENGTH_FT.value),
+        boat_displacement_lbs: parseFloat(form.BOAT_DISPLACEMENT_LBS.value) || 0,
         boat_type: form.BOAT_TYPE.value,
         boat_make_model: form.BOAT_MAKE_MODEL.value,
         boat_year: parseInt(form.BOAT_YEAR.value),
@@ -5435,6 +5434,7 @@ async function handleVesselInfoSave(event) {
         battery_voltage: parseInt(form.BATTERY_VOLTAGE.value),
         battery_capacity_ah: parseInt(form.BATTERY_CAPACITY_AH.value),
         battery_type: form.BATTERY_TYPE.value,
+        battery_make_model: form.BATTERY_MAKE_MODEL.value,
         alternator_brand_model: form.ALTERNATOR_BRAND_MODEL.value,
         solar_watts: parseInt(form.SOLAR_WATTS.value),
         imu_mount_orientation: parseInt(selectedOrientation.value),
@@ -8988,6 +8988,14 @@ function updateTogglesFromData(data) {
         updateCheckbox("AutoShuntGainCorrection_checkbox", data.AutoShuntGainCorrection, "AutoShuntGainCorrection");
         updateCheckbox("AutoAltCurrentZero_checkbox", data.AutoAltCurrentZero, "AutoAltCurrentZero");
         updateCheckbox("CVTuningMode_checkbox", data.CVTuningMode, "CVTuningMode");
+        // updateCheckbox only touches the checkbox; the floating test panel reads device-active state via
+        // getField("CVTuningMode") (the hidden input), so mirror device truth into it too — otherwise the
+        // panel never sees the test turn off and stays open / re-arms on the next settings save. Skip while a
+        // local toggle is pending so the optimistic UI isn't stomped by a stale echo.
+        const _cvHidden = document.getElementById("CVTuningMode");
+        if (_cvHidden && data.CVTuningMode !== undefined && !pendingToggles.has("CVTuningMode")) {
+            _cvHidden.value = String(data.CVTuningMode);
+        }
         // Fast alt-current diagnostic toggles (Pattern B)
         updateSegToggle("faEnabled", data.faEnabled);
         updateSegToggle("faAlarmEnable", data.faAlarmEnable);
@@ -10912,30 +10920,18 @@ window.addEventListener("load", function () {
                 ["ft_checkWiFiConnection_ses_ID", "ft_checkWiFiConnection_ses"],
                 ["ft_ch1_compute_stats_win_ID", "ft_ch1_compute_stats_win"],
                 ["ft_ch1_compute_stats_ses_ID", "ft_ch1_compute_stats_ses"],
-                ["ft_UpdateEngineRuntime_win_ID", "ft_UpdateEngineRuntime_win"],
-                ["ft_UpdateEngineRuntime_ses_ID", "ft_UpdateEngineRuntime_ses"],
-                ["ft_UpdateEngineFuel_win_ID", "ft_UpdateEngineFuel_win"],
-                ["ft_UpdateEngineFuel_ses_ID", "ft_UpdateEngineFuel_ses"],
                 ["ft_UpdateBatterySOC_win_ID", "ft_UpdateBatterySOC_win"],
                 ["ft_UpdateBatterySOC_ses_ID", "ft_UpdateBatterySOC_ses"],
-                ["ft_UpdateTravelStatistics_win_ID", "ft_UpdateTravelStatistics_win"],
-                ["ft_UpdateTravelStatistics_ses_ID", "ft_UpdateTravelStatistics_ses"],
-                ["ft_UpdateBoardTempPressureMaximums_win_ID", "ft_UpdateBoardTempPressureMaximums_win"],
-                ["ft_UpdateBoardTempPressureMaximums_ses_ID", "ft_UpdateBoardTempPressureMaximums_ses"],
-                ["ft_handleSocGainReset_win_ID", "ft_handleSocGainReset_win"],
-                ["ft_handleSocGainReset_ses_ID", "ft_handleSocGainReset_ses"],
-                ["ft_handleAltZeroReset_win_ID", "ft_handleAltZeroReset_win"],
-                ["ft_handleAltZeroReset_ses_ID", "ft_handleAltZeroReset_ses"],
-                ["ft_calculateChargeTimes_win_ID", "ft_calculateChargeTimes_win"],
-                ["ft_calculateChargeTimes_ses_ID", "ft_calculateChargeTimes_ses"],
-                ["ft_UpdateSailingMetrics_win_ID", "ft_UpdateSailingMetrics_win"],
-                ["ft_UpdateSailingMetrics_ses_ID", "ft_UpdateSailingMetrics_ses"],
-                ["ft_updateWeatherMode_win_ID", "ft_updateWeatherMode_win"],
-                ["ft_updateWeatherMode_ses_ID", "ft_updateWeatherMode_ses"],
                 ["ft_updateSensorWindow_win_ID", "ft_updateSensorWindow_win"],
                 ["ft_updateSensorWindow_ses_ID", "ft_updateSensorWindow_ses"],
                 ["ft_checkTimeSync_win_ID", "ft_checkTimeSync_win"],
                 ["ft_checkTimeSync_ses_ID", "ft_checkTimeSync_ses"],
+                ["ft_zeroLogService_win_ID", "ft_zeroLogService_win"],
+                ["ft_zeroLogService_ses_ID", "ft_zeroLogService_ses"],
+                ["ft_bhFlushCapNVS_win_ID", "ft_bhFlushCapNVS_win"],
+                ["ft_bhFlushCapNVS_ses_ID", "ft_bhFlushCapNVS_ses"],
+                ["ft_kneeLearnService_win_ID", "ft_kneeLearnService_win"],
+                ["ft_kneeLearnService_ses_ID", "ft_kneeLearnService_ses"],
                 // HeadingNMEA readout moved to the CSVData4 / NavStream handler
                 ["EngineCyclesID", "EngineCycles"],
                 ["WifiStrengthID", "WifiStrength"],
@@ -11095,7 +11091,10 @@ window.addEventListener("load", function () {
             accScoreCell('accVoltRms',   data.accVoltRms,     1, ' mV', 0, 200, 300);
             accScoreCell('accVoltPeak',  data.accVoltPeak,    1, ' mV', 0, 100, 150);
             accScoreCell('accThermRms',  data.accThermRms,  100, ' °F', 1, 6,  10);
-            accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, 3,  8);
+            // Worst over-temp: red once the peak reaches the over-temp shutdown trip (limit + TempWarnExcess,
+            // default 2°F) — if it shut down, it's red. Orange from half that. Tracks the live warn-excess.
+            const thermWarnF = (window._tempWarnExcessF > 0) ? window._tempWarnExcessF : 2.0;
+            accScoreCell('accThermPeak', data.accThermPeak, 100, ' °F', 1, thermWarnF * 0.5, thermWarnF);
 
             // Update GPS display and manual entry form visibility
             if (data.LatitudeNMEA !== undefined && data.LongitudeNMEA !== undefined) {
@@ -11828,7 +11827,7 @@ max-width: 100%;     /* allow full width on mobile */
 
     // Mirror the segmented A/B controls to their hidden checkbox state on load
     ['ManualFieldToggle_checkbox', 'TempSource_checkbox', 'bmsLogicLevelOff_checkbox',
-        'AlarmLatchEnabled_checkbox', 'timeAxisModeChanging_checkbox'].forEach(syncSegmented);
+        'AlarmLatchEnabled_checkbox', 'timeAxisModeChanging_checkbox', 'cvCurrentSrc_checkbox'].forEach(syncSegmented);
 
     setupInputValidation(); // Client side input validation of settings
     setupKWInputListeners();
@@ -12212,6 +12211,18 @@ function showSubTab(parentTab, subTabName, evt = null) {
     }
 
     updateFlushPillVisibility(parentTab, subTabName);
+}
+
+// Inner Alternator/Battery panel switch inside Live Data -> Diag. Dedicated to avoid the
+// generic showSubTab() querySelectors clobbering these nested panels on outer tab switches.
+function showDiagPanel(panelName, evt = null) {
+    document.querySelectorAll('#livedata-diag .diag-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('#livedata-diag .diag-panel-tab').forEach(b => b.classList.remove('active'));
+    const panel = document.getElementById('diag-panel-' + panelName);
+    if (panel) panel.classList.add('active');
+    if (evt && evt.target) evt.target.classList.add('active');
+    // Battery Health canvas was sized at width 0 while hidden — refresh once it's visible.
+    if (panelName === 'battery' && typeof pollBatteryHealth === 'function') setTimeout(pollBatteryHealth, 60);
 }
 
 // Floating Cloud Upload pill — only visible on the cloud iframe sub-tabs.
@@ -15663,7 +15674,7 @@ function ensureTestPollRunning(testName) {
     }
 }
 
-// Turn off whichever test is currently shown — called by the ✕ and "Turn Off" button
+// Turn off whichever test is currently shown — called by the ✕ and "Turn Off" button.
 function turnOffActiveTest() {
     const test = _testPanelCurrentTest;
     if (!test) return;
@@ -15674,9 +15685,15 @@ function turnOffActiveTest() {
     const param = paramMap[test];
     if (!param) return;
     fetchWithTimeout(buildURL('/get?' + param + '=0&password=' + encodeURIComponent(pw)), {}, 4000)
-        .then(() => {
+        .then(r => {
+            if (!r.ok) return;
+            // Mirror the OFF into checkbox + hidden form input only after the device confirms. The hidden
+            // input is what the floating panel's getField() detection reads — without this it stays "1",
+            // so the panel never closes and a later settings save re-arms the test.
             const cb = document.getElementById(param + '_checkbox');
+            const hidden = document.getElementById(param);
             if (cb) cb.checked = false;
+            if (hidden) hidden.value = '0';
         })
         .catch(e => console.warn('turnOffActiveTest failed:', e));
 }
@@ -16290,7 +16307,7 @@ function confirmSystemIDStart() {
 function abortSystemIDTest() {
     if (sysidPollInterval) { clearInterval(sysidPollInterval); sysidPollInterval = null; }
     const formData = new URLSearchParams();
-    formData.append("password", currentAdminPassword);
+    formData.append("password", currentAdminPassword || '');   // abort is password-free (safety): firmware exempts cancelSystemID
     formData.append("cancelSystemID", "1");
     fetchWithTimeout(buildURL("/get?" + formData.toString()), {}, 5000)
         .then(() => console.log("SystemID: abort sent"))
@@ -17012,7 +17029,7 @@ function cxFinePrint(phase) {
     case 3: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. This characterizes the alternator\'s own field→current behavior, so it runs on <strong>alternator current</strong> and stays valid for the CV battery-current loop (same field L/R plant). Note: the Output PID filter time constant it sets (<code>OutputPIDFilterTC</code>) is now ALSO the filter for the battery-current signal the CV loop regulates — the alternator-derived value is conservative there because the INA battery sensor is faster. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry).';
     case 4: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve. This verifies the inner current loop in its <strong>bulk (alternator-current)</strong> form, which is correct — bulk always regulates alternator current. It does NOT exercise the CV battery-current path; validate that yourself with a square-wave step on Tuning ▸ Voltage (helpers OFF) after Step 7.';
     case 5: return 'Records the worst low-frequency disturbance at each engine speed into a map; ~80% coverage of the &lt;2000 RPM band is enough. The map is measured on <strong>alternator-current</strong> ripple; it feeds the over-current floor in the next step (which now also guards the CV battery-current detector — see Step 7\'s notes).';
-    case 6: return 'Proposes the over-current detector\'s averaging time (= the plant τ) and trip floor (= max(default, post-EMA residual × margin)) from the disturbance map; you review and Apply it here. These two values (<code>IExcessTau</code>, <code>IExcessFloorA</code>) now govern BOTH the bulk alternator-current iExcess AND the CV <strong>battery-current</strong> iExcess. The floor is derived from alternator ripple and used as a conservative proxy for the battery detector (battery ripple ≤ alternator ripple in the common case → fewer false fires). A per-detector battery-ripple floor is planned future work.';
+    case 6: return 'Proposes the over-current detector\'s averaging time (= the plant τ) and trip floors (= max(default, post-EMA residual × margin)) from the disturbance map; you review and Apply here. <code>IExcessTau</code> governs both detectors. Now sets TWO floors: <code>IExcessFloorA</code> (bulk alternator-current detector) from alternator ripple, and <code>IExcessFloorABatt</code> (CV <strong>battery-current</strong> detector) from the battery ripple captured during the same sweep — battery current is much quieter, so its floor is typically lower and catches over-current sooner. The measured ripple is projected up to your max output current (highest RPM-cap-table entry) before sizing the floor, since belt/alternator ripple grows with load — so a floor measured at a low charge current still protects at full output. If no battery ripple was captured (engine not charging during the sweep), the battery floor falls back to the alternator floor as a conservative proxy.';
     case 7: return 'Commands one bounded <strong>battery-current</strong> step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds, measuring the <strong>finite-horizon gain K20</strong> (the rise at a fixed 20 s horizon with the slow charge ramp removed — a charging battery never plateaus, so there is nothing to settle to). The voltage-loop gains follow from K20 via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. All confidence checks are advisory — they warn but never block; only "no measurement" prevents Apply. The fit runs locally in this app — no internet. Only over-voltage hard-shutdown is active; keep all other battery loads constant during the test.';
     default: return '';
   }
@@ -17090,7 +17107,15 @@ function closeCommissionModal() {
         if (cx.verifyRunning) cxGet('TuningMode=0').catch(() => { });
         if (cx.cvFitRunning) { cx.cvFitDone = true; if (cx.cvFitCdTimer) { clearInterval(cx.cvFitCdTimer); cx.cvFitCdTimer = null; } if (cxPollTimer) { clearTimeout(cxPollTimer); cxPollTimer = null; } if (cvFitCapture) cvFitCapture.active = false; cxGet('TuningMode=0').catch(() => { }); }
         if (cx.matrixOn) cxGet('faCommissionGate=0').catch(() => { });
-        cx.fieldRunning = cx.plantRunning = cx.verifyRunning = cx.cvFitRunning = cx.matrixOn = false;
+        // Resonance current-check is the only step that COMMANDS the field — ramp the current to 0 first,
+        // then release field-control + gate, so closing the wizard mid-test exits gently (the deadman is the
+        // backstop for involuntary closes; this is the clean path for a deliberate X).
+        if (cx.rtFieldArmed) {
+            cxGet('resTestTargetA=0').then(() => cxGet('resTest=0')).catch(() => { });
+            cxGet('bcurRtest=0').catch(() => { });
+            cxGet('faCommissionGate=0').catch(() => { });
+        }
+        cx.fieldRunning = cx.plantRunning = cx.verifyRunning = cx.cvFitRunning = cx.matrixOn = cx.rtFieldArmed = false;
     }
     document.getElementById('commission-modal-overlay').style.display = 'none';
 }
@@ -17196,7 +17221,7 @@ function cxRenderField(b) {
     const r = cx.fieldResult;
     let body = '';
     if (cx.fieldRunning) {
-        body += '<p style="color:#4a9eff;">Running field-% ramp… hold RPM steady.</p>';
+        body += '<p style="color:#4a9eff;">Running field-% ramp… keep RPM roughly steady — best effort, it doesn\'t have to be perfect.</p>';
     } else if (cx.fieldAbort) {
         body += '<div style="margin:10px 0;padding:8px 10px;background:#3a2222;border:1px solid #a55;border-radius:6px;color:#f0a500;">' +
             'Ramp stopped: <strong>' + cx.fieldAbort + '</strong><br>' +
@@ -17211,7 +17236,7 @@ function cxRenderField(b) {
             (r.ok ? '' : '<br><span style="color:#f0a500;">Curve looks marginal — review before applying.</span>') +
             (cx.fieldApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>';
     }
-    if (!cx.fieldRunning && !r) body += '<p style="font-size:15px;line-height:1.5;"><strong>Raise engine speed to something within normal cruising range, press Run, and hold steady until test is complete.</strong></p><button onclick="cxFieldStart()" class="btn-primary" style="width:100%;padding:9px;">Run field-% ramp</button>';
+    if (!cx.fieldRunning && !r) body += '<p style="font-size:15px;line-height:1.5;"><strong>Raise engine speed to something within normal cruising range, press Run, and keep it roughly steady until the test finishes — best effort is fine, it doesn\'t have to be perfect.</strong></p><button onclick="cxFieldStart()" class="btn-primary" style="width:100%;padding:9px;">Run field-% ramp</button>';
     else if (!cx.fieldRunning && r) {
         // One primary action: Apply until applied, then the advance button. Re-run stays secondary.
         const action = cx.fieldApplied ? cxNextBtn(true) : '<button onclick="cxFieldApply()" class="btn-primary btn-sm">Apply</button>';
@@ -17284,7 +17309,7 @@ function cxRenderKnee(b) {
     body += '<div style="margin:4px 0 12px;">' + dots + '</div>';
 
     if (cx.kneeRunning) {
-        body += '<p style="color:#4a9eff;">Automatic current sweep running… keep speed steady as possible. <span id="cx-knee-prog"></span></p>';
+        body += '<p style="color:#4a9eff;">Automatic current sweep running… keep speed roughly steady — best effort, it doesn\'t have to be perfect. <span id="cx-knee-prog"></span></p>';
     } else if (step < NSTEP) {
         const s = CX_KNEE_STEPS[step];
         if (cx.kneeAbort) {
@@ -17300,7 +17325,7 @@ function cxRenderKnee(b) {
         body += '<div style="margin:10px 0;padding:10px 12px;background:#1c2530;border-radius:6px;">' +
             '<div style="font-size:15px;"><strong>Step ' + (step + 1) + ' of ' + NSTEP + '</strong> — hold the engine at <strong style="color:#4a9eff;">' + s.tag + '</strong>.</div>' +
             '<div style="margin-top:4px;color:#9aa;font-size:13px;">' + s.hint + '</div></div>';
-        body += '<button onclick="cxKneeStart()" class="btn-primary" style="width:100%;padding:9px;">Start automatic current sweep — hold ' + s.tag + ' steady</button>';
+        body += '<button onclick="cxKneeStart()" class="btn-primary" style="width:100%;padding:9px;">Start automatic current sweep — keep ' + s.tag + ' roughly steady</button>';
     } else {
         body += '<div style="margin:10px 0;padding:8px 10px;background:#1e2a1e;border:1px solid #3a5a3a;border-radius:6px;color:#bdb;">' +
             'All three speeds captured. Review below, then approve.</div>';
@@ -17808,7 +17833,11 @@ function cxRenderMatrix(b) {
             '<button onclick="cxMatrixStop()" class="btn-primary btn-sm">I\'m done sweeping</button>';
     } else if (cx.matrixCov) {
         // Enough coverage already captured → advance is the one primary action; re-sweep is secondary.
-        body += '<div style="margin-top:12px;">' + cxNextBtn(true) + ' <button onclick="cxMatrixStart()" class="btn-secondary btn-sm">Re-sweep</button></div>';
+        body += cxRtestPanel();  // optional resonance-vs-current characterization (§3.2), non-blocking
+        // When a >1 A resonance is present and not yet characterized, the current check IS the recommended
+        // action (green) — so demote Next: Thresholds to secondary until that test is run/declined.
+        const rtPending = (cx.rtestState === 'idle');
+        body += '<div style="margin-top:12px;">' + cxNextBtn(true, !rtPending) + ' <button onclick="cxMatrixStart()" class="btn-secondary btn-sm">Re-sweep</button></div>';
     } else {
         body += sweepInstr + '<button onclick="cxMatrixStart()" class="btn-primary" style="width:100%;padding:9px;">Start guided sweep</button>';
     }
@@ -17816,7 +17845,9 @@ function cxRenderMatrix(b) {
 }
 function cxMatrixStart() {
     cxShowTab('plots', 'displays');   // disturbance creep → watch current on Plots ▸ Short Term
-    cx.matrixOn = true; commissionRender();
+    cx.matrixOn = true;
+    cx.rtestState = undefined; cx.rtest = null; cx.rtestOn = false; cx.rtestRpm = 0;  // re-sweep → re-check resonance
+    commissionRender();
     cxGet('faCommissionGate=1').then(() => { cxStopPoll(); cxPollTimer = setInterval(cxMatrixPoll, 2000); cxMatrixPoll(); });
 }
 function cxMatrixPoll() {
@@ -17838,6 +17869,142 @@ function cxMatrixStop() {
     cxGet('faCommissionGate=0').finally(() => commissionRender());
 }
 
+// ── Guided resonance current-check (COMMISSIONING_SPEC §3.2) ──────────────────────────────
+// After the coverage sweep, if a real resonance was captured, the wizard commands the alternator to 3
+// current levels at the resonant RPM (you hold the speed in the green band and Confirm each), fits
+// ripple = a0 + a1·I, and writes the current-tracking iExcess floor (cvFloorK0/K1). Non-blocking: no
+// resonance, or you skip → Thresholds falls back to the §3.1 projection. State machine on cx.rtestState:
+//   undefined→'checking'→ 'none' (no resonance, silent) | 'idle' (Ready) → 'leveling' (3 commanded steps)
+//   → 'done' (fit) | 'failed'. REQUIRES the matching firmware (resTest/bcurRtest) flashed.
+const CX_RT_BAND = 150;    // ± RPM considered "in range" (green)
+const CX_RT_SETTLE = 5;    // s to hold a commanded level before Confirm is allowed
+function cxRtestPanel() {
+    if (cx.rtestState === undefined) { cx.rtestState = 'checking'; cxRtestInit(); return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>'; }
+    if (cx.rtestState === 'checking') return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>';
+    if (cx.rtestState === 'none') return '';  // no significant resonance → silent skip
+    let h = '<div style="margin:12px 0;padding:8px 10px;background:#222;border-radius:6px;">';
+    h += 'Resonance: <strong>' + cx.rtestPkpk.toFixed(2) + ' A pk-pk near ' + cx.rtestRpm + ' RPM</strong>.<br>';
+    if (cx.rtestState === 'done' && cx.rtest) {
+        h += 'Fit: ripple &asymp; <strong>' + cx.rtest.a0.toFixed(2) + ' + ' + cx.rtest.a1.toFixed(3) + '&middot;I</strong> A pk-pk (' + cx.rtest.n + ' levels, ' + cx.rtest.iLo.toFixed(0) + '&ndash;' + cx.rtest.iHi.toFixed(0) + ' A). ' +
+            '<span style="color:#5a5;">The iExcess floor will track current.</span>' +
+            '<div style="margin-top:8px;"><button onclick="cxRtReady()" class="btn-secondary btn-sm">Re-run</button></div>';
+    } else if (cx.rtestState === 'leveling') {
+        const L = cx.rtLevels, n = cx.rtLevel + 1;
+        h += '<span style="font-size:14px;">Hold engine speed near <strong>' + cx.rtestRpm + ' RPM</strong>. Level <strong>' + n + ' of 3</strong> — wizard is commanding <strong>~' + Math.round(L[cx.rtLevel]) + ' A</strong>.</span>';
+        h += '<div id="cx-rt-rpm" style="margin-top:6px;font-weight:600;">RPM —</div>';
+        h += '<div id="cx-rt-msg" style="margin-top:4px;color:#4a9eff;font-size:13px;">settling…</div>';
+        h += '<div style="margin-top:8px;"><button id="cx-rt-confirm" onclick="cxRtConfirm()" class="btn-primary btn-sm" disabled>Confirm level ' + n + '</button> ' +
+             '<button onclick="cxRtAbort()" class="btn-danger-ghost btn-sm">Abort</button></div>';
+    } else if (cx.rtestState === 'failed') {
+        h += '<span style="color:#f0a500;font-size:13px;">' + (cx.rtFailMsg || 'Test did not produce a usable slope.') + '</span>';
+        h += '<div style="margin-top:8px;"><button onclick="cxRtReady()" class="btn-primary btn-sm">Retry</button></div>';
+    } else {  // 'idle'
+        h += '<span style="font-size:13px;color:#bbb;">Optional: the wizard will step the alternator through 3 current levels here while you hold this RPM, to measure how the ripple grows with current and size the over-current floor accordingly.</span>';
+        h += '<div style="margin-top:8px;"><button onclick="cxRtReady()" class="btn-primary btn-sm">Start current check</button></div>';
+    }
+    h += '</div>';
+    return h;
+}
+function cxRtestInit() {  // find the worst captured battery-ripple bin → the resonance to characterize
+    fetch(buildURL('/bcurripple.csv')).then(r => r.text()).then(txt => {
+        let bestP = 0, bestRpm = 0; const bl = txt.trim().split('\n');
+        for (let i = 1; i < bl.length; i++) {
+            const c = bl[i].split(','); if (c.length < 2) continue;
+            const p = parseFloat(c[1]); if (p > bestP) { bestP = p; bestRpm = parseInt(c[0], 10) + 25; }
+        }
+        if (bestP >= 1.0) { cx.rtestPkpk = bestP; cx.rtestRpm = Math.round(bestRpm); cx.rtestState = 'idle'; }
+        else cx.rtestState = 'none';  // < 1 A pk-pk → not worth a slope
+        commissionRender();
+    }).catch(() => { cx.rtestState = 'none'; commissionRender(); });
+}
+function cxRtReady() {  // user is holding the resonant RPM → arm field-commanding and start level 1
+    let iMax = 0;
+    for (let i = 0; i < 10; i++) { const el = document.getElementById('rpmCapCurrentTable' + i + '_input'); if (el) { const v = parseFloat(el.value); if (v > iMax) iMax = v; } }
+    if (!(iMax > 5)) { cx.rtestState = 'failed'; cx.rtFailMsg = 'Max output current unknown (RPM-cap table empty) — can\'t size the levels.'; commissionRender(); return; }
+    cx.rtLevels = [0.30 * iMax, 0.60 * iMax, 0.90 * iMax];  // 3 spread levels across your output range
+    cx.rtLevel = 0; cx.rtPts = []; cx.rtest = null; cx.rtSettleStart = 0;
+    cx.rtFieldArmed = true;   // field is now under wizard command → closeCommissionModal must tear it down
+    cx.rtestState = 'leveling';
+    cxShowTab('plots', 'displays');
+    commissionRender();
+    // Arm ripple capture + field-commanding, then command level 1.
+    cxGet('faCommissionGate=1').then(() => cxGet('bcurRtest=1')).then(() => cxGet('resTest=1'))
+        .then(() => cxRtSetLevel(0));
+}
+function cxRtSetLevel(idx) {
+    cx.rtLevel = idx; cx.rtSettleStart = 0; cx.rtLastCmd = Date.now();  // reset settle clock + keepalive stamp
+    // Clear the ring at each level: the 64-slot ring would otherwise fill across 3 levels and freeze with
+    // stale data (level 3 would capture nothing). bcurRtest=1 zeroes the count → each level starts fresh.
+    cxGet('bcurRtest=1').then(() => cxGet('resTestTargetA=' + cx.rtLevels[idx].toFixed(1)));
+    commissionRender();
+}
+// Driven off the live CSV1 RPM stream (cxRpmSparkOnCsv1) while leveling: green/red + settle gating.
+function cxRtTick() {
+    const now = Date.now();
+    // Keepalive: refresh the firmware deadman every ~3 s so a closed/crashed wizard auto-releases field control.
+    if (cx.rtLastCmd && now - cx.rtLastCmd > 3000) { cxGet('resTestTargetA=' + cx.rtLevels[cx.rtLevel].toFixed(1)); cx.rtLastCmd = now; }
+    const rpmEl = document.getElementById('cx-rt-rpm'), msgEl = document.getElementById('cx-rt-msg'), btn = document.getElementById('cx-rt-confirm');
+    if (!rpmEl) return;
+    const rpm = cx.liveRpm, inRange = isFinite(rpm) && Math.abs(rpm - cx.rtestRpm) <= CX_RT_BAND;
+    rpmEl.innerHTML = (isFinite(rpm) ? Math.round(rpm) : '—') + ' RPM ' +
+        '<span style="padding:1px 8px;border-radius:8px;background:' + (inRange ? '#2a6' : '#a33') + ';color:#fff;font-size:12px;">' + (inRange ? 'IN RANGE' : 'OUT — adjust throttle') + '</span>';
+    if (!inRange) { cx.rtSettleStart = 0; if (msgEl) msgEl.textContent = 'Bring RPM to ' + cx.rtestRpm + ' (±' + CX_RT_BAND + ').'; if (btn) btn.disabled = true; return; }
+    if (!cx.rtSettleStart) cx.rtSettleStart = now;
+    const held = (now - cx.rtSettleStart) / 1000, left = Math.max(0, CX_RT_SETTLE - held);
+    if (left > 0) { if (msgEl) msgEl.textContent = 'Holding… ' + left.toFixed(0) + ' s'; if (btn) btn.disabled = true; }
+    else { if (msgEl) { msgEl.style.color = '#5a5'; msgEl.textContent = 'Stable — Confirm level ' + (cx.rtLevel + 1) + '.'; } if (btn) btn.disabled = false; }
+}
+function cxRtConfirm() {  // capture this level from the most-recent in-range windows (the stable hold)
+    fetch(buildURL('/bcurrtest.csv')).then(r => r.text()).then(txt => {
+        const lines = txt.trim().split('\n'); const inrange = [];
+        for (let i = 1; i < lines.length; i++) {
+            const c = lines[i].split(','); if (c.length < 3) continue;
+            const rpm = parseFloat(c[0]), iA = parseFloat(c[1]), pk = parseFloat(c[2]);
+            if (Math.abs(rpm - cx.rtestRpm) <= CX_RT_BAND) inrange.push({ i: iA, p: pk });
+        }
+        // The user just held ≥5 s at this level → the last few windows ARE this level. Use the operating
+        // current the ring logged (Bcur), NOT the commanded alternator level, so house loads don't skew it.
+        const recent = inrange.slice(-8);
+        let p = 0, iSum = 0; for (const q of recent) { if (q.p > p) p = q.p; iSum += q.i; }
+        if (recent.length === 0 || !(p > 0)) { const m = document.getElementById('cx-rt-msg'); if (m) { m.style.color = '#f0a500'; m.textContent = 'No ripple captured at this level — hold longer, then Confirm.'; } return; }
+        cx.rtPts.push({ i: iSum / recent.length, p });
+        if (cx.rtLevel < 2) { cxRtSetLevel(cx.rtLevel + 1); }
+        else cxRtFinish();
+    }).catch(() => { const m = document.getElementById('cx-rt-msg'); if (m) m.textContent = 'Read failed — retry Confirm.'; });
+}
+function cxRtFinish() {
+    cxStopPoll(); cx.rtLastCmd = 0; cx.rtFieldArmed = false;  // stop the keepalive; field released below
+    // Gentle exit: ramp the commanded current to 0 and wait long enough for the slew to actually reach it
+    // (~2.5 s covers a high last level at SetpointFallRate), THEN release (slew carries it back to AUTO).
+    cxGet('resTestTargetA=0').then(() => new Promise(r => setTimeout(r, 2500)))
+        .then(() => cxGet('resTest=0')).then(() => cxGet('bcurRtest=0')).then(() => cxGet('faCommissionGate=0'));
+    const pts = cx.rtPts;
+    let iLo = 1e9, iHi = 0; for (const q of pts) { if (q.i < iLo) iLo = q.i; if (q.i > iHi) iHi = q.i; }
+    if (pts.length >= 3 && (iHi - iLo) >= 5) {
+        // Least-squares ripple = a0 + a1·I. Clamp a1 ≥ 0 (ripple can't credibly fall with current; a noisy
+        // negative slope must never LOWER a safety floor) → on clamp, fall back to a flat mean.
+        let n = pts.length, Sx = 0, Sy = 0, Sxx = 0, Sxy = 0;
+        for (const q of pts) { Sx += q.i; Sy += q.p; Sxx += q.i * q.i; Sxy += q.i * q.p; }
+        const d = n * Sxx - Sx * Sx;
+        let a1 = (d !== 0) ? (n * Sxy - Sx * Sy) / d : 0;
+        let a0 = (Sy - a1 * Sx) / n;
+        if (a1 < 0) { a1 = 0; a0 = Sy / n; }
+        cx.rtest = { a0, a1, n, iLo, iHi, rpm: cx.rtestRpm };
+        cx.rtestState = 'done'; cx.thresh = null;  // force Thresholds to recompute with the slope
+    } else {
+        cx.rtestState = 'failed';
+        cx.rtFailMsg = 'Levels spanned only ' + (iHi - iLo > 0 ? (iHi - iLo).toFixed(0) : '0') + ' A (need ≥5 A). Retry — make sure the alternator actually reaches the higher levels at this RPM.';
+    }
+    commissionRender();
+}
+function cxRtAbort() {
+    cxStopPoll(); cx.rtLastCmd = 0; cx.rtFieldArmed = false;  // stop the keepalive; field released below
+    cxGet('resTestTargetA=0').then(() => new Promise(r => setTimeout(r, 2500)))
+        .then(() => cxGet('resTest=0')).then(() => cxGet('bcurRtest=0')).then(() => cxGet('faCommissionGate=0'));
+    cx.rtestState = 'idle';
+    commissionRender();
+}
+
 // ── Step 6 · Thresholds — over-current thresholds from the matrix ─────────────
 function cxRenderThresh(b) {
     let body = '<p style="font-size:15px;line-height:1.5;">Review the proposed over-current limits below, then press Apply.</p>';
@@ -17848,10 +18015,21 @@ function cxRenderThresh(b) {
         body += '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px;">' +
             'Binding tone: <strong>' + t.A.toFixed(1) + ' A @ ' + t.f.toFixed(1) + ' Hz</strong> (' + t.rpm + ' RPM).<br>' +
             'Proposed <strong>averaging τ ' + t.tau.toFixed(0) + ' ms</strong> (= plant τ); post-EMA residual ' + t.R.toFixed(2) + ' A.<br>' +
-            'Proposed <strong>floor ' + t.floor.toFixed(1) + ' A</strong> — the larger of your Protections floor (' + t.base.toFixed(1) + ' A) and what this alternator\'s disturbance needs (residual ' + t.R.toFixed(2) + ' A × ' + t.margin + ' margin = ' + (t.R * t.margin).toFixed(1) + ' A). ' +
+            'Proposed <strong>alternator floor ' + t.floor.toFixed(1) + ' A</strong> — the larger of your Protections floor (' + t.base.toFixed(1) + ' A) and what this alternator\'s disturbance needs (residual ' + t.R.toFixed(2) + ' A × ' + t.margin + ' margin = ' + (t.R * t.margin).toFixed(1) + ' A). ' +
             (t.floor <= t.base + 0.05
                 ? '<span style="color:#5a5;">Your ' + t.base.toFixed(1) + ' A floor already covers it — kept as-is.</span>'
                 : '<span style="color:#f0a500;">Disturbance needs more headroom — raised above your ' + t.base.toFixed(1) + ' A floor.</span>') +
+            (t.battFit
+                ? '<br>Proposed <strong>current-tracking battery floor: ' + t.floorBattLo.toFixed(1) + ' A at low charge → ' + t.floorBattHi.toFixed(1) + ' A at your ' + t.iMax.toFixed(0) + ' A output</strong> — from the measured resonance current-check (ripple ≈ ' + (cx.rtest ? cx.rtest.a0.toFixed(2) + ' + ' + cx.rtest.a1.toFixed(3) + '·I A pk-pk' : 'fitted slope') + '). The CV detector recomputes this live from the present battery current, so it stays tight when you\'re charging gently and only relaxes under heavy output. <span style="color:#5a5;">No over-blunting.</span>' +
+                  (t.battSaturates ? '<br><span style="color:#f0a500;">⚠ At full output this floor reaches your over-current ceiling (' + t.ceilA.toFixed(0) + ' A) and is clamped there — the detector loses over-current margin at high charge current. Raise the ceiling, or accept the blunting.</span>' : '')
+                : '<br>Proposed <strong>battery floor ' + t.floorBatt.toFixed(1) + ' A</strong> — ' +
+                  (t.battProxy
+                      ? '<span style="color:#f0a500;">no battery ripple captured this sweep; using the alternator floor as a conservative proxy. Re-run Disturbances with the engine charging to measure it.</span>'
+                      : 'measured battery ripple ' + t.battPkpk.toFixed(2) + ' A pk-pk' +
+                        (t.battScale > 1.01
+                            ? ' at ' + t.battIat.toFixed(0) + ' A charge → projected ' + t.battProj.toFixed(2) + ' A pk-pk at your ' + t.iMax.toFixed(0) + ' A max output (×' + t.battScale.toFixed(1) + ', conservative — run the resonance current-check to refine)'
+                            : (t.battIat > 0.5 ? ' at ' + t.battIat.toFixed(0) + ' A charge (already near max output — no projection)' : '')) +
+                        ' → residual ' + t.battR.toFixed(2) + ' A × ' + t.margin + ' margin' + (t.floorBatt < t.floor - 0.05 ? ' (lower than the alternator floor — battery current is quieter, so the CV detector catches over-current sooner).' : '.'))) +
             (t.tradeoff ? '<br><span style="color:#f0a500;">' + t.tradeoff + '</span>' : '') +
             (cx.threshApplied ? '<br><span style="color:#5a5;">Applied.</span>' : '') + '</div>';
     }
@@ -17881,7 +18059,18 @@ function cxComputeThresholds() {
     // Fall back to 7 A only if the live value hasn't arrived yet.
     const liveFloor = getEchoNumber('IExcessFloorA_echo');
     const DEFAULT_FLOOR = (liveFloor > 0) ? liveFloor : 7.0;
-    fetch(buildURL('/famatrix.csv')).then(r => r.text()).then(txt => {
+    // Two sources: the alternator disturbance matrix (bulk floor) and the per-RPM-bin battery ripple
+    // (CV battery-current floor). The battery fetch is best-effort — empty/failed → alt proxy.
+    // /famatrix.csv is a chunked response that can drop under device heap pressure (the SSE stream keeps
+    // running) → "Failed to fetch"; retry a couple times before surfacing the error.
+    const fetchRetry = (path, tries) => fetch(buildURL(path)).then(r => r.text()).catch(e => {
+        if (tries > 1) return new Promise(res => setTimeout(res, 700)).then(() => fetchRetry(path, tries - 1));
+        throw e;
+    });
+    Promise.all([
+        fetchRetry('/famatrix.csv', 3),
+        fetch(buildURL('/bcurripple.csv')).then(r => r.text()).catch(() => '')
+    ]).then(([txt, battTxt]) => {
         const lines = txt.trim().split('\n'); let best = null;
         for (let i = 1; i < lines.length; i++) {
             const c = lines[i].split(','); if (c.length < 22) continue;
@@ -17896,18 +18085,85 @@ function cxComputeThresholds() {
         if (!best) { cx.thresh = { err: 'No qualifying tone in the map — sweep more RPM range in the Disturbances step.' }; commissionRender(); return; }
         const R = best.a / (2 * Math.PI * best.f * (tauMs / 1000));
         const floor = Math.max(DEFAULT_FLOOR, R * margin);
-        cx.thresh = { f: best.f, A: best.a, rpm: best.rpm, R, tau: tauMs, floor, margin, base: DEFAULT_FLOOR };
+        // Battery-current floor: pair the worst MEASURED battery ripple with the SAME binding frequency
+        // and τ as the alternator floor (identical residual math) — the only difference is the smaller
+        // battery ripple amplitude, which is the whole point. Capped at the alternator floor (battery
+        // sees ≤ alternator ripple from the same disturbance; data saying otherwise is suspect). No
+        // battery capture → fall back to the alternator floor as a conservative proxy (prior behavior).
+        let battPkpk = 0, battIat = 0;
+        if (battTxt) {
+            const bl = battTxt.trim().split('\n');
+            for (let i = 1; i < bl.length; i++) {
+                const c = bl[i].split(','); if (c.length < 2) continue;
+                const a = parseFloat(c[1]); if (a > battPkpk) { battPkpk = a; battIat = (c.length >= 3) ? parseFloat(c[2]) : 0; }
+            }
+        }
+        // Project the worst measured ripple up to the device's max charge current (highest RPM-cap-table
+        // entry). Belt/alternator torque ripple scales ~with load current, so a floor measured at low
+        // charge current under-protects when the CV detector later faces full output → false trips.
+        let iMax = 0;
+        for (let i = 0; i < 10; i++) {
+            const el = document.getElementById('rpmCapCurrentTable' + i + '_input');
+            if (el) { const v = parseFloat(el.value); if (v > iMax) iMax = v; }
+        }
+        const twoPiFTau = 2 * Math.PI * best.f * (tauMs / 1000);
+        let battProj = battPkpk, battScale = 1, battFit = false;
+        let floorK0 = 0, floorK1 = 0, floorBattLo = 0, floorBattHi = 0;
+        if (cx.rtest && cx.rtest.n >= 3 && (cx.rtest.iHi - cx.rtest.iLo) >= 5 && iMax > 0 && twoPiFTau > 0) {
+            // MEASURED slope (§3.2): the floor is LINEAR in current. residual×margin = (a0+a1·I)/(2πfτ)·margin
+            // = K0 + K1·I → the firmware detector computes floor = max(IExcessFloorABatt, K0 + K1·|Bcur|) live.
+            floorK0 = cx.rtest.a0 * margin / twoPiFTau;
+            floorK1 = cx.rtest.a1 * margin / twoPiFTau;
+            floorBattLo = Math.max(1.0, floorK0);                 // floor at ~zero current (the base)
+            floorBattHi = floorK0 + floorK1 * iMax;               // floor at full output (firmware bounds it at the ceiling live)
+            battFit = true;
+        } else if (battPkpk > 0 && battIat > 0.5 && iMax > battIat) {
+            // Conservative proportional fallback (§3.1, a0=0, static floor): over-estimates when part of the
+            // ripple is current-independent, but it's capped at the alternator floor below — the safe direction.
+            battScale = iMax / battIat; battProj = battPkpk * battScale;
+        }
+        const battR = (battProj > 0) ? battProj / twoPiFTau : 0;
+        const floorBatt = (battPkpk > 0) ? Math.min(floor, Math.max(1.0, battR * margin)) : floor;
+        // High-side cap: the firmware clamps the live tracking floor at the over-current ceiling (IExcessCeilA).
+        // If the projected floor at full output would HIT the ceiling, the detector saturates there and loses
+        // over-current sensitivity — flag it so the user can raise the ceiling or accept the blunting.
+        const ceilA = getEchoNumber('IExcessCeilA_echo');
+        const battSaturates = battFit && ceilA > 0 && floorBattHi >= ceilA;
+        if (battFit && ceilA > 0) floorBattHi = Math.min(floorBattHi, ceilA);  // display the actual (clamped) high end
+        cx.thresh = { f: best.f, A: best.a, rpm: best.rpm, R, tau: tauMs, floor, margin, base: DEFAULT_FLOOR,
+                      floorBatt, battPkpk, battProj, battIat, iMax, battScale, battFit, battR, battProxy: !(battPkpk > 0), ceilA, battSaturates,
+                      floorK0, floorK1, floorBattLo, floorBattHi };
         if (floor > 10) {
             const tauForLowFloor = (best.a * margin) / (2 * Math.PI * best.f * DEFAULT_FLOOR) * 1000;
             cx.thresh.tradeoff = 'Floor is high (' + floor.toFixed(1) + ' A) — lengthening τ to ~' + Math.round(tauForLowFloor) + ' ms would lower it toward ' + DEFAULT_FLOOR + ' A, at the cost of slower reaction. Default keeps τ=plant and the higher floor.';
         }
         commissionRender();
-    }).catch(e => { cx.thresh = { err: 'Matrix fetch failed: ' + e }; commissionRender(); });
+    }).catch(e => {
+        // Heap diag on fail: the chunked GET dropping is a LARGEST-CONTIGUOUS-BLOCK problem, not total-free
+        // (the mbedTLS/AsyncTCP failure mode). The device keeps streaming CSV2 LargestInternalBlock even when
+        // the GET drops, so read it live — a low value (≲34 kB, the handshake floor) is the smoking gun.
+        const blk = (document.getElementById('LargestInternalBlockID') || {}).textContent || '?';
+        cx.thresh = { err: 'Matrix fetch failed: ' + e + ' — largest free internal block ' + blk + ' kB (≲34 kB ⇒ heap fragmentation dropped the connection; healthy ⇒ look elsewhere). Retried 3×.' };
+        commissionRender();
+    });
 }
 function cxThreshApply() {
     const t = cx.thresh; if (!t || t.err) return;
+    // Battery floor: if the resonance current-check produced a slope, write the current-tracking coefficients
+    // cvFloorK0/K1 (the detector applies floor = max(IExcessFloorABatt, K0 + K1·|Bcur|)); else write the static
+    // projected floor and ZERO the coefficients (revert any prior dynamic floor).
+    // NEVER undercut the floor you set: commissioning only RAISES IExcessFloorABatt, mirroring the alternator
+    // floor's "never undercut a floor you set higher" rule. Your Protections value is the hard lower bound.
+    const userBatt = getEchoNumber('IExcessFloorABatt_echo');
+    const computedBase = t.battFit ? t.floorBattLo : t.floorBatt;
+    const battBase = Math.max(userBatt > 0 ? userBatt : 0, computedBase);
+    const k0 = t.battFit ? t.floorK0 : 0;
+    const k1 = t.battFit ? t.floorK1 : 0;
     cxGet('IExcessTau=' + Math.round(Math.min(300, Math.max(20, t.tau))))
         .then(() => cxGet('IExcessFloorA=' + Math.min(20, Math.max(1, t.floor)).toFixed(1)))
+        .then(() => cxGet('IExcessFloorABatt=' + Math.min(20, Math.max(1, battBase)).toFixed(1)))
+        .then(() => cxGet('cvFloorK0=' + k0.toFixed(4)))
+        .then(() => cxGet('cvFloorK1=' + k1.toFixed(4)))
         .then(() => { cx.threshApplied = true; commissionRender(); })
         .catch(e => alert('Apply failed: ' + e));
 }
@@ -17917,7 +18173,8 @@ function cxAppliedSummary() {
     const rows = [];
     if (r) rows.push('Field: stabilize ' + r.propStabA.toFixed(0) + ' A, step ' + r.propStepPct.toFixed(1) + '%');
     if (f && f.ok) rows.push('Gains: Kp ' + f.Kp.toFixed(3) + ', Ki ' + f.Ki.toFixed(3) + '; filters ' + Math.round(f.tauMs / 3) + '/' + Math.round(f.tauMs) + ' ms');
-    if (t && !t.err) rows.push('Over-current: averaging τ ' + t.tau.toFixed(0) + ' ms, floor ' + t.floor.toFixed(1) + ' A');
+    if (t && !t.err) rows.push('Over-current: averaging τ ' + t.tau.toFixed(0) + ' ms, alternator floor ' + t.floor.toFixed(1) + ' A, battery floor ' +
+        (t.battFit ? t.floorBattLo.toFixed(1) + '→' + t.floorBattHi.toFixed(1) + ' A (tracks current)' : t.floorBatt.toFixed(1) + ' A' + (t.battProxy ? ' (proxy)' : '')));
     return rows.length ? rows.join('<br>') : 'No settings applied yet — earlier phases were skipped.';
 }
 function cxFinish() {
@@ -20375,6 +20632,16 @@ function fetchFastFlip(auto) {
 // ════════════ Battery Health (active DCIR test + capacity-vs-cycles trend) ════════════
 function bhSet(id, t) { const e = document.getElementById(id); if (e) e.textContent = t; }
 
+// DCIR normalized to a 25°C (77°F) reference. Resistance rises as the bank cools, so a cold run
+// reads high; this brings every row onto a common footing so the trend isn't just temperature.
+// Board temp is a warm-biased proxy, so this is an APPROXIMATE correction (same model as the
+// battery-temp CV-gain derate). ~0.6%/°F ≈ 1%/°C.
+const BH_TREF_F = 77, BH_TEMPCO_PER_F = 0.006;
+function bhDcir25(dcir, tF) {
+  if (!(dcir > 0) || !isFinite(tF)) return null;
+  return dcir * Math.exp(BH_TEMPCO_PER_F * (tF - BH_TREF_F));
+}
+
 function bhWhen(epoch) {
   if (!epoch || epoch < 1000000000) return '—';   // 0 = clock not synced when the test ran
   const d = new Date(epoch * 1000);
@@ -20398,14 +20665,37 @@ function pollBatteryHealth() {
     const tb = document.getElementById('bhResultsBody');
     if (tb) {
       if (!j.results || j.results.length === 0) {
-        tb.innerHTML = '<tr><td colspan="7" style="text-align:center; opacity:0.7;">No tests yet</td></tr>';
+        tb.innerHTML = '<tr><td colspan="13" style="text-align:center; opacity:0.7;">No tests yet</td></tr>';
       } else {
+        // Oldest row (results[0]) is the baseline; compare temp-corrected to temp-corrected.
+        const base25 = bhDcir25(j.results[0].dcir, j.results[0].tF);
         let rows = '';
         for (let i = j.results.length - 1; i >= 0; i--) {   // newest first
           const r = j.results[i];
+          const d25 = bhDcir25(r.dcir, r.tF);
+          const dV = r.dcir * r.delta;                       // mΩ × A = mV (the raw sag the DCIR came from)
+          let baseCell;
+          if (i === 0) baseCell = '<span style="opacity:0.7;">base</span>';
+          else if (base25 && d25) {
+            const pct = (d25 - base25) / base25 * 100;
+            baseCell = '<span style="color:' + (pct > 0 ? '#ff9800' : '#4caf50') + '">' +
+              (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%</span>';
+          } else baseCell = '—';
+          // Fit quality: spread of the per-edge DCIR relative to the value. Tight + enough edges = trustworthy.
+          const cv = (r.dcir > 0 && isFinite(r.spread)) ? (r.spread / r.dcir) : 1;
+          const fitOk = cv <= 0.10 && r.edges >= 3;
+          const fitCell = '<td style="color:' + (fitOk ? '#4caf50' : '#ff9800') + '" title="edge spread ±' +
+            (isFinite(r.spread) ? r.spread.toFixed(2) : '?') + ' mΩ (' + (cv * 100).toFixed(0) + '%), ' +
+            r.edges + ' edges">' + (fitOk ? '✓' : '⚠') + '</td>';
           rows += '<tr>' +
             '<td>' + bhWhen(r.epoch) + '</td>' +
             '<td>' + r.dcir.toFixed(2) + '</td>' +
+            '<td>' + (d25 ? d25.toFixed(2) : '—') + '</td>' +
+            '<td>' + baseCell + '</td>' +
+            fitCell +
+            '<td>' + dV.toFixed(0) + '</td>' +
+            '<td>' + r.delta.toFixed(0) + '</td>' +
+            '<td>' + (r.dwell ? (r.dwell / 1000).toFixed(1) : '—') + '</td>' +
             '<td>' + r.soc.toFixed(0) + '%</td>' +
             '<td>' + r.v.toFixed(2) + '</td>' +
             '<td>' + r.tF.toFixed(0) + '</td>' +
@@ -20416,16 +20706,39 @@ function pollBatteryHealth() {
       }
     }
 
+    // Capacity (OCV-anchored, date-based)
     const cap = j.cap || [];
-    drawBhCapTrend(cap);
+    drawBhCapDate(cap);
     const latest = cap.length ? cap[cap.length - 1] : null;
-    bhSet('bh_caplatest', latest ? (latest.soh.toFixed(0) + '% health') : '—');
+    bhSet('bh_capheadline', latest ? (latest.pct.toFixed(0) + '%  (' + latest.ah.toFixed(0) + ' Ah)') : 'awaiting first deep cycle');
+    let st = '';
+    if (j.capLastUpd) st += 'last updated ' + bhWhen(j.capLastUpd) + ' · ';
+    st += j.capAnchored
+      ? ('low anchor held at ' + (Number(j.capAnchorSoC) || 0).toFixed(0) + '% — waiting for a full charge')
+      : ('no low anchor yet · resting ' + (j.capRestMin || 0) + ' min, dV/dt ' + (Number(j.capDvdt) || 0).toFixed(1) + ' mV/10min');
+    bhSet('bh_capstatus', st);
     const empty = document.getElementById('bh_capempty');
     if (empty) empty.style.display = cap.length ? 'none' : 'block';
+
+    // capacity config echoes
+    const cfg = j.capCfg || {};
+    bhSet('capRefMode_echo', cfg.refMode == 1 ? '1 (first reading)' : '0 (rated)');
+    bhSet('capRestFrac_echo', cfg.restFrac);
+    bhSet('capRestFloor_echo', cfg.restFloor + ' min');
+    bhSet('capSettleRate_echo', cfg.settleRate + ' mV/10min');
+    bhSet('capSocLowMax_echo', cfg.socLowMax + '%');
+    bhSet('capMinSpan_echo', cfg.minSpan + '%');
+    bhSet('capChgEff_echo', cfg.chgEff);
+    bhSet('capFullSoc_echo', cfg.fullSoc + '%');
+    bhSet('capTempNorm_echo', cfg.tempNorm == 1 ? 'on' : 'off');
+    bhSet('capTempCoeff_echo', cfg.tempCoeff + ' %/°C');
+    bhSet('capTempRef_echo', cfg.tempRef + ' °C');
+    if (j.ocv && j.ocvSoc) renderCapOcvTable(j.ocv, j.ocvSoc);
   }).catch(() => { });
 }
 
-function drawBhCapTrend(pts) {
+// Capacity health: X = date (sparse), Y = capacity %. Filled marker = high confidence, hollow = low.
+function drawBhCapDate(pts) {
   const c = document.getElementById('bhCapCanvas');
   if (!c) return;
   const ctx = c.getContext('2d');
@@ -20435,26 +20748,58 @@ function drawBhCapTrend(pts) {
   ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, H - padB); ctx.lineTo(W - padR, H - padB); ctx.stroke();
   if (!pts || pts.length === 0) return;
-  let minC = Infinity, maxC = -Infinity, minY = Infinity, maxY = -Infinity;
-  pts.forEach(p => { minC = Math.min(minC, p.cyc); maxC = Math.max(maxC, p.cyc); minY = Math.min(minY, p.soh); maxY = Math.max(maxY, p.soh); });
-  if (maxC === minC) maxC = minC + 1;
-  minY = Math.min(minY, 70); maxY = Math.max(maxY, 100);   // always show the 100% reference
-  const X = v => padL + (v - minC) / (maxC - minC) * (W - padL - padR);
+  let minT = Infinity, maxT = -Infinity, minY = Infinity, maxY = -Infinity;
+  pts.forEach(p => { const t = p.epoch || 0; minT = Math.min(minT, t); maxT = Math.max(maxT, t); minY = Math.min(minY, p.pct); maxY = Math.max(maxY, p.pct); });
+  if (maxT === minT) maxT = minT + 1;
+  minY = Math.min(minY, 80); maxY = Math.max(maxY, 100);   // always show 100% reference
+  const X = t => padL + (t - minT) / (maxT - minT) * (W - padL - padR);
   const Y = v => (H - padB) - (v - minY) / (maxY - minY) * (H - padT - padB);
-  ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+  ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
   for (let g = 0; g <= 4; g++) {
     const v = minY + (maxY - minY) * g / 4, yy = Y(v);
     ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
-    ctx.fillText(v.toFixed(0) + '%', padL - 4, yy + 3);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText(v.toFixed(0) + '%', padL - 4, yy + 3);
   }
-  ctx.textAlign = 'center';
-  ctx.fillText(minC.toFixed(0) + ' cyc', padL, H - 8);
-  ctx.fillText(maxC.toFixed(0) + ' cyc', W - padR, H - 8);
-  ctx.strokeStyle = '#4fa3ff'; ctx.lineWidth = 2; ctx.beginPath();
-  pts.forEach((p, i) => { const px = X(p.cyc), py = Y(p.soh); if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
-  ctx.stroke();
-  ctx.fillStyle = '#4fa3ff';
-  pts.forEach(p => { ctx.beginPath(); ctx.arc(X(p.cyc), Y(p.soh), 3, 0, Math.PI * 2); ctx.fill(); });
+  ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  const fmt = t => { if (!t) return '—'; const d = new Date(t * 1000); return (d.getMonth() + 1) + '/' + d.getDate(); };
+  ctx.fillText(fmt(minT), padL, H - 8); ctx.fillText(fmt(maxT), W - padR, H - 8);
+  // faint dashed connector — the gaps between points are real (weeks apart), don't imply daily data
+  ctx.strokeStyle = 'rgba(79,163,255,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]); ctx.beginPath();
+  pts.forEach((p, i) => { const px = X(p.epoch || minT), py = Y(p.pct); if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); });
+  ctx.stroke(); ctx.setLineDash([]);
+  pts.forEach(p => {
+    const px = X(p.epoch || minT), py = Y(p.pct);
+    ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2);
+    if (p.conf) { ctx.fillStyle = '#4fa3ff'; ctx.fill(); }
+    else { ctx.strokeStyle = '#4fa3ff'; ctx.lineWidth = 1.5; ctx.stroke(); }
+  });
+}
+
+const CAP_OCV_DEFAULT = [13.6, 13.4, 13.3, 13.2, 13.1, 13.0, 12.9, 12.8, 12.5, 12.0, 10.0];
+function renderCapOcvTable(volts, socs) {
+  const tb = document.getElementById('capOcvBody');
+  if (!tb) return;
+  if (tb.children.length !== volts.length) {   // build once; don't clobber the user's typing each poll
+    let html = '';
+    for (let i = 0; i < volts.length; i++) {
+      const knee = socs[i] <= 20;
+      html += '<tr' + (knee ? ' style="font-weight:600;"' : '') + '><td>' + socs[i] + (knee ? ' ◀' : '') + '</td>' +
+        '<td><input id="capOcv_' + i + '" type="number" step="0.01" style="width:80px;" value="' + Number(volts[i]).toFixed(2) + '"></td></tr>';
+    }
+    tb.innerHTML = html;
+  }
+}
+function submitCapOcv() {
+  const tb = document.getElementById('capOcvBody');
+  if (!tb) return;
+  const vals = [];
+  for (let i = 0; i < tb.children.length; i++) { const el = document.getElementById('capOcv_' + i); if (el) vals.push(Number(el.value).toFixed(3)); }
+  const pw = document.querySelector('.password_field');
+  fetch(buildURL('/get?capOcv=' + encodeURIComponent(vals.join(',')) + '&password=' + encodeURIComponent(pw ? pw.value : '')))
+    .then(() => setTimeout(pollBatteryHealth, 500)).catch(() => { });
+}
+function loadCapOcvDefaults() {
+  for (let i = 0; i < CAP_OCV_DEFAULT.length; i++) { const el = document.getElementById('capOcv_' + i); if (el) el.value = CAP_OCV_DEFAULT[i].toFixed(2); }
 }
 
 // Poll only when the Health section is on-screen (sub-tab active AND details open).

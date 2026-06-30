@@ -655,8 +655,27 @@ void runShutdownPath(const TickSnapshot &tick, FieldControlMode mode, FieldEvent
   if ((mode == MODE_CRITICAL_RAMP || mode == MODE_WARNING_RAMP_AND_LOCKOUT) && fieldCollapseTime == 0) {
     fieldCollapseTime = tick.nowMs;
     activeCollapseDelay = (reason == REASON_RPM_TOO_LOW) ? RPM_RECOVERY_DELAY : FIELD_COLLAPSE_DELAY;
-    queueConsoleMessageF("Charging stopped - %.1fs cooldown before restart",
-                         activeCollapseDelay / 1000.0f);
+    // Spam guard: with the engine off the temp feed ages past the 20s staleness threshold, so this
+    // cut/restart cycle repeats every cooldown (~2s). Announce a new reason immediately, then throttle
+    // to one heartbeat per minute so a genuinely new fault never gets buried under the idle loop.
+    static FieldEventReason lastCollapseReason = REASON_NONE;
+    static uint32_t lastCollapseMsgMs = 0;
+    static uint32_t collapseLoopCount = 0;
+    bool newReason = (reason != lastCollapseReason);
+    collapseLoopCount++;
+    if (newReason || (uint32_t)(tick.nowMs - lastCollapseMsgMs) >= 60000) {
+      if (newReason) {
+        queueConsoleMessageF("Charging stopped (%s) - %.1fs cooldown before restart",
+                             reasonToString(reason), activeCollapseDelay / 1000.0f);
+      } else {
+        queueConsoleMessageF("Still cycling on %s (%lu cuts) - %.1fs cooldown, suppressing repeats",
+                             reasonToString(reason), (unsigned long)collapseLoopCount,
+                             activeCollapseDelay / 1000.0f);
+      }
+      lastCollapseMsgMs = tick.nowMs;
+      collapseLoopCount = 0;
+    }
+    lastCollapseReason = reason;
   }
 
   reportFieldModeEvent(tick.nowMs, mode, reason, tick, gpio4IsLow, dutyCycle);
@@ -1289,8 +1308,11 @@ void thermalAccuracyScore_tick(uint32_t nowMs, float dtSec) {
                         && (uint32_t)(nowMs - thermalScoreLastExternalMs) > 180000UL;
   if (accBindingReady(accThermal.bindingStartMs, thermalBinding, nowMs, ACC_SETTLE_THERMAL_MS)) {
     float err  = tempFiltered - TemperatureLimitF;              // °F; positive = over the limit
-    float over = err > 0.0f ? err : 0.0f;                       // over-temp side (alternator-damaging)
-    accScoreAdd(accThermal.errAccum, accThermal.timeAccum, accThermal.worstOver, err, over, dtSec);
+    // RMS error ONLY here — gated to sustained thermal binding (regulation-quality metric; scoring
+    // through protection cuts would corrupt it). accThermal.worstOver is tracked UNCONDITIONALLY in
+    // AdjustFieldLearnMode (right after tempFilterUpdate), so the peak captures field-off cut tails too.
+    accThermal.errAccum  += (double)err * (double)err * (double)dtSec;
+    accThermal.timeAccum += (double)dtSec;
   }
 }
 
@@ -1301,11 +1323,8 @@ void AdjustFieldLearnMode() {
   uint32_t currentMillis = millis();
   uint32_t aflT0 = micros();  // section profiler entry mark (see aflWorstSecUs globals)
 
-  // Thermal log runs FIRST so temperature history accumulates regardless of mode.
-  // Every early-return below (immediate cut, LimpHome, stale CH1, non-normal mode,
-  // sysID, cloud-busy hold) used to skip the log; hoisting fixes that. Internal
-  // 1 Hz throttle keeps cadence. Control-side fields (pidOut, outerTermP/I/D,
-  // cv_I) freeze when their owners aren't ticking; temperature fields keep moving.
+  // Runs FIRST (above every early-return below) so temperature history accumulates in all modes.
+  // Internal 1 Hz throttle. Control-side fields freeze when their owners aren't ticking.
   thermalLog_tick(currentMillis);
   uint32_t aflM0 = micros();  // end of section 0: thermal log
 
@@ -1333,20 +1352,25 @@ void AdjustFieldLearnMode() {
 
   TickSnapshot tick = buildTickSnapshot(currentMillis, actualDtMs);
   uint32_t aflM1 = micros();  // end of section 1: RPM tables + tick snapshot
-  // pidLog_tick() runs at the END of the normal control path, after all state is final.
-  // thermalLog_tick() runs at the TOP of this function (above) — unconditional,
-  // so temperature history continues during off/fault/shutdown/sysID.
 
-  // tempFilterUpdate() hoisted here (2026-06-26) so it runs on EVERY tick in EVERY mode,
-  // not just SYS_MODE_AUTO. It used to live in the AUTO branch below — but an over-temp
-  // event drops the system to SYS_MODE_FAULT to cut the field, which skips that branch,
-  // so the filtered temp / slope / projection froze for the whole cooldown and the plot
-  // and thermal log showed a dead-flat line while the alternator was actually cooling.
-  // TempToUse is fresh here (buildTickSnapshot above mirrors tick.tempToUseF to it). Pure
-  // display/estimator math — no PID/field/persisted-state side effects — and it still runs
-  // BEFORE tempPID_tick (in the AUTO branch), so the PID input stays as fresh as before.
-  // Same fix class as the 2026-06-23 hoist out of tempPID_tick that killed the TuningMode freeze.
+  // Runs every tick in every mode (not just AUTO): an over-temp event drops to SYS_MODE_FAULT,
+  // which skips the AUTO branch, so the filtered temp/slope/projection would otherwise freeze
+  // for the whole cooldown. Pure display/estimator math (no PID/field side effects); runs before
+  // tempPID_tick. TempToUse is fresh here (buildTickSnapshot mirrors tick.tempToUseF to it).
   tempFilterUpdate(currentMillis);
+
+  // Worst over-temp for the Control Accuracy panel is tracked HERE — unconditionally, every tick in
+  // every mode (field on, FAULT, lockout, OFF cooldown). Over-temp damages the alternator regardless
+  // of which subsystem holds the field, and the worst excursions happen during the protection-cut
+  // coast-down (field OFF), which tempPID_tick / thermalAccuracyScore_tick never run for. Gating the
+  // peak on sustained thermal binding (the RMS gate, still in thermalAccuracyScore_tick) made the
+  // score blind to thermal limit-cycling — the exact failure it should flag (theramlbad.csv: real
+  // 5.9°F peak reported as 1.9°F because the 120s settle outlasts the trip-to-trip period and the
+  // peaks land while the field is cut). RMS error stays gated (regulation quality; cut noise corrupts it).
+  if (!isnan(tempFiltered)) {
+    float overNow = tempFiltered - TemperatureLimitF;
+    if (overNow > accThermal.worstOver) accThermal.worstOver = overNow;
+  }
 
   isTempSustainedWarning(tick.nowMs, tick.tempToUseF, tick.tempLimitF,
                          tick.tempWarnExcessF, tick.ignoreTemperature);
@@ -1738,8 +1762,14 @@ void AdjustFieldLearnMode() {
   // ========== LOCKOUT TRANSITION TRACKING ==========
   bool lockoutActiveNow = tick.inLockout;
   if (lockoutWasActive && !lockoutActiveNow) {
-    queueConsoleMessage(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
-    Serial.println(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
+    // Spam guard mirrors the cut announcement above: the idle stale-temp loop completes a cooldown
+    // every ~2s. Show recovery at most once per minute so a genuine "resumed" isn't buried under it.
+    static uint32_t lastCooldownDoneMs = 0;
+    if (lastCooldownDoneMs == 0 || (uint32_t)(tick.nowMs - lastCooldownDoneMs) >= 60000) {
+      queueConsoleMessage(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
+      Serial.println(isNormalMode ? "Cooldown complete - charging resumed" : "Cooldown complete");
+      lastCooldownDoneMs = tick.nowMs;
+    }
   }
   lockoutWasActive = lockoutActiveNow;
 
@@ -1933,6 +1963,13 @@ void AdjustFieldLearnMode() {
       // is why the plot flat-lined the moment an over-temp event dropped the system to FAULT.
       // Kept earlier-than-tempPID_tick ordering, so the PID input is unchanged. (was: 2026-06-23)
 
+      // Deadman for the wizard-commanded resonance current-check: if the browser stops refreshing the command
+      // (wizard closed / disconnected), auto-release so the field isn't left commanded to a stale test level.
+      if (resTestActive && (millis() - resTestLastCmdMs > RES_TEST_DEADMAN_MS)) {
+        resTestActive = false; resTestTargetA = 0.0f;
+        queueConsoleMessage("Resonance current-check auto-released (no command refresh)");
+      }
+
       if (batteryHealthTestActive) {
         // Active DCIR step generator. Protections are NOT suppressed: if one fires the
         // step won't manifest and bhComputeDcir() rejects the run (fail-safe).
@@ -1947,7 +1984,12 @@ void AdjustFieldLearnMode() {
         }
         float bhTarget = bhWaveHigh ? (bhStepLowA + bhStepDeltaA) : bhStepLowA;
         setpointCommand = bhTarget;
-        setpointLimited = bhTarget;            // abrupt: no slew
+        // Slew exactly like the Current-tuning square wave (NOT abrupt). The DCIR fit differences
+        // SETTLED end-of-dwell levels, so a slewed transition reads the same resistance while
+        // avoiding the field-slam transient that tripped OV on entry/edges. Entry (operating point →
+        // first level) and exit come out gentle for free, because slew carries setpointLimited continuously.
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       SetpointRiseRate, SetpointFallRate, actualDtSec);
         voltageControlActive = false;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
@@ -1958,10 +2000,31 @@ void AdjustFieldLearnMode() {
         bhSample(tick.nowMs);
         lastBattHealth = true;
 
+      } else if (resTestActive) {
+        // Wizard-commanded resonance current-check (§3.2): drive the loop to resTestTargetA, slewed exactly
+        // like the DCIR / current-tuning square wave so entry AND exit are gentle (slew carries setpointLimited
+        // continuously — the browser ramps the target down before releasing). Protections stay live; if one
+        // fires the ripple sample is simply not trusted. BENCH-VALIDATE the exit transient (the DCIR generator
+        // this mirrors tripped OV on entry/exit on its first bench run).
+        setpointCommand = resTestTargetA;
+        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                       SetpointRiseRate, SetpointFallRate, actualDtSec);
+        voltageControlActive = false;
+        targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                       : g_pidI_filtered;
+        pidInput = (double)targetCurrent;
+        pidSetpoint = (double)setpointLimited;
+        pidError = setpointLimited - targetCurrent;
+        currentPID.Compute();
+
       } else if (TuningMode) {
         // ===== TUNING MODE (square-wave setpoint generator) =====
         static bool tuningWaveHigh = false;
         static uint32_t lastTuningWaveToggle = 0;
+        static bool tuningEntryRamped = false;
+        // Re-arm the slewed entry each time tuning (re)starts. lastTuningMode is still false on the
+        // first tuning tick (it's set true at the end of this block), so this fires exactly on entry.
+        if (!lastTuningMode) tuningEntryRamped = false;
 
         // Parameter changed — discard accumulator and re-ring-in under new params
         if (tuningParamChanged) {
@@ -2017,11 +2080,20 @@ void AdjustFieldLearnMode() {
           // CV plant fit sets tuningSquareAbrupt so the edge is a true step (slew smears the step instant
           // the edge-gain fit keys off, and was only kept for the now-retired dead-time read). Otherwise
           // the manual current-tuning square test keeps its slew + scoring window.
-          if (tuningSquareAbrupt)
-            setpointLimited = setpointCommand;
-          else
+          if (tuningSquareAbrupt) {
+            // Belt-and-suspenders: slew ONLY the entry (operating point → first level) so start-up
+            // doesn't slam the field (OV risk). Once we've arrived, edges go abrupt as the fit needs.
+            if (!tuningEntryRamped) {
+              setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                             SetpointRiseRate, SetpointFallRate, actualDtSec);
+              if (fabsf(setpointLimited - setpointCommand) < 0.5f) tuningEntryRamped = true;
+            } else {
+              setpointLimited = setpointCommand;
+            }
+          } else {
             setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                            SetpointRiseRate, SetpointFallRate, actualDtSec);
+          }
 
           // Open scoring window once slew has settled (rate < 1 A/s) — fair regardless of SetpointRiseRate.
           // lastToggleMs is set here so the 5s timeout starts from when scoring actually begins.
@@ -2073,12 +2145,11 @@ void AdjustFieldLearnMode() {
       } else {
         // ===== NORMAL AUTO =====
 
-        // Health test just ended — bumpless PID reseed to applied duty (avoids a field bump).
-        if (lastBattHealth) {
-          currentPID.ResetIntegratorTo((double)lastAppliedDuty);
-          pidOutput = (double)lastAppliedDuty;
-          lastBattHealth = false;
-        }
+        // Health test just ended. Deliberately NO current-PID reseed: unlike sysID (which runs the
+        // PID in MANUAL and must reseed), the Health test kept it LIVE in AUTOMATIC — like TuningMode,
+        // which also does not reseed. The integrator already tracks; normal AUTO's slew resumes
+        // gently. The sysID-style ResetIntegratorTo here was the exit bump.
+        if (lastBattHealth) lastBattHealth = false;
 
         // Detect TuningMode exit — fires exactly once.
         if (lastTuningMode) {
@@ -2099,29 +2170,10 @@ void AdjustFieldLearnMode() {
         // Temperature loop PID. Library timer governs Compute() cadence.
         tempPID_tick(currentMillis, actualDtSec);
 
-        // --- Command architecture ---
-        //
-        //   I_cap        RPM-dependent mechanical/electrical ceiling (table lookup).
-        //   thermalPenalty  Temperature loop PID output. Derates I_cap when hot;
-        //                   zero-floored in CV stages (enforced in tempPID_tick).
-        //   uTargetAmps  I_cap minus thermal penalty, clamped to [0, MaxTableValue],
-        //                with user overrides applied. This is the table+thermal limit
-        //                and the upper bound passed to the CV controller.
-        //   Icv          CV position-form PID output — the direct current setpoint in
-        //                absorption, float, and TargetVoltageMode. Clamped to
-        //                [0, uTargetAmps]. Never written back to thermalPenaltyAmps
-        //                or the thermal integrator.
-        //
-        // Execution order:
-        //   1. Subtract thermal penalty from I_cap; clamp to [0, MaxTableValue].
-        //   2. Apply user overrides (MaintainMode). HiLow mode is handled at
-        //      table-load time via loadCapTablesForMode() — no runtime halving.
-        //   In CV modes: position-form PI (P+I) produces Icv; setpointCommand = Icv.
-        //      Integrator anti-windup: upward integration frozen when P+I saturates at uTargetAmps ceiling;
-        //      slope-aware bleed (SlopeBleedK) also drains cv_I when voltage rises fast, scaled by
-        //      proximity to setpoint (SlopeBleedProxV) so it is inactive far below target.
-        //   In idle: setpointCommand = uTargetAmps directly. (MaintainMode runs the CV path
-        //      instead: uTargetAmps=0 caps Icv to 0 — see the MaintainMode branch below.)
+        // Command chain: I_cap (RPM-table ceiling) − thermalPenalty → uTargetAmps (clamped
+        // [0, MaxTableValue], the table+thermal limit and upper bound for the CV loop) → Icv
+        // (CV PI output, clamped [0, uTargetAmps]). Icv is never written back to the thermal state.
+        // HiLow is applied at table-load time (loadCapTablesForMode), not by runtime halving.
 
         float I_cap;
         if (capLimitMode == 1 && tick.currentBatteryVoltage > 0.5f) {
@@ -2231,8 +2283,20 @@ void AdjustFieldLearnMode() {
           //  and the unified falling-edge reseed in the bumpless tracker block.)
 
           if (testProtectionsEnabled && !TuningMode && voltageControlActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
-            // Threshold: fraction of command, floor/ceiling guarded.
-            float E = fmaxf(IExcessFloorA, fminf(IExcessFrac * setpointLimited, IExcessCeilA));
+            // Threshold: fraction of command, floor/ceiling guarded. Under battery-current control the
+            // PV is Bcur, which carries far less ripple than alternator current — so use its own
+            // (commissioned) floor IExcessFloorABatt instead of the alternator-derived IExcessFloorA (§G).
+            float floorA;
+            if (cvBattActive) {
+              floorA = IExcessFloorABatt;
+              if (cvFloorK1 > 0.0f) {  // commissioned current-tracking ripple floor (§3.2): grows with operating current
+                float dyn = cvFloorK0 + cvFloorK1 * fabsf(Bcur_filtered);  // track the AVERAGE current, not the instantaneous ripple
+                if (dyn > floorA) floorA = fminf(dyn, IExcessCeilA);  // bounded by the ceiling; never below the static base
+              }
+            } else {
+              floorA = IExcessFloorA;
+            }
+            float E = fmaxf(floorA, fminf(IExcessFrac * setpointLimited, IExcessCeilA));
 
             if (!iExcessActive && (fastOvClampActive || modeCapGlideSuppress)) {
               // Another protection (fastOV/hardOV) already owns the clamp and has collapsed
@@ -4095,6 +4159,11 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     if (tick.nowMs > 60000) {
       tempDataVeryStale = true;
     }
+  } else if (tempTimestamp > tick.nowMs) {
+    // Temp task (Core 0) can stamp dataTimestamps[] a few ms ahead of tick.nowMs (captured at loop
+    // top on Core 1). The unsigned subtraction below would then underflow to ~4.29e9 ms (0xFFFFFFFF)
+    // and trip a false CRITICAL stale cut. An "ahead" stamp means the read is current — treat it fresh.
+    tempDataVeryStale = false;
   } else {
     uint32_t tempAge = tick.nowMs - tempTimestamp;
     tempDataVeryStale = (tempAge > 20000);
@@ -4102,6 +4171,15 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
 
   if (isnan(tempSelected) || tempSelected < -50.0f || tempSelected > 400.0f) {
     tempDataVeryStale = true;
+  }
+
+  // Idle-aware gate: while the engine is below running speed (RPM < 200) the temp task intentionally
+  // stretches its poll to 10s/10min (see the temp task in 2_functions.ino), so the feed reads "stale"
+  // by the 20s rule for long stretches BY DESIGN. The field is off and the alternator can't be heating,
+  // so there is nothing to protect — don't raise a CRITICAL stale cut (it just loops the 2s cooldown).
+  // Freshness is re-enforced the instant the engine spins back up (RPM >= 200) and the field could be live.
+  if (RPM < 200) {
+    tempDataVeryStale = false;
   }
 
   tick.tempDataVeryStale = tempDataVeryStale;
@@ -5082,9 +5160,8 @@ bool isVoltageSensorPlausible() {
 // Call from setup() after NVS and sensors are initialized.
 // ===========================================================================
 void tempPID_init() {
-  // Hybrid form (2026-06-26): no PID-library object. Start with zero penalty and zero holding
-  // integral; the positional FF (P + projection) and the integral both build only if temperature
-  // demands it. tempPID_tick() does the real bumpless seed when it first activates on a valid temp.
+  // Start at zero; FF and the integral build only if temperature demands it. tempPID_tick()
+  // does the real bumpless seed when it first activates on a valid temp.
   thermalPenaltyAmps = 0.0f;
   prevThermalPenalty = 0.0f;
   thermalIntegral = 0.0f;
@@ -5093,17 +5170,10 @@ void tempPID_init() {
   Serial.printf("TempPID: Init | Kp=%.2f Ki=%.3f Lookahead=%.1fs Interval=%lums\n",
                 TempPIDKp, TempPIDKi, ThermalLookaheadSec, (unsigned long)TempPIDIntervalMs);
 }
-// ---------------------------------------------------------------------------
-//  tempFilterUpdate — IIR filter + slope estimator + projected-temp lookahead.
-//  Pure display/estimator math: updates tempFiltered, the slope buffer,
-//  thermalSlopeFPerSec, and projectedTempF. NO PID, NO field, NO persisted state.
-//  Split out of tempPID_tick (2026-06-23) and called every AUTO tick — including
-//  TuningMode and the commissioning sub-steps that toggle it — so the dashboard
-//  plot and thermal log show the REAL temperature during tuning instead of a value
-//  frozen at whatever it was when the tuning step began. Skips on invalid temp so a
-//  NaN / out-of-range sensor read never poisons the filter (same guard tempPID_tick
-//  already applied before it ran the filter inline).
-// ---------------------------------------------------------------------------
+// tempFilterUpdate — IIR filter + slope estimator + projected-temp lookahead. Pure
+// display/estimator math (updates tempFiltered, slope buffer, thermalSlopeFPerSec,
+// projectedTempF; no PID/field/persisted state). Called every tick so the plot/log show
+// real temperature during tuning. Skips on invalid temp so garbage never poisons the filter.
 void tempFilterUpdate(uint32_t nowMs) {
   bool tempValueSane = !isnan(TempToUse) && (TempToUse > -50.0f) && (TempToUse < 400.0f);
   if (!tempValueSane) return;  // hold last filtered value; do not poison with garbage
@@ -5119,19 +5189,9 @@ void tempFilterUpdate(uint32_t nowMs) {
     tempFiltered = alpha * TempToUse + (1.0f - alpha) * tempFiltered;
   }
 
-  // ---------------------------------------------------------------------------
-  //  Slope estimator: backward difference over a TUNABLE window.
-  //  Runs at TempPIDIntervalMs cadence (same as Compute). Buffer holds
-  //  THERMAL_SLOPE_BUF readings (13 × 5s = 60s max). The DIFFERENCE window is
-  //  ThermalSlopeWindowSec (2026-06-26, live-tunable): once the buffer is full, the
-  //  slope is taken over the last `intervals` samples (≈ ThermalSlopeWindowSec/5s)
-  //  instead of the full 12. A shorter window cuts the slope-estimator latency
-  //  (~half the window) → less phase lag → smaller thermal relaxation cycle, at the
-  //  cost of a noisier slope (the ±0.5°F/s clamp below still rejects outliers). The
-  //  60s BUFFER-FULL warmup gate (thermalSlopeBufFull) is unchanged — only the
-  //  difference span shortens; the cold-start warmup stays a conservative 60s.
-  //  Lookahead (ThermalLookaheadSec) is a separate knob — tune both from data.
-  // ---------------------------------------------------------------------------
+  // Slope estimator: backward difference over the last `intervals` samples of a 13×5s=60s buffer.
+  // The difference span = ThermalSlopeWindowSec (live-tunable); shorter = less lag, noisier slope.
+  // The 60s buffer-full warmup gate (thermalSlopeBufFull) is independent of the difference span.
   if ((uint32_t)(nowMs - thermalSlopeLastPushMs) >= TempPIDIntervalMs) {
     thermalSlopeLastPushMs = nowMs;
     float tempSample = (TempSource == 0) ? TempToUse : tempFiltered;
@@ -5154,9 +5214,9 @@ void tempFilterUpdate(uint32_t nowMs) {
       float rawSlope = (tempSample - oldest) / windowSec;
       const float SLOPE_CLAMP = 0.5f;  // °F/sec — beyond this is sensor noise or fault
       if (fabsf(rawSlope) > SLOPE_CLAMP) {
-        // Reject as sensor noise; hold the previous slope so a real fast rise still has
-        // predictive signal while one outlier sample rolls through the difference window.
-        // Old behavior was to clamp to ±0.5 — that injected up to ±15 °F false lookahead.
+        // Reject as sensor noise; hold the previous slope so a real fast rise keeps predictive
+        // signal while one outlier rolls through the window. (Clamping to ±0.5 instead would
+        // inject up to ±15°F of false lookahead.)
         static uint32_t slopeClampLastLogMs = 0;
         if ((uint32_t)(nowMs - slopeClampLastLogMs) >= 60000) {
           slopeClampLastLogMs = nowMs;
@@ -5198,43 +5258,24 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     return;
   }
 
-  // Stage-aware penalty bounds — computed ONCE, referenced everywhere below.
-  // Derived from inBulkStage / inAbsorptionStage directly, NOT voltageControlActive:
-  // the assignment `voltageControlActive = (!inBulkStage || inAbsorptionStage)` runs
-  // AFTER tempPID_tick() returns, so voltageControlActive still carries the previous
-  // stage's value on a transition tick. Stage variables are written before this fn.
+  // Stage bounds from inBulkStage/inAbsorptionStage directly, NOT voltageControlActive:
+  // that flag is reassigned AFTER this fn returns, so it is one stage-transition tick stale.
   const float capCurrent = getCapCurrentForRPM(RPM);
   const float penaltyMax = (float)MaxTableValue;
-
   const bool inPureBulk = (inBulkStage && !inAbsorptionStage);
-  // Thermal penalty is derate-only: PID output range is [0, MaxTableValue].
-  // It can only SUBTRACT from the RPM-table ceiling (I_cmd = I_cap - thermalPenaltyAmps,
-  // see command chain in AdjustFieldLearnMode), never add to it. So a cold alternator
-  // runs at penalty 0 = the full RPM-table current with no derate; the loop cannot push
-  // current above the table cap. There is no separate battery-temperature voltage comp.
-  const float penaltyMin = 0.0f;
+  const float penaltyMin = 0.0f;  // penalty is derate-only: I_cmd = I_cap − penalty
 
-  // ---------------------------------------------------------------------------
-  //  Temperature sanity guard — only stops PID on invalid value (NaN / out of range).
-  //  Stale data (no new reading) is handled at 20s by tempDataVeryStale → field cut;
-  //  no intermediate hold needed here.
-  // ---------------------------------------------------------------------------
+  // Sanity guard stops PID only on an invalid value. Stale data (no new reading) is
+  // handled elsewhere at 20s by tempDataVeryStale → field cut.
   bool tempValueSane = !isnan(TempToUse) && (TempToUse > -50.0f) && (TempToUse < 400.0f);
 
   if (!tempValueSane) {
-    // Debounce (2026-06-23): a SINGLE bad sample used to deactivate the loop immediately, and
-    // the resume then cleared the slope buffer → 65s warmup → setpoint dropped to limit−20 and
-    // the approach gate re-armed (the spurious "140°F setpoint" artifact seen in therm.csv).
-    // Ride through BRIEF glitches instead: hold the last penalty but stay ACTIVE with the slope
-    // buffer intact for up to THERMAL_INVALID_DEBOUNCE_MS. Only a SUSTAINED dropout deactivates,
-    // so the eventual resume still clears a genuinely-stale buffer. Safety unchanged: the penalty
-    // is held (never reduced) here, the separate over-temp protections still fire on real
-    // temperature, and tempDataVeryStale still cuts the field at 20s — far beyond this 3s window.
+    // Ride through brief glitches: hold last penalty, stay ACTIVE with slope buffer intact for
+    // up to THERMAL_INVALID_DEBOUNCE_MS; only a sustained dropout deactivates (so the resume
+    // still clears a genuinely-stale buffer). Over-temp protections + tempDataVeryStale unaffected.
     const uint32_t THERMAL_INVALID_DEBOUNCE_MS = 3000;
     if (tempInvalidSinceMs == 0) tempInvalidSinceMs = nowMs;
-    // Any invalid sample voids a pending preserve-on-resume intent (conservative) — e.g. a
-    // tuning exit that coincided with a dropout must re-enable as a real stale gap.
-    thermalPreserveSlopeOnResume = false;
+    thermalPreserveSlopeOnResume = false;  // an invalid sample voids a pending preserve-on-resume
     if (tempPIDActive && (uint32_t)(nowMs - tempInvalidSinceMs) >= THERMAL_INVALID_DEBOUNCE_MS) {
       tempPIDActive = false;
       queueConsoleMessageF("TempPID: temp value invalid >%lums, holding penalty at %.1fA",
@@ -5244,46 +5285,27 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   }
   tempInvalidSinceMs = 0;  // valid sample — reset the debounce window
 
-  // tempFiltered, the slope buffer / thermalSlopeFPerSec, and projectedTempF are updated
-  // by tempFilterUpdate() — called unconditionally at the TOP of AdjustFieldLearnMode every
-  // tick in every mode (hoisted 2026-06-26) BEFORE this function runs — so they are already
-  // fresh here. Split out 2026-06-23 so the plot/thermal log keep showing real temperature
-  // during tuning/commissioning, then hoisted again so they also stay live during FAULT-mode
-  // over-temp cooldown instead of freezing. See tempFilterUpdate() above.
-
-  // Re-enable after stale period — bumpless transfer. All three penalty state
-  // vars are seeded to resumePenalty (clamped to current stage bounds) so the
-  // command chain, slew limiter, and stale-hold path agree on the first tick:
-  //   thermalPenaltyAmps      — read by command chain this tick
-  //   prevThermalPenalty      — last-applied penalty / slew "prev" on the next tick
-  //   thermalPenaltyLastValid — returned by stale-hold path if temp goes stale
-  //   thermalIntegral         — seeded to 0 (the positional FF carries the resume cut)
+  // tempFiltered / slope buffer / projectedTempF are updated by tempFilterUpdate() at the top
+  // of AdjustFieldLearnMode (every tick, every mode, before this fn) — already fresh here.
   const float activeTempLimit = TemperatureLimitF;
 
-  // Suppress the 60s warmup margin (−20°F) during commissioning and any tuning. Those flows
-  // toggle the field / TuningMode repeatedly, re-seeding the slope buffer over and over, so the
-  // margin would keep stepping the setpoint 155<->140 and derate current mid-test (corrupting
-  // sysID/stabilization/CV/thermal-tuning measurements). The hard trips (limit+TempWarnExcess
-  // warning ramp, limit+TempCritExcess critical) are NOT gated by this, so no damage protection
-  // is lost — only the soft "react-early-while-blind" margin, and only while supervised. Normal
-  // operation and post-trip resume keep the full −20°F margin. See Thermal_Loop_Dev_Summary.md.
+  // Suppress the warmup margin during commissioning/tuning: those toggle the field/TuningMode,
+  // re-seeding the slope buffer, so the margin would step the setpoint and derate mid-test.
+  // Hard trips (warning ramp, critical cut) are NOT gated by this.
   const bool suppressWarmupMargin = (commissionState == 1) || (TuningMode != 0);
 
   if (!tempPIDActive) {
 
     // Preserve the slope buffer when re-enabling from a DORMANT-but-not-stale period (TuningMode
-    // exit): tempFilterUpdate() kept it live the whole time, so the trend is good and clearing it
-    // would force a 60s blind warmup (setpoint → limit-20) that derates the field right after a
-    // test. The one-shot flag is the gate, NOT a freshness timestamp: on a true sensor gap,
-    // tempFilterUpdate() pushes a fresh sample spanning the gap the same tick we re-enable, so a
-    // time-since-last-push test would look "fresh" while the buffer holds garbage — only the
-    // caller knows the data was actually continuous. Default path (stale gap, cold start) clears.
+    // exit): the trend stayed live, so clearing it would force a blind warmup that derates right
+    // after a test. The one-shot flag is the gate, NOT a freshness timestamp — on a true sensor
+    // gap tempFilterUpdate pushes a sample spanning the gap the same tick, so a "time since last
+    // push" test would look fresh while the buffer holds garbage. Default (stale/cold) clears.
     const bool preserveSlope = thermalPreserveSlopeOnResume;
     thermalPreserveSlopeOnResume = false;  // consume the one-shot
 
     if (!preserveSlope) {
-      // Clear slope buffer first — old trend data is stale after a gap, and a stale
-      // slope would inflate projectedTempF used for the bumpless seed below.
+      // Stale slope would inflate projectedTempF used for the bumpless seed below.
       memset(thermalSlopeBuffer, 0, sizeof(thermalSlopeBuffer));
       thermalSlopeBufIdx = 0;
       thermalSlopeBufFull = false;
@@ -5295,23 +5317,16 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
         projectedTempF = isnan(tempNow) ? tempFiltered : tempNow;
       }
     }
-    // When preserved, the slope buffer, thermalSlopeFPerSec, and projectedTempF are left exactly
-    // as tempFilterUpdate() computed them this tick — live trend, no warmup blindness.
-
-    // Warmup setpoint: keyed off thermalSlopeBufFull so it tracks the clear above. If the buffer
-    // was preserved (still full) we are NOT blind → normal −5°F. Only a genuinely cleared buffer
-    // (and no active suppression) takes the −20°F blind-warmup margin. suppressWarmupMargin
-    // (commissioning + tuning) also forces −5 so a re-seed mid-test seeds no spurious penalty.
+    // Warmup setpoint: a cleared (blind) buffer takes the −20°F margin; a preserved-full buffer
+    // or active suppression (commissioning/tuning) takes the normal −5°F.
     const float reEnableSetpoint = activeTempLimit -
         ((suppressWarmupMargin || thermalSlopeBufFull) ? 5.0f : 20.0f);
 
     tempPIDInput_d = (double)projectedTempF;
 
-    // Bumpless resume into the hybrid: the positional FF (P + projection) is recomputed instantly
-    // on the first tick, so seed the holding integral to ZERO — penalty starts at FF alone (= the
-    // old P-only resume seed). thermalPenaltyLastValid reflects conditions when the sensor went
-    // stale; if temp was high then but has since recovered, seeding at the old value overpunishes
-    // and takes minutes to bleed off. The integral rebuilds the hold from there.
+    // Bumpless resume: FF is recomputed instantly, so seed the holding integral to ZERO — penalty
+    // starts at FF alone. Seeding from thermalPenaltyLastValid would overpunish if temp was high
+    // when the sensor went stale but has since recovered. The integral rebuilds the hold.
     float stalePenalty = thermalPenaltyLastValid;
     float e_resume = projectedTempF - reEnableSetpoint;
     float resumePenalty = clamp_f(e_resume > 0.0f ? TempPIDKp * e_resume : 0.0f,
@@ -5322,8 +5337,7 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     thermalPenaltyLastValid = resumePenalty;
     thermalIntegral = 0.0f;  // FF carries the resume cut; the integral rebuilds the hold
 
-    // Re-init the approach gate from present state: resume hot = released, resume cool = treat as
-    // a fresh approach. The gate only holds OFF the up-driving dI; FF acts regardless.
+    // Approach gate from present state: resume hot = released, resume cool = fresh approach.
     thermalIntegratorReleased = (projectedTempF >= activeTempLimit - 5.0f);
 
     tempPIDActive = true;
@@ -5332,87 +5346,54 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
                          stalePenalty, inPureBulk ? "bulk" : "CV");
   }
 
-  // ---------------------------------------------------------------------------
-  //  Update setpoint and output limits every tick.
-  //  Both use the same penaltyMin computed at function entry.
-  //  effectiveSetpoint applies a 20°F fallback margin during the 60s warmup
-  //  window (thermalSlopeBufFull == false) so the PID starts reacting before
-  //  projected temp reaches the hard limit. Once the buffer fills, margin = 0.
-  //  suppressWarmupMargin (commissioning + tuning, computed above) forces the
-  //  margin to the normal −5°F so the live setpoint holds steady instead of
-  //  stepping 155<->140 and derating mid-test. Hard trips are unaffected.
-  // ---------------------------------------------------------------------------
+  // effectiveSetpoint: −20°F fallback margin during the blind warmup (buffer not full) so the PID
+  // reacts before projected temp reaches the limit; −5°F once the buffer fills or while suppressed.
   const float warmupMargin = suppressWarmupMargin ? 5.0f : 20.0f;
   const float effectiveSetpoint = thermalSlopeBufFull ? (activeTempLimit - 5.0f) : (activeTempLimit - warmupMargin);
   tempPIDSetpoint_d = (double)effectiveSetpoint;
-  // HYBRID (2026-06-26): no PID-library object. penalty = clamp(FF + thermalIntegral, 0, cap).
-  // The two error signals:
-  //   eP = max(projectedTempF, present) − setpoint   — projection-led SAFETY term, floored at 0,
-  //                                                     forms the POSITIONAL feedforward FF=Kp·eP
-  //                                                     (instant cold-approach cut + hot-side P).
-  //   eI = present − setpoint                          — PRESENT temp only, drives the accumulated
-  //                                                     holding integral. Never sees the projection.
-  // lookaheadDeltaF and tempNowPid below are kept for LOGGING decomposition (outerTermLookahead/
-  // outerTermP) and for tempPIDInput_d (CSV2 telemetry); they no longer feed a library object.
+
+  // lookaheadDeltaF / tempNowPid are kept only for the logging decomposition (outerTermLookahead/
+  // outerTermP) and tempPIDInput_d telemetry — they no longer feed any library object.
   float lookaheadDeltaF;
   float tempNowPid;
   {
     tempNowPid = (TempSource == 0) ? TempToUse : tempFiltered;
-    // Projection's amps ABOVE max(present, setpoint) — the share of eP attributable to the
-    // lookahead lead. outerTermP + outerTermLookahead = Kp·max(0, max(proj,present)−setpoint),
-    // so the logged decomposition still sums to the P-driven part of the penalty.
     lookaheadDeltaF = fmaxf(0.0f, projectedTempF - fmaxf(tempNowPid, effectiveSetpoint));
     tempPIDInput_d = (double)tempNowPid;
   }
 
-  // One-shot approach gate: released the first time PRESENT temp (not the projection)
-  // reaches the regulation setpoint. Until then dI is held off — the positional FF (P +
-  // projection) handles the approach cut on its own. Winding a holding level before there is
-  // one to hold is what bought the ~2.5× overbuild + deep post-peak sag (measured 2026-06-11).
+  // Approach gate: released the first time PRESENT temp (not the projection) reaches setpoint;
+  // until then dI is held off (FF handles the approach). Winding a hold before there is one to
+  // hold caused the ~2.5× overbuild + deep post-peak sag.
   if (!thermalIntegratorReleased && tempNowPid >= (activeTempLimit - 5.0f)) {
     thermalIntegratorReleased = true;
     queueConsoleMessageF("TempPID: integrator released — present temp %.1f°F reached setpoint", tempNowPid);
   }
 
-  // ---------------------------------------------------------------------------
-  //  HYBRID PENALTY UPDATE (2026-06-26 — see Thermal_Loop_Dev_Summary.md). The penalty is
-  //    penalty = clamp( FF + thermalIntegral, 0, capCurrent )
-  //  where FF (P + projection) is POSITIONAL/instantaneous feedforward and only the holding
-  //  integral is accumulated. WHY: the pure velocity form (2026-06-25) updated penalty by
-  //  dP = Kp·ΔePpos, but a difference form cannot carry a feedforward LEVEL — the projection's
-  //  roughly-constant lead (slope×lookahead) differentiates to ~0, so the lookahead's approach
-  //  cut silently collapsed to ~1/6 strength (longthermal.csv: 6.9 A delivered vs 42 A demanded
-  //  at the setpoint crossing) and the loop tripped on approach overshoot. Making FF positional
-  //  restores the instant approach cut (the 2026-06-22 split-input behavior). The integral keeps
-  //  the velocity-era wins: live-cap anti-windup clamp (I ≤ cap−FF, so FF+I can never exceed the
-  //  live authority — no windup, no MaxTableValue overshoot), asymmetric below-setpoint bleed,
-  //  and the approach + descent gates. No equilibrium estimator (cases 4/5/5b stay deleted).
-  // ---------------------------------------------------------------------------
-  const float ePpos = fmaxf(0.0f, fmaxf(projectedTempF, tempNowPid) - effectiveSetpoint);  // floored eP (projection-led)
-  const float eI    = tempNowPid - effectiveSetpoint;                                       // present-only — drives dI
-  const float FF    = TempPIDKp * ePpos;  // POSITIONAL P + projection feedforward (instant approach cut)
+  // HYBRID penalty: penalty = clamp(FF + thermalIntegral, 0, capCurrent). FF (P + projection) is
+  // POSITIONAL feedforward; only the holding integral is accumulated. ePpos is floored so the
+  // projection-led safety term never goes negative; eI is present-only so the integral never winds
+  // on the projection.
+  const float ePpos = fmaxf(0.0f, fmaxf(projectedTempF, tempNowPid) - effectiveSetpoint);
+  const float eI    = tempNowPid - effectiveSetpoint;
+  const float FF    = TempPIDKp * ePpos;
 
-  // Integral gate: approach holds dI off until present temp first reaches setpoint (was case 1);
-  // descent holds dI off while above setpoint AND cooling (case 3 — kept). FF is never gated — the
-  // P + projection cut lands regardless, on the way up AND down.
+  // Integral gate: hold dI off during the approach (until released) and on the descent (above
+  // setpoint AND cooling). FF is never gated.
   const bool descentHold = (eI > 0.0f) && (thermalSlopeFPerSec < 0.0f);
   const bool applyDI     = thermalIntegratorReleased && !descentHold;
 
-  // Asymmetric bleed (2026-06-26): below setpoint (eI<0) the integral releases at TempPIDKi×
-  // TempPIDKiDownFrac, NOT full Ki, so a transient sub-setpoint undershoot bleeds the holding
-  // level only slowly instead of collapsing it (the fridaytherm.csv grow-to-trip cycle). A
-  // SUSTAINED cold alternator still releases derate (slowed, not frozen). Above setpoint full Ki.
+  // Asymmetric bleed: below setpoint release at Ki×TempPIDKiDownFrac (not full Ki) so a transient
+  // undershoot bleeds the hold slowly instead of collapsing it; above setpoint full Ki.
   const float kiEff = (eI < 0.0f) ? (TempPIDKi * TempPIDKiDownFrac) : TempPIDKi;
   const float dI    = applyDI ? (kiEff * eI * actualDtSec) : 0.0f;
 
-  // Anti-windup: clamp the integral so FF + I stays within [0, live capCurrent]. I itself is
-  // derate-only (≥0). When FF alone already covers the cap, the ceiling is 0 — I cannot wind into
-  // dead authority (the recovery-lag failure the old case-2 freeze targeted), and it rebuilds the
-  // instant FF drops. This is the velocity-era live-cap clamp, applied to the integral only.
+  // Anti-windup: clamp the integral to [0, cap−FF] so FF+I can never exceed live authority and I
+  // cannot wind into dead authority; it rebuilds as FF drops.
   const float iRaw   = thermalIntegral + dI;
   const float iCeil  = fmaxf(0.0f, capCurrent - FF);
   const bool  satClamp = (iRaw > iCeil);
-  thermalIntegralCeil = iCeil;  // instrumentation: logged as iCeil_A. iCeil < outerI ⇒ the clamp is deleting earned hold (watch reheat on recovery).
+  thermalIntegralCeil = iCeil;  // logged as iCeil_A; iCeil < outerI ⇒ clamp is deleting earned hold (watch reheat on recovery)
   thermalIntegral = clamp_f(iRaw, 0.0f, iCeil);
 
   const float penaltyRaw    = FF + iRaw;             // pre-clamp requested penalty (for the log / rpmCap diagnostic)
@@ -5426,10 +5407,8 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
   prevThermalPenalty      = thermalPenaltyAmps;
   thermalPenaltyLastValid = thermalPenaltyAmps;
 
-  // freezeWhy (2026-06-26 hybrid): 0 = dI applied (integral winding); 1 = approach (dI held,
-  // present below setpoint — FF alone cuts); 2 = saturation (integral clamped because FF+I hit
-  // the live cap); 3 = descent (above setpoint and cooling, dI held). 4/5 retired. Priority:
-  // approach > saturation > descent.
+  // freezeWhy log enum: 0 = dI applied; 1 = approach (dI held); 2 = saturation (integral clamped
+  // at the live cap); 3 = descent (above setpoint and cooling). Priority approach>saturation>descent.
   if (!thermalIntegratorReleased)  thermalFreezeReason = 1;
   else if (satClamp)               thermalFreezeReason = 2;
   else if (descentHold)            thermalFreezeReason = 3;
@@ -5446,32 +5425,23 @@ void tempPID_tick(uint32_t nowMs, float actualDtSec) {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  //  Logging decomposition (preserve every thermal-log column's meaning — see the
-  //  "Thermal log decoding" table in Thermal_Loop_Dev_Summary.md). FF = outerTermP +
-  //  outerTermLookahead; total penalty = outerTermP + outerTermLookahead + outerTermI.
-  // ---------------------------------------------------------------------------
-  outerTermP         = TempPIDKp * fmaxf(0.0f, tempNowPid - effectiveSetpoint);  // present-error P share — invert to recover setpoint when hot
-  outerTermLookahead = TempPIDKp * lookaheadDeltaF;                              // projection (lookahead) share of FF
-  outerTermI         = thermalIntegral;                                         // the genuine holding integral (builds toward ~83A on this load)
-  outerPenaltyRaw    = penaltyRaw;                                              // pre-clamp/slew, vs rpmCap = requested-vs-applied signal
+  // Logging decomposition (see "Thermal log decoding" in Thermal_Loop_Dev_Summary.md):
+  // FF = outerTermP + outerTermLookahead; total penalty = FF + outerTermI.
+  outerTermP         = TempPIDKp * fmaxf(0.0f, tempNowPid - effectiveSetpoint);  // present-error P share
+  outerTermLookahead = TempPIDKp * lookaheadDeltaF;                              // projection share of FF
+  outerTermI         = thermalIntegral;
+  outerPenaltyRaw    = penaltyRaw;                                              // pre-clamp/slew, vs rpmCap = requested-vs-applied
 
-  // CV-bleed (the old back-calculation anti-windup) is deleted with the library object: the
-  // penalty is derate-only and the accumulator is clamped to [0, capCurrent] every tick, so
-  // there is no negative integrator bias to bleed. The thermal-log antiWindupFired column
-  // therefore always reads 0 — already its real meaning (zero fires in every log to date).
-  outerAntiWindupFired = false;
+  outerAntiWindupFired = false;  // log column dead (no negative bias to bleed under the [0,cap] clamp)
 
-  // outerImpliedPenalty: voltage cap expressed as a downstream penalty equivalent, for log
-  // debugging only. Does not drive any control action. Keyed off inPureBulk (stage-derived)
-  // for the same timing reason as penaltyMin — voltageControlActive may be one tick stale.
+  // outerImpliedPenalty: voltage cap as a downstream penalty equivalent, log-only. inPureBulk
+  // (not voltageControlActive) for the same one-tick-stale reason as the stage bounds above.
   if (!inPureBulk && Icv > 1.0f) {
     outerImpliedPenalty = fmaxf(0.0f, capCurrent - Icv);
   } else {
     outerImpliedPenalty = 0.0f;
   }
 
-  // Wave generator + scoring + always-on live score
   thermalAccuracyScore_tick(nowMs, actualDtSec);
 }
 void pidLog_init() {

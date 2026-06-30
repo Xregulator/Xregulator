@@ -817,6 +817,11 @@ input[type="submit"]:hover {
   color: #fff !important;
   border-color: #16c2b8 !important;
   box-shadow: 0 2px 10px rgba(0, 161, 154, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  /* Base .btn-primary is nowrap + fit-content (sized for short toolbar buttons); these
+     full-width wizard buttons carry long instructional labels, so let them wrap inside
+     the panel instead of overflowing the right edge. */
+  white-space: normal;
+  max-width: none;
 }
 #commission-modal-panel .btn-primary:hover {
   background: linear-gradient(180deg, #18c4ba 0%, #00a39c 100%) !important;
@@ -1935,6 +1940,48 @@ h2 {
 }
 
 .sub-tab-content.active {
+  display: block;
+}
+
+/* Inner panels inside Live Data -> Diag (Alternator / Battery). Distinct classes so the
+   generic showSubTab() querySelectors never toggle these nested elements. */
+.diag-panel-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.diag-panel-tab {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-light);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dark);
+  border-radius: 20px;
+  transition: all 0.3s ease;
+  min-width: 90px;
+  flex: 0 0 auto;
+}
+
+.diag-panel-tab:hover {
+  background: rgba(0, 161, 154, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.diag-panel-tab.active {
+  background: var(--accent);
+  color: var(--card-light);
+  border-color: var(--accent);
+}
+
+.diag-panel {
+  display: none;
+}
+
+.diag-panel.active {
   display: block;
 }
 

@@ -346,30 +346,19 @@ enum Csv2Index {
   CSV2_ft_checkWiFiConnection_ses,
   CSV2_ft_ch1_compute_stats_win,
   CSV2_ft_ch1_compute_stats_ses,
-  CSV2_ft_UpdateEngineRuntime_win,
-  CSV2_ft_UpdateEngineRuntime_ses,
-  CSV2_ft_UpdateEngineFuel_win,
-  CSV2_ft_UpdateEngineFuel_ses,
   CSV2_ft_UpdateBatterySOC_win,
   CSV2_ft_UpdateBatterySOC_ses,
-  CSV2_ft_UpdateTravelStatistics_win,
-  CSV2_ft_UpdateTravelStatistics_ses,
-  CSV2_ft_UpdateBoardTempPressureMaximums_win,
-  CSV2_ft_UpdateBoardTempPressureMaximums_ses,
-  CSV2_ft_handleSocGainReset_win,
-  CSV2_ft_handleSocGainReset_ses,
-  CSV2_ft_handleAltZeroReset_win,
-  CSV2_ft_handleAltZeroReset_ses,
-  CSV2_ft_calculateChargeTimes_win,
-  CSV2_ft_calculateChargeTimes_ses,
-  CSV2_ft_UpdateSailingMetrics_win,
-  CSV2_ft_UpdateSailingMetrics_ses,
-  CSV2_ft_updateWeatherMode_win,
-  CSV2_ft_updateWeatherMode_ses,
   CSV2_ft_updateSensorWindow_win,
   CSV2_ft_updateSensorWindow_ses,
   CSV2_ft_checkTimeSync_win,
   CSV2_ft_checkTimeSync_ses,
+  // Field-off flash/NVS-flush timers (loop-direct; see ft_dumpLongTermRing rationale)
+  CSV2_ft_zeroLogService_win,
+  CSV2_ft_zeroLogService_ses,
+  CSV2_ft_bhFlushCapNVS_win,
+  CSV2_ft_bhFlushCapNVS_ses,
+  CSV2_ft_kneeLearnService_win,
+  CSV2_ft_kneeLearnService_ses,
   // Fields 323-401: firmware-computed values moved from CSV3
   CSV2_currentRPMTableIndex,
   CSV2_pidInitialized,
@@ -1007,6 +996,8 @@ enum Csv3Index {
   CSV3_TempPIDKiDownFrac,       // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
   CSV3_ThermalSlopeWindowSec,   // thermal slope backward-difference window (s); integer
   CSV3_cvCurrentSrc,            // CV current source: 0=battery-when-available, 1=force alternator (§G)
+  CSV3_IExcessFloorABatt,       // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA, set from battery ripple in Step 6
+  CSV3_cvFloorK1,               // CV battery iExcess current-tracking floor slope (A of floor per A of current); ×10000; 0 = static floor
 
   CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26
 };
@@ -2231,6 +2222,45 @@ void setupServer() {
     request->send(response);
   });
 
+  // ── Battery-current ripple per RPM bin (commissioning Step 5) ──
+  // One row per VISITED 50-RPM bin: drift-removed pk-pk of battery current (A). Small (≤80 rows),
+  // so built into a String and sent whole. Step 6 pairs the worst with the alternator matrix's
+  // binding frequency to derive the CV battery-current detector floor (IExcessFloorABatt). Empty
+  // body (header only) = nothing captured → Step 6 falls back to the alternator proxy.
+  server.on("/bcurripple.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String out = "rpmLo,ripplePkpkA,iAtA\n";  // iAtA = operating battery current when this worst pk-pk was caught (0=unknown)
+    for (int b = 0; b < FA_RPM_BINS; b++) {
+      if (bcurRipplePkpkX100[b] == 0) continue;  // unvisited bin
+      out += String(b * FA_RPM_BIN_W);
+      out += ',';
+      out += String(bcurRipplePkpkX100[b] / 100.0f, 2);
+      out += ',';
+      out += String(bcurRippleIatX100[b] / 100.0f, 2);
+      out += '\n';
+    }
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // Active 3-current resonance test points: (rpm, operating current, pk-pk) per window since arm. Small
+  // (≤BCUR_RTEST_CAP rows) → plain non-chunked response. Browser fits ripple = a0 + a1·I from these.
+  server.on("/bcurrtest.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String out = "rpm,iA,pkpkA\n";
+    uint16_t n = bcurRtestCount; if (n > BCUR_RTEST_CAP) n = BCUR_RTEST_CAP;
+    for (uint16_t i = 0; i < n; i++) {
+      out += String(bcurRtest[i].rpm);
+      out += ',';
+      out += String(bcurRtest[i].iX100 / 100.0f, 2);
+      out += ',';
+      out += String(bcurRtest[i].pkpkX100 / 100.0f, 2);
+      out += '\n';
+    }
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   // ── Alternator (charging-system) health v2 — schema + curve + records + trend exports ──
   // Self-describing schema; the dashboard zips these names against AltLive/AltSettings SSE values.
   server.on("/altschema", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -2756,6 +2786,7 @@ void setupServer() {
     }
     // Update RAM variables
     BOAT_LENGTH_FT = doc["boat_length_ft"];
+    BOAT_DISPLACEMENT_LBS = doc["boat_displacement_lbs"];
     BOAT_TYPE = doc["boat_type"].as<String>();
     BOAT_MAKE_MODEL = doc["boat_make_model"].as<String>();
     BOAT_YEAR = doc["boat_year"];
@@ -2778,6 +2809,7 @@ void setupServer() {
     applyNominalVoltageChange(oldBatteryVoltage, newBatteryVoltage);
     BatteryCapacity_Ah = doc["battery_capacity_ah"];
     BATTERY_TYPE = doc["battery_type"].as<String>();
+    BATTERY_MAKE_MODEL = doc["battery_make_model"].as<String>();
     ALTERNATOR_BRAND_MODEL = doc["alternator_brand_model"].as<String>();
     SolarWatts = doc["solar_watts"];
     imuMountOrientation = doc["imu_mount_orientation"];
@@ -3120,6 +3152,15 @@ void setupServer() {
       foundParameter = true;
       faCommissionGate = (request->getParam("faCommissionGate")->value().toInt() != 0);
       queueConsoleMessageF("Commissioning matrix gate %s", faCommissionGate ? "RELAXED (Phase 2)" : "strict");
+    }
+
+    // ── Active 3-current resonance test (COMMISSIONING_SPEC §3.2): arm = clear the ring + collect ──
+    else if (request->hasParam("bcurRtest")) {
+      foundParameter = true;
+      bool on = (request->getParam("bcurRtest")->value().toInt() != 0);
+      if (on) bcurRtestCount = 0;  // arm clears; samples accrue while faCommissionGate is also open
+      bcurRtestActive = on;
+      queueConsoleMessageF("Resonance current test %s", on ? "ARMED (vary charge current)" : "stopped");
     }
 
     // ── Auto-commissioning: state machine ───────────────────────────────────
@@ -4493,10 +4534,45 @@ void setupServer() {
       bhResultCount = 0; bhResultHead = 0;
       bhCapCount = 0; bhCapHead = 0; bhCapDirty = false;
       bhTestState = 0;
+      capLowAnchorValid = false; capLastPct = NAN; capLastUpdateEpoch = 0;  // reset the capacity anchor/measurement state
       settingWrite(NK_bhResults, "");
       settingWrite(NK_bhCapBlob, "");
       settingWrite(NK_bhBaseline, "0");
       queueConsoleMessage("BATT HEALTH: history cleared, baseline reset (battery replaced)");
+    }
+    if (request->hasParam("bhClearHistory")) {
+      foundParameter = true;   // wipe ONLY the resistance-test table; capacity baseline + trend untouched
+      bhResultCount = 0; bhResultHead = 0;
+      bhLastResultDcir = 0.0f;
+      settingWrite(NK_bhResults, "");
+      queueConsoleMessage("BATT HEALTH: resistance-test history cleared");
+    }
+    // ── Capacity tracker config + OCV table ──
+    if (request->hasParam("capRestFrac"))   { foundParameter = true; capRestCurrentFrac = request->getParam("capRestFrac")->value().toFloat();   settingWrite(NK_capRestFrac, String(capRestCurrentFrac, 4).c_str()); }
+    if (request->hasParam("capRestFloor"))  { foundParameter = true; capRestFloorMin    = (uint16_t)request->getParam("capRestFloor")->value().toInt(); settingWrite(NK_capRestFloor, String(capRestFloorMin).c_str()); }
+    if (request->hasParam("capSettleRate")) { foundParameter = true; capSettleRateMv10  = request->getParam("capSettleRate")->value().toFloat(); settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str()); }
+    if (request->hasParam("capSocLowMax"))  { foundParameter = true; capSocLowMax       = request->getParam("capSocLowMax")->value().toFloat();  settingWrite(NK_capSocLowMax, String(capSocLowMax, 1).c_str()); }
+    if (request->hasParam("capMinSpan"))    { foundParameter = true; capMinSpan         = request->getParam("capMinSpan")->value().toFloat();    settingWrite(NK_capMinSpan, String(capMinSpan, 1).c_str()); }
+    if (request->hasParam("capChgEff"))     { foundParameter = true; capChgEff          = request->getParam("capChgEff")->value().toFloat();     settingWrite(NK_capChgEff, String(capChgEff, 4).c_str()); }
+    if (request->hasParam("capFullSoc"))    { foundParameter = true; capFullSoc         = request->getParam("capFullSoc")->value().toFloat();    settingWrite(NK_capFullSoc, String(capFullSoc, 1).c_str()); }
+    if (request->hasParam("capRefMode"))    { foundParameter = true; capRefMode         = (uint8_t)request->getParam("capRefMode")->value().toInt(); settingWrite(NK_capRefMode, String(capRefMode).c_str()); }
+    if (request->hasParam("capTempNorm"))   { foundParameter = true; capTempNormEnable  = (uint8_t)request->getParam("capTempNorm")->value().toInt(); settingWrite(NK_capTempNorm, String(capTempNormEnable).c_str()); }
+    if (request->hasParam("capTempCoeff"))  { foundParameter = true; capTempCoeffPctC   = request->getParam("capTempCoeff")->value().toFloat();  settingWrite(NK_capTempCoeff, String(capTempCoeffPctC, 3).c_str()); }
+    if (request->hasParam("capTempRef"))    { foundParameter = true; capTempRefC        = request->getParam("capTempRef")->value().toFloat();   settingWrite(NK_capTempRef, String(capTempRefC, 1).c_str()); }
+    if (request->hasParam("capOcv")) {
+      foundParameter = true;   // full OCV table as a comma-joined string of CAP_OCV_ROWS rested voltages
+      String body = request->getParam("capOcv")->value();
+      capDeserializeOcv(body);
+      settingWrite(NK_capOcvBlob, body.c_str());
+    }
+    if (request->hasParam("capClearPoints")) {
+      foundParameter = true;   // wipe ONLY the capacity trend + baseline; resistance history untouched
+      bhBaselineCapacityAh = 0.0f;
+      bhCapCount = 0; bhCapHead = 0; bhCapDirty = false;
+      capLowAnchorValid = false; capLastPct = NAN; capLastUpdateEpoch = 0;
+      settingWrite(NK_bhCapBlob, "");
+      settingWrite(NK_bhBaseline, "0");
+      queueConsoleMessage("BATT CAP: capacity trend + baseline cleared");
     }
     if (request->hasParam("LogAllLearningEvents")) {
       foundParameter = true;
@@ -4846,6 +4922,32 @@ void setupServer() {
       }
       recomputeCvGains();
     }
+    // CV battery iExcess current-tracking floor coefficients (§3.2). Written by the resonance current-check
+    // on Apply; 0/0 = static floor. Hand-settable on the bench too.
+    if (request->hasParam("cvFloorK0")) {
+      foundParameter = true;
+      cvFloorK0 = request->getParam("cvFloorK0")->value().toFloat();
+      settingWrite(NK_cvFloorK0, String(cvFloorK0, 4).c_str());
+    }
+    if (request->hasParam("cvFloorK1")) {
+      foundParameter = true;
+      cvFloorK1 = request->getParam("cvFloorK1")->value().toFloat();
+      settingWrite(NK_cvFloorK1, String(cvFloorK1, 4).c_str());
+    }
+    // Resonance current-check (§3.2): arm/disarm field-commanding, and set the commanded level. Disarm
+    // also zeroes the target so the loop slews back toward the normal AUTO setpoint gently.
+    else if (request->hasParam("resTest")) {
+      foundParameter = true;
+      resTestActive = (request->getParam("resTest")->value().toInt() != 0);
+      if (!resTestActive) resTestTargetA = 0.0f;
+      resTestLastCmdMs = millis();
+      queueConsoleMessageF("Resonance current-check %s", resTestActive ? "ARMED (wizard commands current)" : "released");
+    }
+    else if (request->hasParam("resTestTargetA")) {
+      foundParameter = true;
+      resTestTargetA = request->getParam("resTestTargetA")->value().toFloat();
+      resTestLastCmdMs = millis();  // keepalive refresh (deadman)
+    }
     if (request->hasParam("cvPlantTau")) {
       foundParameter = true;
       cvPlantTau = request->getParam("cvPlantTau")->value().toFloat();
@@ -5121,6 +5223,16 @@ void setupServer() {
       queueConsoleMessageF("IExcess threshold floor set to: %.1fA", IExcessFloorA);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
+    // CV battery-current detector floor (§G) — separate from IExcessFloorA so commissioning can
+    // set it from measured battery ripple (≈3× smaller than alternator ripple) instead of the proxy.
+    if (request->hasParam("IExcessFloorABatt")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessFloorABatt")->value();
+      IExcessFloorABatt = constrain(inputMessage.toFloat(), 1.0f, 20.0f);
+      settingWrite(NK_IExcessFloorABatt, String(IExcessFloorABatt, 1).c_str());
+      queueConsoleMessageF("IExcess battery-current floor set to: %.1fA", IExcessFloorABatt);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
     if (request->hasParam("IExcessCeilA")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessCeilA")->value();
@@ -5389,22 +5501,16 @@ void setupServer() {
       ft_faMatrixFlush.worstSession = 0;
       ft_faDetector.worstSession = 0;
       ft_faWindowFinalize.worstSession = 0;
+      ft_zeroLogService.worstSession = 0;
+      ft_bhFlushCapNVS.worstSession = 0;
+      ft_kneeLearnService.worstSession = 0;
       // NOTE: the ripple analyzer's per-session worsts (faSesPkpkWorstA / faSesPeakWorstA /
       // faSesPeakWorstHz) used to be cleared here too. They now persist across reboot and are
       // cleared only by the ripple panel's own reset (ResetRipplePeaks handler below), so a
       // diagnostics "Reset Peak Values" press no longer wipes the ripple worsts.
       ft_uploadBufferedRecords.worstSession = 0;
       ft_buildConfigPayload.worstSession = 0;
-      ft_UpdateEngineRuntime.worstSession = 0;
-      ft_UpdateEngineFuel.worstSession = 0;
       ft_UpdateBatterySOC.worstSession = 0;
-      ft_UpdateTravelStatistics.worstSession = 0;
-      ft_UpdateBoardTempPressureMaximums.worstSession = 0;
-      ft_handleSocGainReset.worstSession = 0;
-      ft_handleAltZeroReset.worstSession = 0;
-      ft_calculateChargeTimes.worstSession = 0;
-      ft_UpdateSailingMetrics.worstSession = 0;
-      ft_updateWeatherMode.worstSession = 0;
       ft_updateSensorWindow.worstSession = 0;
       ft_checkTimeSync.worstSession = 0;
       ft_rai_total.worstSession = 0;
@@ -5957,8 +6063,11 @@ void setupServer() {
     // User account info
     doc["username"] = request->getParam("username", true)->value();
     doc["email"] = request->getParam("email", true)->value();
-    // Vessel info (15 fields)
+    // Vessel info (17 fields)
     doc["boat_length_ft"] = request->getParam("boat_length_ft", true)->value().toFloat();
+    // Guarded: old vessel_info.json predating these fields won't carry them, so a profile
+    // update from a stale RAM cache would null-deref an unguarded getParam.
+    doc["boat_displacement_lbs"] = request->hasParam("boat_displacement_lbs", true) ? request->getParam("boat_displacement_lbs", true)->value().toFloat() : 0.0f;
     doc["boat_type"] = request->getParam("boat_type", true)->value();
     doc["boat_make_model"] = request->getParam("boat_make_model", true)->value();
     doc["boat_year"] = request->getParam("boat_year", true)->value().toInt();
@@ -5968,6 +6077,7 @@ void setupServer() {
     doc["battery_voltage"] = request->getParam("battery_voltage", true)->value().toInt();
     doc["battery_capacity_ah"] = request->getParam("battery_capacity_ah", true)->value().toInt();
     doc["battery_type"] = request->getParam("battery_type", true)->value();
+    doc["battery_make_model"] = request->hasParam("battery_make_model", true) ? request->getParam("battery_make_model", true)->value() : String("");
     doc["alternator_brand_model"] = request->getParam("alternator_brand_model", true)->value();
     doc["solar_watts"] = request->getParam("solar_watts", true)->value().toInt();
     doc["imu_mount_orientation"] = request->getParam("imu_mount_orientation", true)->value().toInt();
@@ -6047,8 +6157,11 @@ void setupServer() {
     doc["username"] = request->getParam("username", true)->value();
     doc["email"] = request->getParam("email", true)->value();
 
-    // Vessel info (15 fields)
+    // Vessel info (17 fields)
     doc["boat_length_ft"] = request->getParam("boat_length_ft", true)->value().toFloat();
+    // Guarded: old vessel_info.json predating these fields won't carry them, so a profile
+    // update from a stale RAM cache would null-deref an unguarded getParam.
+    doc["boat_displacement_lbs"] = request->hasParam("boat_displacement_lbs", true) ? request->getParam("boat_displacement_lbs", true)->value().toFloat() : 0.0f;
     doc["boat_type"] = request->getParam("boat_type", true)->value();
     doc["boat_make_model"] = request->getParam("boat_make_model", true)->value();
     doc["boat_year"] = request->getParam("boat_year", true)->value().toInt();
@@ -6058,6 +6171,7 @@ void setupServer() {
     doc["battery_voltage"] = request->getParam("battery_voltage", true)->value().toInt();
     doc["battery_capacity_ah"] = request->getParam("battery_capacity_ah", true)->value().toInt();
     doc["battery_type"] = request->getParam("battery_type", true)->value();
+    doc["battery_make_model"] = request->hasParam("battery_make_model", true) ? request->getParam("battery_make_model", true)->value() : String("");
     doc["alternator_brand_model"] = request->getParam("alternator_brand_model", true)->value();
     doc["solar_watts"] = request->getParam("solar_watts", true)->value().toInt();
     doc["imu_mount_orientation"] = request->getParam("imu_mount_orientation", true)->value().toInt();
@@ -7113,8 +7227,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,"
+                               "%d,%d,%d,%d,"
+                               // net -12 specifiers parked here (count-only; field identity is by CSV2_FIELDS order)
                                // 28 ignition-cycle watermark fields (14 lo + 14 hi)
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -7462,30 +7576,18 @@ void SendWifiData() {
                                SafeInt(ft_checkWiFiConnection.worstSession),
                                SafeInt(ft_ch1_compute_stats.worstWindow),
                                SafeInt(ft_ch1_compute_stats.worstSession),
-                               SafeInt(ft_UpdateEngineRuntime.worstWindow),
-                               SafeInt(ft_UpdateEngineRuntime.worstSession),
-                               SafeInt(ft_UpdateEngineFuel.worstWindow),
-                               SafeInt(ft_UpdateEngineFuel.worstSession),
                                SafeInt(ft_UpdateBatterySOC.worstWindow),
                                SafeInt(ft_UpdateBatterySOC.worstSession),
-                               SafeInt(ft_UpdateTravelStatistics.worstWindow),
-                               SafeInt(ft_UpdateTravelStatistics.worstSession),
-                               SafeInt(ft_UpdateBoardTempPressureMaximums.worstWindow),
-                               SafeInt(ft_UpdateBoardTempPressureMaximums.worstSession),
-                               SafeInt(ft_handleSocGainReset.worstWindow),
-                               SafeInt(ft_handleSocGainReset.worstSession),
-                               SafeInt(ft_handleAltZeroReset.worstWindow),
-                               SafeInt(ft_handleAltZeroReset.worstSession),
-                               SafeInt(ft_calculateChargeTimes.worstWindow),
-                               SafeInt(ft_calculateChargeTimes.worstSession),
-                               SafeInt(ft_UpdateSailingMetrics.worstWindow),
-                               SafeInt(ft_UpdateSailingMetrics.worstSession),
-                               SafeInt(ft_updateWeatherMode.worstWindow),
-                               SafeInt(ft_updateWeatherMode.worstSession),
                                SafeInt(ft_updateSensorWindow.worstWindow),
                                SafeInt(ft_updateSensorWindow.worstSession),
                                SafeInt(ft_checkTimeSync.worstWindow),
                                SafeInt(ft_checkTimeSync.worstSession),
+                               SafeInt(ft_zeroLogService.worstWindow),
+                               SafeInt(ft_zeroLogService.worstSession),
+                               SafeInt(ft_bhFlushCapNVS.worstWindow),
+                               SafeInt(ft_bhFlushCapNVS.worstSession),
+                               SafeInt(ft_kneeLearnService.worstWindow),
+                               SafeInt(ft_kneeLearnService.worstSession),
                                // from CSV3 (firmware-computed)
                                SafeInt(currentRPMTableIndex),
                                SafeInt(pidInitialized ? 1 : 0),
@@ -7821,7 +7923,9 @@ void SendWifiData() {
                                "%d,"  // battTempCoeff
                                "%d,"  // TempPIDKiDownFrac
                                "%d,"  // ThermalSlopeWindowSec
-                               "%d",  // cvCurrentSrc
+                               "%d,"  // cvCurrentSrc
+                               "%d,"  // IExcessFloorABatt
+                               "%d",  // cvFloorK1
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8150,7 +8254,9 @@ void SendWifiData() {
                                SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
                                SafeInt(TempPIDKiDownFrac, 1000),                // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
                                SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
-                               (int)cvCurrentSrc                                // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
+                               (int)cvCurrentSrc,                               // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
+                               SafeInt(IExcessFloorABatt, 10),                  // CSV3_IExcessFloorABatt — ×10, 1 decimal
+                               SafeInt(cvFloorK1, 10000)                        // CSV3_cvFloorK1 — A/A ×10000 (0 = static floor)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
@@ -8357,6 +8463,7 @@ void saveVesselInfoToFile() {
   }
   DynamicJsonDocument doc(1024);
   doc["boat_length_ft"]         = BOAT_LENGTH_FT;
+  doc["boat_displacement_lbs"]  = BOAT_DISPLACEMENT_LBS;
   doc["boat_type"]              = BOAT_TYPE;
   doc["boat_make_model"]        = BOAT_MAKE_MODEL;
   doc["boat_year"]              = BOAT_YEAR;
@@ -8366,6 +8473,7 @@ void saveVesselInfoToFile() {
   doc["battery_voltage"]        = BATTERY_VOLTAGE;
   doc["battery_capacity_ah"]    = BatteryCapacity_Ah;
   doc["battery_type"]           = BATTERY_TYPE;
+  doc["battery_make_model"]     = BATTERY_MAKE_MODEL;
   doc["alternator_brand_model"] = ALTERNATOR_BRAND_MODEL;
   doc["solar_watts"]            = SolarWatts;
   doc["imu_mount_orientation"]  = imuMountOrientation;

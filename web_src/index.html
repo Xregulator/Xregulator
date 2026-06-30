@@ -262,6 +262,15 @@
                 <hr>
 
                 <div class="form-row">
+                  <div class="form-label">Displacement (lbs):</div>
+                  <div class="form-input">
+                    <input name="BOAT_DISPLACEMENT_LBS" type="number" step="1" min="0" max="5000000">
+                  </div>
+                </div>
+
+                <hr>
+
+                <div class="form-row">
                   <div class="form-label">Type:</div>
                   <div class="form-input">
                     <select name="BOAT_TYPE" required>
@@ -366,6 +375,15 @@
                       <option value="lead_acid">Lead Acid</option>
                       <option value="other">Other</option>
                     </select>
+                  </div>
+                </div>
+
+                <hr>
+
+                <div class="form-row">
+                  <div class="form-label">Battery Make/Model:</div>
+                  <div class="form-input">
+                    <input name="BATTERY_MAKE_MODEL" type="text" maxlength="50">
                   </div>
                 </div>
 
@@ -2055,7 +2073,7 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <input name="altVbusTol" type="number" step="0.01" />
+                      <input name="altVbusTol" type="number" step="0.001" />
                       <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                     </form>
                   </div>
@@ -2653,14 +2671,48 @@
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
-                      Threshold Floor — minimum amps (<span id="IExcessFloorA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.<br><br>This floor now governs <strong>both</strong> over-current detectors: the bulk alternator-current detector and the CV <strong>battery-current</strong> detector (absorption/float, when the CV loop regulates battery current). Commissioning derives it from <em>alternator</em>-current ripple and applies it to both — a conservative proxy for the battery detector, since battery ripple is usually ≤ alternator ripple. A separate battery-ripple floor is planned future work.</span></span>
+                      Threshold Floor (alternator) — minimum amps (<span id="IExcessFloorA_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.<br><br>This floor governs the <strong>bulk alternator-current</strong> over-current detector. The CV <strong>battery-current</strong> detector (absorption/float) now has its own separate floor below, set from measured battery ripple — battery ripple is usually ~3× smaller than alternator ripple, so a battery-specific floor catches over-current earlier without more false fires. Commissioning Step 6 sets both.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
                         <input name="IExcessFloorA" type="number" step="0.5" min="1" max="20" />
                         <span class="protections-unit">A</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      Threshold Floor (battery) — minimum amps (<span id="IExcessFloorABatt_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The minimum detection threshold for the CV <strong>battery-current</strong> over-current detector (absorption/float, when the CV loop regulates battery current). Separate from the alternator floor above because battery current carries much less ripple than alternator current (the belt-resonance AC mostly returns through bus capacitance, not the battery), so this floor can be lower — catching real over-current sooner without tripping on ripple. Commissioning Step 6 sets it from measured battery ripple; defaults equal to the alternator floor until then.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="IExcessFloorABatt" type="number" step="0.5" min="1" max="20" />
+                        <span class="protections-unit">A</span>
+                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                      </div>
+                    </form>
+                  </article>
+
+                  <hr>
+
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name">
+                      <span class="protections-tag g3">G3</span>
+                      Battery floor — current-tracking slope (<span id="cvFloorK1_echo">?</span> A/A)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the battery over-current floor above <strong>rises per amp of charge current</strong>. The belt/alternator ripple that the floor must clear grows with load, so the resonance current-check measures this slope and the detector recomputes the floor live: <code>floor = max(your floor above, slope × present battery current)</code>, bounded by the over-current ceiling. <strong>Set to 0 to disable current-tracking</strong> — the floor then stays fixed at the value above (static). Normally written by the commissioning resonance current-check, not by hand.</span></span>
+                    </div>
+                    <form action="/get" method="GET" target="hidden-form">
+                      <input type="hidden" name="password" class="password_field">
+                      <div class="protections-edit-row">
+                        <input name="cvFloorK1" type="number" step="0.001" min="0" max="2" />
+                        <span class="protections-unit">A/A</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
@@ -3617,163 +3669,6 @@
 
           </div><!-- closes .settings-card for Battery -->
 
-          <!-- ════════════ Battery Health (active DCIR test + capacity trend) ════════════ -->
-          <div class="settings-card">
-            <details open>
-              <summary
-                style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Health
-              </summary>
-
-              <p style="margin: 6px 0 12px 0;">
-                Estimates how the lithium bank is aging from two signals: an active internal-resistance test
-                (internal resistance, DCIR) you run on demand, and a capacity estimate captured automatically
-                each time the bank reaches full charge. The battery is assumed brand-new when first installed —
-                the first capacity reading becomes the 100% baseline. Press <strong>Start Over</strong> if you
-                replace the bank.
-              </p>
-
-              <details style="margin-bottom: 12px;">
-                <summary style="cursor: pointer; font-weight: 600;">How it works</summary>
-                <div style="padding: 8px 0; font-size: 14px; line-height: 1.5;">
-                  <p><strong>Resistance test (DCIR):</strong> with the engine running, the regulator commands a
-                    repeated abrupt step in charge current and measures how far the battery voltage moves for a
-                    known change in current (ΔV ÷ ΔI). Rising resistance over months is an early aging signal.
-                    The absolute value depends on temperature and state of charge, so compare runs taken under
-                    similar conditions — the trend matters more than any single number.</p>
-                  <p><strong>Capacity:</strong> each time the bank charges from a low point all the way to full,
-                    the amp-hours returned are extrapolated to a full 0–100% span. Plotted against charge cycles,
-                    a falling line is real capacity fade. Only reasonably deep charges are used, so the plot fills
-                    in slowly.</p>
-                  <p style="opacity: 0.8;">This reads the whole bank through one shunt — it cannot see an
-                    individual weak cell. A pack-level number can look healthy while one cell is failing.</p>
-                </div>
-              </details>
-
-              <!-- Run / status -->
-              <div class="form-row">
-                <div class="form-label">Test status:</div>
-                <div class="form-input">
-                  <span id="bh_status" class="reading" style="white-space: normal;">—</span>
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-label">Last resistance (DCIR):</div>
-                <div class="form-input">
-                  <span id="bh_lastdcir" class="reading">—</span>
-                </div>
-              </div>
-              <div style="display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0;">
-                <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
-                  <input type="hidden" name="password" class="password_field">
-                  <input type="hidden" name="BatteryHealthTest" value="1">
-                  <input type="submit" value="Run Health Test" class="btn-primary"
-                    onclick="setTimeout(pollBatteryHealth, 600);" />
-                </form>
-                <form action="/get" method="GET" target="hidden-form" style="margin: 0;"
-                  onsubmit="return confirm('Clear all battery-health history and reset the 100% baseline? Use this only when the battery has been replaced.');">
-                  <input type="hidden" name="password" class="password_field">
-                  <input type="hidden" name="bhStartOver" value="1">
-                  <input type="submit" value="Start Over (battery replaced)" class="btn-danger-ghost"
-                    onclick="setTimeout(pollBatteryHealth, 600);" />
-                </form>
-              </div>
-
-              <!-- Test settings -->
-              <details style="margin: 10px 0;">
-                <summary style="cursor: pointer; font-weight: 600;">Test settings</summary>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label">
-                    <span>Step low current (A) (<span id="bhStepLowA_echo">?</span>):</span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="bhStepLowA" type="number" step="0.5" min="0" max="200" />
-                      <input type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label">
-                    <span>Step size (A) (<span id="bhStepDeltaA_echo">?</span>):</span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="bhStepDeltaA" type="number" step="0.5" min="1" max="200" />
-                      <input type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label">
-                    <span>Dwell per level (sec) (<span id="bhDwellSec_echo">?</span>):</span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="bhDwellSec" type="number" step="0.5" min="1" max="30" />
-                      <input type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-
-                <hr />
-                <div class="form-row">
-                  <div class="form-label">
-                    <span>Scored steps (<span id="bhNumEdges_echo">?</span>):</span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="bhNumEdges" type="number" step="1" min="3" max="60" />
-                      <input type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
-              </details>
-
-              <hr />
-              <!-- DCIR result table -->
-              <div style="font-weight: 600; margin: 10px 0 6px 0;">Resistance test history</div>
-              <div style="overflow-x: auto;">
-                <table class="data-table" style="width: 100%; font-size: 13px;">
-                  <thead>
-                    <tr>
-                      <th>When</th>
-                      <th>DCIR (mΩ)</th>
-                      <th>SoC</th>
-                      <th>Batt V</th>
-                      <th>Board °F</th>
-                      <th>Step</th>
-                      <th>Steps</th>
-                    </tr>
-                  </thead>
-                  <tbody id="bhResultsBody">
-                    <tr><td colspan="7" style="text-align:center; opacity:0.7;">No tests yet</td></tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <hr />
-              <!-- Capacity vs cycles trend -->
-              <div style="font-weight: 600; margin: 10px 0 6px 0;">
-                Capacity health vs charge cycles (<span id="bh_caplatest">—</span>)
-              </div>
-              <canvas id="bhCapCanvas" width="600" height="220"
-                style="width: 100%; max-width: 600px; height: 220px; background: var(--card-bg, #111); border: 1px solid var(--border, #333); border-radius: 6px;"></canvas>
-              <div id="bh_capempty" style="opacity: 0.7; font-size: 13px; margin-top: 6px;">
-                No capacity points yet — they appear after the bank charges from a low point to full.
-              </div>
-            </details>
-          </div>
         </div>
 
         <!-- Weather Mode Settings Section -->
@@ -6767,13 +6662,12 @@
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
-                      <span class="toggle-label">Battery</span>
-                      <label class="switch">
-                        <input id="cvCurrentSrc_checkbox" type="checkbox"
-                          onchange="if(handleUserToggle('cvCurrentSrc_checkbox', 'cvCurrentSrc', 'cvCurrentSrc')) { this.form.submit(); submitMessage(); }" />
-                        <span class="slider round"></span>
-                      </label>
-                      <span class="toggle-label">Alternator</span>
+                      <div class="cap-mode-toggle ab-seg" data-seg-for="cvCurrentSrc_checkbox">
+                        <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Battery</button>
+                        <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Alternator</button>
+                      </div>
+                      <input id="cvCurrentSrc_checkbox" type="checkbox" style="display:none;"
+                        onchange="if(handleUserToggle('cvCurrentSrc_checkbox', 'cvCurrentSrc', 'cvCurrentSrc')) { this.form.submit(); submitMessage(); }" />
                       <input id="cvCurrentSrc" name="cvCurrentSrc" type="number" value="" style="display:none;" />
                     </form>
                   </div>
@@ -9983,6 +9877,57 @@
                 </div>
               </div>
 
+              <!-- Zero-Drift Log Flash Flush -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Zero-Drift Log Flash Flush
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Writes the zero-drift diagnostic ring to flash. Field-off only, dirty-gated,
+                      ~30-minute cycle. 0ms is normal while charging; only the flush pass costs anything.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_zeroLogService_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_zeroLogService_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Battery Health NVS Save -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Battery Health NVS Save
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Persists the battery-health capacity blob and DCIR results to NVS. Field-off
+                      only, dirty-gated — fires only after a capacity anchor or completed health test.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_bhFlushCapNVS_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_bhFlushCapNVS_ses_ID">0</span>
+                </div>
+              </div>
+
+              <!-- Auto Min% Learn NVS Save -->
+              <div
+                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
+                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Auto Min% Learn NVS Save
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️
+                    <span class="tooltip-box">Persists learned field-onset floors (Auto Min%) to NVS. Field-off only,
+                      dirty-gated, throttled to once per 5 minutes.</span>
+                  </span>
+                </div>
+                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
+                    id="ft_kneeLearnService_win_ID">0</span></div>
+                <div
+                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
+                  <span id="ft_kneeLearnService_ses_ID">0</span>
+                </div>
+              </div>
+
               <!-- Upload Buffered Records -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
@@ -10087,30 +10032,6 @@
                 SOC / Update Block
               </div>
 
-              <!-- Update Engine Runtime -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Engine Runtime</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_UpdateEngineRuntime_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_UpdateEngineRuntime_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Update Engine Fuel -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Engine Fuel</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_UpdateEngineFuel_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_UpdateEngineFuel_ses_ID">0</span>
-                </div>
-              </div>
-
               <!-- Update Battery SOC -->
               <div
                 style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
@@ -10120,90 +10041,6 @@
                 <div
                   style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
                   <span id="ft_UpdateBatterySOC_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Update Travel Statistics -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Travel Statistics</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_UpdateTravelStatistics_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_UpdateTravelStatistics_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Update Board Temp / Pressure -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Board Temp / Pressure</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_UpdateBoardTempPressureMaximums_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_UpdateBoardTempPressureMaximums_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Handle SOC Gain Reset -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Handle SOC Gain Reset</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_handleSocGainReset_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_handleSocGainReset_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Handle Alt Zero Reset -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Handle Alt Zero Reset</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_handleAltZeroReset_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_handleAltZeroReset_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Calculate Charge Times -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Calculate Charge Times</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_calculateChargeTimes_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_calculateChargeTimes_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Update Sailing Metrics -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Sailing Metrics</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_UpdateSailingMetrics_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_UpdateSailingMetrics_ses_ID">0</span>
-                </div>
-              </div>
-
-              <!-- Update Weather Mode -->
-              <div
-                style="grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; border-bottom: 1px solid var(--border);">
-                <div style="padding: 6px 8px; font-size: 12px; color: #666;">Update Weather Mode</div>
-                <div style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right;"><span
-                    id="ft_updateWeatherMode_win_ID">0</span></div>
-                <div
-                  style="padding: 6px 8px; font-size: 15px; font-weight: bold; text-align: right; border-left: 1px solid var(--border);">
-                  <span id="ft_updateWeatherMode_ses_ID">0</span>
                 </div>
               </div>
 
@@ -10830,6 +10667,13 @@
   
     <div id="livedata-diag" class="sub-tab-content">
 
+      <div class="diag-panel-tabs">
+        <button class="diag-panel-tab active" onclick="showDiagPanel('alternator', event)">Alternator</button>
+        <button class="diag-panel-tab" onclick="showDiagPanel('battery', event)">Battery</button>
+      </div>
+
+      <div id="diag-panel-alternator" class="diag-panel active">
+
       <!-- Charging-System Health (moved here from Live Data -> Alternator) -->
       <details class="diag-section" open>
         <summary class="diag-section-title">Charging-System Health</summary>
@@ -11331,6 +11175,287 @@
         </div>
         </div>
       </details>
+      </div><!-- closes #diag-panel-alternator -->
+
+      <div id="diag-panel-battery" class="diag-panel">
+
+                <!-- ════════════ Battery Health (active DCIR test + capacity trend) ════════════ -->
+                <div class="settings-card">
+                  <details open>
+                    <summary
+                      style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
+                      Health
+                    </summary>
+
+                    <p style="margin: 6px 0 12px 0;">
+                      Estimates how the lithium bank is aging from two signals: an active internal-resistance test
+                      (internal resistance, DCIR) you run on demand, and a capacity estimate captured automatically
+                      each time the bank reaches full charge. The battery is assumed brand-new when first installed —
+                      the first capacity reading becomes the 100% baseline. Press <strong>Start Over</strong> if you
+                      replace the bank.
+                    </p>
+
+                    <details style="margin-bottom: 12px;">
+                      <summary style="cursor: pointer; font-weight: 600;">How it works</summary>
+                      <div style="padding: 8px 0; font-size: 14px; line-height: 1.5;">
+                        <p><strong>Resistance test (DCIR):</strong> with the engine running, the regulator commands a
+                          repeated abrupt step in charge current and measures how far the battery voltage moves for a
+                          known change in current (ΔV ÷ ΔI). Rising resistance over months is an early aging signal.
+                          The absolute value depends on temperature and state of charge, so compare runs taken under
+                          similar conditions — the trend matters more than any single number.</p>
+                        <p><strong>Capacity:</strong> each time the bank charges from a low point all the way to full,
+                          the amp-hours returned are extrapolated to a full 0–100% span. Plotted against charge cycles,
+                          a falling line is real capacity fade. Only reasonably deep charges are used, so the plot fills
+                          in slowly.</p>
+                        <p style="opacity: 0.8;">This reads the whole bank through one shunt — it cannot see an
+                          individual weak cell. A pack-level number can look healthy while one cell is failing.</p>
+                      </div>
+                    </details>
+
+                    <!-- Run / status -->
+                    <div class="form-row">
+                      <div class="form-label">Test status:</div>
+                      <div class="form-input">
+                        <span id="bh_status" class="reading" style="white-space: normal;">—</span>
+                      </div>
+                    </div>
+                    <div class="form-row">
+                      <div class="form-label">Last resistance (DCIR):</div>
+                      <div class="form-input">
+                        <span id="bh_lastdcir" class="reading">—</span>
+                      </div>
+                    </div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0;">
+                      <form action="/get" method="GET" target="hidden-form" style="margin: 0;">
+                        <input type="hidden" name="password" class="password_field">
+                        <input type="hidden" name="BatteryHealthTest" value="1">
+                        <input type="submit" value="Run Health Test" class="btn-primary"
+                          onclick="setTimeout(pollBatteryHealth, 600);" />
+                      </form>
+                      <form action="/get" method="GET" target="hidden-form" style="margin: 0;"
+                        onsubmit="return confirm('Clear all battery-health history and reset the 100% baseline? Use this only when the battery has been replaced.');">
+                        <input type="hidden" name="password" class="password_field">
+                        <input type="hidden" name="bhStartOver" value="1">
+                        <input type="submit" value="Start Over (battery replaced)" class="btn-danger-ghost"
+                          onclick="setTimeout(pollBatteryHealth, 600);" />
+                      </form>
+                    </div>
+
+                    <!-- Test settings -->
+                    <details style="margin: 10px 0;">
+                      <summary style="cursor: pointer; font-weight: 600;">Test settings</summary>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label">
+                          <span>Step low current (A) (<span id="bhStepLowA_echo">?</span>):</span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="bhStepLowA" type="number" step="0.5" min="0" max="200" />
+                            <input type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label">
+                          <span>Step size (A) (<span id="bhStepDeltaA_echo">?</span>):</span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="bhStepDeltaA" type="number" step="0.5" min="1" max="200" />
+                            <input type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label">
+                          <span>Dwell per level (sec) (<span id="bhDwellSec_echo">?</span>):</span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="bhDwellSec" type="number" step="0.5" min="1" max="30" />
+                            <input type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label">
+                          <span>Scored steps (<span id="bhNumEdges_echo">?</span>):</span>
+                        </div>
+                        <div class="form-input">
+                          <form action="/get" method="GET" target="hidden-form">
+                            <input type="hidden" name="password" class="password_field">
+                            <input name="bhNumEdges" type="number" step="1" min="3" max="60" />
+                            <input type="submit" value="Set" class="btn-primary" />
+                          </form>
+                        </div>
+                      </div>
+                    </details>
+
+                    <hr />
+                    <!-- DCIR result table -->
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 10px 0 6px 0;">
+                      <div style="font-weight: 600;">Resistance test history</div>
+                      <form action="/get" method="GET" target="hidden-form" style="margin: 0;"
+                        onsubmit="return confirm('Clear all resistance-test rows from the table? The capacity 100% baseline and capacity trend are NOT affected — use Start Over for that.');">
+                        <input type="hidden" name="password" class="password_field">
+                        <input type="hidden" name="bhClearHistory" value="1">
+                        <input type="submit" value="Clear history" class="btn-secondary btn-sm"
+                          onclick="setTimeout(pollBatteryHealth, 600);" />
+                      </form>
+                    </div>
+                    <p style="opacity: 0.7; font-size: 12px; margin: 0 0 6px 0;">
+                      Oldest row is the baseline. <strong>@25°C</strong> normalizes for board temperature so runs are
+                      comparable; <strong>Δ base</strong> is the temp-corrected change since the baseline (the aging
+                      signal). <strong>Fit</strong> ✓ = the scored steps agreed; ⚠ = scattered, treat that row with care.
+                    </p>
+                    <div style="overflow-x: auto;">
+                      <table class="data-table" style="width: 100%; font-size: 13px;">
+                        <thead>
+                          <tr>
+                            <th>When</th>
+                            <th>DCIR (mΩ)</th>
+                            <th>@25°C (mΩ)</th>
+                            <th>Δ base</th>
+                            <th>Fit</th>
+                            <th>ΔV (mV)</th>
+                            <th>ΔI (A)</th>
+                            <th>Dwell (s)</th>
+                            <th>SoC</th>
+                            <th>Batt V</th>
+                            <th>Board °F</th>
+                            <th>Step</th>
+                            <th>Steps</th>
+                          </tr>
+                        </thead>
+                        <tbody id="bhResultsBody">
+                          <tr><td colspan="13" style="text-align:center; opacity:0.7;">No tests yet</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <hr />
+                    <!-- Capacity % vs date (OCV-anchored) -->
+                    <div style="font-weight: 600; margin: 10px 0 4px 0;">
+                      Battery Capacity — <span id="bh_capheadline">awaiting first deep cycle</span>
+                    </div>
+                    <div id="bh_capstatus" style="opacity: 0.8; font-size: 12px; margin-bottom: 6px;">—</div>
+                    <canvas id="bhCapCanvas" width="600" height="220"
+                      style="width: 100%; max-width: 600px; height: 220px; background: var(--card-bg, #111); border: 1px solid var(--border, #333); border-radius: 6px;"></canvas>
+                    <div id="bh_capempty" style="opacity: 0.7; font-size: 13px; margin-top: 6px;">
+                      No capacity points yet — one is recorded only after the bank rests low (bottom knee) and then
+                      charges to full. Hollow markers = low-confidence reads.
+                    </div>
+
+                    <details style="margin-top: 12px;">
+                      <summary style="cursor: pointer; font-weight: 600;">Capacity tracker settings</summary>
+                      <p style="font-size: 13px; opacity: 0.85; line-height: 1.5;">
+                        Measured capacity needs an independent low state-of-charge anchor from a <strong>rested</strong>
+                        voltage. Edit the rested open-circuit-voltage curve for your bank (LiFePO4 default shown,
+                        scaled to your nominal voltage). Only the bottom-knee rows (≤20%) are actually used for the
+                        anchor, so those are the ones worth getting right.
+                      </p>
+
+                      <div style="font-weight: 600; margin: 8px 0 4px;">Rested (open-circuit) voltage curve</div>
+                      <table class="data-table" style="width: auto; font-size: 13px;">
+                        <thead><tr><th>SoC %</th><th>Rested V</th></tr></thead>
+                        <tbody id="capOcvBody"><tr><td colspan="2">…</td></tr></tbody>
+                      </table>
+                      <div style="display: flex; gap: 8px; margin: 6px 0;">
+                        <input type="hidden" name="password" class="password_field">
+                        <button type="button" class="btn-primary" onclick="submitCapOcv()">Save curve</button>
+                        <button type="button" class="btn-secondary" onclick="loadCapOcvDefaults()">LiFePO4 defaults</button>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Capacity reference (0=rated, 1=first reading) (<span id="capRefMode_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capRefMode" type="number" step="1" min="0" max="1" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Rest current threshold (C-fraction) (<span id="capRestFrac_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capRestFrac" type="number" step="0.001" min="0" max="1" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Rest floor before OCV trusted (min) (<span id="capRestFloor_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capRestFloor" type="number" step="1" min="1" max="600" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Voltage settle rate (mV per 10 min) (<span id="capSettleRate_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capSettleRate" type="number" step="0.1" min="0.1" max="50" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Low-anchor max SoC (%) (<span id="capSocLowMax_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capSocLowMax" type="number" step="1" min="1" max="50" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Minimum span (full − low, %) (<span id="capMinSpan_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capMinSpan" type="number" step="1" min="20" max="100" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Charge efficiency (0–1) (<span id="capChgEff_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capChgEff" type="number" step="0.001" min="0.5" max="1" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Full-anchor SoC (%) (<span id="capFullSoc_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capFullSoc" type="number" step="0.5" min="90" max="100" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Temperature normalization (0=off, 1=on) (<span id="capTempNorm_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capTempNorm" type="number" step="1" min="0" max="1" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Capacity temp coefficient (%/°C) (<span id="capTempCoeff_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capTempCoeff" type="number" step="0.05" min="0" max="5" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
+                        <div class="form-label"><span>Temp reference (°C) (<span id="capTempRef_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capTempRef" type="number" step="1" min="-20" max="50" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <form action="/get" method="GET" target="hidden-form" style="margin: 6px 0;"
+                        onsubmit="return confirm('Clear the capacity trend and reset the baseline? (Resistance history is kept.)');">
+                        <input type="hidden" name="password" class="password_field">
+                        <input type="hidden" name="capClearPoints" value="1">
+                        <input type="submit" value="Clear capacity trend" class="btn-danger-ghost"
+                          onclick="setTimeout(pollBatteryHealth, 600);" />
+                      </form>
+                    </details>
+                  </details>
+                </div>
+
+      </div><!-- closes #diag-panel-battery -->
     </div>
   </div>
   </div>

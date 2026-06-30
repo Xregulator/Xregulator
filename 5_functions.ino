@@ -929,11 +929,11 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
   SOC_percent = (int)(SoC_float * 100);  // Store as percentage × 100 for 2 decimals
   wmIgnUpdate(wmIgn_SOC, SoC_float);     // ignition-cycle watermark (float percent, 0..100)
 
-  // Battery Health: track the cycle's deepest point for the capacity extrapolation below.
-  if (CoulombCount_Ah_scaled < bhCycleMinCoulomb_scaled) {
-    bhCycleMinCoulomb_scaled = CoulombCount_Ah_scaled;
-    bhCycleMinSoC_x100 = SOC_percent;
-  }
+  // Capacity tracker (OCV-anchored): rest detection, low-OCV anchor capture, Ah bridge.
+  // Uses the FILTERED INA228 voltage (getFiltV) — rest/OCV is a slow read where filtering
+  // is correct (not a safety path). Board temp °F → °C for the temp coefficient.
+  capTrackTick(BatteryCurrent_scaled / 100.0f, getFiltV(),
+               isnan(ambientTemp) ? NAN : (ambientTemp - 32.0f) / 1.8f, elapsedSeconds);
 
   // =================================================================
   //     FULL CHARGE DETECTION - WORKS FROM ANY CHARGING SOURCE
@@ -961,24 +961,11 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
         lastFullChargeMessage = millis();
       }
 
-      // Battery Health capacity point, once per full-charge event (gated by !FullChargeDetected).
-      // Admit only deep cycles (started ≤80% SoC) — shallow top-offs are too noisy.
+      // Capacity measurement at the full anchor (once per event, gated by !FullChargeDetected).
+      // OCV-anchored — capTrackOnFull validates the low anchor + span and emits a dated point.
       if (!FullChargeDetected) {
-        float fullAh   = (float)BatteryCapacity_Ah;             // CoulombCount was just reset to full
-        float minAh    = bhCycleMinCoulomb_scaled / 100.0f;
-        float socStart = bhCycleMinSoC_x100 / 100.0f;          // percent
-        float ahAdded  = fullAh - minAh;
-        if (socStart <= 80.0f && ahAdded > 0.0f) {
-          float depth = (100.0f - socStart) / 100.0f;
-          if (depth > 0.05f) {
-            float capacityEst = ahAdded / depth;
-            if (capacityEst > 0.3f * BatteryCapacity_Ah && capacityEst < 3.0f * BatteryCapacity_Ah) {
-              bhAppendCapacityPoint(capacityEst, socStart);
-            }
-          }
-        }
-        bhCycleMinCoulomb_scaled = (float)BatteryCapacity_Ah * 100.0f;  // reset cycle trackers to full
-        bhCycleMinSoC_x100 = 10000;
+        uint32_t nowEpoch = timeIsSynced ? (timeBase + (millis() - timeBaseMillis) / 1000) : 0;
+        capTrackOnFull(nowEpoch, isnan(ambientTemp) ? NAN : (ambientTemp - 32.0f) / 1.8f);
       }
 
       FullChargeDetected = true;
@@ -2534,6 +2521,10 @@ void _ReadAnalogInputs_inner() {
                          }
                          lastBcurEmaMs = nowBc;
                        }
+
+                       // Commissioning Step 5: fold this fast Bcur sample into the per-RPM-bin ripple
+                       // capture (no-op unless the matrix gate is open). Feeds the CV battery-current floor.
+                       bcurRippleCommissionUpdate(Bcur, RPM);
 
                        if (IBV > IBVMax)              { IBVMax              = IBV; }
                        if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; }

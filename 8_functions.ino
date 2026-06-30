@@ -737,6 +737,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "IExcessArmMarginV", NK_IExcessArmMarginV, 1 },
   { "IExcessCeilA", NK_IExcessCeilA, 1 },
   { "IExcessFloorA", NK_IExcessFloorA, 1 },
+  { "IExcessFloorABatt", NK_IExcessFloorABatt, 1 },
   { "IExcessFrac", NK_IExcessFrac, 1 },
   { "IExcessFracBulk", NK_IExcessFracBulk, 1 },
   { "IExcessKBleed", NK_IExcessKBleed, 1 },
@@ -897,6 +898,7 @@ String exportConfigJson(bool includeHardware) {
   j += ",\"battery_voltage\":";       j += String((unsigned)BATTERY_VOLTAGE);
   j += ",\"battery_capacity_ah\":";   j += String(BatteryCapacity_Ah);
   j += ",\"battery_type\":";          cfgAppendJsonStr(j, BATTERY_TYPE);
+  j += ",\"battery_make_model\":";    cfgAppendJsonStr(j, BATTERY_MAKE_MODEL);
   j += ",\"alternator_brand_model\":";cfgAppendJsonStr(j, ALTERNATOR_BRAND_MODEL);
   j += "},\"config\":";
   j += manifestConfigObject(includeHardware);
@@ -1015,21 +1017,23 @@ void bhComputeDcir() {
   uint32_t bhT0 = micros();   // this fit runs in a field-on loop pass — report its cost so a spike is attributable
   if (bhSampleCount < 8 || bhToggleCount < (int)bhNumEdges + 3) { bhAbort("not enough samples"); return; }
 
-  uint32_t settleSkip = bhDwellMs / 3; if (settleSkip > 1000) settleSkip = 1000;
-  uint32_t win        = bhDwellMs / 3; if (win < 200) win = 200;
+  // Average the SETTLED tail of each level (last `win` ms before its end toggle). End-of-dwell
+  // windows are robust to the slew time of the now-gentle transitions — both levels are fully
+  // settled regardless of how fast the setpoint got there, so ΔV/ΔI is the same as an abrupt step.
+  uint32_t win = bhDwellMs / 3; if (win < 200) win = 200;
 
-  float Rsum = 0.0f; int Rn = 0;
+  float Rsum = 0.0f, Rsq = 0.0f; int Rn = 0;   // Rsq → per-edge std-dev (fit consistency)
   // Score toggle numbers k = 3 .. bhNumEdges+2 (1-indexed). Array index = k-1.
   for (int k = 3; k <= (int)bhNumEdges + 2; k++) {
     if (k >= bhToggleCount) break;
-    uint32_t tEdge = bhToggleMs[k - 1];
-    uint32_t tNext = bhToggleMs[k];
+    uint32_t tEdge = bhToggleMs[k - 1];   // end of prior level
+    uint32_t tNext = bhToggleMs[k];       // end of new level
     float vb = 0, ib = 0, va = 0, ia = 0;
     int   nb = 0, na = 0;
     for (int s = 0; s < bhSampleCount; s++) {
       uint32_t t = bhSamples[s].tMs;
-      if (t + win >= tEdge && t < tEdge)               { vb += bhSamples[s].v; ib += bhSamples[s].i; nb++; }   // settled end of prior level
-      else if (t >= tEdge + settleSkip && t < tNext)   { va += bhSamples[s].v; ia += bhSamples[s].i; na++; }   // settled new level
+      if (t + win >= tEdge && t < tEdge)        { vb += bhSamples[s].v; ib += bhSamples[s].i; nb++; }   // settled tail, prior level
+      else if (t + win >= tNext && t < tNext)   { va += bhSamples[s].v; ia += bhSamples[s].i; na++; }   // settled tail, new level
     }
     if (nb < 2 || na < 2) continue;
     vb /= nb; ib /= nb; va /= na; ia /= na;
@@ -1037,20 +1041,24 @@ void bhComputeDcir() {
     if (fabsf(dI) < 0.5f * bhStepDeltaA) continue;     // step never manifested (protection clamp / field cut)
     float R = (dV / dI) * 1000.0f;                     // mΩ
     if (R < 0.1f || R > 500.0f) continue;              // sanity bound
-    Rsum += R; Rn++;
+    Rsum += R; Rsq += R * R; Rn++;
   }
   if (Rn < 2) { bhAbort("insufficient valid steps (protections firing or step too small?)"); return; }
 
   BattHealthResult r = {};
   r.epoch      = timeIsSynced ? (timeBase + (millis() - timeBaseMillis) / 1000) : 0;
   r.dcir_mOhm  = Rsum / Rn;
-  r.soh_pct    = (bhCapCount > 0) ? bhCapRing[(bhCapHead - 1 + bhCapCap) % bhCapCap].soh_pct : NAN;
+  r.soh_pct    = (bhCapCount > 0) ? bhCapRing[(bhCapHead - 1 + bhCapCap) % bhCapCap].capPct : NAN;
   r.boardTempF = ambientTemp;                          // board-temp proxy (°F)
   r.soc_pct    = SOC_percent / 100.0f;
   r.battV      = IBV;
   r.stepLowA   = bhStepLowA;
   r.stepDeltaA = bhStepDeltaA;
   r.edgesUsed  = (uint8_t)Rn;
+  r.dwellMsUsed = (uint16_t)min(bhDwellMs, (uint32_t)65535);
+  // population std-dev of the per-edge DCIR (r.dcir_mOhm is already the mean = Rsum/Rn)
+  float bhVar = Rsq / Rn - r.dcir_mOhm * r.dcir_mOhm; if (bhVar < 0.0f) bhVar = 0.0f;
+  r.fitSpread_mOhm = sqrtf(bhVar);
   BH_APPEND_RESULT(r);
   bhLastResultDcir = r.dcir_mOhm;
   bhTestState = 2;
@@ -1072,22 +1080,101 @@ void bhServiceCompletion() {
   if (millis() - bhTestStartMs > budget) bhAbort("timed out (engine stopped or left AUTO?)");
 }
 
-// Battery assumed NEW at install: the first admitted measurement defines the 100% baseline.
-void bhAppendCapacityPoint(float capacityAh, float socStart_pct) {
-  if (!bhCapRing || capacityAh <= 0.0f) return;
-  if (bhBaselineCapacityAh <= 0.0f) bhBaselineCapacityAh = capacityAh;
+// ── Capacity tracker (OCV-anchored) — see Xregulator.ino cap globals + dev doc ──
+// Rested battery voltage → SoC% via the editable capOcvVolt[] table (12V-referenced, scaled
+// to the bank). Table descends in both SoC and voltage. Returns 100 above the top row, 0 below
+// the bottom. This is the INDEPENDENT low anchor that makes fade measurable (no coulomb count).
+float ocvToSoC(float restedV) {
+  float vScale = (float)BATTERY_VOLTAGE / 12.0f;
+  if (restedV >= capOcvVolt[0] * vScale) return 100.0f;
+  for (int i = 0; i < CAP_OCV_ROWS - 1; i++) {
+    float vHi = capOcvVolt[i]     * vScale;   // higher SoC, higher V
+    float vLo = capOcvVolt[i + 1] * vScale;   // lower SoC, lower V
+    if (restedV <= vHi && restedV >= vLo) {
+      float frac = (vHi > vLo) ? (restedV - vLo) / (vHi - vLo) : 0.0f;
+      return capOcvSocPct[i + 1] + frac * (capOcvSocPct[i] - capOcvSocPct[i + 1]);
+    }
+  }
+  return 0.0f;
+}
+
+static void capAppendPoint(uint32_t epoch, float capAh, float socLow, float tempC, uint8_t conf) {
+  if (!bhCapRing) return;
+  if (capRefMode == 1 && bhBaselineCapacityAh <= 0.0f) bhBaselineCapacityAh = capAh;  // first = 100%
+  float refAh = (capRefMode == 1) ? bhBaselineCapacityAh : (float)BatteryCapacity_Ah;
   BattCapPoint p = {};
-  p.cycles       = ChargeCycles_AllTime;
-  p.capacityAh   = capacityAh;
-  p.soh_pct      = (bhBaselineCapacityAh > 0) ? (capacityAh / bhBaselineCapacityAh * 100.0f) : 100.0f;
-  p.socStart_pct = socStart_pct;
-  p.boardTempF   = ambientTemp;
+  p.epoch = epoch; p.capacityAh = capAh;
+  p.capPct = (refAh > 0.0f) ? (capAh / refAh * 100.0f) : 100.0f;
+  p.socLow = socLow; p.tempC = tempC; p.conf = conf;
   bhCapRing[bhCapHead] = p;
   bhCapHead = (bhCapHead + 1) % bhCapCap;
   if (bhCapCount < bhCapCap) bhCapCount++;
-  bhCapDirty = true;
-  queueConsoleMessageF("BATT HEALTH: capacity point %.1f Ah (SOH %.0f%%, depth from %.0f%%, cyc %.1f)",
-                       capacityAh, p.soh_pct, socStart_pct, p.cycles);
+  capLastPct = p.capPct;
+  capLastUpdateEpoch = epoch;
+  bhCapDirty = true;   // field-off persist
+  queueConsoleMessageF("BATT CAP: %.1f Ah = %.0f%% (from rested SoC %.0f%%, %s)",
+                       capAh, p.capPct, socLow, conf ? "high conf" : "LOW conf");
+}
+
+// Per battery-update tick. Rest detection (dV/dt-settled + time floor) on the FILTERED voltage,
+// low-OCV anchor capture, and an independent unclamped Ah bridge from the anchor.
+void capTrackTick(float I_batt, float V_filt, float tempC, float dtSec) {
+  if (!bhCapRing || dtSec <= 0.0f) return;
+  uint32_t nowMs = millis();
+  float restThresh = capRestCurrentFrac * (float)BatteryCapacity_Ah;
+  if (restThresh < 0.2f) restThresh = 0.2f;
+
+  // dV/dt of the FILTERED voltage over a ≥2-min window → mV per 10 min (short windows would be all noise)
+  if (isnan(capPrevVForRate)) { capPrevVForRate = V_filt; capPrevVRateMs = nowMs; }
+  else {
+    float dtMin = (nowMs - capPrevVRateMs) / 60000.0f;
+    if (dtMin >= 2.0f) {
+      capLastDvdtMv10 = fabsf(V_filt - capPrevVForRate) * 1000.0f / dtMin * 10.0f;
+      capPrevVForRate = V_filt; capPrevVRateMs = nowMs;
+    }
+  }
+
+  if (fabsf(I_batt) < restThresh) capRestTimerMs += (uint32_t)(dtSec * 1000.0f);
+  else                            capRestTimerMs = 0;
+
+  bool rested = (capRestTimerMs >= (uint32_t)capRestFloorMin * 60000UL) &&
+                (capLastDvdtMv10 < capSettleRateMv10);
+  if (rested) {
+    float soc = ocvToSoC(V_filt);
+    if (soc <= capSocLowMax && (!capLowAnchorValid || soc < capLowAnchorSoC)) {  // bottom knee, keep the lowest
+      capLowAnchorValid = true;
+      capLowAnchorSoC   = soc;
+      capLowAnchorTempC = tempC;
+      capBridgeAh = 0.0f; capBridgeMinAh = 0.0f;
+    }
+  }
+
+  if (capLowAnchorValid) {
+    float dAh = I_batt * dtSec / 3600.0f;
+    if (dAh > 0.0f) dAh *= capChgEff;
+    capBridgeAh += dAh;
+    if (capBridgeAh < capBridgeMinAh) capBridgeMinAh = capBridgeAh;
+    if (capBridgeMinAh < -0.05f * (float)BatteryCapacity_Ah) capLowAnchorValid = false;  // re-discharged → stale
+  }
+}
+
+// At the full-charge anchor. Emits a dated capacity point if the span is deep enough.
+void capTrackOnFull(uint32_t epoch, float tempC) {
+  if (!capLowAnchorValid) return;                 // no independent low anchor → can't measure
+  float span = capFullSoc - capLowAnchorSoC;
+  if (span < capMinSpan || capBridgeAh <= 0.0f) { capLowAnchorValid = false; return; }
+
+  float measuredAh = capBridgeAh / (span / 100.0f);   // no coulomb-derived SoC → actually shows fade
+  if (capTempNormEnable && !isnan(tempC) && !isnan(capLowAnchorTempC)) {
+    float tAvg = 0.5f * (tempC + capLowAnchorTempC);
+    measuredAh *= (1.0f + (capTempCoeffPctC / 100.0f) * (capTempRefC - tAvg));
+  }
+  if (measuredAh < 0.3f * BatteryCapacity_Ah || measuredAh > 1.5f * BatteryCapacity_Ah) {
+    capLowAnchorValid = false; return;            // implausible vs rated → discard
+  }
+  uint8_t conf = (capLastDvdtMv10 < 0.5f * capSettleRateMv10 && span >= capMinSpan + 10.0f) ? 1 : 0;
+  capAppendPoint(epoch, measuredAh, capLowAnchorSoC, isnan(tempC) ? 0.0f : tempC, conf);
+  capLowAnchorValid = false;                       // consume the anchor
 }
 
 // Persist DCIR results + capacity ring to NVS. Caller gates on field-off.
@@ -1118,7 +1205,9 @@ String bhSerializeResults() {
     out += String(r.battV, 2);         out += ',';
     out += String(r.stepLowA, 1);      out += ',';
     out += String(r.stepDeltaA, 1);    out += ',';
-    out += String((int)r.edgesUsed);
+    out += String((int)r.edgesUsed);   out += ',';
+    out += String((unsigned)r.dwellMsUsed); out += ',';
+    out += String(r.fitSpread_mOhm, 3);
   }
   return out;
 }
@@ -1147,21 +1236,24 @@ void bhDeserializeResults(const String &blob) {
     r.stepLowA   = bhTok(blob, pos);
     r.stepDeltaA = bhTok(blob, pos);
     r.edgesUsed  = (uint8_t)bhTok(blob, pos);
+    r.dwellMsUsed    = (uint16_t)bhTok(blob, pos);   // 0 for pre-upgrade rows (clear history once after flashing)
+    r.fitSpread_mOhm = bhTok(blob, pos);
     BH_APPEND_RESULT(r);
   }
 }
 
 String bhSerializeCap() {
-  String out; out.reserve(bhCapCount * 36);
+  String out; out.reserve(bhCapCount * 32);
   int start = (bhCapCount < bhCapCap) ? 0 : bhCapHead;
   for (int n = 0; n < bhCapCount; n++) {
     BattCapPoint &p = bhCapRing[(start + n) % bhCapCap];
     if (n) out += ';';
-    out += String(p.cycles, 2);       out += ',';
-    out += String(p.capacityAh, 1);   out += ',';
-    out += String(p.soh_pct, 1);      out += ',';
-    out += String(p.socStart_pct, 1); out += ',';
-    out += String(p.boardTempF, 1);
+    out += String(p.epoch);         out += ',';
+    out += String(p.capacityAh, 1); out += ',';
+    out += String(p.capPct, 1);     out += ',';
+    out += String(p.socLow, 1);     out += ',';
+    out += String(p.tempC, 1);      out += ',';
+    out += String((int)p.conf);
   }
   return out;
 }
@@ -1172,15 +1264,28 @@ void bhDeserializeCap(const String &blob) {
   int pos = 0;
   while (pos < (int)blob.length()) {
     BattCapPoint p = {};
-    p.cycles       = bhTok(blob, pos);
-    p.capacityAh   = bhTok(blob, pos);
-    p.soh_pct      = bhTok(blob, pos);
-    p.socStart_pct = bhTok(blob, pos);
-    p.boardTempF   = bhTok(blob, pos);
+    p.epoch      = (uint32_t)bhTok(blob, pos);
+    p.capacityAh = bhTok(blob, pos);
+    p.capPct     = bhTok(blob, pos);
+    p.socLow     = bhTok(blob, pos);
+    p.tempC      = bhTok(blob, pos);
+    p.conf       = (uint8_t)bhTok(blob, pos);
     bhCapRing[bhCapHead] = p;
     bhCapHead = (bhCapHead + 1) % bhCapCap;
     if (bhCapCount < bhCapCap) bhCapCount++;
   }
+}
+
+// OCV table blob — CAP_OCV_ROWS rested-voltage values, comma-joined.
+String capSerializeOcv() {
+  String out;
+  for (int i = 0; i < CAP_OCV_ROWS; i++) { if (i) out += ','; out += String(capOcvVolt[i], 3); }
+  return out;
+}
+void capDeserializeOcv(const String &blob) {
+  if (blob.length() == 0) return;
+  int pos = 0;
+  for (int i = 0; i < CAP_OCV_ROWS && pos < (int)blob.length(); i++) capOcvVolt[i] = bhTok(blob, pos);
 }
 
 // Call after InitSystemSettings() — needs the NVS settings layer up.
@@ -1194,6 +1299,20 @@ void bhInitSettings() {
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
   if (settingExists(NK_bhResults)) bhDeserializeResults(settingRead(NK_bhResults));
   if (settingExists(NK_bhCapBlob)) bhDeserializeCap(settingRead(NK_bhCapBlob));
+
+  // Capacity tracker config (Pattern B) + the editable OCV table
+  if (!settingExists(NK_capRestFrac))   settingWrite(NK_capRestFrac, String(capRestCurrentFrac, 4).c_str());   else capRestCurrentFrac = settingRead(NK_capRestFrac).toFloat();
+  if (!settingExists(NK_capRestFloor))  settingWrite(NK_capRestFloor, String(capRestFloorMin).c_str());        else capRestFloorMin   = (uint16_t)settingRead(NK_capRestFloor).toInt();
+  if (!settingExists(NK_capSettleRate)) settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());  else capSettleRateMv10 = settingRead(NK_capSettleRate).toFloat();
+  if (!settingExists(NK_capSocLowMax))  settingWrite(NK_capSocLowMax, String(capSocLowMax, 1).c_str());        else capSocLowMax      = settingRead(NK_capSocLowMax).toFloat();
+  if (!settingExists(NK_capMinSpan))    settingWrite(NK_capMinSpan, String(capMinSpan, 1).c_str());            else capMinSpan        = settingRead(NK_capMinSpan).toFloat();
+  if (!settingExists(NK_capChgEff))     settingWrite(NK_capChgEff, String(capChgEff, 4).c_str());              else capChgEff         = settingRead(NK_capChgEff).toFloat();
+  if (!settingExists(NK_capFullSoc))    settingWrite(NK_capFullSoc, String(capFullSoc, 1).c_str());            else capFullSoc        = settingRead(NK_capFullSoc).toFloat();
+  if (!settingExists(NK_capRefMode))    settingWrite(NK_capRefMode, String(capRefMode).c_str());               else capRefMode        = (uint8_t)settingRead(NK_capRefMode).toInt();
+  if (!settingExists(NK_capTempNorm))   settingWrite(NK_capTempNorm, String(capTempNormEnable).c_str());       else capTempNormEnable = (uint8_t)settingRead(NK_capTempNorm).toInt();
+  if (!settingExists(NK_capTempCoeff))  settingWrite(NK_capTempCoeff, String(capTempCoeffPctC, 3).c_str());    else capTempCoeffPctC  = settingRead(NK_capTempCoeff).toFloat();
+  if (!settingExists(NK_capTempRef))    settingWrite(NK_capTempRef, String(capTempRefC, 1).c_str());           else capTempRefC       = settingRead(NK_capTempRef).toFloat();
+  if (settingExists(NK_capOcvBlob))     capDeserializeOcv(settingRead(NK_capOcvBlob));
 }
 
 String bhBuildStatusJson() {
@@ -1219,16 +1338,44 @@ String bhBuildStatusJson() {
     j += ",\"v\":" + String(r.battV, 2);
     j += ",\"low\":" + String(r.stepLowA, 1);
     j += ",\"delta\":" + String(r.stepDeltaA, 1);
-    j += ",\"edges\":" + String((int)r.edgesUsed) + "}";
+    j += ",\"edges\":" + String((int)r.edgesUsed);
+    j += ",\"dwell\":" + String((unsigned)r.dwellMsUsed);
+    j += ",\"spread\":" + String(r.fitSpread_mOhm, 3) + "}";
   }
+  j += "]";
+  // Capacity: live status + config echoes + editable OCV table + the dated points
+  j += ",\"capLastPct\":" + (isnan(capLastPct) ? String("null") : String(capLastPct, 1));
+  j += ",\"capLastUpd\":" + String(capLastUpdateEpoch);
+  j += ",\"capAnchored\":" + String(capLowAnchorValid ? 1 : 0);
+  j += ",\"capAnchorSoC\":" + String(capLowAnchorSoC, 1);
+  j += ",\"capRestMin\":" + String(capRestTimerMs / 60000);   // current rest accumulation (min)
+  j += ",\"capDvdt\":" + String(capLastDvdtMv10, 1);
+  j += ",\"capCfg\":{";
+  j += "\"restFrac\":" + String(capRestCurrentFrac, 4);
+  j += ",\"restFloor\":" + String(capRestFloorMin);
+  j += ",\"settleRate\":" + String(capSettleRateMv10, 2);
+  j += ",\"socLowMax\":" + String(capSocLowMax, 1);
+  j += ",\"minSpan\":" + String(capMinSpan, 1);
+  j += ",\"chgEff\":" + String(capChgEff, 4);
+  j += ",\"fullSoc\":" + String(capFullSoc, 1);
+  j += ",\"refMode\":" + String(capRefMode);
+  j += ",\"tempNorm\":" + String(capTempNormEnable);
+  j += ",\"tempCoeff\":" + String(capTempCoeffPctC, 3);
+  j += ",\"tempRef\":" + String(capTempRefC, 1) + "}";
+  j += ",\"ocv\":[";
+  for (int i = 0; i < CAP_OCV_ROWS; i++) { if (i) j += ','; j += String(capOcvVolt[i], 2); }
+  j += "],\"ocvSoc\":[";
+  for (int i = 0; i < CAP_OCV_ROWS; i++) { if (i) j += ','; j += String((int)capOcvSocPct[i]); }
   j += "],\"cap\":[";
   int cstart = (bhCapCount < bhCapCap) ? 0 : bhCapHead;
   for (int n = 0; n < bhCapCount; n++) {
     BattCapPoint &p = bhCapRing[(cstart + n) % bhCapCap];
     if (n) j += ',';
-    j += "{\"cyc\":" + String(p.cycles, 2);
+    j += "{\"epoch\":" + String(p.epoch);
     j += ",\"ah\":" + String(p.capacityAh, 1);
-    j += ",\"soh\":" + String(p.soh_pct, 1) + "}";
+    j += ",\"pct\":" + String(p.capPct, 1);
+    j += ",\"socLow\":" + String(p.socLow, 1);
+    j += ",\"conf\":" + String((int)p.conf) + "}";
   }
   j += "]}";
   return j;
