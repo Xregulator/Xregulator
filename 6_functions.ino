@@ -351,8 +351,15 @@ float governor_apply(float lastAppliedDuty, float requestDutyFloat, int gmode,
       // Slew from last applied duty. DutyRampRate is stored in REAL %/s for this bus (its default was
       // scaled by 12/Vbatt at first boot and it's rescaled in place on a voltage change), so it's used
       // as-is here — WYSIWYG with the dashboard box, no hidden runtime multiply.
-      nextFloat = slew_limit_f(lastAppliedDuty, requestClamped,
-                               DutyRampRate, DutyRampRate, dtSec);
+      if (!dutySlewEnable && !g_autoTestActive) {
+        // Duty slew limiter disabled (Test Limiters, both tabs) → duty steps instantly. For A/B study;
+        // removes the coupling-cap transient protection, so leave ON in normal operation. Inert during an
+        // automated test (g_autoTestActive) so a user's OFF can't strip duty slew out of a measurement.
+        nextFloat = requestClamped;
+      } else {
+        nextFloat = slew_limit_f(lastAppliedDuty, requestClamped,
+                                 DutyRampRate, DutyRampRate, dtSec);
+      }
       // Re-clamp after slew (in case of edge effects)
       nextFloat = clamp_f(nextFloat, finalMin, finalMax);
       break;
@@ -1359,6 +1366,17 @@ void AdjustFieldLearnMode() {
   // tempPID_tick. TempToUse is fresh here (buildTickSnapshot mirrors tick.tempToUseF to it).
   tempFilterUpdate(currentMillis);
 
+  // Over-temp protection (warn ramp + critical cut) compares against the FILTERED temperature, not the
+  // raw DS18B20 sample. A single noisy 1-wire reading >limit+warn was instantly latching the warning-ramp
+  // lockout while the true/filtered temp was ~10°F lower (thermalfuckedstill.csv tripped at 162°F filt with
+  // a 170°F limit, 2026-06-30). tempFiltered holds its last good value through garbage reads, so a genuinely
+  // dead sensor is still caught separately by the raw-based staleness CRITICAL cut (tick.tempDataVeryStale).
+  // Override here (after tempFilterUpdate, before the protection calls); TempToUse and the rest of
+  // tick.tempToUseF's producers stay raw — only the trip thresholds and the trip console line see filtered.
+  if (!isnan(tempFiltered)) {
+    tick.tempToUseF = tempFiltered;
+  }
+
   // Worst over-temp for the Control Accuracy panel is tracked HERE — unconditionally, every tick in
   // every mode (field on, FAULT, lockout, OFF cooldown). Over-temp damages the alternator regardless
   // of which subsystem holds the field, and the worst excursions happen during the protection-cut
@@ -1479,11 +1497,14 @@ void AdjustFieldLearnMode() {
       //  this block no longer maintains its own snapshot.)
 
       // Test-mode bypass: when testProtectionsEnabled is false (user toggled it off on a
-      // tuning page) OR TuningMode is active (current-waveform step test), G1 and G2 are
-      // inhibited from firing so a step-test can characterise the plant without protection
-      // layers fighting the input. The release condition below is not gated — if ovActive
-      // was already set before the user disabled, it can still de-assert cleanly.
-      if (testProtectionsEnabled && !TuningMode && IBV > ChargingVoltageTarget - PRED_GUARD) {
+      // tuning page) OR TuningMode is active (current-waveform step test) OR the battery-health
+      // DCIR test is running (batteryHealthTestActive — a current step test that must not be
+      // fought by the soft layers at any SoC), G1 and G2 are inhibited from firing so the test
+      // can characterise the plant/battery without protection layers fighting the input. The
+      // fast-OV ceiling (priority 1.5) and the INA228 hardware ALERT stay live regardless. The
+      // release condition below is not gated — if ovActive was already set before the bypass
+      // engaged, it can still de-assert cleanly.
+      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && IBV > ChargingVoltageTarget - PRED_GUARD) {
         if (OvGroup1Enable && Vpred > V_HARD) {
           float hardCap = fmaxf(0.0f, setpointLimited - KHard * (Vpred - V_HARD));
           // record reason only when this layer actually lowers the cap (equiv. to fminf)
@@ -1493,7 +1514,7 @@ void AdjustFieldLearnMode() {
         }
       }
 
-      if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
+      if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && IBV > ChargingVoltageTarget + OvMeasMarginV) {
         float ovExcess = IBV - (ChargingVoltageTarget + OvMeasMarginV);
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcess);
         if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
@@ -1507,7 +1528,7 @@ void AdjustFieldLearnMode() {
       // SetpointRiseRate, voltage rises, Group 2 re-fires — producing on/off flicker.
       // Softer reference (IBV - target) so the cap relaxes linearly as voltage falls toward
       // the release point. No g_fastOvHardActive — this is the soft hold, not a fresh fire.
-      else if (testProtectionsEnabled && !TuningMode && OvGroup2Enable && ovActive && IBV > ChargingVoltageTarget) {
+      else if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && OvGroup2Enable && ovActive && IBV > ChargingVoltageTarget) {
         float ovExcessSoft = IBV - ChargingVoltageTarget;
         float hystCap = fmaxf(0.0f, setpointLimited - KHard * ovExcessSoft);
         if (hystCap < fastOvCurrentCap) { fastOvCurrentCap = hystCap; capReasonTick = CAP_REASON_KHARD_G2; }
@@ -1668,8 +1689,25 @@ void AdjustFieldLearnMode() {
 
   chargingEnabled = tick.chargingEnabled;
 
+  // An automated/guided test owns the limiters while it runs — the four user-facing limiter toggles
+  // go inert so a stray user setting can't ruin a commissioning/health measurement (each test carries
+  // its own built-in slew behavior). NOT bare TuningMode/CVTuningMode — those are the manual study tabs
+  // where the toggles are meant to be live.
+  g_autoTestActive = (commissionState == 1) || batteryHealthTestActive || resTestActive || (systemIDActive != 0);
+
   // ========== DETERMINE GOVERNOR MODE ==========
   govMode = GOV_NORMAL_SLEW;
+
+  // Any sine waveform (manual sine, sine sweep, commissioning Verify) bypasses duty slew so the actuator
+  // can follow the reference unclamped — DutyRampRate would otherwise smear the frequency response. The
+  // setpoint is already clean (sine branch skips setpoint slew); this removes the matching duty-side clamp.
+  // Gated on g_tuningEntrySettled: while the field is still ramping UP from the rest floor the duty slew
+  // stays engaged (gentle entry); the bypass only kicks in once the entry ramp has settled. On exit
+  // (TuningMode→0) the bypass drops and duty slew re-engages, easing the field back down.
+  // NB: once settled this drops the coupling-cap transient protection during sine (same as open-loop plant-ID).
+  if (TuningMode != 0 && tuningWaveform != 0 && g_tuningEntrySettled) {
+    govMode = GOV_BYPASS_SLEW;
+  }
 
   // Major overvoltage: bypass slew for fast field collapse.
   // Triggers when battery is 0.5V above the hard-shutdown threshold — by this point the
@@ -1984,12 +2022,12 @@ void AdjustFieldLearnMode() {
         }
         float bhTarget = bhWaveHigh ? (bhStepLowA + bhStepDeltaA) : bhStepLowA;
         setpointCommand = bhTarget;
-        // Slew exactly like the Current-tuning square wave (NOT abrupt). The DCIR fit differences
-        // SETTLED end-of-dwell levels, so a slewed transition reads the same resistance while
-        // avoiding the field-slam transient that tripped OV on entry/edges. Entry (operating point →
-        // first level) and exit come out gentle for free, because slew carries setpointLimited continuously.
+        // Slew at the FIXED conservative test rate (NOT the user's SetpointRiseRate/FallRate — a user could
+        // set those aggressively and slam the field on entry/exit). The DCIR fit differences SETTLED
+        // end-of-dwell levels, so the slower transition reads the same resistance; entry up from rest and
+        // exit back down both stay gentle and user-independent.
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       SetpointRiseRate, SetpointFallRate, actualDtSec);
+                                       TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
         voltageControlActive = false;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
@@ -2005,10 +2043,11 @@ void AdjustFieldLearnMode() {
         // like the DCIR / current-tuning square wave so entry AND exit are gentle (slew carries setpointLimited
         // continuously — the browser ramps the target down before releasing). Protections stay live; if one
         // fires the ripple sample is simply not trusted. BENCH-VALIDATE the exit transient (the DCIR generator
-        // this mirrors tripped OV on entry/exit on its first bench run).
+        // this mirrors tripped OV on entry/exit on its first bench run). Uses the FIXED conservative test rate,
+        // not the user's SetpointRiseRate/FallRate, so a stray user setting can't slam entry/exit.
         setpointCommand = resTestTargetA;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       SetpointRiseRate, SetpointFallRate, actualDtSec);
+                                       TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
         voltageControlActive = false;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
@@ -2051,7 +2090,19 @@ void AdjustFieldLearnMode() {
           float baseA = (float)tuningWaveFloor + waveAmplitude * 0.5f;   // midpoint; swings tuningWaveFloor .. tuningWaveFloor+waveAmplitude
           float ampA  = waveAmplitude * 0.5f;
           tuningSineStep(tick.nowMs, actualDtSec, tuningSinePhase, baseA, ampA, MeasuredAmps, setpointCommand);
-          setpointLimited = setpointCommand;           // no slew limiting → clean sine reference
+          // Entry: ease up from the rest floor to the live sine at the FIXED conservative test rate, with
+          // duty slew still engaged (govMode bypass is gated on g_tuningEntrySettled). The rising ramp meets
+          // the oscillating sine within a period; once caught the sine runs clean (setpoint AND duty
+          // unclamped). If it never catches (pathological), it simply stays duty-slewed — safe degradation,
+          // never a slam. This replaces the old unconditional clean-sine assignment that, with duty slew
+          // bypassed, would have slammed the field on entry.
+          if (!tuningEntryRamped) {
+            setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                           TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
+            if (fabsf(setpointLimited - setpointCommand) < 0.5f) tuningEntryRamped = true;
+          } else {
+            setpointLimited = setpointCommand;         // no slew limiting → clean sine reference
+          }
         } else {
           uint32_t halfPeriodMs = ((uint32_t)wavePeriod * 1000) / 2;
           if (tick.nowMs - lastTuningWaveToggle >= halfPeriodMs) {
@@ -2080,17 +2131,22 @@ void AdjustFieldLearnMode() {
           // CV plant fit sets tuningSquareAbrupt so the edge is a true step (slew smears the step instant
           // the edge-gain fit keys off, and was only kept for the now-retired dead-time read). Otherwise
           // the manual current-tuning square test keeps its slew + scoring window.
-          if (tuningSquareAbrupt) {
-            // Belt-and-suspenders: slew ONLY the entry (operating point → first level) so start-up
-            // doesn't slam the field (OV risk). Once we've arrived, edges go abrupt as the fit needs.
+          // Abrupt-edge cases — the slew limiter is turned off (Current tab Test Limiters) OR CV-plant-fit
+          // needs true steps. Either way the FROM-REST entry STILL eases in at the FIXED conservative rate
+          // (TEST_ENTRY_RATE_A, not the user's SetpointRiseRate) so start-up never slams the field (OV risk);
+          // only after we've arrived (tuningEntryRamped) do the edges go abrupt. This keeps the limiter-off
+          // path symmetric with the sine branch — no toggle can produce a from-rest slam. g_autoTestActive
+          // keeps commissioning Verify/CV-fit from taking this path via the limiter-off term.
+          if ((!setpointSlewEnable && !g_autoTestActive) || tuningSquareAbrupt) {
             if (!tuningEntryRamped) {
               setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                             SetpointRiseRate, SetpointFallRate, actualDtSec);
+                                             TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
               if (fabsf(setpointLimited - setpointCommand) < 0.5f) tuningEntryRamped = true;
             } else {
               setpointLimited = setpointCommand;
             }
           } else {
+            // Limiter on, not a fit → manual study keeps its user-set edge slew (the sandbox).
             setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
                                            SetpointRiseRate, SetpointFallRate, actualDtSec);
           }
@@ -2140,6 +2196,8 @@ void AdjustFieldLearnMode() {
         // TrackAppliedOutput() is NOT needed here — falls through to the shared
         // call at the end of the normal-mode section.
 
+        g_tuningEntrySettled = tuningEntryRamped;  // next tick's govMode block reads this to gate the sine duty-bypass
+
         lastTuningMode = true;
 
       } else {
@@ -2166,6 +2224,7 @@ void AdjustFieldLearnMode() {
           tuningSquareAbrupt = false;  // never let the abrupt-step bypass leak past a tuning session
         }
         lastTuningMode = false;
+        g_tuningEntrySettled = false;  // not in TuningMode → sine duty-bypass disarmed (re-arms only after the next entry ramp settles)
 
         // Temperature loop PID. Library timer governs Compute() cadence.
         tempPID_tick(currentMillis, actualDtSec);
@@ -2272,56 +2331,88 @@ void AdjustFieldLearnMode() {
         // Fires on a SUSTAINED current excess over the CV command: an EMA of
         // (MeasuredAmps − setpointLimited) crossing E = clamp(IExcessFrac × setpointLimited,
         // floor, ceil). Voltage-gated to near target (IBV > target − IExcessArmMarginV) so it
-        // can't fire during ramp-up; testProtectionsEnabled=false or TuningMode=1 inhibit it
+        // can't fire during ramp-up; testProtectionsEnabled=false, TuningMode=1, or the
+        // battery-health DCIR test (batteryHealthTestActive) inhibit it
         // (else branch releases the latch and reseeds the EMA).
         // Full math + rationale: Working Markdown Docs/iExcess_Redesign_Spec.md.
         {
           const float K_IE = 1.0f;
           static bool iExcessActive = false;   // latched fire state (held until the average clears)
           static float mExcessEma = 0.0f;      // EMA of signed deviation iActual − setpointLimited (A)
+          static bool postProtMismatch = false;  // wind-down gate: suppress an iExcess re-fire during the field-TC tail AFTER a protection releases (the "double-penalty" guard)
+          static uint32_t postProtClearMs = 0;   // millis the wind-down safety cap is measured from (refreshed every clamped tick → counts from the release edge)
           // (pre-event cv_I capture and reseed are centralised — see preEventCvI above
           //  and the unified falling-edge reseed in the bumpless tracker block.)
 
-          if (testProtectionsEnabled && !TuningMode && voltageControlActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
+          if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
             // Threshold: fraction of command, floor/ceiling guarded. Under battery-current control the
             // PV is Bcur, which carries far less ripple than alternator current — so use its own
             // (commissioned) floor IExcessFloorABatt instead of the alternator-derived IExcessFloorA (§G).
+            // ceilA splits the formerly-shared ceiling: battery detector saturates at IExcessCeilABatt,
+            // alternator at IExcessCeilA. Used both to bound the tracking floor and to cap the fraction term.
+            float ceilA = cvBattActive ? IExcessCeilABatt : IExcessCeilA;
             float floorA;
             if (cvBattActive) {
               floorA = IExcessFloorABatt;
               if (cvFloorK1 > 0.0f) {  // commissioned current-tracking ripple floor (§3.2): grows with operating current
                 float dyn = cvFloorK0 + cvFloorK1 * fabsf(Bcur_filtered);  // track the AVERAGE current, not the instantaneous ripple
-                if (dyn > floorA) floorA = fminf(dyn, IExcessCeilA);  // bounded by the ceiling; never below the static base
+                if (dyn > floorA) floorA = fminf(dyn, ceilA);  // bounded by the (battery) ceiling; never below the static base
               }
             } else {
               floorA = IExcessFloorA;
+              if (ccFloorK1 > 0.0f) {  // commissioned current-tracking ripple floor (bulk mirror of cvFloorK0/K1): grows with operating current
+                float dyn = ccFloorK0 + ccFloorK1 * fabsf(MeasuredAmps_filtered);  // track the AVERAGE alternator current, not instantaneous ripple
+                if (dyn > floorA) floorA = fminf(dyn, ceilA);  // bounded by the (alternator) ceiling; never below the auto-floor base
+              }
             }
-            float E = fmaxf(floorA, fminf(IExcessFrac * setpointLimited, IExcessCeilA));
+            float E = fmaxf(floorA, fminf(IExcessFrac * setpointLimited, ceilA));
 
-            if (!iExcessActive && (fastOvClampActive || modeCapGlideSuppress)) {
-              // Another protection (fastOV/hardOV) already owns the clamp and has collapsed
-              // setpointLimited. The resulting actual-vs-command mismatch is THAT protection's
-              // own doing, not a real over-current — and dev would jump to ~full current,
-              // crossing E in a few ms. Hold the EMA at 0 so we don't fire a redundant iExcess
-              // during the field-TC wind-down. This subsumes the old postFastOvMismatch gate:
-              // once the other protection releases, the EMA restarts from 0 and only a genuinely
-              // sustained post-release excess can fire. (Deliberate keep vs spec §7 — verified
-              // necessary: deleting it outright re-fires ~8 ms after every fastOV event.)
+            // §G.5: under battery-current control setpointLimited IS the battery-current command, so the
+            // mismatch detector reads BATTERY current (raw Bcur — its own IExcessTau EMA does the
+            // filtering, matching the raw-MeasuredAmps pattern). Apples-to-apples, no house-load offset.
+            float ieActual = cvBattActive ? Bcur : MeasuredAmps;
+
+            // Post-protection wind-down gate (the "double-penalty" guard). When fastOV/hardOV releases, the
+            // field current keeps lagging ABOVE the collapsed command for ~1–2 field TCs (L/R fall). Under
+            // battery-current control that lag rides directly on Bcur, so without this guard it re-fires
+            // iExcess on the release edge — zeroing cv_I a SECOND time; and because preEventCvI has already
+            // refreshed down to the first reseed during the quiet gap, the unified reseed then halves cv_I
+            // AGAIN (28→14→7 observed). That second halving is the double penalty. The while-clamped EMA
+            // hold below does NOT cover this — it stops the instant the clamp releases, which is exactly when
+            // the wind-down begins. So re-introduce the retired postFastOvMismatch behaviour, but on the Bcur
+            // PV: arm while any protection owns the clamp, then HOLD past release until the wind-down excess
+            // has decayed back inside the normal band (self-clearing, no fixed timer — same discriminator the
+            // old gate used), bounded by a safety cap so a genuinely sustained over-current is never muted
+            // forever (the voltage backstops own that case regardless).
+            const uint32_t kPostProtMismatchMaxMs = 350;  // ≈3 field-fall TCs; backstop only — normal release is the decay test
+            bool clampOwned = fastOvClampActive || modeCapGlideSuppress;
+            if (clampOwned) {
+              postProtMismatch = true;
+              postProtClearMs  = currentMillis;  // refreshed every clamped tick, so the cap below counts from the release edge
+            } else if (postProtMismatch) {
+              bool decayed  = (ieActual - setpointLimited) <= E;  // field current back inside the normal band → wind-down done
+              bool timedOut = (currentMillis - postProtClearMs) > kPostProtMismatchMaxMs;
+              if (decayed || timedOut) postProtMismatch = false;
+            }
+
+            if (!iExcessActive && (clampOwned || postProtMismatch)) {
+              // Another protection already owns the clamp (clampOwned), OR it just released and the field is
+              // still winding down (postProtMismatch). Either way the actual-vs-command mismatch is THAT
+              // protection's own doing, not a real over-current — dev would jump to ~full current, crossing
+              // E in a few ms. Hold the EMA at 0 so we don't fire a redundant iExcess. When both clear the
+              // EMA restarts from 0 and only a genuinely sustained excess can fire. (The while-clamped half
+              // is a deliberate keep vs spec §7 — verified necessary: deleting it re-fires ~8 ms after every
+              // fastOV event. The postProtMismatch half extends that through the wind-down tail.)
               // modeCapGlideSuppress: the Hi->Lo ceiling glide is deliberately ramping setpointLimited
               // down — the field current lags ABOVE the descending command (plant can't fall as fast
-              // as the ramp), and that lag is the glide's own doing, not a fault. Hold the EMA at 0
-              // for the glide AND a grace tail (settling), then it restarts from 0.
+              // as the ramp), and that lag is the glide's own doing, not a fault.
               mExcessEma = 0.0f;
             } else {
-              // dt-aware EMA of the raw-current deviation (raw MeasuredAmps; the EMA does all
+              // dt-aware EMA of the raw-current deviation (raw Bcur/MeasuredAmps; the EMA does all
               // the filtering). dt = real elapsed control-tick seconds, so I²C jitter stretching
               // a tick can't corrupt the time constant — same pattern as g_fastOvDvdt.
               float tauSec = IExcessTau * 0.001f;
               float alpha  = actualDtSec / (tauSec + actualDtSec);
-              // §G.5: under battery-current control setpointLimited IS the battery-current command, so the
-              // mismatch detector reads BATTERY current (raw Bcur — its own IExcessTau EMA does the
-              // filtering, matching the raw-MeasuredAmps pattern). Apples-to-apples, no house-load offset.
-              float ieActual = cvBattActive ? Bcur : MeasuredAmps;
               mExcessEma  += alpha * ((ieActual - setpointLimited) - mExcessEma);  // setpointLimited = previous tick — acceptable
 
               // Rising edge — fire once.
@@ -2370,6 +2461,7 @@ void AdjustFieldLearnMode() {
             // into a startup fire. Unified reseed fires on the falling edge of fastOvClampActive.
             iExcessActive = false;
             mExcessEma = 0.0f;
+            postProtMismatch = false;  // drop the wind-down guard too — no clamp can be in flight while the gate is closed
             g_mExcessEma = 0.0f;
             g_iExcessThreshold = 0.0f;
           }
@@ -2390,23 +2482,54 @@ void AdjustFieldLearnMode() {
           const float K_IE = 1.0f;
           static bool iExBulkActive = false;     // latched fire state
           static float mExcessEmaBulk = 0.0f;    // EMA of signed deviation iActual − i_ceiling_pre_ov (A)
+          static bool postProtMismatchBulk = false;  // wind-down gate (mirror of the CV detector's postProtMismatch): suppress a redundant bulk re-fire during the field-TC tail AFTER a clamp releases
+          static uint32_t postProtClearMsBulk = 0;   // millis the wind-down safety cap is measured from (refreshed every clamped tick → counts from the release edge)
 
-          if (testProtectionsEnabled && !TuningMode && voltageControlActive
+          if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive
               && (IBV <= ChargingVoltageTarget - IExcessArmMarginV)) {
             // Threshold: fraction of the commanded ceiling, floor/ceiling guarded. Looser than the
             // CV fraction (IExcessFracBulk > IExcessFrac) — tolerate more command-vs-actual error
             // far from the voltage limit, catching only absurd RPM-blip overshoots above ceiling.
-            float E = fmaxf(IExcessFloorA, fminf(IExcessFracBulk * i_ceiling_pre_ov, IExcessCeilA));
+            // Always alternator-domain (this complement runs current-limited), so it uses the bulk
+            // tracking floor (ccFloorK0/K1) over the auto-floor-maintained base IExcessFloorA.
+            float floorBulk = IExcessFloorA;
+            if (ccFloorK1 > 0.0f) {
+              float dyn = ccFloorK0 + ccFloorK1 * fabsf(MeasuredAmps_filtered);  // track the AVERAGE alternator current, not instantaneous ripple
+              if (dyn > floorBulk) floorBulk = fminf(dyn, IExcessCeilA);  // bounded by the ceiling; never below the auto-floor base
+            }
+            float E = fmaxf(floorBulk, fminf(IExcessFracBulk * i_ceiling_pre_ov, IExcessCeilA));
 
-            if (!iExBulkActive && (fastOvClampActive || modeCapGlideSuppress)) {
-              // Another protection (a load dump, the only other fast supervisor active in bulk)
-              // owns the clamp and has collapsed the command. Hold the EMA at 0 so we don't fire
-              // a redundant bulk iExcess during the field-TC wind-down — subsumes the old
-              // postBulkMismatch self-gate.
+            // Post-protection wind-down gate — bulk mirror of the CV detector's postProtMismatch (this
+            // IS the "grace tail" the comment below always described; the old bare clamp-owned-NOW test
+            // never actually implemented it). A Hi->Lo ceiling glide ramps i_ceiling_pre_ov DOWN; when
+            // the glide flag drops, the field current still lags ABOVE the freshly-lowered ceiling for
+            // ~1 field TC, so the bare test would let the bulk EMA rebuild and cross E — a redundant trip
+            // (counter bump + log + brief re-clamp). Arm while any clamp owns the drop, then HOLD past
+            // release until the excess decays back inside the band (self-clearing, no fixed timer),
+            // bounded by a safety cap so a genuinely sustained over-current still fires (the voltage
+            // backstops own that interim regardless).
+            const uint32_t kPostProtMismatchMaxMs = 350;  // ≈3 field-fall TCs; backstop only — normal release is the decay test
+            bool clampOwnedBulk = fastOvClampActive || modeCapGlideSuppress;
+            if (clampOwnedBulk) {
+              postProtMismatchBulk = true;
+              postProtClearMsBulk  = currentMillis;  // refreshed every clamped tick, so the cap counts from the release edge
+            } else if (postProtMismatchBulk) {
+              bool decayed  = (MeasuredAmps - i_ceiling_pre_ov) <= E;  // current back below the (settled) ceiling → wind-down done
+              bool timedOut = (currentMillis - postProtClearMsBulk) > kPostProtMismatchMaxMs;
+              if (decayed || timedOut) postProtMismatchBulk = false;
+            }
+
+            if (!iExBulkActive && (clampOwnedBulk || postProtMismatchBulk)) {
+              // Another protection (a load dump, the only other fast supervisor active in bulk) owns the
+              // clamp and has collapsed the command (clampOwnedBulk), OR it just released and the field is
+              // still winding down above the lowered ceiling (postProtMismatchBulk). Either way the
+              // over-ceiling reading is THAT protection's own doing, not a real over-current — hold the
+              // EMA at 0 so we don't fire a redundant bulk iExcess. When both clear the EMA restarts from 0
+              // and only a genuinely sustained excess can fire.
               // modeCapGlideSuppress: the Hi->Lo ceiling glide ramps i_ceiling_pre_ov DOWN, but the
               // field current lags above the descending ceiling (it can't fall as fast as the
               // ramp) — that lag reads as over-current and was the bulk false-trip on a mode switch.
-              // The glide owns this drop, so hold the EMA at 0 for the glide plus a grace tail.
+              // The glide owns this drop, so hold the EMA at 0 for the glide plus the wind-down tail.
               mExcessEmaBulk = 0.0f;
             } else {
               float tauSec = IExcessTau * 0.001f;
@@ -2415,7 +2538,7 @@ void AdjustFieldLearnMode() {
 
               if (!iExBulkActive && mExcessEmaBulk > E) {
                 cv_I_aw_cap = cv_I;         // cap bumpless tracker ceiling to pre-event level
-                g_iExcessCount++;           // shared Group 3 trip counter
+                g_iExcessCount++;           // shared iExcess trip counter (Group 3 alternator + Group 4 battery)
                 currentPID.ResetIntegratorTo(0.0);
                 queueConsoleMessageF("iExcess (bulk) #%lu: excess=%.1fA over %.1fA ceiling — inner PID integrator reset",
                                      (unsigned long)g_iExcessCount, mExcessEmaBulk, i_ceiling_pre_ov);
@@ -2443,6 +2566,7 @@ void AdjustFieldLearnMode() {
             // Leave g_mExcessEma / g_iExcessThreshold untouched so the CV detector's export stands.
             iExBulkActive = false;
             mExcessEmaBulk = 0.0f;
+            postProtMismatchBulk = false;  // drop the wind-down guard too — no clamp can be in flight while the gate is closed
           }
           g_iExcessBulkActive = iExBulkActive;  // export for PID/CV log flag + dashboard
         }
@@ -2731,7 +2855,7 @@ void AdjustFieldLearnMode() {
         //   in CVTuningMode when enabled, so the square-wave test can be studied with the limiter on/off.
         //   Always snap (no ramp) when not doing voltage control, or on the first CV tick (bumpless seed —
         //   start the target at the right value rather than ramping it up from a stale one). 0 = instant.
-        if (vTgtRampEnable == 0 || !voltageControlActive || enteringCV) {
+        if ((vTgtRampEnable == 0 && !g_autoTestActive) || !voltageControlActive || enteringCV) {
           ChargingVoltageTarget = ChargingVoltageTargetReq;            // snap (disabled / idle / CV entry)
         } else if (ChargingVoltageTargetReq > ChargingVoltageTarget) {
           float step = (vTgtRampUp > 0.0f) ? (vTgtRampUp * actualDtSec) : 1.0e9f;
@@ -2752,7 +2876,9 @@ void AdjustFieldLearnMode() {
           voltageTargetSlewed = ChargingVoltageTarget;
         }
         if (voltageControlActive) {
-          if (ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
+          // cvRiseGovEnable=0 (Voltage tab Test Limiters) disarms the rise clamp → the integrator sees the
+          // full up-step and can wind up into an OV trip; falls were already instant. For A/B study.
+          if ((cvRiseGovEnable || g_autoTestActive) && ChargingVoltageTarget > voltageTargetSlewed + 0.01f) {
             float icvHi_gov = clamp_f(icvCeil, 0.0f, (float)MaxTableValue);  // §G: battery-current ceiling in CV
             float e_needed = (icvHi_gov - cv_I) / VoltageKp_active;
             e_needed = fmaxf(e_needed, 0.02f);
@@ -3086,8 +3212,15 @@ void AdjustFieldLearnMode() {
         else if ((setpointCommand - setpointLimited) > SetpointBigStepThresh)
                                         effectiveRiseRate = SetpointBigStepRiseRate;
         else                            effectiveRiseRate = SetpointRiseRate;
-        setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       effectiveRiseRate, effectiveFallRate, actualDtSec);
+        if (!setpointSlewEnable && !g_autoTestActive) {
+          // Limiter disabled (Current tab Test Limiters): setpoint steps instantly — also bypasses the
+          // startup ramp, big-step gentling and post-protection fast-rise shaping above. For A/B study.
+          // Inert during an automated test (g_autoTestActive) so user state can't strip slew from a measurement.
+          setpointLimited = setpointCommand;
+        } else {
+          setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
+                                         effectiveRiseRate, effectiveFallRate, actualDtSec);
+        }
         // §G.5: snap (no slew) on the battery-current source-handoff tick so the inner-PID setpoint and its
         // newly-swapped PV (Bcur) start equal — bumpless. setpointCommand = Icv was seeded to Bcur_filtered.
         if (enteringCvBatt) setpointLimited = setpointCommand;

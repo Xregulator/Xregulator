@@ -717,6 +717,9 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "vTgtRampEnable", NK_vTgtRampEnable, 1 },
   { "vTgtRampUp", NK_vTgtRampUp, 1 },
   { "vTgtRampDn", NK_vTgtRampDn, 1 },
+  { "setpointSlewEnable", NK_setpointSlewEnable, 1 },
+  { "cvRiseGovEnable", NK_cvRiseGovEnable, 1 },
+  { "dutySlewEnable", NK_dutySlewEnable, 1 },
   { "coldChargeLockoutEnable", NK_coldChargeLockoutEnable, 1 },
   { "MinChargeTempF", NK_MinChargeTempF, 1 },
   { "battTempDerateEnable", NK_battTempDerateEn, 1 },
@@ -736,6 +739,7 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
   { "ReseedFrac", NK_ReseedFrac, 1 },
   { "IExcessArmMarginV", NK_IExcessArmMarginV, 1 },
   { "IExcessCeilA", NK_IExcessCeilA, 1 },
+  { "IExcessCeilABatt", NK_IExcessCeilABatt, 1 },
   { "IExcessFloorA", NK_IExcessFloorA, 1 },
   { "IExcessFloorABatt", NK_IExcessFloorABatt, 1 },
   { "IExcessFrac", NK_IExcessFrac, 1 },
@@ -1325,6 +1329,11 @@ String bhBuildStatusJson() {
   j += ",\"delta\":" + String(bhStepDeltaA, 1);
   j += ",\"dwellMs\":" + String(bhDwellMs);
   j += ",\"edges\":" + String(bhNumEdges);
+  // Wizard countdown: total run = (2 ring-in + scored + 1 trailing) toggles × dwell; elapsed is
+  // live only while running (0 otherwise) so a reopened modal recomputes remaining without a
+  // client-side start-time it would lose on close. Mirrors the (bhNumEdges + 3) bound in bhStep.
+  j += ",\"totalMs\":" + String((uint32_t)(bhNumEdges + 3) * bhDwellMs);
+  j += ",\"elapsedMs\":" + String(bhTestState == 1 ? (millis() - bhTestStartMs) : 0);
   j += ",\"results\":[";
   int start = (bhResultCount < bhResultCap) ? 0 : bhResultHead;
   for (int n = 0; n < bhResultCount; n++) {

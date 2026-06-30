@@ -189,6 +189,7 @@ bool fsRemove(const char *path) {
 #define NK_HiLow "HiLow"
 #define NK_IExcessArmMarginV "IExcessArmMrgnV"
 #define NK_IExcessCeilA "IExcessCeilA"
+#define NK_IExcessCeilABatt "IExCeilBatt"
 #define NK_IExcessFloorA "IExcessFloorA"
 #define NK_IExcessFloorABatt "IExFloorBatt"
 #define NK_IExcessFrac "IExcessFrac"
@@ -280,9 +281,14 @@ bool fsRemove(const char *path) {
 #define NK_vTgtRampEnable "vTgtRampEn"
 #define NK_vTgtRampUp "vTgtRampUp"
 #define NK_vTgtRampDn "vTgtRampDn"
+#define NK_setpointSlewEnable "setptSlewEn"
+#define NK_cvRiseGovEnable "cvRiseGovEn"
+#define NK_dutySlewEnable "dutySlewEn"
 #define NK_cvPlantK "cvPlantK"
 #define NK_cvFloorK0 "cvFloorK0"
 #define NK_cvFloorK1 "cvFloorK1"
+#define NK_ccFloorK0 "ccFloorK0"
+#define NK_ccFloorK1 "ccFloorK1"
 #define NK_cvPlantTau "cvPlantTau"
 #define NK_cvPlantL "cvPlantL"
 #define NK_CommissionTempF "CommissionTmpF"
@@ -3678,16 +3684,22 @@ uint16_t bcurRipplePkpkX100[FA_RPM_BINS];  // worst drift-removed pk-pk of Bcur 
 // device's max charge current instead of trusting a floor measured at whatever current happened to flow.
 uint16_t bcurRippleIatX100[FA_RPM_BINS];
 static float bcurRippleSlow = 0.0f, bcurRippleWinMin = 1e9f, bcurRippleWinMax = -1e9f;
+// Parallel alternator-current (ADS path) ripple accumulator — only used to feed the active 3-level
+// resonance test ring (the alt floor must be measured on the bulk detector's OWN path, not the hi-speed
+// GPIO3 channel). No per-RPM-bin map: the alternator already has the faMatrix for that.
+static float maRippleSlow = 0.0f, maRippleWinMin = 1e9f, maRippleWinMax = -1e9f;
 static uint32_t bcurRippleLastMs = 0, bcurRippleWinStartMs = 0;
 static bool bcurRippleArmed = false;   // false until the first sample after the gate opens (seed, don't measure)
 static bool bcurRippleDirty = false;   // new worst-per-bin pending blob persistence at the next field-off flush
 
 // Active 3-current resonance test (COMMISSIONING_SPEC §3.2): when armed, log each completed window's
 // (rpm, operating current, pk-pk) so the browser can fit ripple = a0 + a1·I and project to max output.
+// Logged for BOTH detectors in the same window: battery (iX100/pkpkX100, INA path) and alternator
+// (iAltX100/altPkpkX100, ADS path) — so the browser fits a battery slope AND a symmetric bulk slope.
 // Unlike the per-bin max above, this keeps MULTIPLE samples so a slope can be fit. RAM-only (ephemeral
 // test), cleared on arm. Capture only runs while faCommissionGate is also open (same window path).
 #define BCUR_RTEST_CAP 64
-struct BcurRtestPt { uint16_t rpm; uint16_t iX100; uint16_t pkpkX100; };
+struct BcurRtestPt { uint16_t rpm; uint16_t iX100; uint16_t pkpkX100; uint16_t iAltX100; uint16_t altPkpkX100; };
 BcurRtestPt bcurRtest[BCUR_RTEST_CAP];
 volatile bool bcurRtestActive = false;
 volatile uint16_t bcurRtestCount = 0;  // appends stop at CAP; browser stops well before
@@ -3698,28 +3710,37 @@ volatile float resTestTargetA = 0.0f;
 volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this; loop auto-releases if it goes stale
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
 
-// Fold one INA battery-current sample into the per-RPM-bin ripple capture. No-op (one bool test) unless
-// the commissioning matrix gate is open. Called from the INA fast-read path in 5_functions.ino.
-void bcurRippleCommissionUpdate(float bcur, float rpm) {
+// Fold one INA battery-current sample (bcur) plus the co-sampled ADS alternator current (macur) into the
+// per-RPM-bin battery ripple capture and, when the active resonance test is running, into its ring (both
+// detectors). No-op (one bool test) unless the commissioning matrix gate is open. Called from the INA
+// fast-read path in 5_functions.ino. macur is only needed for the active 3-level test's alt slope.
+void bcurRippleCommissionUpdate(float bcur, float macur, float rpm) {
   if (!faCommissionGate) { bcurRippleArmed = false; return; }
   uint32_t now = millis();
   if (!bcurRippleArmed) {  // gate just opened — seed the baseline, start a fresh window, measure next time
     bcurRippleSlow = bcur;
+    maRippleSlow = macur;
     bcurRippleLastMs = now;
     bcurRippleWinStartMs = now;
     bcurRippleWinMin = 1e9f;
     bcurRippleWinMax = -1e9f;
+    maRippleWinMin = 1e9f;
+    maRippleWinMax = -1e9f;
     bcurRippleArmed = true;
     return;
   }
   float dt = (now - bcurRippleLastMs) * 0.001f;
   bcurRippleLastMs = now;
-  if (dt <= 0.0f || dt > 1.0f) { bcurRippleSlow = bcur; return; }  // stall/gap → reseed baseline, drop this window
+  if (dt <= 0.0f || dt > 1.0f) { bcurRippleSlow = bcur; maRippleSlow = macur; return; }  // stall/gap → reseed baselines, drop this window
   float aSlow = dt / (BCUR_RIPPLE_SLOW_TC + dt);
   bcurRippleSlow += aSlow * (bcur - bcurRippleSlow);
   float resid = bcur - bcurRippleSlow;  // band-limited AC ripple (drift removed)
   if (resid < bcurRippleWinMin) bcurRippleWinMin = resid;
   if (resid > bcurRippleWinMax) bcurRippleWinMax = resid;
+  maRippleSlow += aSlow * (macur - maRippleSlow);   // parallel alternator-current drift removal (same TC/window)
+  float maResid = macur - maRippleSlow;
+  if (maResid < maRippleWinMin) maRippleWinMin = maResid;
+  if (maResid > maRippleWinMax) maRippleWinMax = maResid;
   if (now - bcurRippleWinStartMs >= BCUR_RIPPLE_WIN_MS) {
     float pkpk = bcurRippleWinMax - bcurRippleWinMin;
     int bin = (int)(rpm / FA_RPM_BIN_W);
@@ -3731,15 +3752,20 @@ void bcurRippleCommissionUpdate(float bcur, float rpm) {
         bcurRippleDirty = true;
       }
       if (bcurRtestActive && bcurRtestCount < BCUR_RTEST_CAP) {  // active test: keep every sample, not just the max
+        float maPkpk = maRippleWinMax - maRippleWinMin;
         BcurRtestPt &p = bcurRtest[bcurRtestCount];
         p.rpm = (uint16_t)fminf(rpm + 0.5f, 65535.0f);
         p.iX100 = (uint16_t)fminf(fabsf(bcurRippleSlow) * 100.0f + 0.5f, 65535.0f);
         p.pkpkX100 = v;
+        p.iAltX100 = (uint16_t)fminf(fabsf(maRippleSlow) * 100.0f + 0.5f, 65535.0f);   // operating alternator current
+        p.altPkpkX100 = (uint16_t)fminf(maPkpk * 100.0f + 0.5f, 65535.0f);             // alternator ripple this window
         bcurRtestCount++;
       }
     }
     bcurRippleWinMin = 1e9f;
     bcurRippleWinMax = -1e9f;
+    maRippleWinMin = 1e9f;
+    maRippleWinMax = -1e9f;
     bcurRippleWinStartMs = now;
   }
 }

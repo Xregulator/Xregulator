@@ -1637,6 +1637,21 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     vTgtRampDn = settingRead(NK_vTgtRampDn).toFloat();
   }
+  if (!settingExists(NK_setpointSlewEnable)) {
+    settingWrite(NK_setpointSlewEnable, String((int)setpointSlewEnable).c_str());
+  } else {
+    setpointSlewEnable = (uint8_t)settingRead(NK_setpointSlewEnable).toInt();
+  }
+  if (!settingExists(NK_cvRiseGovEnable)) {
+    settingWrite(NK_cvRiseGovEnable, String((int)cvRiseGovEnable).c_str());
+  } else {
+    cvRiseGovEnable = (uint8_t)settingRead(NK_cvRiseGovEnable).toInt();
+  }
+  if (!settingExists(NK_dutySlewEnable)) {
+    settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());
+  } else {
+    dutySlewEnable = (uint8_t)settingRead(NK_dutySlewEnable).toInt();
+  }
   if (!settingExists(NK_cvPlantK)) {
     settingWrite(NK_cvPlantK, String(cvPlantK, 5).c_str());
   } else {
@@ -1644,6 +1659,8 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   }
   if (!settingExists(NK_cvFloorK0)) { settingWrite(NK_cvFloorK0, String(cvFloorK0, 4).c_str()); } else { cvFloorK0 = settingRead(NK_cvFloorK0).toFloat(); }
   if (!settingExists(NK_cvFloorK1)) { settingWrite(NK_cvFloorK1, String(cvFloorK1, 4).c_str()); } else { cvFloorK1 = settingRead(NK_cvFloorK1).toFloat(); }
+  if (!settingExists(NK_ccFloorK0)) { settingWrite(NK_ccFloorK0, String(ccFloorK0, 4).c_str()); } else { ccFloorK0 = settingRead(NK_ccFloorK0).toFloat(); }
+  if (!settingExists(NK_ccFloorK1)) { settingWrite(NK_ccFloorK1, String(ccFloorK1, 4).c_str()); } else { ccFloorK1 = settingRead(NK_ccFloorK1).toFloat(); }
   if (!settingExists(NK_cvPlantTau)) {
     settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
   } else {
@@ -1887,6 +1904,11 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
   } else {
     IExcessCeilA = settingRead(NK_IExcessCeilA).toFloat();
+  }
+  if (!settingExists(NK_IExcessCeilABatt)) {
+    settingWrite(NK_IExcessCeilABatt, String(IExcessCeilABatt, 1).c_str());
+  } else {
+    IExcessCeilABatt = settingRead(NK_IExcessCeilABatt).toFloat();
   }
   if (!settingExists(NK_IExcessTau)) {
     settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());

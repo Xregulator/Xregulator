@@ -936,7 +936,7 @@ enum Csv3Index {
   CSV3_LoadDumpDtThresh3,
   CSV3_reserved_VMGUseTrueWind,   // dead slot — Target-mode toggle removed; kept to preserve CSV3 indices, sends 0
   CSV3_hardwarePresent,  // moved from CSV2
-  CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets false on boot
+  CSV3_testProtectionsEnabled,  // runtime flag — not persisted, resets true (enabled) on boot
   CSV3_IExcessArmMarginV,       // %.3f — iExcess voltage gate (decoupled from OvMeasMarginV 2026-05-23)
   CSV3_FastSetpointRiseRate,    // ×100, 1 decimal — multiplier on setpoint rise slew during post-protection recovery
   CSV3_FastSetpointRiseWindowMs, // raw ms — hard upper bound on fast-rise window
@@ -990,6 +990,9 @@ enum Csv3Index {
   CSV3_vTgtRampUp,              // CV voltage-target ramp UP rate (V/s); ×1000
   CSV3_vTgtRampDn,              // CV voltage-target ramp DOWN rate (V/s); ×1000
   CSV3_vTgtRampEnable,          // CV voltage-target slew master switch (0/1)
+  CSV3_setpointSlewEnable,      // inner-loop current setpoint slew master switch (0/1)
+  CSV3_cvRiseGovEnable,         // CV rise governor / anti-windup master switch (0/1)
+  CSV3_dutySlewEnable,          // field duty slew master switch (0/1)
   CSV3_CommissionTempF,         // board temp when CV fit applied — derate reference (°F ×10; -32768 = unset/NaN)
   CSV3_battTempDerateEnable,    // battery-temp gain derate master on/off (0/1)
   CSV3_battTempCoeff,           // battery fractional resistance change per °C; ×10000
@@ -998,8 +1001,10 @@ enum Csv3Index {
   CSV3_cvCurrentSrc,            // CV current source: 0=battery-when-available, 1=force alternator (§G)
   CSV3_IExcessFloorABatt,       // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA, set from battery ripple in Step 6
   CSV3_cvFloorK1,               // CV battery iExcess current-tracking floor slope (A of floor per A of current); ×10000; 0 = static floor
+  CSV3_ccFloorK1,               // BULK (alternator) iExcess current-tracking floor slope (A of floor per A of current); ×10000; 0 = static floor — bulk mirror of cvFloorK1
+  CSV3_IExcessCeilABatt,        // CV battery-current iExcess ceiling (A ×10) — separate from IExcessCeilA (alternator); splits the formerly-shared ceiling
 
-  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26
+  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +2 (ccFloorK1/IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30
 };
 
 
@@ -2246,7 +2251,7 @@ void setupServer() {
   // Active 3-current resonance test points: (rpm, operating current, pk-pk) per window since arm. Small
   // (≤BCUR_RTEST_CAP rows) → plain non-chunked response. Browser fits ripple = a0 + a1·I from these.
   server.on("/bcurrtest.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String out = "rpm,iA,pkpkA\n";
+    String out = "rpm,iA,pkpkA,iAltA,pkpkAltA\n";  // iA/pkpkA = battery (INA); iAltA/pkpkAltA = alternator (ADS)
     uint16_t n = bcurRtestCount; if (n > BCUR_RTEST_CAP) n = BCUR_RTEST_CAP;
     for (uint16_t i = 0; i < n; i++) {
       out += String(bcurRtest[i].rpm);
@@ -2254,6 +2259,10 @@ void setupServer() {
       out += String(bcurRtest[i].iX100 / 100.0f, 2);
       out += ',';
       out += String(bcurRtest[i].pkpkX100 / 100.0f, 2);
+      out += ',';
+      out += String(bcurRtest[i].iAltX100 / 100.0f, 2);
+      out += ',';
+      out += String(bcurRtest[i].altPkpkX100 / 100.0f, 2);
       out += '\n';
     }
     AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
@@ -3166,6 +3175,11 @@ void setupServer() {
     // ── Auto-commissioning: state machine ───────────────────────────────────
     else if (request->hasParam("commissionStart")) {
       foundParameter = true;
+      // Take ownership of the protection flag for the wizard run: save the user's manual-tuning value
+      // (only on a fresh start, not a resume — don't clobber the original) and force protections ON so the
+      // tuning-tab Protections sliders can't leak a stray "off" into commissioning. Restored on done/abort.
+      if (commissionState != 1) commissionProtBackup = testProtectionsEnabled;
+      testProtectionsEnabled = true;
       commissionSnapshot();         // capture pre-commissioning tune for the abort path
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // reset furthest-phase (the wizard bumps it forward per phase)
@@ -3190,6 +3204,7 @@ void setupServer() {
     else if (request->hasParam("commissionAbort")) {
       foundParameter = true;
       faCommissionGate = false;
+      testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
       bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
       commissionSetState(0);                // NOT_COMMISSIONED
       commissionSetPhase(0);                // clear checklist progress
@@ -3203,6 +3218,7 @@ void setupServer() {
     else if (request->hasParam("commissionDone")) {
       foundParameter = true;
       faCommissionGate = false;
+      testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
       settingRemove(NK_commissionSnap);     // commit the new tune (no snapshot ⇒ reboot won't revert)
       commissionClearMinPctBackup();        // discard the Min% backup too — the new floors stay
       commissionRecomputeState();           // COMMISSIONED if every stage done, else IN_PROGRESS (partial)
@@ -4505,6 +4521,10 @@ void setupServer() {
       foundParameter = true;
       if (!bhStartTest()) queueConsoleMessageF("BATT HEALTH: cannot start — %s", bhAbortReason);
     }
+    if (request->hasParam("bhAbort")) {
+      foundParameter = true;   // wizard Abort — only meaningful mid-run; the loop resumes normal slew-limited AUTO control
+      if (bhTestState == 1) bhAbort("cancelled by user");
+    }
     if (request->hasParam("bhStepLowA")) {
       foundParameter = true;
       bhStepLowA = request->getParam("bhStepLowA")->value().toFloat();
@@ -4898,6 +4918,24 @@ void setupServer() {
       settingWrite(NK_vTgtRampEnable, String((int)vTgtRampEnable).c_str());
       queueConsoleMessageF("CV target ramp limiter: %s", vTgtRampEnable ? "ON" : "OFF (instant)");
     }
+    if (request->hasParam("setpointSlewEnable")) {  // master switch for inner-loop current setpoint slew (1=on, 0=instant)
+      foundParameter = true;
+      setpointSlewEnable = (uint8_t)(request->getParam("setpointSlewEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_setpointSlewEnable, String((int)setpointSlewEnable).c_str());
+      queueConsoleMessageF("Current setpoint slew limiter: %s", setpointSlewEnable ? "ON" : "OFF (instant)");
+    }
+    if (request->hasParam("cvRiseGovEnable")) {  // master switch for CV rise governor / anti-windup clamp (1=on, 0=off)
+      foundParameter = true;
+      cvRiseGovEnable = (uint8_t)(request->getParam("cvRiseGovEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_cvRiseGovEnable, String((int)cvRiseGovEnable).c_str());
+      queueConsoleMessageF("CV rise governor (anti-windup): %s", cvRiseGovEnable ? "ON" : "OFF — OV-trip risk on up-steps");
+    }
+    if (request->hasParam("dutySlewEnable")) {  // master switch for field duty slew (1=on, 0=instant)
+      foundParameter = true;
+      dutySlewEnable = (uint8_t)(request->getParam("dutySlewEnable")->value().toInt() ? 1 : 0);
+      settingWrite(NK_dutySlewEnable, String((int)dutySlewEnable).c_str());
+      queueConsoleMessageF("Field duty slew limiter: %s", dutySlewEnable ? "ON" : "OFF (instant)");
+    }
     if (request->hasParam("vTgtRampUp")) {  // CV voltage-target ramp UP rate (V/s); 0 = instant
       foundParameter = true;
       vTgtRampUp = clamp_f(request->getParam("vTgtRampUp")->value().toFloat(), 0.0f, 5.0f);
@@ -4933,6 +4971,18 @@ void setupServer() {
       foundParameter = true;
       cvFloorK1 = request->getParam("cvFloorK1")->value().toFloat();
       settingWrite(NK_cvFloorK1, String(cvFloorK1, 4).c_str());
+    }
+    // Bulk (alternator-current) iExcess current-tracking floor coefficients — mirror of cvFloorK0/K1.
+    // Written by the same 3-level resonance sweep on Apply; 0/0 = static floor (auto-floor maintains base).
+    if (request->hasParam("ccFloorK0")) {
+      foundParameter = true;
+      ccFloorK0 = request->getParam("ccFloorK0")->value().toFloat();
+      settingWrite(NK_ccFloorK0, String(ccFloorK0, 4).c_str());
+    }
+    if (request->hasParam("ccFloorK1")) {
+      foundParameter = true;
+      ccFloorK1 = request->getParam("ccFloorK1")->value().toFloat();
+      settingWrite(NK_ccFloorK1, String(ccFloorK1, 4).c_str());
     }
     // Resonance current-check (§3.2): arm/disarm field-commanding, and set the commanded level. Disarm
     // also zeroes the target so the loop slews back toward the normal AUTO setpoint gently.
@@ -5239,6 +5289,14 @@ void setupServer() {
       IExcessCeilA = constrain(inputMessage.toFloat(), 5.0f, 80.0f);
       settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
       queueConsoleMessageF("IExcess threshold ceiling set to: %.1fA", IExcessCeilA);
+      if (CVTuningMode) cvTuningParamChanged = true;
+    }
+    if (request->hasParam("IExcessCeilABatt")) {
+      foundParameter = true;
+      inputMessage = request->getParam("IExcessCeilABatt")->value();
+      IExcessCeilABatt = constrain(inputMessage.toFloat(), 5.0f, 80.0f);
+      settingWrite(NK_IExcessCeilABatt, String(IExcessCeilABatt, 1).c_str());
+      queueConsoleMessageF("IExcess battery-current ceiling set to: %.1fA", IExcessCeilABatt);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
     if (request->hasParam("IExcessTau")) {
@@ -7918,6 +7976,9 @@ void SendWifiData() {
                                "%d,"  // vTgtRampUp
                                "%d,"  // vTgtRampDn
                                "%d,"  // vTgtRampEnable
+                               "%d,"  // setpointSlewEnable
+                               "%d,"  // cvRiseGovEnable
+                               "%d,"  // dutySlewEnable
                                "%d,"  // CommissionTempF
                                "%d,"  // battTempDerateEnable
                                "%d,"  // battTempCoeff
@@ -7925,7 +7986,9 @@ void SendWifiData() {
                                "%d,"  // ThermalSlopeWindowSec
                                "%d,"  // cvCurrentSrc
                                "%d,"  // IExcessFloorABatt
-                               "%d",  // cvFloorK1
+                               "%d,"  // cvFloorK1
+                               "%d,"  // ccFloorK1
+                               "%d",  // IExcessCeilABatt
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8249,6 +8312,9 @@ void SendWifiData() {
                                SafeInt(vTgtRampUp, 1000),                       // CSV3_vTgtRampUp (target ramp up rate V/s, ×1000)
                                SafeInt(vTgtRampDn, 1000),                       // CSV3_vTgtRampDn (target ramp down rate V/s, ×1000)
                                (int)vTgtRampEnable,                             // CSV3_vTgtRampEnable (slew master switch 0/1)
+                               (int)setpointSlewEnable,                         // CSV3_setpointSlewEnable (current setpoint slew master switch 0/1)
+                               (int)cvRiseGovEnable,                            // CSV3_cvRiseGovEnable (CV rise governor master switch 0/1)
+                               (int)dutySlewEnable,                             // CSV3_dutySlewEnable (field duty slew master switch 0/1)
                                isnan(CommissionTempF) ? -32768 : (int)lroundf(CommissionTempF * 10.0f),  // CSV3_CommissionTempF (°F ×10; -32768 = unset)
                                (int)battTempDerateEnable,                       // CSV3_battTempDerateEnable (0/1)
                                SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
@@ -8256,7 +8322,9 @@ void SendWifiData() {
                                SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
                                (int)cvCurrentSrc,                               // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
                                SafeInt(IExcessFloorABatt, 10),                  // CSV3_IExcessFloorABatt — ×10, 1 decimal
-                               SafeInt(cvFloorK1, 10000)                        // CSV3_cvFloorK1 — A/A ×10000 (0 = static floor)
+                               SafeInt(cvFloorK1, 10000),                       // CSV3_cvFloorK1 — A/A ×10000 (0 = static floor)
+                               SafeInt(ccFloorK1, 10000),                       // CSV3_ccFloorK1 — bulk A/A ×10000 (0 = static floor)
+                               SafeInt(IExcessCeilABatt, 10)                    // CSV3_IExcessCeilABatt — ×10, 1 decimal
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

@@ -830,9 +830,9 @@ const uint32_t INA_OV_DISAGREE_SUPPRESS_MS = 10000;  // 10 seconds
 // Protections continue to read originals. Control loops will migrate to
 // _filtered in a subsequent pass via getBatteryVoltage() / getTargetAmps().
 // Thermistor (CH3) is left on its own filter inside tempPID_tick().
-float InputFilterTC = 12.0f;       // ms — iExcess EMA TC, NVS-backed (default 100→12, 2026-06-10: plant/3 at measured 35ms plant delay)
-float OutputPIDFilterTC = 12.0f;   // ms — Output Current PID EMA TC, NVS-backed (default 100→12, 2026-06-10: plant/3 at measured 35ms plant delay)
-float VoltageFilterTC = 35.0f;     // ms — IBV EMA TC for CV voltage loop, NVS-backed (default 100→35, 2026-06-10: full plant delay at measured 35ms)
+float InputFilterTC = 34.0f;       // ms — iExcess EMA TC, NVS-backed (12→34 2026-06-30: τ/3 at commissioning plant τ=103ms; was plant/3 at 35ms)
+float OutputPIDFilterTC = 34.0f;   // ms — Output Current PID EMA TC, NVS-backed (12→34 2026-06-30: τ/3 at commissioning plant τ=103ms)
+float VoltageFilterTC = 103.0f;    // ms — IBV EMA TC for CV voltage loop, NVS-backed (35→103 2026-06-30: full plant τ at commissioning plant τ=103ms)
 float MeasuredAmps_filtered = 0.0f;  // iExcess EMA signal
 float g_pidI_filtered = 0.0f;        // Output Current PID EMA signal
 float IBV_filtered = 0.0f;           // EMA of INA228 bus voltage — used by getFiltV()
@@ -2623,7 +2623,7 @@ struct BattCapPoint {        // one OCV-anchored capacity measurement (X axis = 
 float    bhStepLowA   = 30.0f;
 float    bhStepDeltaA = 30.0f;  // crest = low + delta
 uint32_t bhDwellMs    = 3000;
-uint8_t  bhNumEdges   = 3;
+uint8_t  bhNumEdges   = 4;  // scored steps; 3 is the floor for the spread/fit check, 4 gives one extra edge to average for little added time
 
 volatile uint8_t bhTestState = 0;          // 0 IDLE, 1 RUNNING, 2 DONE, 3 ABORTED
 bool     batteryHealthTestActive = false;  // read by the control loop's health branch
@@ -2958,11 +2958,11 @@ float pidError = 0.0f;  // PID error for display (A)
 // recomputeCcGains() bakes in ×(12/BATTERY_VOLTAGE) to get the duty-space gains the loop actually
 // applies (PidK*_active), because field current per duty-% scales with bus voltage. Mirror of the CV
 // loop's recomputeCvGains(). Do NOT scale these per-class by hand — the normalization does it.
-float PidKp = 0.5f;   // 12V-equivalent proportional gain
-float PidKi = 2.0f;   // 12V-equivalent integral gain
+float PidKp = 0.812f;  // 12V-equivalent proportional gain (2026-06-30 commissioning plant fit: τ 103ms, K 1.135 A/%, θ 9ms, IMC seed)
+float PidKi = 7.884f;  // 12V-equivalent integral gain (2026-06-30 commissioning plant fit)
 float PidKd = 0.01f;  // 12V-equivalent derivative gain
-volatile float PidKp_active = 0.5f;   // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
-volatile float PidKi_active = 2.0f;   // DERIVED duty-space Ki.
+volatile float PidKp_active = 0.812f;  // DERIVED duty-space gain the PID uses (PidKp × 12/BATTERY_VOLTAGE). Set by recomputeCcGains().
+volatile float PidKi_active = 7.884f;  // DERIVED duty-space Ki.
 volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // --- Voltage (CV) PID ---
 // ── CV gain-mode system (Auto λ-based vs Manual) — see Working Markdown Docs/CV_AUTOTUNE_PLAN.md ──
@@ -2984,6 +2984,12 @@ float   cvPlantK     = 0.0f;      // measured plant gain K (V/A at the pack) fro
 // ONLY when the measured ripple-vs-current slope is significant ("adjust iExcess based on current, if needed").
 float   cvFloorK0    = 0.0f;      // floor at zero current (A)
 float   cvFloorK1    = 0.0f;      // floor slope (A of floor per A of operating current)
+// Bulk (current-limited / CC) iExcess dynamic floor — alternator-current mirror of cvFloorK0/K1:
+// floor(I) = ccFloorK0 + ccFloorK1·|MeasuredAmps_filtered| (A). 0/0 = no current dependence → bulk
+// detector uses the static (auto-floor-maintained) IExcessFloorA. Set by the same 3-level resonance
+// sweep that fits the battery slope, from the always-on alternator ripple map.
+float   ccFloorK0    = 0.0f;      // bulk floor at zero current (A)
+float   ccFloorK1    = 0.0f;      // bulk floor slope (A of floor per A of operating current)
 float   cvPlantTau   = 0.0f;      // measured rise time τ (s)
 float   cvPlantL     = 0.0f;      // measured dead time L (s)
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
@@ -3014,10 +3020,10 @@ uint8_t vTgtRampEnable = 1;       // master switch for the target slew (1=on, de
                                   // byte-identical to pre-ramp behaviour; lets you A/B the limiter, incl. in CV tuning.
 float   vTgtRampUp   = 0.025f;    // V/s — max rate the target may RISE  (up-steps are loop-limited anyway)
 float   vTgtRampDn   = 0.025f;    // V/s — max rate the target may FALL  (the knob that prevents the OV trip)
-volatile float VoltageKp_active = 30.0f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
-volatile float VoltageKi_active = 25.0f;  // DERIVED pack-space Ki the loop uses.
-volatile float VoltageKp = 30.0f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID)
-volatile float VoltageKi = 25.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi. 15→40 2026-06-11: Ki=15 step test settled ~9.7s (TC ~4.4s at measured ~15mV/A plant gain); 40 targeted ~1.7s. 40→25 2026-06-14: idle up-step at Ki=40 showed +50mV windup overshoot + ~3s ring (cv_I wound to ~59A vs ~50A hold eq — integrator winding against the idle current ceiling, not a too-high-Ki failure); 25 is a user trial that trades some blip cv_I-deficit recovery speed for less up-step overshoot — proper fix is the deferred cv_I anti-windup (see CV_Loop_Dev_Summary.md Future Work)
+volatile float VoltageKp_active = 8.5f;  // DERIVED pack-space Kp the loop uses (selected gain × 12/BATTERY_VOLTAGE). Set by recomputeCvGains().
+volatile float VoltageKi_active = 6.0f;  // DERIVED pack-space Ki the loop uses.
+volatile float VoltageKp = 8.5f;    // A/V — proportional gain (volatile: written from Core 0 web handler, read from Core 1 PID). 30→8.5 2026-06-30: commissioning CV plant fit K20=32.2 mV/A, 12 V-equiv
+volatile float VoltageKi = 6.0f;    // A/(V·s) — integral gain; above-target unwind uses KiDown = 7×VoltageKi. 25→6.0 2026-06-30: commissioning CV plant fit (K20=32.2 mV/A). 15→40 2026-06-11: Ki=15 step test settled ~9.7s (TC ~4.4s at measured ~15mV/A plant gain); 40 targeted ~1.7s. 40→25 2026-06-14: idle up-step at Ki=40 showed +50mV windup overshoot + ~3s ring (cv_I wound to ~59A vs ~50A hold eq — integrator winding against the idle current ceiling, not a too-high-Ki failure); 25 is a user trial that trades some blip cv_I-deficit recovery speed for less up-step overshoot — proper fix is the deferred cv_I anti-windup (see CV_Loop_Dev_Summary.md Future Work)
 // VoltageKd removed — D term was always 0 and is redundant with slope-aware integrator bleed (SlopeBleedK).
 float SlopeBleedThresh = 0.50f;      // V/s — integrator bleed activates when cvDSlope exceeds this
 float SlopeBleedK = 50.0f;          // A/(V/s) — bleed rate: per V/s of excess slope, drain this many A/s from cv_I
@@ -3044,9 +3050,10 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
 float IExcessFrac     = 0.10f;   // CV threshold as fraction of setpointLimited (0.10 → 5A at a 50A command). Scales with frame size.
 float IExcessFracBulk = 0.15f;   // BULK threshold as fraction of i_ceiling_pre_ov (looser — tolerate command-vs-actual error far from the voltage limit).
-float IExcessFloorA   = 7.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual.
-float IExcessFloorABatt = 7.0f;  // A — separate min threshold for the CV battery-current detector (§G). Defaults equal to IExcessFloorA (no behavior change until commissioned); Step 6 lowers it from measured battery ripple, which is ~3× smaller than alternator ripple.
-float IExcessCeilA    = 25.0f;   // A — max threshold; guards against too-loose on very large commands.
+float IExcessFloorA   = 5.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual. Default lowered 7→5 (2026-06-30): commissioning never undercuts this base, so a high base masks the measured current-tracking floor (which is typically well under 7 A).
+float IExcessFloorABatt = 3.0f;  // A — separate min threshold for the CV battery-current detector (§G). Default 3 A (battery current is quieter than alternator, so it can sit below the alternator base and catch over-current sooner). Commissioning never undercuts this; lower it manually in Protections for tighter detection.
+float IExcessCeilA    = 25.0f;   // A — max threshold (bulk / alternator detector); guards against too-loose on very large commands.
+float IExcessCeilABatt = 25.0f;  // A — separate max threshold for the CV battery-current detector. Splits the formerly-shared ceiling so the battery tracking floor saturates at a battery-appropriate level, not the alternator one. Defaults equal to IExcessCeilA (no behavior change until set).
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (replaces the old hardcoded 2A IEXCESS_HYST, now scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
@@ -3060,13 +3067,15 @@ float FastSetpointRiseRate = 8.0f;       // multiplier on normal setpoint rise s
 uint32_t FastSetpointRiseWindowMs = 5000; // hard upper bound (ms) on how long the fast-rise window stays open after any protection releases
 float FastSetpointRiseHeadroomV = 0.2f;  // V below ChargingVoltageTarget at which fast-rise is allowed; gate closes once IBV climbs into target - this margin
 // --- Test-mode protection override ---
-// User-controlled flag (per test page). When TRUE (default) G1, G2, G3, and
-// AlternatorHardShutdownV all fire normally. When FALSE the user has disabled them
-// so step-tests can characterise the plant without protection layers fighting the
-// test. NOT persisted — resets to TRUE (enabled) on every boot. G4 (Load Dump),
+// User-controlled flag (per test page). When TRUE (default) G1, G2, the G3/G4 iExcess
+// over-current detectors (alternator + battery), and AlternatorHardShutdownV all fire
+// normally. When FALSE the user has disabled them so step-tests can characterise the
+// plant without protection layers fighting the test. NOT persisted — resets to TRUE
+// (enabled) on every boot. Load Dump (the G4 battery rate-of-change tiers),
 // INA228 hardware OV, and the hardware OC trip (MaxTableValue+10) stay active
 // regardless of this flag.
 bool testProtectionsEnabled = true;
+bool commissionProtBackup   = true;  // saved value of testProtectionsEnabled at commissionStart; restored on done/abort. Commissioning forces protections ON for its run so a stray manual "off" from the tuning-tab sliders can't weaken the wizard's steps (the manual sliders are scoped to manual tuning only).
 // --- CV loop runtime state ---
 uint32_t lastVoltageLoopMs = 0;           // timestamp of last voltage loop update
 uint16_t g_voltLoopActualIntervalMs = 0;  // actual interval of last voltage loop fire (ms); 0 until second fire
@@ -3216,9 +3225,15 @@ struct TickSnapshot {
 
 // --- Rate Limiting (LM2907 coupling cap protection) ---
 float DutyRampRate = 40.0f;  // %/sec - max rate of duty cycle change (protects coupling cap from harsh transitions, includes OnOff toggle!)
+uint8_t dutySlewEnable = 1;  // master switch for the field duty slew (GOV_NORMAL_SLEW). 0 = duty steps instantly (old behaviour, A/B); applies in BOTH commissioning tests and normal operation
 // Asymmetric setpoint slew
 float SetpointRiseRate = 30.0f;  // A/sec
 float SetpointFallRate = 50.0f;  // A/sec
+uint8_t setpointSlewEnable = 1;  // master switch for the inner-loop current setpoint slew. 0 = setpoint steps instantly (drops startup ramp / big-step gentling too); applies in the CC test and normal operation
+uint8_t cvRiseGovEnable   = 1;   // master switch for the CV voltage-target rise governor (anti-windup clamp). 0 = rises are not clamped — integrator can wind up into an OV trip on an up-step; applies in the CV test and normal operation
+bool    g_autoTestActive  = false;  // set per control-loop tick: an automated/guided test owns the limiters now (commissioning / battery-health DCIR / resonance / system-ID). While true the four user limiter toggles above are inert so a stray user setting can't corrupt a measurement; each test's own built-in slew behavior governs.
+const float TEST_ENTRY_RATE_A = 8.0f;  // A/s — FIXED, conservative ramp rate for an automated test's transition up from the rest floor and back down (NOT the user's SetpointRiseRate/FallRate, which a user could set aggressively). Used by DCIR, the resonance check, and the TuningMode entry ramp so a test never slams the field coming on/off. Current-domain, so no bus-voltage scaling.
+bool    g_tuningEntrySettled = false;  // set per tick from tuningEntryRamped: false while a TuningMode test is still ramping up from rest, true once settled. Gates the sine duty-slew bypass so the entry eases in (duty slew engaged) before the actuator is unclamped for the clean sine.
 // Large up-step gentling: up-moves whose remaining gap exceeds SetpointBigStepThresh climb at the
 // slower SetpointBigStepRiseRate (instead of SetpointRiseRate) until the gap closes inside the
 // threshold; small corrections within the threshold keep full SetpointRiseRate responsiveness.
@@ -3479,8 +3494,8 @@ uint32_t ShutdownPhase2HoldMs = 500;  // ms - hold at rpmMinDuty before slow ram
 
 // ===== TEMPERATURE LOOP PID (replaces thermal model) =====
 // Tuning — all web UI configurable
-float TempPIDKp = 1.8f;             // A/°F proportional gain — derated from 3.0 (/1.667) on 2026-06-29 when the alt current sensor was corrected 500A→300A: the penalty is in MeasuredAmps, which now delivers 1.667× more REAL current per amp, so loop authority per °F rose 1.667×; this restores the previously-validated physical thermal response
-float TempPIDKi = 0.06f;            // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error); derated from 0.1 (/1.667) on 2026-06-29 (alt sensor 500A→300A fix — same loop-authority rescale as TempPIDKp)
+float TempPIDKp = 3.0f;             // A/°F proportional gain. Reverted 1.8→3.0 on 2026-06-30: the /1.667 derate (applied 2026-06-29 for the alt-sensor 500A→300A fix) left the loop too weak — it blew through setpoint and tripped the warn ramp on ordinary approaches (theraml fail 2.csv / thermalfuckedstill.csv) while NEVER saturating its cut authority (penalty stayed ~20A under the cap), the signature of under-gain not over-authority. 3.0 is the tune validated June 18–27.
+float TempPIDKi = 0.1f;             // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error). Reverted 0.06→0.1 on 2026-06-30 alongside TempPIDKp (the /1.667 derate built the holding penalty too slowly to catch the climb before the warn-ramp trip).
 float TempPIDKiDownFrac = 0.33f;   // velocity-form asymmetric bleed (2026-06-26): below setpoint (eI<0) the integral bleed uses TempPIDKi×this instead of TempPIDKi, so a transient sub-setpoint undershoot does NOT collapse the learned holding penalty (the fridaytherm.csv grow-to-trip cycle). Ratio (not absolute) so it auto-scales with any Ki. 1.0 = symmetric (old behavior); lower = slower release. Clamped [0,1].
 float ThermalLookaheadSec = 60.0f;  // projection horizon (s), clamped [0,300]; reverted 75→60 (2026-06-29) — 75/25 over-extrapolated the coarse slope and drove the limit-cycle in theramlbad.csv
 float ThermalSlopeWindowSec = 20.0f;  // slope backward-difference window (s), clamped [10,60]; shorter = less lag, noisier slope; reverted 25→20 to the Jun27 value
@@ -3667,7 +3682,7 @@ struct PidLogEntry {
   int16_t voltLoopIntervalMs;  // actual voltage loop interval when fired this tick (ms); 0 if not fired
   int16_t inaIntervalMs;       // ina_last_ms — INA228 read freshness (ms)
   int16_t pad2;                // alignment pad
-  // ── iExcess (Group 3) detector tuning traces ─────────────────────────────
+  // ── iExcess (Group 3 alternator / Group 4 battery) detector tuning traces ─────────────────────────────
   float mExcessEma;            // g_mExcessEma — time-averaged signed current excess over command (A)
   float iExcessThreshold;      // g_iExcessThreshold — computed fire threshold E (A)
 };                   // 140 bytes — naturally aligned, no implicit holes
@@ -3752,7 +3767,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 //    b2  cvActive        voltageControlActive
 //    b3  reserved        (was softClamp — old soft-cap removed)
 //    b4  hardClamp       Group 1 (prediction cap) or Group 2 (voltage threshold) applied
-//    b5  iExcess         Group 3 (iExcess supervisor) fired this tick
+//    b5  iExcess         iExcess supervisor (Group 3 alternator or Group 4 battery) fired this tick
 //    b6  loadDumpActive  load dump feedforward active this tick
 
 
@@ -5267,10 +5282,13 @@ void loop() {
         updateWeatherMode();  // de-instrumented 2026-06-29: core-1 cost is local analysis only; fetch is queued to Core 0
       }
       TIMED_CALL(ft_AdjustFieldLearnMode, AdjustFieldLearnMode());
-      // Inner-PID firing-interval re-baseline: while the field is down, drop the previous-
-      // firing timestamp so the first firing after re-enable measures a fresh interval,
-      // not the whole field-off gap. gpio4IsLow reflects field state set inside the call above.
-      if (gpio4IsLow) pfHasPrev = false;
+      // Inner-PID firing + INA228 read interval re-baseline: while the field is down, drop the
+      // previous-sample timestamp so the first sample after re-enable measures a fresh interval,
+      // not the whole field-off gap. The INA reset also closes the over-temp case where a field-off
+      // flash write stalls the entire loop before inaFastModeActive flips to slow mode — without it
+      // that stall is logged as a fast-mode (field-on) read interval. gpio4IsLow reflects field
+      // state set inside the call above.
+      if (gpio4IsLow) { pfHasPrev = false; inaResetIntervalBaseline(); }
       TIMED_CALL(ft_altHealth, altHealth_tick(millis()));
       TIMED_CALL(ft_boatPerf, boatPerf_tick(millis()));   // Phase 3 boat performance (timing exposed via PerfLive registry)
       if (hardwarePresent == 1) drainIMUFifo();  // skip in fake mode — no hardware means 15ms I2C timeout per call floods the loop

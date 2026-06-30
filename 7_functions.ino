@@ -2681,6 +2681,13 @@ void resetINA228AllStats() {
   ina_over2x_at = 0;
 }
 
+// Drop the previous-read timestamp from outside this file. loop() calls this every
+// pass the field gate is low — the INA equivalent of the pf tracker's per-field-off-pass
+// pfHasPrev reset. Without it, a field-off flash write that stalls the whole loop (so
+// _ReadAnalogInputs_inner never runs to flip inaFastModeActive to slow mode) gets logged
+// as a fast-mode (field-on) read interval the next time a read fires, inflating ina_worst_at.
+void inaResetIntervalBaseline() { inaPrevRead = 0; }
+
 void recordINA228Interval(uint32_t now) {
   if (inaPrevRead == 0) { inaPrevRead = now; return; }
 

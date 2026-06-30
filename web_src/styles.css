@@ -219,6 +219,13 @@ textarea {
   display: block;
   margin-top: 2px;
   font-weight: 500;
+  /* Reserve one line even when blank. MANUAL/unknown/idle stages set textContent=''
+     + charge-stage-hidden (visibility:hidden); an empty block collapses to 0 height
+     despite visibility:hidden, so without this the sticky header shrinks by one line
+     on every transition to/from a blank stage and the whole page jumps. 1.2em == the
+     inherited line-height (cluster line-height:1.2 × this 11px font), so populated and
+     blank states are pixel-identical. */
+  min-height: 1.2em;
 }
 
 /* BULK — aggressive charge → strong green */
@@ -860,6 +867,33 @@ input[type="submit"]:hover {
 #commission-modal-panel .btn-secondary:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Battery-health DCIR test wizard — same dark-panel button treatment as the commissioning modal. */
+#bhw-modal-panel .btn-primary {
+  background: linear-gradient(180deg, #14b8af 0%, #00908a 100%) !important;
+  color: #fff !important;
+  border-color: #16c2b8 !important;
+  box-shadow: 0 2px 10px rgba(0, 161, 154, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  white-space: normal;
+  max-width: none;
+}
+#bhw-modal-panel .btn-primary:hover {
+  background: linear-gradient(180deg, #18c4ba 0%, #00a39c 100%) !important;
+}
+#bhw-modal-panel .btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+#bhw-modal-panel .btn-secondary {
+  background: rgba(255, 255, 255, 0.10);
+  color: #e8e8e8;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  white-space: normal;
+  max-width: none;
+}
+#bhw-modal-panel .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.16);
 }
 
 /* ── Plant Delay Test: minimize-to-pill + mobile bottom-sheet ────────────────

@@ -2522,9 +2522,10 @@ void _ReadAnalogInputs_inner() {
                          lastBcurEmaMs = nowBc;
                        }
 
-                       // Commissioning Step 5: fold this fast Bcur sample into the per-RPM-bin ripple
-                       // capture (no-op unless the matrix gate is open). Feeds the CV battery-current floor.
-                       bcurRippleCommissionUpdate(Bcur, RPM);
+                       // Commissioning Step 5: fold this fast Bcur sample (+ co-sampled MeasuredAmps for
+                       // the parallel alternator slope) into the per-RPM-bin ripple capture (no-op unless
+                       // the matrix gate is open). Feeds the CV battery-current AND bulk alternator floors.
+                       bcurRippleCommissionUpdate(Bcur, MeasuredAmps, RPM);
 
                        if (IBV > IBVMax)              { IBVMax              = IBV; }
                        if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; }
