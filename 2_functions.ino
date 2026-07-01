@@ -285,10 +285,9 @@ bool fsRemove(const char *path) {
 #define NK_cvRiseGovEnable "cvRiseGovEn"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_cvPlantK "cvPlantK"
-#define NK_cvFloorK0 "cvFloorK0"
-#define NK_cvFloorK1 "cvFloorK1"
-#define NK_ccFloorK0 "ccFloorK0"
-#define NK_ccFloorK1 "ccFloorK1"
+// Measured ripple projection (§3.3) — one CSV-encoded string per detector: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
+#define NK_ripFitAlt  "ripFitAlt"
+#define NK_ripFitBatt "ripFitBatt"
 #define NK_cvPlantTau "cvPlantTau"
 #define NK_cvPlantL "cvPlantL"
 #define NK_CommissionTempF "CommissionTmpF"
@@ -407,7 +406,6 @@ bool fsRemove(const char *path) {
 #define NK_capSettleRate "capSettleRate"
 #define NK_capSocLowMax "capSocLowMax"
 #define NK_capMinSpan "capMinSpan"
-#define NK_capChgEff "capChgEff"
 #define NK_capFullSoc "capFullSoc"
 #define NK_capRefMode "capRefMode"
 #define NK_capTempNorm "capTempNorm"
@@ -2835,6 +2833,7 @@ void uploadSensorHistory() {
 // userWord (uint32 → good to 2106). Field-off only — called on the field-off-settled
 // edge + at shutdown.
 void dumpLongTermRing() {
+  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real flash blob
   if (!longTermRing || longTermCount == 0) return;
   uint16_t startIdx = (longTermCount < LONGTERM_RING_SIZE) ? 0 : longTermHead;  // oldest record
   uint32_t n = writePsramBlob(LONGTERM_BACKUP_PATH, LONGTERM_BACKUP_MAGIC, LONGTERM_BACKUP_VER,
@@ -2864,6 +2863,7 @@ void restoreLongTermRing() {
 // Flush the PSRAM ring to LittleFS so a reboot doesn't lose the session. Field-off only (the
 // caller gates it), mirrors dumpLongTermRing — writes just `count` records via the blob scaffold.
 void dumpZeroLog() {
+  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real flash blob
   if (!zeroLogRing || zeroLogCount == 0) return;
   uint16_t startIdx = (zeroLogCount < ZEROLOG_RING_SIZE) ? 0 : zeroLogHead;  // oldest record
   uint32_t n = writePsramBlob(ZEROLOG_PATH, ZEROLOG_MAGIC, ZEROLOG_VER, 0,
@@ -2875,7 +2875,9 @@ void dumpZeroLog() {
 // Boot init: load the enable toggle, alloc the PSRAM ring, restore any persisted records
 // (linearized tail=0, head=count). Called from setup() after kneeLearnInit().
 void zeroLogInit() {
-  if (!settingExists(NK_ZeroLogEnable)) settingWrite(NK_ZeroLogEnable, "0");
+  // Default ON (permanent subsystem — it is the temp-comp correction's data source). A unit that
+  // previously stored "0" keeps its choice; only first-ever boot seeds the new default.
+  if (!settingExists(NK_ZeroLogEnable)) settingWrite(NK_ZeroLogEnable, "1");
   else ZeroLogEnable = (settingRead(NK_ZeroLogEnable).toInt() != 0);
   if (!zeroLogRing) {
     zeroLogRing = (ZeroLogRecord *)ps_malloc(ZEROLOG_RING_SIZE * sizeof(ZeroLogRecord));
@@ -2933,6 +2935,9 @@ void zeroLogService() {
       r.battVx100   = (int16_t)lroundf(getBatteryVoltage() * 100.0f);
       r.altTempFx10 = tempValid ? (int16_t)lroundf(AlternatorTemperatureF * 10.0f)
                                 : ZEROLOG_TEMP_BLANK;   // sensor absent → blank, never fabricated
+      bool boardValid = !isnan(ambientTemp) && !isinf(ambientTemp);
+      r.boardTempFx10 = boardValid ? (int16_t)lroundf(ambientTemp * 10.0f)
+                                   : ZEROLOG_TEMP_BLANK; // board sensor (BMP388) absent → blank
       zeroLogHead = (zeroLogHead + 1) % ZEROLOG_RING_SIZE;
       if (zeroLogCount < ZEROLOG_RING_SIZE) zeroLogCount++;
     }
@@ -3628,10 +3633,8 @@ static float faMvSlope12 = 3100.0f / 4095.0f, faMvOff12 = 0.0f;
 #define FA_CELL_AVG_N 4     // recent-average depth: cell value = running 1/min(n,N) mean (never freezes)
 #define FA_MATRIX_PATH "/famatrix.bin"
 #define FA_MATRIX_MAGIC 0x46414D58u  // 'FAMX'
-#define FA_MATRIX_VER 1
+#define FA_MATRIX_VER 3              // v3: +altFiltPendX100/battFiltPendX100 (two-hit fold candidates); v2 added altFiltPkX100/battFiltPkX100 (measured filtered ripple, §3.1) — older blobs rejected
 #define FA_MATRIX_FLUSH_MS 900000UL  // 15-min field-off cadence, like the long-term ring
-#define FA_IEXCESS_MARGIN   4.0f     // residual-current safety margin — mirrors the commissioning Thresholds math
-#define FA_IEXCESS_FLOOR_MAX 20.0f   // A — auto-floor ceiling, matches the /get?IExcessFloorA constrain upper bound
 
 struct FaPeak {
   uint16_t freqHzX10;  // band center, Hz ×10 (parabolic-refined)
@@ -3640,10 +3643,22 @@ struct FaPeak {
 };
 struct FaCell {
   FaPeak pk[FA_CELL_PEAKS];
-  uint16_t pkpkAX100;  // mean broadband pk-pk of the decimated stream, A ×100
-  uint16_t windows;    // qualified windows merged (saturating)
+  uint16_t pkpkAX100;   // mean broadband pk-pk of the decimated stream, A ×100
+  uint16_t windows;     // qualified windows merged (saturating)
+  // Measured filtered ripple (RIPPLE_DETECTION_REARCH_SPEC §3.1): PEAK pk-pk of each detector's
+  // IExcessTau low-pass of its sensor current, in this cell. == the detector's mExcessEma pk-pk — the
+  // real number it trips on. Used to PICK the current-check RPM (§3.2); never acts on the trip itself.
+  uint16_t altFiltPkX100;   // alternator detector (ADS MeasuredAmps low-pass), A ×100
+  uint16_t battFiltPkX100;  // battery detector (INA Bcur low-pass), A ×100
+  // Two-hit fold candidates: strongest so-far-UNcorroborated window pk-pk above the committed value.
+  // A candidate commits (at the LESSER of the pair) only when a second qualifying window in this cell
+  // also exceeds the committed value — so a lone transient that slips the admission gates can never
+  // permanently poison the cell, and artifact+real pairs commit at the real level. Rides in the blob
+  // so corroboration survives reboots.
+  uint16_t altFiltPendX100;
+  uint16_t battFiltPendX100;
 };
-static FaCell *faMatrix = NULL;  // PSRAM — 1200 × 16 B
+static FaCell *faMatrix = NULL;  // PSRAM — FA_RPM_BINS × FA_AMP_BINS cells
 uint16_t faCellsUsed = 0;        // cells with ≥1 qualified window (diagnostics)
 // Highest Tone in Map (dashboard headline) — strongest single tone across the whole learned map,
 // rescanned whenever the map changes. Read by the CSV2 builder in 3_functions.ino.
@@ -3651,53 +3666,70 @@ uint16_t faDomFreqHzX10 = 0;     // frequency, Hz ×10
 uint16_t faDomAmpAX100 = 0;      // pk-pk amplitude (2 × sine amplitude), A ×100
 uint16_t faDomRpm = 0;           // RPM (bin center) where it occurs
 static uint32_t faMatrixDirtyWindows = 0;
-// Auto-floor: continuously re-derive the over-current floor (IExcessFloorA) from the map's worst
-// binding tone, instead of freezing it at commissioning. faAutoFloorIdx is the running max of
-// (averaged peak amplitude / freq) across cells; the floor only ever RAISES from it and is persisted
-// to NVS on the field-off flush (never a live flash write). See faAutoFloorScanCell/Apply.
-static float faAutoFloorIdx = 0.0f;
-static bool  faAutoFloorDirty = false;  // a higher floor is pending NVS persistence at the next field-off flush
 static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core 0), executed on Core 1
 
-// ── Battery-current ripple capture (commissioning Step 5) ──
-// The disturbance matrix above characterizes ripple on ALTERNATOR current, but the CV over-current
-// detector now runs on BATTERY current (§G). Battery ripple is much smaller (the belt-resonance AC
-// mostly returns through bus capacitance, not the battery — measured ~3× on a real idle CV log), so
-// the alternator-derived floor is an over-conservative proxy for the CV detector. This captures the
-// worst battery-current ripple per 50-RPM bin during the Step-5 idle→2000 sweep so Step 6 can set a
-// battery-specific floor (IExcessFloorABatt). Sampled off the INA fast path (~4.3 ms, field-active) —
-// fast enough for the belt band (~28 Hz), too slow to FFT, so this is a direct drift-removed pk-pk,
-// not a tone decomposition. The browser pairs it with the alternator matrix's binding frequency to
-// derive the post-EMA residual, exactly parallel to the alternator floor math. Persisted to a tiny
-// blob so a reboot between Step 5 and Step 6 doesn't lose it; absent data → Step 6 falls back to the
-// alternator proxy (prior behavior). Bins mirror the matrix (FA_RPM_BINS × FA_RPM_BIN_W).
-#define BCUR_RIPPLE_PATH "/bcurripp.bin"
-#define BCUR_RIPPLE_MAGIC 0x42435252u  // 'BCRR'
-#define BCUR_RIPPLE_VER 1
-#define BCUR_RIPI_PATH "/bcurripi.bin"
-#define BCUR_RIPI_MAGIC 0x42435249u    // 'BCRI' — parallel per-bin operating current at each worst pk-pk
-#define BCUR_RIPPLE_SLOW_TC 0.5f       // s — drift/DC baseline EMA; passes the belt band, blocks the charge ramp
-#define BCUR_RIPPLE_WIN_MS 500UL       // pk-pk measurement window (matches the matrix window)
-uint16_t bcurRipplePkpkX100[FA_RPM_BINS];  // worst drift-removed pk-pk of Bcur per RPM bin, A ×100 (0 = unvisited)
-// Operating battery current (A ×100) at the moment each bin's worst pk-pk was captured. Ripple from belt/
-// alternator torque scales ~with load current, so Step 6 uses this to project the measured ripple up to the
-// device's max charge current instead of trusting a floor measured at whatever current happened to flow.
-uint16_t bcurRippleIatX100[FA_RPM_BINS];
-static float bcurRippleSlow = 0.0f, bcurRippleWinMin = 1e9f, bcurRippleWinMax = -1e9f;
-// Parallel alternator-current (ADS path) ripple accumulator — only used to feed the active 3-level
-// resonance test ring (the alt floor must be measured on the bulk detector's OWN path, not the hi-speed
-// GPIO3 channel). No per-RPM-bin map: the alternator already has the faMatrix for that.
-static float maRippleSlow = 0.0f, maRippleWinMin = 1e9f, maRippleWinMax = -1e9f;
-static uint32_t bcurRippleLastMs = 0, bcurRippleWinStartMs = 0;
-static bool bcurRippleArmed = false;   // false until the first sample after the gate opens (seed, don't measure)
-static bool bcurRippleDirty = false;   // new worst-per-bin pending blob persistence at the next field-off flush
+// ── Measured filtered ripple capture (RIPPLE_DETECTION_REARCH_SPEC §3.1) ──
+// For BOTH detectors, run an always-on IExcessTau LOW-PASS EMA directly on the sensor current — INA228
+// Bcur for the battery (G4) detector, ADS1115 MeasuredAmps for the alternator (G3) detector — and take
+// the pk-pk (max−min) of that low-passed signal over each 0.5 s window. Because the (slow) setpoint
+// cancels in a pk-pk, this EQUALS the detector's own mExcessEma pk-pk — the real number it trips on —
+// WITHOUT needing the loop bound, so the battery figure is measurable even in bulk. This is NOT the old
+// drift-removed AC pk-pk: that high-pass kept the fast belt content the IExcessTau low-pass is meant to
+// attenuate, so it read far too large. The per-window peak folds into the FaCell (altFiltPkX100/
+// battFiltPkX100) — persisted inside /famatrix.bin, used only to PICK the current-check RPM (§3.2) and
+// to draw the Protections reference plot. It NEVER moves the over-current floor. Called every INA
+// fast-read (~4.3 ms, field-active) from 5_functions.ino.
+// ADMISSION (spec §10): a window folds only if it was genuinely steady — the IExcessTau low-pass passes
+// slow current ramps straight through, so a ramping window would record the RAMP size (10–20 A) as
+// "ripple" and peak-hold it forever. Gates: min sample count, no protection clamp, command travel
+// within limit, per-detector 300 ms-EMA drift within limit, same-RPM-bin (cell fold only). NO wizard
+// relaxation — a steady-state quantity cannot be measured while ramping; the wizard's instructed
+// pauses are the admission windows. Live readouts: ROLL_RIPCMDEXC/RIPALTEXC/RIPBATTEXC on the Diag page.
+#define FILT_RIPPLE_WIN_MS 500UL       // pk-pk measurement window (matches the matrix window)
+#define FILT_RIPPLE_MIN_N 58           // min samples/window to fold (~50% of nominal ~116 @ 4.3 ms INA cadence) — a stall-starved window under-samples the extremes
+#define FILT_RIPPLE_ADM_TC 0.300f      // admission-EMA time constant (s) — heavy enough that belt ripple averages out of it, so its window spread measures operating-point drift, not ripple. Matches Path A's 300 ms precedent. NOT the measurement filter.
+static float altFiltEma = 0.0f, battFiltEma = 0.0f;             // IExcessTau low-pass of each sensor current (A) — the MEASUREMENT
+static float altFiltWinMin = 1e9f, altFiltWinMax = -1e9f;       // window extremes of the low-passed alt signal
+static float battFiltWinMin = 1e9f, battFiltWinMax = -1e9f;     // window extremes of the low-passed batt signal
+static float altFiltWinSum = 0.0f, battFiltWinSum = 0.0f;       // window means → operating current for the fit
+// Admission gates (steady-state qualification — see spec §10). Separate 300 ms EMAs per sensor: their
+// window spread is the drift statistic each detector's fold is gated on (per-detector — a steady-alt /
+// ramping-batt window folds alt only). Command travel (setpointLimited max−min, ripple-free by
+// construction) exactly rejects every commanded ramp: test level steps, warmup, big-step gentling,
+// Hi→Lo glide. Protection latch rejects any window a clamp touched (G1/G2, iExcess, load dump).
+extern float faAmpsDriftFloorA, faAmpsDriftPct;                 // shared Path-A drift knobs — defined below in the fast-alt settings block (variables get no Arduino auto-prototype, hence the forward declaration)
+static float altAdmEma = 0.0f, battAdmEma = 0.0f;               // 300 ms admission EMAs (drift statistic, NOT the measurement)
+static float altAdmWinMin = 1e9f, altAdmWinMax = -1e9f;
+static float battAdmWinMin = 1e9f, battAdmWinMax = -1e9f;
+static float cmdWinMin = 1e9f, cmdWinMax = -1e9f;               // setpointLimited travel over the window
+static float filtRippleWinRpm0 = 0.0f;                          // RPM at window start (same-bin check at fold)
+static bool filtRippleWinProt = false;                          // any protection clamp during the window
+static uint32_t filtRippleWinN = 0;
+static uint32_t filtRippleLastMs = 0, filtRippleWinStartMs = 0;
+static bool filtRippleArmed = false;   // false until the first sample seeds the EMAs (seed, don't measure)
+
+// Reset the window accumulators — fresh window baselined at the running EMAs (the caller reseeds the
+// EMAs themselves first on arm/stall; a normal window rollover keeps them running).
+static void filtRippleWinReset(float rpm, uint32_t now) {
+  altFiltWinMin = altFiltWinMax = altFiltEma;
+  battFiltWinMin = battFiltWinMax = battFiltEma;
+  altAdmWinMin = altAdmWinMax = altAdmEma;
+  battAdmWinMin = battAdmWinMax = battAdmEma;
+  cmdWinMin = cmdWinMax = setpointLimited;
+  altFiltWinSum = battFiltWinSum = 0.0f;
+  filtRippleWinN = 0;
+  filtRippleWinRpm0 = rpm;
+  filtRippleWinProt = false;
+  filtRippleWinStartMs = now;
+}
 
 // Active 3-current resonance test (COMMISSIONING_SPEC §3.2): when armed, log each completed window's
 // (rpm, operating current, pk-pk) so the browser can fit ripple = a0 + a1·I and project to max output.
 // Logged for BOTH detectors in the same window: battery (iX100/pkpkX100, INA path) and alternator
 // (iAltX100/altPkpkX100, ADS path) — so the browser fits a battery slope AND a symmetric bulk slope.
-// Unlike the per-bin max above, this keeps MULTIPLE samples so a slope can be fit. RAM-only (ephemeral
-// test), cleared on arm. Capture only runs while faCommissionGate is also open (same window path).
+// pk-pk here is the IExcessTau low-passed pk-pk (same quantity as the FaCell fill), so the fit matches
+// what the detector trips on. This keeps MULTIPLE samples so a slope can be fit. RAM-only (ephemeral
+// test), cleared on arm. Ring appends only while bcurRtestActive; the FaCell fill runs always.
 #define BCUR_RTEST_CAP 64
 struct BcurRtestPt { uint16_t rpm; uint16_t iX100; uint16_t pkpkX100; uint16_t iAltX100; uint16_t altPkpkX100; };
 BcurRtestPt bcurRtest[BCUR_RTEST_CAP];
@@ -3708,77 +3740,126 @@ volatile uint16_t bcurRtestCount = 0;  // appends stop at CAP; browser stops wel
 volatile bool resTestActive = false;
 volatile float resTestTargetA = 0.0f;
 volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this; loop auto-releases if it goes stale
+// Deferred release: on resTest=0 the loop slews the field to ~0 FIRST (still current-controlled, so the
+// target-relative over-voltage stays suppressed) THEN drops resTestActive — so CV re-enters from a
+// low-voltage state and ramps the field back up FROM BELOW the charge target, instead of resuming at the
+// test's high held current and slamming the soft OV (G2) the instant voltage control re-arms.
+volatile bool resTestReleasing = false;
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
 
-// Fold one INA battery-current sample (bcur) plus the co-sampled ADS alternator current (macur) into the
-// per-RPM-bin battery ripple capture and, when the active resonance test is running, into its ring (both
-// detectors). No-op (one bool test) unless the commissioning matrix gate is open. Called from the INA
-// fast-read path in 5_functions.ino. macur is only needed for the active 3-level test's alt slope.
-void bcurRippleCommissionUpdate(float bcur, float macur, float rpm) {
-  if (!faCommissionGate) { bcurRippleArmed = false; return; }
+// Fold one INA battery-current sample (bcur) + the co-sampled ADS alternator current (macur) into the
+// measured filtered-ripple capture. ALWAYS-ON — the map fills during normal running too (§3.1); the
+// resonance-test ring only appends while bcurRtestActive. Called every INA fast-read from 5_functions.ino.
+// See the block comment above: pk-pk is of the IExcessTau LOW-PASS of each sensor, == the detector's own
+// mExcessEma pk-pk, so the map/ring read exactly what the trip reads. rpm bins the cell; altMean is the
+// cell's amp axis; the battery figure rides in the same cell (its own current is logged only in the ring).
+void faFiltRippleUpdate(float bcur, float macur, float rpm) {
   uint32_t now = millis();
-  if (!bcurRippleArmed) {  // gate just opened — seed the baseline, start a fresh window, measure next time
-    bcurRippleSlow = bcur;
-    maRippleSlow = macur;
-    bcurRippleLastMs = now;
-    bcurRippleWinStartMs = now;
-    bcurRippleWinMin = 1e9f;
-    bcurRippleWinMax = -1e9f;
-    maRippleWinMin = 1e9f;
-    maRippleWinMax = -1e9f;
-    bcurRippleArmed = true;
+  if (!filtRippleArmed) {  // seed the EMAs, start a fresh window, measure next time
+    altFiltEma = macur; battFiltEma = bcur;
+    altAdmEma = macur; battAdmEma = bcur;
+    filtRippleLastMs = now;
+    filtRippleWinReset(rpm, now);
+    filtRippleArmed = true;
     return;
   }
-  float dt = (now - bcurRippleLastMs) * 0.001f;
-  bcurRippleLastMs = now;
-  if (dt <= 0.0f || dt > 1.0f) { bcurRippleSlow = bcur; maRippleSlow = macur; return; }  // stall/gap → reseed baselines, drop this window
-  float aSlow = dt / (BCUR_RIPPLE_SLOW_TC + dt);
-  bcurRippleSlow += aSlow * (bcur - bcurRippleSlow);
-  float resid = bcur - bcurRippleSlow;  // band-limited AC ripple (drift removed)
-  if (resid < bcurRippleWinMin) bcurRippleWinMin = resid;
-  if (resid > bcurRippleWinMax) bcurRippleWinMax = resid;
-  maRippleSlow += aSlow * (macur - maRippleSlow);   // parallel alternator-current drift removal (same TC/window)
-  float maResid = macur - maRippleSlow;
-  if (maResid < maRippleWinMin) maRippleWinMin = maResid;
-  if (maResid > maRippleWinMax) maRippleWinMax = maResid;
-  if (now - bcurRippleWinStartMs >= BCUR_RIPPLE_WIN_MS) {
-    float pkpk = bcurRippleWinMax - bcurRippleWinMin;
-    int bin = (int)(rpm / FA_RPM_BIN_W);
-    if (rpm > 0.0f && bin >= 0 && bin < FA_RPM_BINS) {
-      uint16_t v = (uint16_t)fminf(pkpk * 100.0f + 0.5f, 65535.0f);
-      if (v > bcurRipplePkpkX100[bin]) {
-        bcurRipplePkpkX100[bin] = v;
-        bcurRippleIatX100[bin] = (uint16_t)fminf(fabsf(bcurRippleSlow) * 100.0f + 0.5f, 65535.0f);  // current at this worst
-        bcurRippleDirty = true;
+  float dt = (now - filtRippleLastMs) * 0.001f;
+  filtRippleLastMs = now;
+  if (dt <= 0.0f || dt > 1.0f) {  // stall / field-off slow read → reseed baselines, drop this window
+    altFiltEma = macur; battFiltEma = bcur;
+    altAdmEma = macur; battAdmEma = bcur;
+    filtRippleWinReset(rpm, now);
+    return;
+  }
+  float tauSec = IExcessTau * 0.001f;
+  float alpha  = dt / (tauSec + dt);   // exact IExcessTau low-pass the detector uses — NOT a drift high-pass
+  altFiltEma  += alpha * (macur - altFiltEma);
+  battFiltEma += alpha * (bcur  - battFiltEma);
+  float admAlpha = dt / (FILT_RIPPLE_ADM_TC + dt);   // 300 ms admission EMA — drift statistic only
+  altAdmEma  += admAlpha * (macur - altAdmEma);
+  battAdmEma += admAlpha * (bcur  - battAdmEma);
+  if (altFiltEma  < altFiltWinMin)  altFiltWinMin  = altFiltEma;
+  if (altFiltEma  > altFiltWinMax)  altFiltWinMax  = altFiltEma;
+  if (battFiltEma < battFiltWinMin) battFiltWinMin = battFiltEma;
+  if (battFiltEma > battFiltWinMax) battFiltWinMax = battFiltEma;
+  if (altAdmEma  < altAdmWinMin)  altAdmWinMin  = altAdmEma;
+  if (altAdmEma  > altAdmWinMax)  altAdmWinMax  = altAdmEma;
+  if (battAdmEma < battAdmWinMin) battAdmWinMin = battAdmEma;
+  if (battAdmEma > battAdmWinMax) battAdmWinMax = battAdmEma;
+  if (setpointLimited < cmdWinMin) cmdWinMin = setpointLimited;
+  if (setpointLimited > cmdWinMax) cmdWinMax = setpointLimited;
+  if (g_fastOvClampActive) filtRippleWinProt = true;
+  altFiltWinSum += altFiltEma; battFiltWinSum += battFiltEma; filtRippleWinN++;
+  if (now - filtRippleWinStartMs >= FILT_RIPPLE_WIN_MS && filtRippleWinN > 0) {
+    float altPk   = altFiltWinMax  - altFiltWinMin;   // pk-pk of the low-passed alt current (A)
+    float battPk  = battFiltWinMax - battFiltWinMin;  // pk-pk of the low-passed batt current (A)
+    float altMean  = altFiltWinSum  / (float)filtRippleWinN;   // operating alternator current over the window
+    float battMean = battFiltWinSum / (float)filtRippleWinN;   // operating battery current over the window
+    uint16_t altV  = (uint16_t)fminf(altPk  * 100.0f + 0.5f, 65535.0f);
+    uint16_t battV = (uint16_t)fminf(battPk * 100.0f + 0.5f, 65535.0f);
+    // ── Steady-state admission gates (spec §10) ─────────────────────────────
+    // Drift limits share the Path-A knobs (Diag ▸ Anomaly Detection & Ripple-Map Gating). Per-detector
+    // limit uses that detector's own operating current for the %-of-mean term.
+    float limAlt  = fmaxf(faAmpsDriftFloorA, faAmpsDriftPct * 0.01f * fabsf(altMean));
+    float limBatt = fmaxf(faAmpsDriftFloorA, faAmpsDriftPct * 0.01f * fabsf(battMean));
+    float cmdTravel = cmdWinMax - cmdWinMin;
+    float altDrift  = altAdmWinMax - altAdmWinMin;
+    float battDrift = battAdmWinMax - battAdmWinMin;
+    // Live gate readouts (10 s worst of quantity − limit; <=0 = passing) — fed every window, before
+    // gating, so the dashboard shows why windows are/aren't admitting. Command shares the alt limit.
+    rollUpdate(ROLL_RIPCMDEXC,  cmdTravel - limAlt);
+    rollUpdate(ROLL_RIPALTEXC,  altDrift  - limAlt);
+    rollUpdate(ROLL_RIPBATTEXC, battDrift - limBatt);
+    bool commonOk = (filtRippleWinN >= FILT_RIPPLE_MIN_N)   // stall-starved window → extremes under-sampled
+                    && !filtRippleWinProt                    // a protection clamp owned part of the window
+                    && (cmdTravel <= limAlt);                // a commanded ramp is not ripple
+    bool altSteady  = commonOk && (altDrift  <= limAlt);
+    bool battSteady = commonOk && (battDrift <= limBatt);
+    int rpmBin = (int)(rpm / FA_RPM_BIN_W);
+    // Cell fold additionally requires the window to have stayed in ONE 50-RPM bin (start vs end) so a
+    // swept window can't smear ripple into the wrong resonance bin. The test ring skips this check —
+    // the browser filters ring rows by its own ±150 RPM band, and a hold wobbling across a bin
+    // boundary must not starve the 3-level capture.
+    bool rpmSameBin = (rpm > 0.0f) && (filtRippleWinRpm0 > 0.0f)
+                      && ((int)(filtRippleWinRpm0 / FA_RPM_BIN_W) == rpmBin);
+    int ampBin = (int)((altMean - FA_AMP_BIN_LO) / FA_AMP_BIN_W);
+    if (faMatrix && rpmSameBin && rpmBin >= 0 && rpmBin < FA_RPM_BINS
+        && altMean >= FA_AMP_BIN_LO && ampBin >= 0 && ampBin < FA_AMP_BINS) {
+      // Two-hit peak-hold (§10): first qualifying window above the committed value becomes the pending
+      // candidate; the second commits the pair at its LESSER value and consumes the candidate. See the
+      // FaCell comment. Pending updates mark the blob dirty so corroboration survives reboots.
+      FaCell *c = &faMatrix[rpmBin * FA_AMP_BINS + ampBin];
+      if (altSteady && altV > c->altFiltPkX100) {
+        if (c->altFiltPendX100 > c->altFiltPkX100) {
+          c->altFiltPkX100 = (altV < c->altFiltPendX100) ? altV : c->altFiltPendX100;
+          c->altFiltPendX100 = 0;
+        } else {
+          c->altFiltPendX100 = altV;
+        }
+        faMatrixDirtyWindows++;
       }
-      if (bcurRtestActive && bcurRtestCount < BCUR_RTEST_CAP) {  // active test: keep every sample, not just the max
-        float maPkpk = maRippleWinMax - maRippleWinMin;
-        BcurRtestPt &p = bcurRtest[bcurRtestCount];
-        p.rpm = (uint16_t)fminf(rpm + 0.5f, 65535.0f);
-        p.iX100 = (uint16_t)fminf(fabsf(bcurRippleSlow) * 100.0f + 0.5f, 65535.0f);
-        p.pkpkX100 = v;
-        p.iAltX100 = (uint16_t)fminf(fabsf(maRippleSlow) * 100.0f + 0.5f, 65535.0f);   // operating alternator current
-        p.altPkpkX100 = (uint16_t)fminf(maPkpk * 100.0f + 0.5f, 65535.0f);             // alternator ripple this window
-        bcurRtestCount++;
+      if (battSteady && battV > c->battFiltPkX100) {
+        if (c->battFiltPendX100 > c->battFiltPkX100) {
+          c->battFiltPkX100 = (battV < c->battFiltPendX100) ? battV : c->battFiltPendX100;
+          c->battFiltPendX100 = 0;
+        } else {
+          c->battFiltPendX100 = battV;
+        }
+        faMatrixDirtyWindows++;
       }
     }
-    bcurRippleWinMin = 1e9f;
-    bcurRippleWinMax = -1e9f;
-    maRippleWinMin = 1e9f;
-    maRippleWinMax = -1e9f;
-    bcurRippleWinStartMs = now;
+    // Ring rows need BOTH sensors steady (one row carries both detectors' values).
+    if (bcurRtestActive && altSteady && battSteady && bcurRtestCount < BCUR_RTEST_CAP) {
+      BcurRtestPt &p = bcurRtest[bcurRtestCount];
+      p.rpm = (uint16_t)fminf(rpm + 0.5f, 65535.0f);
+      p.iX100 = (uint16_t)fminf(fabsf(battMean) * 100.0f + 0.5f, 65535.0f);   // operating battery current
+      p.pkpkX100 = battV;
+      p.iAltX100 = (uint16_t)fminf(fabsf(altMean) * 100.0f + 0.5f, 65535.0f); // operating alternator current
+      p.altPkpkX100 = altV;
+      bcurRtestCount++;
+    }
+    filtRippleWinReset(rpm, now);
   }
-}
-
-// Persist the per-RPM-bin battery ripple array (field-off flush, alongside the matrix). Tiny blob.
-void bcurRippleFlush() {
-  uint32_t n = writePsramBlob(BCUR_RIPPLE_PATH, BCUR_RIPPLE_MAGIC, BCUR_RIPPLE_VER,
-                              0, bcurRipplePkpkX100, sizeof(uint16_t),
-                              FA_RPM_BINS, 0, FA_RPM_BINS);
-  writePsramBlob(BCUR_RIPI_PATH, BCUR_RIPI_MAGIC, BCUR_RIPPLE_VER,
-                 0, bcurRippleIatX100, sizeof(uint16_t),
-                 FA_RPM_BINS, 0, FA_RPM_BINS);  // parallel operating-current array (separate file, same gate)
-  if (n > 0) bcurRippleDirty = false;
 }
 
 // ── Flat-top windowed FFT (replaced the constant-Q Goertzel bank 2026-06-14) ──
@@ -4072,35 +4153,6 @@ static void faCellFoldPeak(int cellIdx, float fHz, float ampA) {
   c->pk[slot].nAcc = 1;
 }
 
-// Auto-floor part 1: fold one cell's eligible tones into the running-max binding index. ONLY peaks
-// averaged over >= FA_CELL_AVG_N windows are eligible, so a transient (one cycle, one 0.5 s window,
-// even a few) can never move the floor — the tone must persist across ~2 s of qualified steady running.
-static inline void faAutoFloorScanCell(int cellIdx) {
-  const FaCell *c = &faMatrix[cellIdx];
-  for (int s = 0; s < FA_CELL_PEAKS; s++) {
-    if (c->pk[s].nAcc < FA_CELL_AVG_N) continue;  // not yet fully averaged — ineligible
-    float f = c->pk[s].freqHzX10 / 10.0f;
-    if (f < FA_MIN_TONE_HZ) continue;
-    float idx = (c->pk[s].ampAX100 / 100.0f) / f;  // residual-weighted, == a/f (matches the commissioning math)
-    if (idx > faAutoFloorIdx) faAutoFloorIdx = idx;
-  }
-}
-
-// Auto-floor part 2: turn the running-max binding index into the live floor. R = a/(2*pi*f*tau) is the
-// residual current the EMA would carry from that tone; floor = R*margin. Uses the commissioned tau
-// (IExcessTau). Only ever RAISES IExcessFloorA (a 0.05 A deadband avoids float chatter), clamped to the
-// same ceiling as the manual path, and flags persistence for the next field-off flush.
-static void faAutoFloorApply() {
-  float tauSec = IExcessTau * 0.001f;
-  if (tauSec <= 0.0f) return;
-  float cand = (faAutoFloorIdx / (6.2831853f * tauSec)) * FA_IEXCESS_MARGIN;  // 6.2831853 = 2*pi
-  if (cand > FA_IEXCESS_FLOOR_MAX) cand = FA_IEXCESS_FLOOR_MAX;
-  if (cand > IExcessFloorA + 0.05f) {
-    IExcessFloorA = cand;
-    faAutoFloorDirty = true;
-  }
-}
-
 // Window finalize — runs every FA_WIN_DECIM_N decimated samples (0.5 s, crystal-timed).
 // Applies the steady-state gate, runs the flat-top FFT and merges its peaks into the
 // disturbance matrix, and (further down the chain) feeds the flipbook + detector.
@@ -4220,9 +4272,6 @@ static void faWindowFinalize() {
         if (c->windows == 0) faCellsUsed++;
         if (c->windows < 65535) c->windows++;
         faMatrixDirtyWindows++;
-        // Re-derive the live over-current floor from this cell's now-updated tones (eligible peaks only).
-        faAutoFloorScanCell(cellIdx);
-        faAutoFloorApply();
         // Fleet scalars: per-session worsts
         if (pkpkA > faSesPkpkWorstA) {
           faSesPkpkWorstA = pkpkA;
@@ -4726,18 +4775,13 @@ void faMatrixMaybeFlush() {
   if (!faMatrix) return;
   if (faPendingMatrixClear) {  // user-clicked (password-gated /get) — runs here on Core 1
     faPendingMatrixClear = false;
-    memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
+    memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);  // also zeros altFiltPkX100/battFiltPkX100 + the two-hit pend candidates
     faCellsUsed = 0;
     faMatrixDirtyWindows = 0;
-    faAutoFloorIdx = 0.0f;  // map wiped — drop the auto-floor running max too (IExcessFloorA stays; it only re-raises)
     fsTakeLock();
     LittleFS.remove(FA_MATRIX_PATH);
-    LittleFS.remove(BCUR_RIPPLE_PATH);  // battery ripple is part of the same disturbance characterization
-    LittleFS.remove(BCUR_RIPI_PATH);
     fsReleaseLock();
-    memset(bcurRipplePkpkX100, 0, sizeof(bcurRipplePkpkX100));
-    memset(bcurRippleIatX100, 0, sizeof(bcurRippleIatX100));
-    bcurRippleDirty = false;
+    filtRippleArmed = false;  // reseed the low-pass EMAs on the next sample
     faDomReset();  // map wiped — clear the Highest Tone in Map headline too (persists at the next save)
     queueConsoleMessage("Resonance & Ripple Map cleared");
     return;
@@ -4758,14 +4802,9 @@ void faMatrixMaybeFlush() {
   bool rising = off && !prevOff;
   bool periodic = off && (millis() - lastFlushMs >= FA_MATRIX_FLUSH_MS);
   prevOff = off;
-  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty || faAutoFloorDirty || bcurRippleDirty)) {
-    if (faMatrixDirtyWindows > 0) faMatrixFlush();
+  if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty)) {
+    if (faMatrixDirtyWindows > 0) faMatrixFlush();  // filtered-ripple (altFiltPkX100/battFiltPkX100) rides in this same blob
     if (faFlipDirty) faFlipFlush();
-    if (bcurRippleDirty) bcurRippleFlush();
-    if (faAutoFloorDirty) {  // auto-raised floor — persist here (field-off) so it survives reboot; never a live flash write
-      settingWrite(NK_IExcessFloorA, String(IExcessFloorA, 1).c_str());
-      faAutoFloorDirty = false;
-    }
     lastFlushMs = millis();
   }
 }
@@ -4872,14 +4911,8 @@ void faInit() {
   if (readPsramBlob(FA_FLIP_PATH, FA_FLIP_MAGIC, FA_FLIP_VER,
                     faFlip, sizeof(FaFlipPage), FA_FLIP_SLOTS, &anomNext32, false) > 0)
     faAnomNext = (uint8_t)(anomNext32 % FA_FLIP_ANOM);
-  // Battery-current ripple capture (Step 5) — restore the per-RPM-bin worsts so a reboot between
-  // Step 5 and Step 6 keeps them; absent/mismatched blob leaves the zeroed array (Step 6 proxy fallback).
-  memset(bcurRipplePkpkX100, 0, sizeof(bcurRipplePkpkX100));
-  memset(bcurRippleIatX100, 0, sizeof(bcurRippleIatX100));
-  readPsramBlob(BCUR_RIPPLE_PATH, BCUR_RIPPLE_MAGIC, BCUR_RIPPLE_VER,
-                bcurRipplePkpkX100, sizeof(uint16_t), FA_RPM_BINS, NULL, false);
-  readPsramBlob(BCUR_RIPI_PATH, BCUR_RIPI_MAGIC, BCUR_RIPPLE_VER,
-                bcurRippleIatX100, sizeof(uint16_t), FA_RPM_BINS, NULL, false);  // absent on old units → 0 → no projection
+  // Measured filtered ripple (altFiltPkX100/battFiltPkX100) now rides inside the matrix blob above —
+  // no separate per-RPM-bin file to restore.
   faFftInit();
   faWinReset();
   // Global ON/OFF (Pattern B, item 4). InitSystemSettings() runs AFTER faInit() in setup(),

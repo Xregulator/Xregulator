@@ -58,8 +58,9 @@ enum Csv1Index {
   CSV1_mExcessEmaPeak,   // iExcess: per-CSV1-frame peak averaged excess (A ×10) — live sparkline
   CSV1_iExcessThreshMin, // iExcess: per-CSV1-frame min fire threshold E (A ×10) — live sparkline
   CSV1_protEventMask,    // protection-event bitmask this frame (1=OV 2=iExcess 4=LoadDump) — Plots-tab vertical markers
+  CSV1_Bcur_filtered,    // EMA-filtered battery current (Bcur_filtered, OutputPIDFilterTC) — Current plot, off by default
 
-  CSV1_FIELD_COUNT  // = 41
+  CSV1_FIELD_COUNT  // = 42
 };
 
 enum Csv2Index {
@@ -589,6 +590,10 @@ enum Csv2Index {
   CSV2_faTonePk10sMax,      // largest spectral peak, 10s peak (A ×100)
   CSV2_ldSlew10sMax,        // current slew g_dBcur_dt, 10s peak (A/s ×10)
   CSV2_cvSlope10sMax,       // voltage rise cvDSlope, 10s peak (V/s ×10000)
+  // ripple-capture (faFiltRippleUpdate §10) admission gates — window quantity minus its limit, 10s peak (A ×100); <=0 = that gate passing
+  CSV2_ripCmdExc10sMax,     // setpointLimited travel − limit
+  CSV2_ripAltExc10sMax,     // alternator 300ms-EMA drift − limit
+  CSV2_ripBattExc10sMax,    // battery 300ms-EMA drift − limit
 
   // Lifetime nav/sailing records (so the Lifetime Statistics panel can show + individually reset
   // them). Persisted in NVS + uploaded to the leaderboards; previously had no live readout.
@@ -631,7 +636,7 @@ enum Csv2Index {
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
   CSV2_cvBattCurrentActive, // §G: 1 = inner loop is live-regulating BATTERY current in CV (absorption/float)
 
-  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543
+  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543; +3 ripple-capture gate excess readouts (2026-07-01) = 547
 };
 
 enum Csv4Index {
@@ -999,12 +1004,10 @@ enum Csv3Index {
   CSV3_TempPIDKiDownFrac,       // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
   CSV3_ThermalSlopeWindowSec,   // thermal slope backward-difference window (s); integer
   CSV3_cvCurrentSrc,            // CV current source: 0=battery-when-available, 1=force alternator (§G)
-  CSV3_IExcessFloorABatt,       // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA, set from battery ripple in Step 6
-  CSV3_cvFloorK1,               // CV battery iExcess current-tracking floor slope (A of floor per A of current); ×10000; 0 = static floor
-  CSV3_ccFloorK1,               // BULK (alternator) iExcess current-tracking floor slope (A of floor per A of current); ×10000; 0 = static floor — bulk mirror of cvFloorK1
+  CSV3_IExcessFloorABatt,       // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA; plain operator setting, commissioning never writes it
   CSV3_IExcessCeilABatt,        // CV battery-current iExcess ceiling (A ×10) — separate from IExcessCeilA (alternator); splits the formerly-shared ceiling
 
-  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +2 (ccFloorK1/IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30
+  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +1 (IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30; −2 (cvFloorK1/ccFloorK1 removed) ripple re-arch 2026-07-01
 };
 
 
@@ -2227,21 +2230,29 @@ void setupServer() {
     request->send(response);
   });
 
-  // ── Battery-current ripple per RPM bin (commissioning Step 5) ──
-  // One row per VISITED 50-RPM bin: drift-removed pk-pk of battery current (A). Small (≤80 rows),
-  // so built into a String and sent whole. Step 6 pairs the worst with the alternator matrix's
-  // binding frequency to derive the CV battery-current detector floor (IExcessFloorABatt). Empty
-  // body (header only) = nothing captured → Step 6 falls back to the alternator proxy.
-  server.on("/bcurripple.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String out = "rpmLo,ripplePkpkA,iAtA\n";  // iAtA = operating battery current when this worst pk-pk was caught (0=unknown)
-    for (int b = 0; b < FA_RPM_BINS; b++) {
-      if (bcurRipplePkpkX100[b] == 0) continue;  // unvisited bin
-      out += String(b * FA_RPM_BIN_W);
-      out += ',';
-      out += String(bcurRipplePkpkX100[b] / 100.0f, 2);
-      out += ',';
-      out += String(bcurRippleIatX100[b] / 100.0f, 2);
-      out += '\n';
+  // ── Measured filtered ripple per RPM bin (RIPPLE_DETECTION_REARCH_SPEC §3.2) ──
+  // One row per VISITED 50-RPM bin: worst IExcessTau-filtered pk-pk (== detector mExcessEma pk-pk) across
+  // that row's amp bins, for BOTH detectors (alt = ADS MeasuredAmps, batt = INA Bcur). Small (≤80 rows),
+  // sent whole. The Step-6 current-check picks each detector's test RPM from ITS worst row here — the two
+  // may differ. Empty body (header only) = nothing captured yet.
+  server.on("/filtripple.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String out = "rpmLo,altFiltPkA,battFiltPkA\n";
+    if (faMatrix) {
+      for (int r = 0; r < FA_RPM_BINS; r++) {
+        uint16_t altMax = 0, battMax = 0;
+        for (int a = 0; a < FA_AMP_BINS; a++) {
+          const FaCell *c = &faMatrix[r * FA_AMP_BINS + a];
+          if (c->altFiltPkX100  > altMax)  altMax  = c->altFiltPkX100;
+          if (c->battFiltPkX100 > battMax) battMax = c->battFiltPkX100;
+        }
+        if (altMax == 0 && battMax == 0) continue;  // unvisited RPM row
+        out += String(r * FA_RPM_BIN_W);
+        out += ',';
+        out += String(altMax / 100.0f, 2);
+        out += ',';
+        out += String(battMax / 100.0f, 2);
+        out += '\n';
+      }
     }
     AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
     response->addHeader("Cache-Control", "no-cache");
@@ -2268,6 +2279,22 @@ void setupServer() {
     AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
+  });
+
+  // ── Measured ripple projection (§3.3/§4) — the stored per-detector fit for the Protections plot ──
+  // ripple(I)=a0+a1·I plus the 3 measured (I, pk-pk) points and the RPM the test ran at. n=0 → no test
+  // yet (plot shows the threshold line only). Read on the Protections tab and by the Step-7 review.
+  server.on("/ripfit", HTTP_GET, [](AsyncWebServerRequest *request) {
+    auto j = [](const RipFit &r) {
+      String s = "{\"a0\":" + String(r.a0, 4) + ",\"a1\":" + String(r.a1, 5)
+               + ",\"rpm\":" + String(r.rpm, 0) + ",\"n\":" + String((int)r.nPts) + ",\"i\":[";
+      for (int k = 0; k < 3; k++) { if (k) s += ','; s += String(r.iPt[k], 2); }
+      s += "],\"pk\":[";
+      for (int k = 0; k < 3; k++) { if (k) s += ','; s += String(r.pkPt[k], 3); }
+      s += "]}";
+      return s;
+    };
+    request->send(200, "application/json", "{\"alt\":" + j(ripFitAlt) + ",\"batt\":" + j(ripFitBatt) + "}");
   });
 
   // ── Alternator (charging-system) health v2 — schema + curve + records + trend exports ──
@@ -2300,11 +2327,42 @@ void setupServer() {
     j += "}";
     request->send(200, "application/json", j);
   });
+  // Temp-comp zero correction: live learned-equation state for the dashboard panel.
+  server.on("/zerofitstate", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String j = "{\"valid\":";   j += zfValid;
+    j += ",\"sensor\":\"";      j += (zfSensor == ZF_ALT ? "alt" : "board"); j += "\"";
+    j += ",\"c\":";             j += String(zfC, 4);
+    j += ",\"b\":";             j += String(zfB, 5);
+    j += ",\"r2\":";            j += String(zfR2, 3);
+    j += ",\"corrNow\":";       j += String(DynamicAltCurrentZero, 3);
+    j += ",\"applied\":";       j += (AutoAltCurrentZero ? 1 : 0);
+    j += ",\"epoch\":";         j += String((unsigned)zfLastEpoch);
+    j += ",\"histCount\":";     j += String((unsigned)zeroFitHistCount);
+    j += "}";
+    request->send(200, "application/json", j);
+  });
+  // Temp-comp zero correction: daily-fit history (≤90 rows) for the trend view. Small enough to build inline.
+  server.on("/zerofit.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String out = "epoch,sensor,c,b,r2,n\n";
+    if (zeroFitHist && zeroFitHistCount > 0) {
+      for (uint16_t i = 0; i < zeroFitHistCount; i++) {
+        uint16_t idx = (zeroFitHistCount < ZFIT_HIST_SIZE) ? i
+                       : (uint16_t)((zeroFitHistHead + i) % ZFIT_HIST_SIZE);
+        ZeroFitRecord &r = zeroFitHist[idx];
+        char line[80];
+        snprintf(line, sizeof(line), "%u,%s,%.4f,%.5f,%.3f,%u\n",
+                 (unsigned)r.epoch, (r.sensor == ZF_ALT ? "alt" : "board"),
+                 r.c, r.b, r.r2, (unsigned)r.n);
+        out += line;
+      }
+    }
+    request->send(200, "text/csv", out);
+  });
   // Zero-drift log → CSV, streamed oldest-first (constant RAM). Reads the live PSRAM ring, so the
   // download is always complete regardless of the last flash flush.
   server.on("/zerolog.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (!zeroLogRing || zeroLogCount == 0) {
-      request->send(200, "text/csv", "epoch,rpm,battV,altTempF,amps,p2pAmps\n");
+      request->send(200, "text/csv", "epoch,rpm,battV,altTempF,boardTempF,amps,p2pAmps\n");
       return;
     }
     struct ZExp { uint16_t head, count, idx; bool header, done; char line[96]; int len, pos; };
@@ -2318,7 +2376,7 @@ void setupServer() {
         while (written < maxLen) {
           if (st.pos >= st.len) {
             if (st.header) {
-              st.len = snprintf(st.line, sizeof(st.line), "epoch,rpm,battV,altTempF,amps,p2pAmps\n");
+              st.len = snprintf(st.line, sizeof(st.line), "epoch,rpm,battV,altTempF,boardTempF,amps,p2pAmps\n");
               st.header = false;
             } else {
               if (st.idx >= st.count) { st.done = true; return written; }
@@ -2328,9 +2386,12 @@ void setupServer() {
               char altF[12];   // empty cell when the alt-temp sensor was absent (blank sentinel)
               if (r.altTempFx10 == ZEROLOG_TEMP_BLANK) altF[0] = '\0';
               else snprintf(altF, sizeof(altF), "%.1f", r.altTempFx10 / 10.0f);
-              st.len = snprintf(st.line, sizeof(st.line), "%u,%d,%.2f,%s,%.3f,%.3f\n",
+              char boardF[12]; // empty cell when the board-temp sensor was absent (blank sentinel)
+              if (r.boardTempFx10 == ZEROLOG_TEMP_BLANK) boardF[0] = '\0';
+              else snprintf(boardF, sizeof(boardF), "%.1f", r.boardTempFx10 / 10.0f);
+              st.len = snprintf(st.line, sizeof(st.line), "%u,%d,%.2f,%s,%s,%.3f,%.3f\n",
                                 (unsigned)r.epoch, (int)r.rpm, r.battVx100 / 100.0f,
-                                altF, r.amps, r.p2pAmps);
+                                altF, boardF, r.amps, r.p2pAmps);
               st.idx++;
             }
             st.pos = 0;
@@ -3167,7 +3228,7 @@ void setupServer() {
     else if (request->hasParam("bcurRtest")) {
       foundParameter = true;
       bool on = (request->getParam("bcurRtest")->value().toInt() != 0);
-      if (on) bcurRtestCount = 0;  // arm clears; samples accrue while faCommissionGate is also open
+      if (on) bcurRtestCount = 0;  // arm clears; windows append only when the §10 steadiness gates pass (both sensors)
       bcurRtestActive = on;
       queueConsoleMessageF("Resonance current test %s", on ? "ARMED (vary charge current)" : "stopped");
     }
@@ -4573,7 +4634,6 @@ void setupServer() {
     if (request->hasParam("capSettleRate")) { foundParameter = true; capSettleRateMv10  = request->getParam("capSettleRate")->value().toFloat(); settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str()); }
     if (request->hasParam("capSocLowMax"))  { foundParameter = true; capSocLowMax       = request->getParam("capSocLowMax")->value().toFloat();  settingWrite(NK_capSocLowMax, String(capSocLowMax, 1).c_str()); }
     if (request->hasParam("capMinSpan"))    { foundParameter = true; capMinSpan         = request->getParam("capMinSpan")->value().toFloat();    settingWrite(NK_capMinSpan, String(capMinSpan, 1).c_str()); }
-    if (request->hasParam("capChgEff"))     { foundParameter = true; capChgEff          = request->getParam("capChgEff")->value().toFloat();     settingWrite(NK_capChgEff, String(capChgEff, 4).c_str()); }
     if (request->hasParam("capFullSoc"))    { foundParameter = true; capFullSoc         = request->getParam("capFullSoc")->value().toFloat();    settingWrite(NK_capFullSoc, String(capFullSoc, 1).c_str()); }
     if (request->hasParam("capRefMode"))    { foundParameter = true; capRefMode         = (uint8_t)request->getParam("capRefMode")->value().toInt(); settingWrite(NK_capRefMode, String(capRefMode).c_str()); }
     if (request->hasParam("capTempNorm"))   { foundParameter = true; capTempNormEnable  = (uint8_t)request->getParam("capTempNorm")->value().toInt(); settingWrite(NK_capTempNorm, String(capTempNormEnable).c_str()); }
@@ -4960,38 +5020,31 @@ void setupServer() {
       }
       recomputeCvGains();
     }
-    // CV battery iExcess current-tracking floor coefficients (§3.2). Written by the resonance current-check
-    // on Apply; 0/0 = static floor. Hand-settable on the bench too.
-    if (request->hasParam("cvFloorK0")) {
+    // Measured ripple projection (§3.3): the browser fits ripple(I)=a0+a1·I from the 3-level current-check
+    // points and POSTs the whole per-detector record as a CSV string. Reference data for the Protections
+    // ripple-vs-threshold plot ONLY — never touches the over-current floor.
+    if (request->hasParam("ripFitAlt")) {
       foundParameter = true;
-      cvFloorK0 = request->getParam("cvFloorK0")->value().toFloat();
-      settingWrite(NK_cvFloorK0, String(cvFloorK0, 4).c_str());
+      ripFitDecode(request->getParam("ripFitAlt")->value(), ripFitAlt);
+      settingWrite(NK_ripFitAlt, ripFitEncode(ripFitAlt).c_str());
     }
-    if (request->hasParam("cvFloorK1")) {
+    if (request->hasParam("ripFitBatt")) {
       foundParameter = true;
-      cvFloorK1 = request->getParam("cvFloorK1")->value().toFloat();
-      settingWrite(NK_cvFloorK1, String(cvFloorK1, 4).c_str());
-    }
-    // Bulk (alternator-current) iExcess current-tracking floor coefficients — mirror of cvFloorK0/K1.
-    // Written by the same 3-level resonance sweep on Apply; 0/0 = static floor (auto-floor maintains base).
-    if (request->hasParam("ccFloorK0")) {
-      foundParameter = true;
-      ccFloorK0 = request->getParam("ccFloorK0")->value().toFloat();
-      settingWrite(NK_ccFloorK0, String(ccFloorK0, 4).c_str());
-    }
-    if (request->hasParam("ccFloorK1")) {
-      foundParameter = true;
-      ccFloorK1 = request->getParam("ccFloorK1")->value().toFloat();
-      settingWrite(NK_ccFloorK1, String(ccFloorK1, 4).c_str());
+      ripFitDecode(request->getParam("ripFitBatt")->value(), ripFitBatt);
+      settingWrite(NK_ripFitBatt, ripFitEncode(ripFitBatt).c_str());
     }
     // Resonance current-check (§3.2): arm/disarm field-commanding, and set the commanded level. Disarm
     // also zeroes the target so the loop slews back toward the normal AUTO setpoint gently.
     else if (request->hasParam("resTest")) {
       foundParameter = true;
-      resTestActive = (request->getParam("resTest")->value().toInt() != 0);
-      if (!resTestActive) resTestTargetA = 0.0f;
+      bool arm = (request->getParam("resTest")->value().toInt() != 0);
+      if (arm) { resTestActive = true; resTestReleasing = false; }
+      // Release = DEFERRED: keep the field under test-control (OV still suppressed) and let the loop wind the
+      // current down to ~0 first; it drops resTestActive itself once the field is down (6_functions.ino), so
+      // CV re-enters at low voltage and slews up from below rather than slamming G2 on the transition edge.
+      else if (resTestActive) { resTestReleasing = true; resTestTargetA = 0.0f; }
       resTestLastCmdMs = millis();
-      queueConsoleMessageF("Resonance current-check %s", resTestActive ? "ARMED (wizard commands current)" : "released");
+      queueConsoleMessageF("Resonance current-check %s", arm ? "ARMED (wizard commands current)" : "winding down");
     }
     else if (request->hasParam("resTestTargetA")) {
       foundParameter = true;
@@ -5943,6 +5996,12 @@ void setupServer() {
     }
     request->send(200, "text/plain", out);
   });
+
+  // Bench-only data-growth ceiling test: fill every ring to cap + measure the worst-case
+  // scans (handlers defined at the tail of 8_functions.ino where the ring symbols are in scope).
+  { void debugFillMax(AsyncWebServerRequest *); void debugClearMax(AsyncWebServerRequest *);
+    server.on("/debug/fillmax",  HTTP_GET, debugFillMax);
+    server.on("/debug/clearmax", HTTP_GET, debugClearMax); }
 
   // Phone-sourced GPS + time backup. Browser + Capacitor app both POST here
   // periodically (every ~30-60s) when they have a location fix. The priority
@@ -7106,7 +7165,7 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",  // +2: mExcessEmaPeak, iExcessThreshMin; +1: Bcur_filtered
 
                                CSV1_FIELD_COUNT,
                                SafeInt(AlternatorTemperatureF, 100),
@@ -7150,7 +7209,8 @@ void SendWifiData() {
                                SafeInt(g_iExcessThreshold, 10), // CSV1_iExcessThreshold — fire threshold E (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_mExcessEmaPeak : g_mExcessEma, 10),       // CSV1_mExcessEmaPeak (A ×10)
                                SafeInt(g_iExcessArmedWin ? g_iExcessThreshWinMin : g_iExcessThreshold, 10), // CSV1_iExcessThreshMin (A ×10)
-                               SafeInt(protMask)                // CSV1_protEventMask — protection-event bits this frame
+                               SafeInt(protMask),               // CSV1_protEventMask — protection-event bits this frame
+                               SafeInt(Bcur_filtered, 100)      // CSV1_Bcur_filtered — EMA battery current (off by default)
     );
     // Reset the per-frame iExcess sparkline aggregates now that they've been captured.
     g_mExcessEmaPeak = 0.0f;
@@ -7326,8 +7386,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // +7: operating-point context for the two headline worsts (Highest Tone amps/temp/epoch, Session Pk-Pk rpm/amps/temp/epoch)
                                "%d,%d,%d,%d,%d,%d,%d,"
-                               // +6: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope)
-                               "%d,%d,%d,%d,%d,%d,"
+                               // +9: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope, ripple-capture cmd/alt/batt gate excess)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
                                "%d,%d,%d,%d,%d,"
                                // +12: inner-current-loop live accuracy (×4, amps²×10000) + CV-voltage-loop RMS error (×4, mV) + CV peak overshoot (×4, mV), 1m/10m/100m/1000m windows each
@@ -7856,6 +7916,9 @@ void SendWifiData() {
                                rollCsv(ROLL_TONEPK, 100),                  // CSV2_faTonePk10sMax    (A ×100, peak)
                                rollCsv(ROLL_LDSLEW, 10),                   // CSV2_ldSlew10sMax      (A/s ×10, peak)
                                rollCsv(ROLL_CVSLOPE, 10000),               // CSV2_cvSlope10sMax     (V/s ×10000, peak)
+                               rollCsv(ROLL_RIPCMDEXC, 100),               // CSV2_ripCmdExc10sMax   (A ×100, peak; <=0 = passing)
+                               rollCsv(ROLL_RIPALTEXC, 100),               // CSV2_ripAltExc10sMax   (A ×100, peak; <=0 = passing)
+                               rollCsv(ROLL_RIPBATTEXC, 100),              // CSV2_ripBattExc10sMax  (A ×100, peak; <=0 = passing)
                                // Lifetime nav/sailing records (NVS-persisted; shown read-only in Lifetime Statistics)
                                SafeInt(LongestSingleTrip_Nm_AllTime, 10),  // CSV2_LongestTripAT     (nm ×10)
                                SafeInt(Max24hrDistance_AllTime, 10),       // CSV2_Max24hrDistAT     (nm ×10)
@@ -7986,8 +8049,6 @@ void SendWifiData() {
                                "%d,"  // ThermalSlopeWindowSec
                                "%d,"  // cvCurrentSrc
                                "%d,"  // IExcessFloorABatt
-                               "%d,"  // cvFloorK1
-                               "%d,"  // ccFloorK1
                                "%d",  // IExcessCeilABatt
 
                                CSV3_FIELD_COUNT,
@@ -8322,8 +8383,6 @@ void SendWifiData() {
                                SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
                                (int)cvCurrentSrc,                               // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
                                SafeInt(IExcessFloorABatt, 10),                  // CSV3_IExcessFloorABatt — ×10, 1 decimal
-                               SafeInt(cvFloorK1, 10000),                       // CSV3_cvFloorK1 — A/A ×10000 (0 = static floor)
-                               SafeInt(ccFloorK1, 10000),                       // CSV3_ccFloorK1 — bulk A/A ×10000 (0 = static floor)
                                SafeInt(IExcessCeilABatt, 10)                    // CSV3_IExcessCeilABatt — ×10, 1 decimal
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {

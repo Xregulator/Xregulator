@@ -1873,10 +1873,13 @@
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Alternator Auto-Zero (<span id="AutoAltCurrentZero_echo">?</span>):</span>
+                    <span>Alternator Zero Correction (<span id="AutoAltCurrentZero_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Automatically zeros alternator current reading every hour and when
-                        temperature changes 20°F.</span></span>
+                        class="tooltip-box">Temperature-compensated zero correction. Once a day (engine and
+                        field off) it fits a line to the zero-drift log — sensor zero vs. temperature — and
+                        subtracts it live, tracking whichever temperature (board or alternator) the sensor
+                        actually follows. Blended slowly across days and hard-clamped to ±3 A. Reset Zero
+                        clears the learned fit. Turn On to apply the correction.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -1896,17 +1899,24 @@
                     </form>
                   </div>
                 </div>
+                <div class="form-row">
+                  <div class="form-label"><span id="zerofit-status" class="learning-info-label">Fit: —</span></div>
+                  <div class="form-input">
+                    <button type="button" class="btn-secondary btn-sm"
+                      onclick="window.open(buildURL('/zerofit.csv'),'_blank')">Download Fit Trend</button>
+                  </div>
+                </div>
 
                 <hr />
                 <div class="form-row">
                   <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
                     <span>Zero-Drift Log (<span id="ZeroLogEnable_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span
-                        class="tooltip-box">Diagnostic. Records the alternator current reading while the field is
-                        off — every 1 s while the engine spins (for a quick RPM sweep), every 10 min while it's
-                        off — so the sensor's zero drift vs. time, temperature and RPM can be measured. Run this
-                        with Alternator Auto-Zero OFF so the reading is the true raw zero. Download the CSV to
-                        analyze, then Reset to start a fresh session.</span></span>
+                        class="tooltip-box">Records the alternator current reading while the field is off —
+                        every 1 s while the engine spins (for a quick RPM sweep), every 10 min while it's off —
+                        with both board and alternator temperature. This is the data source the Alternator Zero
+                        Correction fits its temperature line to; leave it On. Download the CSV to inspect the raw
+                        drift, or Reset to start a fresh session.</span></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -2640,7 +2650,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Detection Threshold — % of command (<span id="IExcessFrac_echo">?</span>%)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the measured current may rise above the current the regulator is commanding before the near-target detector steps in — set as a percentage of that commanded current. It acts on a short-time-averaged current (see Averaging Time Constant), so a brief momentary spike won't trip it; only a sustained excess will. The percentage is bounded by the active Threshold Floor and Ceiling.<br><br>Shared by both near-target detectors: it acts on <strong>alternator</strong> current (Group 3) in bulk / current-limited charging, and on <strong>battery</strong> current (Group 4) when the CV loop regulates battery current in absorption / float. It is the threshold in effect when battery voltage is near the charge target — within the Strict Over-Current Band. When voltage sits well below the target, the Detection Threshold (Bulk) takes over instead.<br><br><em>Note: once the commissioning current-tracking floor (slope) is set, that floor often exceeds this percentage term across the operating range, in which case this knob no longer binds for the battery detector.</em></span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the measured current may rise above the current the regulator is commanding before the near-target detector steps in — set as a percentage of that commanded current. It acts on a short-time-averaged current (see Averaging Time Constant), so a brief momentary spike won't trip it; only a sustained excess will. The percentage is bounded by the active Threshold Floor and Ceiling.<br><br>Shared by both near-target detectors: it acts on <strong>alternator</strong> current (Group 3) in bulk / current-limited charging, and on <strong>battery</strong> current (Group 4) when the CV loop regulates battery current in absorption / float. It is the threshold in effect when battery voltage is near the charge target — within the Strict Over-Current Band. When voltage sits well below the target, the Detection Threshold (Bulk) takes over instead.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2672,7 +2682,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Threshold Floor (alternator) — minimum amps (<span id="IExcessFloorA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.<br><br>This floor governs the <strong>alternator-current</strong> over-current detector (Group 3). The <strong>battery-current</strong> detector (Group 4, CV absorption/float) has its own separate floor, set from measured battery ripple — battery ripple is usually ~3× smaller than alternator ripple, so a battery-specific floor catches over-current earlier without more false fires. Commissioning Step 6 sets both.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used.<br><br>This floor governs the <strong>alternator-current</strong> over-current detector (Group 3). The <strong>battery-current</strong> detector (Group 4, CV absorption/float) has its own separate floor below — battery ripple is usually ~3× smaller than alternator ripple, so a battery-specific floor catches over-current earlier without more false fires. Both floors are yours to set; the ripple-vs-threshold plot below shows whether your value clears the measured ripple.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2688,7 +2698,7 @@
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
                       Threshold Floor (battery) — minimum amps (<span id="IExcessFloorABatt_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The minimum detection threshold for the CV <strong>battery-current</strong> over-current detector (absorption/float, when the CV loop regulates battery current). Separate from the alternator floor above because battery current carries much less ripple than alternator current (the belt-resonance AC mostly returns through bus capacitance, not the battery), so this floor can be lower — catching real over-current sooner without tripping on ripple. Commissioning Step 6 sets it from measured battery ripple; defaults equal to the alternator floor until then.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The minimum detection threshold for the CV <strong>battery-current</strong> over-current detector (absorption/float, when the CV loop regulates battery current). Separate from the alternator floor above because battery current carries much less ripple than alternator current (the belt-resonance AC mostly returns through bus capacitance, not the battery), so this floor can be lower — catching real over-current sooner without tripping on ripple. You set it; the ripple-vs-threshold plot below shows whether it clears the ripple measured during commissioning.</span></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2701,22 +2711,6 @@
                   </article>
 
                   <hr>
-
-                  <article class="protections-param" data-groups="g4">
-                    <div class="protections-name">
-                      <span class="protections-tag g4">G4</span>
-                      Battery floor — current-tracking slope (<span id="cvFloorK1_echo">?</span> A/A)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How much the battery over-current floor above <strong>rises per amp of charge current</strong>. The belt/alternator ripple that the floor must clear grows with load, so the resonance current-check measures this slope and the detector recomputes the floor live: <code>floor = max(your floor above, slope × present battery current)</code>, bounded by the over-current ceiling. <strong>Set to 0 to disable current-tracking</strong> — the floor then stays fixed at the value above (static). Normally written by the commissioning resonance current-check, not by hand.</span></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="cvFloorK1" type="number" step="0.001" min="0" max="2" />
-                        <span class="protections-unit">A/A</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
 
                   <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
@@ -2734,6 +2728,22 @@
                     </form>
                   </article>
 
+                  <article class="protections-param" data-groups="g3">
+                    <div class="protections-name" style="font-weight:normal; display:block;">
+                      <span class="protections-tag g3">G3</span>
+                      Ripple vs. trip threshold (alternator)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The trip threshold your settings above produce (both regimes: near-target % and bulk %, floor→ramp→ceiling) drawn against the alternator ripple that was actually measured during commissioning. Any current where the measured ripple crosses above the threshold is shaded red — the detector would false-trip there. The threshold lines redraw as you edit the fields above; the ripple line is fixed measured data. Nothing here changes automatically — you decide whether to raise the floor, raise the ceiling, or accept it.</span></span>
+                      <div style="display:flex; align-items:center; gap:6px; margin:6px 0 4px; font-size:11px; color:#888;">
+                        X-axis max
+                        <input id="rippleXmaxAlt" type="number" step="10" min="20" max="400" style="width:70px;" oninput="renderRipplePlots()" />
+                        <span>A</span>
+                      </div>
+                    </div>
+                    <canvas id="rippleThreshPlotAlt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
+                    <div id="rippleVerdictAlt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
+                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
+                  </article>
+
                   <article class="protections-param" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
@@ -2748,6 +2758,22 @@
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
+                  </article>
+
+                  <article class="protections-param" data-groups="g4">
+                    <div class="protections-name" style="font-weight:normal; display:block;">
+                      <span class="protections-tag g4">G4</span>
+                      Ripple vs. trip threshold (battery)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The battery-current trip threshold your settings above produce (% of command, floor→ramp→ceiling) drawn against the battery ripple measured during commissioning. Any current where the measured ripple crosses above the threshold is shaded red. The threshold line redraws as you edit the fields above; the ripple line is fixed measured data. Nothing here changes automatically.</span></span>
+                      <div style="display:flex; align-items:center; gap:6px; margin:6px 0 4px; font-size:11px; color:#888;">
+                        X-axis max
+                        <input id="rippleXmaxBatt" type="number" step="10" min="20" max="400" style="width:70px;" oninput="renderRipplePlots()" />
+                        <span>A</span>
+                      </div>
+                    </div>
+                    <canvas id="rippleThreshPlotBatt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
+                    <div id="rippleVerdictBatt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
+                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
                   </article>
 
                   <article class="protections-param" data-groups="g3 g4">
@@ -7304,13 +7330,14 @@
                   <strong>Three-Loop Cascaded Control:</strong> Three independent controllers run at different rates
                   and stack on top of each other. The <em>output current loop</em> runs 10 times per second and drives
                   the alternator field duty cycle to chase a current target. The <em>voltage loop</em> also runs 10
-                  times per second, but only during Bulk, Absorption, and Float — it computes the current target that
-                  holds the battery at the configured voltage. The <em>temperature loop</em> runs once every 5
-                  seconds, and outputs a single thermal penalty in amps that gets subtracted from the RPM Cap Table
-                  ceiling before the inner loops see it. The cascade is strict: temperature constrains what current
-                  the voltage loop is allowed to ask for; the voltage loop constrains what the output current loop is
-                  allowed to chase; the output current loop is the only thing that touches the field. Each layer
-                  never reaches past the one below it.
+                  times per second during the voltage-hold phases (Absorption and Float) — it computes the current
+                  target that holds the battery at the configured voltage. In the current-limited phase (Bulk) the
+                  voltage loop stands aside and the system charges at the ceiling. The <em>temperature loop</em> runs
+                  once every 5 seconds, and outputs a single thermal penalty in amps that gets subtracted from the RPM
+                  Cap Table ceiling before the inner loops see it. The cascade is strict: temperature constrains what
+                  current the voltage loop is allowed to ask for; the voltage loop constrains what the output current
+                  loop is allowed to chase; the output current loop is the only thing that touches the field. Each
+                  layer never reaches past the one below it.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>RPM Cap Table:</strong> For each engine RPM range, you configure a hard ceiling based on
@@ -7337,12 +7364,20 @@
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Voltage Loop:</strong> A proportional-integral controller (Voltage Loop Kp and Ki) holds
-                  battery voltage at target during Bulk, Absorption, and Float. The integrator uses asymmetric gain —
-                  it bleeds down fast when voltage runs above target and rises slowly when below, biasing toward
-                  safety. The Slope Bleed Gain drains the integrator when voltage is climbing quickly, which prevents
-                  overshoot during the approach to target. Anti-windup freezes upward integration whenever the
-                  current ceiling — not voltage — is the binding constraint, so the integrator does not load up while
-                  unable to act.
+                  battery voltage at target during the voltage-hold phases (Absorption and Float). Its output is a
+                  <em>battery-current</em> target, measured on the battery shunt (INA228), rather than an alternator-current
+                  target. That means the hold reacts to the current the battery actually receives, not to whatever the
+                  alternator happens to be producing while house loads draw off the same bus — a cleaner, quieter signal
+                  to regulate against. An alternator-current ceiling governor sits on top of it, so the loop can never
+                  demand more alternator output than the RPM Cap Table ceiling allows even while chasing a battery-current
+                  target. The current-limited phase (Bulk) still commands alternator current directly. The integrator uses
+                  asymmetric gain — it bleeds down fast when voltage runs above target and rises slowly when below, biasing
+                  toward safety. The Slope Bleed Gain drains the integrator when voltage is climbing quickly, which prevents
+                  overshoot during the approach to target. Anti-windup freezes upward integration whenever the current
+                  ceiling — not voltage — is the binding constraint, so the integrator does not load up while unable to act.
+                  The loop gains are set by the commissioning wizard's plant fit rather than tuned by hand (see below), and
+                  can be automatically re-scaled with board temperature to hold the loop's speed and damping constant as the
+                  battery's internal resistance changes with temperature.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Three-Stage Charging:</strong> The regulator implements a constant-current / constant-voltage /
@@ -7376,11 +7411,16 @@
                   three-loop cascade and act on raw sensor readings without filter lag. <em>Fast OV</em> (Groups 1
                   and 2) caps current immediately when raw battery voltage runs above a margin below the charging
                   target. <em>Load Dump</em> protection (Group 4) caps current when a sustained battery-current rise rate is
-                  detected, catching FET disconnect or load drop events. The <em>iExcess</em> over-current detectors
+                  detected, catching FET disconnect or load drop events. The <em>over-current detectors</em> (iExcess)
                   cap the current ceiling when measured current overshoots the commanded setpoint — <em>Group 3</em>
                   on alternator current (bulk / current-limited) and <em>Group 4</em> on battery current (CV
                   absorption / float) — and collapse the voltage-loop integrator at the same time so it can't
-                  immediately re-demand the excess. None
+                  immediately re-demand the excess. Each detector's trip threshold is not a single fixed number: it
+                  tracks the present charge current along a line the commissioning wizard measures — <em>clamp(floor,
+                  K0 + K1·current, ceiling)</em> — so the threshold sits tight at low current (catches real over-current
+                  sooner) and relaxes under heavy output (tolerates the larger legitimate ripple that comes with load),
+                  without extra false trips. The alternator and battery detectors carry their own floors, ceilings, and
+                  slopes because battery current runs far quieter than alternator current. None
                   of these depend on the control loops being active — they are always armed.
                 </p>
                 <p style="margin: 0; line-height: 1.5; color: var(--text-dark);">
@@ -7401,18 +7441,57 @@
             </div>
 
             <div class="tuning-section">
-              <p class="tuning-section-title">How to Tune the PID Controller</p>
+              <p class="tuning-section-title">How the Control Loops Are Tuned</p>
 
               <div
                 style="background: var(--card-light); padding: 15px; border-radius: var(--radius); border-left: 4px solid var(--accent); margin: 10px 0;">
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
-                  <strong>Overview:</strong> The output current loop and the voltage loop each have their own
-                  dedicated live tuning mode (Tuning Mode for the inner current loop, Waveform Generator for the
-                  voltage loop). Tune them in that order — inner loop first, then voltage — because each layer
-                  depends on the one beneath it being stable. This section covers the inner current loop; the
-                  voltage loop has its own dedicated tab with a built-in step test and live scoring. The
-                  temperature loop is tuned offline from logged data (no live step test) — its tab shows the live
-                  control plot and the controller parameters.
+                  <strong>Start with commissioning — it does nearly all of this for you.</strong> The Commissioning
+                  tab runs a guided wizard that measures your specific alternator and battery bank and sets almost
+                  every loop and protection parameter automatically. You creep the throttle when it asks and confirm
+                  each step; it does the math. On most installs this is the only tuning you ever do — the manual
+                  procedure below is for hand-verifying or fine-tuning after the wizard, or for the rare case where you
+                  want to override what it found.
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  The wizard walks eight steps, each writing real settings on Apply:
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  &bull; <strong>Prep</strong> — snapshots your current settings and checks preconditions (engine
+                  running, headroom, a valid battery shunt) so a run can be reviewed or reverted.<br>
+                  &bull; <strong>Field curve</strong> — ramps field duty open-loop and maps duty&rarr;output current,
+                  finding the saturation knee.<br>
+                  &bull; <strong>Min% floor</strong> — finds the field level where each RPM range first starts making
+                  current, and fills the RPM table's Min(%) column.<br>
+                  &bull; <strong>Plant fit</strong> — a sine sweep on field duty measures the inner current loop's
+                  plant (time constant and gain) and proposes its PID gains and filter constants (also on the Plant
+                  Delay tab).<br>
+                  &bull; <strong>Verify</strong> — a closed-loop sweep with the new inner-loop gains, confirming the
+                  loop is stable before anything downstream trusts it.<br>
+                  &bull; <strong>Disturbances</strong> — you creep idle&rarr;cruise while it records the worst ripple
+                  per RPM range (belt resonance) on both the alternator and battery signals, building the Resonance
+                  &amp; Ripple Map.<br>
+                  &bull; <strong>Thresholds</strong> — turns that map into the over-current detectors' floors,
+                  ceilings, and current-tracking slopes (the <em>clamp(floor, K0 + K1·current, ceiling)</em> line
+                  described above), and draws an approval plot per detector.<br>
+                  &bull; <strong>CV plant fit</strong> — commands one bounded current pulse through the tuned inner
+                  loop and measures how battery voltage responds to battery current (the finite-horizon gain K20),
+                  then computes the voltage-loop gains from your chosen response time.
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  Every step is advisory — it proposes, and nothing changes until you press Apply. You can re-run a
+                  single step, or clear and start over. Progress is stored on the regulator, so it survives a reload
+                  and looks the same from any device.
+                </p>
+                <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
+                  <strong>Manual tuning (optional).</strong> The output current loop and the voltage loop each also
+                  have their own live tuning mode you can drive by hand — Tuning Mode for the inner current loop
+                  (Current tab), and the plant-fit / Auto-or-Manual gain selector on the Voltage tab for the voltage
+                  loop. Tune them in that order — inner loop first, then voltage — because each layer depends on the
+                  one beneath it being stable. The rest of this section covers hand-tuning the inner current loop; the
+                  voltage loop has its own dedicated tab with a built-in step test, an Auto mode that reuses the
+                  commissioned plant fit, and live scoring. The temperature loop is tuned offline from logged data (no
+                  live step test) — its tab shows the live control plot and the controller parameters.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Three-Phase Process:</strong> The goal is to tune the core PID first, then verify it handles
@@ -10947,7 +11026,18 @@
       <details class="diag-section" id="fa-monitor-details" open ontoggle="if(this.open){if(typeof fastDiagOnOpen==='function')fastDiagOnOpen();}else{if(typeof fastDiagStopAuto==='function')fastDiagStopAuto();}">
         <summary class="diag-section-title">Current Ripple Analyzer</summary>
 
-      <!-- Master on/off for the whole channel — kept at the top of the analyzer, above Status -->
+      <!-- Resonance & Ripple Map identity + its own Download/Clear — pulled to the top of the analyzer -->
+      <div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Resonance &amp; Ripple Map</span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load — a separate, long-running dataset from the worst-value table below. Each cell is a rolling recent-average of the last 4 qualified windows (fixed depth, not user-adjustable), so it tracks the machine lately and never freezes; the map persists until Clear Map. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. Clear Map affects ONLY this map; it does not reset the worst-value table below (use Reset Worsts there for that). A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
+          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadCsv('/famatrix.csv','Resonance and Ripple Map')">Download CSV</button>
+          <button type="button" class="btn-danger-ghost btn-sm"
+            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
+        </div>
+      </div>
+
+      <!-- Master on/off for the whole channel — kept near the top of the analyzer, above Status -->
       <div class="settings-card">
         <div class="form-row">
           <div class="form-label">Current Ripple Analyzer (<span id="faEnabled_echo">?</span>):
@@ -10977,10 +11067,14 @@
           <div class="card"><p>Last Fault Class <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A developer/diagnostic readout, not a confirmed diagnosis. The number is the monitor's best guess at the failure type from the ripple pattern. That classification is not yet validated against real teardowns and can be wrong — treat it as a prompt to open the Live Oscilloscope panel and look at the waveform yourself. 0 or blank means no fault detected.</span></span></p><p class="reading" style="font-size:20px;"><span id="faDetectK_ID">?</span></p></div>
           <div class="card"><p>Lifetime Anomalies</p><p class="reading" style="font-size:20px;"><span id="faAnomalyCount_ID">?</span></p></div>
         </div>
+      </div>
+
+      <!-- Worst ripple & tone — its own box (only as related to Status as anything else here) -->
+      <div class="settings-card">
         <!-- Operating-point context for the two headline worsts: where on the engine map each was recorded -->
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:13px; font-weight:600;">Worst ripple &amp; tone — and where each occurred</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The worst ripple amplitude and strongest single tone seen, with the operating point captured at the instant each was last set. Pk-Pk (A) is the ripple amplitude; the Highest Tone row also lists the tone frequency (the Ripple Pk-Pk row spans ALL frequencies, so it has no single tone). Output Current is the 0.5-second window-mean alternator current at that moment (not a setpoint). Alt Temp is the alternator probe reading then ("—" if no probe). Date needs a synced clock — it shows "—" until the regulator has the time. These persist across reboot and clear with Reset Worsts. Reset Worsts affects ONLY this table — it does not touch the Resonance &amp; Ripple Map below.</span></span>
+          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Of the data admitted to the Resonance &amp; Ripple Map, these are the largest values.</span></span>
           <form action="/get" method="GET" target="hidden-form" style="display:inline;margin:0 0 0 auto;">
             <input type="hidden" name="ResetRipplePeaks" id="ResetRipplePeaks" value="0" />
             <input type="hidden" name="password" class="password_field" />
@@ -11023,16 +11117,10 @@
             </tbody>
           </table>
         </div>
-        <hr />
-        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:13px; font-weight:600;">Resonance &amp; Ripple Map</span>
-          <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load — a separate, long-running dataset from the worst-value table above. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. Clear Map affects ONLY this map; it does not reset the worst-value table above (use Reset Worsts there for that). A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
-          <span style="font-size:12px; color:var(--text-muted);">Separate long-term dataset — not affected by Reset Worsts</span>
-          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadCsv('/famatrix.csv','Resonance and Ripple Map')">Download CSV</button>
-          <button type="button" class="btn-danger-ghost btn-sm"
-            onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
-        </div>
-        <hr />
+      </div>
+
+      <!-- Biggest Actionable Disturbance — its own box -->
+      <div class="settings-card">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:13px; font-weight:600;">Biggest Actionable Disturbance in the Ripple Map</span>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The strongest ripple tone in the Resonance &amp; Ripple Map above that is slow enough for the field to actually chase — the band from 4 Hz up to the actuator bandwidth set by the plant time constant (τ) from the Commissioning Plant Delay sweep. On a normal alternator the field is slower than 4 Hz, so no tone is chaseable: there is nothing to tune and this line just says so, updating automatically from the fitted τ. Only if a sweep ever fits a fast plant (τ below ~40 ms) does a Compute button appear, to scan the map for the actual tone and the residual current that leaks past the over-current detector.</span></span>
@@ -11040,16 +11128,20 @@
           <button type="button" id="faComputeBtn" class="btn-secondary btn-sm" style="margin-left:auto; display:none;" onclick="computeActionableDisturbance()">Compute</button>
         </div>
         <div id="faActionableResult" style="font-size:13px; color:#555; margin-top:4px;">Run a Plant Delay sine sweep in Commissioning to evaluate this.</div>
+      </div>
+
+      <!-- How this diagnostic panel works — its own box -->
+      <div class="settings-card">
         <details style="margin:10px auto 0;max-width:560px;font-size:13px;color:#555;">
           <summary style="cursor:pointer;font-weight:600;color:#3a7bd5;">How this diagnostic panel works</summary>
           <div style="margin-top:8px;line-height:1.5;">
             <p><b>Channel State</b> is whether the fast current sensor is actively sampling, dormant
               (its sense wire reads open, so the regulator stopped and re-probes every few minutes),
-              or switched off in Setup below.</p>
+              or switched off with the master toggle near the top of this panel.</p>
             <p><b>Map Cells Learned</b> counts how many RPM/output-current operating points have a
               stored ripple signature yet — the Resonance &amp; Ripple Map fills in as the engine runs at
-              more speeds and loads. The <b>Highest Tone</b> row below is the strongest single tone
-              across all of those cells, and where it occurs.</p>
+              more speeds and loads. The <b>Highest Tone</b> row in the Worst ripple &amp; tone box is the
+              strongest single tone across all of those cells, and where it occurs.</p>
             <p><b>Last Fault Class / Lifetime Anomalies</b> summarize the rectifier/stator monitor: the
               most recent fault category and the running count of fault detections over the unit's
               life. The <b>Worst ripple &amp; tone</b> table lists the largest broadband ripple
@@ -11067,8 +11159,9 @@
       <!-- Tuning knobs (items 3-5, 8): alarm, anomaly-pause + the steady-gate / range / peak knobs -->
       <div class="settings-card">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Automatic Anomaly Detection</span>
+          <span style="font-size:14px; font-weight:600;">Anomaly Detection &amp; Ripple-Map Gating</span>
         </div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">These steady-state gates feed three things: the fault (anomaly) detector and the Resonance &amp; Ripple Map (both on the fast-alternator channel), and the <strong>measured filtered-ripple capture</strong> (the slow-sensor pk-pk behind the Protections ripple plots and the commissioning current check). The current-drift limits apply to all three; the RPM Margin applies to the <strong>map only</strong> — the detector ignores RPM so it still works with a dead tach. The ripple capture adds its own live rows under the Drift Floor: command steady, alternator current steady, battery current steady — each shows its 10s worst margin vs the limit (green = windows are admitting).</div>
 
         <div class="form-row">
           <div class="form-label">Sound Alarm on Fault (<span id="faAlarmEnable_echo">?</span>):
@@ -11089,7 +11182,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State RPM Margin (RPM) (<span id="faRpmEdgeMargin_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed engine speed — a 1-second-averaged RPM, not the raw tach. A 0.5-second window is discarded unless that smoothed RPM stays at least this many RPM inside one internal 50-RPM speed bin (not the wide flipbook bands) for the whole window. The 1-second averaging is deliberate: it removes the ripple and resonance being measured, so the gate judges only whether the engine is holding speed. Unlike the drift readouts below, here bigger is stricter: the "10s worst margin" line must be at or above this value to pass, so a small number (engine sitting right on a bin edge) is a fail.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed engine speed — a 1-second-averaged RPM, not the raw tach. A 0.5-second window is discarded unless that smoothed RPM stays at least this many RPM inside one internal 50-RPM speed bin (not the wide flipbook bands) for the whole window. The 1-second averaging is deliberate: it removes the ripple and resonance being measured, so the gate judges only whether the engine is holding speed. Unlike the drift readouts below, here bigger is stricter: the "10s worst margin" line must be at or above this value to pass, so a small number (engine sitting right on a bin edge) is a fail. Note: this gate governs the Resonance &amp; Ripple Map ONLY — the anomaly detector's arming ignores RPM entirely, so changing this has no effect on fault detection.</span></span>
             <span id="faRpmEdgeMargin_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s worst margin: —</span>
           </div>
           <div class="form-input">
@@ -11104,8 +11197,11 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State Current Drift Floor (A) (<span id="faAmpsDriftFloorA_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed output current — a 1-second-averaged current. A window is discarded unless that smoothed current drifts less than the larger of this floor or the slope % (below) across the window. The 1-second averaging removes the ripple being measured, so the gate sees only slow drift, not the tones.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed output current — a 1-second-averaged current. A window is discarded unless that smoothed current drifts less than the larger of this floor or the slope % (below) across the window. The 1-second averaging removes the ripple being measured, so the gate sees only slow drift, not the tones.<br><br>The same floor/slope limit also gates the <strong>measured filtered-ripple capture</strong> (the data behind the Protections ripple plots and the commissioning current check), where it is checked three ways per 0.5-second window: the current <em>command</em> must not travel more than the limit (rejects deliberate ramps — test steps, warm-up, mode glides), and each sensor's own 0.3-second-averaged current (alternator and battery separately) must drift less than the limit. The three lines below show each check's worst margin vs the limit over the last 10 s — at or below zero (green) means windows are being admitted. These capture gates are never relaxed, even during the commissioning sweep: a steady-state ripple number cannot be measured while current is ramping.</span></span>
             <span id="faAmpsDriftFloorA_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
+            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command steady, 10s worst vs limit: —</span>
+            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt current steady, 10s worst vs limit: —</span>
+            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt current steady, 10s worst vs limit: —</span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -11119,7 +11215,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State Current Drift Slope (%) (<span id="faAmpsDriftPct_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, as a percent of mean current. Same 1-second-averaged current; the gate allows whichever is larger — this percentage or the fixed floor.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, as a percent of mean current. Same 1-second-averaged current; the gate allows whichever is larger — this percentage or the fixed floor. Also feeds the measured filtered-ripple capture gates (see the Drift Floor tooltip), where the percent term uses each detector's own mean current.</span></span>
             <span id="faAmpsDriftPct_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
           </div>
           <div class="form-input">
@@ -11291,9 +11387,9 @@
               </tr>
               <tr style="border-top:1px solid var(--border);">
                 <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal RMS</td>
-                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 6 °F</td>
-                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">6 – 10 °F</td>
-                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 10 °F</td>
+                <td style="padding:5px 8px;color:#21c25e;font-weight:600;">&lt; 10 °F</td>
+                <td style="padding:5px 8px;color:#f08c1d;font-weight:600;">10 – 15 °F</td>
+                <td style="padding:5px 0 5px 8px;color:#ef4444;font-weight:600;">&ge; 15 °F</td>
               </tr>
               <tr style="border-top:1px solid var(--border);">
                 <td style="padding:5px 6px 5px 0;color:var(--text-muted);">Thermal overshoot</td>
@@ -11304,7 +11400,7 @@
             </tbody>
           </table>
           <p style="font-size:0.74em;color:var(--text-muted);margin:8px 0 0 0;">
-            Thermal-overshoot bands track the live over-temp shutdown trip (default 2&nbsp;°F); red means it reached shutdown. Current overshoot is shown in grey — a single-sample peak is too easily skewed by one bad reading to color-score.
+            Thermal-overshoot bands track the live over-temp shutdown trip (default 2&nbsp;°F); red means it reached shutdown. Current overshoot is not scored at this time, too noisy to be meaningful.
           </p>
         </div>
 
@@ -11548,6 +11644,13 @@
                       </div>
 
                       <hr />
+                      <!-- Battery capacity + charge efficiency are owned by the Battery Monitor tab; shown here read-only so the fade math is transparent -->
+                      <div class="form-row">
+                        <div class="form-label"><span>Battery capacity (Ah) (<span id="capBankAh_echo">?</span>): <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Read-only here. Set it in the <strong>Battery Monitor</strong> tab (Battery Capacity Ah). "% of rated" is measured against this value, and it also scales the rest-current threshold and the plausibility bounds.</span></span></span></div>
+                        <div class="form-input"><span style="opacity:0.6; font-style:italic;">set in Battery Monitor tab</span></div>
+                      </div>
+
+                      <hr />
                       <div class="form-row">
                         <div class="form-label"><span>Capacity reference (0=rated, 1=first reading) (<span id="capRefMode_echo">?</span>):</span></div>
                         <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capRefMode" type="number" step="1" min="0" max="1" /><input type="submit" value="Set" class="btn-primary" /></form></div>
@@ -11579,20 +11682,20 @@
 
                       <hr />
                       <div class="form-row">
+                        <div class="form-label"><span>Full-anchor SoC (%) (<span id="capFullSoc_echo">?</span>):</span></div>
+                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capFullSoc" type="number" step="0.5" min="90" max="100" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                      </div>
+
+                      <hr />
+                      <div class="form-row">
                         <div class="form-label"><span>Minimum span (full − low, %) (<span id="capMinSpan_echo">?</span>):</span></div>
                         <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capMinSpan" type="number" step="1" min="20" max="100" /><input type="submit" value="Set" class="btn-primary" /></form></div>
                       </div>
 
                       <hr />
                       <div class="form-row">
-                        <div class="form-label"><span>Charge efficiency (0–1) (<span id="capChgEff_echo">?</span>):</span></div>
-                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capChgEff" type="number" step="0.001" min="0.5" max="1" /><input type="submit" value="Set" class="btn-primary" /></form></div>
-                      </div>
-
-                      <hr />
-                      <div class="form-row">
-                        <div class="form-label"><span>Full-anchor SoC (%) (<span id="capFullSoc_echo">?</span>):</span></div>
-                        <div class="form-input"><form action="/get" method="GET" target="hidden-form"><input type="hidden" name="password" class="password_field"><input name="capFullSoc" type="number" step="0.5" min="90" max="100" /><input type="submit" value="Set" class="btn-primary" /></form></div>
+                        <div class="form-label"><span>Charge efficiency (<span id="capChgEff_echo">?</span>): <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Read-only here. Set it in the <strong>Battery Monitor</strong> tab (Charge Efficiency %). The capacity-fade math uses that same value so the SoC counter and this tracker stay consistent.</span></span></span></div>
+                        <div class="form-input"><span style="opacity:0.6; font-style:italic;">set in Battery Monitor tab</span></div>
                       </div>
 
                       <hr />

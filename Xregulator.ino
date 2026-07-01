@@ -118,6 +118,9 @@ struct FaDetectResult;  // fast alt-current channel detector contract (full defi
 struct FadJob;          // pulse-pattern detector state machine (full definition in 2_functions.ino;
 struct FadResult;       // function bodies in 8_functions.ino) — forward-declared so their
                         // auto-generated prototypes (FadJob*/FadResult* params) compile
+struct ZFitResult;      // zeroFitRegress() return type (full def near ZeroFitRecord) — same reason
+struct RipFit;          // measured ripple projection (full def below); forward-declared so the auto-prototypes
+                        // of ripFitEncode(const RipFit&)/ripFitDecode(...) don't precede its definition
 // Auto-prototype generator fails on default-argument functions defined in later .ino files.
 bool fieldOffSettled(uint32_t extraMs = 0);
 
@@ -208,7 +211,10 @@ String currentUID;
 
 // Performance-vs-engine-hours TREND ring (the headline). One point per engine-hour bucket:
 // average + worst output-% vs the best-ever front. Survives reboot; uploads for cloud history.
-#define ALT_TREND_CAP 20000    // engine-hour buckets retained (~20k hrs; 120 KB PSRAM)
+#define ALT_TREND_CAP 8760     // buckets retained = 1-yr rolling window of continuous runtime (~52 KB
+                               // PSRAM); device-side display window only — cloud keeps the raw points
+#define ALT_TREND_DROP 720     // oldest buckets evicted per rollover (~30 days) → one full /alttrend.bin
+                               // rewrite per ~month of runtime instead of per engine-hour
 struct AltTrendPt {
   uint16_t engHour;            // engine-hours-since-baseline bucket index
   int16_t  worstPct;          // worst (min) output-% in this bucket (×10)
@@ -218,6 +224,10 @@ static AltTrendPt *altTrend = nullptr;
 static int         altTrendCount = 0;
 static uint32_t    altTrendFlushed = 0;     // trend records already in the /alttrend.bin append log
 static bool        altTrendRewrite = true;  // force a full log rewrite (load-miss or ring eviction)
+// Raised by /debug/fillmax (without ?persist=yes) + /debug/clearmax: in-RAM rings are synthetic/empty,
+// so every field-off persister early-returns and flash keeps the real learned blobs. RAM-only →
+// reboot is the sole exit.
+volatile bool dbgRingsSynthetic = false;
 // Current-bucket accumulators (committed when the engine-hour bucket advances).
 static double altBucket_sum = 0, altBucket_n = 0;   // running average over the bucket
 static float  altBucket_worst = 0;                  // min output-% seen this bucket
@@ -1752,27 +1762,30 @@ const unsigned long LONGTERM_DUMP_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
 // Records the alternator current sensor's reading WHILE THE FIELD IS OFF, to characterize how its
 // zero point drifts vs. time / temperature / RPM. Sampled only when field-off >= 5 s: every 1 s
 // while the engine spins (RPM>=200, for fast RPM sweeps), every 10 min while the engine is off.
-// MeasuredAmps IS the raw sensor zero as long as auto-zero + manual offset are off — so run the
-// characterization with Alternator Auto-Zero OFF. PSRAM ring, flushed to LittleFS field-off only;
-// /zerolog.csv reads the live ring (always complete). Master toggle ZeroLogEnable, default OFF.
-struct ZeroLogRecord {        // 18 bytes (compiler pads to 20)
+// MeasuredAmps IS the raw sensor zero as long as auto-zero + manual offset are off. The field-off
+// samples here are the data source for the temperature-compensated zero correction (zeroFitCompute,
+// ZERO_DRIFT_TEMPCOMP_SPEC.md) — no separate active zeroing cycle. PSRAM ring, flushed to LittleFS
+// field-off only; /zerolog.csv reads the live ring (always complete). ZeroLogEnable default ON.
+struct ZeroLogRecord {        // 20 bytes
   uint32_t epoch;             // wall-clock seconds (0 = unsynced)
   float    amps;              // MeasuredAmps at sample time (the zero-drift signal)
   float    p2pAmps;           // peak-to-peak of MeasuredAmps over the prior 0.5 s
   int16_t  rpm;               // engine RPM
   int16_t  battVx100;         // battery volts ×100
-  int16_t  altTempFx10;       // alternator temperature °F ×10
+  int16_t  altTempFx10;       // alternator temperature °F ×10 (ZEROLOG_TEMP_BLANK = sensor absent)
+  int16_t  boardTempFx10;     // regulator board temp (BMP388) °F ×10 — drift may track EITHER this or
+                              // altTempFx10 per install; the daily fit keeps the better correlate.
 };
 const uint16_t ZEROLOG_RING_SIZE = 10000;   // ~195 KB PSRAM; ~2.8 hr @1s spinning, days @10min idle
 ZeroLogRecord *zeroLogRing = nullptr;       // ps_malloc'd in zeroLogInit()
 volatile uint16_t zeroLogHead = 0;          // next write slot (circular)
 volatile uint16_t zeroLogCount = 0;         // 0..ZEROLOG_RING_SIZE
 uint16_t  prev_zeroLogHead = 0xFFFF;        // shadow — flush only when head moved
-bool      ZeroLogEnable = false;            // master toggle (NVS NK_ZeroLogEnable), default OFF
+bool      ZeroLogEnable = true;             // master toggle (NVS NK_ZeroLogEnable), default ON (permanent subsystem)
 float     altAmpsP2P = 0.0f;                // latched 0.5 s peak-to-peak of MeasuredAmps (set in ReadAnalogInputs)
 #define ZEROLOG_PATH  "/zerolog.bin"
 #define ZEROLOG_MAGIC 0x5A45524Fu           // 'ZERO'
-#define ZEROLOG_VER   1u
+#define ZEROLOG_VER   2u                     // v2 added boardTempFx10; v1 files discarded on load
 #define ZEROLOG_FIELDOFF_MIN_MS  5000UL     // field must be off this long before a sample (own short gate)
 #define ZEROLOG_RUN_INTERVAL_MS  1000UL     // sample period while engine spinning (RPM>=200)
 #define ZEROLOG_IDLE_INTERVAL_MS 600000UL   // sample period while engine off (RPM<200) = 10 min
@@ -1782,6 +1795,56 @@ float     altAmpsP2P = 0.0f;                // latched 0.5 s peak-to-peak of Mea
 // NaN-derived temperature. If still NaN past the window the sensor is absent → log the blank.
 #define ZEROLOG_TEMP_GRACE_MS    30000UL    // post-reboot wait for the first valid alt-temp read
 #define ZEROLOG_TEMP_BLANK       INT16_MIN  // alt-temp "sensor absent" sentinel → CSV emits an empty cell
+
+// ===== Temperature-compensated zero correction (ZERO_DRIFT_TEMPCOMP_SPEC.md) =====
+// Daily line-fit of the zero-drift log → live correction zero(T)=c+b·(T−T_REF), EMA-smoothed across
+// days, ±3 A clamped. Replaces the old active auto-zero cycle.
+#define ZF_BOARD 0
+#define ZF_ALT   1
+#define ZFIT_T_REF            100.0f     // °F — fixed reference; c is the offset at this temp (never change)
+#define ZFIT_MIN_SPAN_F       30.0f      // fit block must span >this many °F
+#define ZFIT_MIN_POINTS       30         // and hold at least this many field-off samples
+#define ZFIT_MAX_LOOKBACK_S   2592000UL  // stop walking back past 30 days
+#define ZFIT_MAX_RESID_A      1.5f       // fit residual RMS above this → too noisy, hold last (a clean
+                                         // flat offset has tiny residual, so this passes it — R² would not)
+#define ZFIT_ALPHA            0.25f      // EMA base weight → ~4-5 day response
+#define ZFIT_W_MAX            0.30f      // cap on a single day's blend weight
+#define ZFIT_CLAMP_A          3.0f       // correction hard-bounded to ±this many amps, always
+#define ZFIT_OUTLIER_C_A      2.0f       // reject a day whose c differs from history median by >this (A)
+#define ZFIT_OUTLIER_B        0.05f      // ...or whose b differs by >this (A/°F)
+#define ZFIT_OUTLIER_MINHIST  5          // outlier gate arms only once history has >=this many entries
+#define ZFIT_FLIP_MARGIN      0.1f       // other sensor must beat chosen sensor's R² by >this to flip
+#define ZFIT_FLIP_DAYS        3          // ...for this many consecutive fits
+#define ZFIT_HIST_SIZE        90         // daily-fit history ring (outlier median + trend)
+#define ZFIT_INTERVAL_MS      86400000UL // recompute at most once per 24 h of runtime
+#define ZFIT_RETRY_MS         3600000UL  // if a compute HELD (no spread/noisy), retry in 1 h not 24 h
+#define ZFIT_PATH  "/zerofit.bin"
+#define ZFIT_MAGIC 0x5A464954u           // 'ZFIT'
+#define ZFIT_VER   1u
+
+struct ZeroFitRecord {        // one accepted daily fit
+  uint32_t epoch;             // wall-clock seconds of the fit
+  float    c;                 // offset at T_REF (amps)
+  float    b;                 // slope (amps/°F)
+  float    r2;                // correlation of the winning regression
+  uint16_t sensor;           // ZF_BOARD or ZF_ALT
+  uint16_t n;                 // sample count in the fit block
+};
+// Output of one regression pass (zeroFitRegress, 5_functions.ino) — here so the auto-prototype sees it.
+struct ZFitResult { bool ok; float c, b, r2, residRms, span; uint16_t n; };
+ZeroFitRecord *zeroFitHist = nullptr;       // ps_malloc'd in zeroFitInit()
+uint16_t  zeroFitHistHead  = 0;             // next write slot (circular)
+uint16_t  zeroFitHistCount = 0;             // 0..ZFIT_HIST_SIZE
+uint16_t  prev_zeroFitHistHead = 0xFFFF;    // shadow — flush only when head moved
+// Live equation (persisted, NVS storage namespace). zfValid=0 until the first good fit → correction 0.
+int   zfValid  = 0;
+int   zfSensor = ZF_BOARD;
+float zfC = 0.0f;                           // offset at T_REF
+float zfB = 0.0f;                           // slope A/°F
+float zfR2 = 0.0f;
+uint32_t zfLastEpoch = 0;                   // epoch of the last accepted fit
+int   zfFlipPending = ZF_BOARD;             // which sensor has been trying to win
+int   zfFlipStreak  = 0;                    // consecutive fits the other sensor has won
 
 struct ImuWindow {  // moved to PSRAM to save internal SRAM
   // Raw accel signals (scaled by 1000: 1.234g → 1234)
@@ -1971,10 +2034,14 @@ float prev_InsulDamage = 0.0f;
 float prev_GreaseDamage = 0.0f;
 float prev_BrushDamage = 0.0f;
 float prev_ShuntGain = 0.0f;
-float prev_AltZero = 0.0f;
 uint32_t prev_LastGainTime = 0;
-uint32_t prev_LastZeroTime = 0;
-float prev_LastZeroTemp = 0.0f;
+// Temp-comp zero-correction learned-equation shadows (auto-fire NVS compare-first)
+int prev_zfValid = -1;
+int prev_zfSensor = -1;
+float prev_zfC = 1e30f;
+float prev_zfB = 1e30f;
+float prev_zfR2 = -1.0f;
+uint32_t prev_zfLastEpoch = 0xFFFFFFFFu;
 uint32_t prev_SolarEnergy = 0;
 int32_t prev_EngineFuel = 0;
 float prev_ChargeCycles = 0;
@@ -2111,21 +2178,10 @@ const float MAX_DYNAMIC_GAIN_FACTOR = 1.2;                   // Don't go above 1
 const float MAX_REASONABLE_ERROR = 0.2;                      // Don't correct if error > 20%
 const unsigned long MIN_GAIN_CORRECTION_INTERVAL = 3600000;  // 1 hour minimum between corrections
 
-// Alternator Current Auto-Zeroing
-int AutoAltCurrentZero = 0;         // 0=off, 1=on - enable/disable auto-zeroing
-float DynamicAltCurrentZero = 0.0;  // Learned zero offset (starts at 0.0)
-int ResetDynamicAltZero = 0;        // Momentary reset button (0=normal, 1=reset)
-
-// Auto-zeroing timing and state tracking
-unsigned long lastAutoZeroTime = 0;                // Last time auto-zero was performed
-float lastAutoZeroTemp = -999.0;                   // Temperature when last auto-zero was done
-unsigned long autoZeroStartTime = 0;               // When current auto-zero cycle started (0 = not active)
-const unsigned long AUTO_ZERO_DURATION = 10000;    // 10 seconds at zero field
-const unsigned long AUTO_ZERO_INTERVAL = 3600000;  // 1 hour in milliseconds
-const float AUTO_ZERO_TEMP_DELTA = 20.0;           // 20°F temperature change triggers auto-zero
-// Auto-zero averaging variables
-float autoZeroAccumulator = 0.0;
-int autoZeroSampleCount = 0;
+// Alternator Current Zero Correction (temperature-compensated, ZERO_DRIFT_TEMPCOMP_SPEC.md)
+int AutoAltCurrentZero = 0;         // 0=off, 1=on - master enable for applying the zero correction
+float DynamicAltCurrentZero = 0.0;  // LIVE correction (amps) recomputed each loop from the fit; subtracted from MeasuredAmps
+int ResetDynamicAltZero = 0;        // Momentary reset button (0=normal, 1=reset) — clears the learned fit + history
 
 //Momentary Buttons and alarm logic
 int FactorySettings = 0;  // Reset Button
@@ -2666,7 +2722,6 @@ uint16_t capRestFloorMin    = 30;     // minimum rest before OCV is trusted (min
 float    capSettleRateMv10  = 2.0f;   // dV/dt settle threshold (mV per 10 min) — voltage must be this flat
 float    capSocLowMax       = 20.0f;  // low anchor must be ≤ this (only the bottom knee is reliable on LiFePO4)
 float    capMinSpan         = 70.0f;  // (capFullSoc − socLow) must exceed this — "deep enough"
-float    capChgEff          = 0.99f;  // coulombic efficiency, charge direction
 float    capFullSoc         = 100.0f; // SoC assigned to the full-charge anchor
 uint8_t  capRefMode         = 0;      // 0 = % vs rated (BatteryCapacity_Ah), 1 = % vs first measurement
 uint8_t  capTempNormEnable  = 0;      // 0 = record temp only, 1 = normalize capacity to capTempRefC
@@ -2979,17 +3034,44 @@ uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) —
 // cvLambdaMult removed 2026-06-25 — the λ/SIMC tuning path was retired (gains come from cvCrossover/ω_c now);
 // its CSV3 slot survives as the reserved placeholder CSV3_EXTRA1 so the field count is unchanged.
 float   cvPlantK     = 0.0f;      // measured plant gain K (V/A at the pack) from the CV plant-fit step; 0 = no valid fit
-// CV battery-current iExcess dynamic floor: floor(I) = cvFloorK0 + cvFloorK1·|Bcur| (A). 0/0 = no current
-// dependence → detector uses the static IExcessFloorABatt (default). Set by the resonance current-check (§3.2)
-// ONLY when the measured ripple-vs-current slope is significant ("adjust iExcess based on current, if needed").
-float   cvFloorK0    = 0.0f;      // floor at zero current (A)
-float   cvFloorK1    = 0.0f;      // floor slope (A of floor per A of operating current)
-// Bulk (current-limited / CC) iExcess dynamic floor — alternator-current mirror of cvFloorK0/K1:
-// floor(I) = ccFloorK0 + ccFloorK1·|MeasuredAmps_filtered| (A). 0/0 = no current dependence → bulk
-// detector uses the static (auto-floor-maintained) IExcessFloorA. Set by the same 3-level resonance
-// sweep that fits the battery slope, from the always-on alternator ripple map.
-float   ccFloorK0    = 0.0f;      // bulk floor at zero current (A)
-float   ccFloorK1    = 0.0f;      // bulk floor slope (A of floor per A of operating current)
+// Measured ripple projection (RIPPLE_DETECTION_REARCH_SPEC §3.3). The commissioning current-check
+// runs a 3-level test per detector and line-fits ripple(I) = a0 + a1·I to the IExcessTau-filtered
+// excess pk-pk (the same quantity the detector trips on). This is REFERENCE DATA ONLY — it drives the
+// ripple-vs-threshold plot on Protections so the operator can see whether their floor/ceiling/% clear
+// the real ripple. It NEVER moves the over-current floor (no auto-floor, no tracking slope).
+struct RipFit {
+  float a0, a1;      // ripple(I) = a0 + a1·I (A pk-pk of the IExcessTau-filtered excess)
+  float rpm;         // engine RPM the 3-level test ran at (0 = no test yet)
+  float iPt[3];      // the 3 commanded operating currents (A)
+  float pkPt[3];     // measured filtered-excess pk-pk at each level (A)
+  uint8_t nPts;      // valid measured points (0 = no fit → plot shows threshold line only)
+};
+RipFit ripFitAlt  = {0};   // alternator (G3) detector — ADS1115 MeasuredAmps path
+RipFit ripFitBatt = {0};   // battery   (G4) detector — INA228 Bcur path
+
+// Persisted as one CSV string per detector under NK_ripFitAlt/NK_ripFitBatt (settings namespace, string).
+static String ripFitEncode(const RipFit &r) {
+  String s = String(r.a0, 4) + "," + String(r.a1, 5) + "," + String(r.rpm, 0);
+  for (int i = 0; i < 3; i++) s += "," + String(r.iPt[i], 2);
+  for (int i = 0; i < 3; i++) s += "," + String(r.pkPt[i], 3);
+  s += "," + String((int)r.nPts);
+  return s;
+}
+static void ripFitDecode(const String &s, RipFit &r) {
+  float f[9]; int n = 0, from = 0;
+  memset(&r, 0, sizeof(r));
+  for (int field = 0; field < 10 && from <= s.length(); field++) {
+    int comma = s.indexOf(',', from);
+    String tok = (comma < 0) ? s.substring(from) : s.substring(from, comma);
+    if (field < 9) f[field] = tok.toFloat(); else n = tok.toInt();
+    if (comma < 0) break;
+    from = comma + 1;
+  }
+  r.a0 = f[0]; r.a1 = f[1]; r.rpm = f[2];
+  r.iPt[0] = f[3]; r.iPt[1] = f[4]; r.iPt[2] = f[5];
+  r.pkPt[0] = f[6]; r.pkPt[1] = f[7]; r.pkPt[2] = f[8];
+  r.nPts = (uint8_t)constrain(n, 0, 3);
+}
 float   cvPlantTau   = 0.0f;      // measured rise time τ (s)
 float   cvPlantL     = 0.0f;      // measured dead time L (s)
 float   cvComputedKp = 30.0f;     // user-facing (12V-equivalent) gains the Auto path produced — dashboard display only
@@ -3141,7 +3223,7 @@ uint32_t perfCountersResetMs = 0;
 enum FieldControlMode {
   MODE_CRITICAL_RAMP,             // Critical fault: ramp to 0, cut if fault persists
   MODE_WARNING_RAMP_AND_LOCKOUT,  // Warning fault: ramp to 0, cut if fault persists, start lockout
-  MODE_LOCKOUT_RAMP,              // Lockout/auto-zero: ramp to 0, cut when settled
+  MODE_LOCKOUT_RAMP,              // Lockout: ramp to 0, cut when settled
   MODE_DISABLED_RAMP,             // Normal shutdown: ramp to 0, cut when settled
   MODE_NORMAL_MANUAL,             // Manual control with rate limiting
   MODE_NORMAL_AUTO_PID,           // PID control with learning
@@ -3152,7 +3234,6 @@ enum FieldControlMode {
 
 enum FieldEventReason : uint8_t {
   REASON_NONE = 0,
-  REASON_AUTOZERO_ACTIVE,
   REASON_TEMP_STALE,
   REASON_TEMP_CRITICAL,
   REASON_TEMP_WARNING,
@@ -3186,7 +3267,6 @@ struct TickSnapshot {
 
   bool chargingEnabled;
   bool manualMode;
-  bool autoZeroActive;
 
   bool tempDataVeryStale;
   bool ignoreTemperature;
@@ -3498,7 +3578,7 @@ float TempPIDKp = 3.0f;             // A/°F proportional gain. Reverted 1.8→3
 float TempPIDKi = 0.1f;             // A/(°F·s) integral gain — must wind the full steady-state penalty alone (P contributes nothing at zero error). Reverted 0.06→0.1 on 2026-06-30 alongside TempPIDKp (the /1.667 derate built the holding penalty too slowly to catch the climb before the warn-ramp trip).
 float TempPIDKiDownFrac = 0.33f;   // velocity-form asymmetric bleed (2026-06-26): below setpoint (eI<0) the integral bleed uses TempPIDKi×this instead of TempPIDKi, so a transient sub-setpoint undershoot does NOT collapse the learned holding penalty (the fridaytherm.csv grow-to-trip cycle). Ratio (not absolute) so it auto-scales with any Ki. 1.0 = symmetric (old behavior); lower = slower release. Clamped [0,1].
 float ThermalLookaheadSec = 60.0f;  // projection horizon (s), clamped [0,300]; reverted 75→60 (2026-06-29) — 75/25 over-extrapolated the coarse slope and drove the limit-cycle in theramlbad.csv
-float ThermalSlopeWindowSec = 20.0f;  // slope backward-difference window (s), clamped [10,60]; shorter = less lag, noisier slope; reverted 25→20 to the Jun27 value
+float ThermalSlopeWindowSec = 25.0f;  // slope backward-difference window (s), clamped [10,60]; shorter = less lag, noisier slope; set 20→25 (2026-07-01) after good_thermal.csv passed on the restored 3.0/0.1 tune — 20 showed ±0.2/0.3°F/s sensor-quantization steps, 25 splits that noise floor vs the clean 30
 
 float ThermalPenaltyRiseRate = 60.0f;  // A/s — how fast penalty can increase (restrict current)
 float ThermalPenaltyFallRate = 20.0f;  // A/s — how fast penalty can decrease (allow more current)
@@ -3852,7 +3932,10 @@ uint32_t g_fastOvHardCount = 0;
 // gaps. Float buckets are written from sensor/control tasks and read by the web task without a
 // lock; a torn read only blurs a tuning display, never control. Direction per gate: peak for
 // trip-type gates (slew/drift/tone), trough for the RPM edge-margin pass-gate.
-enum { ROLL_RPMEDGE = 0, ROLL_AMPSDRIFT, ROLL_AMPSDRIFTEXC, ROLL_TONEPK, ROLL_LDSLEW, ROLL_CVSLOPE, ROLL_COUNT };
+enum { ROLL_RPMEDGE = 0, ROLL_AMPSDRIFT, ROLL_AMPSDRIFTEXC, ROLL_TONEPK, ROLL_LDSLEW, ROLL_CVSLOPE,
+       // Ripple-capture (faFiltRippleUpdate) admission gates — each is (window quantity − its
+       // effective limit), peak over 10s; <=0 = that gate passing. Same knobs as the Path-A drift gate.
+       ROLL_RIPCMDEXC, ROLL_RIPALTEXC, ROLL_RIPBATTEXC, ROLL_COUNT };
 #define ROLL_EMPTY (-2000000000)   // CSV sentinel: no sample in the 10s window (distinct from SafeInt's -1)
 struct Roll10s {
   float v[10];
@@ -4814,7 +4897,8 @@ void setup() {
   }
   loadLearningTableFromNVS();  // Load all table data at boot
   kneeLearnInit();             // Auto Min% learning: load knobs + learned per-bin state (after the table)
-  zeroLogInit();               // Zero-drift characterization log: load toggle, alloc PSRAM ring, restore persisted records
+  zeroLogInit();               // Zero-drift log: load toggle, alloc PSRAM ring, restore persisted records
+  zeroFitInit();               // Temp-comp zero correction: alloc daily-fit history ring, restore /zerofit.bin
   Serial.println();
   // Force initial sensor readings before main loop starts
   delay(50);  // Brief settling time
@@ -5275,8 +5359,7 @@ void loop() {
       TIMED_CALL(ft_CheckAlarms, CheckAlarms());  // Process alarms (runs with fake or real data)
       calculateThermalStress();                   // alternator lifetime modeling (runs with fake or real data)
       //UpdateDisplay();
-      checkAutoZeroTriggers();  //Auto-zero processing (must be before AdjustField)
-      processAutoZero();        //Auto-zero processing (must be before AdjustField)
+      zeroFitService();  // Temp-comp zero correction: daily fit (engine+field off) + live correction (must be before AdjustField)
 
       if (currentMode == MODE_CLIENT && WiFi.status() == WL_CONNECTED) {
         updateWeatherMode();  // de-instrumented 2026-06-29: core-1 cost is local analysis only; fetch is queued to Core 0

@@ -2004,13 +2004,16 @@ void AdjustFieldLearnMode() {
       // Deadman for the wizard-commanded resonance current-check: if the browser stops refreshing the command
       // (wizard closed / disconnected), auto-release so the field isn't left commanded to a stale test level.
       if (resTestActive && (millis() - resTestLastCmdMs > RES_TEST_DEADMAN_MS)) {
-        resTestActive = false; resTestTargetA = 0.0f;
+        resTestActive = false; resTestTargetA = 0.0f; resTestReleasing = false;
         queueConsoleMessage("Resonance current-check auto-released (no command refresh)");
       }
 
       if (batteryHealthTestActive) {
-        // Active DCIR step generator. Protections are NOT suppressed: if one fires the
-        // step won't manifest and bhComputeDcir() rejects the run (fail-safe).
+        // Active DCIR step generator. Soft protections (G1/G2 + CV/bulk iExcess) are deliberately
+        // dropped during the test via the !batteryHealthTestActive gates so the step actually
+        // manifests; fast-OV (priority 1.5) and the INA228 hardware OV stay live as the safety net,
+        // and the test self-clears (edge-count exit, /get?bhAbort, watchdog). bhComputeDcir() still
+        // rejects a run whose step didn't form cleanly.
         if (tick.nowMs - bhLastToggleMs >= bhDwellMs) {
           bhWaveHigh = !bhWaveHigh;
           bhLastToggleMs = tick.nowMs;
@@ -2040,14 +2043,22 @@ void AdjustFieldLearnMode() {
 
       } else if (resTestActive) {
         // Wizard-commanded resonance current-check (§3.2): drive the loop to resTestTargetA, slewed exactly
-        // like the DCIR / current-tuning square wave so entry AND exit are gentle (slew carries setpointLimited
-        // continuously — the browser ramps the target down before releasing). Protections stay live; if one
-        // fires the ripple sample is simply not trusted. BENCH-VALIDATE the exit transient (the DCIR generator
-        // this mirrors tripped OV on entry/exit on its first bench run). Uses the FIXED conservative test rate,
-        // not the user's SetpointRiseRate/FallRate, so a stray user setting can't slam entry/exit.
-        setpointCommand = resTestTargetA;
+        // like the DCIR / current-tuning square wave so ENTRY is gentle. Protections stay live; if one fires
+        // the ripple sample is simply not trusted. voltageControlActive=false the whole test, so the
+        // target-relative over-voltage (G1/G2) is suppressed — that is why the field can sit at 0.90×max
+        // output without tripping; only the absolute fast-OV cut and INA228 comparator are live.
+        //
+        // EXIT is deferred (resTestReleasing, set on resTest=0): the failure this fixes is that releasing
+        // straight to CV at the high held current re-armed G2 the instant voltage control resumed (the bus
+        // was legitimately floated above the charge target during current control), which read as an
+        // over-target event and slammed the field. So instead we slew the current to ~0 HERE first — fast
+        // (SetpointFallRate; dropping the field is the safe direction) but still current-controlled with OV
+        // suppressed — and only drop out of the test once the field is down. CV then re-enters from a
+        // low-voltage state and ramps the field back up FROM BELOW the target, which never trips G2.
+        setpointCommand = resTestReleasing ? 0.0f : resTestTargetA;
+        float resFallRate = resTestReleasing ? SetpointFallRate : TEST_ENTRY_RATE_A;
         setpointLimited = slew_limit_f(setpointLimited, setpointCommand,
-                                       TEST_ENTRY_RATE_A, TEST_ENTRY_RATE_A, actualDtSec);
+                                       TEST_ENTRY_RATE_A, resFallRate, actualDtSec);
         voltageControlActive = false;
         targetCurrent = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
                                                                                        : g_pidI_filtered;
@@ -2055,6 +2066,8 @@ void AdjustFieldLearnMode() {
         pidSetpoint = (double)setpointLimited;
         pidError = setpointLimited - targetCurrent;
         currentPID.Compute();
+        // Field is down → hand back to normal control from a low-voltage state (CV ramps up from below).
+        if (resTestReleasing && setpointLimited <= 2.0f) { resTestActive = false; resTestReleasing = false; }
 
       } else if (TuningMode) {
         // ===== TUNING MODE (square-wave setpoint generator) =====
@@ -2347,24 +2360,12 @@ void AdjustFieldLearnMode() {
           if (testProtectionsEnabled && !TuningMode && !batteryHealthTestActive && voltageControlActive && (IBV > ChargingVoltageTarget - IExcessArmMarginV)) {
             // Threshold: fraction of command, floor/ceiling guarded. Under battery-current control the
             // PV is Bcur, which carries far less ripple than alternator current — so use its own
-            // (commissioned) floor IExcessFloorABatt instead of the alternator-derived IExcessFloorA (§G).
+            // floor IExcessFloorABatt (a plain operator setting) instead of the alternator floor IExcessFloorA (§G).
             // ceilA splits the formerly-shared ceiling: battery detector saturates at IExcessCeilABatt,
-            // alternator at IExcessCeilA. Used both to bound the tracking floor and to cap the fraction term.
-            float ceilA = cvBattActive ? IExcessCeilABatt : IExcessCeilA;
-            float floorA;
-            if (cvBattActive) {
-              floorA = IExcessFloorABatt;
-              if (cvFloorK1 > 0.0f) {  // commissioned current-tracking ripple floor (§3.2): grows with operating current
-                float dyn = cvFloorK0 + cvFloorK1 * fabsf(Bcur_filtered);  // track the AVERAGE current, not the instantaneous ripple
-                if (dyn > floorA) floorA = fminf(dyn, ceilA);  // bounded by the (battery) ceiling; never below the static base
-              }
-            } else {
-              floorA = IExcessFloorA;
-              if (ccFloorK1 > 0.0f) {  // commissioned current-tracking ripple floor (bulk mirror of cvFloorK0/K1): grows with operating current
-                float dyn = ccFloorK0 + ccFloorK1 * fabsf(MeasuredAmps_filtered);  // track the AVERAGE alternator current, not instantaneous ripple
-                if (dyn > floorA) floorA = fminf(dyn, ceilA);  // bounded by the (alternator) ceiling; never below the auto-floor base
-              }
-            }
+            // alternator at IExcessCeilA — used to cap the fraction term. Floor/ceiling are operator-owned;
+            // commissioning never writes them (the measured ripple is a reference plot only, never a live floor).
+            float ceilA  = cvBattActive ? IExcessCeilABatt  : IExcessCeilA;
+            float floorA = cvBattActive ? IExcessFloorABatt : IExcessFloorA;
             float E = fmaxf(floorA, fminf(IExcessFrac * setpointLimited, ceilA));
 
             // §G.5: under battery-current control setpointLimited IS the battery-current command, so the
@@ -2490,13 +2491,9 @@ void AdjustFieldLearnMode() {
             // Threshold: fraction of the commanded ceiling, floor/ceiling guarded. Looser than the
             // CV fraction (IExcessFracBulk > IExcessFrac) — tolerate more command-vs-actual error
             // far from the voltage limit, catching only absurd RPM-blip overshoots above ceiling.
-            // Always alternator-domain (this complement runs current-limited), so it uses the bulk
-            // tracking floor (ccFloorK0/K1) over the auto-floor-maintained base IExcessFloorA.
+            // Always alternator-domain (this complement runs current-limited), so its floor is the
+            // plain operator setting IExcessFloorA (no commissioning-derived tracking floor).
             float floorBulk = IExcessFloorA;
-            if (ccFloorK1 > 0.0f) {
-              float dyn = ccFloorK0 + ccFloorK1 * fabsf(MeasuredAmps_filtered);  // track the AVERAGE alternator current, not instantaneous ripple
-              if (dyn > floorBulk) floorBulk = fminf(dyn, IExcessCeilA);  // bounded by the ceiling; never below the auto-floor base
-            }
             float E = fmaxf(floorBulk, fminf(IExcessFracBulk * i_ceiling_pre_ov, IExcessCeilA));
 
             // Post-protection wind-down gate — bulk mirror of the CV detector's postProtMismatch (this
@@ -3809,7 +3806,6 @@ const char *modeToString(FieldControlMode mode) {
 const char *reasonToString(FieldEventReason r) {
   switch (r) {
     case REASON_NONE: return "NONE";
-    case REASON_AUTOZERO_ACTIVE: return "AUTOZERO";
     case REASON_TEMP_STALE: return "TEMP_STALE";
     case REASON_TEMP_CRITICAL: return "TEMP_CRITICAL";
     case REASON_TEMP_WARNING: return "TEMP_WARNING";
@@ -3893,11 +3889,6 @@ FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
     return MODE_WARNING_RAMP_AND_LOCKOUT;
   }
 
-  // PRIORITY 6: AUTO-ZERO
-  if (tick.autoZeroActive) {
-    return MODE_LOCKOUT_RAMP;
-  }
-
   // PRIORITY 7: LOCKOUT
   if (tick.inLockout) {
     return MODE_LOCKOUT_RAMP;
@@ -3966,9 +3957,6 @@ FieldEventReason selectFieldEventReason(const TickSnapshot &tick) {
     }
     return REASON_TEMP_WARNING;
   }
-
-  // Priority 6: Auto-zero
-  if (tick.autoZeroActive) return REASON_AUTOZERO_ACTIVE;
 
   // Priority 7: Lockout
   if (tick.inLockout) return REASON_LOCKOUT_ACTIVE;
@@ -4156,7 +4144,6 @@ bool shouldCutGPIO4AfterSettle(FieldEventReason reason, uint32_t nowMs, float ap
       return false;
 
       // Intentional shutdown: cut after settle
-    case REASON_AUTOZERO_ACTIVE:
     case REASON_LOCKOUT_ACTIVE:
       return true;
 
@@ -4196,7 +4183,6 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
 
   // Control state
   tick.manualMode = (ManualFieldToggle == 1);
-  tick.autoZeroActive = (autoZeroStartTime > 0);
   tick.ignoreTemperature = (IgnoreTemperature != 0);
   tick.ignoreRPM = (IgnoreRPM != 0);
   tick.rpmBelowMinimum = (!tick.ignoreRPM && RPM < (float)MinRPMForField);

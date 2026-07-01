@@ -1657,10 +1657,8 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvPlantK = settingRead(NK_cvPlantK).toFloat();
   }
-  if (!settingExists(NK_cvFloorK0)) { settingWrite(NK_cvFloorK0, String(cvFloorK0, 4).c_str()); } else { cvFloorK0 = settingRead(NK_cvFloorK0).toFloat(); }
-  if (!settingExists(NK_cvFloorK1)) { settingWrite(NK_cvFloorK1, String(cvFloorK1, 4).c_str()); } else { cvFloorK1 = settingRead(NK_cvFloorK1).toFloat(); }
-  if (!settingExists(NK_ccFloorK0)) { settingWrite(NK_ccFloorK0, String(ccFloorK0, 4).c_str()); } else { ccFloorK0 = settingRead(NK_ccFloorK0).toFloat(); }
-  if (!settingExists(NK_ccFloorK1)) { settingWrite(NK_ccFloorK1, String(ccFloorK1, 4).c_str()); } else { ccFloorK1 = settingRead(NK_ccFloorK1).toFloat(); }
+  if (settingExists(NK_ripFitAlt))  ripFitDecode(settingRead(NK_ripFitAlt),  ripFitAlt);   // measured ripple projection (§3.3); absent → nPts=0 → plot shows threshold only
+  if (settingExists(NK_ripFitBatt)) ripFitDecode(settingRead(NK_ripFitBatt), ripFitBatt);
   if (!settingExists(NK_cvPlantTau)) {
     settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
   } else {

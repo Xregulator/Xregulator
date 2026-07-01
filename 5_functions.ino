@@ -2035,109 +2035,209 @@ void handleSocGainReset() {
     queueConsoleMessage("SOC Gain: Dynamic gain factor reset to 1.0");
   }
 }
-void checkAutoZeroTriggers() {
-  // Only check if feature is enabled
-  if (AutoAltCurrentZero == 0) {
-    return;
-  }
+// ===== Temperature-compensated zero correction (ZERO_DRIFT_TEMPCOMP_SPEC.md) ==================
+// Replaces the old active auto-zero. The zero-drift log is the data source; the daily fit builds a
+// line zero(T)=c+b·(T−T_REF), EMA-smoothed across days, and the live correction is clamped to ±3 A.
 
-  // Don't start if already in progress
-  if (autoZeroStartTime > 0) {
-    return;
-  }
+// ZFitResult (one regression's output) is declared in Xregulator.ino so Arduino's auto-generated
+// prototype for zeroFitRegress can see the return type.
 
-  // Make sure engine is running
-  if (RPM < 200) {
-    return;
+// Least-squares fit of logged zero (amps) vs one sensor's temperature. Walks the ring newest→oldest,
+// x-centered at T_REF so the intercept IS c, and stops the moment it has both enough points AND a
+// >30 °F span — that block is the freshest data that reaches the required spread.
+static ZFitResult zeroFitRegress(int sensor, uint32_t nowEpoch) {
+  ZFitResult res; res.ok = false; res.c = res.b = res.r2 = res.residRms = res.span = 0.0f; res.n = 0;
+  if (!zeroLogRing || zeroLogCount == 0) return res;
+  double sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+  uint32_t n = 0;
+  float tmin = 1e30f, tmax = -1e30f;
+  for (uint16_t k = 0; k < zeroLogCount; k++) {
+    uint16_t idx = (uint16_t)((zeroLogHead + ZEROLOG_RING_SIZE - 1 - k) % ZEROLOG_RING_SIZE);
+    ZeroLogRecord &r = zeroLogRing[idx];
+    if (nowEpoch > 0 && r.epoch > 0 && (nowEpoch - r.epoch) > ZFIT_MAX_LOOKBACK_S) break;  // 30-day cap
+    int16_t traw = (sensor == ZF_BOARD) ? r.boardTempFx10 : r.altTempFx10;
+    if (traw == ZEROLOG_TEMP_BLANK) continue;              // that sensor absent for this record
+    if (isnan(r.amps) || isinf(r.amps)) continue;
+    float T = traw / 10.0f;
+    double x = (double)T - ZFIT_T_REF;
+    double y = (double)r.amps;
+    sx += x; sy += y; sxx += x * x; sxy += x * y; syy += y * y; n++;
+    if (T < tmin) tmin = T;
+    if (T > tmax) tmax = T;
+    if (n >= ZFIT_MIN_POINTS && (tmax - tmin) >= ZFIT_MIN_SPAN_F) break;  // latest sufficient spread
   }
-
-  unsigned long now = millis();
-  bool shouldTrigger = false;
-  static char triggerReasonBuf[64];  // Static buffer for reason string
-  const char *triggerReason = "";
-
-  // Check time-based trigger (1 hour)
-  if (now - lastAutoZeroTime >= AUTO_ZERO_INTERVAL) {
-    shouldTrigger = true;
-    triggerReason = "scheduled interval";
-  }
-
-  // Check temperature-based trigger (20°F change)
-  float currentTemp = (TempSource == 0) ? AlternatorTemperatureF : temperatureThermistor;
-  if (lastAutoZeroTemp > -900 && abs(currentTemp - lastAutoZeroTemp) >= AUTO_ZERO_TEMP_DELTA) {
-    shouldTrigger = true;
-    snprintf(triggerReasonBuf, sizeof(triggerReasonBuf), "temperature change (%.1f°F)",
-             abs(currentTemp - lastAutoZeroTemp));
-    triggerReason = triggerReasonBuf;
-  }
-
-  if (shouldTrigger) {
-    startAutoZero(triggerReason);
-  }
+  if (n < ZFIT_MIN_POINTS || (tmax - tmin) < ZFIT_MIN_SPAN_F) return res;
+  double denom = (double)n * sxx - sx * sx;
+  if (fabs(denom) < 1e-9) return res;                      // temperature didn't actually vary
+  double b = ((double)n * sxy - sx * sy) / denom;
+  double c = (sy - b * sx) / (double)n;                    // intercept at x=0 → zero at T_REF
+  double ssRes = syy - c * sy - b * sxy;                   // LS identity (normal-equation shortcut)
+  if (ssRes < 0) ssRes = 0;
+  double ssTot = syy - sy * sy / (double)n;
+  double r2 = (ssTot > 1e-12) ? (1.0 - ssRes / ssTot) : 0.0;
+  if (r2 < 0) r2 = 0; else if (r2 > 1) r2 = 1;
+  res.ok = true;
+  res.c = (float)c; res.b = (float)b; res.r2 = (float)r2;
+  res.residRms = (float)sqrt(ssRes / (double)n);
+  res.span = tmax - tmin; res.n = (uint16_t)n;
+  return res;
 }
-void startAutoZero(const char *reason) {  // Changed from String reason
-  autoZeroStartTime = millis();
-  queueConsoleMessageF("Auto-zero: Starting alternator current zeroing (%s)", reason);
+
+// Median c and b across the daily-fit history ring (for the outlier gate).
+static void zeroFitMedians(float *cMed, float *bMed) {
+  static float cs[ZFIT_HIST_SIZE], bs[ZFIT_HIST_SIZE];    // static: keep off the loop stack
+  uint16_t m = zeroFitHistCount;
+  for (uint16_t i = 0; i < m; i++) {
+    uint16_t idx = (zeroFitHistCount < ZFIT_HIST_SIZE) ? i
+                   : (uint16_t)((zeroFitHistHead + i) % ZFIT_HIST_SIZE);
+    cs[i] = zeroFitHist[idx].c; bs[i] = zeroFitHist[idx].b;
+  }
+  for (uint16_t i = 1; i < m; i++) { float k = cs[i]; int j = i - 1; while (j >= 0 && cs[j] > k) { cs[j + 1] = cs[j]; j--; } cs[j + 1] = k; }
+  for (uint16_t i = 1; i < m; i++) { float k = bs[i]; int j = i - 1; while (j >= 0 && bs[j] > k) { bs[j + 1] = bs[j]; j--; } bs[j + 1] = k; }
+  *cMed = cs[m / 2]; *bMed = bs[m / 2];
 }
-void processAutoZero() {
-  // Cancel if feature gets disabled during active cycle
-  if (AutoAltCurrentZero == 0) {
-    if (autoZeroStartTime > 0) {
-      autoZeroStartTime = 0;      // Cancel active cycle
-      autoZeroAccumulator = 0.0;  // Reset accumulator
-      autoZeroSampleCount = 0;
-      queueConsoleMessage("Auto-zero: Cancelled - feature disabled");
+
+static void zeroFitPushHistory(uint32_t epoch, float c, float b, float r2, uint16_t sensor, uint16_t n) {
+  if (!zeroFitHist) return;
+  ZeroFitRecord &h = zeroFitHist[zeroFitHistHead];
+  h.epoch = epoch; h.c = c; h.b = b; h.r2 = r2; h.sensor = sensor; h.n = n;
+  zeroFitHistHead = (zeroFitHistHead + 1) % ZFIT_HIST_SIZE;
+  if (zeroFitHistCount < ZFIT_HIST_SIZE) zeroFitHistCount++;
+}
+
+// Boot: alloc the history ring in PSRAM, restore it from /zerofit.bin (the live equation itself is
+// restored separately from NVS in loadNVSData). Called from setup() near zeroLogInit().
+void zeroFitInit() {
+  if (!zeroFitHist) {
+    zeroFitHist = (ZeroFitRecord *)ps_malloc(ZFIT_HIST_SIZE * sizeof(ZeroFitRecord));
+    if (!zeroFitHist) { Serial.println("FATAL: zeroFitHist ps_malloc failed"); return; }
+    memset(zeroFitHist, 0, ZFIT_HIST_SIZE * sizeof(ZeroFitRecord));
+  }
+  uint32_t uw = 0;
+  uint32_t n = readPsramBlob(ZFIT_PATH, ZFIT_MAGIC, ZFIT_VER,
+                             zeroFitHist, sizeof(ZeroFitRecord), ZFIT_HIST_SIZE, &uw, false);
+  zeroFitHistCount = (uint16_t)n;
+  zeroFitHistHead  = (n >= ZFIT_HIST_SIZE) ? 0 : (uint16_t)n;
+  prev_zeroFitHistHead = zeroFitHistHead;
+  if (n > 0) Serial.printf("zeroFitInit: restored %u fits\n", (unsigned)n);
+}
+
+// Persist the history ring to LittleFS (field-off only — caller guarantees it). Mirrors dumpZeroLog.
+void dumpZeroFit() {
+  if (!zeroFitHist || zeroFitHistCount == 0) return;
+  uint16_t startIdx = (zeroFitHistCount < ZFIT_HIST_SIZE) ? 0 : zeroFitHistHead;
+  uint32_t n = writePsramBlob(ZFIT_PATH, ZFIT_MAGIC, ZFIT_VER, 0,
+                              zeroFitHist, sizeof(ZeroFitRecord),
+                              ZFIT_HIST_SIZE, startIdx, zeroFitHistCount);
+  if (n > 0) prev_zeroFitHistHead = zeroFitHistHead;
+}
+
+// The once-per-day math. Returns true when a fit was accepted (blended or seeded), false when it
+// held the last equation (no sufficient spread / too noisy / outlier). Caller has confirmed off.
+bool zeroFitCompute() {
+  if (!zeroLogRing || zeroLogCount == 0) return false;
+  uint32_t nowEpoch = (uint32_t)getCurrentTimestamp();
+
+  ZFitResult fb = zeroFitRegress(ZF_BOARD, nowEpoch);
+  ZFitResult fa = zeroFitRegress(ZF_ALT,   nowEpoch);
+  if (!fb.ok && !fa.ok) return false;                     // no >30 °F spread on either sensor → hold
+
+  // Auto-pick the better-correlated sensor among those with a valid block.
+  int cand; ZFitResult best;
+  if (fb.ok && fa.ok) { if (fa.r2 > fb.r2) { cand = ZF_ALT; best = fa; } else { cand = ZF_BOARD; best = fb; } }
+  else if (fb.ok)     { cand = ZF_BOARD; best = fb; }
+  else                { cand = ZF_ALT;   best = fa; }
+
+  // Residual-noise gate — passes a clean flat fit (which R² would wrongly reject), blocks scatter.
+  if (best.residRms > ZFIT_MAX_RESID_A) {
+    queueConsoleMessageF("Zero-fit: held (residual %.2fA > %.2fA)", best.residRms, ZFIT_MAX_RESID_A);
+    return false;
+  }
+
+  // Sticky sensor: flip only after the other sensor wins by margin for N consecutive fits.
+  bool flip = false;
+  if (zfValid && cand != zfSensor) {
+    ZFitResult cur = (zfSensor == ZF_BOARD) ? fb : fa;
+    float curR2 = cur.ok ? cur.r2 : -1.0f;
+    if (best.r2 - curR2 > ZFIT_FLIP_MARGIN) {
+      if (zfFlipPending == cand) zfFlipStreak++;
+      else { zfFlipPending = cand; zfFlipStreak = 1; }
+      if (zfFlipStreak >= ZFIT_FLIP_DAYS) flip = true;
+    } else {
+      zfFlipStreak = 0;
     }
-    return;
-  }
-
-  // Only process if auto-zero is active
-  if (autoZeroStartTime == 0) {
-    return;
-  }
-
-  unsigned long now = millis();
-  unsigned long elapsed = now - autoZeroStartTime;
-
-  if (elapsed < AUTO_ZERO_DURATION) {
-    // Still in zeroing phase - force field to minimum
-    dutyCycle = MinDuty;
-    setDutyPercent((int)dutyCycle);
-    digitalWrite(4, 0);  // Disable field completely for more accurate zero
-
-    // Accumulate readings after 2 second settling time
-    if (elapsed > 2000) {
-      autoZeroAccumulator += MeasuredAmps;
-      autoZeroSampleCount++;
+    if (!flip) {
+      if (!cur.ok) return false;                          // stay put but current sensor has no spread → hold
+      cand = zfSensor; best = cur;
     }
   } else {
-    // Zeroing complete - calculate average and restore normal operation
-    float currentTemp = (TempSource == 0) ? AlternatorTemperatureF : temperatureThermistor;
-
-    // Calculate average of accumulated samples
-    if (autoZeroSampleCount > 0) {
-      DynamicAltCurrentZero = autoZeroAccumulator / autoZeroSampleCount;
-    } else {
-      DynamicAltCurrentZero = MeasuredAmps;  // Fallback to single reading
-    }
-
-    lastAutoZeroTime = now;
-    lastAutoZeroTemp = currentTemp;
-    autoZeroStartTime = 0;      // Clear active flag
-    autoZeroAccumulator = 0.0;  // Reset accumulator
-    autoZeroSampleCount = 0;
-    queueConsoleMessageF("Auto-zero: Complete, new zero offset: %.3fA (avg of %d samples)",
-                         DynamicAltCurrentZero, autoZeroSampleCount);
+    zfFlipStreak = 0; zfFlipPending = cand;
   }
+
+  // Outlier reject vs history median (arms once enough history exists).
+  if (zeroFitHistCount >= ZFIT_OUTLIER_MINHIST) {
+    float cMed, bMed; zeroFitMedians(&cMed, &bMed);
+    if (fabsf(best.c - cMed) > ZFIT_OUTLIER_C_A || fabsf(best.b - bMed) > ZFIT_OUTLIER_B) {
+      queueConsoleMessageF("Zero-fit: outlier held (c=%.2f med=%.2f b=%.3f med=%.3f)",
+                           best.c, cMed, best.b, bMed);
+      return false;
+    }
+  }
+
+  // Seed (first fit or a sensor flip) or confidence-weighted EMA blend. Weight omits R² on purpose
+  // so a flat offset still converges; span + point-count set how hard a good day pulls.
+  bool seed = (!zfValid) || flip;
+  if (seed) {
+    zfC = best.c; zfB = best.b;
+    if (flip) { zeroFitHistCount = 0; zeroFitHistHead = 0; prev_zeroFitHistHead = 0xFFFF; }  // history is per-sensor
+  } else {
+    float w = ZFIT_ALPHA * fminf(1.0f, best.span / 60.0f) * fminf(1.0f, best.n / 100.0f);
+    if (w > ZFIT_W_MAX) w = ZFIT_W_MAX;
+    zfC = (1.0f - w) * zfC + w * best.c;
+    zfB = (1.0f - w) * zfB + w * best.b;
+  }
+  zfSensor = cand; zfR2 = best.r2; zfValid = 1; zfLastEpoch = nowEpoch;
+  if (flip) { zfFlipStreak = 0; zfFlipPending = cand; }
+
+  zeroFitPushHistory(nowEpoch, best.c, best.b, best.r2, (uint16_t)cand, best.n);
+  dumpZeroFit();                                           // field-off guaranteed by caller
+  queueConsoleMessageF("Zero-fit: %s c=%.3fA b=%.4fA/F R2=%.2f N=%u span=%.0fF",
+                       (cand == ZF_ALT ? "alt" : "board"), zfC, zfB, zfR2, (unsigned)best.n, best.span);
+  return true;
 }
+
+// Called every loop. Recomputes the daily fit at most 1×/24 h when engine+field are both off, and
+// updates DynamicAltCurrentZero from the live equation + live temperature every pass.
+void zeroFitService() {
+  uint32_t now = millis();
+
+  static uint32_t nextComputeMs = 0;                      // 0 → first attempt as soon as everything's off
+  bool everythingOff = (RPM < 200) && (fieldActiveStatus == 0);
+  if (now >= nextComputeMs && everythingOff) {
+    bool accepted = zeroFitCompute();
+    nextComputeMs = now + (accepted ? ZFIT_INTERVAL_MS : ZFIT_RETRY_MS);  // retry sooner if it held
+  }
+
+  // Live correction, recomputed every loop (cheap). Uses the chosen sensor's live temperature.
+  float Tlive = (zfSensor == ZF_ALT) ? AlternatorTemperatureF : ambientTemp;
+  float corr;
+  if (!zfValid)                          corr = 0.0f;
+  else if (isnan(Tlive) || isinf(Tlive)) corr = zfC;                       // temp unknown → offset only
+  else                                   corr = zfC + zfB * (Tlive - ZFIT_T_REF);
+  DynamicAltCurrentZero = constrain(corr, -ZFIT_CLAMP_A, ZFIT_CLAMP_A);
+}
+
 void handleAltZeroReset() {
   if (ResetDynamicAltZero == 1) {
-    DynamicAltCurrentZero = 0.0;
-    lastAutoZeroTime = 0;
-    lastAutoZeroTemp = -999.0;
-    autoZeroStartTime = 0;    // Cancel any active auto-zero
+    DynamicAltCurrentZero = 0.0f;
+    zfValid = 0; zfC = 0.0f; zfB = 0.0f; zfR2 = 0.0f; zfSensor = ZF_BOARD;
+    zfLastEpoch = 0; zfFlipStreak = 0; zfFlipPending = ZF_BOARD;
+    zeroFitHistCount = 0; zeroFitHistHead = 0; prev_zeroFitHistHead = 0xFFFF;
+    fsTakeLock();
+    if (fsExists(ZFIT_PATH)) LittleFS.remove(ZFIT_PATH);
+    fsReleaseLock();
     ResetDynamicAltZero = 0;  // Clear the momentary flag
-    queueConsoleMessage("Auto-zero: Dynamic alternator zero offset reset to 0.0");
+    queueConsoleMessage("Zero correction: learned fit + history cleared");
   }
 }
 void calculateChargeTimes() {
@@ -2522,10 +2622,10 @@ void _ReadAnalogInputs_inner() {
                          lastBcurEmaMs = nowBc;
                        }
 
-                       // Commissioning Step 5: fold this fast Bcur sample (+ co-sampled MeasuredAmps for
-                       // the parallel alternator slope) into the per-RPM-bin ripple capture (no-op unless
-                       // the matrix gate is open). Feeds the CV battery-current AND bulk alternator floors.
-                       bcurRippleCommissionUpdate(Bcur, MeasuredAmps, RPM);
+                       // Fold this fast Bcur sample (+ co-sampled MeasuredAmps) into the measured
+                       // filtered-ripple capture (§3.1). ALWAYS-ON: peak IExcessTau-filtered pk-pk per
+                       // FaCell for the map + Protections plot; the 3-level test ring appends only when armed.
+                       faFiltRippleUpdate(Bcur, MeasuredAmps, RPM);
 
                        if (IBV > IBVMax)              { IBVMax              = IBV; }
                        if (IBV > PeakVoltage_AllTime) { PeakVoltage_AllTime = IBV; }
@@ -4100,10 +4200,14 @@ void saveNVSDataFull() {
   if (prev_GreaseDamage != CumulativeGreaseDamage)                          { nvs_set_blob(h, "GreaseDamage",  &CumulativeGreaseDamage,     sizeof(float));     prev_GreaseDamage = CumulativeGreaseDamage;                          chg = true; }
   if (prev_BrushDamage != CumulativeBrushDamage)                            { nvs_set_blob(h, "BrushDamage",   &CumulativeBrushDamage,      sizeof(float));     prev_BrushDamage = CumulativeBrushDamage;                            chg = true; }
   if (prev_ShuntGain != DynamicShuntGainFactor)                             { nvs_set_blob(h, "ShuntGain",     &DynamicShuntGainFactor,     sizeof(float));     prev_ShuntGain = DynamicShuntGainFactor;                             chg = true; }
-  if (prev_AltZero != DynamicAltCurrentZero)                                { nvs_set_blob(h, "AltZero",       &DynamicAltCurrentZero,      sizeof(float));     prev_AltZero = DynamicAltCurrentZero;                                chg = true; }
   if (prev_LastGainTime != (uint32_t)lastGainCorrectionTime)                { nvs_set_u32(h, "LastGainTime",   (uint32_t)lastGainCorrectionTime);              prev_LastGainTime = (uint32_t)lastGainCorrectionTime;                chg = true; }
-  if (prev_LastZeroTime != (uint32_t)lastAutoZeroTime)                      { nvs_set_u32(h, "LastZeroTime",   (uint32_t)lastAutoZeroTime);                    prev_LastZeroTime = (uint32_t)lastAutoZeroTime;                      chg = true; }
-  if (prev_LastZeroTemp != lastAutoZeroTemp)                                 { nvs_set_blob(h, "LastZeroTemp",  &lastAutoZeroTemp,           sizeof(float));     prev_LastZeroTemp = lastAutoZeroTemp;                                chg = true; }
+  // Temp-comp zero-correction learned equation (ZERO_DRIFT_TEMPCOMP_SPEC.md). Compare-first → ~1 write/day.
+  if (prev_zfValid != zfValid)                                              { nvs_set_i32(h,  "ZFitValid",     zfValid);                                       prev_zfValid = zfValid;                                              chg = true; }
+  if (prev_zfSensor != zfSensor)                                            { nvs_set_i32(h,  "ZFitSensor",    zfSensor);                                      prev_zfSensor = zfSensor;                                            chg = true; }
+  if (prev_zfC != zfC)                                                      { nvs_set_blob(h, "ZFitC",         &zfC,                        sizeof(float));     prev_zfC = zfC;                                                      chg = true; }
+  if (prev_zfB != zfB)                                                      { nvs_set_blob(h, "ZFitB",         &zfB,                        sizeof(float));     prev_zfB = zfB;                                                      chg = true; }
+  if (prev_zfR2 != zfR2)                                                    { nvs_set_blob(h, "ZFitR2",        &zfR2,                       sizeof(float));     prev_zfR2 = zfR2;                                                    chg = true; }
+  if (prev_zfLastEpoch != zfLastEpoch)                                      { nvs_set_u32(h,  "ZFitEpoch",     zfLastEpoch);                                   prev_zfLastEpoch = zfLastEpoch;                                      chg = true; }
   if (prev_sailing_days_alltime != sailing_days_alltime)                    { nvs_set_blob(h, "SailDays_AT",   &sailing_days_alltime,       sizeof(float));     prev_sailing_days_alltime = sailing_days_alltime;                    chg = true; }
   if (prev_sailing_dist_alltime != sailing_dist_alltime)                    { nvs_set_blob(h, "SailDist_AT",   &sailing_dist_alltime,       sizeof(float));     prev_sailing_dist_alltime = sailing_dist_alltime;                    chg = true; }
   if (prev_alt_power_max_alltime_w != alt_power_max_alltime_w)              { nvs_set_blob(h, "AltPwrMax_AT",  &alt_power_max_alltime_w,    sizeof(float));     prev_alt_power_max_alltime_w = alt_power_max_alltime_w;              chg = true; }
@@ -4418,10 +4522,16 @@ void loadNVSData() {
 
   // Dynamic Learning
   nvs_get_blob(nvs_handle, "ShuntGain", &DynamicShuntGainFactor, &required_size);
-  nvs_get_blob(nvs_handle, "AltZero", &DynamicAltCurrentZero, &required_size);
   if (nvs_get_u32(nvs_handle, "LastGainTime", &temp_uint32) == ESP_OK) lastGainCorrectionTime = temp_uint32;
-  if (nvs_get_u32(nvs_handle, "LastZeroTime", &temp_uint32) == ESP_OK) lastAutoZeroTime = temp_uint32;
-  nvs_get_blob(nvs_handle, "LastZeroTemp", &lastAutoZeroTemp, &required_size);
+  // Temp-comp zero-correction learned equation (hold-last-good survives reboot). Old AltZero/LastZeroTime/
+  // LastZeroTemp keys are orphaned and intentionally not read. (temp_int32 already declared above.)
+  if (nvs_get_i32(nvs_handle, "ZFitValid",  &temp_int32) == ESP_OK) zfValid  = temp_int32;
+  if (nvs_get_i32(nvs_handle, "ZFitSensor", &temp_int32) == ESP_OK) zfSensor = temp_int32;
+  required_size = sizeof(float);
+  nvs_get_blob(nvs_handle, "ZFitC",  &zfC,  &required_size);
+  nvs_get_blob(nvs_handle, "ZFitB",  &zfB,  &required_size);
+  nvs_get_blob(nvs_handle, "ZFitR2", &zfR2, &required_size);
+  if (nvs_get_u32(nvs_handle, "ZFitEpoch", &temp_uint32) == ESP_OK) zfLastEpoch = temp_uint32;
 
   // IMU Lifetime Counters
   if (nvs_get_u32(nvs_handle, "IMU_Capsize", &temp_uint32) == ESP_OK) imu_capsize_count = temp_uint32;
@@ -4552,10 +4662,13 @@ void initNVSCache() {
 
   // Dynamic learning
   prev_ShuntGain = DynamicShuntGainFactor;
-  prev_AltZero = DynamicAltCurrentZero;
   prev_LastGainTime = (uint32_t)lastGainCorrectionTime;
-  prev_LastZeroTime = (uint32_t)lastAutoZeroTime;
-  prev_LastZeroTemp = lastAutoZeroTemp;
+  prev_zfValid = zfValid;
+  prev_zfSensor = zfSensor;
+  prev_zfC = zfC;
+  prev_zfB = zfB;
+  prev_zfR2 = zfR2;
+  prev_zfLastEpoch = zfLastEpoch;
 
   // Sailing metrics cached
   prev_sailing_days_alltime = sailing_days_alltime;

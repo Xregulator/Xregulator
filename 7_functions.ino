@@ -236,7 +236,9 @@ struct FrontStore {
     pts[count++] = p; return true;
   }
   // IDW surface evaluation, O(count) — the spec's front_eval(). Float + precomputed reciprocal axis
-  // scales (4 mults/point, not 4 divides) keep this cheap on the 200 Hz fold even at the raised cap.
+  // scales (4 mults/point, not 4 divides). Reached only via classify()/pushesHybrid() at 1 Hz
+  // (altHealth_tick, behind gHeavyRanThisPass) — never from the 200 Hz altFold_tick, so front size
+  // has no control-loop cost.
   // A convex blend of the support points → the result is ALWAYS within their y-range: never extrapolates.
   // d_i = sqrt(Σ_a ((x[a]-pts.x[a])*invSc[a])^2); exact hit → that point's y; else Σ w_i y_i / Σ w_i.
   float eval(const float x[NAXIS], float idwPower) const {
@@ -251,7 +253,7 @@ struct FrontStore {
         d2 += dx * dx;
       }
       if (d2 < 1e-12f) return pts[i].y;              // exact hit
-      // dᵢ^power. Fast-path power 2 (the default) — d2 already is dᵢ²; skip sqrt+pow (200 Hz hot path).
+      // dᵢ^power. Fast-path power 2 (the default) — d2 already is dᵢ²; skip sqrt+pow (1 Hz evaluator).
       float dp = (idwPower == 2.0f) ? d2 : powf(sqrtf(d2), idwPower);
       float w = 1.0f / (dp + 1e-9f);
       wsum += w; num += w * pts[i].y;
@@ -611,10 +613,11 @@ static void altCommitTrendBucket() {
   if (altCurEngHour < 0 || altBucket_n < (double)altTrendMinSamp || !altTrend) return;
   float overall = (float)(altBucket_sum / altBucket_n) * 100.0f;
   float worst   = altBucket_worst * 100.0f;
-  if (altTrendCount >= ALT_TREND_CAP) {  // ring full → drop oldest
-    memmove(altTrend, altTrend + 1, (ALT_TREND_CAP - 1) * sizeof(AltTrendPt));
-    altTrendCount = ALT_TREND_CAP - 1;
-    altTrendRewrite = true;              // indices shifted → next save rewrites the whole log
+  if (altTrendCount >= ALT_TREND_CAP) {  // window full → evict the oldest ALT_TREND_DROP block in one
+    // shift; indices moved → next save rewrites the whole log (once per ~DROP hours, not per hour)
+    memmove(altTrend, altTrend + ALT_TREND_DROP, (ALT_TREND_CAP - ALT_TREND_DROP) * sizeof(AltTrendPt));
+    altTrendCount = ALT_TREND_CAP - ALT_TREND_DROP;
+    altTrendRewrite = true;
   }
   AltTrendPt &p = altTrend[altTrendCount++];
   p.engHour = (uint16_t)altCurEngHour;
@@ -715,10 +718,11 @@ static bool altCapWarned = false;   // once per boot OR per Start Over (cleared 
 
 // ---- per-control-tick fold (THE canonical cadence) ----
 // Live: called from the pidLog hook (~200 Hz). Bench-sim: called at 1 Hz from altHealth_tick.
-// Reads the final control state, updates the live output-%, feeds the Episode detector, and on a
-// steady-run emit derives the excitation surface coord, gates against the front, pushes if it
-// beats best-ever, and feeds the engine-hour trend. The off/fault/shutdown paths early-return
-// before the live pidLog hook, so field-off cases exclude themselves with no mode check.
+// Reads the final control state, EMA-filters the detector inputs, feeds the Episode detector, and on a
+// steady-run emit builds the surface point and STASHES it into altEmitQ — the O(count) work (front
+// gate, push-if-best, trend feed) all happens at 1 Hz in altProcessEmits/altHealth_tick, never in this
+// ~200 Hz tick. The off/fault/shutdown paths early-return before the live pidLog hook, so field-off
+// cases exclude themselves with no mode check.
 void altFold_tick(uint32_t nowMs) {
   if (!altFrontBuf || !altEpRing) return;
 
@@ -1127,7 +1131,7 @@ static bool altIngestFrontCsvInto(char *body, bool toUploaded) {
 bool altIngestFrontCsv(char *body) { return altIngestFrontCsvInto(body, false); }
 
 // Append-only engine-hour trend log: 8-byte {magic,ver} header + AltTrendPt records. Each field-off
-// appends only the newly committed buckets (~6 B/hour) instead of rewriting the whole 120 KB ring;
+// appends only the newly committed buckets (~6 B/hour) instead of rewriting the whole ~52 KB ring;
 // a full rewrite happens only on a load-miss or ring eviction (altTrendRewrite).
 static void altTrendPersist() {
   if (!altTrend) return;
@@ -1179,6 +1183,7 @@ static void altTrendLoad() {
 
 // ---- persistence (field-off-gated by caller) — front + trend survive reboot (cloud authoritative) ----
 void altHealthSave() {
+  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM rings are synthetic/empty — keep the real flash blobs
   if (!altFrontBuf || hardwarePresent != 1) return;
   uint32_t uw = ((uint32_t)altFront2.source << 8) | (uint32_t)ALT_NAXIS;   // stash source + naxis
   writePsramBlob("/altfront.bin", ALT_FRONT_MAGIC, ALT_VER, uw, altFrontBuf, sizeof(FrontPoint<ALT_NAXIS>), ALT_FRONT_CAP, 0, altFront2.count);
@@ -1819,6 +1824,7 @@ static void perfSendMotorLive() {
 
 // ---- persistence (Phase-0 scaffold; field-off-gated by caller) ----
 void boatPerfSave() {
+  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM rings are synthetic/empty — keep the real flash blobs
   if (!sailFrontBuf || hardwarePresent != 1) return;
   uint32_t suw = ((uint32_t)sailFront.source  << 8) | (uint32_t)PERF_NAXIS;
   uint32_t muw = ((uint32_t)motorFront.source << 8) | (uint32_t)PERF_NAXIS;

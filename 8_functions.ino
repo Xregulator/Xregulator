@@ -1155,7 +1155,7 @@ void capTrackTick(float I_batt, float V_filt, float tempC, float dtSec) {
 
   if (capLowAnchorValid) {
     float dAh = I_batt * dtSec / 3600.0f;
-    if (dAh > 0.0f) dAh *= capChgEff;
+    if (dAh > 0.0f) dAh *= (ChargeEfficiency_scaled / 1000.0f);   // single source of truth = Battery Monitor's ChargeEfficiency_scaled (%×10)
     capBridgeAh += dAh;
     if (capBridgeAh < capBridgeMinAh) capBridgeMinAh = capBridgeAh;
     if (capBridgeMinAh < -0.05f * (float)BatteryCapacity_Ah) capLowAnchorValid = false;  // re-discharged → stale
@@ -1183,6 +1183,7 @@ void capTrackOnFull(uint32_t epoch, float tempC) {
 
 // Persist DCIR results + capacity ring to NVS. Caller gates on field-off.
 void bhFlushCapNVS() {
+  if (dbgRingsSynthetic) return;   // fillmax/clearmax: RAM ring is synthetic/empty — keep the real NVS blob
   if (bhCapDirty) {
     settingWrite(NK_bhCapBlob, bhSerializeCap().c_str());
     settingWrite(NK_bhBaseline, String(bhBaselineCapacityAh, 3).c_str());
@@ -1310,7 +1311,6 @@ void bhInitSettings() {
   if (!settingExists(NK_capSettleRate)) settingWrite(NK_capSettleRate, String(capSettleRateMv10, 2).c_str());  else capSettleRateMv10 = settingRead(NK_capSettleRate).toFloat();
   if (!settingExists(NK_capSocLowMax))  settingWrite(NK_capSocLowMax, String(capSocLowMax, 1).c_str());        else capSocLowMax      = settingRead(NK_capSocLowMax).toFloat();
   if (!settingExists(NK_capMinSpan))    settingWrite(NK_capMinSpan, String(capMinSpan, 1).c_str());            else capMinSpan        = settingRead(NK_capMinSpan).toFloat();
-  if (!settingExists(NK_capChgEff))     settingWrite(NK_capChgEff, String(capChgEff, 4).c_str());              else capChgEff         = settingRead(NK_capChgEff).toFloat();
   if (!settingExists(NK_capFullSoc))    settingWrite(NK_capFullSoc, String(capFullSoc, 1).c_str());            else capFullSoc        = settingRead(NK_capFullSoc).toFloat();
   if (!settingExists(NK_capRefMode))    settingWrite(NK_capRefMode, String(capRefMode).c_str());               else capRefMode        = (uint8_t)settingRead(NK_capRefMode).toInt();
   if (!settingExists(NK_capTempNorm))   settingWrite(NK_capTempNorm, String(capTempNormEnable).c_str());       else capTempNormEnable = (uint8_t)settingRead(NK_capTempNorm).toInt();
@@ -1365,7 +1365,8 @@ String bhBuildStatusJson() {
   j += ",\"settleRate\":" + String(capSettleRateMv10, 2);
   j += ",\"socLowMax\":" + String(capSocLowMax, 1);
   j += ",\"minSpan\":" + String(capMinSpan, 1);
-  j += ",\"chgEff\":" + String(capChgEff, 4);
+  j += ",\"chgEff\":" + String(ChargeEfficiency_scaled / 1000.0f, 4);   // read-only mirror of Battery Monitor tab
+  j += ",\"capacityAh\":" + String(BatteryCapacity_Ah);                 // read-only mirror of Battery Monitor tab (drives % vs rated)
   j += ",\"fullSoc\":" + String(capFullSoc, 1);
   j += ",\"refMode\":" + String(capRefMode);
   j += ",\"tempNorm\":" + String(capTempNormEnable);
@@ -1388,4 +1389,179 @@ String bhBuildStatusJson() {
   }
   j += "]}";
   return j;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// /debug/fillmax + /debug/clearmax — bench-only "age the unit to its ceiling": every accumulating
+// store is a fixed-cap ring, so a decade-old unit == rings at cap; this forces that state now and
+// times the O(count) worst cases on real hardware. Points are DISPERSED (not clones) so the IDW/LWLR
+// front scans do real work; the zero-drift log's temp span is kept < ZFIT_MIN_SPAN_F ON PURPOSE so
+// zeroFitRegress can't early-exit (worst case — and a synthetic fit can never be accepted). Default is
+// RAM-only: dbgRingsSynthetic freezes every field-off persister until reboot, so flash keeps the real
+// learned blobs and a plain reboot restores them. &persist=yes skips the freeze and runs+times the five
+// real savers inline (end-to-end flash/NVS test) — synthetic data then survives reboot AND reflash
+// (data partitions are not touched by a reflash); recover with Erase All Flash / factory reset. Lives
+// at the sketch tail so every static ring/front symbol (2/3/7_functions) is in scope; registered in
+// setupServer().
+// ───────────────────────────────────────────────────────────────────────────
+static uint32_t dbgLcg = 0x1234567u;               // deterministic LCG → identical fill every run
+static inline float dbgRand(float lo, float hi) {
+  dbgLcg = dbgLcg * 1664525u + 1013904223u;
+  return lo + (hi - lo) * ((float)(dbgLcg >> 8) / 16777216.0f);
+}
+
+void debugFillMax(AsyncWebServerRequest *request) {
+  if (!request->hasParam("confirm") || request->getParam("confirm")->value() != "yes") {
+    request->send(200, "text/plain",
+      "REFUSED. /debug/fillmax fills EVERY ring to cap with synthetic data and\n"
+      "OVERWRITES the learned alt-health + boat-perf surfaces in RAM (not flash — a\n"
+      "reboot restores them; persistence is frozen until then). Bench units only.\n"
+      "Re-send as /debug/fillmax?confirm=yes to proceed.\n"
+      "Add &persist=yes to ALSO run+time the real field-off savers (writes the synthetic\n"
+      "data to LittleFS/NVS; survives reboot AND reflash — recover with Erase All Flash).\n");
+    return;
+  }
+  bool persist = request->hasParam("persist") && request->getParam("persist")->value() == "yes";
+  dbgRingsSynthetic = !persist;                     // default: freeze ALL field-off persistence until reboot (flash stays real)
+  dbgLcg = 0x1234567u;                              // reseed
+  String out;
+
+  // 4-D alternator best-ever front → cap, dispersed across the real operating box (axisScale set at init)
+  if (altFrontBuf) {
+    for (int i = 0; i < ALT_FRONT_CAP; i++) {
+      FrontPoint<ALT_NAXIS> &p = altFrontBuf[i];
+      p.x[0] = dbgRand(800.0f, 6000.0f);            // RPM
+      p.x[1] = dbgRand(0.0f, 3.0f);                 // excitation
+      p.x[2] = dbgRand(12.0f, 15.0f);               // Vbus
+      p.x[3] = dbgRand(40.0f, 250.0f);              // tempF
+      p.ex[0] = 0; p.ex[1] = 0; p.y = dbgRand(20.0f, 150.0f); p.nSamp = 120; p.tEmit = (uint32_t)i;
+    }
+    altFront2.count = ALT_FRONT_CAP; altFront2.source = 0;
+  }
+
+  // 3-D boat-perf fronts (sail + motor) → cap (blob + scan cost; not timed here)
+  if (sailFrontBuf) {
+    for (int i = 0; i < PERF_FRONT_CAP; i++) {
+      FrontPoint<PERF_NAXIS> &p = sailFrontBuf[i];
+      for (int a = 0; a < PERF_NAXIS; a++) p.x[a] = dbgRand(0.0f, 60.0f);
+      p.ex[0] = 0; p.ex[1] = 0; p.y = dbgRand(2.0f, 12.0f); p.nSamp = 60; p.tEmit = (uint32_t)i;
+    }
+    sailFront.count = PERF_FRONT_CAP; sailFront.source = 0;
+  }
+  if (motorFrontBuf) {
+    for (int i = 0; i < PERF_FRONT_CAP; i++) {
+      FrontPoint<PERF_NAXIS> &p = motorFrontBuf[i];
+      for (int a = 0; a < PERF_NAXIS; a++) p.x[a] = dbgRand(0.0f, 60.0f);
+      p.ex[0] = 0; p.ex[1] = 0; p.y = dbgRand(2.0f, 12.0f); p.nSamp = 60; p.tEmit = (uint32_t)i;
+    }
+    motorFront.count = PERF_FRONT_CAP; motorFront.source = 0;
+  }
+
+  // Alt-health engine-hour trend → cap (drives the /alttrend.csv scan + ~52 KB /alttrend.bin)
+  if (altTrend) {
+    for (int i = 0; i < ALT_TREND_CAP; i++) {
+      altTrend[i].engHour    = (uint16_t)i;
+      altTrend[i].worstPct   = (int16_t)lroundf(dbgRand(600.0f, 950.0f));    // %×10
+      altTrend[i].overallPct = (int16_t)lroundf(dbgRand(800.0f, 1000.0f));
+    }
+    altTrendCount = ALT_TREND_CAP; altTrendFlushed = 0; altTrendRewrite = true;  // next field-off save rewrites whole log
+  }
+
+  // 30-day long-term ring → cap
+  if (longTermRing) {
+    uint32_t base = (uint32_t)time(NULL); if (base < 1700000000u) base = 1700000000u;
+    for (int i = 0; i < LONGTERM_RING_SIZE; i++) {
+      LongTermRecord &r = longTermRing[i];
+      r.timestamp = base - (uint32_t)(LONGTERM_RING_SIZE - i) * 600u;         // 10-min cadence
+      r.validMask = 0xFFFFFFFFu; r.chargeStage = 1;
+    }
+    longTermCount = LONGTERM_RING_SIZE; longTermHead = 0;
+  }
+
+  // Zero-drift log → cap, temp span < ZFIT_MIN_SPAN_F so zeroFitRegress can't early-exit (true worst case)
+  if (zeroLogRing) {
+    for (int i = 0; i < ZEROLOG_RING_SIZE; i++) {
+      ZeroLogRecord &r = zeroLogRing[i];
+      r.epoch = (uint32_t)i; r.amps = dbgRand(-0.5f, 0.5f); r.p2pAmps = 0.1f; r.rpm = 0; r.battVx100 = 1280;
+      r.altTempFx10   = (int16_t)lroundf(dbgRand(700.0f, 720.0f));            // ~2 °F span → never satisfies the 30 °F gate
+      r.boardTempFx10 = (int16_t)lroundf(dbgRand(700.0f, 720.0f));
+    }
+    zeroLogCount = ZEROLOG_RING_SIZE; zeroLogHead = 0;
+  }
+
+  // Battery-capacity ring → cap. (The sensor upload ring is deliberately NOT faked: bumping its
+  // count would queue SENSOR_RING_SIZE junk rows to the cloud, and it feeds the Core-0 uploader, not
+  // any O(count) control-path scan — so it tests nothing the growth audit cares about.)
+  if (bhCapRing) {
+    for (int i = 0; i < bhCapCap; i++) {
+      BattCapPoint &p = bhCapRing[i];
+      p.epoch = 1700000000u + (uint32_t)i * 86400u; p.capacityAh = dbgRand(180.0f, 210.0f);
+      p.capPct = dbgRand(85.0f, 100.0f); p.socLow = dbgRand(8.0f, 15.0f); p.tempC = 25.0f; p.conf = 1;
+    }
+    bhCapCount = bhCapCap; bhCapHead = 0; bhCapDirty = true;   // dirty so a persist-mode bhFlushCapNVS actually writes
+  }
+
+  // Measure the two worst-case data-scaling scans on THIS board (not estimates):
+  // 1) front classify() at cap = the real 1 Hz alt-health cost (IDW eval + LWLR select + 48-pt solve)
+  float pred = 0; volatile long sink = 0;
+  float surf[ALT_NAXIS] = { 3000.0f, 1.5f, 13.5f, 150.0f };
+  uint32_t t0 = micros();
+  for (int r = 0; r < 20; r++) sink += altFront2.classify(surf, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
+  uint32_t classifyUs = (micros() - t0) / 20;
+  // 2) trend drop-oldest memmove at cap = the "once per decade" event on real PSRAM
+  uint32_t t1 = micros();
+  memmove(altTrend, altTrend + 1, (size_t)(ALT_TREND_CAP - 1) * sizeof(AltTrendPt));
+  uint32_t memmoveUs = micros() - t1;
+  altTrendCount = ALT_TREND_CAP;                    // memmove left a dup in the last slot; keep count at cap
+
+  out  = "FILLMAX done — every ring at cap (bench worst-case)\n";
+  out += "altFront2="   + String(altFront2.count) + "/" + String(ALT_FRONT_CAP);
+  out += "  sail/motor=" + String(sailFront.count) + "/" + String(motorFront.count) + "\n";
+  out += "altTrend="    + String(altTrendCount) + "/" + String(ALT_TREND_CAP);
+  out += "  longTerm="  + String((unsigned)longTermCount) + "/" + String((unsigned)LONGTERM_RING_SIZE) + "\n";
+  out += "zeroLog="     + String((unsigned)zeroLogCount) + "/" + String((unsigned)ZEROLOG_RING_SIZE);
+  out += "  bhCap="     + String(bhCapCount) + "/" + String(bhCapCap) + "\n";
+  out += "---- measured ceilings ----\n";
+  out += "classify() @ " + String(ALT_FRONT_CAP) + " pts (1 Hz alt-health tick): " + String(classifyUs) + " us\n";
+  out += "trend memmove @ cap (once-per-decade drop-oldest): " + String(memmoveUs) + " us\n";
+  out += "free heap=" + String(ESP.getFreeHeap()) + " maxBlock=" + String(ESP.getMaxAllocHeap());
+  out += " freePSRAM=" + String(ESP.getFreePsram()) + "\n";
+  out += "sink=" + String(sink) + "\n\n";
+  if (persist) {
+    struct { const char *name; void (*fn)(); } savers[] = {
+      { "altHealthSave (fronts + trend)", altHealthSave },
+      { "boatPerfSave (sail + motor fronts)", boatPerfSave },
+      { "dumpLongTermRing", dumpLongTermRing },
+      { "dumpZeroLog", dumpZeroLog },
+      { "bhFlushCapNVS (capacity blob, NVS)", bhFlushCapNVS },
+    };
+    out += "---- persist=yes: real field-off savers run inline, timed ----\n";
+    for (auto &s : savers) {
+      uint32_t w0 = millis();
+      s.fn();
+      out += String(s.name) + ": " + String(millis() - w0) + " ms\n";
+    }
+    out += "Flash/NVS now hold SYNTHETIC data (survives reboot AND reflash).\n";
+    out += "Reboot to test the load-at-cap boot path; recover with Erase All Flash / factory reset.\n";
+  } else {
+    out += "Persistence is FROZEN until reboot (flash untouched) — reboot restores real data.\n";
+  }
+  out += "LittleFS used/total=" + String((unsigned)LittleFS.usedBytes()) + "/" + String((unsigned)LittleFS.totalBytes()) + "\n";
+  out += "Next: watch ft_altFold / ft_altHealth / ft_dumpLongTermRing in /debug for worst-pass loop time.\n";
+  request->send(200, "text/plain", out);
+}
+
+// Zero the in-RAM rings after a fillmax. Persistence stays FROZEN — empty is as un-real as synthetic;
+// reboot restores the real data. sensorRing untouched (never faked; zeroing it would drop real pending uploads).
+void debugClearMax(AsyncWebServerRequest *request) {
+  dbgRingsSynthetic = true;                         // RAM empty ≠ real → keep every field-off persister frozen until reboot
+  if (altFront2.source == 0) altFront2.count = 0;   // only clear a LEARNED surface, never an uploaded one
+  sailFront.count = 0; motorFront.count = 0;
+  altTrendCount = 0; altTrendFlushed = 0; altTrendRewrite = true;
+  longTermCount = 0; longTermHead = 0;
+  zeroLogCount = 0; zeroLogHead = 0;
+  bhCapCount = 0; bhCapHead = 0;
+  request->send(200, "text/plain",
+    "CLEARMAX done — in-RAM rings zeroed; persistence frozen. REBOOT to reload from flash\n"
+    "(real data — unless a fillmax?persist=yes wrote synthetic there; then Erase All Flash).\n");
 }
