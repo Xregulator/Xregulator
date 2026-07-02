@@ -629,6 +629,10 @@ done:
 // One ALLOWLIST (CONFIG_MANIFEST) is the single source of truth for which NVS
 // "settings" keys are shareable. tier 1 = free clone; tier 2 = install/hardware
 // topology (sensor/shunt/polarity) — exported but applied only with includeHardware.
+// The alt-health / boat-perf registry knobs (ALT_SETTINGS / PERF_SETTINGS in
+// 7_functions.ino) are ALSO shareable but save through generic loops the literal
+// manifest can't reference — they are emitted/imported programmatically (tier-1)
+// minus CFG_REGISTRY_SKIP, so a knob added to either registry is covered automatically.
 // Per-device calibration, identity/secrets, UI prefs, and momentary actions are
 // NEVER in the manifest (see config_drift_check.py — it fails the build if any
 // settingWrite key is in neither the manifest nor its EXCLUDE list).
@@ -858,6 +862,19 @@ static const ConfigManifestEntry CONFIG_MANIFEST[] = {
 };
 static const size_t CONFIG_MANIFEST_COUNT = sizeof(CONFIG_MANIFEST)/sizeof(CONFIG_MANIFEST[0]);
 
+// Registry knobs NEVER exported/imported (everything else in ALT_SETTINGS/PERF_SETTINGS is):
+//   altPaused / perfPaused — learning pause state, runtime intent not a charge profile
+//   perfSpeedSrc — per-boat speed-sensor topology (STW vs SOG); importing it would bypass
+//     the Clear-All reset perfSettingsHandle fires on change, leaving the learned
+//     surfaces silently mismatched to the new source
+// config_drift_check.py parses this array — keep it a plain literal.
+static const char *CFG_REGISTRY_SKIP[] = { "altPaused", "perfPaused", "perfSpeedSrc" };
+static bool cfgRegistrySkipped(const char *name) {
+  for (size_t i = 0; i < sizeof(CFG_REGISTRY_SKIP)/sizeof(CFG_REGISTRY_SKIP[0]); i++)
+    if (strcmp(name, CFG_REGISTRY_SKIP[i]) == 0) return true;
+  return false;
+}
+
 // Append val as a JSON string literal (quotes + backslash escaped).
 static void cfgAppendJsonStr(String &out, const String &val) {
   out += '"';
@@ -873,9 +890,11 @@ static void cfgAppendJsonStr(String &out, const String &val) {
 // Single source of truth for BOTH /exportConfig (sharing) and the daily fleet config
 // snapshot (buildConfigPayload's "settings") — so neither can drift as settings are added.
 // includeHardware adds the tier-2 install/topology keys. Keys never set are omitted.
+// The alt-health/boat-perf registries are appended generically (minus CFG_REGISTRY_SKIP),
+// so knobs added to those registries are covered without touching the manifest.
 String manifestConfigObject(bool includeHardware) {
   String j;
-  j.reserve(6144);
+  j.reserve(8192);
   j = "{";
   bool first = true;
   for (size_t i = 0; i < CONFIG_MANIFEST_COUNT; i++) {
@@ -887,6 +906,27 @@ String manifestConfigObject(bool includeHardware) {
     j += '"'; j += CONFIG_MANIFEST[i].param; j += "\":";
     cfgAppendJsonStr(j, v);
   }
+  // A macro, not a helper: ALT_SETTINGS and PERF_SETTINGS are different struct types,
+  // and a free function taking either by pointer would make Arduino's auto-prototype
+  // generator hoist a prototype above the struct definitions in 7_functions.ino
+  // ("does not name a type"). JSON param = FULL registry name (what the dashboard
+  // sends); NVS key = name truncated to the 15-char cap, mirroring altSettingsLoad/
+  // perfSettingsLoad exactly.
+  #define CFG_EMIT_REGISTRY(REG, COUNT) \
+    for (size_t i = 0; i < COUNT; i++) { \
+      if (cfgRegistrySkipped(REG[i].name)) continue; \
+      char key[16]; \
+      snprintf(key, sizeof(key), "%s", REG[i].name); \
+      if (!settingExists(key)) continue; \
+      String v = settingRead(key); \
+      if (!first) j += ','; \
+      first = false; \
+      j += '"'; j += REG[i].name; j += "\":"; \
+      cfgAppendJsonStr(j, v); \
+    }
+  CFG_EMIT_REGISTRY(ALT_SETTINGS, ALT_SETTING_COUNT)
+  CFG_EMIT_REGISTRY(PERF_SETTINGS, PERF_SETTING_COUNT)
+  #undef CFG_EMIT_REGISTRY
   j += "}";
   return j;
 }
@@ -895,7 +935,7 @@ String manifestConfigObject(bool includeHardware) {
 // table-of-contents) + the manifest "config" object. includeHardware adds tier-2 keys.
 String exportConfigJson(bool includeHardware) {
   String j;
-  j.reserve(8192);
+  j.reserve(10240);
   j = "{\"fw_version\":\"";
   j += FIRMWARE_VERSION;
   j += "\",\"payload_v\":1,\"vessel\":{";
@@ -937,10 +977,10 @@ static bool cfgJsonExtract(const char *from, const char *key, String &val) {
   return true;
 }
 
-// Apply an imported config blob. Only manifest (allowlisted) keys are written —
-// anything else in the body is ignored by construction. Returns count applied,
-// or -1 if the body has no "config" object. settingWrite is compare-first so
-// unchanged values cost no flash. Caller reboots so the new set loads cleanly.
+// Apply an imported config blob. Only manifest + registry (allowlisted) keys are
+// written — anything else in the body is ignored by construction. Returns count
+// applied, or -1 if the body has no "config" object. settingWrite is compare-first
+// so unchanged values cost no flash. Caller reboots so the new set loads cleanly.
 int applyImportConfig(const char *body, bool includeHardware) {
   if (!body) return -1;
   const char *cfg = strstr(body, "\"config\"");
@@ -953,6 +993,21 @@ int applyImportConfig(const char *body, bool includeHardware) {
       if (settingWrite(CONFIG_MANIFEST[i].nvsKey, val.c_str())) applied++;
     }
   }
+  // Registry knobs — generic import mirroring the export side (all tier-1, so not
+  // gated on includeHardware). Macro for the same auto-prototype reason as the emit.
+  #define CFG_IMPORT_REGISTRY(REG, COUNT) \
+    for (size_t i = 0; i < COUNT; i++) { \
+      if (cfgRegistrySkipped(REG[i].name)) continue; \
+      String val; \
+      if (cfgJsonExtract(cfg, REG[i].name, val)) { \
+        char key[16]; \
+        snprintf(key, sizeof(key), "%s", REG[i].name); \
+        if (settingWrite(key, val.c_str())) applied++; \
+      } \
+    }
+  CFG_IMPORT_REGISTRY(ALT_SETTINGS, ALT_SETTING_COUNT)
+  CFG_IMPORT_REGISTRY(PERF_SETTINGS, PERF_SETTING_COUNT)
+  #undef CFG_IMPORT_REGISTRY
   return applied;
 }
 
@@ -976,6 +1031,15 @@ void bhSample(uint32_t nowMs) {
   bhSampleCount++;
 }
 
+// Floor for bhDwellMs, derived so the knobs can never produce an unfittable waveform:
+// the fit averages the last THIRD of each dwell, so the first two thirds must cover the
+// slewed traverse (bhStepDeltaA / TEST_ENTRY_RATE_A) plus a 1s settle margin. Below this
+// the wave is a triangle that never reaches either level and every edge fails the ΔI gate.
+uint32_t bhMinDwellMs() {
+  float traverseMs = (bhStepDeltaA / TEST_ENTRY_RATE_A) * 1000.0f;
+  return (uint32_t)(1.5f * (traverseMs + 1000.0f));
+}
+
 void bhAbort(const char *reason) {
   batteryHealthTestActive = false;
   bhTestState = 3;
@@ -992,6 +1056,7 @@ bool bhStartTest() {
   if (BatteryCurrentSource != 0){ bhAbortReason = "needs INA228 battery shunt"; return false; }
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
+  if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();   // belt-and-braces; set paths already clamp
   bhSampleCount  = 0;
   bhSampleLastMs = 0;
   bhWaveHigh     = false;
@@ -1305,6 +1370,8 @@ void bhInitSettings() {
   if (settingExists(NK_bhBaseline))    bhBaselineCapacityAh = settingRead(NK_bhBaseline).toFloat();
   if (bhNumEdges < 3) bhNumEdges = 3;
   if (bhNumEdges > BH_MAX_TOGGLES - 3) bhNumEdges = BH_MAX_TOGGLES - 3;
+  if (bhStepDeltaA < 5.0f) bhStepDeltaA = 5.0f;   // ΔV must clear ripple/noise; also guards the ΔI validity gate
+  if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();
   if (settingExists(NK_bhResults)) bhDeserializeResults(settingRead(NK_bhResults));
   if (settingExists(NK_bhCapBlob)) bhDeserializeCap(settingRead(NK_bhCapBlob));
 

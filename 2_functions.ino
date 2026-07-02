@@ -524,8 +524,10 @@ void commissionSnapshot() {
   // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
   // a commissioning run must never strand the user in the wrong mode. Older 12-field snapshots
   // are still accepted on restore (the mode is simply left untouched).
-  // 14th field = IExcessFloorABatt (CV battery-current detector floor) — Step 6 overwrites it,
-  // so the abort path must capture it. Older ≤13-field snapshots omit it (left untouched on restore).
+  // 14th field = IExcessFloorABatt (CV battery-current detector floor) — a protection floor captured
+  // with the others so an abort restores the full pre-commissioning set. (As of 2026-07-01 commissioning
+  // no longer writes it — floors are operator-owned — but it stays in the snapshot for parity/safety.)
+  // Older ≤13-field snapshots omit it (left untouched on restore).
   snprintf(buf, sizeof(buf),
            "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f",
            PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
@@ -1238,11 +1240,9 @@ void TempTask(void *parameter) {
     }
 
     uint32_t pollInterval = lastReadWasSuccess ? 5000 : 1000;
-    // Engine off: throttle to save standby power. But the CPU is already at 240MHz whenever a
-    // dashboard is connected (see enterLowPowerStandby), so reading faster then is nearly free —
-    // drop to 10s so a watching user sees live temp instead of a 12s-fresh / 10min-stale flicker.
-    // Unwatched, stay at 10 min (reads fine at 80MHz; keeps temp fresh for the zero-drift log).
-    if (RPM < 200) pollInterval = (events.count() > 0) ? 10000 : 600000;
+    // Engine off: throttle unwatched reads to save standby power. Watched stays at 5s so the
+    // client's 12s stale threshold keeps margin (a 10s poll grayed the gauge on any hiccup).
+    if (RPM < 200) pollInterval = (events.count() > 0) ? 5000 : 60000;
     if (now - lastTempRead < pollInterval) {
       tempStaleSkipCount++;
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1752,7 +1752,7 @@ void resetSensorWindow() {
   currentWindow->tempMargin_area_v_us = 0;
   currentWindow->tempMargin_valid_us = 0;
 
-  currentWindow->lastUpdateTime_us = micros();  // Initialize timing
+  currentWindow->lastUpdateTime_us = micros();
   currentWindow->windowStartTime = millis();
 }
 
@@ -2989,7 +2989,9 @@ void clearSensorBuffer() {
 // ESP32 CONFIG SNAPSHOT FUNCTIONS
 // ============================================
 // Build config snapshot JSON payload.
-// Shape: { device_uid, token, snapshot_timestamp, settings: {…161 fields…}, state: {…28 fields…} }
+// Shape: { device_uid, token, snapshot_timestamp, settings: {…}, state: {…} }
+// settings = the complete manifest + alt/perf-registry set from manifestConfigObject
+// (~260 keys, grows automatically as settings are added — stored verbatim as jsonb).
 // Settings populate device_settings_snapshots (owner-visible only, never leaderboards).
 // State populates device_state_daily + UPSERTs lifetime fields into device_statistics.
 // Field names and grouping mirror configsnapshot_picker.html (locked 2026-05-27).
@@ -3640,7 +3642,7 @@ static float faMvSlope12 = 3100.0f / 4095.0f, faMvOff12 = 0.0f;
 #define FA_CELL_AVG_N 4     // recent-average depth: cell value = running 1/min(n,N) mean (never freezes)
 #define FA_MATRIX_PATH "/famatrix.bin"
 #define FA_MATRIX_MAGIC 0x46414D58u  // 'FAMX'
-#define FA_MATRIX_VER 4              // v4: +altFiltPendMs/battFiltPendMs (two-hit corroboration deadline, §11); v3 added altFiltPendX100/battFiltPendX100 (two-hit fold candidates); v2 added altFiltPkX100/battFiltPkX100 (measured filtered ripple, §3.1) — older blobs rejected
+#define FA_MATRIX_VER 5              // bump on any FaCell layout change — older blobs rejected (map re-learns)
 #define FA_MATRIX_FLUSH_MS 900000UL  // 15-min field-off cadence, like the long-term ring
 
 struct FaPeak {
@@ -3652,23 +3654,17 @@ struct FaCell {
   FaPeak pk[FA_CELL_PEAKS];
   uint16_t pkpkAX100;   // mean broadband pk-pk of the decimated stream, A ×100
   uint16_t windows;     // qualified windows merged (saturating)
-  // Measured filtered ripple (RIPPLE_DETECTION_REARCH_SPEC §3.1): PEAK pk-pk of each detector's
-  // IExcessTau low-pass of its sensor current, in this cell. == the detector's mExcessEma pk-pk — the
-  // real number it trips on. Used to PICK the current-check RPM (§3.2); never acts on the trip itself.
-  uint16_t altFiltPkX100;   // alternator detector (ADS MeasuredAmps low-pass), A ×100
-  uint16_t battFiltPkX100;  // battery detector (INA Bcur low-pass), A ×100
-  // Two-hit fold candidates: strongest so-far-UNcorroborated window pk-pk above the committed value.
-  // A candidate commits (at the LESSER of the pair) only when a second qualifying window in this cell
-  // also exceeds the committed value WITHIN RIP_PEND_EXPIRY_MS of the first (§11) — so a lone transient
-  // that slips the admission gates can never permanently poison the cell, artifact+real pairs commit at
-  // the real level, and two unrelated one-offs far apart in time can't corroborate each other. The
-  // *PendMs deadline is millis-based, so pending is meaningless across a reboot — faInit zeroes both
-  // pend fields on blob restore (they ride in the blob only because the struct is dumped whole).
-  uint16_t altFiltPendX100;
-  uint16_t battFiltPendX100;
-  uint32_t altFiltPendMs;
-  uint32_t battFiltPendMs;
 };
+// Filtered-ripple fields moved OUT of FaCell 2026-07-02 (RPM_RIPPLE_TABLE_SPEC): the raw matrix is
+// always-on and welcomes every operating point; the filtered pk-pk now lives in the game-scoped 1-D
+// ripTab below, rated at ONE fixed commanded current. FA_MATRIX_VER 4→5 rejects old blobs.
+// NOTE (§12, built 2026-07-02 then REVERTED same day): a "detector's-eye excursion peak" per cell
+// (max mExcessEma while armed+unclamped) was added here and fed to a threshold-recommendation
+// verdict. Timeline analysis of the vicious-cycle log killed it: the recorded excursions were one
+// commanded throttle blip + five post-trip RECOVERY OVERSHOOTS (duty ramping 7 pts past its steady
+// value) — the protection's own dynamics. Recommending floors from them deafens the protection to
+// cover a control defect. Do not re-add without solving that self-reference (e.g., exclude a window
+// after any trip release).
 static FaCell *faMatrix = NULL;  // PSRAM — FA_RPM_BINS × FA_AMP_BINS cells
 uint16_t faCellsUsed = 0;        // cells with ≥1 qualified window (diagnostics)
 // Highest Tone in Map (dashboard headline) — strongest single tone across the whole learned map,
@@ -3686,10 +3682,10 @@ static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core
 // cancels in a pk-pk, this EQUALS the detector's own mExcessEma pk-pk — the real number it trips on —
 // WITHOUT needing the loop bound, so the battery figure is measurable even in bulk. This is NOT the old
 // drift-removed AC pk-pk: that high-pass kept the fast belt content the IExcessTau low-pass is meant to
-// attenuate, so it read far too large. The per-window peak folds into the FaCell (altFiltPkX100/
-// battFiltPkX100) — persisted inside /famatrix.bin, used only to PICK the current-check RPM (§3.2) and
-// to draw the Protections reference plot. It NEVER moves the over-current floor. Called every INA
-// fast-read (~4.3 ms, field-active) from 5_functions.ino.
+// attenuate, so it read far too large. Qualifying windows fold into the game-scoped ripTab below
+// (RPM_RIPPLE_TABLE_SPEC) — used only to PICK the current-check RPM and to draw the Protections
+// reference plot. It NEVER moves the over-current floor. Called every INA fast-read (~4.3 ms,
+// field-active) from 5_functions.ino.
 // ADMISSION (spec §10): a window folds only if it was genuinely steady — the IExcessTau low-pass passes
 // slow current ramps straight through, so a ramping window would record the RAMP size (10–20 A) as
 // "ripple" and peak-hold it forever. Gates: min sample count, no protection clamp, command travel
@@ -3710,9 +3706,46 @@ float ripDriftPct = 5.0f;       // % of window-mean alt current — command-trav
 #define RIP_STAT_K 0.25f           // mean-shift tolerance as a fraction of that sensor's full-window filtered pk-pk. A linear ramp shifts the half-means by 0.50×pk-pk → rejected with 2× margin; a ≥2-cycle hunt shifts them <0.1×pk-pk → admitted with 2.5× margin.
 #define RIP_RPM_STAT_FLOOR 10.0f   // RPM — mean-shift floor for the RPM stationarity test (tach jitter tolerance)
 #define RIP_CROSS_MIN 4            // cell fold only — min crossings of the measurement EMA about its 300 ms baseline per window. A one-shot transient crosses ~2×; real ripple/hunt crosses constantly. Ring exempt (median-of-8 already robust; must not starve the wizard hold).
-#define RIP_PEND_EXPIRY_MS 60000UL // two-hit corroboration deadline — the second qualifying window must land within this of the first, else the pending candidate lapses. Kills the cross-session pairing where two unrelated one-off glitches (days apart) corroborated each other. Windows arrive every ripWinMs at a held point, so 60 s ≈ 30 chances.
 uint32_t g_ripAltAdmitCount = 0;   // windows that passed ALL alt-fold gates (throughput readout, CSV2; not persisted)
 uint32_t g_ripBattAdmitCount = 0;  // same for the battery detector
+
+// ── RPM ripple table (RPM_RIPPLE_TABLE_SPEC, 2026-07-02) ──
+// 1-D per-50-RPM-bin filtered pk-pk (both detectors), filled ONLY while the RPM Invaders game holds
+// a fixed commanded current through resTest. Replaces the FaCell filtered layer, which had no
+// reproducibility test, smeared the amp axis with a max, and captured at whatever current AUTO
+// produced (the 6.27 A @ 1125 phantom). Agree-twice commit: pending → second qualifying window within
+// tolerance commits the AVERAGE of the pair; disagree replaces the pending. Cells are immutable once
+// committed; the whole table is wiped at game start and persisted (frozen) on every teardown path,
+// including Abort — refreshing the data = re-run the sweep. No expiry timer: a game-scoped table
+// can't cross-session pair. §11 gates, live readouts, and admit counters stay always-on upstream;
+// ONLY this fold is game-gated.
+#define RIPTAB_BINS 40               // [0, 2000) RPM in 50-RPM bins
+#define RIPTAB_PATH "/riptab.bin"
+#define RIPTAB_MAGIC 0x52495054u     // 'RIPT'
+#define RIPTAB_VER 1
+#define RIPTAB_AGREE_FRAC 0.33f      // agree when |new − pend| ≤ max(floor, frac × max(new, pend))
+#define RIPTAB_AGREE_FLOOR_A 0.5f    // lets near-zero battery ripple pair trivially
+#define RIPTAB_ALT_PEND  0x01
+#define RIPTAB_ALT_DONE  0x02
+#define RIPTAB_BATT_PEND 0x04
+#define RIPTAB_BATT_DONE 0x08
+struct RipTabCell {
+  uint16_t altPkX100, battPkX100;      // committed values (0 = none)
+  uint16_t altPendX100, battPendX100;  // agree-twice pending candidates
+  uint8_t  state;                      // RIPTAB_* bits
+};
+struct RipTabSession {   // stamps persisted with the table — "captured at N A, 13.1–13.6 V"
+  float levelA;          // fixed commanded current (resTestTargetA at game start)
+  float ibvMinV, ibvMaxV;  // IBV span over the windows that actually folded
+  uint16_t idleRpm;      // browser-detected idle at game start (coverage-band floor source)
+  uint32_t epoch;        // game-start wall clock (0 = clock not synced)
+};
+struct RipTab { RipTabSession sess; RipTabCell cell[RIPTAB_BINS]; };
+static RipTab ripTab;                       // ~410 B — static, not worth a PSRAM alloc
+volatile bool ripGameFill = false;          // fold window is OPEN (game running); set on Core 1 at wipe
+static volatile bool ripTabPendingWipe = false;  // /get arm → wipe+stamp runs on Core 1 (faMatrixMaybeFlush) so it can't race the folds
+static volatile bool ripTabPendingSave = false;  // /get disarm (or deadman) → persist runs on Core 1
+static volatile uint16_t ripIdleRpmStage = 0;    // browser sends idle BEFORE arming; stamped into the session at wipe
 static float altFiltEma = 0.0f, battFiltEma = 0.0f;             // IExcessTau low-pass of each sensor current (A) — the MEASUREMENT
 static float altFiltWinMin = 1e9f, altFiltWinMax = -1e9f;       // FULL-window extremes of the low-passed alt signal — stationarity self-scale + forensics
 static float battFiltWinMin = 1e9f, battFiltWinMax = -1e9f;     // same, batt
@@ -3786,18 +3819,20 @@ volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this
 volatile bool resTestReleasing = false;
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
 
-// Commit forensics (diagnostic ring, RAM-only): each time a filtered-ripple value COMMITS to a cell's
-// visible peak — the two-hit second edge that writes altFiltPkX100/battFiltPkX100, i.e. the number
-// filtripple.csv and the wizard actually report — snapshot the window that produced it. Lets a phantom map
-// value (map says 4.76 A, current-check finds nothing) be traced afterward WITHOUT a live CSV log. Never
-// touches control or the map. Read by /ripforensic.csv. Overwrites oldest; a torn row is a harmless stale read.
+// Fold forensics (diagnostic ring, RAM-only): snapshots the window behind every ripTab fold event so
+// a phantom table value stays traceable without a live CSV log — the "why won't this bin settle"
+// trace. event: 'P' pending set, 'D' disagree (pending replaced; otherX100 = the value it replaced),
+// 'C' commit (otherX100 = the partner it averaged with). pkpkX100 is always the window's own value.
+// Never touches control or the table. Read by /ripforensic.csv. Overwrites oldest; a torn row is a
+// harmless stale read.
 #define RIP_FORENSIC_CAP 32
-struct RipForensicPt { uint16_t rpm, ampLo, meanX100, pkpkX100, shiftX100, cmdTravelX100, crossings; uint8_t detector; };
+struct RipForensicPt { uint16_t rpm, ampLo, meanX100, pkpkX100, shiftX100, cmdTravelX100, crossings, otherX100; uint8_t detector; char event; };
 RipForensicPt ripForensic[RIP_FORENSIC_CAP];
 volatile uint16_t ripForensicHead = 0;    // next write slot (wraps)
-volatile uint16_t ripForensicCount = 0;   // total commits recorded (saturates)
+volatile uint16_t ripForensicCount = 0;   // total fold events recorded (saturates)
 static void ripForensicPush(uint8_t det, uint16_t rpm, int ampLo, float meanA, uint16_t pkpkX100,
-                            float meanShiftA, float cmdTravelA, uint16_t crossings) {
+                            float meanShiftA, float cmdTravelA, uint16_t crossings,
+                            char event, uint16_t otherX100) {
   RipForensicPt &p = ripForensic[ripForensicHead];
   p.detector = det;
   p.rpm = rpm;
@@ -3807,6 +3842,8 @@ static void ripForensicPush(uint8_t det, uint16_t rpm, int ampLo, float meanA, u
   p.shiftX100 = (uint16_t)fminf(fabsf(meanShiftA) * 100.0f + 0.5f, 65535.0f);
   p.cmdTravelX100 = (uint16_t)fminf(fabsf(cmdTravelA) * 100.0f + 0.5f, 65535.0f);
   p.crossings = crossings;
+  p.event = event;
+  p.otherX100 = otherX100;
   ripForensicHead = (ripForensicHead + 1) % RIP_FORENSIC_CAP;
   if (ripForensicCount < 65535) ripForensicCount++;
 }
@@ -3917,54 +3954,71 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
                     && (cmdTravel <= limCmd);                // a commanded ramp is not ripple
     bool altSteady  = commonOk && (altShift  <= limStatAlt);
     bool battSteady = commonOk && (battShift <= limStatBatt);
-    // RPM stationarity replaces the old same-bin edge-margin gate, and the cell bins on the window-MEAN
+    // RPM stationarity replaces the old same-bin edge-margin gate, and the table bins on the window-MEAN
     // RPM — a hunt wobbling across a 50-RPM boundary attributes to its center of mass instead of being
     // rejected (the straddle rejection was the other half of the idle starvation).
     bool rpmOk = (filtRippleWinRpmMin > 0.0f) && (rpmShift <= limStatRpm);
     int rpmBin = (int)(rpmMean / FA_RPM_BIN_W);
-    int ampBin = (int)((altMean - FA_AMP_BIN_LO) / FA_AMP_BIN_W);
-    bool cellValid = faMatrix && rpmOk && rpmBin >= 0 && rpmBin < FA_RPM_BINS
-                     && altMean >= FA_AMP_BIN_LO && ampBin >= 0 && ampBin < FA_AMP_BINS;
-    // Crossings gate (cell fold only, per-detector): the measurement EMA must cross its 300 ms baseline
+    bool tabValid = rpmOk && rpmMean > 0.0f && rpmBin >= 0 && rpmBin < RIPTAB_BINS;
+    // Crossings gate (table fold only, per-detector): the measurement EMA must cross its 300 ms baseline
     // ≥ RIP_CROSS_MIN times in the window — a one-shot that slipped the stationarity test crosses ~2×,
     // real ripple/hunt crosses constantly. The test ring is exempt (a wizard hold must not starve; the
     // browser's median-of-8 is the robustness there).
-    bool altFold  = cellValid && altSteady  && (altFiltCross  >= RIP_CROSS_MIN);
-    bool battFold = cellValid && battSteady && (battFiltCross >= RIP_CROSS_MIN);
-    // Throughput readouts: count windows that passed ALL of that detector's cell-fold gates (whether or
-    // not the value beat the cell) — a frozen counter with green gate rows points at protection/starve.
+    bool altFold  = tabValid && altSteady  && (altFiltCross  >= RIP_CROSS_MIN);
+    bool battFold = tabValid && battSteady && (battFiltCross >= RIP_CROSS_MIN);
+    // Throughput readouts: count windows that passed ALL of that detector's fold gates (game running or
+    // not) — a frozen counter with green gate rows points at protection/starve.
     if (altFold)  g_ripAltAdmitCount++;
     if (battFold) g_ripBattAdmitCount++;
-    if (cellValid) {
-      // Two-hit peak-hold with corroboration deadline (§11): first qualifying window above the committed
-      // value becomes the pending candidate; a second within RIP_PEND_EXPIRY_MS commits the pair at its
-      // LESSER value and consumes the candidate. Recurrence in TIME, not just count — the old no-deadline
-      // pending let two unrelated one-off glitches, days apart, corroborate each other (the 4.76 A
-      // phantom). Pending no longer usefully persists across reboots (millis deadline); faInit zeroes it.
-      FaCell *c = &faMatrix[rpmBin * FA_AMP_BINS + ampBin];
-      if (altFold && altV > c->altFiltPkX100) {
-        if (c->altFiltPendX100 > c->altFiltPkX100 && (now - c->altFiltPendMs) <= RIP_PEND_EXPIRY_MS) {
-          c->altFiltPkX100 = (altV < c->altFiltPendX100) ? altV : c->altFiltPendX100;
-          c->altFiltPendX100 = 0;
-          ripForensicPush(0, (uint16_t)fminf(rpm + 0.5f, 65535.0f), FA_AMP_BIN_LO + ampBin * FA_AMP_BIN_W,
-                          altMean, c->altFiltPkX100, altShift, cmdTravel, altFiltCross);
+    // Agree-twice fold, game-gated (RPM_RIPPLE_TABLE_SPEC §2.3): first qualifying window becomes the
+    // pending candidate; a second that agrees (±33% or ±0.5 A) commits the AVERAGE of the pair and
+    // freezes that detector's cell; a disagree replaces the pending (the monster regrows). Every event
+    // is forensic-logged so an unsettled bin stays explainable.
+    if (ripGameFill && (altFold || battFold)) {
+      RipTabCell *c = &ripTab.cell[rpmBin];
+      uint16_t rpmU = (uint16_t)fminf(rpm + 0.5f, 65535.0f);
+      int ampLo = (altMean >= FA_AMP_BIN_LO)
+                    ? FA_AMP_BIN_LO + ((int)((altMean - FA_AMP_BIN_LO) / FA_AMP_BIN_W)) * FA_AMP_BIN_W : 0;
+      if (altFold && !(c->state & RIPTAB_ALT_DONE)) {
+        if (!(c->state & RIPTAB_ALT_PEND)) {
+          c->altPendX100 = altV;
+          c->state |= RIPTAB_ALT_PEND;
+          ripForensicPush(0, rpmU, ampLo, altMean, altV, altShift, cmdTravel, altFiltCross, 'P', 0);
         } else {
-          c->altFiltPendX100 = altV;
-          c->altFiltPendMs = now;
+          float newA = altV * 0.01f, pendA = c->altPendX100 * 0.01f;
+          if (fabsf(newA - pendA) <= fmaxf(RIPTAB_AGREE_FLOOR_A, RIPTAB_AGREE_FRAC * fmaxf(newA, pendA))) {
+            c->altPkX100 = (uint16_t)(((uint32_t)altV + c->altPendX100 + 1) / 2);
+            c->state = (uint8_t)((c->state & ~RIPTAB_ALT_PEND) | RIPTAB_ALT_DONE);
+            ripForensicPush(0, rpmU, ampLo, altMean, altV, altShift, cmdTravel, altFiltCross, 'C', c->altPendX100);
+            c->altPendX100 = 0;
+          } else {
+            ripForensicPush(0, rpmU, ampLo, altMean, altV, altShift, cmdTravel, altFiltCross, 'D', c->altPendX100);
+            c->altPendX100 = altV;
+          }
         }
-        faMatrixDirtyWindows++;
       }
-      if (battFold && battV > c->battFiltPkX100) {
-        if (c->battFiltPendX100 > c->battFiltPkX100 && (now - c->battFiltPendMs) <= RIP_PEND_EXPIRY_MS) {
-          c->battFiltPkX100 = (battV < c->battFiltPendX100) ? battV : c->battFiltPendX100;
-          c->battFiltPendX100 = 0;
-          ripForensicPush(1, (uint16_t)fminf(rpm + 0.5f, 65535.0f), FA_AMP_BIN_LO + ampBin * FA_AMP_BIN_W,
-                          battMean, c->battFiltPkX100, battShift, cmdTravel, battFiltCross);
+      if (battFold && !(c->state & RIPTAB_BATT_DONE)) {
+        if (!(c->state & RIPTAB_BATT_PEND)) {
+          c->battPendX100 = battV;
+          c->state |= RIPTAB_BATT_PEND;
+          ripForensicPush(1, rpmU, ampLo, battMean, battV, battShift, cmdTravel, battFiltCross, 'P', 0);
         } else {
-          c->battFiltPendX100 = battV;
-          c->battFiltPendMs = now;
+          float newA = battV * 0.01f, pendA = c->battPendX100 * 0.01f;
+          if (fabsf(newA - pendA) <= fmaxf(RIPTAB_AGREE_FLOOR_A, RIPTAB_AGREE_FRAC * fmaxf(newA, pendA))) {
+            c->battPkX100 = (uint16_t)(((uint32_t)battV + c->battPendX100 + 1) / 2);
+            c->state = (uint8_t)((c->state & ~RIPTAB_BATT_PEND) | RIPTAB_BATT_DONE);
+            ripForensicPush(1, rpmU, ampLo, battMean, battV, battShift, cmdTravel, battFiltCross, 'C', c->battPendX100);
+            c->battPendX100 = 0;
+          } else {
+            ripForensicPush(1, rpmU, ampLo, battMean, battV, battShift, cmdTravel, battFiltCross, 'D', c->battPendX100);
+            c->battPendX100 = battV;
+          }
         }
-        faMatrixDirtyWindows++;
+      }
+      // IBV session stamp — span over windows that actually reached the fold
+      if (!isnan(IBV) && IBV > 0.0f) {
+        if (IBV < ripTab.sess.ibvMinV) ripTab.sess.ibvMinV = IBV;
+        if (IBV > ripTab.sess.ibvMaxV) ripTab.sess.ibvMaxV = IBV;
       }
     }
     // Ring rows need BOTH sensors steady (one row carries both detectors' values).
@@ -4878,6 +4932,13 @@ void faMatrixFlush() {
   if (n > 0) faMatrixDirtyWindows = 0;
 }
 
+// RPM ripple table + session stamps → flash (one ~420 B record). Written ONLY on game teardown
+// (done/Abort/modal close/deadman) — the table is frozen between sweeps, so there is nothing to
+// flush periodically.
+void ripTabFlush() {
+  writePsramBlob(RIPTAB_PATH, RIPTAB_MAGIC, RIPTAB_VER, 0, &ripTab, sizeof(RipTab), 1, 0, 1);
+}
+
 // Reference flipbook → flash (whole blob, ~18 KB) via the shared versioned-blob scaffold.
 void faFlipFlush() {
   if (!faFlip) return;
@@ -4891,10 +4952,27 @@ void faFlipFlush() {
 // long-term ring: matrix + flipbook bank during charging, flush on the field-off settled
 // rising edge and every 15 min thereafter while new data has merged.
 void faMatrixMaybeFlush() {
+  // RPM ripple table service (deferred from /get so wipe/save run on Core 1, same core as the
+  // faFiltRippleUpdate folds — no locking needed). Wipe = game start: zero + stamp the session,
+  // THEN open the fold window. Save = game teardown: persist the frozen table.
+  if (ripTabPendingWipe) {
+    ripTabPendingWipe = false;
+    memset(&ripTab, 0, sizeof(ripTab));
+    ripTab.sess.levelA = resTestTargetA;   // browser sets the level before arming the fill flag
+    ripTab.sess.ibvMinV = 1e9f;
+    ripTab.sess.ibvMaxV = -1e9f;
+    ripTab.sess.idleRpm = ripIdleRpmStage;
+    ripTab.sess.epoch = timeIsSynced ? (uint32_t)time(NULL) : 0;
+    ripGameFill = true;
+  }
+  if (ripTabPendingSave) {
+    ripTabPendingSave = false;
+    ripTabFlush();
+  }
   if (!faMatrix) return;
   if (faPendingMatrixClear) {  // user-clicked (password-gated /get) — runs here on Core 1
     faPendingMatrixClear = false;
-    memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);  // also zeros altFiltPkX100/battFiltPkX100 + the two-hit pend candidates
+    memset(faMatrix, 0, sizeof(FaCell) * FA_RPM_BINS * FA_AMP_BINS);
     faCellsUsed = 0;
     faMatrixDirtyWindows = 0;
     fsTakeLock();
@@ -4922,7 +5000,7 @@ void faMatrixMaybeFlush() {
   bool periodic = off && (millis() - lastFlushMs >= FA_MATRIX_FLUSH_MS);
   prevOff = off;
   if ((rising || periodic) && (faMatrixDirtyWindows > 0 || faFlipDirty)) {
-    if (faMatrixDirtyWindows > 0) faMatrixFlush();  // filtered-ripple (altFiltPkX100/battFiltPkX100) rides in this same blob
+    if (faMatrixDirtyWindows > 0) faMatrixFlush();
     if (faFlipDirty) faFlipFlush();
     lastFlushMs = millis();
   }
@@ -5022,20 +5100,23 @@ void faInit() {
                                     faMatrix, sizeof(FaCell), FA_RPM_BINS * FA_AMP_BINS,
                                     &priorWindows, false);
   if (restored > 0) {
-    for (int i = 0; i < FA_RPM_BINS * FA_AMP_BINS; i++) {
+    for (int i = 0; i < FA_RPM_BINS * FA_AMP_BINS; i++)
       if (faMatrix[i].windows > 0) faCellsUsed++;
-      // Pending two-hit candidates are millis-deadlined (§11) — stale by definition after a reboot.
-      faMatrix[i].altFiltPendX100 = 0;  faMatrix[i].battFiltPendX100 = 0;
-      faMatrix[i].altFiltPendMs = 0;    faMatrix[i].battFiltPendMs = 0;
-    }
     Serial.printf("faInit: disturbance matrix restored, %u cells populated\n", (unsigned)faCellsUsed);
   }
   uint32_t anomNext32 = 0;
   if (readPsramBlob(FA_FLIP_PATH, FA_FLIP_MAGIC, FA_FLIP_VER,
                     faFlip, sizeof(FaFlipPage), FA_FLIP_SLOTS, &anomNext32, false) > 0)
     faAnomNext = (uint8_t)(anomNext32 % FA_FLIP_ANOM);
-  // Measured filtered ripple (altFiltPkX100/battFiltPkX100) now rides inside the matrix blob above —
-  // no separate per-RPM-bin file to restore.
+  // RPM ripple table (game-scoped, own blob): restore for the wizard pick + Protections plots.
+  if (readPsramBlob(RIPTAB_PATH, RIPTAB_MAGIC, RIPTAB_VER, &ripTab, sizeof(RipTab), 1, NULL, false) > 0) {
+    for (int i = 0; i < RIPTAB_BINS; i++) {
+      // Pending candidates never span sessions — the agree-twice pair must come from one sweep.
+      ripTab.cell[i].altPendX100 = 0;
+      ripTab.cell[i].battPendX100 = 0;
+      ripTab.cell[i].state &= (RIPTAB_ALT_DONE | RIPTAB_BATT_DONE);
+    }
+  }
   faFftInit();
   faWinReset();
   // Global ON/OFF (Pattern B, item 4). InitSystemSettings() runs AFTER faInit() in setup(),

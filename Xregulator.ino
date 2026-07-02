@@ -1167,7 +1167,7 @@ uint32_t absorptionTailTimer = 0;
 uint32_t bulkVoltageHoldMs = 250;  // time at bulk voltage before entering absorption
 
 float FieldAdjustmentInterval = 50;  // The regulator field output is updated once every this many milliseconds
-float TemperatureLimitF = 212;       // measured at the case probe; internal/metal temps run roughly +40 to +50 °F above this depending on sensor installation. Strategy rationale: docs Charging Strategy page
+float TemperatureLimitF = 175;       // measured at the case probe; internal/metal temps run roughly +40 to +50 °F above this depending on sensor installation. Strategy rationale: docs Charging Strategy page
 // Cold-charge lockout: board temp (BMP388 ambientTemp, °F) is a proxy for battery temp and reads
 // warmer than ambient, so set MinChargeTempF with margin. Default ON (lithium); lead-acid can opt out.
 bool  coldChargeLockoutEnable = true;    // master on/off for the cold-charge lockout (default ON)
@@ -2678,7 +2678,7 @@ struct BattCapPoint {        // one OCV-anchored capacity measurement (X axis = 
 
 float    bhStepLowA   = 30.0f;
 float    bhStepDeltaA = 30.0f;  // crest = low + delta
-uint32_t bhDwellMs    = 3000;
+uint32_t bhDwellMs    = 8000;   // must exceed bhMinDwellMs() — the 30A step slews at TEST_ENTRY_RATE_A (8 A/s), so the level needs ~3.75s just to arrive, plus a settled tail for the fit window
 uint8_t  bhNumEdges   = 4;  // scored steps; 3 is the floor for the spread/fit check, 4 gives one extra edge to average for little added time
 
 volatile uint8_t bhTestState = 0;          // 0 IDLE, 1 RUNNING, 2 DONE, 3 ABORTED
@@ -3132,10 +3132,10 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 // See Working Markdown Docs/iExcess_Redesign_Spec.md and CV_Loop_Dev_Summary.md.
 float IExcessFrac     = 0.10f;   // CV threshold as fraction of setpointLimited (0.10 → 5A at a 50A command). Scales with frame size.
 float IExcessFracBulk = 0.15f;   // BULK threshold as fraction of i_ceiling_pre_ov (looser — tolerate command-vs-actual error far from the voltage limit).
-float IExcessFloorA   = 5.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual. Default lowered 7→5 (2026-06-30): commissioning never undercuts this base, so a high base masks the measured current-tracking floor (which is typically well under 7 A).
+float IExcessFloorA   = 5.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual. Default lowered 7→5 (2026-06-30) back when commissioning wrote a measured current-tracking floor a high base could mask (that tracking floor was removed 2026-07-01 — floors are operator-owned now — but 5 A was kept as the base).
 float IExcessFloorABatt = 3.0f;  // A — separate min threshold for the CV battery-current detector (§G). Default 3 A (battery current is quieter than alternator, so it can sit below the alternator base and catch over-current sooner). Commissioning never undercuts this; lower it manually in Protections for tighter detection.
 float IExcessCeilA    = 25.0f;   // A — max threshold (bulk / alternator detector); guards against too-loose on very large commands.
-float IExcessCeilABatt = 25.0f;  // A — separate max threshold for the CV battery-current detector. Splits the formerly-shared ceiling so the battery tracking floor saturates at a battery-appropriate level, not the alternator one. Defaults equal to IExcessCeilA (no behavior change until set).
+float IExcessCeilABatt = 25.0f;  // A — separate max threshold for the CV battery-current detector. Splits the formerly-shared ceiling so the battery detector's threshold saturates at a battery-appropriate level, not the alternator one. Defaults equal to IExcessCeilA (no behavior change until set).
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (replaces the old hardcoded 2A IEXCESS_HYST, now scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
@@ -3401,8 +3401,8 @@ int defaultRPMValues[RPM_TABLE_SIZE] = { 100, 300, 600, 1100, 1500, 2000, 2650, 
 // mode or PID output. Exists to protect the belt, shaft, and mounting hardware
 // from mechanical overload at any RPM. The target table above cannot push current
 // above this ceiling. Factory reset restores defaultCapCurrentValues.
-float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
-float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 100, 100, 100, 100, 100, 100, 100, 100, 100 };
+float rpmCapCurrentTable[RPM_TABLE_SIZE] = { 0, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
+float defaultCapCurrentValues[RPM_TABLE_SIZE] = { 0, 70, 70, 70, 70, 70, 70, 70, 70, 70 };
 
 // ===== CAP POWER TABLE =====
 // Alternative cap expressed in kW instead of amps (active only when capLimitMode=1).
@@ -4553,8 +4553,9 @@ void setup() {
   if (!anchorageRing) Serial.println("FATAL: anchorageRing ps_malloc failed");
   else memset(anchorageRing, 0, ANCHORAGE_RING_SIZE * sizeof(AnchorageSample));
   if (consoleQueue) memset(consoleQueue, 0, CONSOLE_QUEUE_SIZE * sizeof(ConsoleMessage));
-  // Battery Health PSRAM buffers (sample buffer interval-gated, so a ~24s test fits 4096).
-  bhSampleCap = 4096;
+  // Battery Health PSRAM buffers (sample buffer interval-gated at 15ms: 8192 covers ~120s,
+  // i.e. the default 56s test plus headroom for a raised edge count or stretched dwell).
+  bhSampleCap = 8192;
   bhSamples = (BattHealthSample *)ps_malloc(bhSampleCap * sizeof(BattHealthSample));
   if (!bhSamples) Serial.println("FATAL: bhSamples ps_malloc failed");
   bhResults = (BattHealthResult *)ps_malloc(bhResultCap * sizeof(BattHealthResult));
@@ -5028,7 +5029,7 @@ void loop() {
   }
 
   esp_task_wdt_reset();              // Feed the watchdog to prevent timeout
-  starttime = esp_timer_get_time();  // Record start time for Loop
+  starttime = esp_timer_get_time();
   // Latched at the top of the pass so a pass that drops the field mid-way still counts as
   // field-on (it ran control code). Consumed by the field-ON loop worst at the bottom of loop().
   bool passFieldOn = !gpio4IsLow;
@@ -5615,7 +5616,7 @@ void loop() {
 
     prev_millis7888 = millis();
   }
-  endtime = esp_timer_get_time();  //Record end of Loop
+  endtime = esp_timer_get_time();
   LoopTime = (endtime - starttime);
   // Worst-loop attribution. All ft_*.lastCall are THIS pass's durations (every suspect is TIMED_CALL'd
   // earlier in this same loop()). ctrl(inclFold) already contains fold. A part larger than total = that

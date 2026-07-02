@@ -457,7 +457,7 @@ void ReadVEData() {
     return;
   }
 
-  int start1 = micros();      // Start timing VeData
+  int start1 = micros();
   bool dataReceived = false;  // Track if we got any valid data
   float solarPower_W = 0.0f;  // Track solar power for this update
 
@@ -508,7 +508,7 @@ void ReadVEData() {
       if (strcmp(myve.veName[i], "H22") == 0)  { VictronYieldYesterday_kWh = atof(myve.veValue[i]) / 100.0f; dataReceived = true; }  // 0.01 kWh units
       if (strcmp(myve.veName[i], "H23") == 0)  { VictronMaxPowerYesterday_W = atof(myve.veValue[i]);         dataReceived = true; }
     }
-    yield();  // Allow other processes to run
+    yield();
   }
 
   // Panel current derived from power / voltage (VE.Direct MPPTs report PPV + VPV, not panel A)
@@ -540,8 +540,8 @@ void ReadVEData() {
 
   lastSolarEnergyUpdate = currentTime;
 
-  int end1 = micros();     // End timing
-  VeTime = end1 - start1;  // Store elapsed time
+  int end1 = micros();
+  VeTime = end1 - start1;
   lastVEDataRead = currentTime;
 }
 void checkAndRestart() {
@@ -1000,7 +1000,7 @@ void UpdateBatterySOC(unsigned long elapsedMillis) {
       alternatorOnAccumulator %= 1000;  // Keep remainder milliseconds
     }
 
-    alternatorWasOn = alternatorIsOn;  // State tracking
+    alternatorWasOn = alternatorIsOn;
 
     // Calculate alternator energy output
     static float alternatorEnergyAccumulator = 0.0f;
@@ -1406,7 +1406,6 @@ void UpdateEngineRuntime(unsigned long elapsedMillis) {
     queueConsoleMessageF("Engine STOPPED (RPM=%d)", (int)RPM);
   }
 
-  // Update engine state
   engineWasRunning = engineIsRunning;
 }
 // Function to get smoothed GPS position (5-sample moving average)
@@ -4469,29 +4468,52 @@ void loadNVSData() {
     float voltage = getBatteryVoltage();
     int estimatedSoC = 50;  // Default to 50%
 
-    // Simple voltage-based estimation. The open-circuit thresholds below are 12V-bank values; scale
-    // them by the bank class so a 24/48V bank doesn't read a flat 100%. Read the user-entered class
-    // straight from NVS (NK_BatteryVoltage, the authoritative store) rather than auto-detecting from
-    // the measured voltage — a sagging higher-voltage bank no longer mis-buckets. This runs in
-    // loadNVSData() (before InitSystemSettings loads the vessel mirror), so on a brand-new device with
-    // the key not yet seeded it falls back to 12V class — same as the prior fresh-device behavior.
+    // Bank-class scale. The 12V-bank thresholds below are scaled by the class so a 24/48V bank doesn't
+    // read a flat 100%. Read the user-entered class straight from NVS (NK_BatteryVoltage, the
+    // authoritative store) rather than auto-detecting from the measured voltage — a sagging
+    // higher-voltage bank no longer mis-buckets. This runs in loadNVSData() (before InitSystemSettings
+    // loads the vessel mirror), so on a brand-new device with the key not yet seeded it falls back to
+    // 12V class — same as the prior fresh-device behavior.
     float socM = 1.0f;  // 12V class
     if (settingExists(NK_BatteryVoltage)) {
       int nomV = settingRead(NK_BatteryVoltage).toInt();
       if (nomV == 24) socM = 2.0f;
       else if (nomV == 48) socM = 4.0f;
     }
-    if (voltage >= 12.7 * socM) estimatedSoC = 100;
-    else if (voltage >= 12.5 * socM) estimatedSoC = 90;
-    else if (voltage >= 12.4 * socM) estimatedSoC = 80;
-    else if (voltage >= 12.2 * socM) estimatedSoC = 60;
-    else if (voltage >= 12.0 * socM) estimatedSoC = 40;
-    else if (voltage >= 11.8 * socM) estimatedSoC = 20;
-    else estimatedSoC = 10;
+
+    // battery_type is parsed later (InitSystemSettings), so read just that field from vessel_info.json here.
+    bool isLithium = true;
+    if (LittleFS.exists("/vessel_info.json")) {
+      File vf = LittleFS.open("/vessel_info.json", "r");
+      if (vf) {
+        DynamicJsonDocument vdoc(4096);
+        if (deserializeJson(vdoc, vf) == DeserializationError::Ok) {
+          String bt = vdoc["battery_type"] | "lifepo4";
+          bt.toLowerCase();
+          isLithium = (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
+                       bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0);
+        }
+        vf.close();
+      }
+    }
+
+    if (isLithium) {
+      // ocvToSoC() scales by BATTERY_VOLTAGE/12, but that global is still its default 12 this early in
+      // boot, so pass the 12V-equivalent voltage to hit the 12V table for any bank class.
+      estimatedSoC = (int)(ocvToSoC(voltage / socM) + 0.5f);
+    } else {
+      if (voltage >= 12.7 * socM) estimatedSoC = 100;
+      else if (voltage >= 12.5 * socM) estimatedSoC = 90;
+      else if (voltage >= 12.4 * socM) estimatedSoC = 80;
+      else if (voltage >= 12.2 * socM) estimatedSoC = 60;
+      else if (voltage >= 12.0 * socM) estimatedSoC = 40;
+      else if (voltage >= 11.8 * socM) estimatedSoC = 20;
+      else estimatedSoC = 10;
+    }
 
     SOC_percent = estimatedSoC * 100;
-    Serial.printf("NVS LOAD: SOC_percent NOT FOUND - estimated %d%% from voltage %.2fV\n",
-                  estimatedSoC, voltage);
+    Serial.printf("NVS LOAD: SOC_percent NOT FOUND - estimated %d%% from voltage %.2fV (%s)\n",
+                  estimatedSoC, voltage, isLithium ? "lithium OCV table" : "lead-acid ladder");
   }
 
   if (nvs_get_i32(nvs_handle, "CoulombCount", &temp_int32) == ESP_OK) {

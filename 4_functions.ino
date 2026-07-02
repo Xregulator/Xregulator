@@ -486,7 +486,6 @@ void imuInit() {
   }
   Serial.println("WHO_AM_I verified - LSM6DSOX detected");
 
-  // Now proceed with library initialization
   if (imu.begin() != LSM6DSOX_OK) {
     Serial.println("ERROR: LSM6DSOX library init failed");
     queueConsoleMessageF("IMU library init failed");
@@ -630,7 +629,6 @@ void initIMUStructures() {
   imuWindow->heel_min = imuWindow->pitch_min = INT32_MAX;
   imuWindow->heel_max = imuWindow->pitch_max = INT32_MIN;
 
-  // Initialize timing
   imuWindow->lastUpdateTime_us = 0;
   imuWindow->lastGyroUpdateTime_us = 0;
 
@@ -643,7 +641,7 @@ void initializeHardware() {  // Helper function to organize hardware initializat
 
   Serial.println("Starting hardware initialization...");
   // Force I2C initialization with correct pins
-  Wire.end();  // End any existing I2C
+  Wire.end();
   Wire.begin(9, 10);
   Wire.setClock(400000);  // 400 kHz — in-spec Fast-mode. Reverted from 800 kHz after ADS1115 declared disconnected (adsI2CErrorCount went non-zero — the documented tripwire for backing out the overclock). Was previously stable at 800 kHz; re-evaluate only if ADS1115/IMU I²C errors stay clean at 400 kHz.
   Wire.setTimeOut(15);   // Added as safety April 2026
@@ -3150,7 +3148,7 @@ bool parseTarHeader(StreamingExtractor *extractor) {
   } else if (extractor->currentFileName.indexOf('.') > 0) {
     // Mount prod_fs for web file updates
     if (!extractor->prodFSMounted) {
-      webFS.end();  // End any existing mount
+      webFS.end();
       if (webFS.begin(true, "/web", 10, "prod_fs")) {
         extractor->prodFSMounted = true;
         Serial.println("OTA: Mounted prod_fs for web file updates");
@@ -3854,7 +3852,7 @@ void performOTAUpdateToVersion(const char *targetVersion) {
   events.send("OTA: Beginning download of version " + String(targetVersion), "console", millis());
   performOTAUpdate(updateInfo);
 
-  lastHttpsOperationTime = millis();  // Update timestamp
+  lastHttpsOperationTime = millis();
   Serial.println("HEAP AFTER OTA attempt:");
   Serial.printf("  Internal: %u free, %u largest\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

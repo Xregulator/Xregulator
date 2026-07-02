@@ -1878,6 +1878,58 @@ input[type="submit"]:hover {
   display: block;
 }
 
+/* "s" signal-info badge — same click-to-toggle mechanics as .tooltip, but outlined in a muted
+   gray-blue so it reads as "signal chain" (source / filter / where set) next to the filled "i"
+   help badge. The box content is JS-generated (SINFO table in script.js) at open time and
+   re-rendered on telemetry frames while open, so time constants and derived values stay live. */
+.sinfo {
+  cursor: pointer;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: 1.5px solid #6e7f8d;
+  border-radius: 50%;
+  font-size: 0;
+  flex-shrink: 0;
+  vertical-align: middle;
+  margin-left: 4px;
+  user-select: none;
+}
+
+.sinfo::before {
+  content: "s";
+  font-size: 11px;
+  font-weight: bold;
+  font-family: Georgia, serif;
+  color: #6e7f8d;
+}
+
+.sinfo.active .tooltip-box {
+  display: block;
+  text-align: left;
+}
+
+/* segment labels (Signal / Source / Filter / Set) inside the s-box */
+.sinfo .tooltip-box .s-k {
+  color: #a8bcc9;
+  font-weight: bold;
+}
+
+.sinfo .tooltip-box .s-row {
+  margin: 3px 0;
+}
+
+/* Flex form-labels use justify-content:space-between; with the s-badge added as a third child
+   the ℹ️ would be stranded mid-row. margin-left:auto absorbs the free space instead, keeping
+   both badges together on the right (and is a no-op when the badge is the only icon). */
+.form-label[style*="space-between"] > .tooltip {
+  margin-left: auto;
+}
+
 
 /* Main Tab Navigation */
 .main-tabs {
@@ -4418,6 +4470,158 @@ body.dark-mode #alt-panel-protections .protections-intro p {
 body.dark-mode #alt-panel-protections .protections-intro p strong {
   color: #fff;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Setup → Diag — checkpoint (C1–C4) filter pills. Mirrors the
+   Protections pill pattern above, but the pills show/hide whole
+   <details class="checkpoint-section"> blocks instead of cards.
+   Scoped under #settings-diag (Live Data → Diag is results-only, unfiltered).
+   ═══════════════════════════════════════════════════════════════════ */
+#settings-diag .checkpoint-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--card-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+#settings-diag .checkpoint-filter-label {
+  font-size: 12px;
+  color: #777;
+  margin-right: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+#settings-diag .checkpoint-filters button {
+  background: var(--card-light);
+  color: var(--text-dark);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.1s, color 0.1s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.15;
+  min-height: 40px;
+}
+#settings-diag .checkpoint-filters button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#settings-diag .checkpoint-filters button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+#settings-diag .checkpoint-filters button .group-label {
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #888;
+  font-weight: 600;
+}
+#settings-diag .checkpoint-filters button.active .group-label {
+  color: rgba(255, 255, 255, 0.85);
+}
+#settings-diag .checkpoint-filters button .nick-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+#settings-diag .checkpoint-filters button.single-line {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#settings-diag .checkpoint-intro {
+  margin-bottom: 12px;
+}
+#settings-diag .checkpoint-intro p {
+  display: none;
+  margin: 0;
+  padding: 10px 12px;
+  background: #fafafa;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 13px;
+  color: #444;
+  line-height: 1.55;
+}
+#settings-diag .checkpoint-intro p.active {
+  display: block;
+}
+#settings-diag .checkpoint-intro p strong {
+  color: var(--text-dark);
+}
+
+/* Chips in section summaries — same look as .protections-tag, own colors per checkpoint */
+.checkpoint-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+  border: 1px solid;
+  background: var(--card-light);
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: middle;
+  margin-right: 2px;
+}
+.checkpoint-tag.c1 { color: #1a73e8; border-color: #1a73e8; }
+.checkpoint-tag.c2 { color: var(--accent); border-color: var(--accent); }
+.checkpoint-tag.c3 { color: #21c25e; border-color: #21c25e; }
+.checkpoint-tag.c4 { color: #d68910; border-color: #d68910; }
+
+body.dark-mode #settings-diag .checkpoint-filters,
+body.dark-mode #settings-diag .checkpoint-filters button,
+body.dark-mode .checkpoint-tag {
+  background: #242424;
+  border-color: #444;
+  color: #e0e0e0;
+}
+body.dark-mode .checkpoint-tag.c1 { color: #1a73e8; border-color: #1a73e8; }
+body.dark-mode .checkpoint-tag.c2 { color: var(--accent); border-color: var(--accent); }
+body.dark-mode .checkpoint-tag.c3 { color: #21c25e; border-color: #21c25e; }
+body.dark-mode .checkpoint-tag.c4 { color: #d68910; border-color: #d68910; }
+body.dark-mode #settings-diag .checkpoint-filter-label {
+  color: #aaa;
+}
+body.dark-mode #settings-diag .checkpoint-intro p {
+  background: #1e1e1e;
+  color: #ccc;
+}
+body.dark-mode #settings-diag .checkpoint-intro p strong {
+  color: #fff;
+}
+
+/* Setup → Diag flat knob blocks — one per logical group, chip-tagged, shown/hidden by pill membership
+   (JS toggles display). No accordions; the inner .settings-card supplies the box. */
+#settings-diag .checkpoint-param {
+  margin: 0 0 16px;
+}
+#settings-diag .checkpoint-param-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px 2px;
+}
+#settings-diag .checkpoint-param-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+body.dark-mode #settings-diag .checkpoint-param-title {
+  color: #fff;
+}
+
 body.dark-mode #alt-panel-protections .protections-edit-row input[type="number"] {
   background: #2a2a2a;
   color: #e0e0e0;

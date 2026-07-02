@@ -233,7 +233,7 @@ const CSV1_FIELDS = [
     "perfCountersResetElapsedS",  // seconds since "Reset Peak Values" press (0 = boot)
     "shutdownPhase",
     "BatteryV_raw",
-    "MeasuredAmps_filtered",
+    "MeasuredAmps_filtered",  // CC current-PID PV (OutputPIDSigSrc-selected) — name kept for span/scaling compatibility
     "voltageTarget",
     "Icv",
     "WaterDepth_ft",
@@ -891,31 +891,43 @@ function gateReadoutOnCsv2(data) {
         }
     }
 }
-// iExcessLive: live iExcess detector sparkline (Group 3 alternator / Group 4 battery, whichever is active). Per CSV1 frame the firmware ships the
-// PEAK averaged excess and the MIN threshold E over that frame (aggregated at control-loop rate),
-// plus protEventMask bit 2 = a TRUE fire that frame. The chart plots peak excess (teal) vs min E
-// (amber) with Floor/Ceiling context; a segment goes red only where the detector actually fired —
-// not where the plotted peak/min lines merely cross. Numbers underneath show the latest values.
-const _ieSpark = { peak: new Array(200).fill(0), minE: new Array(200).fill(0), fired: new Array(200).fill(0), N: 200 };
+// iExcessLive: G3 (alternator) + G4 (battery) detector strips. Firmware ships one peak/threshold pair —
+// only one detector is ever armed — so ownership is inferred, MIRRORING the firmware arm gates in
+// 6_functions.ino (keep in sync): threshMin ≤ 0 = neither; IBV ≤ voltageTarget − ArmMargin = G3 (bulk);
+// else cvBattCurrentActive (CSV2 cache) picks G4 vs G3. Non-owner records zeros and draws dimmed.
+const _ieSparkG3 = { peak: new Array(200).fill(0), minE: new Array(200).fill(0), fired: new Array(200).fill(0), N: 200, armed: false,
+    canvasId: 'iExcessSparkG3', autoId: 'iExcessSparkAutoG3', peakId: 'mExcessEmaLiveG3', eId: 'iExcessELiveG3', floorId: 'IExcessFloorA_echo', ceilId: 'IExcessCeilA_echo' };
+const _ieSparkG4 = { peak: new Array(200).fill(0), minE: new Array(200).fill(0), fired: new Array(200).fill(0), N: 200, armed: false,
+    canvasId: 'iExcessSparkG4', autoId: 'iExcessSparkAutoG4', peakId: 'mExcessEmaLiveG4', eId: 'iExcessELiveG4', floorId: 'IExcessFloorABatt_echo', ceilId: 'IExcessCeilABatt_echo' };
 function iExcessLiveOnCsv1(data) {
-    const canvas = document.getElementById('iExcessSpark');
-    if (!canvas) return;  // strip not present on this page
+    if (!document.getElementById('iExcessSparkG3')) return;  // strips not present on this page
     const peak = Number(data.mExcessEmaPeak) / 10;
     const minE = Number(data.iExcessThreshMin) / 10;
     const fired = (Number(data.protEventMask) & 2) ? 1 : 0;
-    const S = _ieSpark;
-    S.peak.push(isFinite(peak) ? peak : 0); S.peak.shift();
-    S.minE.push(isFinite(minE) ? minE : 0); S.minE.shift();
-    S.fired.push(fired); S.fired.shift();
-    const pe = document.getElementById('mExcessEmaLive'); if (pe) pe.textContent = (isFinite(peak) ? peak : 0).toFixed(2);
-    const ee = document.getElementById('iExcessELive'); if (ee) ee.textContent = (minE > 0 ? minE.toFixed(1) : '—');
-    drawIExcessSpark(canvas);
+    let owner = null;  // null = neither detector armed
+    if (minE > 0) {
+        const ibv = Number(data.IBV), tgt = Number(data.voltageTarget);
+        const marginEl = document.getElementById('IExcessArmMarginV_echo');
+        const margin = (marginEl && parseFloat(marginEl.textContent)) || 0.1;
+        if (isFinite(ibv) && isFinite(tgt) && ibv <= tgt - margin) owner = _ieSparkG3;  // bulk sub-mode: always alternator
+        else owner = (g_lastCsv2 && Number(g_lastCsv2.cvBattCurrentActive) === 1) ? _ieSparkG4 : _ieSparkG3;
+    }
+    for (const S of [_ieSparkG3, _ieSparkG4]) {
+        const own = (S === owner);
+        S.armed = own;
+        S.peak.push(own && isFinite(peak) ? peak : 0); S.peak.shift();
+        S.minE.push(own && isFinite(minE) ? minE : 0); S.minE.shift();
+        S.fired.push(own ? fired : 0); S.fired.shift();
+        const pe = document.getElementById(S.peakId); if (pe) pe.textContent = (own && isFinite(peak)) ? peak.toFixed(2) : '—';
+        const ee = document.getElementById(S.eId); if (ee) ee.textContent = (own && minE > 0) ? minE.toFixed(1) : '—';
+        const canvas = document.getElementById(S.canvasId); if (canvas) drawIExcessSpark(canvas, S);
+    }
 }
-function drawIExcessSpark(c) {
-    const S = _ieSpark, N = S.N;
-    if (!S._init) { S._init = true; const cb = document.getElementById('iExcessSparkAuto'); if (cb) cb.checked = localStorage.getItem('iExcessSparkAuto') === '1'; }
-    const autoEl = document.getElementById('iExcessSparkAuto'), auto = !!(autoEl && autoEl.checked);
-    const floorEl = document.getElementById('IExcessFloorA_echo'), ceilEl = document.getElementById('IExcessCeilA_echo');
+function drawIExcessSpark(c, S) {
+    const N = S.N;
+    if (!S._init) { S._init = true; const cb = document.getElementById(S.autoId); if (cb) cb.checked = localStorage.getItem(S.autoId) === '1'; }
+    const autoEl = document.getElementById(S.autoId), auto = !!(autoEl && autoEl.checked);
+    const floorEl = document.getElementById(S.floorId), ceilEl = document.getElementById(S.ceilId);
     const floor = (floorEl && parseFloat(floorEl.textContent)) || 4;
     const ceil = (ceilEl && parseFloat(ceilEl.textContent)) || 25;
     const dpr = window.devicePixelRatio || 1, w = c.clientWidth || 220, h = c.clientHeight || 30;
@@ -935,6 +947,7 @@ function drawIExcessSpark(c) {
         g.beginPath(); g.moveTo(0, Y(ceil)); g.lineTo(w, Y(ceil)); g.stroke();
     }
     g.setLineDash([]);
+    if (!S.armed) g.globalAlpha = 0.35;  // disarmed strip: history stays visible but clearly not live
     // vertical fire markers — full-height red line at every frame that truly fired (drawn first,
     // behind the traces). From the real fire flag (protEventMask), not the plotted crossing.
     g.strokeStyle = 'rgba(192,57,43,0.85)'; g.lineWidth = 1.5;
@@ -949,6 +962,8 @@ function drawIExcessSpark(c) {
     g.strokeStyle = '#00a19a'; g.lineWidth = 1.7; g.stroke();
     g.fillStyle = '#00a19a';
     g.beginPath(); g.arc(X(N - 1), Y(S.peak[N - 1]), 2.4, 0, 7); g.fill();
+    g.globalAlpha = 1;
+    if (!S.armed) { g.fillStyle = '#888'; g.font = '10px sans-serif'; g.fillText('disarmed', 6, 12); }
 }
 
 // Commissioning RPM sparkline: permanent strip in the commissioning modal so the user can
@@ -958,7 +973,7 @@ function drawIExcessSpark(c) {
 const _cxRpmSpark = { rpm: new Array(150).fill(NaN), N: 150 };
 function cxRpmSparkOnCsv1(data) {
     const canvas = document.getElementById('cxRpmSpark');
-    if (!canvas || !canvas.clientWidth) return;  // modal closed / not laid out
+    if (!canvas) return;
     const rpm = Number(data.RPM);
     if (cx) {                                  // green/red in-range check for the resonance current-check
         cx.liveRpm = isFinite(rpm) ? rpm : NaN;
@@ -968,7 +983,9 @@ function cxRpmSparkOnCsv1(data) {
     S.rpm.push(isFinite(rpm) ? rpm : NaN); S.rpm.shift();
     const ve = document.getElementById('cx-rpm-spark-val');
     if (ve) ve.textContent = isFinite(rpm) ? Math.round(rpm) + ' RPM' : '—';
-    drawCxRpmSpark(canvas);
+    // Draw only when the strip is laid out (modal open, not hidden by the sweep game) — but the
+    // ring above must keep feeding regardless: the game reads the same ring for its trace.
+    if (canvas.clientWidth) drawCxRpmSpark(canvas);
 }
 function drawCxRpmSpark(c) {
     const S = _cxRpmSpark, N = S.N;
@@ -1194,6 +1211,8 @@ function updateAltHealth() {
   if (modeLbl) modeLbl.textContent = [altLive.source>=1 ? 'Uploaded reference' : '',
                                       altLive.paused>=1 ? 'learning paused' : '']
                                      .filter(Boolean).join(' · ');
+  setSeg(['alt-src-hist','alt-src-file'], altLive.source>=1?1:0);
+  setSeg(['alt-learn-on','alt-learn-off'], altLive.paused>=1?1:0);
   setSeg(['alt-sim-off','alt-sim-on'], altLive.sim>=1?1:0);   // simulator now lives in Setup (segmented, mirrors Vessel Performance)
 }
 
@@ -1277,21 +1296,84 @@ function exportConfigDownload(){
       setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     }).catch(e=>alert('Export failed: '+(e&&e.message?e.message:e)));
 }
+// Pre-apply diff preview. Fetches this regulator's current config twice (with and
+// without hardware keys — the difference identifies tier-2 keys, which the browser
+// otherwise can't distinguish from never-set tier-1 keys) and shows current → new for
+// every key the incoming blob would change. Nothing is written until the user approves.
+// Residual imprecision: a tier-2 key never set in NVS on this device is invisible to
+// both exports, so with hardware excluded it's listed as "will apply" though the
+// firmware skips it — harmless direction (over-warns, never under-warns).
+let _cfgDiffResolve=null;
+function cfgDiffClose(apply){
+  document.getElementById('cfgdiff-modal-overlay').style.display='none';
+  const r=_cfgDiffResolve; _cfgDiffResolve=null;
+  if(r) r(apply);
+}
+function _cfgEsc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+async function cfgDiffPreview(blobText, hw, sourceLabel){
+  let incoming;
+  try{ incoming=JSON.parse(blobText); }catch(e){ alert('That is not a valid configuration file.'); return false; }
+  if(!incoming || typeof incoming.config!=='object'){ alert('That file has no "config" section — not a regulator configuration.'); return false; }
+  const base='/exportConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware=';
+  // sequential, not Promise.all — each export builds a ~10KB String in internal heap on the device
+  const rFull=await fetchWithTimeout(buildURL(base+'1'),{},10000);
+  const rT1=await fetchWithTimeout(buildURL(base+'0'),{},10000);
+  if(!rFull.ok||!rT1.ok){ alert('Could not read the current configuration for comparison (HTTP '+(rFull.ok?rT1.status:rFull.status)+').'); return false; }
+  const curFull=(await rFull.json()).config||{};
+  const tier1=(await rT1.json()).config||{};
+  const tier2=new Set(Object.keys(curFull).filter(k=>!(k in tier1)));
+  const changed=[],fresh=[],skipped=[];
+  let unchanged=0;
+  for(const k of Object.keys(incoming.config).sort()){
+    const nv=String(incoming.config[k]);
+    if(!hw && tier2.has(k)){ skipped.push(k); continue; }
+    if(k in curFull){
+      if(String(curFull[k])===nv) unchanged++;
+      else changed.push({k,cur:String(curFull[k]),nv});
+    } else fresh.push({k,nv});
+  }
+  const sum=document.getElementById('cfgdiff-summary');
+  const body=document.getElementById('cfgdiff-body');
+  const vNow=incoming.vessel&&incoming.vessel.battery_voltage;
+  sum.innerHTML='Loading <b>'+_cfgEsc(sourceLabel)+'</b>'+(incoming.fw_version?' (saved on firmware '+_cfgEsc(incoming.fw_version)+')':'')+'.<br>'
+    +'<b>'+changed.length+'</b> settings change, <b>'+fresh.length+'</b> are new here, <b>'+unchanged+'</b> already match'
+    +(skipped.length?', <b>'+skipped.length+'</b> hardware settings skipped (box unchecked)':'')+'.'
+    +(vNow?'<br>Source system voltage: <b>'+_cfgEsc(vNow)+' V</b> — confirm this matches your bank.':'')
+    +(hw?'<br><span style="color:#fca5a5;">Hardware settings (sensor/shunt/polarity) WILL be applied — identical hardware only.</span>':'');
+  const row=(k,cur,nv)=>'<tr><td style="padding:3px 8px 3px 0; color:#9cc; word-break:break-all;">'+_cfgEsc(k)+'</td>'
+    +'<td style="padding:3px 8px; color:#888; word-break:break-all;">'+_cfgEsc(cur)+'</td>'
+    +'<td style="padding:3px 0; color:#fff; word-break:break-all;">'+_cfgEsc(nv)+'</td></tr>';
+  let h='';
+  if(changed.length||fresh.length){
+    h='<table style="width:100%; border-collapse:collapse; font-size:0.85em;"><tr style="color:#aaa; text-align:left;"><th style="padding:3px 8px 3px 0;">Setting</th><th style="padding:3px 8px;">Now</th><th style="padding:3px 0;">New</th></tr>'
+      +changed.map(c=>row(c.k,c.cur,c.nv)).join('')
+      +fresh.map(f=>row(f.k,'(not set)',f.nv)).join('')+'</table>';
+  } else {
+    h='<div style="color:#888; font-size:0.9em; padding:8px 0;">No settings would change — this regulator already matches the file.</div>';
+  }
+  body.innerHTML=h;
+  document.getElementById('cfgdiff-apply-btn').style.display=(changed.length||fresh.length)?'':'none';
+  document.getElementById('cfgdiff-modal-overlay').style.display='flex';
+  return new Promise(res=>{ _cfgDiffResolve=res; });
+}
+function _cfgPostImport(bodyText, hw){
+  fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),
+    {method:'POST',body:bodyText},12000)
+    .then(r=>{ if(!r.ok){ return r.text().then(t=>{ throw new Error(t||('HTTP '+r.status)); }); } return r.json(); })
+    .then(res=>alert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
+    .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+}
 function importConfigFromFile(){
   if(!currentAdminPassword){ alert('Please unlock settings first'); return; }
   const inp=document.getElementById('importConfigFile');
   if(!inp || !inp.files || !inp.files.length){ alert('Choose a configuration file first.'); return; }
   const hw=configHwFlag();
-  const warn='Apply this configuration to the regulator?\n\nThe regulator will REBOOT to apply it.'+
-    (hw?'\n\nHardware-specific settings (sensor/shunt/polarity) WILL be applied — only do this on identical hardware.':'');
-  if(!confirm(warn)) return;
   const reader=new FileReader();
   reader.onload=function(){
-    fetchWithTimeout(buildURL('/importConfig?password='+encodeURIComponent(currentAdminPassword)+'&includeHardware='+hw),
-      {method:'POST',body:reader.result},12000)
-      .then(r=>{ if(!r.ok){ return r.text().then(t=>{ throw new Error(t||('HTTP '+r.status)); }); } return r.json(); })
-      .then(res=>alert('Applied '+res.applied+' settings. '+(res.reboot?'The regulator is rebooting — reconnect in ~30 s.':'')))
-      .catch(e=>alert('Import failed: '+(e&&e.message?e.message:e)));
+    const txt=reader.result;
+    cfgDiffPreview(txt, hw, inp.files[0].name)
+      .then(ok=>{ if(ok) _cfgPostImport(txt, hw); })
+      .catch(e=>alert('Preview failed: '+(e&&e.message?e.message:e)));
   };
   reader.readAsText(inp.files[0]);
 }
@@ -2991,6 +3073,7 @@ function initializeEventSource() {
                     ? toDisplayTempDelta(v[i]).toFixed(1)
                     : (Math.round(v[i] * 1000) / 1000);
             });
+            sinfoRefreshOpen();   // alt* echoes feed the C3 "s" signal-info boxes
         }, false);
 
         // \u2500\u2500 SSE: PerfLive / PerfSettings \u2500 schema-driven (names from /perfschema; no hardcoded array) \u2500\u2500
@@ -4923,7 +5006,10 @@ function updateWeatherAlerts() {
 function updateAllEchosOptimized(data) {
     let updatesCount = 0;
 
-    // All echo updates with change detection        
+    // Cache raw °F setpoint for the banner temp warning tint (updateHeaderTempColor).
+    if ('TemperatureLimitF' in data) window._lastAltTempLimitF = parseFloat(data.TemperatureLimitF);
+
+    // All echo updates with change detection
     //THIS IS WHERE SCALING HAPPENS FOR THE ECHOS!!!
 
     const echoUpdates = [
@@ -5244,6 +5330,9 @@ function updateAllEchosOptimized(data) {
             }
         }
     });
+
+    // Re-render any open "s" signal-info boxes so their embedded live values track the fresh echoes
+    sinfoRefreshOpen();
 
     return updatesCount;
 };
@@ -7184,13 +7273,11 @@ function _configShareHandleMessage(e) {
     if (e.origin !== 'https://supabase-nine-ashy.vercel.app') return;
     if (!e.data || e.data.type !== 'LOAD_CONFIG_TO_DEVICE' || !e.data.config) return;
     if (!currentAdminPassword) { alert('Please unlock settings first'); return; }
-    const label = e.data.name ? ('"' + e.data.name + '"') : 'this configuration';
-    if (!confirm('Load ' + label + ' onto your regulator?\n\nThe regulator will REBOOT to apply it. Hardware-specific settings are not included.')) return;
-    fetchWithTimeout(buildURL('/importConfig?password=' + encodeURIComponent(currentAdminPassword) + '&includeHardware=0'),
-        { method: 'POST', body: JSON.stringify(e.data.config) }, 12000)
-        .then(r => { if (!r.ok) { return r.text().then(t => { throw new Error(t || ('HTTP ' + r.status)); }); } return r.json(); })
-        .then(res => alert('Applied ' + res.applied + ' settings. ' + (res.reboot ? 'The regulator is rebooting — reconnect in ~30 s.' : '')))
-        .catch(err => alert('Load failed: ' + (err && err.message ? err.message : err)));
+    const label = e.data.name ? ('"' + e.data.name + '"') : 'this shared configuration';
+    const txt = JSON.stringify(e.data.config);
+    cfgDiffPreview(txt, 0, label)
+        .then(ok => { if (ok) _cfgPostImport(txt, 0); })
+        .catch(err => alert('Preview failed: ' + (err && err.message ? err.message : err)));
 }
 window.addEventListener('message', _configShareHandleMessage);
 
@@ -7780,22 +7867,26 @@ function initCurrentTempPlot() {
                 dash: [4, 2]
             },
             {
-                // The EMA-smoothed alternator current the control loop actually acts on (InputFilterTC ~τ/3).
-                // Off by default — toggle via legend. Shows what the loop "sees" (calm) vs the raw blue trace
-                // (full physical ripple) during a resonance: the filter stops the loop reacting, it doesn't
-                // remove the physical current swing.
+                // The exact process variable the CC current PID acts on in AdjustFieldLearnMode — the
+                // OutputPIDSigSrc-selected signal (default EMA at OutputPIDFilterTC, or MA(N), or raw).
+                // Off by default — toggle via legend. Dashed because at the ~34 ms default TC it sits
+                // almost exactly on the raw blue trace at this plot's sample rate; the dash is what
+                // makes it visible when overlapping. Diverges from raw during fast ripple/resonance.
                 label: "Alt Current filtered (A)",
                 stroke: "#90CAF9",
                 width: 1,
+                dash: [6, 3],
                 scale: "current",
                 show: false
             },
             {
-                // EMA-smoothed battery current the CV loop's battery-current PV acts on (OutputPIDFilterTC).
-                // Off by default — toggle via legend. Calm version of the green raw battery-current trace.
+                // EMA-smoothed battery current (Bcur_filtered, OutputPIDFilterTC) — the exact PV the CV
+                // loop's battery-current mode regulates. Off by default — toggle via legend. Dashed for
+                // the same overlap reason as the alt filtered trace.
                 label: "Batt Current filtered (A)",
                 stroke: "#A5D6A7",
                 width: 1,
+                dash: [6, 3],
                 scale: "current",
                 show: false
             }
@@ -8566,6 +8657,22 @@ function applyStaleStyleByAge(elementId, ageMs, staleThreshold = STALE_THRESHOLD
         element.title = "";
     }
 }
+// Tint the banner alternator-temp readout as it nears/exceeds the Alt Temp Limit: orange within
+// 2°F of the limit, red once >2°F over. Compares in raw °F so it's independent of the °F/°C toggle.
+// Skips while stale so applyStaleStyleByAge keeps ownership of the gray/faded look.
+function updateHeaderTempColor(ageMs) {
+    const el = document.getElementById('header-alt-temp');
+    if (!el) return;
+    if (ageMs > STALE_THRESHOLD_TEMP_MS) { el._tempWarn = null; return; }
+    const t = window._lastAltTempF, lim = window._lastAltTempLimitF;
+    let color = "var(--reading)";
+    if (isFinite(t) && isFinite(lim)) {
+        if (t > lim + 2)       color = "#f44336";  // >2°F over limit — matches .anchor-bad
+        else if (t >= lim - 2) color = "#ff9800";  // within 2°F of limit — matches .anchor-warn
+    }
+    if (el._tempWarn !== color) { el.style.color = color; el._tempWarn = color; }
+}
+
 // Function to update all staleness styling
 function updateAllStalenessStyles() {
     if (!window.sensorAges) return;
@@ -8605,6 +8712,7 @@ function updateAllStalenessStyles() {
     applyStaleStyleByAge("header-alt-current", sa.measuredAmps);
     applyStaleStyleByAge("header-batt-current", sa.bcur);
     applyStaleStyleByAge("header-alt-temp", sa.alternatorTemp, STALE_THRESHOLD_TEMP_MS);
+    updateHeaderTempColor(sa.alternatorTemp);
     applyStaleStyleByAge("header-rpm", sa.rpm);
     applyStaleStyleByAge("dutyCycleID3", sa.dutyCycle);
 
@@ -12309,10 +12417,10 @@ function showSubTab(parentTab, subTabName, evt = null) {
         if (typeof windTrendRender === 'function') setTimeout(() => { try { windTrendRender(); } catch (e) { } }, 60);
     }
 
-    // Resume the Fast Alt-Current scope only if its (collapsed-by-default) section is already expanded
+    // Resume the Fast Alt-Current scope only if its Waveforms section is expanded and on-screen
     if (parentTab === 'livedata' && subTabName === 'diag') {
-        const faDet = document.getElementById('fa-monitor-details');
-        if (faDet && faDet.open && typeof fastDiagOnOpen === 'function') fastDiagOnOpen();
+        if (typeof fastDiagIsVisible === 'function' && fastDiagIsVisible()
+            && typeof fastDiagOnOpen === 'function') fastDiagOnOpen();
     }
 
     // Initialize profile tab when switching to My Profile
@@ -12361,6 +12469,16 @@ function showDiagPanel(panelName, evt = null) {
     if (evt && evt.target) evt.target.classList.add('active');
     // Battery Health canvas was sized at width 0 while hidden — refresh once it's visible.
     if (panelName === 'battery' && typeof pollBatteryHealth === 'function') setTimeout(pollBatteryHealth, 60);
+}
+
+// Inner Charge Settings / Battery Monitor switch inside Setup -> Battery. Dedicated (NOT showAltTab,
+// which is hardcoded to #settings-alternator) so it can't clobber the alternator panels.
+function showBatteryPanel(panelName, evt = null) {
+    document.querySelectorAll('#settings-battery .diag-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('#settings-battery .diag-panel-tab').forEach(b => b.classList.remove('active'));
+    const panel = document.getElementById('battery-panel-' + panelName);
+    if (panel) panel.classList.add('active');
+    if (evt && evt.target) evt.target.classList.add('active');
 }
 
 // Floating Cloud Upload pill — only visible on the cloud iframe sub-tabs.
@@ -13103,6 +13221,317 @@ function getEchoText(id, fallback = '?') {
     const t = (el.textContent || '').trim();
     return t.length ? t : fallback;
 }
+
+// ── "s" signal-info badges (Protections + Setup▸Diag) ────────────────────────────────────
+// Each badge states: the signal a setting acts on / is compared to, the physical source
+// (INA228 / ADS1115 / on-chip ADC / PWM command / temp sensor), the filter and its time
+// constant, and where the value gets set. Content is built from the SAME echo spans the
+// settings UI already maintains, so it is regenerated on open and re-rendered on every
+// CSV3 / AltSettings frame while a box is open — live values stay hot without new telemetry.
+let _sinfoOpenN = 0;
+
+function sinfoToggle(el) {
+    if (!el.classList.contains('active')) sinfoRender(el);
+    el.classList.toggle('active');
+    _sinfoOpenN = Math.max(0, _sinfoOpenN + (el.classList.contains('active') ? 1 : -1));
+}
+
+function sinfoRender(el) {
+    const fn = SINFO[el.dataset.sinfo];
+    let box = el.querySelector('.tooltip-box');
+    if (!box) { box = document.createElement('span'); box.className = 'tooltip-box'; el.appendChild(box); }
+    box.innerHTML = fn ? fn().map(r => '<div class="s-row"><span class="s-k">' + r[0] + ':</span> ' + r[1] + '</div>').join('') : 'No signal info registered.';
+}
+
+function sinfoRefreshOpen() {
+    if (!_sinfoOpenN) return;
+    document.querySelectorAll('.sinfo.active').forEach(sinfoRender);
+}
+
+// live-value helpers: echo text with a unit, and echo parsed as a number
+function svv(id, unit) { return '<b>' + getEchoText(id) + (unit ? '&nbsp;' + unit : '') + '</b>'; }
+function svTargetV() {
+    // voltageTarget rides CSV1 into cvPlotCache (÷100 = volts); blank until the stream is up
+    const t = (typeof cvPlotCache === 'object' && cvPlotCache && cvPlotCache.voltageTarget != null)
+        ? ' (now <b>' + (cvPlotCache.voltageTarget / 100).toFixed(2) + '&nbsp;V</b>)' : '';
+    return 'the active charge target' + t + ' — set on Setup ▸ Battery ▸ Charge Settings, moves with charge stage';
+}
+function svTempSensor() {
+    const s = getEchoText('TempSource_echo');
+    if (s === 'Digital') return 'digital one-wire probe (DS18B20) per Temp Source on Setup ▸ Alternator';
+    if (s === 'Thermistor') return 'thermistor per Temp Source on Setup ▸ Alternator';
+    return 'digital probe or thermistor, per Temp Source on Setup ▸ Alternator';
+}
+
+// shared source descriptions
+const S_ADS_ALT = 'alternator output current — Hall-effect clamp, read by the external 16-bit ADC (ADS1115 ch&nbsp;1), fresh every ~5&nbsp;ms';
+const S_INA_I = 'battery current — INA228 shunt monitor, new sample every ~5&nbsp;ms while charging';
+const S_INA_V = 'battery voltage — INA228 bus-voltage register, new sample every ~5&nbsp;ms';
+const S_FAST = 'the same alternator Hall clamp, tapped to the ESP32’s own on-chip ADC (GPIO3) at 20,000 samples/s — separate from the ADS1115 slow path';
+const S_RPM_ADS = 'engine speed — tach conditioner voltage on ADS1115 ch&nbsp;2 × RPM scaling factor';
+const S_DUTY = 'field drive strength (duty cycle) — the regulator’s own PWM command, no sensor involved';
+const S_HERE = 'user input, this tab';
+
+function sIETau() { return 'smoothed with a moving-average low-pass (EMA), time constant ' + svv('IExcessTau_echo', 'ms') + ' (the Averaging Time Constant field)'; }
+function sAltEma() { return 'smoothed with a moving-average low-pass (EMA), time constant ' + svv('altEmaSec_echo', 's') + ' (the Signal Smoothing Filter field)'; }
+
+const SINFO = {
+    // ── Protections: Detection ──
+    MaxTableValue: () => [
+        ['Signal', S_ADS_ALT],
+        ['Compared to', 'derived trip point = this limit + 10&nbsp;A = ' + svv('HardOCTripAmps_echo', 'A') + ', after the debounce below'],
+        ['Filter', 'none — raw; this is the last line of defense'],
+        ['Set', 'here — same setting as the Alternator Current Limit on the Tuning tab; editing either updates the trip point'],
+    ],
+    HardOCDebounceMs: () => [
+        ['Signal', S_ADS_ALT],
+        ['Role', 'excess above ' + svv('HardOCTripAmps_echo', 'A') + ' must persist this long continuously before the field cut'],
+        ['Filter', 'none — raw'],
+        ['Set', S_HERE],
+    ],
+    ovG1: () => [
+        ['Signal', 'predicted voltage = measured + ' + svv('TdPred_echo', 's') + ' × rate-of-rise (rising only), vs ' + svv('OvPredMarginV_echo', 'V') + ' above target'],
+        ['Source', S_INA_V + ', unfiltered'],
+        ['Filter', 'only the rate-of-rise is smoothed — moving-average low-pass (EMA), time constant ' + svv('DvdtTC_echo', 'ms')],
+        ['Compared to', svTargetV()],
+    ],
+    DvdtTC: () => [
+        ['Signal', 'the voltage rate-of-rise feeding Group 1’s prediction'],
+        ['Source', 'successive INA228 bus-voltage samples ~5&nbsp;ms apart'],
+        ['Filter', 'this field IS the filter — moving-average low-pass (EMA) time constant'],
+        ['Set', S_HERE],
+    ],
+    ovG2: () => [
+        ['Signal', 'measured battery voltage vs ' + svv('OvMeasMarginV_echo', 'V') + ' above target'],
+        ['Source', S_INA_V + ', unfiltered — fastest possible reaction'],
+        ['Compared to', svTargetV()],
+    ],
+    iexG3: () => [
+        ['Signal', 'smoothed excess of alternator current over the live current command'],
+        ['Source', S_ADS_ALT],
+        ['Filter', sIETau()],
+        ['Armed', 'in bulk (voltage more than ' + svv('IExcessArmMarginV_echo', 'V') + ' below target), and near target while the loop still regulates alternator current'],
+    ],
+    iexG4: () => [
+        ['Signal', 'smoothed excess of battery current over the live current command'],
+        ['Source', S_INA_I],
+        ['Filter', sIETau()],
+        ['Armed', 'only while the loop regulates battery current (absorption / float / manual voltage, battery shunt healthy)'],
+    ],
+    IExcessArmMarginV: () => [
+        ['Signal', 'battery voltage vs (target − this band)'],
+        ['Source', S_INA_V + ', unfiltered'],
+        ['Role', 'picks which detector regime is armed: inside the band = strict near-target detector, below it = looser bulk detector'],
+        ['Compared to', svTargetV()],
+    ],
+    IExcessFrac: () => [
+        ['Signal', 'smoothed current excess vs ' + svv('IExcessFrac_echo', '%') + ' of the live current command, clamped to the active Floor / Ceiling'],
+        ['Source', 'alternator current (ADS1115 Hall clamp) in the bulk regime; battery current (INA228 shunt) in battery-current regulation — regime picked by the Strict Band'],
+        ['Filter', sIETau()],
+        ['Set', S_HERE],
+    ],
+    IExcessFracBulk: () => [
+        ['Signal', 'smoothed alternator-current excess vs ' + svv('IExcessFracBulk_echo', '%') + ' of the live ceiling'],
+        ['Ceiling', 'RPM-table cap (auto-learned table, Setup ▸ Alternator) minus any thermal / warm-up derate, never above the Command Limit'],
+        ['Source', S_ADS_ALT],
+        ['Filter', sIETau()],
+    ],
+    IExcessFloorA: () => [
+        ['Role', 'lower bound (amps) on the alternator detector’s threshold'],
+        ['Signal context', S_ADS_ALT],
+        ['Set', 'here only — never auto-written; size it with the ripple plot below (measured in Commissioning ▸ Step 6)'],
+    ],
+    IExcessFloorABatt: () => [
+        ['Role', 'lower bound (amps) on the battery detector’s threshold'],
+        ['Signal context', S_INA_I + ' — carries ~3× less ripple than alternator current, so this floor can sit lower'],
+        ['Set', 'here only — never auto-written; size it with the battery ripple plot below (Commissioning ▸ Step 6)'],
+    ],
+    IExcessCeilA: () => [
+        ['Role', 'upper bound (amps) on the alternator detector’s threshold'],
+        ['Signal context', S_ADS_ALT],
+        ['Set', S_HERE],
+    ],
+    IExcessCeilABatt: () => [
+        ['Role', 'upper bound (amps) on the battery detector’s threshold'],
+        ['Signal context', S_INA_I],
+        ['Set', S_HERE],
+    ],
+    ripPlotAlt: () => [
+        ['Threshold lines', 'recomputed live from the threshold / floor / ceiling fields above'],
+        ['Ripple line', 'alternator ripple measured during Commissioning ▸ Step 6 (current check), filtered with the same EMA the detectors use (τ = ' + svv('IExcessTau_echo', 'ms') + ') so it is detector-eye ripple; fixed until Step 6 is re-run'],
+        ['Source', S_ADS_ALT],
+    ],
+    ripPlotBatt: () => [
+        ['Threshold line', 'recomputed live from the threshold / floor / ceiling fields above'],
+        ['Ripple line', 'battery ripple measured during Commissioning ▸ Step 6 (current check), filtered with the same EMA the detectors use (τ = ' + svv('IExcessTau_echo', 'ms') + '); fixed until Step 6 is re-run'],
+        ['Source', S_INA_I],
+    ],
+    IExcessTau: () => [
+        ['Role', 'this field IS the filter — moving-average low-pass (EMA) time constant on both detectors’ excess signal'],
+        ['Also used by', 'the measured-ripple capture (Setup ▸ Diag ▸ Ripple Capture) and the commissioning ripple fit, so the ripple plots stay comparable to what the detectors see. Changing it changes those measurements too.'],
+        ['Set', S_HERE],
+    ],
+    IExcessRelFrac: () => [
+        ['Signal', 'the same smoothed excess (EMA, τ = ' + svv('IExcessTau_echo', 'ms') + ') vs ' + svv('IExcessRelFrac_echo', '%') + ' of the threshold, for re-arm'],
+        ['Set', S_HERE],
+    ],
+    loadDump: () => [
+        ['Signal', 'rate-of-change of battery current, computed on every new sample'],
+        ['Source', S_INA_I],
+        ['Filter', 'none — raw per-sample derivative (a filtered edge would be missed)'],
+        ['Armed', 'whenever charging with fast battery reads — even when test protections are disabled'],
+        ['Set', S_HERE],
+    ],
+    // ── Protections: Response ──
+    KHard: () => [
+        ['Acts on', 'the current cap — trimmed by ' + svv('KHard_echo', 'A') + ' per volt of overshoot, recomputed from the live overshoot every control tick'],
+        ['Overshoot signal', 'Group 1 predicted / Group 2 measured battery voltage (INA228 bus register)'],
+        ['Set', S_HERE],
+    ],
+    IExcessKBleed: () => [
+        ['Acts on', 'the voltage-loop integrator, once at the instant a Group 3/4 detector fires; the amount scales with the smoothed excess (EMA, τ = ' + svv('IExcessTau_echo', 'ms') + ')'],
+        ['Set', S_HERE],
+    ],
+    AwBleedRate: () => [
+        ['Acts on', 'the voltage-loop integrator while any protection is clamping'],
+        ['Effective rate', (function () { const r = parseFloat(getEchoText('AwBleedRate_echo')), m = parseFloat(getEchoText('MaxTableValue_echo')); return svv('AwBleedRate_echo') + ' × Command Limit ' + svv('MaxTableValue_echo', 'A') + (isFinite(r) && isFinite(m) ? ' = <b>' + (r * m).toFixed(0) + '&nbsp;A/s</b>' : ''); })()],
+        ['Set', S_HERE],
+    ],
+    // ── Protections: Recovery ──
+    ReseedFrac: () => [
+        ['Acts on', 'the voltage-loop integrator, one-shot when the last protection releases: reseeded to ' + svv('ReseedFrac_echo') + ' × its pre-event value'],
+        ['Set', S_HERE],
+    ],
+    AwSeedProtectMs: () => [
+        ['Role', 'a timer, no sensor — suppresses the AW Bleed for ' + svv('AwSeedProtectMs_echo', 'ms') + ' after an integrator seed'],
+        ['Set', S_HERE],
+    ],
+    fastRise: () => [
+        ['Acts on', 'the current-setpoint slew after a protection releases'],
+        ['Effective rate', (function () { const x = parseFloat(getEchoText('FastSetpointRiseRate_echo')), b = parseFloat(getEchoText('SetpointRiseRate_echo')); return svv('FastSetpointRiseRate_echo', '×') + ' the normal Setpoint Rise Rate ' + svv('SetpointRiseRate_echo', 'A/s') + ' (set on Tuning ▸ Current)' + (isFinite(x) && isFinite(b) ? ' = <b>' + (x * b).toFixed(0) + '&nbsp;A/s</b>' : ''); })()],
+        ['Gate', 'battery voltage (INA228, unfiltered) below target − ' + svv('FastSetpointRiseHeadroomV_echo', 'V') + ', capped at ' + svv('FastSetpointRiseWindowMs_echo', 'ms')],
+        ['Compared to', svTargetV()],
+    ],
+    // ── Setup ▸ Diag: C1+C2 fast channel ──
+    faEnabled: () => [
+        ['Gates', 'the entire fast current channel and everything fed by it: anomaly detector (C1), Resonance &amp; Ripple Map (C2), live oscilloscope, flipbook'],
+        ['Source', S_FAST],
+        ['Set', S_HERE],
+    ],
+    faDrift: () => [
+        ['Signal', 'the fast channel’s own current, smoothed by a 300&nbsp;ms moving-average low-pass (EMA), judged across each 0.5&nbsp;s capture window'],
+        ['Source', S_FAST + ' (16-sample average → 1,250/s stream)'],
+        ['Gates', 'both the anomaly detector’s arming (C1) and the map folds (C2): window rejected when drift exceeds the larger of the floor or the slope % of the window’s mean current'],
+        ['Set', S_HERE],
+    ],
+    faAtten: () => [
+        ['Signal', S_ADS_ALT + ' (the authoritative slow reading — not the fast channel itself), with a 5&nbsp;s dwell'],
+        ['Acts on', 'the on-chip ADC’s input range on GPIO3: sensitive (6&nbsp;dB) below the switch-down value, high-range (12&nbsp;dB) above the switch-up value; the switch lands on a window boundary'],
+        ['Set', S_HERE],
+    ],
+    faAlarmEnable: () => [
+        ['Gates', 'the audible alarm on a pulse-pattern fault verdict'],
+        ['Signal', 'a raw 2&nbsp;s capture of the 20,000 samples/s fast channel, analyzed on the second CPU core; arming needs a drift-clean window at ≥&nbsp;5&nbsp;A mean and ignores engine speed entirely'],
+        ['Source', S_FAST],
+        ['Set', S_HERE],
+    ],
+    // ── Setup ▸ Diag: C2 map-only gates ──
+    faRpmEdgeMargin: () => [
+        ['Signal', S_RPM_ADS + ', smoothed by a 1&nbsp;s moving-average low-pass (EMA)'],
+        ['Gate', 'the whole 0.5&nbsp;s window must stay inside one 50-RPM bin with at least this margin to both edges — map folds only, never detector arming'],
+        ['Set', 'here; relaxed automatically during the commissioning map bootstrap'],
+    ],
+    faPeakMinA: () => [
+        ['Signal', 'each detected tone’s amplitude from the spectrum (FFT) of a 0.5&nbsp;s window of the 1,250/s stream'],
+        ['Source', S_FAST],
+        ['Set', 'here; the map downstream keeps self-learning continuously'],
+    ],
+    // ── Setup ▸ Diag: C3 steadiness bands ──
+    altBandRpm: () => [
+        ['Signal', S_RPM_ADS],
+        ['Filter', sAltEma()],
+        ['Gate', 'hold within the band for the steady time — all five axes (RPM, duty, voltage, amps, temperature) must be steady at once before a point records'],
+        ['Set', S_HERE],
+    ],
+    altBandDuty: () => [
+        ['Signal', S_DUTY],
+        ['Filter', sAltEma()],
+        ['Gate', 'hold within the band for the steady time — one of the five axes that must all be steady at once'],
+        ['Set', S_HERE],
+    ],
+    altBandVbus: () => [
+        ['Signal', S_INA_V],
+        ['Filter', sAltEma()],
+        ['Gate', 'hold within the band for the steady time — one of the five axes that must all be steady at once'],
+        ['Set', S_HERE],
+    ],
+    altBandTemp: () => [
+        ['Signal', 'alternator temperature — ' + svTempSensor()],
+        ['Filter', 'none — judged raw, deliberately unsmoothed (thermal mass is its own filter)'],
+        ['Gate', 'full steady runs need the whole dwell; the This-Session tier automatically uses half of it (' + (function () { const v = parseFloat(getEchoText('altThermSec_echo')); return isFinite(v) ? '<b>' + (v / 2).toFixed(0) + '&nbsp;s</b>' : 'half the dwell'; })() + ')'],
+        ['Set', S_HERE],
+    ],
+    altBandAmps: () => [
+        ['Signal', S_ADS_ALT],
+        ['Filter', sAltEma()],
+        ['Gate', 'band = the larger of the % of reading or the floor, held for the steady time — one of the five axes that must all be steady at once'],
+        ['Set', S_HERE],
+    ],
+    altEmaSec: () => [
+        ['Role', 'this field IS the filter — an interval-aware moving-average low-pass (EMA) on RPM, field duty, voltage, and amps before their steadiness bands are judged; temperature is deliberately excluded'],
+        ['Set', S_HERE],
+    ],
+    altMinRun: () => [
+        ['Signal', 'the combined steadiness verdict of all five axes (RPM, field duty, voltage, amps, temperature) — a steady run shorter than this never emits a point'],
+        ['Set', S_HERE],
+    ],
+    altTrend: () => [
+        ['Signal', 'committed health % keyed to the all-time engine-hours counter (accumulated whenever RPM &gt; 0)'],
+        ['Fed by', 'full steady runs only (the orange-ring points)'],
+        ['Set', S_HERE],
+    ],
+    altAdmit: () => [
+        ['Signals', 'smoothed alternator amps (ADS1115 Hall clamp) and smoothed field duty (PWM command), filter τ = ' + svv('altEmaSec_echo', 's')],
+        ['Set', S_HERE],
+    ],
+    altFit: () => [
+        ['Acts on', 'the best-ever reference surface and its locally-weighted fit (LWLR)'],
+        ['Fit inputs', 'smoothed RPM, excitation (derived from field duty / voltage / temperature), vs the recorded points'],
+        ['Set', 'here; the prune neighbor count is stored on the device but applied cloud-side by the prune job'],
+    ],
+    altHiField: () => [
+        ['Signals', 'smoothed field duty (PWM command) at or above ' + svv('altHiFieldPct_echo', '%') + ' AND smoothed alternator amps (ADS1115) at or below ' + svv('altLowOutAmps_echo', 'A') + ' for ' + svv('altHiFieldSec_echo', 's')],
+        ['Filter', sAltEma()],
+        ['Role', 'advisory readout only — no audible alarm, no field action'],
+        ['Set', S_HERE],
+    ],
+    altRefLearn: () => [
+        ['Acts on', 'which reference surface grades the live % and trend (My History vs an uploaded file), and whether new points enter My History'],
+        ['Auto-change', 'choosing Uploaded pauses learning automatically; Continue re-enables it — the buttons reflect the device’s live state'],
+        ['Set', 'here (persisted); the Simulator switch is not persisted and resets to Off at reboot'],
+    ],
+    // ── Setup ▸ Diag: C4 measured-ripple capture ──
+    ripWinMs: () => [
+        ['Signals', 'battery current (INA228 shunt) + alternator current (ADS1115 Hall clamp) + engine speed (ADS1115 ch&nbsp;2), sampled together every ~5&nbsp;ms while charging'],
+        ['Filter', 'the same EMA the over-current detectors use — τ = ' + svv('IExcessTau_echo', 'ms') + ', set as "Averaging Time Constant" on Setup ▸ Alternator ▸ Protections'],
+        ['Recorded value', 'the smaller of the two half-window peak-to-peaks'],
+        ['Consumed by', 'Commissioning ▸ Step 6 current check and the RPM-table game'],
+    ],
+    ripDriftFloorA: () => [
+        ['Signals', 'the two half-window averages of each sensor (alternator ADS1115, battery INA228, plus RPM with its own fixed floor), and the travel of the current command'],
+        ['Command', 'the slewed current setpoint — internal, no sensor'],
+        ['Set', S_HERE],
+    ],
+    ripDriftPct: () => [
+        ['Signal', 'travel of the current command only — the slewed internal setpoint, no sensor; the sensor gates self-scale instead (see the floor)'],
+        ['Set', S_HERE],
+    ],
+    ripThroughput: () => [
+        ['Signals', 'battery current (INA228) + alternator current (ADS1115 Hall clamp) + engine speed (ADS1115 ch&nbsp;2)'],
+        ['Filter', 'the detectors’ own EMA, τ = ' + svv('IExcessTau_echo', 'ms') + ' — so admitted windows measure exactly what the protections see'],
+        ['Counts', 'windows that passed every gate since power-up, per detector'],
+    ],
+};
 
 function drawPidWatermark(u) {
     const kp = getEchoText('PidKp_echo');
@@ -17157,7 +17586,7 @@ function cxFinePrint(phase) {
     case 2: return 'Briefly ramps field at each held RPM until output current just begins (the onset knee). The onset follows a 1/RPM law, so those three points fit the whole Min% column, parked a margin below and maintained automatically over alternator life. Above your highest captured RPM the floor is forced to zero, so the field can always shut fully off at speed. Only over-voltage is active during the ramp.';
     case 3: return 'Open-loop sine sweep on field duty identifies the plant (time constant τ, gain, dead time) and proposes the PI gains and filter time constants. This characterizes the alternator\'s own field→current behavior, so it runs on <strong>alternator current</strong> and stays valid for the CV battery-current loop (same field L/R plant). Note: the Output PID filter time constant it sets (<code>OutputPIDFilterTC</code>) is now ALSO the filter for the battery-current signal the CV loop regulates — the alternator-derived value is conservative there because the INA battery sensor is faster. Wave floor and step size carry over from the Field curve step\'s proposal (the Plant Delay tab). The sweep frequency range is fixed at <strong>0.5–20 Hz</strong> (0.3–30 Hz on an auto-widen retry).';
     case 4: return 'Closed-loop sine sweep — passes when the peak closed-loop gain stays ≤ 1.15 (no resonant peak). The parameters are computed from the plant fit and field curve. This verifies the inner current loop in its <strong>bulk (alternator-current)</strong> form, which is correct — bulk always regulates alternator current. It does NOT exercise the CV battery-current path; validate that yourself with a square-wave step on Tuning ▸ Voltage (helpers OFF) after Step 7.';
-    case 5: return 'Records the low-frequency disturbance at each engine speed into a map; ~80% coverage of the &lt;2000 RPM band is enough. The map now also captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) for both the alternator and battery detectors. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
+    case 5: return 'Records the low-frequency disturbance at each engine speed into a map; ~80% coverage of the idle-to-2000 RPM band is enough. During the sweep the wizard holds the alternator at a <strong>fixed test current</strong> (25% of your RPM/Amps table max) and captures the <strong>measured filtered ripple</strong> (the same IExcessTau-averaged signal each over-current detector trips on) per RPM bin, for both the alternator and battery detectors — a value only commits when two readings at that speed agree, so a throttle transient can\'t poison the table. The optional current-check then commands 3 current levels at the worst-ripple RPM and fits ripple = a0 + a1·I per detector. This produces the <strong>measured-ripple projection</strong> only — it never sets a threshold. Review it against your settings in the next step and on the Protections ripple plots.';
     case 6: return 'A read-only review — nothing is written here. It draws each over-current detector\'s trip threshold <code>max(Min, %·current, Max)</code> (from the Min/%/Max you set in <strong>Protections</strong>) against the ripple just measured in Step 6, for both the <strong>alternator (bulk)</strong> and <strong>battery (CV)</strong> detectors. Any current where the measured ripple crosses above your threshold is shaded red — the detector would false-trip there; raise that detector\'s floor (or accept it). The floor/ceiling/% are yours to set; commissioning only measures the ripple. The identical plots live permanently on Settings ▸ Alternator ▸ Protections and redraw live as you edit.';
     case 7: return 'Commands one bounded <strong>battery-current</strong> step (~6–40 A, auto-sized for ~300 mV) through the already-tuned current loop and records how battery voltage responds, measuring the <strong>finite-horizon gain K20</strong> (the rise at a fixed 20 s horizon with the slow charge ramp removed — a charging battery never plateaus, so there is nothing to settle to). The voltage-loop gains follow from K20 via the exact PI magnitude condition, Ki = ρ·Kp, and the CV gain source switches to Auto on Apply. All confidence checks are advisory — they warn but never block; only "no measurement" prevents Apply. The fit runs locally in this app — no internet. Only over-voltage hard-shutdown is active; keep all other battery loads constant during the test.';
     default: return '';
@@ -17235,8 +17664,11 @@ function closeCommissionModal() {
         if (cx.plantRunning) cxGet('cancelSystemID=1').catch(() => { });
         if (cx.verifyRunning) cxGet('TuningMode=0').catch(() => { });
         if (cx.cvFitRunning) { cx.cvFitDone = true; if (cx.cvFitCdTimer) { clearInterval(cx.cvFitCdTimer); cx.cvFitCdTimer = null; } if (cxPollTimer) { clearTimeout(cxPollTimer); cxPollTimer = null; } if (cvFitCapture) cvFitCapture.active = false; cxGet('TuningMode=0').catch(() => { }); }
-        if (cx.matrixOn) cxGet('faCommissionGate=0').catch(() => { });
-        // Resonance current-check is the only step that COMMANDS the field — ramp the current to 0 first,
+        // Modal close is a sweep teardown path: freeze + persist the RPM ripple table (committed cells
+        // from a cut-short sweep are honest data). The rtFieldArmed block below releases the field —
+        // the game runs with rtFieldArmed set for exactly that reason.
+        if (cx.matrixOn) { cxGet('ripGameFill=0').catch(() => { }); cxGet('faCommissionGate=0').catch(() => { }); }
+        // The current-check and the sweep game both COMMAND the field — ramp the current to 0 first,
         // then release field-control + gate, so closing the wizard mid-test exits gently (the deadman is the
         // backstop for involuntary closes; this is the clean path for a deliberate X).
         if (cx.rtFieldArmed) {
@@ -17958,14 +18390,25 @@ function cxCVFitDownload() {
 // ── Step 5 · Disturbances — guided slow sweep populates the matrix ────────────
 function cxRenderMatrix(b) {
     let body = '';
-    // The creep-the-throttle instruction is the active guidance only before/while sweeping; once enough
-    // coverage is captured the step is done, so it would be a stale instruction — drop it there.
-    // Pause length matters (§11): the ripple map needs two complete ~2 s stationary windows at a speed
-    // before a value commits, so ~6 s per pause — the old 2–3 s satisfied only the tone-map coverage
-    // counter and left the ripple map (which picks the current-check RPM) empty.
-    const sweepInstr = '<p style="font-size:15px;line-height:1.5;">Press Start and <strong>let the engine sit at idle for ~10 seconds first</strong> — a rough or hunting idle is one of the most important readings. Then <strong>step the throttle up toward ~2000 RPM in small increments of roughly 50 RPM, pausing ~6 seconds at each speed</strong> so readings land in each band (the throttle doesn\'t need to be perfectly still — a wandering speed is fine, just don\'t move it on purpose during a pause). Then <strong>step back down to idle the same way</strong>. One pass usually doesn\'t cover every bin — repeat up/down until the coverage requirement is met. Note: this step may be optional depending on data already collected — follow wizard prompts.</p>';
+    // Pause length matters (§11): a ripple value needs TWO agreeing ~2 s stationary windows at a speed
+    // before it commits (agree-twice), so ~6 s per pause. The wizard holds a fixed test current
+    // (25% of the cap-table max ≤2000 RPM) through resTest for the whole sweep — ripple scales with
+    // current, so the table is only comparable across RPM at one amperage.
+    const lvl = cxMatrixLevelA();
+    const sweepInstr = '<p style="font-size:15px;line-height:1.5;"><strong>Map ripple across your RPM range with this Space-Invaders-style game.</strong> After pressing Start, sit at idle ~10 s while the wizard detects your idle speed. It then holds the alternator at a fixed test current' + (lvl > 0 ? ' (~' + Math.round(lvl) + ' A)' : '') + ' for the whole sweep — keep big electrical loads steady, and pause ~6 s at each speed.</p>';
     if (cx.matrixOn) {
-        body += sweepInstr + '<div id="cx-cov" style="margin:10px 0;">Coverage: checking…</div>' +
+        // Sweep-in-progress view is the "RPM Invaders" game (cxGame* below): y-axis = RPM, one
+        // invader per required 50-RPM bin, killed when its bin lands in /famatrix.csv. The ripple
+        // strip under it plots /filtripple.csv as it populates — a live sanity check on the values
+        // the map is admitting.
+        body += sweepInstr +
+            '<div style="position:relative;">' +
+            '<canvas id="cxGame" style="display:block; width:100%; height:400px; background:#161618; border-radius:6px;"></canvas>' +
+            '<div id="cxGameToast" style="position:absolute; left:50%; transform:translateX(-50%); top:12px; background:rgba(240,80,60,.92); color:#fff; font-size:12px; font-weight:600; padding:4px 12px; border-radius:12px; opacity:0; transition:opacity .25s; pointer-events:none; white-space:nowrap;"></div>' +
+            '</div>' +
+            '<div style="font-size:11px; color:#888; margin:8px 0 2px;">Measured filtered ripple per bin (sanity check) — <span style="color:#2ec4b6;">alternator</span> / <span style="color:#f0a500;">battery</span></div>' +
+            '<canvas id="cxGameRip" style="display:block; width:100%; height:90px; background:#161618; border-radius:6px;"></canvas>' +
+            '<div id="cx-cov" style="margin:10px 0;">Coverage: checking…</div>' +
             // Disabled until the poll confirms ≥80% coverage — clicking early only stops the sweep and drops
             // back to Start (no advance button below the gate), so it looks like "skip" but silently traps you.
             '<button id="cx-sweep-done" onclick="cxMatrixStop()" class="btn-primary btn-sm"' + (cx.matrixCov ? '' : ' disabled') + '>I\'m done sweeping</button>';
@@ -17982,32 +18425,356 @@ function cxRenderMatrix(b) {
         body += sweepInstr + '<button onclick="cxMatrixStart()" class="btn-primary" style="width:100%;padding:9px;">Start guided sweep</button>';
     }
     b.innerHTML = body;
+    // Game lifecycle follows the sweep state; Stop also restores the RPM sparkline strip.
+    if (cx.matrixOn) cxGameStart(); else cxGameStop();
+}
+// Fixed sweep current (RPM_RIPPLE_TABLE_SPEC §2.4): 0.25 × max cap-table amps over rows whose RPM
+// breakpoint ≤ 2000; if no breakpoint lands exactly at 2000, the first row above 2000 also competes
+// (its band covers part of ≤2000). Reads the same DOM inputs cxRtReady uses (amps valid in kW mode too).
+function cxMatrixLevelA() {
+    let best = 0, minAbove = Infinity, minAboveAmps = 0, sawAt2000 = false;
+    for (let i = 0; i < 10; i++) {
+        const cEl = document.getElementById('rpmCapCurrentTable' + i + '_input');
+        const rEl = document.getElementById('rpmTableRPMPoints' + i + '_input');
+        const amps = cEl ? parseFloat(cEl.value) : NaN;
+        const rpm = rEl ? parseFloat(rEl.value) : NaN;
+        if (!isFinite(amps) || !isFinite(rpm) || amps <= 0) continue;
+        if (rpm <= 2000) { if (amps > best) best = amps; if (rpm === 2000) sawAt2000 = true; }
+        else if (rpm < minAbove) { minAbove = rpm; minAboveAmps = amps; }
+    }
+    if (!sawAt2000 && isFinite(minAbove) && minAboveAmps > best) best = minAboveAmps;
+    return 0.25 * best;
 }
 function cxMatrixStart() {
-    cxShowTab('plots', 'displays');   // disturbance creep → watch current on Plots ▸ Short Term
-    cx.matrixOn = true;
+    const levelA = cxMatrixLevelA();
+    if (!(levelA > 1)) { alert('RPM/Amps table looks empty — the sweep needs it to size the held test current.'); return; }
+    cxShowTab('plots', 'displays');   // watch current on Plots ▸ Short Term
+    cx.matrixOn = true; cx.matrixLevelA = levelA; cx.matrixIdle = 0;
     cx.rtestState = undefined; cx.rtest = null; cx.rtestOn = false; cx.rtestRpm = 0;  // re-sweep → re-check resonance
+    cxGame.binLo = 0; cxGame.bins = null; cxGame.seeded = false;  // band rebuilt after idle detection
     commissionRender();
-    cxGet('faCommissionGate=1').then(() => { cxStopPoll(); cxPollTimer = setInterval(cxMatrixPoll, 2000); cxMatrixPoll(); });
+    cxGameToast('Sit at idle — detecting your idle RPM…');
+    // Idle-adaptive coverage band (§2.5): median of ~4 s of live RPM sets the floor to idle−50
+    // (a hardcoded 500 floor bricks the done button on engines idling above ~900). Snap to the
+    // 50-RPM grid, clamp to [400, 1200], fall back to 500 if the reading is absent/nonsensical.
+    const samples = [];
+    const sampler = setInterval(() => { if (isFinite(cx.liveRpm) && cx.liveRpm > 0) samples.push(cx.liveRpm); }, 300);
+    setTimeout(() => {
+        clearInterval(sampler);
+        if (!cx || !cx.matrixOn) return;   // torn down during detection
+        const s = samples.slice().sort((a, b) => a - b);
+        const med = s.length >= 5 ? s[Math.floor(s.length / 2)] : NaN;
+        cx.matrixIdle = isFinite(med) ? Math.round(med) : 0;
+        cxGame.binLo = isFinite(med) ? Math.min(1200, Math.max(400, Math.floor((med - 50) / CX_GAME_BIN_W) * CX_GAME_BIN_W)) : CX_GAME_BIN_LO;
+        cxGame.bins = null;   // next cxGameStart rebuilds on the detected band
+        cx.rtFieldArmed = true;   // field under wizard command → closeCommissionModal tears it down
+        cx.rtLastCmd = Date.now();
+        // Arm order matters: idle stamp + resTest level land BEFORE ripGameFill=1 — the firmware wipe
+        // stamps resTestTargetA and the staged idle into the session at arm.
+        cxGet('ripGameIdleRpm=' + cx.matrixIdle)
+            .then(() => cxGet('resTest=1'))
+            .then(() => cxGet('resTestTargetA=' + levelA.toFixed(1)))
+            .then(() => cxGet('faCommissionGate=1'))
+            .then(() => cxGet('ripGameFill=1'))
+            .then(() => { cxStopPoll(); cxPollTimer = setInterval(cxMatrixPoll, 2000); cxMatrixPoll(); })
+            .catch(() => cxGameToast('Device not responding — close and retry'));
+        commissionRender();
+    }, 4000);
 }
 function cxMatrixPoll() {
-    fetch(buildURL('/famatrix.csv')).then(r => r.text()).then(txt => {
-        const lines = txt.trim().split('\n');
-        const bins = new Set();
-        for (let i = 1; i < lines.length; i++) { const c = lines[i].split(','); if (c.length >= 3) bins.add(parseInt(c[0], 10)); }
-        // Coverage over the relevant idle→ceiling band (500–2000 RPM, 50-RPM bins). Gaps tolerated.
-        let covered = 0; const lo = 500, hi = 2000, total = (hi - lo) / 50;
-        for (let r = lo; r < hi; r += 50) { if (bins.has(r)) covered++; }
+    // Keepalive: the game holds the fixed test current through resTest — refresh the 8 s deadman on
+    // this 2 s poll so a closed/crashed tab auto-releases the field (and freezes+saves the table).
+    if (cx.matrixOn && cx.rtFieldArmed && cx.matrixLevelA) { cxGet('resTestTargetA=' + cx.matrixLevelA.toFixed(1)).catch(() => { }); cx.rtLastCmd = Date.now(); }
+    // One fetch serves kills, coverage AND the ripple strip — the table state IS the kill ground truth.
+    fetch(buildURL('/filtripple.csv')).then(r => r.text()).then(txt => {
+        const rows = txt.trim().split('\n').slice(1).map(l => l.split(','))
+            .filter(c => c.length >= 5)
+            .map(c => ({ rpm: +c[0], alt: +c[1], batt: +c[2], altSt: +c[3], battSt: +c[4] }));
+        cxGame.rip = rows;
+        cxGameRipDraw();
+        cxGamePollBins(rows);
+        // Coverage gate (§2.5): COMMITTED alt bins within the idle-adaptive band, same ≥80% threshold.
+        // Batt commits ride along opportunistically and are not gated on.
+        const lo = cxGame.binLo || CX_GAME_BIN_LO, hi = CX_GAME_BIN_HI, total = (hi - lo) / CX_GAME_BIN_W;
+        let covered = 0;
+        for (const p of rows) if (p.altSt === 2 && p.rpm >= lo && p.rpm < hi) covered++;
         const pct = Math.round(100 * covered / total);
         cx.matrixCov = pct >= 80;
         const el = document.getElementById('cx-cov');
-        if (el) el.innerHTML = 'Coverage: <strong style="color:' + (cx.matrixCov ? '#5a5' : '#f0a500') + ';">' + covered + '/' + total + ' RPM bins</strong> (' + pct + '%). ' + (cx.matrixCov ? 'Enough — you can stop.' : 'Keep stepping the throttle — pause ~6 s at each speed.');
+        if (el) el.innerHTML = 'Coverage: <strong style="color:' + (cx.matrixCov ? '#5a5' : '#f0a500') + ';">' + covered + '/' + total + ' RPM bins</strong> (' + pct + '%). ' + (cx.matrixCov ? 'Enough — you can stop.' : 'Clear the remaining targets — pause ~6 s on each.');
         const doneBtn = document.getElementById('cx-sweep-done'); if (doneBtn) doneBtn.disabled = !cx.matrixCov;
     }).catch(() => { });
 }
 function cxMatrixStop() {
-    cx.matrixOn = false; cxStopPoll();
-    cxGet('faCommissionGate=0').finally(() => commissionRender());
+    cx.matrixOn = false; cxStopPoll(); cx.rtLastCmd = 0; cx.rtFieldArmed = false;
+    // Freeze + persist the table FIRST, then the gentle resTest exit (mirrors cxRtFinish: command 0,
+    // let the slew actually get there, then release — firmware deferred-release covers the rest).
+    cxGet('ripGameFill=0')
+        .then(() => cxGet('resTestTargetA=0')).then(() => new Promise(r => setTimeout(r, 2500)))
+        .then(() => cxGet('resTest=0')).then(() => cxGet('faCommissionGate=0'))
+        .catch(() => { });
+    commissionRender();
+}
+
+// ── "RPM Invaders" — the guided sweep as a game ───────────────────────────────
+// Y-axis = RPM (auto-ranged so a low idle slides the floor down, never clipped), trace + ship
+// ride the same CSV1 ring as the sparkline strip (which is hidden while the game owns the screen).
+// TWO invaders per required 50-RPM bin (idle-adaptive floor → 2000): the right one dies when the
+// bin gets a qualifying pending value, the left one when the agree-twice pair commits. Kills are
+// GROUND TRUTH from the new RPM ripple table's state (rides the /filtripple.csv poll); the charge
+// ring is a local dwell estimate only. A disagree (pending replaced) regrows the right invader +
+// toasts. A FULL ring left unconfirmed for ~3 polls means the §11 admission gates rejected the
+// pause → "not admitted" toast + ring reset — that reject feedback is the whole point.
+const CX_GAME_BIN_LO = 500, CX_GAME_BIN_HI = 2000;   // default band; cxGame.binLo overrides the floor after idle detection
+const CX_GAME_BIN_W = 50;
+const CX_GAME_CHARGE_S = 4;      // nominal dwell-to-full-ring; real pending usually beats it
+const CX_GAME_MISS_MS = 6500;    // full ring unconfirmed this long (~3 polls) = admission reject
+const cxGame = { active: false, raf: 0, lastT: 0, bins: null, seeded: false, binLo: 0,
+                 coveredExtra: null, parts: [], rip: null, toastT: 0, view: null };
+// classic 11×8 invader bitmap
+const _cxInvBmp = ['00100000100', '00010001000', '00111111100', '01101110110',
+                   '11111111111', '10111111101', '10100000101', '00011011000'].map(s => s.split('').map(Number));
+
+function cxGameStart() {
+    const strip = document.getElementById('cx-rpm-strip');
+    if (strip) strip.style.display = 'none';
+    if (!cxGame.bins) {
+        cxGame.bins = {};
+        const lo = cxGame.binLo || CX_GAME_BIN_LO;
+        for (let r = lo; r < CX_GAME_BIN_HI; r += CX_GAME_BIN_W)
+            cxGame.bins[r] = { covered: false, pend: false, pendVal: 0, regrowT: 0, charge: 0, pendT: 0, wob: Math.random() * 6.28 };
+        cxGame.coveredExtra = new Set();
+    }
+    if (!cxGame.active) {
+        cxGame.active = true; cxGame.lastT = performance.now();
+        cxGame.raf = requestAnimationFrame(cxGameFrame);
+    }
+    cxGameRipDraw();
+}
+function cxGameStop() {
+    cxGame.active = false;
+    if (cxGame.raf) { cancelAnimationFrame(cxGame.raf); cxGame.raf = 0; }
+    const strip = document.getElementById('cx-rpm-strip');
+    if (strip) strip.style.display = '';
+}
+// Called from cxMatrixPoll with the parsed /filtripple.csv rows. Kill ground truth is the RPM ripple
+// table's per-bin ALT state: pending (altSt 1) kills the first invader, commit (altSt 2) kills both
+// (batt commits opportunistically alongside — never gated on). A pending VALUE that changed while
+// still pending means the agree-twice pair disagreed → the first invader regrows + toast.
+function cxGamePollBins(rows) {
+    if (!cxGame.bins) return;
+    const byRpm = {};
+    for (const p of rows) byRpm[p.rpm] = p;
+    for (const k in cxGame.bins) {
+        const bin = cxGame.bins[k], p = byRpm[k];
+        if (p && p.altSt === 2) {
+            if (!bin.covered) {
+                bin.covered = true; bin.pend = true; bin.regrowT = 0; bin.charge = 0; bin.pendT = 0;
+                if (cxGame.seeded) cxGameBoom(+k);   // seed poll = resumed prior coverage, no fireworks
+            }
+        } else if (p && p.altSt === 1) {
+            if (!bin.pend) {
+                bin.pend = true; bin.pendVal = p.alt; bin.charge = 0; bin.pendT = 0;
+                if (cxGame.seeded) cxGameBoom(+k);
+            } else if (Math.abs(p.alt - bin.pendVal) > 0.005) {
+                bin.pendVal = p.alt; bin.regrowT = 1.4;
+                if (cxGame.seeded) cxGameToast('Readings at ~' + (+k + CX_GAME_BIN_W / 2) + ' RPM disagree — hold it again');
+            }
+        } else if (!p && (bin.covered || bin.pend)) {
+            bin.covered = bin.pend = false;   // table wiped mid-sweep (re-sweep)
+        }
+    }
+    // Committed bins OUTSIDE the required band (e.g. below the detected idle floor) still earn a
+    // green tick — real data, they just don't count toward the 80% gate.
+    const lo = cxGame.binLo || CX_GAME_BIN_LO;
+    cxGame.coveredExtra = new Set(rows.filter(p => p.altSt === 2 && (p.rpm < lo || p.rpm >= CX_GAME_BIN_HI)).map(p => p.rpm));
+    cxGame.seeded = true;
+}
+function cxGameToast(msg) {
+    const t = document.getElementById('cxGameToast');
+    if (t) { t.textContent = msg; t.style.opacity = 1; }
+    cxGame.toastT = 2.4;
+}
+function cxGameBoom(rpmLo) {
+    const v = cxGame.view; if (!v) return;
+    const y = v.yOf(rpmLo + CX_GAME_BIN_W / 2);
+    for (let i = 0; i < 26; i++) {
+        const a = Math.random() * 6.28, sp = 30 + Math.random() * 120;
+        cxGame.parts.push({ x: v.tgtX, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                            life: 0.55 + Math.random() * 0.35, c: Math.random() < 0.5 ? '#2ec4b6' : '#f0a500' });
+    }
+}
+function cxGameFrame(now) {
+    if (!cxGame.active) return;
+    const c = document.getElementById('cxGame');
+    if (!c) { cxGameStop(); return; }            // step advanced / body re-rendered without the game
+    if (!c.clientWidth) {                        // modal hidden — idle cheaply until it's back
+        cxGame.lastT = now; cxGame.raf = requestAnimationFrame(cxGameFrame); return;
+    }
+    const dt = Math.min(0.05, (now - cxGame.lastT) / 1000); cxGame.lastT = now;
+    const rpm = (cx && isFinite(cx.liveRpm)) ? cx.liveRpm : NaN;
+    const curKey = (isFinite(rpm) && rpm >= (cxGame.binLo || CX_GAME_BIN_LO) && rpm < CX_GAME_BIN_HI)
+        ? Math.floor(rpm / CX_GAME_BIN_W) * CX_GAME_BIN_W : -1;
+    for (const k in cxGame.bins) {
+        const bin = cxGame.bins[k];
+        if (bin.regrowT > 0) bin.regrowT -= dt;
+        if (bin.covered) continue;
+        if (+k === curKey) {
+            if (!bin.pendT) {
+                bin.charge = Math.min(1, bin.charge + dt / CX_GAME_CHARGE_S);
+                if (bin.charge >= 1) bin.pendT = now;
+            } else if (now - bin.pendT > CX_GAME_MISS_MS) {
+                bin.pendT = 0; bin.charge = 0;
+                cxGameToast('Not admitted — too unsteady, hold this speed again');
+            }
+        } else {
+            // brief grace then drain; walking away also cancels a pending miss (commit may still
+            // arrive via the poll and kill the invader from afar)
+            bin.charge = Math.max(0, bin.charge - dt * 2.5);
+            if (bin.charge <= 0) bin.pendT = 0;
+        }
+    }
+    if (cxGame.toastT > 0) {
+        cxGame.toastT -= dt;
+        if (cxGame.toastT <= 0) { const t = document.getElementById('cxGameToast'); if (t) t.style.opacity = 0; }
+    }
+    cxGameDraw(c, now / 1000, rpm, curKey, dt);
+    cxGame.raf = requestAnimationFrame(cxGameFrame);
+}
+function cxGameDraw(c, t, rpm, curKey, dt) {
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+    const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const padT = 14, padB = 14, axisX = 40;
+    const shipX = axisX + (w - axisX) * 0.52;    // ship well left of the targets → long shot travel
+    const tgtX = w - 46;
+    // Auto range: default 450–2050, extended to keep the whole trace on screen (low idle, high revs).
+    let dmin = Infinity, dmax = -Infinity;
+    for (const v of _cxRpmSpark.rpm) if (isFinite(v)) { if (v < dmin) dmin = v; if (v > dmax) dmax = v; }
+    const lo = Math.min(450, isFinite(dmin) ? dmin - 40 : 450);
+    const hi = Math.max(2050, isFinite(dmax) ? dmax + 40 : 2050);
+    const yOf = r => (h - padB) - (r - lo) / (hi - lo) * (h - padT - padB);
+    cxGame.view = { tgtX, yOf };                 // for explosion placement between frames
+    const binPx = (h - padT - padB) * CX_GAME_BIN_W / (hi - lo);
+
+    // gridlines + labels (coarser when revving stretches the range)
+    const step = (hi - lo) > 2400 ? 500 : 250;
+    g.font = '10px -apple-system, sans-serif'; g.textAlign = 'right'; g.textBaseline = 'middle';
+    for (let gv = Math.ceil(lo / step) * step; gv <= hi; gv += step) {
+        const y = yOf(gv);
+        g.strokeStyle = '#242428'; g.beginPath(); g.moveTo(axisX, y); g.lineTo(w - 6, y); g.stroke();
+        g.fillStyle = '#666'; g.fillText(gv, axisX - 5, y);
+    }
+    // current-bin band highlight
+    if (curKey >= 0 && !cxGame.bins[curKey].covered) {
+        g.fillStyle = 'rgba(46,196,182,0.07)';
+        g.fillRect(axisX, yOf(curKey + CX_GAME_BIN_W), w - 6 - axisX, binPx);
+    }
+    // covered bins → green strips on the target column (required band + any extras like a low idle)
+    const drawTick = rLo => { g.fillRect(tgtX - 16, yOf(rLo + CX_GAME_BIN_W) + 1, 58, binPx - 2); };
+    g.fillStyle = 'rgba(85,170,85,0.16)';
+    for (const k in cxGame.bins) if (cxGame.bins[k].covered) drawTick(+k);
+    if (cxGame.coveredExtra) for (const r of cxGame.coveredExtra) drawTick(r);
+    // RPM trace (same 150-sample ~15 s ring as the sparkline), ending at the ship column
+    const S = _cxRpmSpark, N = S.N;
+    g.strokeStyle = '#2ec4b6'; g.lineWidth = 1.7; g.beginPath();
+    let started = false;
+    for (let i = 0; i < N; i++) {
+        const v = S.rpm[i]; if (!isFinite(v)) { started = false; continue; }
+        const x = axisX + 4 + i * (shipX - axisX - 4) / (N - 1), y = yOf(v);
+        started ? g.lineTo(x, y) : g.moveTo(x, y); started = true;
+    }
+    g.stroke(); g.lineWidth = 1;
+    if (isFinite(rpm)) {
+        const sy = yOf(rpm);
+        // ship chevron
+        g.fillStyle = '#2ec4b6'; g.beginPath();
+        g.moveTo(shipX + 12, sy); g.lineTo(shipX - 2, sy - 7); g.lineTo(shipX + 2, sy);
+        g.lineTo(shipX - 2, sy + 7); g.closePath(); g.fill();
+        // charging shot: long fast dashes from ship to the live target
+        if (curKey >= 0 && !cxGame.bins[curKey].covered && cxGame.bins[curKey].charge > 0.02) {
+            const ty = yOf(curKey + CX_GAME_BIN_W / 2);
+            const gr = g.createLinearGradient(shipX + 12, 0, tgtX - 10, 0);
+            gr.addColorStop(0, 'rgba(46,196,182,0.9)'); gr.addColorStop(1, 'rgba(46,196,182,0.15)');
+            g.strokeStyle = gr; g.lineWidth = 1 + cxGame.bins[curKey].charge * 2.5;
+            g.setLineDash([14, 10]); g.lineDashOffset = -t * 160;
+            g.beginPath(); g.moveTo(shipX + 12, sy); g.lineTo(tgtX - 10, ty); g.stroke();
+            g.setLineDash([]); g.lineWidth = 1;
+        }
+    }
+    // invaders + charge rings — TWO monsters per bin: right dies on pending, left on commit.
+    // A disagree regrows the right one briefly (regrowT flicker) — the pending value was replaced.
+    for (const k in cxGame.bins) {
+        const bin = cxGame.bins[k];
+        if (bin.covered) continue;
+        const cy = yOf(+k + CX_GAME_BIN_W / 2), hot = +k === curKey;
+        const wob = Math.sin(t * 2 + bin.wob) * 1.5;
+        const col = bin.pendT ? '#fff' : hot ? '#f0a500' : '#8a8a92';
+        const px = Math.max(1.1, (binPx - 3) / 9), iw = 11 * px, ih = 8 * px;
+        const drawInv = (xOff, alpha) => {
+            g.globalAlpha = alpha; g.fillStyle = col;
+            for (let r = 0; r < 8; r++) for (let cc = 0; cc < 11; cc++)
+                if (_cxInvBmp[r][cc]) g.fillRect(tgtX + xOff + wob - iw / 2 + cc * px, cy - ih / 2 + r * px, px + 0.5, px + 0.5);
+            g.globalAlpha = 1;
+        };
+        drawInv(-iw * 0.75, hot ? 1 : 0.85);                              // left monster (dies on commit)
+        if (!bin.pend) drawInv(iw * 0.75, hot ? 1 : 0.85);                // right monster (dies on pending)
+        else if (bin.regrowT > 0) drawInv(iw * 0.75, 0.2 + 0.4 * Math.abs(Math.sin(t * 10)));  // disagree regrow flicker
+        if (bin.charge > 0.02) {
+            g.strokeStyle = '#f0a500'; g.lineWidth = 2;
+            g.beginPath(); g.arc(tgtX + wob, cy, binPx * 0.75, -Math.PI / 2, -Math.PI / 2 + bin.charge * 6.283);
+            g.stroke(); g.lineWidth = 1;
+        }
+    }
+    // explosion particles
+    for (let i = cxGame.parts.length - 1; i >= 0; i--) {
+        const p = cxGame.parts[i];
+        p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 60 * dt;
+        if (p.life <= 0) { cxGame.parts.splice(i, 1); continue; }
+        g.globalAlpha = Math.min(1, p.life * 2); g.fillStyle = p.c;
+        g.fillRect(p.x, p.y, 2.5, 2.5); g.globalAlpha = 1;
+    }
+    // live RPM readout (replaces the hidden strip's number)
+    g.font = '700 16px -apple-system, sans-serif'; g.textAlign = 'right'; g.textBaseline = 'top';
+    g.fillStyle = '#2ec4b6';
+    g.fillText(isFinite(rpm) ? Math.round(rpm) + ' RPM' : '—', w - 8, 6);
+}
+// Ripple sanity strip: the RPM ripple table per bin, both detectors, redrawn per poll.
+// Committed values draw solid; pending (unconfirmed agree-twice candidates) draw dimmed.
+function cxGameRipDraw() {
+    const c = document.getElementById('cxGameRip');
+    if (!c || !c.clientWidth) return;
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+    const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const rip = (cxGame.rip || []).filter(p => p.alt > 0 || p.batt > 0);
+    g.font = '10px -apple-system, sans-serif';
+    if (!rip.length) {
+        g.fillStyle = '#555'; g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.fillText('No ripple committed yet — values appear here as pauses are admitted', w / 2, h / 2);
+        return;
+    }
+    const padL = 30, padR = 8, padT = 8, padB = 4;
+    const xLo = 400, xHi = 2100;   // matches the game's default RPM span
+    const yMax = Math.max(0.5, ...rip.map(p => Math.max(p.alt, p.batt))) * 1.15;
+    const X = r => padL + (r + CX_GAME_BIN_W / 2 - xLo) / (xHi - xLo) * (w - padL - padR);
+    const Y = v => (h - padB) - v / yMax * (h - padT - padB);
+    g.strokeStyle = '#242428'; g.beginPath(); g.moveTo(padL, Y(yMax / 1.15)); g.lineTo(w - padR, Y(yMax / 1.15)); g.stroke();
+    g.fillStyle = '#666'; g.textAlign = 'right'; g.textBaseline = 'middle';
+    g.fillText((yMax / 1.15).toFixed(1) + 'A', padL - 3, Y(yMax / 1.15));
+    for (const ser of [['alt', '#2ec4b6', 'altSt'], ['batt', '#f0a500', 'battSt']]) {
+        const pts = rip.filter(p => p[ser[0]] > 0).sort((a, b) => a.rpm - b.rpm);
+        if (!pts.length) continue;
+        g.strokeStyle = ser[1]; g.globalAlpha = 0.5; g.beginPath();
+        pts.forEach((p, i) => { const x = X(p.rpm), y = Y(p[ser[0]]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+        g.stroke(); g.globalAlpha = 1;
+        g.fillStyle = ser[1];
+        for (const p of pts) {
+            g.globalAlpha = (p[ser[2]] === 2) ? 1 : 0.35;   // pending = dimmed, committed = solid
+            g.beginPath(); g.arc(X(p.rpm), Y(p[ser[0]]), 2.2, 0, 7); g.fill();
+        }
+        g.globalAlpha = 1;
+    }
 }
 
 // ── Guided resonance current-check (RIPPLE_DETECTION_REARCH_SPEC §3.2/§3.3) ──────────────────
@@ -18020,7 +18787,7 @@ function cxMatrixStop() {
 //   undefined→'checking'→ 'none' (no ripple, silent) | 'idle' (Ready) → 'leveling' (3 commanded steps)
 //   → 'done' (fit) | 'failed'. REQUIRES the matching firmware (resTest/bcurRtest) flashed.
 const CX_RT_BAND = 150;    // ± RPM considered "in range" (green)
-const CX_RT_SETTLE = 20;   // s to hold a commanded level before Confirm is allowed — sized so ~8 of the §11 2 s stationary ring windows exist when Record unlocks (was 5 s when windows were 0.5 s)
+const CX_RT_MIN_WINS = 5;  // captured ring windows (~2 s each) required before Record unlocks — counts real admissions off /bcurrtest.csv, not a blind timer
 function cxRtestPanel() {
     if (cx.rtestState === undefined) { cx.rtestState = 'checking'; cxRtestInit(); return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>'; }
     if (cx.rtestState === 'checking') return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>';
@@ -18075,14 +18842,17 @@ function cxRtestPanel() {
     return h;
 }
 function cxRtestInit() {  // find the RPM with the worst measured filtered ripple → the resonance to characterize (§3.2)
-    // Columns: rpmLo, altFiltPkA, battFiltPkA (IExcessTau-filtered pk-pk == detector mExcessEma pk-pk). The
-    // belt resonance is a mechanical property common to both detectors, so the strongest filtered ripple across
+    // Columns: rpmLo, altFiltPkA, battFiltPkA, altSt, battSt (IExcessTau-filtered pk-pk == detector
+    // mExcessEma pk-pk, captured at the sweep's fixed current). COMMITTED values only (st 2) — a lone
+    // pending candidate never passed the agree-twice test and must not steer the pick. The belt
+    // resonance is mechanical and common to both detectors, so the strongest committed ripple across
     // either signal locates the RPM to run the 3-level check at (it records both fits in one pass).
     fetch(buildURL('/filtripple.csv')).then(r => r.text()).then(txt => {
         let bestP = 0, bestRpm = 0; const bl = txt.trim().split('\n');
         for (let i = 1; i < bl.length; i++) {
             const c = bl[i].split(','); if (c.length < 3) continue;
-            const p = Math.max(parseFloat(c[1]) || 0, parseFloat(c[2]) || 0);
+            const aOk = c.length < 5 || +c[3] === 2, bOk = c.length < 5 || +c[4] === 2;
+            const p = Math.max(aOk ? parseFloat(c[1]) || 0 : 0, bOk ? parseFloat(c[2]) || 0 : 0);
             if (p > bestP) { bestP = p; bestRpm = parseInt(c[0], 10) + 25; }
         }
         if (bestP >= 0.3) { cx.rtestPkpk = bestP; cx.rtestRpm = Math.round(bestRpm); cx.rtestState = 'idle'; }
@@ -18107,7 +18877,7 @@ function cxRtReady() {  // user is holding the resonant RPM → arm field-comman
     if (!capAt) capAt = iMax;   // test RPM above every breakpoint (or RPM column unreadable) → top-band cap
     if (!(capAt > 5)) { cx.rtestState = 'failed'; cx.rtFailMsg = 'Output ceiling at ' + cx.rtestRpm + ' RPM unknown (RPM-cap table empty) — can\'t size the levels.'; commissionRender(); return; }
     cx.rtLevels = [0.30 * capAt, 0.60 * capAt, 0.90 * capAt];  // 3 spread levels across what this speed can actually deliver
-    cx.rtLevel = 0; cx.rtPts = []; cx.rtest = null; cx.rtSettleStart = 0;
+    cx.rtLevel = 0; cx.rtPts = []; cx.rtest = null; cx.rtWinN = 0; cx.rtRingAt = 0;
     cx.rtFieldArmed = true;   // field is now under wizard command → closeCommissionModal must tear it down
     cx.rtestState = 'leveling';
     cxShowTab('plots', 'displays');
@@ -18117,7 +18887,7 @@ function cxRtReady() {  // user is holding the resonant RPM → arm field-comman
         .then(() => cxRtSetLevel(0));
 }
 function cxRtSetLevel(idx) {
-    cx.rtLevel = idx; cx.rtSettleStart = 0; cx.rtLastCmd = Date.now();  // reset settle clock + keepalive stamp
+    cx.rtLevel = idx; cx.rtWinN = 0; cx.rtRingAt = 0; cx.rtLastCmd = Date.now();  // reset window count + keepalive stamp (ring itself is cleared below)
     // Clear the ring at each level: the 64-slot ring would otherwise fill across 3 levels and freeze with
     // stale data (level 3 would capture nothing). bcurRtest=1 zeroes the count → each level starts fresh.
     cxGet('bcurRtest=1').then(() => cxGet('resTestTargetA=' + cx.rtLevels[idx].toFixed(1)));
@@ -18133,11 +18903,22 @@ function cxRtTick() {
     const rpm = cx.liveRpm, inRange = isFinite(rpm) && Math.abs(rpm - cx.rtestRpm) <= CX_RT_BAND;
     rpmEl.innerHTML = (isFinite(rpm) ? Math.round(rpm) : '—') + ' RPM ' +
         '<span style="padding:1px 8px;border-radius:8px;background:' + (inRange ? '#2a6' : '#a33') + ';color:#fff;font-size:12px;">' + (inRange ? 'IN RANGE' : 'OUT — adjust throttle') + '</span>';
-    if (!inRange) { cx.rtSettleStart = 0; if (msgEl) { msgEl.style.color = '#4a9eff'; msgEl.textContent = 'Bring RPM to ' + cx.rtestRpm + ' (±' + CX_RT_BAND + ').'; } if (btn) btn.disabled = true; return; }
-    if (!cx.rtSettleStart) cx.rtSettleStart = now;
-    const held = (now - cx.rtSettleStart) / 1000, left = Math.max(0, CX_RT_SETTLE - held);
-    if (left > 0) { if (msgEl) { msgEl.style.color = '#4a9eff'; msgEl.textContent = 'Settling… ' + left.toFixed(0) + ' s — hold steady.'; } if (btn) btn.disabled = true; }
-    else { if (msgEl) { msgEl.style.color = '#5a5'; msgEl.textContent = 'Settled — press Record.'; } if (btn) btn.disabled = false; }
+    if (!inRange) { if (msgEl) { msgEl.style.color = '#4a9eff'; msgEl.textContent = 'Bring RPM to ' + cx.rtestRpm + ' (±' + CX_RT_BAND + ').'; } if (btn) btn.disabled = true; return; }
+    // Ring is cleared at each level start, so its in-range row count IS this level's progress.
+    if (!cx.rtRingAt || now - cx.rtRingAt > 2500) {
+        cx.rtRingAt = now;
+        fetch(buildURL('/bcurrtest.csv')).then(r => r.text()).then(txt => {
+            const lines = txt.trim().split('\n'); let n = 0;
+            for (let i = 1; i < lines.length; i++) {
+                const c = lines[i].split(','); if (c.length < 3) continue;
+                if (Math.abs(parseFloat(c[0]) - cx.rtestRpm) <= CX_RT_BAND) n++;
+            }
+            cx.rtWinN = n;
+        }).catch(() => {});
+    }
+    const got = cx.rtWinN || 0;
+    if (got < CX_RT_MIN_WINS) { if (msgEl) { msgEl.style.color = '#4a9eff'; msgEl.textContent = 'Capturing steady windows… ' + got + ' of ' + CX_RT_MIN_WINS + ' — hold steady.'; } if (btn) btn.disabled = true; }
+    else { if (msgEl) { msgEl.style.color = '#5a5'; msgEl.textContent = 'Captured ' + got + ' steady windows — press Record.'; } if (btn) btn.disabled = false; }
 }
 function cxRtConfirm() {  // capture this level from the most-recent in-range windows (the stable hold)
     fetch(buildURL('/bcurrtest.csv')).then(r => r.text()).then(txt => {
@@ -18149,7 +18930,7 @@ function cxRtConfirm() {  // capture this level from the most-recent in-range wi
             const iAlt = c.length >= 5 ? parseFloat(c[3]) : 0, pkAlt = c.length >= 5 ? parseFloat(c[4]) : 0;
             if (Math.abs(rpm - cx.rtestRpm) <= CX_RT_BAND) inrange.push({ i: iA, p: pk, ia: iAlt, pa: pkAlt });
         }
-        // The user just held ≥CX_RT_SETTLE (20 s ≈ 8 of the §11 2 s ring windows) at this level → the last
+        // Record unlocked on ≥CX_RT_MIN_WINS captured in-range ring windows at this level → the last
         // few windows ARE this level. Use the operating current the ring logged (Bcur for battery,
         // MeasuredAmps for alt), NOT the commanded level, so house loads don't skew it.
         // MEDIAN of the recent windows (was max): with the firmware §10/§11 admission gates the ring rows
@@ -18595,6 +19376,40 @@ window.addEventListener('load', function () {
   }
 });
 
+// Live Data → Diag checkpoint pills (C1–C4) — same pattern as the Protections filter below,
+// but filtering whole <details class="checkpoint-section"> blocks (data-checkpoints is
+// space-separated; an empty list means All-view only, e.g. Wear Rate / Accuracy Scores).
+(function initDiagCheckpoints() {
+    // Pills now live only in Setup → Diag (the knobs). Live Data → Diag is results-only, never filtered.
+    const panel = document.getElementById('settings-diag');
+    if (!panel) return;
+    const pills = panel.querySelectorAll('.checkpoint-filters button[data-filter]');
+    if (!pills.length) return;
+    let active = 'all';
+
+    function apply() {
+        panel.querySelectorAll('.checkpoint-param').forEach(card => {
+            const cks = (card.dataset.checkpoints || '').split(/\s+/).filter(Boolean);
+            const show = (active === 'all') || cks.includes(active);
+            card.style.display = show ? '' : 'none';
+        });
+        panel.querySelectorAll('.checkpoint-intro p').forEach(p => {
+            p.classList.toggle('active', p.dataset.intro === active);
+        });
+    }
+
+    pills.forEach(btn => {
+        btn.addEventListener('click', () => {
+            pills.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            active = btn.dataset.filter;
+            apply();
+        });
+    });
+
+    apply();
+})();
+
 // Protections alt-tab — filter pills + intro toggling + empty-phase hiding.
 // Scoped to #alt-panel-protections so it can't affect the rest of the site.
 (function initProtectionsFilters() {
@@ -18610,8 +19425,10 @@ window.addEventListener('load', function () {
       const show = (activeFilter === 'all') || groups.includes(activeFilter);
       card.style.display = show ? '' : 'none';
     });
+    // data-intro accepts a space-separated group list (same convention as data-groups),
+    // so one paragraph can serve several pills — e.g. the shared Recovery intro.
     panel.querySelectorAll('.protections-intro p').forEach(p => {
-      p.classList.toggle('active', p.dataset.intro === activeFilter);
+      p.classList.toggle('active', (p.dataset.intro || '').split(/\s+/).includes(activeFilter));
     });
     panel.querySelectorAll('.protections-phase').forEach(sec => {
       const anyCard = Array.from(sec.querySelectorAll('.protections-param'))
@@ -20397,9 +21214,10 @@ function fastDiagIsVisible() {
     if (document.visibilityState !== 'visible') return false;
     const panel = document.getElementById('livedata-diag');
     if (!panel || !panel.classList.contains('active')) return false;
-    // Fast Alt-Current Monitor now lives in a collapsed-by-default <details>; only live when expanded
+    // The scope lives in the Waveforms <details> on the Diag tab; only live when that section is
+    // expanded AND actually on-screen (offsetParent is null when display:none)
     const det = document.getElementById('fa-monitor-details');
-    return !!(det && det.open);
+    return !!(det && det.open && det.offsetParent !== null);
 }
 let fastDiagFlipTick = 0;
 function fastDiagStartAuto() {
@@ -20469,7 +21287,7 @@ function downloadFaFlipPageCsv() {
 // then fixed 2020-byte pages — slots 0..refSlots-1 are the per-1000-RPM reference
 // pages, the rest are anomaly captures. Layout pinned by static_assert in firmware.
 // ─────────────────────────────────────────────────────────────────────────────
-// ── Current Ripple Analyzer: segmented Off/On toggles + the chart Pause/Resume (faAnomPause) ──
+// ── Fast current channel (faEnabled/faAlarmEnable): segmented Off/On toggles + the chart Pause/Resume (faAnomPause) ──
 // updateSegToggle mirrors updateCheckbox's pending-toggle reconciliation so an in-flight
 // optimistic press isn't reverted by a stale echo before the regulator confirms.
 function updateSegToggle(key, value) {
@@ -20978,7 +21796,7 @@ function bhwRender() {
 function bhwRenderPre(b) {
   const j = bhw.j || {};
   const low = (j.low != null) ? j.low : 30, delta = (j.delta != null) ? j.delta : 30;
-  const totalS = Math.round(((j.totalMs != null) ? j.totalMs : ((j.edges || 4) + 3) * (j.dwellMs || 3000)) / 1000);
+  const totalS = Math.round(((j.totalMs != null) ? j.totalMs : ((j.edges || 4) + 3) * (j.dwellMs || 8000)) / 1000);
   b.innerHTML =
     '<p style="font-size:15px;line-height:1.5;"><strong>Measure the battery\'s internal resistance.</strong> The regulator briefly raises and lowers the alternator output a few times and watches how far the battery voltage moves.</p>' +
     '<div style="margin:10px 0; padding:8px 10px; background:#222; border-radius:6px; font-size:13px; line-height:1.7;">' +
@@ -21032,7 +21850,7 @@ function bhwRenderRun(b) {
 }
 function bhwRunRefresh() {
   const j = bhw.j || {};
-  const total = (j.totalMs != null && j.totalMs > 0) ? j.totalMs : (((j.edges || 4) + 3) * (j.dwellMs || 3000));
+  const total = (j.totalMs != null && j.totalMs > 0) ? j.totalMs : (((j.edges || 4) + 3) * (j.dwellMs || 8000));
   const elapsed = bhw.startedAt ? (Date.now() - bhw.startedAt) : (j.elapsedMs || 0);
   const remain = Math.max(0, total - elapsed);
   const cd = document.getElementById('bhw-cd'); if (cd) cd.textContent = Math.ceil(remain / 1000) + 's';

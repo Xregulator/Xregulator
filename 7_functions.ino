@@ -551,7 +551,7 @@ float altTrendFeedSec   = 10.0f;    // TREND_FEED_SEC — min spacing between gr
 float altTrendMinSamp   = 2.0f;     // MIN_SAMPLES — a bucket needs ≥ this many graded steady-run samples before it commits
 // Output-steadiness band (5th criterion: the measured amps themselves must hold steady — directly
 // guards what gets recorded, letting the input bands stay tight) + detector signal conditioning:
-float altAmpsTolPct   = 5.0f;    // output-amps band, % of the filtered reading
+float altAmpsTolPct   = 4.0f;    // output-amps band, % of the filtered reading
 float altAmpsFloorA   = 1.5f;    // output-amps band floor (A) — governs at low output where ripple dominates
 float altAmpsSec      = 3.0f;    // output-amps steady time (s)
 float altEmaSec       = 0.5f;    // EMA time constant (s) on detector inputs RPM/duty/Vbus/amps (0 = off)

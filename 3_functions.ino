@@ -48,7 +48,7 @@ enum Csv1Index {
   CSV1_perfCountersResetElapsedS,  // seconds since "Reset Peak Values" press (or boot if never pressed); UI formats as "last X min" / "last X.X hr"
   CSV1_shutdownPhase,
   CSV1_BatteryV_raw,
-  CSV1_MeasuredAmps_filtered,
+  CSV1_MeasuredAmps_filtered,  // CC current-PID process variable — the OutputPIDSigSrc-selected signal (EMA/MA/raw), NOT the InputFilterTC display EMA (name kept for JS compatibility)
   CSV1_voltageTarget,
   CSV1_Icv,
   CSV1_WaterDepth_ft,  // NMEA2k depth ×3.28084 (meters → feet), scaled ×10 (0.1 ft); 0 if stale
@@ -2237,42 +2237,60 @@ void setupServer() {
     request->send(response);
   });
 
-  // ── Measured filtered ripple per RPM bin (RIPPLE_DETECTION_REARCH_SPEC §3.2) ──
-  // One row per VISITED 50-RPM bin: worst IExcessTau-filtered pk-pk (== detector mExcessEma pk-pk) across
-  // that row's amp bins, for BOTH detectors (alt = ADS MeasuredAmps, batt = INA Bcur). Small (≤80 rows),
-  // sent whole. The Step-6 current-check picks each detector's test RPM from ITS worst row here — the two
-  // may differ. Empty body (header only) = nothing captured yet.
+  // ── Measured filtered ripple per RPM bin (RPM_RIPPLE_TABLE_SPEC) ──
+  // Reads the game-scoped 1-D ripTab: one row per 50-RPM bin with any state, IExcessTau-filtered pk-pk
+  // (== detector mExcessEma pk-pk) captured at the game's fixed commanded current. First three columns
+  // keep the legacy layout (parsers read [0..2] after a length ≥ 3 check); altSt/battSt appended:
+  // 0 = none, 1 = pending (value = the unconfirmed candidate), 2 = committed. The wizard pick and the
+  // game's kill/coverage logic use committed only; the game strip may draw pending dimmed.
   server.on("/filtripple.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String out = "rpmLo,altFiltPkA,battFiltPkA\n";
-    if (faMatrix) {
-      for (int r = 0; r < FA_RPM_BINS; r++) {
-        uint16_t altMax = 0, battMax = 0;
-        for (int a = 0; a < FA_AMP_BINS; a++) {
-          const FaCell *c = &faMatrix[r * FA_AMP_BINS + a];
-          if (c->altFiltPkX100  > altMax)  altMax  = c->altFiltPkX100;
-          if (c->battFiltPkX100 > battMax) battMax = c->battFiltPkX100;
-        }
-        if (altMax == 0 && battMax == 0) continue;  // unvisited RPM row
-        out += String(r * FA_RPM_BIN_W);
-        out += ',';
-        out += String(altMax / 100.0f, 2);
-        out += ',';
-        out += String(battMax / 100.0f, 2);
-        out += '\n';
-      }
+    String out = "rpmLo,altFiltPkA,battFiltPkA,altSt,battSt\n";
+    for (int r = 0; r < RIPTAB_BINS; r++) {
+      const RipTabCell *c = &ripTab.cell[r];
+      if (c->state == 0) continue;
+      int altSt  = (c->state & RIPTAB_ALT_DONE)  ? 2 : (c->state & RIPTAB_ALT_PEND)  ? 1 : 0;
+      int battSt = (c->state & RIPTAB_BATT_DONE) ? 2 : (c->state & RIPTAB_BATT_PEND) ? 1 : 0;
+      uint16_t altV  = (altSt == 2)  ? c->altPkX100  : c->altPendX100;
+      uint16_t battV = (battSt == 2) ? c->battPkX100 : c->battPendX100;
+      out += String(r * FA_RPM_BIN_W);
+      out += ',';
+      out += String(altV / 100.0f, 2);
+      out += ',';
+      out += String(battV / 100.0f, 2);
+      out += ',';
+      out += String(altSt);
+      out += ',';
+      out += String(battSt);
+      out += '\n';
     }
     AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
     response->addHeader("Cache-Control", "no-cache");
     request->send(response);
   });
 
-  // ── Filtered-ripple COMMIT forensics (diagnostic) ──
-  // One row per committed cell peak, oldest→newest. crossings ~2 = one-shot transient (suspect phantom);
-  // many = sustained oscillation (likely real). meanShiftA (§11: |half-mean difference|, the stationarity
-  // statistic) and cmdTravelA are how close that window sat to the admission limits. Empty (header only)
-  // = no commits since boot. Small (≤RIP_FORENSIC_CAP rows).
+  // ── RPM ripple table session stamps (RPM_RIPPLE_TABLE_SPEC §4) ──
+  // "captured at N A, 13.1–13.6 V" for the wizard + Protections overlay annotation. levelA 0 = no
+  // sweep recorded yet; ibv fields 0 when no window folded.
+  server.on("/riptabmeta", HTTP_GET, [](AsyncWebServerRequest *request) {
+    bool ibvOk = (ripTab.sess.ibvMaxV >= ripTab.sess.ibvMinV);
+    String out = "{\"level\":" + String(ripTab.sess.levelA, 1)
+               + ",\"ibvMin\":" + String(ibvOk ? ripTab.sess.ibvMinV : 0.0f, 2)
+               + ",\"ibvMax\":" + String(ibvOk ? ripTab.sess.ibvMaxV : 0.0f, 2)
+               + ",\"idleRpm\":" + String(ripTab.sess.idleRpm)
+               + ",\"epoch\":" + String(ripTab.sess.epoch)
+               + ",\"gameActive\":" + String((ripGameFill || ripTabPendingWipe) ? 1 : 0) + "}";
+    AsyncWebServerResponse *response = request->beginResponse(200, "application/json", out);
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
+  // ── Filtered-ripple fold forensics (diagnostic) ──
+  // One row per ripTab fold event, oldest→newest — the "why won't this bin settle" trace. event:
+  // P = pending set, D = disagree (otherA = the pending it replaced), C = commit (otherA = the pair
+  // partner; the committed value is their average). pkpkA is always the window's own value.
+  // crossings ~2 = one-shot transient; many = sustained oscillation.
   server.on("/ripforensic.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String out = "detector,rpm,ampLo,meanA,pkpkA,meanShiftA,cmdTravelA,crossings\n";
+    String out = "detector,rpm,ampLo,meanA,pkpkA,meanShiftA,cmdTravelA,crossings,event,otherA\n";
     uint16_t n = ripForensicCount < RIP_FORENSIC_CAP ? ripForensicCount : RIP_FORENSIC_CAP;
     for (uint16_t i = 0; i < n; i++) {
       uint16_t idx = (ripForensicHead + RIP_FORENSIC_CAP - n + i) % RIP_FORENSIC_CAP;
@@ -2281,7 +2299,7 @@ void setupServer() {
       out += ',' + String(p.rpm) + ',' + String(p.ampLo) + ',';
       out += String(p.meanX100 / 100.0f, 2) + ',' + String(p.pkpkX100 / 100.0f, 2) + ',';
       out += String(p.shiftX100 / 100.0f, 2) + ',' + String(p.cmdTravelX100 / 100.0f, 2) + ',';
-      out += String(p.crossings) + '\n';
+      out += String(p.crossings) + ',' + String(p.event) + ',' + String(p.otherX100 / 100.0f, 2) + '\n';
     }
     AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
     response->addHeader("Cache-Control", "no-cache");
@@ -3253,6 +3271,27 @@ void setupServer() {
       queueConsoleMessageF("Commissioning matrix gate %s", faCommissionGate ? "RELAXED (Phase 2)" : "strict");
     }
 
+    // ── RPM ripple table game-fill window (RPM_RIPPLE_TABLE_SPEC §2.2) ──
+    // Arm = wipe + stamp + open the fold (deferred to Core 1); disarm = freeze + persist. The browser
+    // sends ripGameIdleRpm and the resTest level BEFORE arming — the wipe stamps both into the session.
+    else if (request->hasParam("ripGameFill")) {
+      foundParameter = true;
+      bool on = (request->getParam("ripGameFill")->value().toInt() != 0);
+      if (on) {
+        ripTabPendingWipe = true;
+      } else {
+        ripGameFill = false;
+        ripTabPendingWipe = false;  // cancel an arm that never executed
+        ripTabPendingSave = true;
+      }
+      queueConsoleMessageF("RPM ripple sweep %s", on ? "started (table wiped)" : "ended (table frozen + saved)");
+    }
+    else if (request->hasParam("ripGameIdleRpm")) {
+      foundParameter = true;
+      long v = request->getParam("ripGameIdleRpm")->value().toInt();
+      ripIdleRpmStage = (uint16_t)((v < 0) ? 0 : (v > 4000) ? 4000 : v);
+    }
+
     // ── Active 3-current resonance test (COMMISSIONING_SPEC §3.2): arm = clear the ring + collect ──
     else if (request->hasParam("bcurRtest")) {
       foundParameter = true;
@@ -3294,6 +3333,9 @@ void setupServer() {
     else if (request->hasParam("commissionAbort")) {
       foundParameter = true;
       faCommissionGate = false;
+      // Abort is a teardown path too: committed cells from an aborted sweep are honest data captured
+      // at level — freeze + persist, never discard (RPM_RIPPLE_TABLE_SPEC §2.2).
+      if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
       testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
       bool reverted = commissionRestore();  // revert every setting to the Phase-0 snapshot
       commissionSetState(0);                // NOT_COMMISSIONED
@@ -3308,6 +3350,7 @@ void setupServer() {
     else if (request->hasParam("commissionDone")) {
       foundParameter = true;
       faCommissionGate = false;
+      if (ripGameFill || ripTabPendingWipe) { ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true; }
       testProtectionsEnabled = commissionProtBackup;  // restore the user's manual-tuning protection setting
       settingRemove(NK_commissionSnap);     // commit the new tune (no snapshot ⇒ reboot won't revert)
       commissionClearMinPctBackup();        // discard the Min% backup too — the new floors stay
@@ -4642,11 +4685,17 @@ void setupServer() {
     if (request->hasParam("bhStepDeltaA")) {
       foundParameter = true;
       bhStepDeltaA = request->getParam("bhStepDeltaA")->value().toFloat();
+      if (bhStepDeltaA < 5.0f) bhStepDeltaA = 5.0f;
       settingWrite(NK_bhStepDeltaA, String(bhStepDeltaA, 1).c_str());
+      if (bhDwellMs < bhMinDwellMs()) {   // bigger step lengthens the slew traverse — stretch dwell to match
+        bhDwellMs = bhMinDwellMs();
+        settingWrite(NK_bhDwellMs, String(bhDwellMs).c_str());
+      }
     }
     if (request->hasParam("bhDwellSec")) {
       foundParameter = true;   // UI is seconds, internal is ms
       bhDwellMs = (uint32_t)(request->getParam("bhDwellSec")->value().toFloat() * 1000.0f);
+      if (bhDwellMs < bhMinDwellMs()) bhDwellMs = bhMinDwellMs();
       settingWrite(NK_bhDwellMs, String(bhDwellMs).c_str());
     }
     if (request->hasParam("bhNumEdges")) {
@@ -5374,8 +5423,9 @@ void setupServer() {
       queueConsoleMessageF("IExcess threshold floor set to: %.1fA", IExcessFloorA);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    // CV battery-current detector floor (§G) — separate from IExcessFloorA so commissioning can
-    // set it from measured battery ripple (≈3× smaller than alternator ripple) instead of the proxy.
+    // CV battery-current detector floor (§G) — separate from IExcessFloorA because battery ripple is
+    // quieter (≈3× smaller than alternator ripple), so it can sit lower and catch over-current sooner.
+    // Plain operator setting: commissioning measures ripple for the Protections plot but never writes it.
     if (request->hasParam("IExcessFloorABatt")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessFloorABatt")->value();
@@ -7208,6 +7258,12 @@ void SendWifiData() {
     uint8_t protMask = g_protEventLatch;
     g_protEventLatch &= ~protMask;
 
+    // The "Alt Current filtered" plot trace must show the SAME signal the CC current PID
+    // acts on — the OutputPIDSigSrc-selected PV (mirrors the ternary in AdjustFieldLearnMode),
+    // not MeasuredAmps_filtered's InputFilterTC display EMA.
+    float pidAltPV = (OutputPIDSigSrc == 2) ? MeasuredAmps : (OutputPIDSigSrc == 1) ? g_pidMA_N
+                                                                                    : g_pidI_filtered;
+
     int payload1Len = snprintf(payload1, PAYLOAD1_SIZE,
                                "%d,"  // CSV1_FIELD_COUNT
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
@@ -7247,7 +7303,7 @@ void SendWifiData() {
                                SafeInt((int32_t)((millis() - perfCountersResetMs) / 1000UL)),  // seconds since perf-counters reset (0 = boot)
                                SafeInt(shutdownPhase),
                                SafeInt(BatteryV, 100),                  // raw ADS1115
-                               SafeInt(MeasuredAmps_filtered, 100),
+                               SafeInt(pidAltPV, 100),  // CSV1_MeasuredAmps_filtered — CC PID PV (OutputPIDSigSrc-selected)
                                SafeInt(ChargingVoltageTarget * 100),
                                SafeInt(Icv * 100),
                                // Water depth in feet ×10 (0.1 ft resolution). 0 if NMEA depth stale or unavailable.

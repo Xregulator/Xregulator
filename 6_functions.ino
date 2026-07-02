@@ -2005,6 +2005,12 @@ void AdjustFieldLearnMode() {
       // (wizard closed / disconnected), auto-release so the field isn't left commanded to a stale test level.
       if (resTestActive && (millis() - resTestLastCmdMs > RES_TEST_DEADMAN_MS)) {
         resTestActive = false; resTestTargetA = 0.0f; resTestReleasing = false;
+        // A dead browser also ends the RPM Invaders sweep: close the fold window (folds from AUTO
+        // running would poison the fixed-current table) and persist what committed — every teardown
+        // path saves, including this one.
+        if (ripGameFill || ripTabPendingWipe) {
+          ripGameFill = false; ripTabPendingWipe = false; ripTabPendingSave = true;
+        }
         queueConsoleMessage("Resonance current-check auto-released (no command refresh)");
       }
 
@@ -2307,24 +2313,31 @@ void AdjustFieldLearnMode() {
         static float cv_I_aw_cap = 100.0f;
 
         // ── CV battery-current control gate + load-offset filter (§G) ────────
-        // In absorption/float, regulate BATTERY current (Bcur) instead of alternator current
-        // (MeasuredAmps): Bcur is co-sampled with the controlled voltage IBV at the fast-INA cadence
-        // and couples the inner loop directly to what charges the battery. Bulk stays alternator-current
-        // (bulk IS an alternator-current limit). MaintainMode is independent (already uses Bcur below).
+        // In every constant-voltage regime (absorption, float, AND the manual voltage-target hold
+        // TARGET_V), regulate BATTERY current (Bcur) instead of alternator current (MeasuredAmps):
+        // Bcur is co-sampled with the controlled voltage IBV at the fast-INA cadence and couples the
+        // inner loop directly to what charges the battery. Bulk stays alternator-current (bulk IS an
+        // alternator-current limit). MaintainMode is independent (already uses Bcur below).
         //   Availability is LATCHED per CV session at enteringCV (cvBattSessionLatched, set further down)
         //   so config/source changes don't thrash mid-session; the live stage + fast-INA are checked here.
         //   cvBattSessionLatched / cvLoadOffset_filt / lastCvBattActive persist across ticks (function
         //   statics, like cv_I_track / voltageTargetSlewed below). Read here uses last tick's latch — it
-        //   only changes at session boundaries, and the CV iExcess that depends on it can't arm until
-        //   absorption (many ticks after the latch is set).
+        //   only changes at session boundaries. On a TARGET_V entry straight from idle the latch is set
+        //   later this tick, so cvBattActive holds false for one tick and the enteringCvBatt bumpless
+        //   seed fires the next tick — a few-ms handoff, not a control glitch.
         static bool  cvBattSessionLatched = false;
         static float cvLoadOffset_filt = 0.0f;   // EMA of MeasuredAmps − Bcur (house-load offset, A)
         static bool  lastCvBattActive = false;
         int  cvStageNow = getChargeStageDisplayCode();
+        // Battery-current control/protection engages in EVERY constant-voltage regime, not just the
+        // natural absorption/float stages: TARGET_V is the manual voltage-target hold, which runs the
+        // identical voltage PI. getChargeStageDisplayCode() special-cases TargetVoltageMode to TARGET_V
+        // (priority over the float branch), so it must be listed explicitly or the gate excludes it.
         bool cvBattActive = cvBattSessionLatched && inaFastModeActive
-                            && (cvStageNow == CHARGE_STAGE_ABSORPTION || cvStageNow == CHARGE_STAGE_FLOAT);
+                            && (cvStageNow == CHARGE_STAGE_ABSORPTION || cvStageNow == CHARGE_STAGE_FLOAT
+                                || cvStageNow == CHARGE_STAGE_TARGET_V);
         g_cvBattCurrentActive = cvBattActive;
-        bool enteringCvBatt = (cvBattActive && !lastCvBattActive);  // bulk→absorption source handoff edge
+        bool enteringCvBatt = (cvBattActive && !lastCvBattActive);  // source handoff edge into any CV regime
         lastCvBattActive = cvBattActive;
         // House-load offset I_load = MeasuredAmps − Bcur (alternator minus battery current). Light EMA so it
         // tracks real load changes within ~1 s without chasing INA ripple. Used ONLY to lower the
@@ -2454,7 +2467,7 @@ void AdjustFieldLearnMode() {
                 }
               }
             }
-            g_mExcessEma = mExcessEma;       // tuning traces (CV detector owns the export when its gate is open)
+            g_mExcessEma = mExcessEma;       // CV detector owns the export while its gate is open (script.js iExcessLiveOnCsv1 mirrors this gate)
             g_iExcessThreshold = E;
           } else {
             // Gate closed (battV below target − ArmMargin, or protections off / tuning) — release
@@ -2556,7 +2569,7 @@ void AdjustFieldLearnMode() {
                 }
               }
             }
-            g_mExcessEma = mExcessEmaBulk;   // bulk owns the tuning export while its gate is open
+            g_mExcessEma = mExcessEmaBulk;   // bulk owns the export while its gate is open (script.js iExcessLiveOnCsv1 mirrors this gate)
             g_iExcessThreshold = E;
           } else {
             // Gate closed (near/above target — CV iExcess owns this regime, or protections off).
@@ -2733,9 +2746,13 @@ void AdjustFieldLearnMode() {
         {
           static bool lastCVTuningMode = false;
 
-          // Discard accumulator on CVTuningMode turn-off — commit is always manual
+          // Discard accumulator on CVTuningMode turn-off — commit is always manual.
+          // Snap the real target back to the commanded (non-test) value so the wave's HIGH
+          // offset can't glide off at vTgtRampDn — otherwise CV keeps chasing the leftover
+          // test peak (max current) for minutes after the test ends.
           if (lastCVTuningMode && !CVTuningMode) {
             cvTuningScore = {};
+            ChargingVoltageTarget = ChargingVoltageTargetReq;
           }
           lastCVTuningMode = (CVTuningMode != 0);
 
@@ -3832,7 +3849,7 @@ const char *reasonToString(FieldEventReason r) {
 /**
  * selectFieldControlMode()
  * PURE function - determines mode from tick snapshot only
- * Priority: Disabled (user off switch) > Manual (unrestricted) > Critical > Warning > AutoZero > Lockout > Auto
+ * Priority: Disabled (user off switch) > Manual (unrestricted) > Critical > Warning > Lockout > Auto
  */
 FieldControlMode selectFieldControlMode(const TickSnapshot &tick) {
 
@@ -4292,12 +4309,13 @@ TickSnapshot buildTickSnapshot(uint32_t currentMillis, uint32_t dt_ms) {
     tempDataVeryStale = true;
   }
 
-  // Idle-aware gate: while the engine is below running speed (RPM < 200) the temp task intentionally
-  // stretches its poll to 10s/10min (see the temp task in 2_functions.ino), so the feed reads "stale"
-  // by the 20s rule for long stretches BY DESIGN. The field is off and the alternator can't be heating,
-  // so there is nothing to protect — don't raise a CRITICAL stale cut (it just loops the 2s cooldown).
-  // Freshness is re-enforced the instant the engine spins back up (RPM >= 200) and the field could be live.
-  if (RPM < 200) {
+  // Idle-aware gate: below running speed the temp task stretches its poll (5s/60s in 2_functions.ino),
+  // so the feed reads "stale" by the 20s rule BY DESIGN — field is off, nothing to protect, and a
+  // CRITICAL stale cut would just loop the 2s cooldown. Suppression holds 15s past spin-up because
+  // the last engine-off sample can be 60s old; a genuinely dead sensor still cuts 15s after start.
+  static uint32_t lastBelowRunRpmMs = 0;
+  if (RPM < 200) lastBelowRunRpmMs = tick.nowMs;
+  if (RPM < 200 || (uint32_t)(tick.nowMs - lastBelowRunRpmMs) < 15000UL) {
     tempDataVeryStale = false;
   }
 
