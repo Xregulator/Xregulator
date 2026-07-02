@@ -2206,7 +2206,7 @@ int ShuntResistanceMicroOhm = 100;    // Shunt resistance in microohms
 int ChargedDetectionTime = 180;       // Time at charged state to consider 100% (seconds) (3 mins, industry standard for lithium)
 int IgnoreTemperature = 0;            // If no temp sensor, set to 1
 int IgnoreRPM = 0;                    // If RPM sensor absent or malfunctioning, set to 1 to bypass RPM gate
-int MinRPMForField = 200;             // Field is cut when RPM is below this threshold (RPM)
+int MinRPMForField = 125;             // Field is cut when RPM is below this threshold (RPM). Engine (crank) RPM. Floored to no lower than the 100-RPM noise floor in ReadAnalogInputs — values <=100 collapse to that floor.
 // Engine-stopped fast field cut: when RPM is a confirmed zero, drop the field immediately
 // instead of letting the graceful shutdown ramp keep it energized. At true 0 RPM the
 // alternator makes no output, so there is no load-dump risk; an energized field during the
@@ -2247,7 +2247,7 @@ unsigned long FIELD_COLLAPSE_DELAY = 30000;  // ms
 // lockout instead of borrowing the 30s fault cooldown. Lets charging resume ~immediately on engine
 // restart. Only the RPM-gate path uses this; every real fault (OV, OT, voltage disagreement) keeps
 // FIELD_COLLAPSE_DELAY. Not user-adjustable by design.
-unsigned long RPM_RECOVERY_DELAY = 2000;  // ms
+unsigned long RPM_RECOVERY_DELAY = 500;  // ms — short by design: while the engine sits stopped this cooldown re-arms every window (see 6_functions runShutdownPath), so on restart you wait out whatever remains of the current window before the field re-engages. Keep it small so that residual wait is short.
 // Delay applied to the CURRENTLY-armed lockout, set at arm time (RPM_RECOVERY_DELAY for the RPM gate,
 // else FIELD_COLLAPSE_DELAY). The remaining/clear/inLockout checks read this, not the constant.
 unsigned long activeCollapseDelay = 30000;  // ms
@@ -3933,9 +3933,11 @@ uint32_t g_fastOvHardCount = 0;
 // lock; a torn read only blurs a tuning display, never control. Direction per gate: peak for
 // trip-type gates (slew/drift/tone), trough for the RPM edge-margin pass-gate.
 enum { ROLL_RPMEDGE = 0, ROLL_AMPSDRIFT, ROLL_AMPSDRIFTEXC, ROLL_TONEPK, ROLL_LDSLEW, ROLL_CVSLOPE,
-       // Ripple-capture (faFiltRippleUpdate) admission gates — each is (window quantity − its
-       // effective limit), peak over 10s; <=0 = that gate passing. Same knobs as the Path-A drift gate.
-       ROLL_RIPCMDEXC, ROLL_RIPALTEXC, ROLL_RIPBATTEXC, ROLL_COUNT };
+       // Ripple-capture (faFiltRippleUpdate) admission gates (§11 stationarity). All four entries are
+       // (window quantity − its effective limit), peak over 10s, <=0 = passing: command travel vs the
+       // amplitude limit, alt/batt half-window mean-shift vs the stationarity limit, and RPM half-window
+       // mean-shift vs its stationarity limit (replaced the old bin-edge-margin trough 2026-07-01).
+       ROLL_RIPCMDEXC, ROLL_RIPALTEXC, ROLL_RIPBATTEXC, ROLL_RIPRPMSHIFT, ROLL_COUNT };
 #define ROLL_EMPTY (-2000000000)   // CSV sentinel: no sample in the 10s window (distinct from SafeInt's -1)
 struct Roll10s {
   float v[10];
@@ -4611,7 +4613,8 @@ void setup() {
   if (!gRoll) Serial.println("FATAL: gRoll ps_malloc failed");
   else {
     memset(gRoll, 0, sizeof(Roll10s) * ROLL_COUNT);
-    gRoll[ROLL_RPMEDGE].isMin = true;   // worst (smallest) RPM edge margin is the binding case
+    gRoll[ROLL_RPMEDGE].isMin = true;      // worst (smallest) RPM edge margin is the binding case
+    // ROLL_RIPRPMSHIFT is a peak-tracked excess like the other rip* rows (§11) — no isMin
   }
   size_t loopStackBytes = getArduinoLoopTaskStackSize();
   UBaseType_t loopHighWaterBytes = uxTaskGetStackHighWaterMark(NULL);  // bytes on ESP32-S3

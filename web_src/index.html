@@ -11031,7 +11031,7 @@
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Resonance &amp; Ripple Map</span>
           <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A learned table of the strongest current-ripple tones at every engine speed and load — a separate, long-running dataset from the worst-value table below. Each cell is a rolling recent-average of the last 4 qualified windows (fixed depth, not user-adjustable), so it tracks the machine lately and never freezes; the map persists until Clear Map. Download CSV saves the whole table; Clear Map wipes it (after a belt or alternator change) and it re-learns on the next steady runs. Clear Map affects ONLY this map; it does not reset the worst-value table below (use Reset Worsts there for that). A tone that stays at a fixed frequency as RPM changes points to a resonance (drive-system most likely, then crankshaft torsional, then electrical); a tone that scales with RPM is ordinary rectifier ripple.</span></span>
-          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadCsv('/famatrix.csv','Resonance and Ripple Map')">Download CSV</button>
+          <button type="button" class="btn-secondary btn-sm" style="margin-left:auto;" onclick="downloadRippleBundle()">Download CSV</button>
           <button type="button" class="btn-danger-ghost btn-sm"
             onclick="if(!currentAdminPassword){alert('Please unlock settings first');return;} if(confirm('Clear the entire Resonance & Ripple Map? Every learned RPM/current cell is wiped and re-learned from scratch on the next steady runs. This cannot be undone.')){fetchWithTimeout(buildURL('/get?password='+encodeURIComponent(currentAdminPassword)+'&FastAltClearMatrix=1'),{},5000).then(()=>{}).catch(()=>{});}">Clear Map</button>
         </div>
@@ -11161,7 +11161,7 @@
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
           <span style="font-size:14px; font-weight:600;">Anomaly Detection &amp; Ripple-Map Gating</span>
         </div>
-        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">These steady-state gates feed three things: the fault (anomaly) detector and the Resonance &amp; Ripple Map (both on the fast-alternator channel), and the <strong>measured filtered-ripple capture</strong> (the slow-sensor pk-pk behind the Protections ripple plots and the commissioning current check). The current-drift limits apply to all three; the RPM Margin applies to the <strong>map only</strong> — the detector ignores RPM so it still works with a dead tach. The ripple capture adds its own live rows under the Drift Floor: command steady, alternator current steady, battery current steady — each shows its 10s worst margin vs the limit (green = windows are admitting).</div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">These steady-state gates feed two things that share the fast-alternator channel: the fault (anomaly) detector and the Resonance &amp; Ripple Map. The current-drift gates apply to both; the RPM Margin applies to the <strong>map only</strong> — the detector ignores RPM so it still works with a dead tach. The <strong>measured-ripple capture</strong> (Protections ripple plots + commissioning current check) has its OWN gates and knobs — the separate card below — so tuning capture admission can never loosen fault-detector arming.</div>
 
         <div class="form-row">
           <div class="form-label">Sound Alarm on Fault (<span id="faAlarmEnable_echo">?</span>):
@@ -11197,11 +11197,8 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State Current Drift Floor (A) (<span id="faAmpsDriftFloorA_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed output current — a 1-second-averaged current. A window is discarded unless that smoothed current drifts less than the larger of this floor or the slope % (below) across the window. The 1-second averaging removes the ripple being measured, so the gate sees only slow drift, not the tones.<br><br>The same floor/slope limit also gates the <strong>measured filtered-ripple capture</strong> (the data behind the Protections ripple plots and the commissioning current check), where it is checked three ways per 0.5-second window: the current <em>command</em> must not travel more than the limit (rejects deliberate ramps — test steps, warm-up, mode glides), and each sensor's own 0.3-second-averaged current (alternator and battery separately) must drift less than the limit. The three lines below show each check's worst margin vs the limit over the last 10 s — at or below zero (green) means windows are being admitted. These capture gates are never relaxed, even during the commissioning sweep: a steady-state ripple number cannot be measured while current is ramping.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Applies to the smoothed output current — a 1-second-averaged current. A window is discarded unless that smoothed current drifts less than the larger of this floor or the slope % (below) across the window. The 1-second averaging removes the ripple being measured, so the gate sees only slow drift, not the tones.</span></span>
             <span id="faAmpsDriftFloorA_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
-            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command steady, 10s worst vs limit: —</span>
-            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt current steady, 10s worst vs limit: —</span>
-            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt current steady, 10s worst vs limit: —</span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -11215,7 +11212,7 @@
         <hr />
         <div class="form-row">
           <div class="form-label">Steady-State Current Drift Slope (%) (<span id="faAmpsDriftPct_echo">?</span>):
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, as a percent of mean current. Same 1-second-averaged current; the gate allows whichever is larger — this percentage or the fixed floor. Also feeds the measured filtered-ripple capture gates (see the Drift Floor tooltip), where the percent term uses each detector's own mean current.</span></span>
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, as a percent of mean current. Same 1-second-averaged current; the gate allows whichever is larger — this percentage or the fixed floor.</span></span>
             <span id="faAmpsDriftPct_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">10s peak drift: —</span>
           </div>
           <div class="form-input">
@@ -11268,6 +11265,67 @@
               <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
             </form>
           </div>
+        </div>
+      </div>
+
+      <div class="settings-card">
+        <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
+          <span style="font-size:14px; font-weight:600;">Measured-Ripple Capture Gating</span>
+        </div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">These gates qualify the <strong>measured filtered-ripple capture</strong> — the slow-sensor (ADS alternator + INA battery) pk-pk behind the Protections ripple plots and the commissioning current check. A capture window folds only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the map. Every gate is shown live below (green = passing over the last 10 s); the admitted counters at the bottom show throughput — if all rows are green but the counters freeze, a protection clamp or a starved window is rejecting. Never relaxed during the commissioning sweep: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when windows admit. Gates with no knob: no protection clamp during the window, at least half the expected samples present, RPM's two half-averages must match (same stationarity test as current), and the map fill (not the wizard's test capture) additionally requires the signal to oscillate about its baseline at least 4 times in the window — a one-time step or glitch crosses only once or twice and can never become a map value.</div>
+
+        <div class="form-row">
+          <div class="form-label">Capture Window (ms) (<span id="ripWinMs_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long each ripple measurement lasts. The recorded pk-pk is the <em>smaller</em> of the two half-window pk-pks (a one-time event shows in only one half, so it can't inflate the value), and the stationarity gates are judged between the same two halves. Each HALF must hold at least one full cycle of the slowest disturbance you care about — a hunting idle wanders with a ~1–2 second period, hence the 2000 ms default. Shorter windows see slow hunt as drift and reject or under-read it. <strong>Changing this changes the measured quantity itself</strong> — map cells and the current-check fit captured under a different window length are not comparable. After changing it: clear the map and re-run the commissioning current check.</span></span>
+            <span id="ripRpmGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">RPM stationarity (mean-shift), 10s worst vs limit: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="ripWinMs" type="number" step="100" min="500" max="4000" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Current Drift Floor (A) (<span id="ripDriftFloorA_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The shared tolerance floor, used two ways. (1) Command gate: the current <em>command</em> must not travel more than the larger of this floor or the slope % below (rejects deliberate ramps — test steps, warm-up, mode glides; the command carries no ripple, so a plain travel limit is correct for it). (2) Stationarity gates: each sensor's two half-window averages (alternator and battery separately, plus RPM with its own fixed floor) must agree within the larger of this floor or a quarter of that window's own full swing — self-scaling, so a rough-but-repeating signal gets proportionally more tolerance while a one-way ramp is still rejected. Each line shows (worst value − its limit) over the last 10 s: at or below zero (green) = that gate is passing. Separate from the anomaly detector's drift knobs above so tuning capture admission never loosens fault-detector arming.</span></span>
+            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command steady, 10s worst vs limit: —</span>
+            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt stationarity (mean-shift), 10s worst vs limit: —</span>
+            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt stationarity (mean-shift), 10s worst vs limit: —</span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="ripDriftFloorA" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Current Drift Slope (%) (<span id="ripDriftPct_echo">?</span>):
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, for the <em>command</em> gate only: the command may travel up to this percent of the window's mean alternator current (or the fixed floor, whichever is larger). The sensor gates no longer use it — their tolerance self-scales on each window's own measured swing (see the floor's tooltip).</span></span>
+          </div>
+          <div class="form-input">
+            <form action="/get" method="GET" target="hidden-form">
+              <input type="hidden" name="password" class="password_field">
+              <input name="ripDriftPct" type="number" step="0.5" min="0" max="50" />
+              <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+            </form>
+          </div>
+        </div>
+
+        <hr />
+        <div class="form-row">
+          <div class="form-label">Capture throughput:
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Running count of capture windows that passed every gate for each detector since power-up (the map's peak only moves when an admitted window also beats the stored value — twice, and the second confirmation must arrive within 60 seconds of the first, so two unrelated one-off events far apart in time can never confirm each other). Counting up = the capture is live. Frozen with all gate lines green = windows are being rejected by the knob-less gates: a protection clamp fired during the window, a processing stall starved it of samples, or the signal didn't oscillate enough (one-shot filter).</span></span>
+            <span id="ripAdmit_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">windows admitted — alt: —, batt: —</span>
+          </div>
+          <div class="form-input"></div>
         </div>
       </div>
 

@@ -823,12 +823,13 @@ static void altProcessEmits() {
     // (1) TREND FEED — every FULL-steady run is graded against the ACTIVE surface (My History or Uploaded)
     // and fed to the engine-hours trend, throttled to one sample per altTrendFeedSec. This is the trend's
     // ONLY source (reverted 2026-06-24 from the 1 Hz live feed): the spec wants the trend built purely from
-    // full steady runs. Only Measured/Estimated runs carry a %; No-reference/risky-fit runs feed nothing.
+    // full steady runs. MEASURED runs only (session plot: green dot + orange ring) — Estimated grades
+    // lean on interpolation and would blur the trend; No-reference/risky-fit runs feed nothing.
     {
       static uint32_t lastTrendFeedMs = 0;
       float pred = 0;
       int st = altGradeFront().classify(sp.x, altRefRadius, altIdwPower, altRidgeFrac, altRiskThresh, &pred);
-      bool graded = (st == FRONT_MEASURED || st == FRONT_ESTIMATED) && pred > 0.1f;
+      bool graded = (st == FRONT_MEASURED) && pred > 0.1f;
       uint32_t nowMs = millis();
       if (graded && (lastTrendFeedMs == 0 || (uint32_t)(nowMs - lastTrendFeedMs) >= (uint32_t)(altTrendFeedSec * 1000.0f))) {
         lastTrendFeedMs = nowMs;

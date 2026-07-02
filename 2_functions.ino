@@ -288,6 +288,13 @@ bool fsRemove(const char *path) {
 // Measured ripple projection (§3.3) — one CSV-encoded string per detector: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
 #define NK_ripFitAlt  "ripFitAlt"
 #define NK_ripFitBatt "ripFitBatt"
+// Measured-ripple capture admission gates (§10.8/§11) — own knobs, deliberately DECOUPLED from the
+// fa* anomaly-detector gates so tuning capture admission can't loosen detector arming.
+// NK "ripRpmMargin" RETIRED 2026-07-01 (§11 stationarity gate replaced the bin-edge margin) — key
+// abandoned in NVS, never reuse it for a different meaning.
+#define NK_ripWinMs "ripWinMs"
+#define NK_ripDriftFloorA "ripDriftFloorA"
+#define NK_ripDriftPct "ripDriftPct"
 #define NK_cvPlantTau "cvPlantTau"
 #define NK_cvPlantL "cvPlantL"
 #define NK_CommissionTempF "CommissionTmpF"
@@ -3633,7 +3640,7 @@ static float faMvSlope12 = 3100.0f / 4095.0f, faMvOff12 = 0.0f;
 #define FA_CELL_AVG_N 4     // recent-average depth: cell value = running 1/min(n,N) mean (never freezes)
 #define FA_MATRIX_PATH "/famatrix.bin"
 #define FA_MATRIX_MAGIC 0x46414D58u  // 'FAMX'
-#define FA_MATRIX_VER 3              // v3: +altFiltPendX100/battFiltPendX100 (two-hit fold candidates); v2 added altFiltPkX100/battFiltPkX100 (measured filtered ripple, §3.1) — older blobs rejected
+#define FA_MATRIX_VER 4              // v4: +altFiltPendMs/battFiltPendMs (two-hit corroboration deadline, §11); v3 added altFiltPendX100/battFiltPendX100 (two-hit fold candidates); v2 added altFiltPkX100/battFiltPkX100 (measured filtered ripple, §3.1) — older blobs rejected
 #define FA_MATRIX_FLUSH_MS 900000UL  // 15-min field-off cadence, like the long-term ring
 
 struct FaPeak {
@@ -3652,11 +3659,15 @@ struct FaCell {
   uint16_t battFiltPkX100;  // battery detector (INA Bcur low-pass), A ×100
   // Two-hit fold candidates: strongest so-far-UNcorroborated window pk-pk above the committed value.
   // A candidate commits (at the LESSER of the pair) only when a second qualifying window in this cell
-  // also exceeds the committed value — so a lone transient that slips the admission gates can never
-  // permanently poison the cell, and artifact+real pairs commit at the real level. Rides in the blob
-  // so corroboration survives reboots.
+  // also exceeds the committed value WITHIN RIP_PEND_EXPIRY_MS of the first (§11) — so a lone transient
+  // that slips the admission gates can never permanently poison the cell, artifact+real pairs commit at
+  // the real level, and two unrelated one-offs far apart in time can't corroborate each other. The
+  // *PendMs deadline is millis-based, so pending is meaningless across a reboot — faInit zeroes both
+  // pend fields on blob restore (they ride in the blob only because the struct is dumped whole).
   uint16_t altFiltPendX100;
   uint16_t battFiltPendX100;
+  uint32_t altFiltPendMs;
+  uint32_t battFiltPendMs;
 };
 static FaCell *faMatrix = NULL;  // PSRAM — FA_RPM_BINS × FA_AMP_BINS cells
 uint16_t faCellsUsed = 0;        // cells with ≥1 qualified window (diagnostics)
@@ -3685,42 +3696,70 @@ static volatile bool faPendingMatrixClear = false;  // set by /get handler (Core
 // within limit, per-detector 300 ms-EMA drift within limit, same-RPM-bin (cell fold only). NO wizard
 // relaxation — a steady-state quantity cannot be measured while ramping; the wizard's instructed
 // pauses are the admission windows. Live readouts: ROLL_RIPCMDEXC/RIPALTEXC/RIPBATTEXC on the Diag page.
-#define FILT_RIPPLE_WIN_MS 500UL       // pk-pk measurement window (matches the matrix window)
-#define FILT_RIPPLE_MIN_N 58           // min samples/window to fold (~50% of nominal ~116 @ 4.3 ms INA cadence) — a stall-starved window under-samples the extremes
 #define FILT_RIPPLE_ADM_TC 0.300f      // admission-EMA time constant (s) — heavy enough that belt ripple averages out of it, so its window spread measures operating-point drift, not ripple. Matches Path A's 300 ms precedent. NOT the measurement filter.
+// Capture-gate knobs (Pattern B, Diag ▸ Measured-Ripple Capture Gating card; each has a live
+// pass/fail readout there). Own settings, NOT the fa* anomaly-detector gates.
+float ripWinMs = 2000.0f;       // ms — pk-pk measurement window. Must hold ≥2 periods of the slowest disturbance to characterize (idle hunt ~1 s → 2 s default; the old 500 ms saw hunt as drift and rejected it). CAVEAT: the window defines the measured quantity — map/fit values captured under a different length are not comparable (clear map + re-run current check after changing). NVS NOTE: devices flashed before 2026-07-01 hold 500 in NVS — set 2000 on the Diag card after flashing.
+float ripDriftFloorA = 2.0f;    // A — floor shared by the command-travel gate AND the stationarity gate (mean-shift tolerance below which a window always passes)
+float ripDriftPct = 5.0f;       // % of window-mean alt current — command-travel gate ONLY (commands are ripple-free, so amplitude gating stays correct for them; the sensor gates are stationarity-based below)
+// Stationarity gate (spec §11 — replaces the §10.8 amplitude drift gate): a window is "steady" if its
+// two HALVES have (nearly) the same mean — a transient/ramp walks the mean monotonically (half-means
+// differ by ~half the excursion), while hunt/ripple recurs (half-means cancel). Self-scaling: tolerance
+// grows with the window's own measured pk-pk, so a dirty-but-stationary idle admits while a same-size
+// ramp rejects. Design-time constants, not knobs — they set the SHAPE of the test, not an operating point.
+#define RIP_STAT_K 0.25f           // mean-shift tolerance as a fraction of that sensor's full-window filtered pk-pk. A linear ramp shifts the half-means by 0.50×pk-pk → rejected with 2× margin; a ≥2-cycle hunt shifts them <0.1×pk-pk → admitted with 2.5× margin.
+#define RIP_RPM_STAT_FLOOR 10.0f   // RPM — mean-shift floor for the RPM stationarity test (tach jitter tolerance)
+#define RIP_CROSS_MIN 4            // cell fold only — min crossings of the measurement EMA about its 300 ms baseline per window. A one-shot transient crosses ~2×; real ripple/hunt crosses constantly. Ring exempt (median-of-8 already robust; must not starve the wizard hold).
+#define RIP_PEND_EXPIRY_MS 60000UL // two-hit corroboration deadline — the second qualifying window must land within this of the first, else the pending candidate lapses. Kills the cross-session pairing where two unrelated one-off glitches (days apart) corroborated each other. Windows arrive every ripWinMs at a held point, so 60 s ≈ 30 chances.
+uint32_t g_ripAltAdmitCount = 0;   // windows that passed ALL alt-fold gates (throughput readout, CSV2; not persisted)
+uint32_t g_ripBattAdmitCount = 0;  // same for the battery detector
 static float altFiltEma = 0.0f, battFiltEma = 0.0f;             // IExcessTau low-pass of each sensor current (A) — the MEASUREMENT
-static float altFiltWinMin = 1e9f, altFiltWinMax = -1e9f;       // window extremes of the low-passed alt signal
-static float battFiltWinMin = 1e9f, battFiltWinMax = -1e9f;     // window extremes of the low-passed batt signal
-static float altFiltWinSum = 0.0f, battFiltWinSum = 0.0f;       // window means → operating current for the fit
-// Admission gates (steady-state qualification — see spec §10). Separate 300 ms EMAs per sensor: their
-// window spread is the drift statistic each detector's fold is gated on (per-detector — a steady-alt /
-// ramping-batt window folds alt only). Command travel (setpointLimited max−min, ripple-free by
-// construction) exactly rejects every commanded ramp: test level steps, warmup, big-step gentling,
-// Hi→Lo glide. Protection latch rejects any window a clamp touched (G1/G2, iExcess, load dump).
-extern float faAmpsDriftFloorA, faAmpsDriftPct;                 // shared Path-A drift knobs — defined below in the fast-alt settings block (variables get no Arduino auto-prototype, hence the forward declaration)
-static float altAdmEma = 0.0f, battAdmEma = 0.0f;               // 300 ms admission EMAs (drift statistic, NOT the measurement)
-static float altAdmWinMin = 1e9f, altAdmWinMax = -1e9f;
-static float battAdmWinMin = 1e9f, battAdmWinMax = -1e9f;
+static float altFiltWinMin = 1e9f, altFiltWinMax = -1e9f;       // FULL-window extremes of the low-passed alt signal — stationarity self-scale + forensics
+static float battFiltWinMin = 1e9f, battFiltWinMax = -1e9f;     // same, batt
+// Per-HALF accumulators (spec §11): the committed pk-pk is the LESSER of the two half-window pk-pks —
+// a one-shot event inflates only one half so the min stays honest, while real ripple/hunt (period ≤
+// half the window) inflates both. The half sums/counts feed the mean-shift stationarity test.
+static float altFiltH1Min = 1e9f, altFiltH1Max = -1e9f, altFiltH2Min = 1e9f, altFiltH2Max = -1e9f;
+static float battFiltH1Min = 1e9f, battFiltH1Max = -1e9f, battFiltH2Min = 1e9f, battFiltH2Max = -1e9f;
+static float altFiltH1Sum = 0.0f, altFiltH2Sum = 0.0f, battFiltH1Sum = 0.0f, battFiltH2Sum = 0.0f;
+static float rpmH1Sum = 0.0f, rpmH2Sum = 0.0f;                  // RPM half-means → RPM stationarity + mean-RPM binning
+static uint32_t filtRippleH1N = 0, filtRippleH2N = 0;
+// Admission gates (steady-state qualification — spec §11). Command travel (setpointLimited max−min,
+// ripple-free by construction) exactly rejects every commanded ramp: test level steps, warmup,
+// big-step gentling, Hi→Lo glide. Protection latch rejects any window a clamp touched (G1/G2, iExcess,
+// load dump). Sensor steadiness is the half-mean stationarity test (per-detector — a stationary-alt /
+// ramping-batt window folds alt only). The 300 ms EMAs remain ONLY as the crossings baseline.
+static float altAdmEma = 0.0f, battAdmEma = 0.0f;               // 300 ms baselines for the crossings tally (NOT the measurement, no longer a drift gate)
 static float cmdWinMin = 1e9f, cmdWinMax = -1e9f;               // setpointLimited travel over the window
-static float filtRippleWinRpm0 = 0.0f;                          // RPM at window start (same-bin check at fold)
+static float filtRippleWinRpmMin = 1e9f, filtRippleWinRpmMax = -1e9f;  // window RPM span → RPM stationarity self-scale
 static bool filtRippleWinProt = false;                          // any protection clamp during the window
 static uint32_t filtRippleWinN = 0;
 static uint32_t filtRippleLastMs = 0, filtRippleWinStartMs = 0;
 static bool filtRippleArmed = false;   // false until the first sample seeds the EMAs (seed, don't measure)
+// Crossings tally — GATE for the cell fold (≥ RIP_CROSS_MIN) and recorded into the commit forensics ring:
+// how many times the fast measurement EMA crossed its slow (300 ms) baseline within the window. A one-shot
+// transient crosses ~twice; sustained oscillation many times. Promoted from forensic-only 2026-07-01 (§11).
+static uint16_t altFiltCross = 0, battFiltCross = 0;
+static bool altAboveAdm = false, battAboveAdm = false;   // sign of (measurement − baseline) last sample
 
 // Reset the window accumulators — fresh window baselined at the running EMAs (the caller reseeds the
 // EMAs themselves first on arm/stall; a normal window rollover keeps them running).
 static void filtRippleWinReset(float rpm, uint32_t now) {
   altFiltWinMin = altFiltWinMax = altFiltEma;
   battFiltWinMin = battFiltWinMax = battFiltEma;
-  altAdmWinMin = altAdmWinMax = altAdmEma;
-  battAdmWinMin = battAdmWinMax = battAdmEma;
+  altFiltH1Min = altFiltH1Max = altFiltH2Min = altFiltH2Max = altFiltEma;
+  battFiltH1Min = battFiltH1Max = battFiltH2Min = battFiltH2Max = battFiltEma;
+  altFiltH1Sum = altFiltH2Sum = battFiltH1Sum = battFiltH2Sum = 0.0f;
+  rpmH1Sum = rpmH2Sum = 0.0f;
+  filtRippleH1N = filtRippleH2N = 0;
   cmdWinMin = cmdWinMax = setpointLimited;
-  altFiltWinSum = battFiltWinSum = 0.0f;
   filtRippleWinN = 0;
-  filtRippleWinRpm0 = rpm;
+  filtRippleWinRpmMin = filtRippleWinRpmMax = rpm;
   filtRippleWinProt = false;
   filtRippleWinStartMs = now;
+  altFiltCross = battFiltCross = 0;
+  altAboveAdm  = (altFiltEma  >= altAdmEma);
+  battAboveAdm = (battFiltEma >= battAdmEma);
 }
 
 // Active 3-current resonance test (COMMISSIONING_SPEC §3.2): when armed, log each completed window's
@@ -3746,6 +3785,31 @@ volatile uint32_t resTestLastCmdMs = 0;       // deadman: browser refreshes this
 // test's high held current and slamming the soft OV (G2) the instant voltage control re-arms.
 volatile bool resTestReleasing = false;
 #define RES_TEST_DEADMAN_MS 8000UL            // > the browser's ~3 s keepalive; catches a closed/crashed wizard
+
+// Commit forensics (diagnostic ring, RAM-only): each time a filtered-ripple value COMMITS to a cell's
+// visible peak — the two-hit second edge that writes altFiltPkX100/battFiltPkX100, i.e. the number
+// filtripple.csv and the wizard actually report — snapshot the window that produced it. Lets a phantom map
+// value (map says 4.76 A, current-check finds nothing) be traced afterward WITHOUT a live CSV log. Never
+// touches control or the map. Read by /ripforensic.csv. Overwrites oldest; a torn row is a harmless stale read.
+#define RIP_FORENSIC_CAP 32
+struct RipForensicPt { uint16_t rpm, ampLo, meanX100, pkpkX100, shiftX100, cmdTravelX100, crossings; uint8_t detector; };
+RipForensicPt ripForensic[RIP_FORENSIC_CAP];
+volatile uint16_t ripForensicHead = 0;    // next write slot (wraps)
+volatile uint16_t ripForensicCount = 0;   // total commits recorded (saturates)
+static void ripForensicPush(uint8_t det, uint16_t rpm, int ampLo, float meanA, uint16_t pkpkX100,
+                            float meanShiftA, float cmdTravelA, uint16_t crossings) {
+  RipForensicPt &p = ripForensic[ripForensicHead];
+  p.detector = det;
+  p.rpm = rpm;
+  p.ampLo = (uint16_t)(ampLo < 0 ? 0 : ampLo);
+  p.meanX100 = (uint16_t)fminf(fabsf(meanA) * 100.0f + 0.5f, 65535.0f);
+  p.pkpkX100 = pkpkX100;
+  p.shiftX100 = (uint16_t)fminf(fabsf(meanShiftA) * 100.0f + 0.5f, 65535.0f);
+  p.cmdTravelX100 = (uint16_t)fminf(fabsf(cmdTravelA) * 100.0f + 0.5f, 65535.0f);
+  p.crossings = crossings;
+  ripForensicHead = (ripForensicHead + 1) % RIP_FORENSIC_CAP;
+  if (ripForensicCount < 65535) ripForensicCount++;
+}
 
 // Fold one INA battery-current sample (bcur) + the co-sampled ADS alternator current (macur) into the
 // measured filtered-ripple capture. ALWAYS-ON — the map fills during normal running too (§3.1); the
@@ -3775,75 +3839,130 @@ void faFiltRippleUpdate(float bcur, float macur, float rpm) {
   float alpha  = dt / (tauSec + dt);   // exact IExcessTau low-pass the detector uses — NOT a drift high-pass
   altFiltEma  += alpha * (macur - altFiltEma);
   battFiltEma += alpha * (bcur  - battFiltEma);
-  float admAlpha = dt / (FILT_RIPPLE_ADM_TC + dt);   // 300 ms admission EMA — drift statistic only
+  float admAlpha = dt / (FILT_RIPPLE_ADM_TC + dt);   // 300 ms baseline EMA — crossings-tally reference only
   altAdmEma  += admAlpha * (macur - altAdmEma);
   battAdmEma += admAlpha * (bcur  - battAdmEma);
+  { bool a = (altFiltEma  >= altAdmEma);  if (a != altAboveAdm)  { altFiltCross++;  altAboveAdm  = a; }   // crossings tally — fold gate + forensics (see decl)
+    bool b = (battFiltEma >= battAdmEma); if (b != battAboveAdm) { battFiltCross++; battAboveAdm = b; } }
   if (altFiltEma  < altFiltWinMin)  altFiltWinMin  = altFiltEma;
   if (altFiltEma  > altFiltWinMax)  altFiltWinMax  = altFiltEma;
   if (battFiltEma < battFiltWinMin) battFiltWinMin = battFiltEma;
   if (battFiltEma > battFiltWinMax) battFiltWinMax = battFiltEma;
-  if (altAdmEma  < altAdmWinMin)  altAdmWinMin  = altAdmEma;
-  if (altAdmEma  > altAdmWinMax)  altAdmWinMax  = altAdmEma;
-  if (battAdmEma < battAdmWinMin) battAdmWinMin = battAdmEma;
-  if (battAdmEma > battAdmWinMax) battAdmWinMax = battAdmEma;
+  // Half-window routing (spec §11): first vs second half by elapsed time. Half extremes feed the
+  // min-of-halves estimator; half sums feed the mean-shift stationarity test and mean-RPM binning.
+  if ((now - filtRippleWinStartMs) * 2 < (uint32_t)ripWinMs) {
+    if (altFiltEma  < altFiltH1Min)  altFiltH1Min  = altFiltEma;
+    if (altFiltEma  > altFiltH1Max)  altFiltH1Max  = altFiltEma;
+    if (battFiltEma < battFiltH1Min) battFiltH1Min = battFiltEma;
+    if (battFiltEma > battFiltH1Max) battFiltH1Max = battFiltEma;
+    altFiltH1Sum += altFiltEma; battFiltH1Sum += battFiltEma; rpmH1Sum += rpm; filtRippleH1N++;
+  } else {
+    if (altFiltEma  < altFiltH2Min)  altFiltH2Min  = altFiltEma;
+    if (altFiltEma  > altFiltH2Max)  altFiltH2Max  = altFiltEma;
+    if (battFiltEma < battFiltH2Min) battFiltH2Min = battFiltEma;
+    if (battFiltEma > battFiltH2Max) battFiltH2Max = battFiltEma;
+    altFiltH2Sum += altFiltEma; battFiltH2Sum += battFiltEma; rpmH2Sum += rpm; filtRippleH2N++;
+  }
   if (setpointLimited < cmdWinMin) cmdWinMin = setpointLimited;
   if (setpointLimited > cmdWinMax) cmdWinMax = setpointLimited;
+  if (rpm < filtRippleWinRpmMin) filtRippleWinRpmMin = rpm;
+  if (rpm > filtRippleWinRpmMax) filtRippleWinRpmMax = rpm;
   if (g_fastOvClampActive) filtRippleWinProt = true;
-  altFiltWinSum += altFiltEma; battFiltWinSum += battFiltEma; filtRippleWinN++;
-  if (now - filtRippleWinStartMs >= FILT_RIPPLE_WIN_MS && filtRippleWinN > 0) {
-    float altPk   = altFiltWinMax  - altFiltWinMin;   // pk-pk of the low-passed alt current (A)
-    float battPk  = battFiltWinMax - battFiltWinMin;  // pk-pk of the low-passed batt current (A)
-    float altMean  = altFiltWinSum  / (float)filtRippleWinN;   // operating alternator current over the window
-    float battMean = battFiltWinSum / (float)filtRippleWinN;   // operating battery current over the window
+  filtRippleWinN++;
+  if (now - filtRippleWinStartMs >= (uint32_t)ripWinMs && filtRippleWinN > 0) {
+    // Committed pk-pk = the LESSER of the two half-window pk-pks (§11 min-of-halves): a one-shot event
+    // inflates only one half, so the min stays honest; anything real (period ≤ half the window) recurs
+    // in both. The FULL-window pk-pk is kept as the stationarity self-scale — for a ramp it equals the
+    // whole excursion, which is exactly the size the mean-shift test must reject against.
+    float altPkFull  = altFiltWinMax  - altFiltWinMin;
+    float battPkFull = battFiltWinMax - battFiltWinMin;
+    float altPk   = fminf(altFiltH1Max  - altFiltH1Min,  altFiltH2Max  - altFiltH2Min);
+    float battPk  = fminf(battFiltH1Max - battFiltH1Min, battFiltH2Max - battFiltH2Min);
+    float altMean  = (altFiltH1Sum  + altFiltH2Sum)  / (float)filtRippleWinN;   // operating alternator current over the window
+    float battMean = (battFiltH1Sum + battFiltH2Sum) / (float)filtRippleWinN;   // operating battery current over the window
     uint16_t altV  = (uint16_t)fminf(altPk  * 100.0f + 0.5f, 65535.0f);
     uint16_t battV = (uint16_t)fminf(battPk * 100.0f + 0.5f, 65535.0f);
-    // ── Steady-state admission gates (spec §10) ─────────────────────────────
-    // Drift limits share the Path-A knobs (Diag ▸ Anomaly Detection & Ripple-Map Gating). Per-detector
-    // limit uses that detector's own operating current for the %-of-mean term.
-    float limAlt  = fmaxf(faAmpsDriftFloorA, faAmpsDriftPct * 0.01f * fabsf(altMean));
-    float limBatt = fmaxf(faAmpsDriftFloorA, faAmpsDriftPct * 0.01f * fabsf(battMean));
+    // ── Steady-state admission gates (spec §11 — stationarity, not smallness) ────────────────────
+    // "Steady" = the window's two halves have (nearly) the same mean. A transient/throttle ramp walks
+    // the mean monotonically (half-means differ by ~half the full excursion); dirty-but-stationary
+    // operation (idle hunt, load churn) swings hard but recurs, so the half-means cancel. Tolerance
+    // self-scales on that sensor's own full-window pk-pk — the dirtier the signal, the more mean
+    // movement is allowed. This is what lets a "dirty speed" in while still rejecting ramps: the old
+    // amplitude drift gate rejected hunting idle every window, which starved the map at the exact RPM
+    // that trips the bulk over-current supervisor (the 2026-07-01 vicious-cycle log).
+    uint32_t minN = (uint32_t)(ripWinMs * 0.1f);            // ~50% of expected samples at the ~5 ms INA cadence
+    bool halvesOk = (filtRippleH1N >= minN / 4) && (filtRippleH2N >= minN / 4);  // both half-means must be real averages, not a few stray samples
+    float altShift = 1e9f, battShift = 1e9f, rpmShift = 1e9f, rpmMean = 0.0f;
+    if (halvesOk) {
+      altShift  = fabsf(altFiltH1Sum  / (float)filtRippleH1N - altFiltH2Sum  / (float)filtRippleH2N);
+      battShift = fabsf(battFiltH1Sum / (float)filtRippleH1N - battFiltH2Sum / (float)filtRippleH2N);
+      rpmShift  = fabsf(rpmH1Sum / (float)filtRippleH1N - rpmH2Sum / (float)filtRippleH2N);
+      rpmMean   = (rpmH1Sum + rpmH2Sum) / (float)filtRippleWinN;
+    }
+    float limStatAlt  = fmaxf(ripDriftFloorA, RIP_STAT_K * altPkFull);
+    float limStatBatt = fmaxf(ripDriftFloorA, RIP_STAT_K * battPkFull);
+    float limStatRpm  = fmaxf(RIP_RPM_STAT_FLOOR, RIP_STAT_K * (filtRippleWinRpmMax - filtRippleWinRpmMin));
+    // Command travel keeps the OLD amplitude limit (max(floor, pct%·mean)) — setpointLimited is
+    // ripple-free by construction, so smallness IS the correct test for it.
+    float limCmd = fmaxf(ripDriftFloorA, ripDriftPct * 0.01f * fabsf(altMean));
     float cmdTravel = cmdWinMax - cmdWinMin;
-    float altDrift  = altAdmWinMax - altAdmWinMin;
-    float battDrift = battAdmWinMax - battAdmWinMin;
-    // Live gate readouts (10 s worst of quantity − limit; <=0 = passing) — fed every window, before
-    // gating, so the dashboard shows why windows are/aren't admitting. Command shares the alt limit.
-    rollUpdate(ROLL_RIPCMDEXC,  cmdTravel - limAlt);
-    rollUpdate(ROLL_RIPALTEXC,  altDrift  - limAlt);
-    rollUpdate(ROLL_RIPBATTEXC, battDrift - limBatt);
-    bool commonOk = (filtRippleWinN >= FILT_RIPPLE_MIN_N)   // stall-starved window → extremes under-sampled
+    // Live gate readouts — fed every window, before gating, so the dashboard shows why windows
+    // are/aren't admitting. All four rows are (quantity − limit), 10 s peak, <=0 = passing.
+    rollUpdate(ROLL_RIPCMDEXC,  cmdTravel - limCmd);
+    rollUpdate(ROLL_RIPALTEXC,  altShift  - limStatAlt);
+    rollUpdate(ROLL_RIPBATTEXC, battShift - limStatBatt);
+    rollUpdate(ROLL_RIPRPMSHIFT, rpmShift - limStatRpm);
+    bool commonOk = (filtRippleWinN >= minN) && halvesOk     // stall-starved window → extremes under-sampled
                     && !filtRippleWinProt                    // a protection clamp owned part of the window
-                    && (cmdTravel <= limAlt);                // a commanded ramp is not ripple
-    bool altSteady  = commonOk && (altDrift  <= limAlt);
-    bool battSteady = commonOk && (battDrift <= limBatt);
-    int rpmBin = (int)(rpm / FA_RPM_BIN_W);
-    // Cell fold additionally requires the window to have stayed in ONE 50-RPM bin (start vs end) so a
-    // swept window can't smear ripple into the wrong resonance bin. The test ring skips this check —
-    // the browser filters ring rows by its own ±150 RPM band, and a hold wobbling across a bin
-    // boundary must not starve the 3-level capture.
-    bool rpmSameBin = (rpm > 0.0f) && (filtRippleWinRpm0 > 0.0f)
-                      && ((int)(filtRippleWinRpm0 / FA_RPM_BIN_W) == rpmBin);
+                    && (cmdTravel <= limCmd);                // a commanded ramp is not ripple
+    bool altSteady  = commonOk && (altShift  <= limStatAlt);
+    bool battSteady = commonOk && (battShift <= limStatBatt);
+    // RPM stationarity replaces the old same-bin edge-margin gate, and the cell bins on the window-MEAN
+    // RPM — a hunt wobbling across a 50-RPM boundary attributes to its center of mass instead of being
+    // rejected (the straddle rejection was the other half of the idle starvation).
+    bool rpmOk = (filtRippleWinRpmMin > 0.0f) && (rpmShift <= limStatRpm);
+    int rpmBin = (int)(rpmMean / FA_RPM_BIN_W);
     int ampBin = (int)((altMean - FA_AMP_BIN_LO) / FA_AMP_BIN_W);
-    if (faMatrix && rpmSameBin && rpmBin >= 0 && rpmBin < FA_RPM_BINS
-        && altMean >= FA_AMP_BIN_LO && ampBin >= 0 && ampBin < FA_AMP_BINS) {
-      // Two-hit peak-hold (§10): first qualifying window above the committed value becomes the pending
-      // candidate; the second commits the pair at its LESSER value and consumes the candidate. See the
-      // FaCell comment. Pending updates mark the blob dirty so corroboration survives reboots.
+    bool cellValid = faMatrix && rpmOk && rpmBin >= 0 && rpmBin < FA_RPM_BINS
+                     && altMean >= FA_AMP_BIN_LO && ampBin >= 0 && ampBin < FA_AMP_BINS;
+    // Crossings gate (cell fold only, per-detector): the measurement EMA must cross its 300 ms baseline
+    // ≥ RIP_CROSS_MIN times in the window — a one-shot that slipped the stationarity test crosses ~2×,
+    // real ripple/hunt crosses constantly. The test ring is exempt (a wizard hold must not starve; the
+    // browser's median-of-8 is the robustness there).
+    bool altFold  = cellValid && altSteady  && (altFiltCross  >= RIP_CROSS_MIN);
+    bool battFold = cellValid && battSteady && (battFiltCross >= RIP_CROSS_MIN);
+    // Throughput readouts: count windows that passed ALL of that detector's cell-fold gates (whether or
+    // not the value beat the cell) — a frozen counter with green gate rows points at protection/starve.
+    if (altFold)  g_ripAltAdmitCount++;
+    if (battFold) g_ripBattAdmitCount++;
+    if (cellValid) {
+      // Two-hit peak-hold with corroboration deadline (§11): first qualifying window above the committed
+      // value becomes the pending candidate; a second within RIP_PEND_EXPIRY_MS commits the pair at its
+      // LESSER value and consumes the candidate. Recurrence in TIME, not just count — the old no-deadline
+      // pending let two unrelated one-off glitches, days apart, corroborate each other (the 4.76 A
+      // phantom). Pending no longer usefully persists across reboots (millis deadline); faInit zeroes it.
       FaCell *c = &faMatrix[rpmBin * FA_AMP_BINS + ampBin];
-      if (altSteady && altV > c->altFiltPkX100) {
-        if (c->altFiltPendX100 > c->altFiltPkX100) {
+      if (altFold && altV > c->altFiltPkX100) {
+        if (c->altFiltPendX100 > c->altFiltPkX100 && (now - c->altFiltPendMs) <= RIP_PEND_EXPIRY_MS) {
           c->altFiltPkX100 = (altV < c->altFiltPendX100) ? altV : c->altFiltPendX100;
           c->altFiltPendX100 = 0;
+          ripForensicPush(0, (uint16_t)fminf(rpm + 0.5f, 65535.0f), FA_AMP_BIN_LO + ampBin * FA_AMP_BIN_W,
+                          altMean, c->altFiltPkX100, altShift, cmdTravel, altFiltCross);
         } else {
           c->altFiltPendX100 = altV;
+          c->altFiltPendMs = now;
         }
         faMatrixDirtyWindows++;
       }
-      if (battSteady && battV > c->battFiltPkX100) {
-        if (c->battFiltPendX100 > c->battFiltPkX100) {
+      if (battFold && battV > c->battFiltPkX100) {
+        if (c->battFiltPendX100 > c->battFiltPkX100 && (now - c->battFiltPendMs) <= RIP_PEND_EXPIRY_MS) {
           c->battFiltPkX100 = (battV < c->battFiltPendX100) ? battV : c->battFiltPendX100;
           c->battFiltPendX100 = 0;
+          ripForensicPush(1, (uint16_t)fminf(rpm + 0.5f, 65535.0f), FA_AMP_BIN_LO + ampBin * FA_AMP_BIN_W,
+                          battMean, c->battFiltPkX100, battShift, cmdTravel, battFiltCross);
         } else {
           c->battFiltPendX100 = battV;
+          c->battFiltPendMs = now;
         }
         faMatrixDirtyWindows++;
       }
@@ -4903,8 +5022,12 @@ void faInit() {
                                     faMatrix, sizeof(FaCell), FA_RPM_BINS * FA_AMP_BINS,
                                     &priorWindows, false);
   if (restored > 0) {
-    for (int i = 0; i < FA_RPM_BINS * FA_AMP_BINS; i++)
+    for (int i = 0; i < FA_RPM_BINS * FA_AMP_BINS; i++) {
       if (faMatrix[i].windows > 0) faCellsUsed++;
+      // Pending two-hit candidates are millis-deadlined (§11) — stale by definition after a reboot.
+      faMatrix[i].altFiltPendX100 = 0;  faMatrix[i].battFiltPendX100 = 0;
+      faMatrix[i].altFiltPendMs = 0;    faMatrix[i].battFiltPendMs = 0;
+    }
     Serial.printf("faInit: disturbance matrix restored, %u cells populated\n", (unsigned)faCellsUsed);
   }
   uint32_t anomNext32 = 0;

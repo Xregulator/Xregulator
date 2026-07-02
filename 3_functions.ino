@@ -590,10 +590,13 @@ enum Csv2Index {
   CSV2_faTonePk10sMax,      // largest spectral peak, 10s peak (A ×100)
   CSV2_ldSlew10sMax,        // current slew g_dBcur_dt, 10s peak (A/s ×10)
   CSV2_cvSlope10sMax,       // voltage rise cvDSlope, 10s peak (V/s ×10000)
-  // ripple-capture (faFiltRippleUpdate §10) admission gates — window quantity minus its limit, 10s peak (A ×100); <=0 = that gate passing
-  CSV2_ripCmdExc10sMax,     // setpointLimited travel − limit
-  CSV2_ripAltExc10sMax,     // alternator 300ms-EMA drift − limit
-  CSV2_ripBattExc10sMax,    // battery 300ms-EMA drift − limit
+  // ripple-capture (faFiltRippleUpdate §11 stationarity) admission gates — window quantity minus its limit, 10s peak; <=0 = that gate passing
+  CSV2_ripCmdExc10sMax,     // setpointLimited travel − amplitude limit (A ×100)
+  CSV2_ripAltExc10sMax,     // alternator half-window mean-shift − stationarity limit (A ×100)
+  CSV2_ripBattExc10sMax,    // battery half-window mean-shift − stationarity limit (A ×100)
+  CSV2_ripRpmShift10sMax,   // RPM half-window mean-shift − stationarity limit, 10s peak (RPM ×10); <=0 = passing (replaced the edge-margin trough 2026-07-01)
+  CSV2_ripAltAdmitCount,    // windows that passed ALL alt-fold gates (lifetime; UI diffs frames for rate)
+  CSV2_ripBattAdmitCount,   // same for the battery detector
 
   // Lifetime nav/sailing records (so the Lifetime Statistics panel can show + individually reset
   // them). Persisted in NVS + uploaded to the leaderboards; previously had no live readout.
@@ -636,7 +639,7 @@ enum Csv2Index {
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
   CSV2_cvBattCurrentActive, // §G: 1 = inner loop is live-regulating BATTERY current in CV (absorption/float)
 
-  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543; +3 ripple-capture gate excess readouts (2026-07-01) = 547
+  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543; +3 ripple-capture gate excess readouts (2026-07-01) = 547; +3 ripple-capture rpm-margin readout + 2 admit counters (2026-07-01) = 550
 };
 
 enum Csv4Index {
@@ -1006,8 +1009,12 @@ enum Csv3Index {
   CSV3_cvCurrentSrc,            // CV current source: 0=battery-when-available, 1=force alternator (§G)
   CSV3_IExcessFloorABatt,       // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA; plain operator setting, commissioning never writes it
   CSV3_IExcessCeilABatt,        // CV battery-current iExcess ceiling (A ×10) — separate from IExcessCeilA (alternator); splits the formerly-shared ceiling
+  // measured-ripple capture admission gates (§10.8/§11) — own knobs, decoupled from the fa* detector gates
+  CSV3_ripWinMs,                // pk-pk capture window (ms, integer)
+  CSV3_ripDriftFloorA,          // shared floor: command-travel gate + stationarity mean-shift tolerance (A ×100)
+  CSV3_ripDriftPct,             // command-travel gate slope (% of mean, ×10) — command gate only since §11
 
-  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +1 (IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30; −2 (cvFloorK1/ccFloorK1 removed) ripple re-arch 2026-07-01
+  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +1 (IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30; −2 (cvFloorK1/ccFloorK1 removed) ripple re-arch 2026-07-01; +4 (ripRpmMargin/ripWinMs/ripDriftFloorA/ripDriftPct) capture-gate knobs 2026-07-01 = 339; −1 (ripRpmMargin retired, §11 stationarity) 2026-07-01 = 338
 };
 
 
@@ -2259,6 +2266,28 @@ void setupServer() {
     request->send(response);
   });
 
+  // ── Filtered-ripple COMMIT forensics (diagnostic) ──
+  // One row per committed cell peak, oldest→newest. crossings ~2 = one-shot transient (suspect phantom);
+  // many = sustained oscillation (likely real). meanShiftA (§11: |half-mean difference|, the stationarity
+  // statistic) and cmdTravelA are how close that window sat to the admission limits. Empty (header only)
+  // = no commits since boot. Small (≤RIP_FORENSIC_CAP rows).
+  server.on("/ripforensic.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String out = "detector,rpm,ampLo,meanA,pkpkA,meanShiftA,cmdTravelA,crossings\n";
+    uint16_t n = ripForensicCount < RIP_FORENSIC_CAP ? ripForensicCount : RIP_FORENSIC_CAP;
+    for (uint16_t i = 0; i < n; i++) {
+      uint16_t idx = (ripForensicHead + RIP_FORENSIC_CAP - n + i) % RIP_FORENSIC_CAP;
+      const RipForensicPt &p = ripForensic[idx];
+      out += (p.detector == 0 ? "alt" : "batt");
+      out += ',' + String(p.rpm) + ',' + String(p.ampLo) + ',';
+      out += String(p.meanX100 / 100.0f, 2) + ',' + String(p.pkpkX100 / 100.0f, 2) + ',';
+      out += String(p.shiftX100 / 100.0f, 2) + ',' + String(p.cmdTravelX100 / 100.0f, 2) + ',';
+      out += String(p.crossings) + '\n';
+    }
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/csv", out);
+    response->addHeader("Cache-Control", "no-cache");
+    request->send(response);
+  });
+
   // Active 3-current resonance test points: (rpm, operating current, pk-pk) per window since arm. Small
   // (≤BCUR_RTEST_CAP rows) → plain non-chunked response. Browser fits ripple = a0 + a1·I from these.
   server.on("/bcurrtest.csv", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -3394,6 +3423,25 @@ void setupServer() {
       foundParameter = true;
       faAmpsDriftPct = request->getParam("faAmpsDriftPct")->value().toFloat();
       settingWrite(NK_faAmpsDriftPct, String(faAmpsDriftPct, 1).c_str());
+    }
+    // Measured-ripple capture admission gates (§10.8/§11) — own knobs, decoupled from the fa* detector gates
+    else if (request->hasParam("ripWinMs")) {
+      foundParameter = true;
+      // Floor 500 ms: each HALF-window (§11 stationarity/min-of-halves) must hold ≥1 cycle of the lowest
+      // resolvable disturbance; ceiling 4 s bounds capture latency. Also sizes the min-sample gate.
+      ripWinMs = clamp_f(request->getParam("ripWinMs")->value().toFloat(), 500.0f, 4000.0f);
+      settingWrite(NK_ripWinMs, String(ripWinMs, 0).c_str());
+      queueConsoleMessage("Ripple capture window changed — stored map/fit values from the old window are not comparable (clear map + re-run current check)");
+    }
+    else if (request->hasParam("ripDriftFloorA")) {
+      foundParameter = true;
+      ripDriftFloorA = clamp_f(request->getParam("ripDriftFloorA")->value().toFloat(), 0.0f, 50.0f);
+      settingWrite(NK_ripDriftFloorA, String(ripDriftFloorA, 2).c_str());
+    }
+    else if (request->hasParam("ripDriftPct")) {
+      foundParameter = true;
+      ripDriftPct = clamp_f(request->getParam("ripDriftPct")->value().toFloat(), 0.0f, 50.0f);
+      settingWrite(NK_ripDriftPct, String(ripDriftPct, 1).c_str());
     }
     else if (request->hasParam("faAttenUpAmps")) {
       foundParameter = true;
@@ -7386,8 +7434,8 @@ void SendWifiData() {
                                "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // +7: operating-point context for the two headline worsts (Highest Tone amps/temp/epoch, Session Pk-Pk rpm/amps/temp/epoch)
                                "%d,%d,%d,%d,%d,%d,%d,"
-                               // +9: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope, ripple-capture cmd/alt/batt gate excess)
-                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                               // +12: gate-tuning 10s live readouts (RPM edge margin, amps-drift spread, amps-drift gate excess, tone peak, current slew, voltage slope, ripple-capture cmd/alt/batt gate excess + rpm margin + 2 admit counters)
+                               "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,"
                                // +5: lifetime nav/sailing records (longest trip, max 24h dist, deepest anchorage, best upwind VMG, longest gale)
                                "%d,%d,%d,%d,%d,"
                                // +12: inner-current-loop live accuracy (×4, amps²×10000) + CV-voltage-loop RMS error (×4, mV) + CV peak overshoot (×4, mV), 1m/10m/100m/1000m windows each
@@ -7919,6 +7967,9 @@ void SendWifiData() {
                                rollCsv(ROLL_RIPCMDEXC, 100),               // CSV2_ripCmdExc10sMax   (A ×100, peak; <=0 = passing)
                                rollCsv(ROLL_RIPALTEXC, 100),               // CSV2_ripAltExc10sMax   (A ×100, peak; <=0 = passing)
                                rollCsv(ROLL_RIPBATTEXC, 100),              // CSV2_ripBattExc10sMax  (A ×100, peak; <=0 = passing)
+                               rollCsv(ROLL_RIPRPMSHIFT, 10),              // CSV2_ripRpmShift10sMax (RPM ×10, peak; <=0 = passing)
+                               (int)(g_ripAltAdmitCount & 0x7FFFFFFF),     // CSV2_ripAltAdmitCount  (lifetime admit counter)
+                               (int)(g_ripBattAdmitCount & 0x7FFFFFFF),    // CSV2_ripBattAdmitCount (lifetime admit counter)
                                // Lifetime nav/sailing records (NVS-persisted; shown read-only in Lifetime Statistics)
                                SafeInt(LongestSingleTrip_Nm_AllTime, 10),  // CSV2_LongestTripAT     (nm ×10)
                                SafeInt(Max24hrDistance_AllTime, 10),       // CSV2_Max24hrDistAT     (nm ×10)
@@ -8049,7 +8100,10 @@ void SendWifiData() {
                                "%d,"  // ThermalSlopeWindowSec
                                "%d,"  // cvCurrentSrc
                                "%d,"  // IExcessFloorABatt
-                               "%d",  // IExcessCeilABatt
+                               "%d,"  // IExcessCeilABatt
+                               "%d,"  // ripWinMs
+                               "%d,"  // ripDriftFloorA
+                               "%d",  // ripDriftPct
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8383,7 +8437,10 @@ void SendWifiData() {
                                SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
                                (int)cvCurrentSrc,                               // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
                                SafeInt(IExcessFloorABatt, 10),                  // CSV3_IExcessFloorABatt — ×10, 1 decimal
-                               SafeInt(IExcessCeilABatt, 10)                    // CSV3_IExcessCeilABatt — ×10, 1 decimal
+                               SafeInt(IExcessCeilABatt, 10),                   // CSV3_IExcessCeilABatt — ×10, 1 decimal
+                               SafeInt(ripWinMs),                               // CSV3_ripWinMs (ms, integer)
+                               SafeInt(ripDriftFloorA, 100),                    // CSV3_ripDriftFloorA (A ×100)
+                               SafeInt(ripDriftPct, 10)                         // CSV3_ripDriftPct (% ×10)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);

@@ -2150,6 +2150,24 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     faAmpsDriftPct = settingRead(NK_faAmpsDriftPct).toFloat();
   }
+  // Measured-ripple capture admission gates (§10.8/§11). ripRpmMargin retired 2026-07-01 (§11
+  // stationarity gate replaced the bin-edge margin) — NVS key "ripRpmMargin" abandoned, never reuse.
+  if (!settingExists(NK_ripWinMs)) {
+    settingWrite(NK_ripWinMs, String(ripWinMs, 0).c_str());
+  } else {
+    // §11 halves need ≥1 disturbance cycle each — floor pre-§11 stored values (250–500 ms era) up to the new minimum
+    ripWinMs = fmaxf(500.0f, settingRead(NK_ripWinMs).toFloat());
+  }
+  if (!settingExists(NK_ripDriftFloorA)) {
+    settingWrite(NK_ripDriftFloorA, String(ripDriftFloorA, 2).c_str());
+  } else {
+    ripDriftFloorA = settingRead(NK_ripDriftFloorA).toFloat();
+  }
+  if (!settingExists(NK_ripDriftPct)) {
+    settingWrite(NK_ripDriftPct, String(ripDriftPct, 1).c_str());
+  } else {
+    ripDriftPct = settingRead(NK_ripDriftPct).toFloat();
+  }
   if (!settingExists(NK_faAttenUpAmps)) {
     settingWrite(NK_faAttenUpAmps, String(faAttenUpAmps, 1).c_str());
   } else {

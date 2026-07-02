@@ -758,10 +758,13 @@ const CSV2_FIELDS = [
     "faTonePk10sMax",          // largest spectral peak, 10s peak (A ×100)
     "ldSlew10sMax",            // current slew, 10s peak (A/s ×10)
     "cvSlope10sMax",           // voltage rise, 10s peak (V/s ×10000)
-    // ripple-capture admission gates (quantity − limit, 10s peak, A ×100; <=0 = that gate passing)
-    "ripCmdExc10sMax",         // setpoint (command) travel over the 0.5s window − limit
-    "ripAltExc10sMax",         // alternator 300ms-EMA drift over the window − limit
-    "ripBattExc10sMax",        // battery 300ms-EMA drift over the window − limit
+    // ripple-capture admission gates (§11 stationarity — quantity − limit, 10s peak; <=0 = that gate passing)
+    "ripCmdExc10sMax",         // setpoint (command) travel over the capture window − amplitude limit (A ×100)
+    "ripAltExc10sMax",         // alternator half-window mean-shift − stationarity limit (A ×100)
+    "ripBattExc10sMax",        // battery half-window mean-shift − stationarity limit (A ×100)
+    "ripRpmShift10sMax",       // RPM half-window mean-shift − stationarity limit (RPM ×10); <=0 = passing
+    "ripAltAdmitCount",        // windows that passed all alt-fold gates (lifetime counter)
+    "ripBattAdmitCount",       // same for the battery detector
     // lifetime nav/sailing records (read-only display in Lifetime Statistics; reset individually)
     "LongestTripAT",           // longest single trip, nm ×10
     "Max24hrDistAT",           // max 24-hour distance, nm ×10
@@ -829,8 +832,9 @@ const GATE_READOUTS_CSV2 = [
     // Ripple-capture admission gates — firmware streams (window quantity − its limit); <=0 = passing,
     // so the label reads as margin-vs-limit rather than a raw drift number.
     { spans: ['ripCmdGate_live'],                                                            f: 'ripCmdExc10sMax',  s: 100,   lbl: 'command steady, 10s worst vs limit',   u: 'A', d: 2 },
-    { spans: ['ripAltGate_live'],                                                            f: 'ripAltExc10sMax',  s: 100,   lbl: 'alt current steady, 10s worst vs limit',  u: 'A', d: 2 },
-    { spans: ['ripBattGate_live'],                                                           f: 'ripBattExc10sMax', s: 100,   lbl: 'batt current steady, 10s worst vs limit', u: 'A', d: 2 },
+    { spans: ['ripAltGate_live'],                                                            f: 'ripAltExc10sMax',  s: 100,   lbl: 'alt stationarity (mean-shift), 10s worst vs limit',  u: 'A', d: 2 },
+    { spans: ['ripBattGate_live'],                                                           f: 'ripBattExc10sMax', s: 100,   lbl: 'batt stationarity (mean-shift), 10s worst vs limit', u: 'A', d: 2 },
+    { spans: ['ripRpmGate_live'],                                                            f: 'ripRpmShift10sMax', s: 10,   lbl: 'RPM stationarity (mean-shift), 10s worst vs limit', u: 'RPM', d: 1 },
 ];
 // Pass/fail styling for the anomaly steady-state gate readouts: green+bold when the last-10s extreme
 // currently satisfies the gate, red+bold when it doesn't, neutral (muted gray) when the window had no
@@ -867,9 +871,24 @@ function gateReadoutOnCsv2(data) {
     gateColor('faAmpsDriftFloorA_live', drPass);
     gateColor('faAmpsDriftPct_live', drPass);
     // Ripple-capture gates: same excess convention (<=0 = that gate passed every window in the last 10s).
-    for (const [f, id] of [['ripCmdExc10sMax', 'ripCmdGate_live'], ['ripAltExc10sMax', 'ripAltGate_live'], ['ripBattExc10sMax', 'ripBattGate_live']]) {
+    // The RPM row joined this convention with the §11 stationarity gate (was an edge-margin trough with
+    // its own set-margin compare — the knob is retired, the firmware streams shift − limit directly).
+    for (const [f, id, s] of [['ripCmdExc10sMax', 'ripCmdGate_live', 100], ['ripAltExc10sMax', 'ripAltGate_live', 100], ['ripBattExc10sMax', 'ripBattGate_live', 100], ['ripRpmShift10sMax', 'ripRpmGate_live', 10]]) {
         const v = Number(data[f]);
-        gateColor(id, (!isFinite(v) || v <= ROLL_EMPTY_SENTINEL) ? null : (v / 100) <= 0);
+        gateColor(id, (!isFinite(v) || v <= ROLL_EMPTY_SENTINEL) ? null : (v / s) <= 0);
+    }
+    // Admitted-window throughput: lifetime counters; diff successive CSV2 frames (~5s apart) for a live
+    // rate. Frozen counters with all gate rows green ⇒ protection-clamped or stall-starved windows.
+    {
+        const el = document.getElementById('ripAdmit_live');
+        const a = Number(data.ripAltAdmitCount), b = Number(data.ripBattAdmitCount);
+        if (el && isFinite(a) && isFinite(b)) {
+            const prev = window._ripAdmitPrev || null;
+            let rate = '';
+            if (prev && a >= prev.a && b >= prev.b) rate = ` (+${a - prev.a} / +${b - prev.b} last frame)`;
+            window._ripAdmitPrev = { a, b };
+            el.textContent = `windows admitted — alt: ${a}, batt: ${b}${rate}`;
+        }
     }
 }
 // iExcessLive: live iExcess detector sparkline (Group 3 alternator / Group 4 battery, whichever is active). Per CSV1 frame the firmware ships the
@@ -1212,6 +1231,26 @@ function downloadCsv(url, baseName){
     document.body.appendChild(a); a.click();
     setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }).catch(e=>alert('Download failed: '+(e&&e.message?e.message:e)));
+}
+
+// The Resonance & Ripple Map button pulls THREE distinct datasets, not one: the fast ESP32 tone/broadband
+// map (famatrix), the filtered INA228+ADS1115 pk-pk per RPM bin that the commissioning ripple check reads
+// (filtripple), and the commit-forensics ring (ripforensic). filtripple/ripforensic are supplementary —
+// download them silently and skip (no alert) if empty, so an un-swept device still gets the main map.
+function downloadRippleBundle(){
+  downloadCsv('/famatrix.csv','Resonance and Ripple Map');
+  const stampName=b=>{ const d=new Date(), p=n=>String(n).padStart(2,'0');
+    return b+' '+d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+'-'+p(d.getMinutes())+'-'+p(d.getSeconds())+'.csv'; };
+  for(const [url,name] of [['/filtripple.csv','Filtered Ripple (INA+ADS)'],['/ripforensic.csv','Ripple Commit Forensics']]){
+    fetchWithTimeout(buildURL(url),{},10000).then(r=>r.text()).then(txt=>{
+      if(!txt || txt.trim().split('\n').length < 2) return;  // header-only / empty → nothing captured, skip silently
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([txt],{type:'text/csv'}));
+      a.download=stampName(name);
+      document.body.appendChild(a); a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }).catch(()=>{});
+  }
 }
 
 // ── Configuration Backup & Sharing ──────────────────────────────────────────
@@ -1576,19 +1615,18 @@ function buildAltSessPlot(){
 
   // Click-to-inspect: find plotted dots near the pointer (same valToPos mapping the draw hook uses)
   // and render the operating point behind one into the panel below the plot. valToPos(...,false) is
-  // CSS px relative to the whole canvas, so subtract the bbox inset (canvas px → CSS via pxRatio).
+  // CSS px relative to the `over` element (zero offset — NOT the whole canvas), so it compares
+  // directly against the cursor position in over-element px; no bbox-inset correction.
   // Returns dot indices within `radius`, nearest first, plus the cursor position in over-element px.
   const altSessPick = (e, radius) => {
-    const dpr = altSessPlot.pxRatio || (window.devicePixelRatio || 1);
     const r = altSessPlot.over.getBoundingClientRect();
     const cx = e.clientX - r.left, cy = e.clientY - r.top;
-    const offX = altSessPlot.bbox.left / dpr, offY = altSessPlot.bbox.top / dpr;
     const rr = radius * radius, hits = [];
     for (let i = 0; i < altSessT.length; i++) {
       const v = altSessMeas[i] != null ? altSessMeas[i] : altSessEst[i];
       if (v == null) continue;
-      const dx = (altSessPlot.valToPos(altSessT[i], 'x', false) - offX) - cx;
-      const dy = (altSessPlot.valToPos(v, 'y', false) - offY) - cy;
+      const dx = altSessPlot.valToPos(altSessT[i], 'x', false) - cx;
+      const dy = altSessPlot.valToPos(v, 'y', false) - cy;
       const d = dx * dx + dy * dy;
       if (d <= rr) hits.push({ i, d });
     }
@@ -2372,6 +2410,10 @@ const CSV3_FIELDS = [
     "cvCurrentSrc",                  // CV current source: 0=battery-when-available, 1=force alternator (§G)
     "IExcessFloorABatt",             // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA; plain operator setting
     "IExcessCeilABatt",              // CV battery-current iExcess ceiling (A ×10) — separate from IExcessCeilA
+    // measured-ripple capture admission gates (§10.8/§11) — own knobs, decoupled from the fa* detector gates
+    "ripWinMs",                      // pk-pk capture window (ms, integer)
+    "ripDriftFloorA",                // shared floor: command gate + stationarity mean-shift tolerance (A ×100)
+    "ripDriftPct",                   // command-travel gate slope (% of mean, ×10)
 ];
 const TS_FIELDS = [
     "ts_HeadingNMEA",
@@ -5099,6 +5141,10 @@ function updateAllEchosOptimized(data) {
         { key: 'faAttenUpAmps',             id: 'faAttenUpAmps_echo',             transform: v => (v / 10) },
         { key: 'faAttenDownAmps',           id: 'faAttenDownAmps_echo',           transform: v => (v / 10) },
         { key: 'faPeakMinA',                id: 'faPeakMinA_echo',                transform: v => (v / 100) },
+        // Measured-ripple capture gate knob echoes (§10.8/§11 — ripRpmMargin retired)
+        { key: 'ripWinMs',                  id: 'ripWinMs_echo',                  transform: v => Math.round(v) },
+        { key: 'ripDriftFloorA',            id: 'ripDriftFloorA_echo',            transform: v => (v / 100) },
+        { key: 'ripDriftPct',               id: 'ripDriftPct_echo',               transform: v => (v / 10) },
 
     ];
 
@@ -5144,7 +5190,12 @@ function updateAllEchosOptimized(data) {
         }
     });
 
-    // Sync <select> elements to current firmware values
+    // Sync <select> elements to current firmware values.
+    // Mid-edit guard: without it the CSV3 poll snapped a not-yet-Set selection back to
+    // the live value, so clicking Set submitted the OLD value (bit us on AmpSensorRange).
+    // pendingEdit is set on change, cleared when the form submits or the firmware echo
+    // matches the dropdown (edit landed or was moot), so a walked-away edit can't block
+    // sync forever.
     const selectSyncs = [
         { key: 'AmpSensorRange',        name: 'AmpSensorRange' },
         { key: 'gpsTimeSourceMode',     name: 'gpsTimeSourceMode' },
@@ -5152,7 +5203,16 @@ function updateAllEchosOptimized(data) {
     selectSyncs.forEach(({ key, name }) => {
         if (key in data) {
             const sel = document.querySelector(`select[name="${name}"]`);
-            if (sel && sel.value !== String(data[key])) sel.value = String(data[key]);
+            if (!sel) return;
+            if (!sel.dataset.syncGuard) {
+                sel.dataset.syncGuard = '1';
+                sel.addEventListener('change', () => { sel.dataset.pendingEdit = '1'; });
+                if (sel.form) sel.form.addEventListener('submit', () => { delete sel.dataset.pendingEdit; });
+            }
+            const fwVal = String(data[key]);
+            if (sel.value === fwVal) { delete sel.dataset.pendingEdit; return; }
+            if (sel.dataset.pendingEdit || sel === document.activeElement) return;
+            sel.value = fwVal;
         }
     });
 
@@ -7796,7 +7856,10 @@ function initCurrentTempPlot() {
                             { label: "Battery Current (A)", color: "#4CAF50" },
                             { label: "Alternator Current (A)", color: "#2196F3" },
                             { label: "Field Current (A)", color: "#9C27B0" },
-                            { label: "Field %", color: "#9E9E9E" }
+                            { label: "Field %", color: "#9E9E9E" },
+                            // off:true → default hidden, matching the series show:false above (filtered = what the loops act on)
+                            { label: "Alt Current filtered (A)", color: "#90CAF9", off: true },
+                            { label: "Batt Current filtered (A)", color: "#A5D6A7", off: true }
                         ], u);
 
                         const resizePlot = debounce(() => {
@@ -8682,7 +8745,8 @@ flex-wrap: wrap;
 
     legendItems.forEach((item, i) => {
         const seriesIdx = i + 1;
-        let shown = vis[item.label] !== false;
+        // No stored preference → fall back to the item's own default (off:true = start hidden)
+        let shown = (item.label in vis) ? (vis[item.label] !== false) : !item.off;
 
         const legendItem = document.createElement('div');
         legendItem.style.cssText = `
@@ -17896,10 +17960,15 @@ function cxRenderMatrix(b) {
     let body = '';
     // The creep-the-throttle instruction is the active guidance only before/while sweeping; once enough
     // coverage is captured the step is done, so it would be a stale instruction — drop it there.
-    const sweepInstr = '<p style="font-size:15px;line-height:1.5;">Press Start, then <strong>from idle step the throttle up toward ~2000 RPM in small increments of roughly 50 RPM, pausing ~2–3 seconds at each speed</strong> so a clean reading lands in each band. Then <strong>step back down to idle the same way</strong>. One pass usually doesn\'t cover every bin — repeat up/down until the coverage requirement is met. Note: this step may be optional depending on data already collected — follow wizard prompts.</p>';
+    // Pause length matters (§11): the ripple map needs two complete ~2 s stationary windows at a speed
+    // before a value commits, so ~6 s per pause — the old 2–3 s satisfied only the tone-map coverage
+    // counter and left the ripple map (which picks the current-check RPM) empty.
+    const sweepInstr = '<p style="font-size:15px;line-height:1.5;">Press Start and <strong>let the engine sit at idle for ~10 seconds first</strong> — a rough or hunting idle is one of the most important readings. Then <strong>step the throttle up toward ~2000 RPM in small increments of roughly 50 RPM, pausing ~6 seconds at each speed</strong> so readings land in each band (the throttle doesn\'t need to be perfectly still — a wandering speed is fine, just don\'t move it on purpose during a pause). Then <strong>step back down to idle the same way</strong>. One pass usually doesn\'t cover every bin — repeat up/down until the coverage requirement is met. Note: this step may be optional depending on data already collected — follow wizard prompts.</p>';
     if (cx.matrixOn) {
         body += sweepInstr + '<div id="cx-cov" style="margin:10px 0;">Coverage: checking…</div>' +
-            '<button onclick="cxMatrixStop()" class="btn-primary btn-sm">I\'m done sweeping</button>';
+            // Disabled until the poll confirms ≥80% coverage — clicking early only stops the sweep and drops
+            // back to Start (no advance button below the gate), so it looks like "skip" but silently traps you.
+            '<button id="cx-sweep-done" onclick="cxMatrixStop()" class="btn-primary btn-sm"' + (cx.matrixCov ? '' : ' disabled') + '>I\'m done sweeping</button>';
     } else if (cx.matrixCov) {
         // Enough coverage already captured → advance is the one primary action; re-sweep is secondary.
         body += cxRtestPanel();  // optional resonance-vs-current characterization (§3.2), non-blocking
@@ -17932,7 +18001,8 @@ function cxMatrixPoll() {
         const pct = Math.round(100 * covered / total);
         cx.matrixCov = pct >= 80;
         const el = document.getElementById('cx-cov');
-        if (el) el.innerHTML = 'Coverage: <strong style="color:' + (cx.matrixCov ? '#5a5' : '#f0a500') + ';">' + covered + '/' + total + ' RPM bins</strong> (' + pct + '%). ' + (cx.matrixCov ? 'Enough — you can stop.' : 'Keep creeping the throttle up.');
+        if (el) el.innerHTML = 'Coverage: <strong style="color:' + (cx.matrixCov ? '#5a5' : '#f0a500') + ';">' + covered + '/' + total + ' RPM bins</strong> (' + pct + '%). ' + (cx.matrixCov ? 'Enough — you can stop.' : 'Keep stepping the throttle — pause ~6 s at each speed.');
+        const doneBtn = document.getElementById('cx-sweep-done'); if (doneBtn) doneBtn.disabled = !cx.matrixCov;
     }).catch(() => { });
 }
 function cxMatrixStop() {
@@ -17950,7 +18020,7 @@ function cxMatrixStop() {
 //   undefined→'checking'→ 'none' (no ripple, silent) | 'idle' (Ready) → 'leveling' (3 commanded steps)
 //   → 'done' (fit) | 'failed'. REQUIRES the matching firmware (resTest/bcurRtest) flashed.
 const CX_RT_BAND = 150;    // ± RPM considered "in range" (green)
-const CX_RT_SETTLE = 5;    // s to hold a commanded level before Confirm is allowed
+const CX_RT_SETTLE = 20;   // s to hold a commanded level before Confirm is allowed — sized so ~8 of the §11 2 s stationary ring windows exist when Record unlocks (was 5 s when windows were 0.5 s)
 function cxRtestPanel() {
     if (cx.rtestState === undefined) { cx.rtestState = 'checking'; cxRtestInit(); return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>'; }
     if (cx.rtestState === 'checking') return '<div style="margin:10px 0;color:#4a9eff;">Checking for resonance…</div>';
@@ -18021,10 +18091,22 @@ function cxRtestInit() {  // find the RPM with the worst measured filtered rippl
     }).catch(() => { cx.rtestState = 'none'; commissionRender(); });
 }
 function cxRtReady() {  // user is holding the resonant RPM → arm field-commanding and start level 1
-    let iMax = 0;
-    for (let i = 0; i < 10; i++) { const el = document.getElementById('rpmCapCurrentTable' + i + '_input'); if (el) { const v = parseFloat(el.value); if (v > iMax) iMax = v; } }
-    if (!(iMax > 5)) { cx.rtestState = 'failed'; cx.rtFailMsg = 'Max output current unknown (RPM-cap table empty) — can\'t size the levels.'; commissionRender(); return; }
-    cx.rtLevels = [0.30 * iMax, 0.60 * iMax, 0.90 * iMax];  // 3 spread levels across your output range
+    // Size the 3 levels from the cap-table ceiling AT THE TEST RPM, not the global table max. With the
+    // §11 stationarity gates the worst-ripple pick can legitimately land at idle, where a global-max
+    // level is unreachable — the command would saturate at the idle ceiling, cluster the 3 points, and
+    // fail the fit's span check. Table rows are "below this RPM" bands in ascending order, so the
+    // binding row is the first breakpoint above the test RPM (amps column is populated in kW mode too).
+    let iMax = 0, capAt = 0;
+    for (let i = 0; i < 10; i++) {
+        const c = document.getElementById('rpmCapCurrentTable' + i + '_input');
+        const r = document.getElementById('rpmTableRPMPoints' + i + '_input');
+        const v = c ? parseFloat(c.value) : NaN;
+        if (isFinite(v) && v > iMax) iMax = v;
+        if (!capAt && r && isFinite(v) && cx.rtestRpm < (parseFloat(r.value) || 0)) capAt = v;
+    }
+    if (!capAt) capAt = iMax;   // test RPM above every breakpoint (or RPM column unreadable) → top-band cap
+    if (!(capAt > 5)) { cx.rtestState = 'failed'; cx.rtFailMsg = 'Output ceiling at ' + cx.rtestRpm + ' RPM unknown (RPM-cap table empty) — can\'t size the levels.'; commissionRender(); return; }
+    cx.rtLevels = [0.30 * capAt, 0.60 * capAt, 0.90 * capAt];  // 3 spread levels across what this speed can actually deliver
     cx.rtLevel = 0; cx.rtPts = []; cx.rtest = null; cx.rtSettleStart = 0;
     cx.rtFieldArmed = true;   // field is now under wizard command → closeCommissionModal must tear it down
     cx.rtestState = 'leveling';
@@ -18067,10 +18149,11 @@ function cxRtConfirm() {  // capture this level from the most-recent in-range wi
             const iAlt = c.length >= 5 ? parseFloat(c[3]) : 0, pkAlt = c.length >= 5 ? parseFloat(c[4]) : 0;
             if (Math.abs(rpm - cx.rtestRpm) <= CX_RT_BAND) inrange.push({ i: iA, p: pk, ia: iAlt, pa: pkAlt });
         }
-        // The user just held ≥5 s at this level → the last few windows ARE this level. Use the operating
-        // current the ring logged (Bcur for battery, MeasuredAmps for alt), NOT the commanded level, so house loads don't skew it.
-        // MEDIAN of the recent windows (was max): with the firmware §10 steadiness gates the ring rows are
-        // already ramp-free, and the median makes the fit point immune to any single outlier window slipping through.
+        // The user just held ≥CX_RT_SETTLE (20 s ≈ 8 of the §11 2 s ring windows) at this level → the last
+        // few windows ARE this level. Use the operating current the ring logged (Bcur for battery,
+        // MeasuredAmps for alt), NOT the commanded level, so house loads don't skew it.
+        // MEDIAN of the recent windows (was max): with the firmware §10/§11 admission gates the ring rows
+        // are already ramp-free, and the median makes the fit point immune to any single outlier window.
         const recent = inrange.slice(-8);
         const med = a => { const s = a.slice().sort((x, y) => x - y); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : 0; };
         let iSum = 0, iaSum = 0;

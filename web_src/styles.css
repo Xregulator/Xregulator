@@ -834,6 +834,16 @@ input[type="submit"]:hover {
   background: linear-gradient(180deg, #18c4ba 0%, #00a39c 100%) !important;
   box-shadow: 0 4px 16px rgba(0, 161, 154, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
+/* Disabled state (e.g. "I'm done sweeping" before coverage is met): kill the teal glow so
+   it reads as inert, not as the obvious thing to click. :disabled hover must not re-light it. */
+#commission-modal-panel .btn-primary:disabled,
+#commission-modal-panel .btn-primary:disabled:hover {
+  background: #2c2c2c !important;
+  color: #777 !important;
+  border-color: #3a3a3a !important;
+  box-shadow: none;
+  cursor: not-allowed;
+}
 
 /* Secondary (neutral) */
 .btn-secondary {
