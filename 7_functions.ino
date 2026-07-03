@@ -2296,9 +2296,6 @@ void cvLog_tick(uint32_t nowMs) {
   if (g_iExcessBulkActive) e.flags |= (1 << 3);  // iExcess BULK sub-mode (current-control phase)
   if (g_iExcessActive)   e.flags |= (1 << 5);
   if (g_loadDumpActive)  e.flags |= (1 << 6);
-  // bit 7: CV battery-current control active (§G) — when set, the inner loop regulates battI_x10 (battery
-  // current) instead of iMeas (alternator current), so the setpoint should be tracked against battI.
-  if (g_cvBattCurrentActive) e.flags |= (1 << 7);
 
   e.capReason = g_fastOvCapReason;  // which layer set the binding fastOvCap this tick
 

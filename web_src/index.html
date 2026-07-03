@@ -2062,7 +2062,7 @@
                 </button>
                 <button type="button" data-filter="g4">
                   <span class="group-label">Group 4</span>
-                  <span class="nick-label">Battery iExcess</span>
+                  <span class="nick-label">Battery Limit</span>
                 </button>
               </div>
 
@@ -2071,11 +2071,11 @@
                 <div class="protections-section-title">Detection</div>
 
                 <div class="protections-intro">
-                  <p data-intro="cl">When measured current exceeds the safe system limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum across the whole system — including alternator continuous rating, battery acceptance, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. The trip threshold is automatically 10 A above Command Limit.</p>
+                  <p data-intro="cl">When measured alternator current exceeds the safe limit for the debounce duration, the trip fires. Set <strong>Command Limit</strong> to the lowest safe maximum on the <strong>alternator side</strong> of the system — alternator continuous rating, mechanical belt drive capacity, fuse ratings, and wiring limits. Whichever is lowest. Battery acceptance is handled separately by the Group 4 <strong>Battery Charge Current Limit</strong>. The trip threshold is automatically 10 A above Command Limit.</p>
                   <p data-intro="g1">Predicts where battery voltage will be a fraction of a second from now: <strong>predicted = measured + Prediction Horizon × voltage rise rate</strong>. Engages when the prediction exceeds the active charge target by more than the <strong>Group 1 Trigger Margin</strong>. <strong>dvdt EMA TC</strong> sets how much the rise rate is smoothed before prediction — larger TC means smoother but laggier. <strong>Group 1 Enable</strong> turns the whole layer off.</p>
                   <p data-intro="g2">Engages when measured battery voltage exceeds the active charge target by more than the <strong>Group 2 Trigger Margin</strong>. <strong>Group 2 Enable</strong> turns the whole layer off.</p>
-                  <p data-intro="g3">Watches <strong>alternator</strong> output current. Two regimes, split at the <strong>Strict Over-Current Band</strong> below target. <strong>Near the target</strong>: engages when the time-averaged current rises above the commanded <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong>. <strong>Below the band</strong>: the looser <strong>Detection Threshold (Bulk)</strong> takes over, judged against the commanded <strong>ceiling</strong> instead of the moving setpoint — so normal speed-up ramps don't false-trip. The threshold is bounded by the <strong>Threshold Floor / Ceiling</strong> (amps), and <strong>Release Hysteresis</strong> sets the re-arm point. (Strict Band, Detection Threshold, Averaging Time Constant and Release Hysteresis are shared with the Group 4 battery detector.)</p>
-                  <p data-intro="g4">Two <strong>battery-current</strong> protections. <strong>Battery over-current</strong> runs while the loop regulates <strong>battery</strong> current (CV absorption / float): the same near-target detector as Group 3, but with the <strong>battery Threshold Floor / Ceiling</strong> — battery current is much cleaner than alternator current, so its floor can sit lower and catch real over-current sooner. <strong>Load Dump</strong> is independent: three tiered thresholds on the <em>rate-of-change</em> of battery current — <strong>Tier 1</strong> fires when one sample exceeds its threshold, <strong>Tier 2</strong> when two consecutive do, <strong>Tier 3</strong> when three consecutive do — catching FET-disconnect or load-drop events. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled.</p>
+                  <p data-intro="g3">Watches <strong>alternator</strong> output current. Two regimes, split at the <strong>Strict Over-Current Band</strong> below target. <strong>Near the target</strong>: engages when the time-averaged current rises above the commanded <strong>setpoint</strong> by more than the <strong>Detection Threshold</strong>. <strong>Below the band</strong>: the looser <strong>Detection Threshold (Bulk)</strong> takes over, judged against the commanded <strong>ceiling</strong> instead of the moving setpoint — so normal speed-up ramps don't false-trip. The threshold is bounded by the <strong>Threshold Floor / Ceiling</strong> (amps), and <strong>Release Hysteresis</strong> sets the re-arm point.</p>
+                  <p data-intro="g4">Two <strong>battery-side</strong> features. <strong>Battery Charge Current Limit</strong> is a ceiling, not a trip: the commanded alternator current is capped at the limit plus the measured house-load draw, so the battery never sees more than the set amps no matter what the loads are doing. It needs the INA228 battery shunt and is off when set to 0. <strong>Load Dump</strong> is a protection: three tiered thresholds on the <em>rate-of-change</em> of battery current — <strong>Tier 1</strong> fires when one sample exceeds its threshold, <strong>Tier 2</strong> when two consecutive do, <strong>Tier 3</strong> when three consecutive do — catching FET-disconnect or load-drop events. Unlike the over-current detectors, Load Dump stays armed even when test protections are disabled.</p>
                 </div>
 
                 <div class="protections-cards">
@@ -2118,7 +2118,6 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span>
                       Group 1 Enable (<span id="OvGroup1Enable_echo">?</span>)
-                      <span class="sinfo" data-sinfo="ovG1" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2189,7 +2188,6 @@
                     <div class="protections-name">
                       <span class="protections-tag g2">G2</span>
                       Group 2 Enable (<span id="OvGroup2Enable_echo">?</span>)
-                      <span class="sinfo" data-sinfo="ovG2" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2234,32 +2232,15 @@
                       <canvas id="iExcessSparkG3" style="display:block; width:100%; height:60px;"></canvas>
                       <div style="font-size:0.92em; margin-top:5px;">
                         peak excess <strong id="mExcessEmaLiveG3">—</strong> A&nbsp;·&nbsp;threshold <strong id="iExcessELiveG3">—</strong> A
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> fire threshold (amber). The threshold rides the live current command and clamps onto this detector's Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross. Only one detector is armed at any moment: while the battery detector (G4) owns the regime, this strip dims and reads <em>disarmed</em>.</span></span>
+                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> fire threshold (amber). The threshold rides the live current command and clamps onto this detector's Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross.</span></span>
                         <span class="sinfo" data-sinfo="iexG3" onclick="sinfoToggle(this)"></span>
                       </div>
                     </div>
                   </article>
 
-                  <article class="protections-param" data-groups="g4">
-                    <div class="protections-name" style="font-weight:normal; display:block;">
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
-                        <span><span class="protections-tag g4">G4</span> Battery-current detector — live</span>
-                        <label style="display:inline-flex; align-items:center; gap:4px; font-size:11px; color:#888; cursor:pointer;">
-                          <input type="checkbox" id="iExcessSparkAutoG4" onchange="localStorage.setItem('iExcessSparkAutoG4', this.checked?'1':'0')" style="margin:0;"> auto-scale
-                        </label>
-                      </div>
-                      <canvas id="iExcessSparkG4" style="display:block; width:100%; height:60px;"></canvas>
-                      <div style="font-size:0.92em; margin-top:5px;">
-                        peak excess <strong id="mExcessEmaLiveG4">—</strong> A&nbsp;·&nbsp;threshold <strong id="iExcessELiveG4">—</strong> A
-                        <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Per ~0.1 s frame the chart plots the <strong>peak</strong> current excess above command (teal) against the <strong>minimum</strong> fire threshold (amber). The threshold rides the live current command and clamps onto the battery Floor (grey dotted) / Ceiling (purple dashed). A <strong style="color:#c0392b">vertical red line</strong> marks a frame where the detector actually fired — drawn from the real event, not from where the plotted lines cross. Only one detector is armed at any moment: while an alternator-current detector (G3) owns the regime, this strip dims and reads <em>disarmed</em>.</span></span>
-                        <span class="sinfo" data-sinfo="iexG4" onclick="sinfoToggle(this)"></span>
-                      </div>
-                    </div>
-                  </article>
-
-                  <article class="protections-param" data-groups="g3 g4">
+                  <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
-                      <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      <span class="protections-tag g3">G3</span>
                       Strict Over-Current Band — V below target (<span id="IExcessArmMarginV_echo">?</span>)
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Within this band of the presently acting voltage target (usually, the bulk voltage), it's strict — it reacts whenever current exceeds the current setpoint. Below this band, current is allowed to momentarily run well above the moment-to-moment setpoint, all the way up toward the “ceiling” (the most current allowed right now).</span></span>
                       <span class="sinfo" data-sinfo="IExcessArmMarginV" onclick="sinfoToggle(this)"></span>
@@ -2274,11 +2255,11 @@
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g3 g4">
+                  <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
-                      <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      <span class="protections-tag g3">G3</span>
                       Detection Threshold — % of command (<span id="IExcessFrac_echo">?</span>%)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the measured current may rise above the commanded current before the near-target detector steps in, as a percentage of that command. It acts on a time-averaged current, so a brief spike won't trip it — only a sustained excess — and it is bounded by the active Threshold Floor / Ceiling. Shared by Group 3 (bulk / current-limited) and Group 4 (battery current, absorption / float). Well below the target, the Detection Threshold (Bulk) takes over instead.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How far the measured current may rise above the commanded current before the near-target detector steps in, as a percentage of that command. It acts on a time-averaged current, so a brief spike won't trip it — only a sustained excess — and it is bounded by the Threshold Floor / Ceiling. Well below the target, the Detection Threshold (Bulk) takes over instead.</span></span>
                       <span class="sinfo" data-sinfo="IExcessFrac" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
@@ -2312,30 +2293,13 @@
                     <div class="protections-name">
                       <span class="protections-tag g3">G3</span>
                       Threshold Floor (alternator) — minimum amps (<span id="IExcessFloorA_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used. The battery detector (Group 4) has its own separate floor below. The ripple-vs-threshold plot shows whether your value clears the measured ripple.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The smallest the detection threshold is ever allowed to become, in amps. When the commanded current is small, the percentage-of-command threshold above could shrink so far that normal current variation trips it — this floor prevents that. Whichever is larger, the percentage or this floor, is used. The ripple-vs-threshold plot shows whether your value clears the measured ripple.</span></span>
                       <span class="sinfo" data-sinfo="IExcessFloorA" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
                         <input name="IExcessFloorA" type="number" step="0.5" min="1" max="20" />
-                        <span class="protections-unit">A</span>
-                        <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
-                      </div>
-                    </form>
-                  </article>
-
-                  <article class="protections-param" data-groups="g4">
-                    <div class="protections-name">
-                      <span class="protections-tag g4">G4</span>
-                      Threshold Floor (battery) — minimum amps (<span id="IExcessFloorABatt_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The minimum threshold for the battery-current detector (Group 4). Separate from the alternator floor above because battery current carries much less ripple (the belt-resonance AC mostly returns through bus capacitance, not the battery), so this floor can sit lower — catching real over-current sooner without tripping on ripple. The ripple-vs-threshold plot shows whether it clears the measured ripple.</span></span>
-                      <span class="sinfo" data-sinfo="IExcessFloorABatt" onclick="sinfoToggle(this)"></span>
-                    </div>
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="protections-edit-row">
-                        <input name="IExcessFloorABatt" type="number" step="0.5" min="1" max="20" />
                         <span class="protections-unit">A</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
@@ -2375,48 +2339,31 @@
                     </div>
                     <canvas id="rippleThreshPlotAlt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
                     <div id="rippleVerdictAlt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
-                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
+                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 5 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
                   </article>
 
                   <article class="protections-param" data-groups="g4">
                     <div class="protections-name">
                       <span class="protections-tag g4">G4</span>
-                      Threshold Ceiling (battery) — maximum amps (<span id="IExcessCeilABatt_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The largest the detection threshold is ever allowed to become, in amps, for the battery-current (CV / absorption-float) detector. Separate from the alternator ceiling because battery current and alternator current are different signals — the battery detector's threshold saturates here, not at the alternator ceiling.</span></span>
-                      <span class="sinfo" data-sinfo="IExcessCeilABatt" onclick="sinfoToggle(this)"></span>
+                      Battery Charge Current Limit (A) (<span id="BattCurrentLimitA_echo">?</span>)
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The most charging current the battery is allowed to receive, in amps — set it to the battery bank's maximum acceptance (for lithium, the C-rate limit). This is a ceiling on the command, not a trip: the alternator command is capped at this limit plus the measured house-load draw, so loads are always covered and only the battery's share is limited. Requires the INA228 battery shunt as the Battery Current Source. 0 disables the limit.</span></span>
+                      <span class="sinfo" data-sinfo="BattCurrentLimitA" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
                       <div class="protections-edit-row">
-                        <input name="IExcessCeilABatt" type="number" step="1" min="5" max="80" />
+                        <input name="BattCurrentLimitA" type="number" step="5" min="0" max="500" />
                         <span class="protections-unit">A</span>
                         <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                       </div>
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g4">
-                    <div class="protections-name" style="font-weight:normal; display:block;">
-                      <span class="protections-tag g4">G4</span>
-                      Ripple vs. trip threshold (battery)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The battery-current trip threshold your settings above produce (% of command, floor→ramp→ceiling) drawn against the measured battery ripple. Any current where the ripple crosses above the threshold is shaded red. The threshold line redraws as you edit the fields above; the ripple line is fixed measured data. Nothing here changes automatically.</span></span>
-                      <span class="sinfo" data-sinfo="ripPlotBatt" onclick="sinfoToggle(this)"></span>
-                      <div style="display:flex; align-items:center; gap:6px; margin:6px 0 4px; font-size:11px; color:#888;">
-                        X-axis max
-                        <input id="rippleXmaxBatt" type="number" step="10" min="20" max="400" style="width:70px;" oninput="renderRipplePlots()" />
-                        <span>A</span>
-                      </div>
-                    </div>
-                    <canvas id="rippleThreshPlotBatt" style="display:block; width:100%; height:220px; background:#161616; border-radius:6px;"></canvas>
-                    <div id="rippleVerdictBatt" style="font-size:12px; color:#bbb; margin-top:6px; line-height:1.5;"></div>
-                    <div style="font-size:11px; color:#777; margin-top:4px; line-height:1.5;">Ripple projection is from <strong>Commissioning ▸ Step 6 (Disturbances) ▸ current check</strong>. Re-run that step to update it.</div>
-                  </article>
-
-                  <article class="protections-param" data-groups="g3 g4">
+                  <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
-                      <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      <span class="protections-tag g3">G3</span>
                       Averaging Time Constant (<span id="IExcessTau_echo">?</span> ms)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Larger = smooths brief fluctuations more, so momentary spikes won't trip the detectors, but reacts a little slower to a real, sustained overshoot. The default suits most installations across the full speed range. Governs both detectors (Group 3 and Group 4).</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Larger = smooths brief fluctuations more, so momentary spikes won't trip the detector, but reacts a little slower to a real, sustained overshoot. The default suits most installations across the full speed range. Governs both Group 3 regimes (near-target and bulk).</span></span>
                       <span class="sinfo" data-sinfo="IExcessTau" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
@@ -2429,9 +2376,9 @@
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g3 g4">
+                  <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
-                      <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      <span class="protections-tag g3">G3</span>
                       Release Hysteresis — % of threshold (<span id="IExcessRelFrac_echo">?</span>%)
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">After the iExcess detector fires it stays engaged until the averaged excess falls back below this percentage of the threshold, then it re-arms. Prevents the detector from rapidly switching on and off as the current settles. Lower = holds longer before releasing; higher = re-arms sooner.</span></span>
                       <span class="sinfo" data-sinfo="IExcessRelFrac" onclick="sinfoToggle(this)"></span>
@@ -2509,7 +2456,7 @@
                   <p data-intro="g1"><strong>KHard — Response Slope</strong> sets how aggressively the current cap is trimmed per volt of overshoot — recomputed from the live overshoot every tick. Shared with Measured OV. <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while any of the other protections is clamping.</p>
                   <p data-intro="g2">Same <strong>KHard — Response Slope</strong> cap-trim mechanism as Predictive OV (shared parameter). <strong>AW Bleed Rate</strong> continuously drains the voltage integrator while the clamp is active.</p>
                   <p data-intro="g3">Trims the current cap by the measured amount of excess each tick — the same cap-trim action the OV groups apply, but driven by alternator-current overshoot rather than voltage. <strong>K_bleed — Integrator Bleed Mode</strong> additionally drains the voltage integrator when the event fires — 0 means snap to zero (maximum response); &gt; 0 takes a single bite proportional to the amount of excess. <strong>AW Bleed Rate</strong> also drains continuously while active.</p>
-                  <p data-intro="g4"><strong>Battery over-current</strong> responds exactly like Group 3: it trims the current cap by the measured excess each tick and applies <strong>K_bleed — Integrator Bleed Mode</strong> to the voltage integrator (0 = snap to zero, &gt; 0 = a proportional bite at the fire instant). <strong>Load Dump</strong> instead snaps the voltage integrator to 0 instantly on the rising edge of the trip — hardcoded, no adjustable parameter for the snap itself. <strong>AW Bleed Rate</strong> drains the integrator continuously while either is active.</p>
+                  <p data-intro="g4"><strong>Battery Charge Current Limit</strong> has no trip response — it is a ceiling the command simply never exceeds. <strong>Load Dump</strong> snaps the voltage integrator to 0 instantly on the rising edge of the trip — hardcoded, no adjustable parameter for the snap itself. <strong>AW Bleed Rate</strong> drains the integrator continuously while it is active.</p>
                 </div>
 
                 <div class="protections-cards">
@@ -2530,11 +2477,11 @@
                     </form>
                   </article>
 
-                  <article class="protections-param" data-groups="g3 g4">
+                  <article class="protections-param" data-groups="g3">
                     <div class="protections-name">
-                      <span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
+                      <span class="protections-tag g3">G3</span>
                       K_bleed — Integrator Bleed Mode (<span id="IExcessKBleed_echo">?</span>)
-                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How the voltage loop integrator is driven down when an iExcess event (Group 3 or 4) fires, on top of the AW Bleed:<br><br>• <strong>0</strong> = snap it to zero (maximum response).<br>• <strong>&gt; 0</strong> = take a single bite proportional to how far the current is over the limit — gentler, lowers undershoot risk after the event clears.<br><br><strong>Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.</strong> Recovery is always handled by the Shared Recovery block regardless of mode.</span></span>
+                      <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How the voltage loop integrator is driven down when an iExcess event (Group 3) fires, on top of the AW Bleed:<br><br>• <strong>0</strong> = snap it to zero (maximum response).<br>• <strong>&gt; 0</strong> = take a single bite proportional to how far the current is over the limit — gentler, lowers undershoot risk after the event clears.<br><br><strong>Try 2–5 if the snap-to-zero causes an unacceptable voltage dip below target.</strong> Recovery is always handled by the Shared Recovery block regardless of mode.</span></span>
                       <span class="sinfo" data-sinfo="IExcessKBleed" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
@@ -2583,7 +2530,6 @@
                     <div class="protections-name">
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Recovery Seed Fraction (<span id="ReseedFrac_echo">?</span>)
-                      <span class="sinfo" data-sinfo="ReseedFrac" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2600,7 +2546,6 @@
                       <span class="protections-tag g1">G1</span><span class="protections-tag g2">G2</span><span class="protections-tag g3">G3</span><span class="protections-tag g4">G4</span>
                       Seed Protect Window (ms) (<span id="AwSeedProtectMs_echo">?</span>)
                       <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Milliseconds after either of these two events during which the AW Bleed Rate is suppressed:<br><br>• A <strong>CV-entry bumpless seed</strong> fires (when CV mode first activates),<br>• A <strong>protection-release reseed</strong> fires (when every protection clears).<br><br>Prevents the just-seeded integrator from being immediately bled back to zero if a brief new protection event fires right after the seed. 0 = disabled.</span></span>
-                      <span class="sinfo" data-sinfo="AwSeedProtectMs" onclick="sinfoToggle(this)"></span>
                     </div>
                     <form action="/get" method="GET" target="hidden-form">
                       <input type="hidden" name="password" class="password_field">
@@ -2845,26 +2790,24 @@
 
               <div class="form-row">
                 <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                  <span>Use Float (<span id="UseFloat_echo">?</span>):</span>
+                  <span>Float Mode (<span id="UseFloat_echo">?</span>):</span>
                   <span class="tooltip" onclick="this.classList.toggle('active')">
                     ℹ️
-                    <span class="tooltip-box">When ON, after Absorption the system holds the battery at Float Voltage to
-                      maintain near-full charge. When OFF, charging stops after Absorption and only resumes when rebulk
-                      criteria are met — better for lithium longevity in cycling applications.</span>
+                    <span class="tooltip-box"><strong>No Float (idle)</strong> — after Absorption the field turns off. The battery carries the house loads, and charging restarts when the rebulk criteria (next section) are met.<br><br><strong>Voltage Float</strong> — the classic third stage: holds the battery at Float Voltage indefinitely to maintain near-full charge.<br><br><strong>Zero-Current Float</strong> — the alternator carries exactly the house loads and the battery rests at 0 A, at whatever voltage it naturally sits. The battery is neither charged nor discharged while the engine runs. Needs the INA228 battery shunt. The rebulk criteria stay armed — unlike the manual Force Maintain Mode override below, which suspends the charge-stage machine entirely.</span>
                   </span>
                 </div>
                 <div class="form-input">
-                  <form action="/get" method="GET" target="hidden-form">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'UseFloat')">
                     <input type="hidden" name="password" class="password_field">
-                    <span class="toggle-label">Off</span>
-                    <label class="switch">
-                      <input id="UseFloat_checkbox" type="checkbox"
-                        onchange="if(validateAndSubmitBatteryToggle(this, 'UseFloat') && handleUserToggle('UseFloat_checkbox', 'UseFloat', 'UseFloat')) { this.form.submit(); submitMessage(); } updateFloatVisibility();" />
-                      <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">On</span>
-                    <input id="UseFloat" name="UseFloat" type="number" value="" style="display:none;" />
+                    <select name="UseFloat" onchange="updateFloatVisibility(this.value)">
+                      <option value="0">No Float (idle)</option>
+                      <option value="1">Voltage Float</option>
+                      <option value="2">Zero-Current Float</option>
+                    </select>
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
+                  <div id="floatModeDesc" style="font-size:12px;color:#999;margin-top:4px;line-height:1.4;"></div>
                 </div>
               </div>
 
@@ -2907,25 +2850,25 @@
                   </div>
                 </div>
 
-                <hr />
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>Minimum Float Time (min) (<span id="MinFloatTime_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">
-                      ℹ️
-                      <span class="tooltip-box">Delay before rebulk allowed.</span>
-                    </span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form"
-                      onsubmit="return validateAndSubmitBatteryNumber(this, 'MinFloatTime')">
-                      <input type="hidden" name="password" class="password_field">
-                      <input name="MinFloatTime" type="number" step="0.01" min="0" max="9999999" />
-                      <input type="submit" value="Set" class="btn-primary" />
-                    </form>
-                  </div>
-                </div>
+              </div>
 
+              <hr />
+              <div class="form-row">
+                <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
+                  <span>Minimum Float Time (min) (<span id="MinFloatTime_echo">?</span>):</span>
+                  <span class="tooltip" onclick="this.classList.toggle('active')">
+                    ℹ️
+                    <span class="tooltip-box">Delay after Absorption completes before any rebulk is allowed. Applies in all three Float Modes (idle, voltage float, zero-current float).</span>
+                  </span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form"
+                    onsubmit="return validateAndSubmitBatteryNumber(this, 'MinFloatTime')">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="MinFloatTime" type="number" step="0.01" min="0" max="9999999" />
+                    <input type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
               </div>
 
               <hr />
@@ -3918,14 +3861,14 @@
             <details open style="margin-top: 20px;">
               <summary
                 style="cursor: pointer; font-weight: bold; font-size: 16px; padding: 10px 0; border-bottom: 2px solid var(--accent); margin-bottom: 10px;">
-                Voltage Alarms</summary>
+                Voltage &amp; Charge Alarms</summary>
 
               <div class="form-row">
                 <div class="form-label">High Voltage Alarm (<span id="VoltageAlarmHigh_echo">0</span>):</div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageAlarmHigh" type="number" step="0.1" min="0" max="70" />
+                    <input name="VoltageAlarmHigh" type="number" step="0.01" min="0" max="70" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -3937,7 +3880,21 @@
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
                     <input type="hidden" name="password" class="password_field">
-                    <input name="VoltageAlarmLow" type="number" step="0.1" min="0" max="70" />
+                    <input name="VoltageAlarmLow" type="number" step="0.01" min="0" max="70" />
+                    <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
+                  </form>
+                </div>
+              </div>
+
+              <hr />
+              <div class="form-row">
+                <div class="form-label">Low State of Charge Alarm (%) (<span id="SocAlarmLow_echo">0</span>):
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Sounds the alarm when the battery's state of charge falls below this percentage. Only active when the battery monitor's state of charge information is available. 0 disables.</span></span>
+                </div>
+                <div class="form-input">
+                  <form action="/get" method="GET" target="hidden-form">
+                    <input type="hidden" name="password" class="password_field">
+                    <input name="SocAlarmLow" type="number" step="1" min="0" max="100" />
                     <input onclick="submitMessage()" type="submit" value="Set" class="btn-primary" />
                   </form>
                 </div>
@@ -3966,6 +3923,7 @@
               <div class="form-row">
                 <div class="form-label">High Current Alarm (Battery) (A) (<span
                     id="MaximumAllowedBatteryAmps_echo">0</span>):
+                  <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Alarm only — never reduces the field. Fires when battery current magnitude exceeds this value in either direction, so it catches heavy discharge as well as over-charge. Separate from the Group 4 Battery Charge Current Limit (which actively caps the command); set this alarm above that limit so a correctly limited charge doesn't alarm. 0 disables.</span></span>
                 </div>
                 <div class="form-input">
                   <form action="/get" method="GET" target="hidden-form">
@@ -4033,7 +3991,7 @@
              (same card-filter pattern as Setup → Alternator → Protections). Results display on Live Data → Diag. -->
         <div id="settings-diag" class="sub-tab-content">
       <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0;line-height:1.5;">
-        Four independent checkpoints decide what data gets recorded on the Live Data → Diag tab. These are their gates &amp; tuning knobs — pick a pill to see only that checkpoint's settings; a setting shared by two checkpoints shows under all of them.
+        Four independent checkpoints decide what data gets recorded on the Live Data → Diag tab. These are their gates &amp; tuning knobs — pick a pill to see only that checkpoint's settings; a setting shared by two checkpoints shows under both of them.
       </p>
       <div class="checkpoint-filters">
         <span class="checkpoint-filter-label">View:</span>
@@ -4052,7 +4010,7 @@
         </button>
         <button type="button" data-filter="c4">
           <span class="group-label">C4</span>
-          <span class="nick-label">Ripple Capture</span>
+          <span class="nick-label">Ripple Measurements</span>
         </button>
       </div>
 
@@ -4060,7 +4018,7 @@
         <p data-intro="c1"><strong>C1 — Anomaly Detection</strong> watches the fast current sensor for rectifier/stator fault signatures. It shares the fast channel and its steady-state admission gates (current drift floor/slope, input-range switching) with C2 — those live in the shared Fast Current Channel section. Its own pieces: the fault alarm, the fault-class and lifetime-anomaly readouts, and the anomaly snapshots in the Waveforms flipbook. Arming ignores engine speed entirely, so it keeps working with a dead tach.</p>
         <p data-intro="c2"><strong>C2 — Resonance &amp; Ripple Map</strong> learns the strongest current-ripple tones at every engine speed and load, from the same fast channel as C1. It uses the shared current-drift gates plus two gates of its own: the steady-state RPM margin (a window is discarded when the engine sits on a speed-bin edge) and the minimum tone amplitude. Its results: the map itself, the worst ripple &amp; tone table, and the biggest actionable disturbance.</p>
         <p data-intro="c3"><strong>C3 — Charging-System Health</strong> grades output amps against the best this machine has ever done at the same operating point. A point is admitted only after every signal — RPM, field duty, voltage, temperature, amps — holds steady. Those admission gates and the curve-fit tuning are the knobs under Gates &amp; Tuning in this section; the resulting health gauge, session plot, and engine-hours trend appear on Live Data → Diag → Alternator.</p>
-        <p data-intro="c4"><strong>C4 — Measured-Ripple Capture</strong> measures filtered peak-to-peak ripple on the slow sensors (both alternator and battery current) — the numbers behind the Protections ripple plots and the commissioning current check. Its stationarity gates are deliberately separate from C1/C2’s, so tuning capture admission can never loosen fault-detector arming.</p>
+        <p data-intro="c4"><strong>C4 — Ripple Measurements</strong> is one measurement engine with two collectors: the RPM ripple table is filled <em>only</em> by the commissioning game, and the ripple-vs-current line on the Protections plots is filled <em>only</em> by Commissioning Step 5. These gates define what counts as a valid measurement for both. They are deliberately separate from C1/C2’s gates, so tuning them can never loosen fault-detector arming.</p>
       </div>
 
           <!-- Flat, pill-filtered knob cards (Protections pattern): each block tags the checkpoint(s)
@@ -4072,7 +4030,6 @@
         <div class="form-row">
           <div class="form-label">Fast Current Channel (<span id="faEnabled_echo">?</span>):
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Master on/off for this whole diagnostic channel. Off stops sampling entirely — no map learning, no fault detection, no oscilloscope.</span></span>
-            <span class="sinfo" data-sinfo="faEnabled" onclick="sinfoToggle(this)"></span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -4172,7 +4129,6 @@
         <div class="form-row">
           <div class="form-label">Sound Alarm on Fault (<span id="faAlarmEnable_echo">?</span>):
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Recommend leaving this off — the fault alarm is still unproven and in development.</span></span>
-            <span class="sinfo" data-sinfo="faAlarmEnable" onclick="sinfoToggle(this)"></span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -4338,7 +4294,6 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Trend bucket length (s) (<span id="altTrendBuckSec_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Engine-seconds per point on the % vs Engine-Hours trend. 3600 = one point per engine-hour (production). Set 600 to see points fill in every 10 minutes for testing.</span></span>
-                    <span class="sinfo" data-sinfo="altTrend" onclick="sinfoToggle(this)"></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4353,7 +4308,6 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Trend sample spacing (s) (<span id="altTrendFeedSec_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Minimum spacing between full steady-run samples that feed a trend bucket. Throttles a long steady run so it contributes several spread-out samples rather than a flood.</span></span>
-                    <span class="sinfo" data-sinfo="altTrend" onclick="sinfoToggle(this)"></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4368,7 +4322,6 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Trend min samples per bucket (<span id="altTrendMinSamp_echo">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">A trend bucket needs at least this many full steady-run samples before it commits a point. A sparser bucket shows a gap instead of a single-reading artifact.</span></span>
-                    <span class="sinfo" data-sinfo="altTrend" onclick="sinfoToggle(this)"></span>
                   </div>
                   <div class="form-input">
                     <form action="/get" method="GET" target="hidden-form">
@@ -4587,7 +4540,6 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Reference source (<span id="alt-mode-label">?</span>):</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which reference surface grades the live % and the trend. "My History" is what this device learned. "Uploaded File" is a borrowed surface from Load CSV — selecting it defaults Pause ON, but you can Continue to keep learning My History while graded against the uploaded one. Learning never modifies an uploaded surface.</span></span>
-                    <span class="sinfo" data-sinfo="altRefLearn" onclick="sinfoToggle(this)"></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -4601,7 +4553,6 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Learning</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Pause / Continue learning into My History. Independent of the reference source — you can pause learning and still grade against either surface. Live display and the trend keep updating either way.</span></span>
-                    <span class="sinfo" data-sinfo="altRefLearn" onclick="sinfoToggle(this)"></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -4615,7 +4566,6 @@
                   <div class="form-label" style="display:flex;align-items:center;justify-content:space-between;">
                     <span>Simulator</span>
                     <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Injects synthetic operating points for bench testing without a running engine, so the curve fills and the health trend visibly declines. Leave off for real use; simulated data is not saved.</span></span>
-                    <span class="sinfo" data-sinfo="altRefLearn" onclick="sinfoToggle(this)"></span>
                   </div>
                   <div class="form-input">
                     <div class="cap-mode-toggle">
@@ -4654,15 +4604,14 @@
             <div class="checkpoint-param-chips"><span class="checkpoint-tag c4">C4</span></div>
 <div class="settings-card">
         <div class="form-row form-row-wide" style="align-items:center; gap:8px; flex-wrap:wrap;">
-          <span style="font-size:14px; font-weight:600;">Measured-Ripple Capture Gating</span>
+          <span style="font-size:14px; font-weight:600;">Ripple Measurements</span>
         </div>
-        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">These gates qualify the <strong>measured filtered-ripple capture</strong> — the peak-to-peak numbers behind the Protections ripple plots and the commissioning current check. A capture window folds only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the map. Every gate is shown live below (green = passing over the last 10 s); the admitted counters at the bottom show throughput. Never relaxed during the commissioning sweep: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when windows admit.</div>
+        <div style="font-size:0.85em; opacity:0.75; margin:-2px 0 6px; line-height:1.4;">One measurement engine, two collectors: the <strong>RPM ripple table</strong> is filled only by the commissioning game, and the <strong>ripple-vs-current line</strong> on the Protections plots only by Commissioning Step 5. These gates define what counts as a valid measurement for both. A measurement counts only if conditions were <strong>stationary</strong>: the window's two halves must have (nearly) the same average — a throttle or load transient walks the average in one direction and is rejected, while a rough-but-repeating condition (a hunting idle, cycling loads) swings hard yet averages the same in both halves and is admitted. This is deliberate: a "dirty speed" is exactly what the over-current protections experience, so it must make it into the table. Each gate shows its worst value over the last 10 s (green = passing). Never relaxed during commissioning: a stationary number cannot be measured while ramping — the wizard's instructed pauses are when measurements admit.</div>
 
         <div class="form-row">
           <div class="form-label">Capture Window (ms) (<span id="ripWinMs_echo">?</span>):
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">How long each ripple measurement lasts. Each HALF of the window must hold at least one full cycle of the slowest disturbance you care about — a hunting idle wanders with a ~1–2 second period, hence the 2000 ms default; shorter windows see slow hunt as drift and reject or under-read it. <strong>Changing this changes the measured quantity itself</strong> — map cells and the current-check fit captured under a different window length are not comparable. After changing it: clear the map and re-run the commissioning current check.</span></span>
             <span class="sinfo" data-sinfo="ripWinMs" onclick="sinfoToggle(this)"></span>
-            <span id="ripRpmGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">RPM stationarity (mean-shift), 10s worst vs limit: —</span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -4678,9 +4627,8 @@
           <div class="form-label">Current Drift Floor (A) (<span id="ripDriftFloorA_echo">?</span>):
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The shared tolerance floor, used two ways. (1) Command gate: the current <em>command</em> must not travel more than the larger of this floor or the slope % below (rejects deliberate ramps — test steps, warm-up, mode glides). (2) Stationarity gates: each sensor's two half-window averages must agree within the larger of this floor or a quarter of that window's own full swing — self-scaling, so a rough-but-repeating signal gets proportionally more tolerance while a one-way ramp is still rejected. Each line shows (worst value − its limit) over the last 10 s: at or below zero (green) = passing. Separate from the C1/C2 drift knobs above, so tuning capture admission never loosens fault-detector arming.</span></span>
             <span class="sinfo" data-sinfo="ripDriftFloorA" onclick="sinfoToggle(this)"></span>
-            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command steady, 10s worst vs limit: —</span>
-            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt stationarity (mean-shift), 10s worst vs limit: —</span>
-            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt stationarity (mean-shift), 10s worst vs limit: —</span>
+            <span id="ripAltGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">alt mean-shift beyond limit (larger of Floor / ¼ window swing), 10s worst, ≤0 passes: —</span>
+            <span id="ripBattGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">batt mean-shift beyond limit (larger of Floor / ¼ window swing), 10s worst, ≤0 passes: —</span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -4696,6 +4644,7 @@
           <div class="form-label">Current Drift Slope (%) (<span id="ripDriftPct_echo">?</span>):
             <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The proportional companion to the floor above, for the <em>command</em> gate only: the command may travel up to this percent of the window's mean alternator current (or the fixed floor, whichever is larger). The sensor gates don't use it — their tolerance self-scales on each window's own measured swing (see the floor's tooltip).</span></span>
             <span class="sinfo" data-sinfo="ripDriftPct" onclick="sinfoToggle(this)"></span>
+            <span id="ripCmdGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">command travel beyond limit (larger of Floor / Slope % × mean), 10s worst, ≤0 passes: —</span>
           </div>
           <div class="form-input">
             <form action="/get" method="GET" target="hidden-form">
@@ -4708,10 +4657,9 @@
 
         <hr />
         <div class="form-row">
-          <div class="form-label">Capture throughput:
-            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Running count of capture windows that passed every gate for each detector since power-up. Counting up = the capture is live. Frozen with all gate lines green = windows are being rejected by the knob-less gates: a protection clamp fired during the window, a processing stall starved it of samples, or the signal didn't oscillate about its baseline enough (one-time steps and glitches are filtered out). Table cells commit only when two admitted windows agree with each other, so a lone outlier can never become a stored value.</span></span>
-            <span class="sinfo" data-sinfo="ripThroughput" onclick="sinfoToggle(this)"></span>
-            <span id="ripAdmit_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">windows admitted — alt: —, batt: —</span>
+          <div class="form-label">Steady-State RPM:
+            <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">The engine speed must also be stationary across the window — same two-half test as the currents. Its limit is automatic — the larger of 10 RPM or a quarter of the window's own RPM swing — so there is nothing to set. The readout shows (shift − limit): a negative number means that many RPM inside the limit.</span></span>
+            <span id="ripRpmGate_live" style="display:block; font-size:0.85em; opacity:0.7; font-weight:normal; margin-top:2px;">RPM mean-shift beyond limit (larger of 10 RPM / ¼ window swing), 10s worst, ≤0 passes: —</span>
           </div>
           <div class="form-input"></div>
         </div>
@@ -7153,27 +7101,6 @@
                   </div>
                 </div>
 
-                <hr />
-                <!-- CV current source: battery current (Bcur) vs forced alternator current -->
-                <div class="form-row">
-                  <div class="form-label" style="display: flex; align-items: center; justify-content: space-between;">
-                    <span>CV Current Source (<span id="cvCurrentSrc_echo">?</span>):</span>
-                    <span class="tooltip" onclick="this.classList.toggle('active')">ℹ️<span class="tooltip-box">Which current the voltage loop's inner current loop regulates while holding absorption / float voltage. <strong>Battery</strong> (default) regulates the battery current measured at the shunt (INA228) — it is co-sampled with the battery voltage and reacts faster, so a switched house load is rejected at inner-loop speed instead of waiting for the slow voltage loop. <strong>Alternator (forced)</strong> reverts to the legacy behaviour (regulate alternator current) for A/B comparison. Battery mode only engages when the battery-current sensor is the INA228 shunt and it is healthy; otherwise it automatically uses alternator current. Bulk (current-limited) charging always uses alternator current regardless of this setting, and the alternator's own current ceiling is still enforced. The live state is reported in System / Diagnostics.</span></span>
-                  </div>
-                  <div class="form-input">
-                    <form action="/get" method="GET" target="hidden-form">
-                      <input type="hidden" name="password" class="password_field">
-                      <div class="cap-mode-toggle ab-seg" data-seg-for="cvCurrentSrc_checkbox">
-                        <button type="button" class="cap-mode-btn" data-checked="0" onclick="abSegClick(this)">Battery</button>
-                        <button type="button" class="cap-mode-btn" data-checked="1" onclick="abSegClick(this)">Alternator</button>
-                      </div>
-                      <input id="cvCurrentSrc_checkbox" type="checkbox" style="display:none;"
-                        onchange="if(handleUserToggle('cvCurrentSrc_checkbox', 'cvCurrentSrc', 'cvCurrentSrc')) { this.form.submit(); submitMessage(); }" />
-                      <input id="cvCurrentSrc" name="cvCurrentSrc" type="number" value="" style="display:none;" />
-                    </form>
-                  </div>
-                </div>
-
                 <!-- Manual gains — shown only in Manual mode; ignored (but preserved) when Auto λ is active -->
                 <div id="cvManualBlock">
                 <hr />
@@ -7694,13 +7621,11 @@
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
                   <strong>Voltage Loop:</strong> A proportional-integral controller (Voltage Loop Kp and Ki) holds
-                  battery voltage at target during the voltage-hold phases (Absorption and Float). Its output is a
-                  <em>battery-current</em> target, measured on the battery shunt (INA228), rather than an alternator-current
-                  target. That means the hold reacts to the current the battery actually receives, not to whatever the
-                  alternator happens to be producing while house loads draw off the same bus — a cleaner, quieter signal
-                  to regulate against. An alternator-current ceiling governor sits on top of it, so the loop can never
-                  demand more alternator output than the RPM Cap Table ceiling allows even while chasing a battery-current
-                  target. The current-limited phase (Bulk) still commands alternator current directly. The integrator uses
+                  battery voltage at target during the voltage-hold phases (Absorption and Float). Its output is an
+                  <em>alternator-current</em> target, capped at the RPM Cap Table ceiling (with thermal derating) and,
+                  when the Group 4 Battery Charge Current Limit is set, at that limit plus the measured house-load
+                  draw — so the battery's share of the output is bounded regardless of what the loads are doing.
+                  The current-limited phase (Bulk) commands alternator current the same way. The integrator uses
                   asymmetric gain — it bleeds down fast when voltage runs above target and rises slowly when below, biasing
                   toward safety. The Slope Bleed Gain drains the integrator when voltage is climbing quickly, which prevents
                   overshoot during the approach to target. Anti-windup freezes upward integration whenever the current
@@ -7741,16 +7666,15 @@
                   three-loop cascade and act on raw sensor readings without filter lag. <em>Fast OV</em> (Groups 1
                   and 2) caps current immediately when raw battery voltage runs above a margin below the charging
                   target. <em>Load Dump</em> protection (Group 4) caps current when a sustained battery-current rise rate is
-                  detected, catching FET disconnect or load drop events. The <em>over-current detectors</em> (iExcess)
-                  cap the current ceiling when measured current overshoots the commanded setpoint — <em>Group 3</em>
-                  on alternator current (bulk / current-limited) and <em>Group 4</em> on battery current (CV
-                  absorption / float) — and collapse the voltage-loop integrator at the same time so it can't
-                  immediately re-demand the excess. Each detector's trip threshold is not a single fixed number: it is
+                  detected, catching FET disconnect or load drop events. The <em>over-current detector</em> (iExcess,
+                  Group 3) caps the current ceiling when measured alternator current overshoots the commanded
+                  setpoint — with a strict regime near the voltage target and a looser one in bulk — and collapses
+                  the voltage-loop integrator at the same time so it can't
+                  immediately re-demand the excess. Its trip threshold is not a single fixed number: it is
                   <em>max(floor, percent·commanded current, ceiling)</em>, so the percentage term rides up with the
                   commanded current — tight at low current (catches real over-current sooner) and looser under heavy
                   output (tolerates the larger legitimate ripple that comes with load) — while the floor guards the
-                  low-command case and the ceiling caps it. The alternator and battery detectors carry their own floors,
-                  ceilings, and percentages because battery current runs far quieter than alternator current. You set
+                  low-command case and the ceiling caps it. You set
                   those in Protections; the commissioning wizard measures the ripple and plots it against your thresholds
                   so you can check them, but never sets them for you. None
                   of these depend on the control loops being active — they are always armed.
@@ -7803,11 +7727,11 @@
                   &bull; <strong>Disturbances</strong> — you creep idle&rarr;cruise while it records the worst ripple
                   per RPM range (belt resonance) on both the alternator and battery signals, building the Resonance
                   &amp; Ripple Map.<br>
-                  &bull; <strong>Thresholds</strong> — a read-only review: it draws each over-current detector's trip
+                  &bull; <strong>Thresholds</strong> — a read-only review: it draws the over-current detector's trip
                   threshold (from the floor, ceiling, and percent you set in Protections) against the ripple just
-                  measured, per detector, so you can confirm your settings clear it. Nothing is written here.<br>
+                  measured, so you can confirm your settings clear it. Nothing is written here.<br>
                   &bull; <strong>CV plant fit</strong> — commands one bounded current pulse through the tuned inner
-                  loop and measures how battery voltage responds to battery current (the finite-horizon gain K20),
+                  loop and measures how battery voltage responds to the current step (the finite-horizon gain K20),
                   then computes the voltage-loop gains from your chosen response time.
                 </p>
                 <p style="margin: 0 0 15px 0; line-height: 1.5; color: var(--text-dark);">
@@ -11209,8 +11133,6 @@
 
       <div id="diag-panel-alternator" class="diag-panel active">
 
-      <p style="font-size:12px;color:var(--text-muted);margin:0 0 12px 0;line-height:1.5;">Results only — the gates &amp; tuning for these checkpoints live in <strong>Setup → Diag</strong>.</p>
-
       <!-- ── Shared fast-channel hardware + steady-state gates — feeds both C1 and C2 ── -->
       <details class="diag-section" open>
         <summary class="diag-section-title"><span class="checkpoint-tag c1">C1</span> <span class="checkpoint-tag c2">C2</span> Fast Current Channel</summary>
@@ -12903,7 +12825,7 @@
         <div id="commission-steps" style="display:flex; flex-wrap:wrap; gap:4px 8px; margin-bottom:14px; font-size:11px; color:#777;"></div>
         <!-- Permanent RPM sparkline — lives ABOVE the per-phase #commission-body so the
              body's innerHTML re-render each phase never wipes it. Fed off CSV1 (cxRpmSparkOnCsv1).
-             Hidden while the Step-6 sweep game owns the screen (cxGameStart/cxGameStop) — the game
+             Hidden while the Step-5 sweep game owns the screen (cxGameStart/cxGameStop) — the game
              draws the same trace + live RPM itself. -->
         <div id="cx-rpm-strip" style="margin-bottom:14px; padding:8px 10px; background:#222; border-radius:6px;">
           <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:#888; margin-bottom:4px;">
@@ -12950,6 +12872,24 @@
       </div>
     </div>
   </div><!-- END cfgdiff-modal-overlay -->
+
+  <!-- Battery-defaults populator: after a Vessel Info save that sets/changes battery type, capacity,
+       or system voltage, proposes chemistry-appropriate charge/protection values, Now → Proposed.
+       Never applies silently; Bulk/Absorption voltages deliberately excluded (manufacturer sheet). -->
+  <div id="battdef-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:9100; align-items:center; justify-content:center;">
+    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e1e1e; color:#ddd; width:560px; max-width:calc(100vw - 40px); border-radius:8px; box-shadow:0 6px 32px rgba(0,0,0,0.8); border:1px solid #444; box-sizing:border-box; max-height:calc(100vh - 100px); display:flex; flex-direction:column;">
+      <div style="padding:10px 16px 9px; border-bottom:1px solid #333; display:flex; align-items:center; justify-content:space-between; background:#252525; border-radius:8px 8px 0 0; user-select:none;">
+        <span style="font-weight:600; font-size:13px; color:#aaa; letter-spacing:0.03em;">Recommended Battery Settings</span>
+        <button onclick="battDefClose(false)" style="background:none; border:none; color:#888; cursor:pointer; font-size:18px; padding:0 4px; line-height:1;">✕</button>
+      </div>
+      <div id="battdef-summary" style="padding:12px 16px 0; font-size:0.9em; line-height:1.45; color:#ddd;"></div>
+      <div id="battdef-body" style="padding:8px 16px; overflow-y:auto; flex:1; min-height:0;"></div>
+      <div style="padding:12px 16px; border-top:1px solid #333; display:flex; gap:10px; justify-content:flex-end;">
+        <button onclick="battDefClose(false)" style="background:#3a3a3a; border:1px solid #555; color:#ddd; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em;">Skip</button>
+        <button id="battdef-apply-btn" onclick="battDefClose(true)" style="background:#2e7d32; border:1px solid #4a4; color:#fff; border-radius:6px; padding:8px 16px; cursor:pointer; font-size:0.9em; font-weight:600;">Apply Defaults</button>
+      </div>
+    </div>
+  </div><!-- END battdef-modal-overlay -->
 
   <!-- Scheduled-restart warning banner (visible during the 10-min countdown window) -->
   <div id="restart-countdown-banner" style="display:none; position:fixed; top:0; left:0; right:0; z-index:9000;

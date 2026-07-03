@@ -189,9 +189,8 @@ bool fsRemove(const char *path) {
 #define NK_HiLow "HiLow"
 #define NK_IExcessArmMarginV "IExcessArmMrgnV"
 #define NK_IExcessCeilA "IExcessCeilA"
-#define NK_IExcessCeilABatt "IExCeilBatt"
 #define NK_IExcessFloorA "IExcessFloorA"
-#define NK_IExcessFloorABatt "IExFloorBatt"
+#define NK_BattCurrentLimitA "BattCurLimA"
 #define NK_IExcessFrac "IExcessFrac"
 #define NK_IExcessFracBulk "IExcessFrcBlk"
 #define NK_IExcessKBleed "IExcessKBleed"
@@ -266,6 +265,7 @@ bool fsRemove(const char *path) {
 #define NK_SOC_AllowRebulk_percent "SOCAllwRblkprcn"
 #define NK_SOC_BlockRebulk_percent "SOCBlckRblkprcn"
 #define NK_SafeOperationThreshold "SafOprtnThrshld"
+#define NK_SocAlarmLow "SocAlarmLow"
 #define NK_SetpointFallRate "SetpointFallRat"
 #define NK_SetpointRiseRate "SetpointRiseRat"
 #define NK_SetpointBigStepThresh "SetpntBigStpTh"
@@ -275,7 +275,6 @@ bool fsRemove(const char *path) {
 #define NK_ShutdownPhase2HoldMs "ShtdwnPhs2HldMs"
 #define NK_cvHelpersEnabled "cvHelpersEn"
 #define NK_cvGainMode "cvGainMode"
-#define NK_cvCurrentSrc "cvCurrentSrc"
 #define NK_cvCrossover "cvCrossover"
 #define NK_cvPiZero "cvPiZero"
 #define NK_vTgtRampEnable "vTgtRampEn"
@@ -285,9 +284,8 @@ bool fsRemove(const char *path) {
 #define NK_cvRiseGovEnable "cvRiseGovEn"
 #define NK_dutySlewEnable "dutySlewEn"
 #define NK_cvPlantK "cvPlantK"
-// Measured ripple projection (§3.3) — one CSV-encoded string per detector: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
+// Measured ripple projection (§3.3) — one CSV-encoded string: "a0,a1,rpm,i0,i1,i2,pk0,pk1,pk2,n"
 #define NK_ripFitAlt  "ripFitAlt"
-#define NK_ripFitBatt "ripFitBatt"
 // Measured-ripple capture admission gates (§10.8/§11) — own knobs, deliberately DECOUPLED from the
 // fa* anomaly-detector gates so tuning capture admission can't loosen detector arming.
 // NK "ripRpmMargin" RETIRED 2026-07-01 (§11 stationarity gate replaced the bin-edge margin) — key
@@ -315,7 +313,7 @@ bool fsRemove(const char *path) {
 #define NK_systemIDSineCycles "SysIDSineCyc"
 #define NK_SystemIDStabilizeAmps "SysIDStabAmps"
 #define NK_commissionState "commissnState"   // 0=not / 1=in-progress / 2=commissioned
-#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished)
+#define NK_commissionPhase "commissnPhase"    // furthest wizard phase reached (0=Prep…7=Min% floor, 8=finished)
 #define NK_commissionDoneMask "commissnDoneMsk" // per-stage completion bitmask (bit i = stage i done); 15-char max
 #define NK_commissionSnap "commissnSnap"      // Phase-0 snapshot: positional CSV of the settings the flow writes
 #define NK_T0_C "T0_C"
@@ -524,15 +522,11 @@ void commissionSnapshot() {
   // 13th field = HiLow (charge-rate mode). Captured so an abort/reboot restores the mode too —
   // a commissioning run must never strand the user in the wrong mode. Older 12-field snapshots
   // are still accepted on restore (the mode is simply left untouched).
-  // 14th field = IExcessFloorABatt (CV battery-current detector floor) — a protection floor captured
-  // with the others so an abort restores the full pre-commissioning set. (As of 2026-07-01 commissioning
-  // no longer writes it — floors are operator-owned — but it stays in the snapshot for parity/safety.)
-  // Older ≤13-field snapshots omit it (left untouched on restore).
   snprintf(buf, sizeof(buf),
-           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d,%.1f",
+           "%.4f,%.4f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%.3f,%d",
            PidKp, PidKi, InputFilterTC, OutputPIDFilterTC, VoltageFilterTC,
            IExcessTau, IExcessFloorA, IExcessCeilA, IExcessFrac, IExcessFracBulk,
-           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow, IExcessFloorABatt);
+           SystemIDStabilizeAmps, SystemIDStepAmplitude, HiLow);
   settingWrite(NK_commissionSnap, buf);
   // The Min% floor table + knee tracker don't fit this positional CSV (10 floats × 3 + bools), so
   // they are backed up separately as "bk_*" blobs. Keeps an abort able to revert the Min% step too.
@@ -547,7 +541,7 @@ bool commissionRestore() {
   int n = sscanf(s.c_str(), "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f",
                  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
                  &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]);
-  if (n < 12) return false;  // accept 12 (legacy) / 13 (+HiLow) / 14 (+IExcessFloorABatt); fewer = malformed
+  if (n < 12) return false;  // accept 12 (legacy) / 13 (+HiLow); a legacy 14th field (retired battery iExcess floor) parses but is ignored
   PidKp = v[0];                  settingWrite(NK_PidKp, String(PidKp, 4).c_str());
   PidKi = v[1];                  settingWrite(NK_PidKi, String(PidKi, 4).c_str());
   InputFilterTC = v[2];          settingWrite(NK_InputFilterTC, String(InputFilterTC, 2).c_str());
@@ -570,11 +564,6 @@ bool commissionRestore() {
       loadCapTablesForMode(HiLow);
     }
   }
-  // IExcessFloorABatt (14th field). Older ≤13-field snapshots omit it — leave the current value as-is.
-  if (n >= 14) {
-    IExcessFloorABatt = v[13];
-    settingWrite(NK_IExcessFloorABatt, String(IExcessFloorABatt, 1).c_str());
-  }
   recomputeCcGains();  // re-apply CC gains live (normalized to BATTERY_VOLTAGE)
   commissionRestoreMinPct();      // revert the Min% floor table + knee tracker (also clears the backup)
   settingRemove(NK_commissionSnap);
@@ -595,7 +584,7 @@ void commissionSetPhase(uint8_t p) {
 }
 
 // ── Per-stage completion tracking ─────────────────────────────────────────────
-// commissionDoneMask carries one bit per stage (0=Prep … 7=CV plant fit). It is the
+// commissionDoneMask carries one bit per stage (0=Prep … 6=CV plant fit, 7=Min% floor). It is the
 // source of truth for the per-step ✓ marks and for the default checkbox selection of a
 // partial re-run. commissionState (0/1/2) is the lifecycle badge and is DERIVED from the
 // mask wherever it is recomputed below.
@@ -603,17 +592,18 @@ void commissionSetPhase(uint8_t p) {
 #define COMMISSION_ALL_DONE    0xFF   // bits 0..7 set = every stage complete
 
 // Downstream stages invalidated when an upstream stage is (re)completed — see the coupling
-// analysis: Field curve(1) feeds Plant fit(3) + Verify(4); Plant fit(3) feeds Verify(4);
-// Disturbances(5) feeds Thresholds(6). CV plant fit(7) measures the current→voltage plant, which
+// analysis: Field curve(1) feeds Plant fit(2) + Verify(3); Plant fit(2) feeds Verify(3);
+// Disturbances(4) feeds Thresholds(5). CV plant fit(6) measures the current→voltage plant, which
 // sits downstream of the whole inner current loop — so any current-loop retune (Field curve 1,
-// Plant fit 3, or Verify 4) makes the CV fit stale and clears bit 7. Re-doing an upstream stage
-// clears its dependents' done bits; the wizard forces them back into the same run to be re-measured.
+// Plant fit 2, or Verify 3) makes the CV fit stale and clears bit 6. Min% floor(7) is independent
+// (nothing feeds it, it feeds nothing) and runs last so the engine is warm at max RPM. Re-doing an
+// upstream stage clears its dependents' done bits; the wizard forces them into the same run to be re-measured.
 static uint16_t commissionDependentsMask(int stage) {
   switch (stage) {
-    case 1: return (1 << 3) | (1 << 4) | (1 << 7);  // Field curve → Plant fit, Verify, CV plant fit
-    case 3: return (1 << 4) | (1 << 7);             // Plant fit   → Verify, CV plant fit
-    case 4: return (1 << 7);                        // Verify      → CV plant fit
-    case 5: return (1 << 6);                        // Disturbances → Thresholds
+    case 1: return (1 << 2) | (1 << 3) | (1 << 6);  // Field curve → Plant fit, Verify, CV plant fit
+    case 2: return (1 << 3) | (1 << 6);             // Plant fit   → Verify, CV plant fit
+    case 3: return (1 << 6);                        // Verify      → CV plant fit
+    case 4: return (1 << 5);                        // Disturbances → Thresholds
     default: return 0;
   }
 }

@@ -1205,14 +1205,19 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     TempAlarmLow = settingRead(NK_TempAlarmLow).toInt();
   }
   if (!settingExists(NK_VoltageAlarmHigh)) {
-    settingWrite(NK_VoltageAlarmHigh, String(VoltageAlarmHigh).c_str());
+    settingWrite(NK_VoltageAlarmHigh, String(VoltageAlarmHigh, 2).c_str());
   } else {
-    VoltageAlarmHigh = settingRead(NK_VoltageAlarmHigh).toInt();
+    VoltageAlarmHigh = settingRead(NK_VoltageAlarmHigh).toFloat();  // pre-float NVS strings ("15") parse fine
   }
   if (!settingExists(NK_VoltageAlarmLow)) {
-    settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow).c_str());
+    settingWrite(NK_VoltageAlarmLow, String(VoltageAlarmLow, 2).c_str());
   } else {
-    VoltageAlarmLow = settingRead(NK_VoltageAlarmLow).toInt();
+    VoltageAlarmLow = settingRead(NK_VoltageAlarmLow).toFloat();
+  }
+  if (!settingExists(NK_SocAlarmLow)) {
+    settingWrite(NK_SocAlarmLow, String(SocAlarmLow).c_str());
+  } else {
+    SocAlarmLow = settingRead(NK_SocAlarmLow).toInt();
   }
   if (!settingExists(NK_CurrentAlarmHigh)) {
     settingWrite(NK_CurrentAlarmHigh, String(CurrentAlarmHigh).c_str());
@@ -1591,12 +1596,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     cvGainMode = (uint8_t)settingRead(NK_cvGainMode).toInt();
   }
-  // CV current source (§G): 0 = battery-when-available (default), 1 = force alternator
-  if (!settingExists(NK_cvCurrentSrc)) {
-    settingWrite(NK_cvCurrentSrc, String((int)cvCurrentSrc).c_str());
-  } else {
-    cvCurrentSrc = (uint8_t)settingRead(NK_cvCurrentSrc).toInt();
-  }
   // CV crossover ω_c — NVS key renamed cvOmega → cvCrossover (§F.3). Mint-new-key + migrate: adopt the old
   // value if present, folding in the misnamed-0.286 → 0.20 default fix (else ~24 % hot under the exact
   // magnitude formula), write the new key, and remove the orphaned old one. Dev-units-only window.
@@ -1656,7 +1655,6 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
     cvPlantK = settingRead(NK_cvPlantK).toFloat();
   }
   if (settingExists(NK_ripFitAlt))  ripFitDecode(settingRead(NK_ripFitAlt),  ripFitAlt);   // measured ripple projection (§3.3); absent → nPts=0 → plot shows threshold only
-  if (settingExists(NK_ripFitBatt)) ripFitDecode(settingRead(NK_ripFitBatt), ripFitBatt);
   if (!settingExists(NK_cvPlantTau)) {
     settingWrite(NK_cvPlantTau, String(cvPlantTau, 3).c_str());
   } else {
@@ -1891,20 +1889,15 @@ void InitSystemSettings() {  // load all settings from NVS.  If no keys exist, c
   } else {
     IExcessFloorA = settingRead(NK_IExcessFloorA).toFloat();
   }
-  if (!settingExists(NK_IExcessFloorABatt)) {
-    settingWrite(NK_IExcessFloorABatt, String(IExcessFloorABatt, 1).c_str());
-  } else {
-    IExcessFloorABatt = settingRead(NK_IExcessFloorABatt).toFloat();
-  }
   if (!settingExists(NK_IExcessCeilA)) {
     settingWrite(NK_IExcessCeilA, String(IExcessCeilA, 1).c_str());
   } else {
     IExcessCeilA = settingRead(NK_IExcessCeilA).toFloat();
   }
-  if (!settingExists(NK_IExcessCeilABatt)) {
-    settingWrite(NK_IExcessCeilABatt, String(IExcessCeilABatt, 1).c_str());
+  if (!settingExists(NK_BattCurrentLimitA)) {
+    settingWrite(NK_BattCurrentLimitA, String(BattCurrentLimitA, 1).c_str());
   } else {
-    IExcessCeilABatt = settingRead(NK_IExcessCeilABatt).toFloat();
+    BattCurrentLimitA = settingRead(NK_BattCurrentLimitA).toFloat();
   }
   if (!settingExists(NK_IExcessTau)) {
     settingWrite(NK_IExcessTau, String(IExcessTau, 1).c_str());

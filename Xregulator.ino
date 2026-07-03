@@ -1042,9 +1042,9 @@ int   kneeFitWorstIdx  = -1;                    // anchor index (capture order) 
 // Phase 0 snapshots every setting the flow may write (positional CSV string in one
 // NVS key) so an explicit abort reverts to the pre-commissioning tune.
 uint8_t commissionState = 0;                    // mirrors NK_commissionState
-uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=CV plant fit, 8=finished); drives the Commissioning tab checklist
+uint8_t commissionPhase = 0;                    // mirrors NK_commissionPhase — furthest wizard phase reached (0=Prep…7=Min% floor, 8=finished); drives the Commissioning tab checklist
 // Per-stage completion bitmask (mirrors NK_commissionDoneMask). bit i = stage i has been completed:
-// 0=Prep 1=Field curve 2=Min% floor 3=Plant fit 4=Verify 5=Disturbances 6=Thresholds 7=CV plant fit. Drives the
+// 0=Prep 1=Field curve 2=Plant fit 3=Verify 4=Disturbances 5=Thresholds 6=CV plant fit 7=Min% floor. Drives the
 // per-step ✓ marks and the default checkbox selection for partial re-runs. COMMISSION_ALL_DONE = 0xFF.
 uint16_t commissionDoneMask = 0;                // mirrors NK_commissionDoneMask
 volatile bool faCommissionGate = false;         // Phase 2: relax the matrix steadiness gate (RPM-in-bin, drift OK)
@@ -1154,7 +1154,8 @@ uint32_t floatStartTime = 0;
 
 float RebulkCurrent_A = 5.0f;  // net discharge current threshold to trigger rebulk
 bool inIdleStage = false;      // true when UseFloat=0 and absorption complete, waiting for rebulk
-int UseFloat = 0;              // 1 = enter float after absorption, 0 = idle until rebulk criteria met
+int UseFloat = 0;              // post-absorption mode: 0 = idle until rebulk criteria met, 1 = hold FloatVoltage, 2 = zero-current float (alternator carries house loads, battery held at 0 A)
+bool zeroFloatActive = false;  // live: in the float stage with UseFloat=2 — zero-current regulation (MaintainMode's control law, entered by the stage machine with rebulk criteria still armed)
 
 
 // Absorption stage
@@ -1214,8 +1215,7 @@ uint32_t Freq = 0;         // ESP32 switching Frequency in case we want to repor
 //Variables to store measurements
 float ShuntVoltage_mV;                        // Battery shunt voltage from INA228
 float Bcur;                                   // battery shunt current from INA228
-float Bcur_filtered = 0.0f;                   // EMA of Bcur (OutputPIDFilterTC) — inner-PID PV for CV battery-current control (§G); raw Bcur stays the load-dump derivative source
-bool  g_cvBattCurrentActive = false;          // telemetry: true when the inner loop is live-regulating BATTERY current in CV (absorption/float). CSV2.
+float Bcur_filtered = 0.0f;                   // EMA of Bcur (OutputPIDFilterTC) — telemetry/plot trace; raw Bcur stays the load-dump derivative source
 float targetCurrent;                          // This is used in the field adjustment loop, gets set to the desired source of current info (ie battery shunt, alt hall sensor, victron, etc.)
 float IBV;                                    // Ina 228 battery voltage
 float IBVMax = 6;                             // used to track maximum battery voltage (NVS-persisted, shown on dashboard)
@@ -1960,6 +1960,11 @@ int BatteryCapacity_Ah = 200;         // Battery capacity in Amp-hours
 int SOC_percent = 5000;               // State of Charge percentage (0-100) but have to multiply by 100 for annoying reasons, but go with it
 float ManualSOCPoint = 25.0f;              // Used to set it manually (decimals allowed)
 int CoulombCount_Ah_scaled = 7500;    // Current energy in battery (Ah × 100 for precision)
+// Deferred first-boot SoC seed: loadNVSData() runs before the INA228 is ever read (IBV still 0)
+// and before InitSystemSettings parses battery type/voltage/capacity, so the voltage-based
+// estimate must wait until the forced ReadAnalogInputs() at the end of setup().
+bool socSeedPending = false;      // SOC_percent key missing from NVS at boot
+bool coulombSeedPending = false;  // CoulombCount key missing — re-derive from the seeded SoC
 float PeukertRatedCurrent_A = 15.0f;  // Standard discharge rate for Peukert (C/20), will be calculated from capacity
 bool FullChargeDetected = false;      // Flag for full charge detection
 unsigned long FullChargeTimer = 0;    // Accumulates elapsed seconds while full-charge conditions hold; compared against ChargedDetectionTime
@@ -2221,8 +2226,9 @@ bool bmsSignalActive;                 // Read from GPIO34
 int AlarmActivate = 0;                // set to 1 to enable alarm conditions
 int TempAlarm = 190;                  // above this value, sound alarm
 int TempAlarmLow = 32;                // below this value, sound alarm (0 = disabled)
-int VoltageAlarmHigh = 15;            // above this value, sound alarm
-int VoltageAlarmLow = 11;             // below this value, sound alarm
+float VoltageAlarmHigh = 15.0f;       // above this value, sound alarm (V, 2 decimals)
+float VoltageAlarmLow = 11.0f;        // below this value, sound alarm (V, 2 decimals)
+int SocAlarmLow = 0;                  // sound alarm when SoC falls below this % (0 = disabled; needs socInfoAvailable)
 int CurrentAlarmHigh = 100;           // above this value, sound alarm
 int MaximumAllowedBatteryAmps = 150;  // safety for battery, optional
 int RPMScalingFactor = 1330;          // self explanatory, adjust until it matches your trusted tachometer
@@ -3024,10 +3030,6 @@ volatile float PidKd_active = 0.01f;  // DERIVED duty-space Kd.
 // VoltageKp/VoltageKi below are the MANUAL gains (12V-equivalent space). The control loop never reads
 // them directly — it reads VoltageKp_active/VoltageKi_active, which recomputeCvGains() derives from the
 // selected mode and bakes the 12V-block normalization (×12/BATTERY_VOLTAGE) into.
-// CV current source (§G): 0 = battery current (Bcur) when available — DEFAULT; 1 = force alternator current
-// (MeasuredAmps, legacy/A-B test escape). Battery-current control only actually engages when the availability
-// gate passes (INA source + healthy shunt + fast INA + absorption/float) — see cvBattActive in 6_functions.
-uint8_t cvCurrentSrc = 0;
 uint8_t cvGainMode   = 0;         // 0 = Manual (use the typed VoltageKp/Ki) — DEFAULT, so a fresh/never-commissioned
                                   // device shows Manual 30/25; 1 = AUTO (measured-K_dc, see CV_AUTOTUNE_PLAN.md §E).
                                   // The CV plant-fit commissioning step flips this to 1 (Auto) on Apply.
@@ -3047,9 +3049,8 @@ struct RipFit {
   uint8_t nPts;      // valid measured points (0 = no fit → plot shows threshold line only)
 };
 RipFit ripFitAlt  = {0};   // alternator (G3) detector — ADS1115 MeasuredAmps path
-RipFit ripFitBatt = {0};   // battery   (G4) detector — INA228 Bcur path
 
-// Persisted as one CSV string per detector under NK_ripFitAlt/NK_ripFitBatt (settings namespace, string).
+// Persisted as one CSV string under NK_ripFitAlt (settings namespace, string).
 static String ripFitEncode(const RipFit &r) {
   String s = String(r.a0, 4) + "," + String(r.a1, 5) + "," + String(r.rpm, 0);
   for (int i = 0; i < 3; i++) s += "," + String(r.iPt[i], 2);
@@ -3133,9 +3134,8 @@ float DvdtTC         = 58.0f;   // ms — TC for dvdt (rate-of-rise) EMA fed int
 float IExcessFrac     = 0.10f;   // CV threshold as fraction of setpointLimited (0.10 → 5A at a 50A command). Scales with frame size.
 float IExcessFracBulk = 0.15f;   // BULK threshold as fraction of i_ceiling_pre_ov (looser — tolerate command-vs-actual error far from the voltage limit).
 float IExcessFloorA   = 5.0f;    // A — min threshold; guards the low-command / depressed-setpoint case where the fraction would shrink below the residual. Default lowered 7→5 (2026-06-30) back when commissioning wrote a measured current-tracking floor a high base could mask (that tracking floor was removed 2026-07-01 — floors are operator-owned now — but 5 A was kept as the base).
-float IExcessFloorABatt = 3.0f;  // A — separate min threshold for the CV battery-current detector (§G). Default 3 A (battery current is quieter than alternator, so it can sit below the alternator base and catch over-current sooner). Commissioning never undercuts this; lower it manually in Protections for tighter detection.
 float IExcessCeilA    = 25.0f;   // A — max threshold (bulk / alternator detector); guards against too-loose on very large commands.
-float IExcessCeilABatt = 25.0f;  // A — separate max threshold for the CV battery-current detector. Splits the formerly-shared ceiling so the battery detector's threshold saturates at a battery-appropriate level, not the alternator one. Defaults equal to IExcessCeilA (no behavior change until set).
+float BattCurrentLimitA = 100.0f;  // A — max battery charge current (G4). Ceiling on the alternator-amp command = limit + measured house-load offset; requires the INA228 battery shunt as Battery Current Source. 0 = disabled.
 float IExcessTau      = 75.0f;   // ms — EMA time constant. Sized by the worst-case (idle) belt resonance; one fixed value covers the whole RPM range. dt-aware alpha.
 float IExcessRelFrac  = 0.5f;    // hysteresis: release the fire latch when mExcessEma falls below IExcessFrac-threshold × this (replaces the old hardcoded 2A IEXCESS_HYST, now scale-aware).
 float IExcessKBleed = 0.0f;      // 0=snap-to-zero; >0=proportional bleed rate (A/s per A of excess)
@@ -3804,7 +3804,7 @@ uint8_t pidLog_enteringTargetVoltageMode = 0;
 
 // ===========================================================================
 // CV / Voltage Tuner Log
-// Logs every CH1 sample (~213 Hz / ~4.7ms interval) — no internal rate limiter.
+// Logs every CH1 sample (fresh CH1 arrives 5–25ms apart, assume ~30ms) — no internal rate limiter.
 // Binary download via /cvlog.bin, decoded to CSV by JS.
 // 42 bytes/entry × 6000 entries = 252 KB PSRAM → ~28 sec at full rate.
 // ===========================================================================
@@ -3867,7 +3867,7 @@ struct __attribute__((packed)) CvLogEntry {
   int16_t spLimited;
   int16_t iMeas;
   int16_t duty;
-  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=cvBattActive(§G)
+  uint8_t flags;   // b0=fastOvActive b1=voltLoopFired b2=cvActive b3=iExcessBulk b4=hardClamp b5=iExcess b6=loadDumpActive b7=reserved
   uint8_t awState; // 0=normal 1=frozen(supervisor) 2=saturated 3=bleeding 4=bumpless
   int16_t rpm;
   int16_t battV_filt_x100;  // IBV × 100    (V)
@@ -4349,7 +4349,7 @@ enum ADS1115_State {
 };
 
 ADS1115_State adsState = ADS_IDLE;
-uint8_t adsCurrentChannel = 0;  // Driven by adsSeq[] = {1,0,1,2,1,3}; CH1 fires 3× per cycle (~213 Hz / ~4.7ms)
+uint8_t adsCurrentChannel = 0;  // Driven by adsSeq[] = {1,0,1,2,1,3}; CH1 fires 3× per cycle (fresh CH1 measured 5–25ms apart, assume ~30ms)
 int adsTriggeredChannel = 0;
 unsigned long adsStateEntered = 0;
 const unsigned long ADS_CONVERSION_MS = 3;  // 1.16ms at 860SPS + millis() granularity margin
@@ -4358,9 +4358,9 @@ const uint32_t ADS_SLOT_US = 4500;  // absolute per-slot grid; CH1 = 2 slots ≈
 
 volatile bool ch1FreshFlag = false;  // Set when CH1 result is ready, consumed by AdjustFieldLearnMode()
 
-uint8_t PidSampleDivisor = 1;  // 1=PID runs every CH1 sample (~213 Hz / ~4.7ms), 2=every other (~107 Hz), etc.
+uint8_t PidSampleDivisor = 1;  // 1=PID runs every CH1 sample (measured 5–25ms apart, assume ~30ms), 2=every other, etc.
                                // CH1 fires at positions 0, 2, 4 in adsSeq[] {1,0,1,2,1,3};
-                               // 6 steps × ~2.35ms/step = ~14ms full cycle → CH1 every ~4.7ms
+                               // ADS_SLOT_US grid puts CH1 at ~9ms nominal, but loop timing stretches it — measured 5–25ms
 
 const uint16_t adsMuxCodes[4] = {
   ADS1115_REG_CONFIG_MUX_SINGLE_0,
@@ -4911,6 +4911,7 @@ void setup() {
     delay(50);           // Give it a moment to process
     ReadAnalogInputs();  // Second reading to be sure
   }
+  seedSocFromVoltage();  // deferred first-boot SoC estimate — needs the reads above (IBV) + vessel info (battery type/voltage/capacity)
 
   const esp_partition_t *running_partition = esp_ota_get_running_partition();
   const esp_partition_t *factory_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);

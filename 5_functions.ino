@@ -1676,7 +1676,7 @@ void CheckAlarms() {
       alarmReason = "High battery voltage";
       if (millis() - lastVoltHighMsgMs >= 30000) {
         lastVoltHighMsgMs = millis();
-        queueConsoleMessageF("High battery voltage: %.2fV (limit: %.0fV)",
+        queueConsoleMessageF("High battery voltage: %.2fV (limit: %.2fV)",
                              currentVoltage, VoltageAlarmHigh);
       }
     } else {
@@ -1691,11 +1691,25 @@ void CheckAlarms() {
       alarmReason = "Low battery voltage";
       if (millis() - lastVoltLowMsgMs >= 30000) {
         lastVoltLowMsgMs = millis();
-        queueConsoleMessageF("Low battery voltage: %.2fV (limit: %.0fV)",
+        queueConsoleMessageF("Low battery voltage: %.2fV (limit: %.2fV)",
                              currentVoltage, VoltageAlarmLow);
       }
     } else {
       lastVoltLowMsgMs = 0;
+    }
+
+    static unsigned long lastSocLowMsgMs = 0;
+    // SOC_percent is %×100; socInfoAvailable gates this the same way as the rebulk SoC gates
+    if (SocAlarmLow > 0 && socInfoAvailable && SOC_percent < SocAlarmLow * 100) {
+      currentAlarmCondition = true;
+      alarmReason = "Low battery state of charge";
+      if (millis() - lastSocLowMsgMs >= 30000) {
+        lastSocLowMsgMs = millis();
+        queueConsoleMessageF("Low battery state of charge: %.1f%% (limit: %d%%)",
+                             SOC_percent / 100.0f, SocAlarmLow);
+      }
+    } else {
+      lastSocLowMsgMs = 0;
     }
 
     static unsigned long lastCurHighMsgMs = 0;
@@ -2520,7 +2534,7 @@ void _ReadAnalogInputs_inner() {
       INA.setBusVoltageConversionTime(4);   // 540µs
       INA.setShuntVoltageConversionTime(4); // 540µs — total update: 4×1080µs ≈ 4.3ms
       IBV_filtered = IBV;                   // reseed EMA so CV loop starts clean
-      Bcur_filtered = Bcur;                 // §G: match IBV_filtered — reseed the CV battery-current PV on fast-mode entry
+      Bcur_filtered = Bcur;                 // match IBV_filtered — reseed the Bcur display EMA on fast-mode entry
       inaReadInterval = INA_FAST_INTERVAL_MS;
       inaFastModeActive = true;
     } else if (!fieldGateOpen && inaFastModeActive) {
@@ -2602,10 +2616,9 @@ void _ReadAnalogInputs_inner() {
                          bcurPrevMs = nowIna;
                        }
 
-                       // Bcur EMA — inner-PID process variable for CV battery-current control (§G).
-                       // Mirrors g_pidI_filtered's EMA on MeasuredAmps, reusing OutputPIDFilterTC, but co-sampled
-                       // with IBV at the fast-INA cadence (fresher than the loop fires). Raw Bcur above stays the
-                       // load-dump dBcur/dt source; this filtered copy is only the PID feedback.
+                       // Bcur EMA — telemetry/plot trace (dashed battery-current trace on the live plot).
+                       // Mirrors g_pidI_filtered's EMA on MeasuredAmps, reusing OutputPIDFilterTC. Raw Bcur
+                       // above stays the load-dump dBcur/dt source.
                        {
                          uint32_t nowBc = millis();
                          static bool bcur_ema_init = false;
@@ -2651,7 +2664,7 @@ void _ReadAnalogInputs_inner() {
   }
 
   // ── ADS1115 non-blocking state machine ───────────────────────────────────
-  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples (~213 Hz / ~4.7ms interval)
+  // Sequence {1,0,1,2,1,3} → CH1 = 3/6 samples (fresh CH1 measured 5–25ms apart, assume ~30ms)
   // ADS_WAIT uses time-based 3ms delay — no isConversionDone() I²C poll.
   // Back-to-back trigger fires next conversion at end of ADS_READ_RESULT,
   // saving one loop() call per step. Falls back to ADS_IDLE if <2ms elapsed.
@@ -3282,7 +3295,7 @@ void ReadAnalogInputs_Fake() {
     //if (fakeBattCurrent > 180.0) fakeBattCurrent = 180.0;
     fakeBattCurrent = 100;
     Bcur = fakeBattCurrent * (InvertBattAmps ? -1 : 1);  // Apply invert flag
-    Bcur_filtered = Bcur;                                 // fake mode: no EMA lag needed (§G CV battery-current PV)
+    Bcur_filtered = Bcur;                                 // fake mode: no EMA lag needed
     BatteryCurrent_scaled = Bcur * 100;
     VictronCurrent = Bcur + (random(-80, 80) / 10.0);  // ±8 A offset
     MARK_FRESH(IDX_BCUR);
@@ -4331,6 +4344,88 @@ bool fieldOffSettled(uint32_t extraMs) {
 // (Xregulator.ino loop) and the shutdown sequence — both run with field off so any
 // commit duration is safe. See git log for the original 9-phase implementation.
 
+// First-boot SoC seed, deferred from loadNVSData() to the end of setup() so IBV holds a real
+// INA228 reading and BATTERY_TYPE / BATTERY_VOLTAGE / BatteryCapacity_Ah hold the vessel-info
+// values (all were still defaults/zero at loadNVSData time, which seeded 0% every fresh boot).
+void seedSocFromVoltage() {
+  if (!socSeedPending) return;
+  socSeedPending = false;
+
+  float voltage = getBatteryVoltage();
+  float socM = BATTERY_VOLTAGE / 12.0f;  // bank-class scale for the 12V-referenced thresholds
+  int estimatedSoC = 50;                 // fallback if the INA never produced a sane reading
+
+  if (voltage > 5.0f) {  // same sanity floor as the INA read path
+    String bt = BATTERY_TYPE;
+    bt.toLowerCase();
+    bool isLithium = (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
+                      bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0);
+
+    // Current compensation: back out open-circuit voltage before the table lookup
+    // (Vocv ≈ Vterm − I·Reff). The published SoC-vs-V curve families at different C-rates are
+    // the rested curve shifted by this term, so one effective resistance per chemistry replaces
+    // them. Reff per 100Ah 12V block including polarization: LFP ~6 mΩ, lead-acid ~12 mΩ;
+    // parallel Ah divides it, series blocks multiply it. Clamped so a bogus current reading
+    // can't wreck the seed.
+    // Reff also scales with temperature (~doubles per −20°C, both chemistries). ambientTemp is
+    // still NAN here on a cold boot (BMP388 runs an 8s cycle in ReadAnalogInputs and discards
+    // its first sample), so take one blocking forced conversion — ~50ms once, only on the
+    // fresh-NVS path, and the board hasn't self-heated yet so it's the best proxy it ever is.
+    float boardTempF = ambientTemp;
+    if (isnan(boardTempF)) {
+      bmp388.startForcedConversion();
+      float t, p, a;
+      uint32_t t0 = millis();
+      while (millis() - t0 < 250) {
+        if (bmp388.getMeasurements(t, p, a)) {
+          if (isfinite(t) && t > -40.0f && t < 85.0f) boardTempF = t * 1.8f + 32.0f;
+          break;
+        }
+        delay(5);
+      }
+    }
+    float rTempScale = 1.0f;
+    if (!isnan(boardTempF)) {
+      float tC = (boardTempF - 32.0f) / 1.8f;
+      rTempScale = constrain(expf(0.035f * (25.0f - tC)), 0.5f, 3.0f);
+    }
+
+    float iBat = getBatteryCurrent();  // positive = charging
+    float corr = 0.0f;
+    if (BatteryCapacity_Ah > 0) {
+      float r100 = (isLithium ? 0.006f : 0.012f) * rTempScale;
+      corr = iBat * r100 * (100.0f / (float)BatteryCapacity_Ah) * socM;
+      corr = constrain(corr, -0.6f * socM, 0.6f * socM);
+    }
+    float vOcv = voltage - corr;
+
+    if (isLithium) {
+      estimatedSoC = (int)(ocvToSoC(vOcv) + 0.5f);  // ocvToSoC scales by BATTERY_VOLTAGE/12 itself
+    } else {
+      if (vOcv >= 12.7f * socM) estimatedSoC = 100;
+      else if (vOcv >= 12.5f * socM) estimatedSoC = 90;
+      else if (vOcv >= 12.4f * socM) estimatedSoC = 80;
+      else if (vOcv >= 12.2f * socM) estimatedSoC = 60;
+      else if (vOcv >= 12.0f * socM) estimatedSoC = 40;
+      else if (vOcv >= 11.8f * socM) estimatedSoC = 20;
+      else estimatedSoC = 10;
+    }
+    Serial.printf("SOC SEED: estimated %d%% from %.2fV terminal, %.1fA, %.0f°F (Rx%.2f) -> %.2fV OCV (%s)\n",
+                  estimatedSoC, voltage, iBat, isnan(boardTempF) ? -99.0f : boardTempF, rTempScale,
+                  vOcv, isLithium ? "lithium OCV table" : "lead-acid ladder");
+  } else {
+    Serial.printf("SOC SEED: no valid voltage (%.2fV) - defaulting to 50%%\n", voltage);
+  }
+
+  SOC_percent = estimatedSoC * 100;
+  if (coulombSeedPending) {
+    // UpdateBatterySOC re-derives SOC_percent from the coulomb count every tick, so this
+    // is the assignment that actually sticks.
+    CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 100;
+    coulombSeedPending = false;
+  }
+}
+
 void loadNVSData() {
   nvs_handle_t nvs_handle;
   esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
@@ -4464,65 +4559,23 @@ void loadNVSData() {
     SOC_percent = temp_int32;
     Serial.printf("NVS LOAD: SOC_percent = %d (%.2f%%)\n", temp_int32, temp_int32 / 100.0f);
   } else {
-    // If no saved SoC, estimate from voltage
-    float voltage = getBatteryVoltage();
-    int estimatedSoC = 50;  // Default to 50%
-
-    // Bank-class scale. The 12V-bank thresholds below are scaled by the class so a 24/48V bank doesn't
-    // read a flat 100%. Read the user-entered class straight from NVS (NK_BatteryVoltage, the
-    // authoritative store) rather than auto-detecting from the measured voltage — a sagging
-    // higher-voltage bank no longer mis-buckets. This runs in loadNVSData() (before InitSystemSettings
-    // loads the vessel mirror), so on a brand-new device with the key not yet seeded it falls back to
-    // 12V class — same as the prior fresh-device behavior.
-    float socM = 1.0f;  // 12V class
-    if (settingExists(NK_BatteryVoltage)) {
-      int nomV = settingRead(NK_BatteryVoltage).toInt();
-      if (nomV == 24) socM = 2.0f;
-      else if (nomV == 48) socM = 4.0f;
-    }
-
-    // battery_type is parsed later (InitSystemSettings), so read just that field from vessel_info.json here.
-    bool isLithium = true;
-    if (LittleFS.exists("/vessel_info.json")) {
-      File vf = LittleFS.open("/vessel_info.json", "r");
-      if (vf) {
-        DynamicJsonDocument vdoc(4096);
-        if (deserializeJson(vdoc, vf) == DeserializationError::Ok) {
-          String bt = vdoc["battery_type"] | "lifepo4";
-          bt.toLowerCase();
-          isLithium = (bt.indexOf("lifepo") >= 0 || bt.indexOf("lithium") >= 0 ||
-                       bt.indexOf("li-ion") >= 0 || bt.indexOf("liion") >= 0 || bt.indexOf("lfp") >= 0);
-        }
-        vf.close();
-      }
-    }
-
-    if (isLithium) {
-      // ocvToSoC() scales by BATTERY_VOLTAGE/12, but that global is still its default 12 this early in
-      // boot, so pass the 12V-equivalent voltage to hit the 12V table for any bank class.
-      estimatedSoC = (int)(ocvToSoC(voltage / socM) + 0.5f);
-    } else {
-      if (voltage >= 12.7 * socM) estimatedSoC = 100;
-      else if (voltage >= 12.5 * socM) estimatedSoC = 90;
-      else if (voltage >= 12.4 * socM) estimatedSoC = 80;
-      else if (voltage >= 12.2 * socM) estimatedSoC = 60;
-      else if (voltage >= 12.0 * socM) estimatedSoC = 40;
-      else if (voltage >= 11.8 * socM) estimatedSoC = 20;
-      else estimatedSoC = 10;
-    }
-
-    SOC_percent = estimatedSoC * 100;
-    Serial.printf("NVS LOAD: SOC_percent NOT FOUND - estimated %d%% from voltage %.2fV (%s)\n",
-                  estimatedSoC, voltage, isLithium ? "lithium OCV table" : "lead-acid ladder");
+    // No saved SoC. IBV is still 0 here (first INA228 read is the forced ReadAnalogInputs() at the
+    // end of setup) and battery type/voltage/capacity aren't parsed yet (InitSystemSettings), so an
+    // estimate now would always be 0%. Defer to seedSocFromVoltage(); provisional 50% until then.
+    SOC_percent = 5000;
+    socSeedPending = true;
+    Serial.println("NVS LOAD: SOC_percent NOT FOUND - voltage-based seed deferred to end of setup");
   }
 
   if (nvs_get_i32(nvs_handle, "CoulombCount", &temp_int32) == ESP_OK) {
     CoulombCount_Ah_scaled = temp_int32;
     Serial.printf("NVS LOAD: CoulombCount_Ah_scaled = %d\n", temp_int32);
   } else {
-    // Initialize based on estimated SoC
+    // Initialize based on estimated SoC. If the SoC seed is deferred, this provisional value is
+    // re-derived in seedSocFromVoltage() with the real voltage AND the real bank capacity
+    // (BatteryCapacity_Ah here is still the compile-time default, not the vessel-info value).
     CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 100;
-    // CoulombCount_Ah_scaled = (BatteryCapacity_Ah * SOC_percent) / 10000; ChatGPT suggests this!!
+    coulombSeedPending = true;
 
     Serial.printf("NVS LOAD: CoulombCount NOT FOUND - initialized to %d based on SoC\n",
                   CoulombCount_Ah_scaled);

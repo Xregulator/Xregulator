@@ -637,9 +637,8 @@ enum Csv2Index {
   CSV2_httpsUpload_ses, // Core-0 cloud op time, WORST since last Reset Peak Values (ms)
 
   CSV2_cvTempDerateScale, // live battery-temp gain derate multiplier on the active CV gains; ×1000
-  CSV2_cvBattCurrentActive, // §G: 1 = inner loop is live-regulating BATTERY current in CV (absorption/float)
 
-  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543; +3 ripple-capture gate excess readouts (2026-07-01) = 547; +3 ripple-capture rpm-margin readout + 2 admit counters (2026-07-01) = 550
+  CSV2_FIELD_COUNT // -17 nav/wind/solar/fuel fields moved to CSV4/NavStream (2026-06-15) = 534. auto: was 445; +4 alt-health = 449; +2 imu-zero = 451; +10 victron-solar = 461; +2 fuel-live = 463; +18 fuel-curve = 481; +1 fuel-curve-scale = 482; +2 alt-fold = 484; +2 boat-fold = 486; +4 loop80 = 490; +1 stw = 491; +4 thermal-live = 495; +10 pid-fire = 505; +4 i2c-health = 509; -2 voltloop-2row +10 voltloop-ladder = 517; +2 longterm-flush-timer = 519; +1 imu-worst-samples = 520; +2 field-on-loop = 522; +10 fast-alt-channel = 532; +2 fa-detector-timer = 534; +1 fa-anomaly-count = 535; +2 fa-window-finalize-timer = 537; +5 gate-tuning-readouts = 545; +5 lifetime-nav-records = 550; +1 amps-drift-gate-excess = 551 (running tally above under-counts by 3 from earlier undocumented additions; the enum position is authoritative — was 551, now 534); +8 inner/cv-live-scores (2026-06-15) = 542; +4 cv-live-score split RMS+peak (2026-06-16) = 546; +7 ripple-worst operating-point context (2026-06-17) = 553; -4 thermal-live-windows + -12 inner/cv-live-windows + 6 control-accuracy-v2 (2026-06-18) = 543; +3 ripple-capture gate excess readouts (2026-07-01) = 547; +3 ripple-capture rpm-margin readout + 2 admit counters (2026-07-01) = 550; −1 cvBattCurrentActive (battery-current CV revert 2026-07-02)
 };
 
 enum Csv4Index {
@@ -981,7 +980,7 @@ enum Csv3Index {
   CSV3_SystemIDStabilizeAmps,   // A ×10 — plant-delay baseline/trough current
   CSV3_tuningWaveFloor,         // A — Current Target Generator wave floor (trough), shared square + sine
   CSV3_commissionState,         // auto-commissioning state: 0=not, 1=in-progress, 2=commissioned
-  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=Thresholds, 7=CV plant fit, 8=finished
+  CSV3_commissionPhase,         // furthest wizard phase reached: 0=Prep…6=CV plant fit, 7=Min% floor, 8=finished
   CSV3_commissionDoneMask,      // per-stage completion bitmask (bit i = stage i done)
   CSV3_cvHelpersEnabled,        // master switch: asymmetric KiDown unwind + slope-aware integrator bleed (1=on)
   CSV3_MinChargeTempF,          // cold-charge lockout board-temp floor (°F)
@@ -1006,15 +1005,14 @@ enum Csv3Index {
   CSV3_battTempCoeff,           // battery fractional resistance change per °C; ×10000
   CSV3_TempPIDKiDownFrac,       // thermal velocity-form below-setpoint integral bleed ratio (×Ki); ×1000
   CSV3_ThermalSlopeWindowSec,   // thermal slope backward-difference window (s); integer
-  CSV3_cvCurrentSrc,            // CV current source: 0=battery-when-available, 1=force alternator (§G)
-  CSV3_IExcessFloorABatt,       // CV battery-current iExcess floor (A ×10) — separate from IExcessFloorA; plain operator setting, commissioning never writes it
-  CSV3_IExcessCeilABatt,        // CV battery-current iExcess ceiling (A ×10) — separate from IExcessCeilA (alternator); splits the formerly-shared ceiling
+  CSV3_BattCurrentLimitA,       // max battery charge current (A ×10, G4); 0 = disabled — ceiling on the alternator command = limit + house-load offset
   // measured-ripple capture admission gates (§10.8/§11) — own knobs, decoupled from the fa* detector gates
   CSV3_ripWinMs,                // pk-pk capture window (ms, integer)
   CSV3_ripDriftFloorA,          // shared floor: command-travel gate + stationarity mean-shift tolerance (A ×100)
   CSV3_ripDriftPct,             // command-travel gate slope (% of mean, ×10) — command gate only since §11
+  CSV3_SocAlarmLow,             // low-SoC alarm threshold (%, integer); 0 = disabled
 
-  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +1 (IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30; −2 (cvFloorK1/ccFloorK1 removed) ripple re-arch 2026-07-01; +4 (ripRpmMargin/ripWinMs/ripDriftFloorA/ripDriftPct) capture-gate knobs 2026-07-01 = 339; −1 (ripRpmMargin retired, §11 stationarity) 2026-07-01 = 338
+  CSV3_FIELD_COUNT  // +5 (cvOmega/cvKiRatio/vTgtRampUp/vTgtRampDn/vTgtRampEnable) over the prior 319; +3 (CommissionTempF/battTempDerateEnable/battTempCoeff) batt-temp derate 2026-06-25; +1 (TempPIDKiDownFrac) asymmetric thermal bleed 2026-06-26; +1 (IExcessCeilABatt) CC/CV iExcess symmetry 2026-06-30; −2 (cvFloorK1/ccFloorK1 removed) ripple re-arch 2026-07-01; +4 (ripRpmMargin/ripWinMs/ripDriftFloorA/ripDriftPct) capture-gate knobs 2026-07-01 = 339; −1 (ripRpmMargin retired, §11 stationarity) 2026-07-01 = 338; −3 (cvCurrentSrc/IExcessFloorABatt/IExcessCeilABatt) +1 (BattCurrentLimitA) battery-current CV revert 2026-07-02 = 336; +1 (SocAlarmLow) low-SoC alarm 2026-07-02 = 337
 };
 
 
@@ -1970,7 +1968,7 @@ void setupServer() {
               state.lineLen = snprintf(
                 state.line, sizeof(state.line),
                 "# PID diagnostic log — CV loop / output current PID / duty pipeline\n"
-                "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass bit5=cvBattActive(CV regulating battery current)\n"
+                "# flags: bit0=AUTO bit1=voltCtrl bit4=govBypass\n"
                 "# ovFlags: bit0=fastOvActive bit1=iExcessBulk(current-control phase) bit2=hardClamp bit3=iExcess bit4=loadDumpActive\n"
                 "# voltageLoopRanThisTick=1 means Icv/cv_I updated this row\n"
                 "# vError: always fresh every tick regardless of loop interval\n"
@@ -2330,7 +2328,7 @@ void setupServer() {
 
   // ── Measured ripple projection (§3.3/§4) — the stored per-detector fit for the Protections plot ──
   // ripple(I)=a0+a1·I plus the 3 measured (I, pk-pk) points and the RPM the test ran at. n=0 → no test
-  // yet (plot shows the threshold line only). Read on the Protections tab and by the Step-7 review.
+  // yet (plot shows the threshold line only). Read on the Protections tab and by the Step-6 review.
   server.on("/ripfit", HTTP_GET, [](AsyncWebServerRequest *request) {
     auto j = [](const RipFit &r) {
       String s = "{\"a0\":" + String(r.a0, 4) + ",\"a1\":" + String(r.a1, 5)
@@ -2341,7 +2339,7 @@ void setupServer() {
       s += "]}";
       return s;
     };
-    request->send(200, "application/json", "{\"alt\":" + j(ripFitAlt) + ",\"batt\":" + j(ripFitBatt) + "}");
+    request->send(200, "application/json", "{\"alt\":" + j(ripFitAlt) + "}");
   });
 
   // ── Alternator (charging-system) health v2 — schema + curve + records + trend exports ──
@@ -3313,7 +3311,7 @@ void setupServer() {
       commissionSetState(1);        // IN_PROGRESS (held explicitly for the whole wizard run)
       commissionSetPhase(0);        // reset furthest-phase (the wizard bumps it forward per phase)
       commissionMarkStage(0);       // Prep complete: snapshot taken, preconditions checked
-      // Wipe the live onset-knee FIT SCRATCH so step 3 starts the sweeps clean if it is run.
+      // Wipe the live onset-knee FIT SCRATCH so the Min% floor step (step 8) starts the sweeps clean if it is run.
       // (This is only the in-session anchor/fit state — NOT the applied rpmMinDutyTable floors,
       // which are left intact so a partial re-run that skips Min% keeps its learned floors.)
       kneeAnchorN = 0;
@@ -3980,13 +3978,19 @@ void setupServer() {
       foundParameter = true;
       inputMessage = request->getParam("VoltageAlarmHigh")->value();
       settingWrite(NK_VoltageAlarmHigh, inputMessage.c_str());
-      VoltageAlarmHigh = inputMessage.toInt();
+      VoltageAlarmHigh = inputMessage.toFloat();
     }
     if (request->hasParam("VoltageAlarmLow")) {
       foundParameter = true;
       inputMessage = request->getParam("VoltageAlarmLow")->value();
       settingWrite(NK_VoltageAlarmLow, inputMessage.c_str());
-      VoltageAlarmLow = inputMessage.toInt();
+      VoltageAlarmLow = inputMessage.toFloat();
+    }
+    if (request->hasParam("SocAlarmLow")) {
+      foundParameter = true;
+      inputMessage = request->getParam("SocAlarmLow")->value();
+      SocAlarmLow = constrain(inputMessage.toInt(), 0, 100);
+      settingWrite(NK_SocAlarmLow, String(SocAlarmLow).c_str());
     }
     if (request->hasParam("CurrentAlarmHigh")) {
       foundParameter = true;
@@ -4124,7 +4128,7 @@ void setupServer() {
     if (request->hasParam("UseFloat")) {
       foundParameter = true;
       inputMessage = request->getParam("UseFloat")->value();
-      UseFloat = inputMessage.toInt();
+      UseFloat = constrain(inputMessage.toInt(), 0, 2);  // 0=idle, 1=voltage float, 2=zero-current float
       settingWrite(NK_UseFloat, String(UseFloat).c_str());
     }
     if (request->hasParam("RebulkCurrent_A")) {
@@ -4840,7 +4844,7 @@ void setupServer() {
       // new breakpoints instead of silently re-applied at shifted RPMs.
       if (rpmPointChanged) {
         kneeLearnResetDefaults();   // zero floors/knees, unfreeze, drop rpmMinDutyTable to 0
-        commissionClearStage(2);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
+        commissionClearStage(7);    // Min% floor stage now stale (demotes a commissioned device to in-progress)
         queueConsoleMessage("Learning: RPM breakpoints changed — Min% floors cleared, re-run the Min% floor step");
       }
 
@@ -5023,13 +5027,6 @@ void setupServer() {
       recomputeCvGains();
       queueConsoleMessageF("CV gain mode: %s", cvGainMode ? "AUTO (lambda-based)" : "MANUAL");
     }
-    // CV current source (§G): 0 = battery-when-available (default), 1 = force alternator (legacy / A-B test).
-    if (request->hasParam("cvCurrentSrc")) {
-      foundParameter = true;
-      cvCurrentSrc = (uint8_t)(request->getParam("cvCurrentSrc")->value().toInt() != 0 ? 1 : 0);
-      settingWrite(NK_cvCurrentSrc, String((int)cvCurrentSrc).c_str());
-      queueConsoleMessageF("CV current source: %s", cvCurrentSrc ? "ALTERNATOR (forced)" : "BATTERY (when available)");
-    }
     // cvLambdaMult handler removed 2026-06-25 — λ tuning retired; the Response Speed slider now drives cvCrossover.
     if (request->hasParam("cvCrossover")) {  // CV crossover ω_c (rad/s) — exact magnitude formula, §F.3 (was cvOmega)
       foundParameter = true;
@@ -5118,17 +5115,12 @@ void setupServer() {
       recomputeCvGains();
     }
     // Measured ripple projection (§3.3): the browser fits ripple(I)=a0+a1·I from the 3-level current-check
-    // points and POSTs the whole per-detector record as a CSV string. Reference data for the Protections
+    // points and POSTs the whole record as a CSV string. Reference data for the Protections
     // ripple-vs-threshold plot ONLY — never touches the over-current floor.
     if (request->hasParam("ripFitAlt")) {
       foundParameter = true;
       ripFitDecode(request->getParam("ripFitAlt")->value(), ripFitAlt);
       settingWrite(NK_ripFitAlt, ripFitEncode(ripFitAlt).c_str());
-    }
-    if (request->hasParam("ripFitBatt")) {
-      foundParameter = true;
-      ripFitDecode(request->getParam("ripFitBatt")->value(), ripFitBatt);
-      settingWrite(NK_ripFitBatt, ripFitEncode(ripFitBatt).c_str());
     }
     // Resonance current-check (§3.2): arm/disarm field-commanding, and set the commanded level. Disarm
     // also zeroes the target so the loop slews back toward the normal AUTO setpoint gently.
@@ -5423,17 +5415,6 @@ void setupServer() {
       queueConsoleMessageF("IExcess threshold floor set to: %.1fA", IExcessFloorA);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    // CV battery-current detector floor (§G) — separate from IExcessFloorA because battery ripple is
-    // quieter (≈3× smaller than alternator ripple), so it can sit lower and catch over-current sooner.
-    // Plain operator setting: commissioning measures ripple for the Protections plot but never writes it.
-    if (request->hasParam("IExcessFloorABatt")) {
-      foundParameter = true;
-      inputMessage = request->getParam("IExcessFloorABatt")->value();
-      IExcessFloorABatt = constrain(inputMessage.toFloat(), 1.0f, 20.0f);
-      settingWrite(NK_IExcessFloorABatt, String(IExcessFloorABatt, 1).c_str());
-      queueConsoleMessageF("IExcess battery-current floor set to: %.1fA", IExcessFloorABatt);
-      if (CVTuningMode) cvTuningParamChanged = true;
-    }
     if (request->hasParam("IExcessCeilA")) {
       foundParameter = true;
       inputMessage = request->getParam("IExcessCeilA")->value();
@@ -5442,13 +5423,15 @@ void setupServer() {
       queueConsoleMessageF("IExcess threshold ceiling set to: %.1fA", IExcessCeilA);
       if (CVTuningMode) cvTuningParamChanged = true;
     }
-    if (request->hasParam("IExcessCeilABatt")) {
+    // Max battery charge current (G4). Ceiling on the alternator command = limit + measured
+    // house-load offset; requires the INA228 battery shunt. 0 disables the feature.
+    if (request->hasParam("BattCurrentLimitA")) {
       foundParameter = true;
-      inputMessage = request->getParam("IExcessCeilABatt")->value();
-      IExcessCeilABatt = constrain(inputMessage.toFloat(), 5.0f, 80.0f);
-      settingWrite(NK_IExcessCeilABatt, String(IExcessCeilABatt, 1).c_str());
-      queueConsoleMessageF("IExcess battery-current ceiling set to: %.1fA", IExcessCeilABatt);
-      if (CVTuningMode) cvTuningParamChanged = true;
+      inputMessage = request->getParam("BattCurrentLimitA")->value();
+      BattCurrentLimitA = constrain(inputMessage.toFloat(), 0.0f, 500.0f);
+      settingWrite(NK_BattCurrentLimitA, String(BattCurrentLimitA, 1).c_str());
+      if (BattCurrentLimitA > 0.0f) queueConsoleMessageF("Battery charge current limit set to: %.1fA", BattCurrentLimitA);
+      else queueConsoleMessage("Battery charge current limit disabled");
     }
     if (request->hasParam("IExcessTau")) {
       foundParameter = true;
@@ -7505,8 +7488,6 @@ void SendWifiData() {
                                // +2: Core-0 HTTPS task cloud op time (last/worst, ms)
                                "%d,%d,"
                                // +1: live battery-temp CV gain derate multiplier (×1000)
-                               "%d,"
-                               // +1: CV battery-current-control live flag (§G)
                                "%d",
 
                                CSV2_FIELD_COUNT,
@@ -8050,8 +8031,7 @@ void SendWifiData() {
                                SafeInt(csv2SendWorstUs),                  // CSV2_csv2SendWorst  (µs)
                                SafeInt(httpsUploadLastMs),                // CSV2_httpsUpload_win -> Core-0 cloud op LAST (ms)
                                SafeInt(httpsUploadWorstMs),               // CSV2_httpsUpload_ses -> Core-0 cloud op WORST since reset (ms)
-                               SafeInt(cvTempDerateScale, 1000),          // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
-                               (int)g_cvBattCurrentActive                 // CSV2_cvBattCurrentActive -> CV battery-current-control live flag (§G)
+                               SafeInt(cvTempDerateScale, 1000)           // CSV2_cvTempDerateScale -> battery-temp gain derate multiplier (×1000)
     );
     csv2BuildLastUs = micros() - _csv2b0;   // CSV2 build (snprintf) cost
     if (csv2BuildLastUs > csv2BuildWorstUs) csv2BuildWorstUs = csv2BuildLastUs;
@@ -8154,12 +8134,11 @@ void SendWifiData() {
                                "%d,"  // battTempCoeff
                                "%d,"  // TempPIDKiDownFrac
                                "%d,"  // ThermalSlopeWindowSec
-                               "%d,"  // cvCurrentSrc
-                               "%d,"  // IExcessFloorABatt
-                               "%d,"  // IExcessCeilABatt
+                               "%d,"  // BattCurrentLimitA
                                "%d,"  // ripWinMs
                                "%d,"  // ripDriftFloorA
-                               "%d",  // ripDriftPct
+                               "%d,"  // ripDriftPct
+                               "%d",  // SocAlarmLow
 
                                CSV3_FIELD_COUNT,
                                SafeInt(TemperatureLimitF),
@@ -8375,8 +8354,8 @@ void SendWifiData() {
                                SafeInt(LimpHome),
                                SafeInt(AlarmActivate),
                                SafeInt(TempAlarm),
-                               SafeInt(VoltageAlarmHigh),
-                               SafeInt(VoltageAlarmLow),
+                               SafeInt(VoltageAlarmHigh, 100),  // V ×100, 2 decimals
+                               SafeInt(VoltageAlarmLow, 100),   // V ×100, 2 decimals
                                SafeInt(CurrentAlarmHigh),
                                SafeInt(AlarmTest),
                                SafeInt(AlarmLatchEnabled),
@@ -8491,12 +8470,11 @@ void SendWifiData() {
                                SafeInt(battTempCoeff, 10000),                   // CSV3_battTempCoeff (fractional R change per °C, ×10000)
                                SafeInt(TempPIDKiDownFrac, 1000),                // CSV3_TempPIDKiDownFrac (below-setpoint bleed ratio ×Ki, ×1000)
                                SafeInt(ThermalSlopeWindowSec),                  // CSV3_ThermalSlopeWindowSec (slope difference window, s)
-                               (int)cvCurrentSrc,                               // CSV3_cvCurrentSrc (0=battery-when-available, 1=force alternator)
-                               SafeInt(IExcessFloorABatt, 10),                  // CSV3_IExcessFloorABatt — ×10, 1 decimal
-                               SafeInt(IExcessCeilABatt, 10),                   // CSV3_IExcessCeilABatt — ×10, 1 decimal
+                               SafeInt(BattCurrentLimitA, 10),                  // CSV3_BattCurrentLimitA — ×10, 1 decimal; 0 = disabled
                                SafeInt(ripWinMs),                               // CSV3_ripWinMs (ms, integer)
                                SafeInt(ripDriftFloorA, 100),                    // CSV3_ripDriftFloorA (A ×100)
-                               SafeInt(ripDriftPct, 10)                         // CSV3_ripDriftPct (% ×10)
+                               SafeInt(ripDriftPct, 10),                        // CSV3_ripDriftPct (% ×10)
+                               SafeInt(SocAlarmLow)                             // CSV3_SocAlarmLow (%, integer; 0 = disabled)
     );
     if (payload3Len < 0 || payload3Len >= PAYLOAD3_SIZE) {
       Serial.printf("payload3 truncated or format error: %d\n", payload3Len);
